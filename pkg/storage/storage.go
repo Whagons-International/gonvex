@@ -409,10 +409,25 @@ func (t *Tenant) finalize(meta gonvex.FileMetadata, head HeadResult) (gonvex.Fil
 	return meta, nil
 }
 
-// load reads one metadata row.
+// load reads one metadata row, scoped to this handle's tenant.
+//
+// The lookup was previously by id alone, so any code path that accepted a
+// client-supplied storage id could read or delete a row belonging to a
+// different tenant. Cross-tenant containment then rested entirely on tenants
+// being in physically separate databases; this makes the scoping explicit so a
+// single shared database is not silently a cross-tenant read.
+//
+// Note deliberately NOT enforced here: visibility and owner_id. Enforcing those
+// would change which files a workspace can legitimately share and needs a
+// product decision plus an explicit admin escape hatch -- see the PR body.
 func (t *Tenant) load(fileID string) (gonvex.FileMetadata, error) {
-	row := t.db.QueryRowContext(t.ctx,
-		`SELECT `+fileColumns+` FROM _gonvex_files WHERE id = $1`, fileID)
+	query := `SELECT ` + fileColumns + ` FROM _gonvex_files WHERE id = $1`
+	args := []any{fileID}
+	if t.tenantID != "" {
+		query += ` AND tenant_id = $2`
+		args = append(args, t.tenantID)
+	}
+	row := t.db.QueryRowContext(t.ctx, query, args...)
 	meta, err := scanFile(row)
 	if err == sql.ErrNoRows {
 		return gonvex.FileMetadata{}, gonvex.ErrFileNotFound

@@ -58,8 +58,9 @@ func TestDevSyncLoadsProjectBundle(t *testing.T) {
 	}
 
 	server := New(config.Config{
-		GonvexModuleRoot: moduleRoot,
-		PluginCacheDir:   t.TempDir(),
+		AllowUnauthenticatedSync: true,
+		GonvexModuleRoot:         moduleRoot,
+		PluginCacheDir:           t.TempDir(),
 	})
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))

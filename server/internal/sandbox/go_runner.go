@@ -115,7 +115,7 @@ func (r *Runner) RunGo(ctx context.Context, req gonvex.GoSandboxRequest) (gonvex
 	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module sandbox\n\ngo 1.22\n"), 0o644); err != nil {
 		return gonvex.GoSandboxResult{}, err
 	}
-	if err := os.WriteFile(filepath.Join(workDir, "main.go"), []byte(renderMain(code)), 0o644); err != nil {
+	if err := writeSandboxSources(workDir, code); err != nil {
 		return gonvex.GoSandboxResult{}, err
 	}
 
@@ -282,7 +282,62 @@ func validateGoBody(code string) error {
 	return nil
 }
 
-func renderMain(code string) string {
+const (
+	// The host plumbing and the user body are deliberately emitted as two
+	// separate files. Go resolves imports per file, so a package imported by
+	// the host file is NOT in scope for the user file. That property -- not the
+	// regex blocklist -- is what keeps `os`, and therefore the host filesystem,
+	// environment and process table, out of reach of sandbox code.
+	hostSourceFile = "main.go"
+	userSourceFile = "user.go"
+)
+
+// writeSandboxSources emits the two-file program that `go run .` compiles.
+func writeSandboxSources(dir, code string) error {
+	if err := os.WriteFile(filepath.Join(dir, hostSourceFile), []byte(renderHost()), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, userSourceFile), []byte(renderUser(code)), 0o644)
+}
+
+// renderUser emits the user body in a file whose only imports are a curated,
+// side-effect-free subset of the standard library. Adding a package here grants
+// it to every sandbox script, so anything that can touch the filesystem, the
+// network, the process table, or memory unsafely must never be added.
+func renderUser(code string) string {
+	return `package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Referenced so the curated imports compile whether or not the user body uses
+// them; Go rejects unused imports.
+var (
+	_ = json.Marshal
+	_ = errors.New
+	_ = fmt.Sprintf
+	_ = math.Abs
+	_ = sort.Ints
+	_ = strconv.Itoa
+	_ = strings.TrimSpace
+	_ = time.Now
+)
+
+func Run() (any, error) {
+` + code + `
+}
+`
+}
+
+func renderHost() string {
 	return `package main
 
 import (
@@ -412,9 +467,6 @@ func whagonsCall(kind string, path string, args any) (map[string]any, error) {
 	return map[string]any{"value": response.Result}, nil
 }
 
-func Run() (any, error) {
-` + code + `
-}
 `
 }
 

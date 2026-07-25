@@ -325,7 +325,7 @@ func TestDeleteDataRowRequiresRuntimeAdminKey(t *testing.T) {
 }
 
 func TestDevSyncStoresManifest(t *testing.T) {
-	server := New(config.Config{})
+	server := New(config.Config{AllowUnauthenticatedSync: true})
 	body := bytes.NewBufferString(`{"project":"test","generatedAt":"now","functions":{"tasks.list":{"kind":"query","handler":"List","file":"gonvex/tasks.go"}},"schema":{}}`)
 
 	recorder := httptest.NewRecorder()
@@ -924,7 +924,8 @@ func TestDevSyncRejectsHeaderProjectMismatch(t *testing.T) {
 
 func TestDevSyncRejectsUnregisteredProjectInsteadOfUsingControlDatabase(t *testing.T) {
 	server := New(config.Config{
-		PostgresURL: "postgres://control.example/gonvex_control",
+		AllowUnauthenticatedSync: true,
+		PostgresURL:              "postgres://control.example/gonvex_control",
 		ProjectDatabases: map[string]string{
 			"whagons-5": "postgres://app.example/whagons_5",
 		},
@@ -948,7 +949,7 @@ func TestDevSyncRejectsUnregisteredProjectInsteadOfUsingControlDatabase(t *testi
 }
 
 func TestDevSyncUsesHeaderProjectWhenManifestProjectIsEmpty(t *testing.T) {
-	server := New(config.Config{})
+	server := New(config.Config{AllowUnauthenticatedSync: true})
 	body := bytes.NewBufferString(`{"generatedAt":"now","functions":{},"schema":{}}`)
 	request := httptest.NewRequest(http.MethodPost, "/dev/sync", body)
 	request.Header.Set("x-gonvex-project-id", "header-project")
@@ -965,7 +966,7 @@ func TestDevSyncUsesHeaderProjectWhenManifestProjectIsEmpty(t *testing.T) {
 }
 
 func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
-	server := New(config.Config{})
+	server := New(config.Config{AllowUnauthenticatedSync: true})
 	body := bytes.NewBufferString(`{"project":"persisted-project","generatedAt":"now","functions":{"messages.list":{"kind":"query","handler":"ListMessages","file":"gonvex/messages.go"}},"schema":{"tables":{}}}`)
 
 	recorder := httptest.NewRecorder()
@@ -998,7 +999,7 @@ func TestDevSyncAlwaysStampsRuntimeDatabaseArtifactVersion(t *testing.T) {
 }
 
 func TestDevSyncSkipsSchemaLoadedFromPersistedManifest(t *testing.T) {
-	server := New(config.Config{})
+	server := New(config.Config{AllowUnauthenticatedSync: true})
 	persisted := manifest.Manifest{
 		Project:             "persisted-project",
 		Functions:           map[string]manifest.FunctionEntry{},
