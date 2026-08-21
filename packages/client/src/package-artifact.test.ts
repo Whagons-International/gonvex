@@ -14,7 +14,13 @@ describe("client package artifact", () => {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "inherit"],
     });
-    const files = (JSON.parse(packed) as Array<{ files?: Array<{ path: string }> }>)[0]?.files?.map((file) => file.path) ?? [];
+    const packResult = JSON.parse(packed) as
+      | Array<{ files?: Array<{ path: string }> }>
+      | Record<string, { files?: Array<{ path: string }> }>;
+    const packageResult = Array.isArray(packResult)
+      ? packResult[0]
+      : Object.values(packResult)[0];
+    const files = packageResult?.files?.map((file) => file.path) ?? [];
     const removed = /(?:browser-cache|cache(?:-coordinator)?|persistent-cache|query-cache|sync-store)/;
 
     expect(files).toContain("dist/index.js");
