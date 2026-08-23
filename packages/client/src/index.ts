@@ -1,6 +1,7 @@
 import type {
   BrowserTelemetryInfo,
   ClientMessage,
+  ExecutionScope,
   JsonValue,
   MessageTrace,
   ServerCapabilities,
@@ -35,6 +36,7 @@ import {
   type ReplicaTransaction,
   type ReplicaWindow,
   type LiveQueryResult,
+  type ReplicaCollectionState,
 } from "./local-replica.js";
 import { runOfflineLiveQuery, type LiveQueryPlan, type OfflineLiveQueryResult } from "./query-expression.js";
 export * from "./error-reporter.js";
@@ -56,9 +58,11 @@ export {
   type ReplicaTransaction,
   type ReplicaWindow,
   type LiveQueryResult,
+  type ReplicaCollectionState,
 } from "./local-replica.js";
 export * from "./query-expression.js";
 export * from "./indexeddb-replica.js";
+export * from "./control.js";
 
 function asReplicaRow(value: JsonValue | undefined): ReplicaRow | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -83,9 +87,11 @@ function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
     listWindows: () => replica.listWindows(),
     windowRows: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.windowRows<T>(signature),
     entity: <T extends ReplicaRow = ReplicaRow>(entity: string, id: string) => replica.entity<T>(entity, id),
+    entityBatch: <T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]) => replica.entityBatch<T>(entity, ids),
     entityRows: <T extends ReplicaRow = ReplicaRow>(entity: string) => replica.entityRows<T>(entity),
     entityCompleteness: (entity) => replica.entityCompleteness(entity),
     liveQuery: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.liveQuery<T>(signature),
+    collectionState: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.collectionState<T>(signature),
     hasLiveQuery: (signature) => replica.hasLiveQuery(signature),
     snapshot: () => replica.snapshot(),
   } satisfies LocalReplicaView);
@@ -105,6 +111,7 @@ export type ReplicaSubscriptionHandler = (message: ReplicaMessage) => void;
 type WatchUpdateHandler = () => void;
 type TelemetryHandler = (event: GonvexTelemetryEvent) => void;
 type ConnectionStateHandler = (state: ConnectionState) => void;
+export type SupportCommand = { id: string; kind: string; payload: JsonValue };
 type QuerySubscription = {
   id: string;
   key: string;
@@ -119,6 +126,7 @@ type QuerySubscription = {
   lastRevision?: SubscriptionRevision;
   revisionSocketGeneration?: number;
   scope?: ReplicaScope;
+  executionScope: ExecutionScope;
 };
 type ReplicaSubscription = {
   id: string;
@@ -167,6 +175,8 @@ type OneShotQuery = {
   id: string;
   path: string;
   args: JsonValue;
+  scope: ExecutionScope;
+  authorization?: FunctionReference["authorization"];
   reject: (error: Error) => void;
   socketGeneration?: number;
   timeoutTimer?: ReturnType<typeof setTimeout>;
@@ -175,6 +185,11 @@ type PendingCall = {
   id: string;
   kind: "reducer" | "action";
   path: string;
+  args: JsonValue;
+  scope: ExecutionScope;
+  authorization?: FunctionReference["authorization"];
+  idempotencyKey?: string;
+  socketGeneration?: number;
   reject: (error: Error) => void;
   timeoutTimer?: ReturnType<typeof setTimeout>;
 };
@@ -182,6 +197,11 @@ type PendingCall = {
 export type FunctionReference<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue> = {
   kind: string;
   path: string;
+  /** Core Control Plane functions share the same persistent connection. */
+  scope?: ExecutionScope;
+  authorization?: "public" | "account" | "tenantAdmin" | "projectAdmin" | "internal";
+  argsSchema?: JsonValue;
+  resultSchema?: JsonValue;
   delivery?: "oneShot" | "live" | "replica";
   offline?: {
     mode: "forbidden" | "allowed" | "onlineOnly";
@@ -309,7 +329,7 @@ export type GonvexClientOptions = GonvexClientAuth & {
   outbox?: { databaseName?: string; enabled?: boolean; store?: OutboxStore };
   /** Transactional normalized store used by Replica Collections and Live Queries. */
   localReplica?: { storage?: LocalReplicaStorage };
-  errorReporting?: false | Omit<ErrorReporterOptions, "endpoint" | "project" | "tenant">;
+  errorReporting?: false | Omit<ErrorReporterOptions, "transport" | "project" | "tenant">;
   timeouts?: GonvexTimeoutOptions;
 };
 
@@ -391,6 +411,7 @@ export class GonvexClient {
   private manuallyClosed = false;
   private readonly pendingCalls = new Map<string, PendingCall>();
   private readonly connectionStateHandlers = new Set<ConnectionStateHandler>();
+  private readonly supportCommandHandlers = new Set<(command: SupportCommand) => void>();
   private isWebSocketConnected = false;
   private hasEverConnected = false;
   private connectionCount = 0;
@@ -427,7 +448,12 @@ export class GonvexClient {
       actionTimeoutMs: options.timeouts?.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS,
     };
     if (options.errorReporting && options.project) {
-      this.errorReporter = new GonvexErrorReporter({ endpoint: url, project: options.project, tenant: options.tenant, ...options.errorReporting });
+      this.errorReporter = new GonvexErrorReporter({
+        project: options.project,
+        tenant: options.tenant,
+        ...options.errorReporting,
+        transport: (type, payload) => this.sendNativeError(type, payload),
+      });
     }
   }
 
@@ -438,6 +464,21 @@ export class GonvexClient {
 
   replicaSignature(ref: FunctionReference, args: JsonValue = {}) {
     return querySubscriptionKey(ref, args);
+  }
+
+  /** Read one persisted Live Query membership without starting another transport subscription. */
+  retainedLiveQuery<T extends ReplicaRow = ReplicaRow>(signature: string): LiveQueryResult<T> {
+    return this.replica.liveQuery<T>(signature);
+  }
+
+  /** Resolve an ordered ID batch from one normalized entity store. */
+  replicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
+    return this.replica.entityBatch<T>(entity, ids);
+  }
+
+  /** Read rows and server-owned completeness for a persisted Replica Collection. */
+  replicaCollectionState<T extends ReplicaRow = ReplicaRow>(ref: FunctionReference, args: JsonValue = {}): ReplicaCollectionState<T> {
+    return this.replica.collectionState<T>(this.replicaSignature(ref, args));
   }
 
   /** Run the generated Live Query plan over the bounded normalized cache. */
@@ -537,6 +578,20 @@ export class GonvexClient {
       // e.g. installing the hint after its token is already live — are inert.
       || (hasOwn(auth, "identity") && !sameAuthTokenIdentity(this.auth, nextAuth));
     if (scopeMayChange) {
+      this.pendingMessages.length = 0;
+      this.rejectPendingCalls((call) => new GonvexClientError(
+        `Authentication scope changed while waiting for ${call.kind} ${call.path}`,
+        { code: "auth", path: call.path, operation: call.kind },
+      ));
+      for (const query of this.oneShotQueries.values()) {
+        if (query.timeoutTimer) clearTimeout(query.timeoutTimer);
+        this.handlers.delete(query.id);
+        query.reject(new GonvexClientError(
+          `Authentication scope changed while waiting for Query ${query.path}`,
+          { code: "auth", path: query.path, operation: "query" },
+        ));
+      }
+      this.oneShotQueries.clear();
       this.resetReplicaScopeState();
     }
     this.auth = nextAuth;
@@ -570,6 +625,7 @@ export class GonvexClient {
       this.replica.setFreshness("verifying");
       this.hasEverConnected = true;
       this.connectionCount += 1;
+      this.errorReporter?.connectionRestored?.();
       this.sendAuth(false);
       if (isReconnect) this.resubscribeQueries(generation);
       void this.drainOutbox();
@@ -596,7 +652,7 @@ export class GonvexClient {
       this.rejectPendingCalls((call) => new GonvexClientError(
         `Connection lost while waiting for ${call.kind} ${call.path}. The operation may or may not have been applied.`,
         { code: "disconnected", path: call.path, operation: call.kind },
-      ));
+      ), (call) => call.scope !== "control");
       this.scheduleReconnect();
       this.notifyConnectionState();
     });
@@ -611,7 +667,11 @@ export class GonvexClient {
       if (message.type === "session.ready") {
         this.serverCapabilities = message.capabilities ?? {};
         if (!message.replica) {
-          this.rejectMissingReplicaDirective();
+          if (this.hasControlPlaneWork() || (!!this.auth.token && !this.auth.tenant)) {
+            this.flushPendingMessages();
+          } else {
+            this.rejectMissingReplicaDirective();
+          }
           return;
         }
         const ready = this.activateReplicaDirective(message.replica);
@@ -637,7 +697,11 @@ export class GonvexClient {
           this.authRetriedAfterError = false;
           const directive = replicaDirectiveFromAuthResult(message.result);
           if (!directive) {
-            this.rejectMissingReplicaDirective();
+            if (!this.auth.tenant) {
+              this.resumeQuerySubscriptions();
+            } else {
+              this.rejectMissingReplicaDirective();
+            }
             this.flushPendingMessages();
             return;
           }
@@ -697,6 +761,14 @@ export class GonvexClient {
         if (this.serverCapabilities.replicaWatermark === 1) {
           this.handleReplicaWatermark(message.revision);
         }
+        return;
+      }
+      if (message.type === "support.command") {
+        const result = message.result && typeof message.result === "object" && !Array.isArray(message.result)
+          ? message.result as Record<string, JsonValue>
+          : {};
+        const command = { id: message.id, kind: String(result.kind ?? ""), payload: result.payload ?? null };
+        for (const handler of this.supportCommandHandlers) handler(command);
         return;
       }
 			if (message.type === "query.fanout") {
@@ -779,15 +851,19 @@ export class GonvexClient {
     this.replica.setFreshness("offline");
     this.notifyConnectionState();
     this.connectionStateHandlers.clear();
+    this.supportCommandHandlers.clear();
     if (!socket) return;
     socket.close();
   }
 
-  private rejectPendingCalls(makeError: (call: PendingCall) => GonvexClientError) {
+  private rejectPendingCalls(
+    makeError: (call: PendingCall) => GonvexClientError,
+    predicate: (call: PendingCall) => boolean = () => true,
+  ) {
     if (this.pendingCalls.size === 0) return;
-    const calls = Array.from(this.pendingCalls.values());
-    this.pendingCalls.clear();
+    const calls = Array.from(this.pendingCalls.values()).filter(predicate);
     for (const call of calls) {
+      this.pendingCalls.delete(call.id);
       if (call.timeoutTimer) clearTimeout(call.timeoutTimer);
       this.handlers.delete(call.id);
       call.reject(makeError(call));
@@ -802,6 +878,11 @@ export class GonvexClient {
   onSessionScopeChange(handler: () => void) {
     this.sessionScopeHandlers.add(handler);
     return () => this.sessionScopeHandlers.delete(handler);
+  }
+
+  onSupportCommand(handler: (command: SupportCommand) => void) {
+    this.supportCommandHandlers.add(handler);
+    return () => this.supportCommandHandlers.delete(handler);
   }
 
   subscribeLiveQuery<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: SubscriptionHandler) {
@@ -852,6 +933,7 @@ export class GonvexClient {
       listeners: new Set([onMessage]),
       serverSettled: false,
       scope: this.replicaScope,
+      executionScope: ref.scope ?? "tenant",
     };
     this.querySubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
@@ -1119,6 +1201,8 @@ export class GonvexClient {
     let latestError: Error | undefined;
     let snapshotVersion = -1;
     let snapshotRows: T[] | undefined;
+    let stateVersion = -1;
+    let snapshotState: ReplicaCollectionState | undefined;
     let releaseTimer: ReturnType<typeof setTimeout> | undefined;
     const notify = () => {
       for (const handler of updateHandlers) handler();
@@ -1150,6 +1234,15 @@ export class GonvexClient {
         snapshotVersion = version;
         snapshotRows = this.replica.liveQuery(key).rows as unknown as T[];
         return snapshotRows;
+      },
+      localReplicaState: () => {
+        if (latestError) throw latestError;
+        if (!this.replica.hasLiveQuery(key)) return undefined;
+        const version = this.replica.version();
+        if (stateVersion === version) return snapshotState;
+        stateVersion = version;
+        snapshotState = this.replica.collectionState(key);
+        return snapshotState;
       },
       status: () => ({
         isLoading: !this.replica.hasLiveQuery(key),
@@ -1305,8 +1398,10 @@ export class GonvexClient {
         kind: "replica" as const,
         entity: subscription.entity,
         key: message.key,
-        rows: rows.filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map((row) => asReplicaRow(row)! ),
-        completeness: "complete" as const,
+        rows: rows.filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map((row) => asReplicaRow(row)!),
+        // A snapshot is still verifying until replica.ready supplies the
+        // authoritative budget/truncation result.
+        completeness: "partial" as const,
         source: "server" as const,
         cursor: message.cursor,
         mode: message.mode,
@@ -1416,6 +1511,7 @@ export class GonvexClient {
     if (window) {
       await this.replica.replaceWindow({
         ...window, rows: this.replica.windowRows(subscription.key), source: "server", cursor: message.cursor,
+        completeness: message.truncated === true ? "partial" : "complete",
         mode: message.mode ?? window.mode, truncated: message.truncated ?? window.truncated,
         hashes: window.hashes,
       });
@@ -1878,7 +1974,10 @@ export class GonvexClient {
     const id = randomID();
     const timeoutMs = options.timeoutMs ?? this.timeouts.queryTimeoutMs;
     return new Promise<T>((resolve, reject) => {
-      const query: OneShotQuery = { id, path: ref.path, args, reject };
+      const query: OneShotQuery = {
+        id, path: ref.path, args, scope: ref.scope ?? "tenant",
+        authorization: ref.authorization, reject,
+      };
       const settle = () => {
         if (query.timeoutTimer) clearTimeout(query.timeoutTimer);
         this.oneShotQueries.delete(id);
@@ -1966,7 +2065,7 @@ export class GonvexClient {
       }));
     const requiresStandardReducerPath = options.offline === "queue"
       || options.optimistic !== undefined
-      || calls.some((call) => call.ref.optimistic?.transaction !== undefined);
+      || calls.some((call) => call.ref.optimistic?.transaction !== undefined || call.ref.scope === "control");
     if (this.serverCapabilities.reducerBatch !== 1 || requiresStandardReducerPath) {
       const outcomes: Array<{ status: "ok"; result: T | QueuedReducerOutcome } | { status: "error"; error: GonvexClientError }> = [];
       for (const call of calls) {
@@ -2002,28 +2101,48 @@ export class GonvexClient {
     idempotencyKey?: string,
   ): Promise<T> {
     this.connect();
-    const entry = this.registerCall<T>(kind, ref, args, timeoutMs, id);
+    const callId = id ?? randomID();
+    const effectiveIdempotencyKey = ref.scope === "control"
+      ? (idempotencyKey ?? callId)
+      : idempotencyKey;
+    const entry = this.registerCall<T>(kind, ref, args, timeoutMs, callId, effectiveIdempotencyKey);
     if (kind === "reducer") {
-      this.send({
+      this.sendInvocation(ref, {
         type: "reducer.call",
         id: entry.id,
         path: ref.path,
         args,
+        ...(ref.scope === "control" ? { scope: "control" as const } : {}),
         trace: { clientSentAtMs: entry.clientSentAtMs },
-        ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
       });
     } else {
-      this.send({ type: "action.call", id: entry.id, path: ref.path, args, trace: { clientSentAtMs: entry.clientSentAtMs } });
+      this.sendInvocation(ref, {
+        type: "action.call", id: entry.id, path: ref.path, args,
+        ...(ref.scope === "control" ? { scope: "control" as const } : {}),
+        ...(effectiveIdempotencyKey ? { idempotencyKey: effectiveIdempotencyKey } : {}),
+        trace: { clientSentAtMs: entry.clientSentAtMs },
+      });
     }
     this.notifyConnectionState();
     return entry.promise;
   }
 
-  private registerCall<T>(kind: "reducer" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number, callId = randomID()): { id: string; clientSentAtMs: number; promise: Promise<T> } {
+  private registerCall<T>(kind: "reducer" | "action", ref: FunctionReference, args: JsonValue, timeoutMs: number, callId = randomID(), idempotencyKey?: string): { id: string; clientSentAtMs: number; promise: Promise<T> } {
     const id = callId;
     const clientSentAtMs = nowMs();
     const promise = new Promise<T>((resolve, reject) => {
-      const pending: PendingCall = { id, kind, path: ref.path, reject };
+      const pending: PendingCall = {
+        id,
+        kind,
+        path: ref.path,
+        args,
+        scope: ref.scope ?? "tenant",
+        authorization: ref.authorization,
+        idempotencyKey,
+        socketGeneration: this.socketGeneration,
+        reject,
+      };
       const settle = () => {
         if (pending.timeoutTimer) clearTimeout(pending.timeoutTimer);
         this.pendingCalls.delete(id);
@@ -2105,6 +2224,7 @@ export class GonvexClient {
       id: subscription.id,
       path: subscription.path,
       args: subscription.args,
+      ...(subscription.executionScope === "control" ? { scope: "control" as const } : {}),
       windowRevision: undefined,
     });
   }
@@ -2123,6 +2243,7 @@ export class GonvexClient {
         id: subscription.id,
         path: subscription.path,
         args: subscription.args,
+        ...(subscription.executionScope === "control" ? { scope: "control" as const } : {}),
         windowRevision: undefined,
       }));
     for (let offset = 0; offset < subscribes.length; offset += maxReplicaBatchOpens) {
@@ -2187,7 +2308,9 @@ export class GonvexClient {
   private sendOneShotQuery(query: OneShotQuery) {
     if (query.socketGeneration === this.socketGeneration) return;
     query.socketGeneration = this.socketGeneration;
-    this.send({ type: "query.call", id: query.id, path: query.path, args: query.args });
+    const message: ClientMessage = { type: "query.call", id: query.id, path: query.path, args: query.args, ...(query.scope === "control" ? { scope: "control" as const } : {}) };
+    if (query.scope === "control" && query.authorization === "public" && this.authInFlight) this.sendNow(message);
+    else this.send(message);
   }
 
   private resubscribeQueries(generation: number) {
@@ -2200,6 +2323,9 @@ export class GonvexClient {
     for (const query of this.oneShotQueries.values()) {
       this.sendOneShotQuery(query);
     }
+    for (const call of this.pendingCalls.values()) {
+      if (call.scope === "control") this.sendPendingControlCall(call);
+    }
     for (const subscription of this.replicaSubscriptions.values()) {
       if (subscription.listeners.size === 0) continue;
       this.clearReplicaRetry(subscription, true);
@@ -2207,6 +2333,46 @@ export class GonvexClient {
       subscription.socketGeneration = undefined;
       this.sendReplicaOpen(subscription);
     }
+  }
+
+  private sendPendingControlCall(call: PendingCall) {
+    if (call.socketGeneration === this.socketGeneration) return;
+    call.socketGeneration = this.socketGeneration;
+    const trace = { clientSentAtMs: nowMs() };
+    if (call.kind === "reducer") {
+      const message: ClientMessage = {
+        type: "reducer.call",
+        id: call.id,
+        path: call.path,
+        args: call.args,
+        scope: "control",
+        idempotencyKey: call.idempotencyKey ?? call.id,
+        trace,
+      };
+      if (call.authorization === "public" && this.authInFlight) this.sendNow(message);
+      else this.send(message);
+      return;
+    }
+    const message: ClientMessage = {
+      type: "action.call", id: call.id, path: call.path, args: call.args,
+      scope: "control", idempotencyKey: call.idempotencyKey ?? call.id, trace,
+    };
+    if (call.authorization === "public" && this.authInFlight) this.sendNow(message);
+    else this.send(message);
+  }
+
+  private sendInvocation(ref: FunctionReference, message: ClientMessage) {
+    if (ref.scope === "control" && ref.authorization === "public" && this.authInFlight) {
+      this.sendNow(message);
+      return;
+    }
+    this.send(message);
+  }
+
+  private hasControlPlaneWork() {
+    for (const query of this.oneShotQueries.values()) if (query.scope === "control") return true;
+    for (const call of this.pendingCalls.values()) if (call.scope === "control") return true;
+    return false;
   }
 
   private scheduleReconnect() {
@@ -2330,6 +2496,36 @@ export class GonvexClient {
     });
   }
 
+  private sendNativeError(type: "register" | "envelope" | "heartbeat", payload: unknown): Promise<void> {
+    if (this.manuallyClosed) return Promise.reject(new Error("Gonvex client is closed"));
+    this.connect();
+    const id = randomID();
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.handlers.delete(id);
+        reject(new Error("native error telemetry timed out"));
+      }, 10_000);
+      this.handlers.set(id, (message) => {
+        if (message.type !== "error.ack") return;
+        clearTimeout(timer);
+        this.handlers.delete(id);
+        if (message.error) reject(new Error(message.error));
+        else resolve();
+      });
+      if (type === "register") {
+        const registration = payload as { release?: string; environment?: string };
+        this.send({ type: "error.register", id, release: registration.release, environment: registration.environment });
+        return;
+      }
+      if (type === "heartbeat") {
+        this.send({ type: "error.heartbeat", id });
+        return;
+      }
+      const events = (payload as { events?: JsonValue[] }).events ?? [];
+      this.send({ type: "error.envelope", id, events });
+    });
+  }
+
   private sendAuth(force: boolean, options: { useFetcher?: boolean } = {}) {
     if (!force && !this.auth.token && !this.auth.tenant && !this.auth.project && !this.auth.fetchToken) return;
     this.authInFlight = true;
@@ -2350,6 +2546,7 @@ export class GonvexClient {
       token: this.auth.token,
       project: this.auth.project,
       tenant: this.auth.tenant,
+      controlOnly: !this.auth.tenant,
       device: browserTelemetryInfo(),
 		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
     });
@@ -2536,6 +2733,7 @@ function replaceOfflineLiveQueryMetadata(
 
 function querySubscriptionKey(ref: FunctionReference, args: JsonValue) {
   const contract = {
+    scope: ref.scope ?? "tenant",
     delivery: ref.delivery ?? "oneShot",
     live: ref.live
       ? { entity: ref.live.entity, key: ref.live.key, resultPath: [...(ref.live.resultPath ?? [])], plan: ref.live.plan ?? null }
@@ -2751,7 +2949,10 @@ function normalizeQuerySubscriptionRetentionMs(value: number | undefined): numbe
 
 function authIdentityKey(auth: GonvexClientAuth) {
   if (!auth.tenant) return "";
-  if (auth.token) return authIdentityKeyFromToken(auth);
+  if (auth.token) {
+    const tokenIdentity = authIdentityKeyFromToken(auth);
+    if (tokenIdentity) return tokenIdentity;
+  }
   // Token-free fallback: an explicit identity hint carries the same claims a
   // token would supply, so both paths derive the same key for the same Account.
   const hint = auth.identity;

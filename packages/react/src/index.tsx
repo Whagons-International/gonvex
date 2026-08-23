@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { GonvexClient, GonvexClientError, type ConnectionState, type FunctionReference, type LiveQueryResult, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, type ConnectionState, type FunctionReference, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState } from "@gonvex/client";
@@ -69,7 +69,6 @@ export type GonvexAuthValue = AuthState & {
   createTenant: (name: string) => Promise<GonvexAuthTenant>;
   inviteMember: (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown> }) => Promise<void>;
   revokeInvitation: (tenantId: string, email: string) => Promise<void>;
-  removeMember: (tenantId: string, memberId: string) => Promise<void>;
 };
 
 export type GonvexAuthConfig = {
@@ -178,10 +177,13 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     sessionRef.current = next;
     if (next) {
       if (persist) safeLocalStorageSet(storageKey, JSON.stringify(next));
-      props.client.setAuth({ project: props.projectId, tenant: next.activeTenantId, token: next.accessToken });
+      props.client.setAuth({
+        project: props.projectId, tenant: next.activeTenantId, token: next.accessToken,
+        identity: { sub: next.account.id, iss: props.projectId },
+      });
     } else {
       if (persist) safeLocalStorageRemove(storageKey);
-      props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined });
+      props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined, identity: undefined });
     }
     setSession(next);
   }, [props.client, props.projectId, storageKey]);
@@ -190,7 +192,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     let cancelled = false;
     let bootstrap = authBootstrapPromises.get(storageKey);
     if (!bootstrap) {
-      bootstrap = bootstrapGonvexAuth({ callbackPath, pkceStorageKey, projectId: props.projectId, runtimeUrl, storageKey })
+      bootstrap = bootstrapGonvexAuth({ callbackPath, client: props.client, pkceStorageKey, projectId: props.projectId, runtimeUrl, storageKey })
         .finally(() => {
           // Keep the resolved promise briefly so a StrictMode remount attaches
           // to the same result instead of re-running a spent OAuth code.
@@ -223,12 +225,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       if (!current || current.refreshExpiresAt <= Date.now()) return null;
       if (!force && current.expiresAt > Date.now() + 60_000) return current;
       attemptedRefreshToken = current.refreshToken;
-      const next = await requestGonvexAuthToken(runtimeUrl, {
-        grantType: "refresh_token",
-        project: props.projectId,
-        refreshToken: current.refreshToken,
-        tenant: current.activeTenantId,
-      });
+      const grant = await props.client.action(control.auth.refreshSession, { refreshToken: current.refreshToken });
+      const next = sessionFromNativeGrant(grant, current);
       // Persist the rotated token before releasing the cross-tab lock. The
       // next waiter must never read and reuse the just-consumed refresh token.
       safeLocalStorageSet(storageKey, JSON.stringify(next));
@@ -268,7 +266,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     });
     refreshRef.current = request;
     return request;
-  }, [installSession, props.projectId, runtimeUrl, storageKey]);
+  }, [installSession, props.client, storageKey]);
 
   useEffect(() => {
     if (!session) return;
@@ -307,15 +305,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
 
   const signOut = useCallback(async (options?: { allDevices?: boolean }) => {
     const current = sessionRef.current;
-    installSession(null);
     setError(null);
-    if (!current) return;
-    await fetch(`${runtimeUrl}/auth/logout`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${current.accessToken}`, "content-type": "application/json" },
-      body: JSON.stringify({ refreshToken: current.refreshToken, all: options?.allDevices === true }),
-    }).catch(() => undefined);
-  }, [installSession, runtimeUrl]);
+    if (current) {
+      await props.client.reducer(control.auth.logout, { refreshToken: current.refreshToken, all: options?.allDevices === true }).catch(() => undefined);
+    }
+    installSession(null);
+  }, [installSession, props.client]);
 
   const fetchAccessToken = useCallback(async (args: { forceRefreshToken: boolean }) => {
     const current = sessionRef.current;
@@ -336,59 +331,39 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const token = await fetchAccessToken({ forceRefreshToken: false });
     if (!token) throw new Error("Sign in before loading tenant memberships.");
     const current = sessionRef.current!;
-    const response = await fetch(`${runtimeUrl}/auth/me`, {
-      headers: { authorization: `Bearer ${token}`, ...(current.activeTenantId ? { "x-gonvex-tenant-id": current.activeTenantId } : {}) },
-    });
-    const payload = await response.json().catch(() => ({})) as { error?: string; account?: GonvexAuthAccount; tenants?: GonvexAuthTenant[]; activeTenantId?: string };
-    if (!response.ok || !payload.account || !payload.tenants) throw new Error(payload.error ?? "Could not load tenant memberships.");
-    installSession({ ...current, account: payload.account, tenants: payload.tenants, activeTenantId: payload.activeTenantId });
-    return payload.tenants;
-  }, [fetchAccessToken, installSession, runtimeUrl]);
+    const [account, tenants] = await Promise.all([
+      props.client.query(control.accounts.me, {}),
+      props.client.query(control.tenants.mine, {}),
+    ]);
+    const mappedAccount: GonvexAuthAccount = { id: account.id, email: account.email, emailVerified: true, name: account.name, picture: account.avatarUrl, provider: current.account.provider };
+    const mappedTenants = tenants as GonvexAuthTenant[];
+    const activeTenantId = mappedTenants.some((tenant) => tenant.id === current.activeTenantId) ? current.activeTenantId : mappedTenants[0]?.id;
+    installSession({ ...current, account: mappedAccount, tenants: mappedTenants, activeTenantId });
+    return mappedTenants;
+  }, [fetchAccessToken, installSession, props.client]);
 
   const createTenant = useCallback(async (name: string) => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
     if (!token) throw new Error("Sign in before creating a tenant.");
-    const response = await fetch(`${runtimeUrl}/auth/tenants`, {
-      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    const payload = await response.json().catch(() => ({})) as { error?: string; tenant?: GonvexAuthTenant };
-    if (!response.ok || !payload.tenant) throw new Error(payload.error ?? "Could not create the tenant.");
+    const tenant = await props.client.reducer(control.tenants.create, { name }) as GonvexAuthTenant;
     const current = sessionRef.current!;
-    installSession({ ...current, tenants: [...current.tenants.filter((tenant) => tenant.id !== payload.tenant!.id), payload.tenant], activeTenantId: payload.tenant.id });
-    return payload.tenant;
-  }, [fetchAccessToken, installSession, runtimeUrl]);
+    installSession({ ...current, tenants: [...current.tenants.filter((item) => item.id !== tenant.id), tenant], activeTenantId: tenant.id });
+    return tenant;
+  }, [fetchAccessToken, installSession, props.client]);
 
   const inviteMember = useCallback(async (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown> }) => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
     if (!token) throw new Error("Sign in before inviting a member.");
-    const response = await fetch(`${runtimeUrl}/auth/tenants/${encodeURIComponent(tenantId)}/members`, {
-      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ email, role: options?.role ?? "member", permissions: options?.permissions ?? {} }),
-    });
-    const payload = await response.json().catch(() => ({})) as { error?: string };
-    if (!response.ok) throw new Error(payload.error ?? "Could not invite the member.");
-  }, [fetchAccessToken, runtimeUrl]);
-
-  const removeMember = useCallback(async (tenantId: string, memberId: string) => {
-    const token = await fetchAccessToken({ forceRefreshToken: false });
-    if (!token) throw new Error("Sign in before removing a member.");
-    const response = await fetch(`${runtimeUrl}/auth/tenants/${encodeURIComponent(tenantId)}/members/${encodeURIComponent(memberId)}`, {
-      method: "DELETE", headers: { authorization: `Bearer ${token}` },
-    });
-    const payload = await response.json().catch(() => ({})) as { error?: string };
-    if (!response.ok) throw new Error(payload.error ?? "Could not remove the member.");
-  }, [fetchAccessToken, runtimeUrl]);
+    if (tenantId !== sessionRef.current?.activeTenantId) throw new Error("Switch to the tenant before inviting a member.");
+    await props.client.reducer(control.invitations.create, { email, role: options?.role ?? "member", permissions: (options?.permissions ?? {}) as Record<string, JsonValue> });
+  }, [fetchAccessToken, props.client]);
 
   const revokeInvitation = useCallback(async (tenantId: string, email: string) => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
     if (!token) throw new Error("Sign in before revoking an invitation.");
-    const response = await fetch(`${runtimeUrl}/auth/tenants/${encodeURIComponent(tenantId)}/invitations/${encodeURIComponent(email)}`, {
-      method: "DELETE", headers: { authorization: `Bearer ${token}` },
-    });
-    const payload = await response.json().catch(() => ({})) as { error?: string };
-    if (!response.ok) throw new Error(payload.error ?? "Could not revoke the invitation.");
-  }, [fetchAccessToken, runtimeUrl]);
+    if (tenantId !== sessionRef.current?.activeTenantId) throw new Error("Switch to the tenant before revoking an invitation.");
+    await props.client.reducer(control.invitations.revoke, { id: "", email });
+  }, [fetchAccessToken, props.client]);
 
   const activeTenant = session?.tenants.find((tenant) => tenant.id === session.activeTenantId) ?? null;
 
@@ -407,8 +382,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     createTenant,
     inviteMember,
     revokeInvitation,
-    removeMember,
-  }), [activeTenant, createTenant, error, fetchAccessToken, inviteMember, isLoading, refreshMemberships, removeMember, revokeInvitation, session, setActiveTenant, signIn, signOut]);
+  }), [activeTenant, createTenant, error, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, setActiveTenant, signIn, signOut]);
 
   return (
     <ManagedAuthContext.Provider value={authValue}>
@@ -475,6 +449,7 @@ function GoogleMark() {
 
 async function bootstrapGonvexAuth(options: {
   callbackPath: string;
+  client: GonvexClient;
   pkceStorageKey: string;
   projectId: string;
   runtimeUrl: string;
@@ -494,10 +469,9 @@ async function bootstrapGonvexAuth(options: {
         const latest = readAuthSession(options.storageKey) ?? current;
         if (latest.expiresAt > Date.now() + 30_000) return latest;
         if (latest.refreshExpiresAt <= Date.now()) throw new GonvexAuthRequestError("Your session expired. Please sign in again.", 401);
-        const next = await requestGonvexAuthToken(options.runtimeUrl, {
-          grantType: "refresh_token", project: options.projectId,
-          refreshToken: latest.refreshToken, tenant: latest.activeTenantId,
-        });
+        options.client.setAuth({ project: options.projectId, token: latest.accessToken });
+        const grant = await options.client.action(control.auth.refreshSession, { refreshToken: latest.refreshToken });
+        const next = sessionFromNativeGrant(grant, latest);
         safeLocalStorageSet(options.storageKey, JSON.stringify(next));
         return next;
       });
@@ -540,6 +514,17 @@ async function bootstrapGonvexAuth(options: {
   // even if the first effect was cancelled before installSession.
   safeLocalStorageSet(options.storageKey, JSON.stringify(session));
   return session;
+}
+
+function sessionFromNativeGrant(value: JsonValue, previous: GonvexAuthSession): GonvexAuthSession {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !isGonvexAuthSession(value as Partial<GonvexAuthSession>)) {
+    throw new GonvexAuthRequestError("Gonvex returned an invalid native session.", 502);
+  }
+  const session = value as GonvexAuthSession;
+  const activeTenantId = session.tenants.some((tenant) => tenant.id === previous.activeTenantId)
+    ? previous.activeTenantId
+    : session.activeTenantId;
+  return { ...session, activeTenantId };
 }
 
 async function requestGonvexAuthToken(runtimeUrl: string, body: Record<string, unknown>): Promise<GonvexAuthSession> {
@@ -850,6 +835,36 @@ export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id:
   return client.localReplica.entity<T>(entity, id);
 }
 
+/** Resolve an ordered entity batch with one Local Replica subscription. */
+export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
+  const client = useGonvexClient();
+  const idsKey = JSON.stringify(ids);
+  const version = useSyncExternalStore(
+    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback(() => client.localReplica.version(), [client]),
+    () => 0,
+  );
+  return useMemo(() => client.replicaEntities<T>(entity, ids), [client, entity, idsKey, version]);
+}
+
+/** Read a persisted Live Query window without opening another server subscription. */
+export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
+  signatureOrReference: string | FunctionReference,
+  args: JsonValue = {},
+): LiveQueryResult<T> {
+  const client = useGonvexClient();
+  const argsKey = JSON.stringify(args);
+  const signature = typeof signatureOrReference === "string"
+    ? signatureOrReference
+    : client.replicaSignature(signatureOrReference, args);
+  const version = useSyncExternalStore(
+    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback(() => client.localReplica.version(), [client]),
+    () => 0,
+  );
+  return useMemo(() => client.retainedLiveQuery<T>(signature), [client, signature, argsKey, version]);
+}
+
 /** Structured Live Query state backed by normalized Local Replica entities. */
 export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   ref: FunctionReference,
@@ -872,6 +887,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     const offline = client.offlineLiveQuery<T>(ref, args);
     return {
       rows: offline.rows,
+      ids: offline.rows.map((row) => String(row.id ?? row._id ?? "")).filter(Boolean),
       ...(offline.total === undefined ? {} : { total: offline.total }),
       ...(offline.offset === undefined ? {} : { offset: offline.offset }),
       ...(offline.limit === undefined ? {} : { limit: offline.limit }),
@@ -884,7 +900,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   }
   return signature
     ? client.localReplica.liveQuery<T>(signature)
-    : { rows: [], source: "cache", completeness: "partial", freshness: client.localReplica.freshness() };
+    : { rows: [], ids: [], source: "cache", completeness: "partial", freshness: client.localReplica.freshness() };
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
@@ -932,6 +948,26 @@ export function useReplicaCollection<T extends JsonValue = JsonValue>(
   return useSyncExternalStore(
     useCallback((onStoreChange) => watch?.onUpdate(onStoreChange) ?? (() => undefined), [watch]),
     useCallback(() => watch?.localReplicaResult(), [watch]),
+    () => undefined,
+  );
+}
+
+/** Replica rows plus authoritative completeness, truncation, and freshness metadata. */
+export function useReplicaCollectionState<T extends ReplicaRow = ReplicaRow>(
+  ref: FunctionReference,
+  args: JsonValue | "skip" = {},
+): ReplicaCollectionState<T> | undefined {
+  const client = useGonvexClient();
+  const path = ref.path;
+  const argsKey = JSON.stringify(args);
+  const watch = useMemo(
+    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, ref.kind, path, argsKey],
+  );
+  return useSyncExternalStore(
+    useCallback((onStoreChange) => watch?.onUpdate(onStoreChange) ?? (() => undefined), [watch]),
+    useCallback(() => watch?.localReplicaState() as ReplicaCollectionState<T> | undefined, [watch]),
     () => undefined,
   );
 }

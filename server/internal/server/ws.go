@@ -31,6 +31,8 @@ type clientMessage struct {
 	Token              string                  `json:"token,omitempty"`
 	Project            string                  `json:"project,omitempty"`
 	Tenant             string                  `json:"tenant,omitempty"`
+	Scope              string                  `json:"scope,omitempty"`
+	ControlOnly        bool                    `json:"controlOnly,omitempty"`
 	Trace              *messageTrace           `json:"trace,omitempty"`
 	IdempotencyKey     string                  `json:"idempotencyKey,omitempty"`
 	Kind               string                  `json:"kind,omitempty"`
@@ -51,6 +53,9 @@ type clientMessage struct {
 	Subscribes         []querySubscribeRequest `json:"subscribes,omitempty"`
 	Calls              []reducerCallRequest    `json:"calls,omitempty"`
 	Capabilities       *clientCapabilities     `json:"capabilities,omitempty"`
+	Events             []json.RawMessage       `json:"events,omitempty"`
+	Release            string                  `json:"release,omitempty"`
+	Environment        string                  `json:"environment,omitempty"`
 }
 
 // maxBatchedClientRequests bounds every batched client frame (replica.openMany,
@@ -61,6 +66,7 @@ type querySubscribeRequest struct {
 	ID             string          `json:"id"`
 	Path           string          `json:"path"`
 	Args           json.RawMessage `json:"args,omitempty"`
+	Scope          string          `json:"scope,omitempty"`
 	WindowRevision string          `json:"windowRevision,omitempty"`
 }
 
@@ -68,6 +74,7 @@ type reducerCallRequest struct {
 	ID    string          `json:"id"`
 	Path  string          `json:"path"`
 	Args  json.RawMessage `json:"args,omitempty"`
+	Scope string          `json:"scope,omitempty"`
 	Trace *messageTrace   `json:"trace,omitempty"`
 	// IdempotencyKey marks a replayable command from the client outbox. Replays
 	// reuse the key, so the runtime executes the reducer once and serves the
@@ -179,6 +186,8 @@ type serverMessage struct {
 	OriginCommandID      string                          `json:"originCommandId,omitempty"`
 	CommittedRevision    uint64                          `json:"committedRevision,omitempty"`
 	Changes              []replicaChangeMessage          `json:"changes,omitempty"`
+	Accepted             int                             `json:"accepted,omitempty"`
+	Fingerprints         []string                        `json:"fingerprints,omitempty"`
 }
 
 // explicitNull makes a nil handler result serialize as an explicit JSON null
@@ -355,7 +364,11 @@ type wsConn struct {
 	member            *gonvex.Member
 	perms             map[string]any
 	auth              bool
+	controlOnly       bool
+	remoteIP          string
 	authToken         string
+	impersonationID   string
+	impersonatorID    string
 	authCheckedAt     time.Time
 	replicaScope      string
 	visibilityScope   string
@@ -432,6 +445,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		id:           fmt.Sprintf("conn-%06d", s.wsConnectionSeq.Add(1)),
 		project:      project,
 		tenant:       tenantIDFromRequest(project, requestedTenant),
+		remoteIP:     s.requestRemoteIP(r),
 		tenantPinned: strings.TrimSpace(requestedTenant) != "",
 		connectedAt:  connectedAt,
 		lastActiveAt: connectedAt,
@@ -515,14 +529,58 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		if c.tenantPinned {
 			currentTenant = c.tenant
 		}
-		user, permissions, project, tenant, err := c.server.authenticateSocket(ctx, requestedProject, currentTenant, message.Token, message.Tenant)
+		var user *gonvex.Account
+		var permissions map[string]any
+		var project, tenant string
+		var err error
+		impersonationID, impersonatorID := "", ""
+		if strings.HasPrefix(strings.TrimSpace(message.Token), "gvx_imp_") {
+			user, permissions, project, tenant, impersonationID, impersonatorID, err = c.server.authenticateImpersonationSocket(ctx, requestedProject, message.Token, c.id)
+		} else if message.ControlOnly && strings.TrimSpace(message.Token) == "" {
+			// Bind an anonymous socket to one logical project so it can invoke only
+			// explicitly public Control Plane functions. This exposes no database
+			// selector or credential and avoids treating a normal signed-out browser
+			// as an authentication failure.
+			if requestedProject == "" {
+				err = fmt.Errorf("project is required for public Control Plane calls")
+			} else {
+				err = c.server.requireControlProject(ctx, requestedProject)
+				project = requestedProject
+			}
+			if err == nil {
+				c.clearAuthentication()
+				c.mu.Lock()
+				c.project = project
+				c.tenant = ""
+				c.controlOnly = true
+				c.authCheckedAt = time.Now()
+				c.mu.Unlock()
+				c.write(serverMessage{Type: "auth.result", ID: message.ID, Result: map[string]any{"projectId": project, "accountId": "", "tenantId": ""}})
+				return
+			}
+		} else if message.ControlOnly {
+			user, project, err = c.server.authenticateControlSocket(ctx, requestedProject, message.Token)
+		} else {
+			user, permissions, project, tenant, err = c.server.authenticateSocket(ctx, requestedProject, currentTenant, message.Token, message.Tenant)
+		}
 		if err != nil {
 			c.clearAuthentication()
+			// A rejected credential must not deadlock refresh-token and other
+			// explicitly public Control Plane calls queued behind this auth frame.
+			// Bind only the logical project after validating it exists. No Account,
+			// Member, tenant, database credential, or non-public authority survives.
+			if requestedProject != "" && c.server.requireControlProject(ctx, requestedProject) == nil {
+				c.mu.Lock()
+				c.project = requestedProject
+				c.tenant = ""
+				c.controlOnly = true
+				c.mu.Unlock()
+			}
 			c.write(serverMessage{Type: "auth.error", ID: message.ID, Error: err.Error()})
 			return
 		}
 		var member *gonvex.Member
-		if user != nil {
+		if user != nil && !message.ControlOnly {
 			member, err = c.server.loadTenantMember(ctx, project, tenant, user.ID)
 			if err != nil {
 				c.clearAuthentication()
@@ -550,7 +608,10 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.project = project
 		c.tenant = tenant
 		c.auth = true
+		c.controlOnly = message.ControlOnly
 		c.authToken = message.Token
+		c.impersonationID = impersonationID
+		c.impersonatorID = impersonatorID
 		c.authCheckedAt = time.Now()
 		c.replicaScope = replicaScope
 		c.visibilityScope = connVisibilityScope
@@ -606,13 +667,21 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			c.resetReplicaSubscriptions("visibility-changed")
 		}
 	case "query.subscribe":
+		if message.Scope == "control" {
+			c.write(serverMessage{Type: "query.error", ID: message.ID, Path: message.Path, Error: "Control Plane queries are one-shot"})
+			return
+		}
 		if !c.requireAuth(ctx, "query.error", message.ID) {
 			return
 		}
 		c.subscribeQuery(ctx, querySubscribeRequest{
-			ID: message.ID, Path: message.Path, Args: message.Args, WindowRevision: message.WindowRevision,
+			ID: message.ID, Path: message.Path, Args: message.Args, Scope: message.Scope, WindowRevision: message.WindowRevision,
 		})
 	case "query.call":
+		if message.Scope == "control" {
+			c.callControlPlane(ctx, "query", message.ID, message.Path, message.Args, "")
+			return
+		}
 		if !c.requireAuth(ctx, "query.error", message.ID) {
 			return
 		}
@@ -631,6 +700,10 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			return
 		}
 		for _, subscribe := range message.Subscribes {
+			if subscribe.Scope == "control" {
+				c.write(serverMessage{Type: "query.error", ID: subscribe.ID, Path: subscribe.Path, Error: "Control Plane queries are one-shot"})
+				continue
+			}
 			c.subscribeQuery(ctx, subscribe)
 		}
 	case "query.unsubscribe":
@@ -658,11 +731,15 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 	case "replica.close":
 		c.closeReplica(message.ID)
 	case "reducer.call":
+		if message.Scope == "control" {
+			c.callControlPlane(ctx, "reducer", message.ID, message.Path, message.Args, message.IdempotencyKey)
+			return
+		}
 		if !c.requireAuth(ctx, "reducer.error", message.ID) {
 			return
 		}
 		c.callReducer(ctx, receivedAt, reducerCallRequest{
-			ID: message.ID, Path: message.Path, Args: message.Args, Trace: message.Trace,
+			ID: message.ID, Path: message.Path, Args: message.Args, Scope: message.Scope, Trace: message.Trace,
 			IdempotencyKey: message.IdempotencyKey,
 		})
 	case "reducer.callMany":
@@ -678,9 +755,21 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			return
 		}
 		for _, call := range message.Calls {
+			if call.Scope == "control" {
+				c.callControlPlane(ctx, "reducer", call.ID, call.Path, call.Args, call.IdempotencyKey)
+				continue
+			}
 			c.callReducer(ctx, receivedAt, call)
 		}
 	case "action.call":
+		if message.Scope == "control" {
+			idempotencyKey := message.IdempotencyKey
+			if idempotencyKey == "" {
+				idempotencyKey = message.ID
+			}
+			c.callControlPlane(ctx, "action", message.ID, message.Path, message.Args, idempotencyKey)
+			return
+		}
 		if !c.requireAuth(ctx, "action.error", message.ID) {
 			return
 		}
@@ -699,6 +788,8 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.server.recordTransactionTelemetry(transactionEntryFromTrace(c.project, c.tenant, message.ID, "action", message.Path, "server", "", "ok", "", trace))
 	case "telemetry.event":
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
+	case "error.register", "error.heartbeat", "error.envelope":
+		c.handleNativeErrorTelemetry(ctx, message)
 	default:
 		c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "unknown websocket message type"})
 	}
@@ -862,15 +953,46 @@ func (c *wsConn) revalidateAppAuth(ctx context.Context) error {
 	tenant := c.tenant
 	checkedAt := c.authCheckedAt
 	authenticated := c.auth
+	controlOnly := c.controlOnly
+	impersonationID := c.impersonationID
 	c.mu.Unlock()
 	if !authenticated {
 		return fmt.Errorf("authentication is required")
+	}
+	if impersonationID != "" {
+		account, member, err := c.server.revalidateImpersonation(ctx, project, tenant, impersonationID, c.id)
+		if err != nil {
+			return err
+		}
+		c.mu.Lock()
+		if c.impersonationID == impersonationID {
+			c.user = account
+			c.member = member
+			c.perms = member.Permissions
+			c.authCheckedAt = time.Now()
+		}
+		c.mu.Unlock()
+		return nil
 	}
 	nativeToken := strings.HasPrefix(strings.TrimSpace(token), "gvx_session_")
 	if !nativeToken {
 		return fmt.Errorf("a Gonvex app session is required")
 	}
 	if time.Since(checkedAt) < 5*time.Second {
+		return nil
+	}
+	if controlOnly {
+		account, authenticatedProject, err := c.server.authenticateControlSocket(ctx, project, token)
+		if err != nil {
+			return err
+		}
+		c.mu.Lock()
+		if c.authToken == token {
+			c.user = account
+			c.project = authenticatedProject
+			c.authCheckedAt = time.Now()
+		}
+		c.mu.Unlock()
 		return nil
 	}
 	session, _, err := c.server.validateAppSession(ctx, project, token, tenant)
@@ -905,7 +1027,10 @@ func (c *wsConn) clearAuthentication() {
 	c.member = nil
 	c.perms = nil
 	c.auth = false
+	c.controlOnly = false
 	c.authToken = ""
+	c.impersonationID = ""
+	c.impersonatorID = ""
 	c.authCheckedAt = time.Time{}
 	c.replicaScope = ""
 	c.visibilityScope = ""
@@ -2014,7 +2139,6 @@ func (s *Server) runReducerInTx(reducerCtx *gonvex.ReducerCtx, path string, rawA
 func restrictReducerCapabilities(ctx *gonvex.ReducerCtx) {
 	ctx.DB = nil
 	ctx.TenantDB = nil
-	ctx.ControlPlaneDB = nil
 	ctx.Storage = gonvex.UnavailableStorage()
 }
 
@@ -2102,7 +2226,6 @@ func (s *Server) actionContext(ctx context.Context, projectID string, tenantID s
 	// must re-enter through ctx.Reducers.Call.
 	runtimeCtx.DB = nil
 	runtimeCtx.TenantDB = nil
-	runtimeCtx.ControlPlaneDB = nil
 	runtimeCtx.Tx = nil
 	runtimeCtx.Reducers = &actionReducerCaller{
 		server: s, project: projectID, tenant: tenantID, caller: caller,
@@ -2144,11 +2267,6 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 	if err != nil {
 		return gonvex.RuntimeContext{}, err
 	}
-	controlPlaneURL := s.databaseURLForProject(projectID)
-	controlPlaneStore, err := s.tenantStores.Store(ctx, tenantStoreKey(projectID, "__control_plane__"), controlPlaneURL)
-	if err != nil {
-		return gonvex.RuntimeContext{}, err
-	}
 	logger := slog.Default().With("project", projectID, "tenant", activeTenant)
 	storageAPI := s.storageForTenant(ctx, projectID, activeTenant, store.DB, caller, logger)
 	return gonvex.RuntimeContext{
@@ -2161,7 +2279,6 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		Member:           caller.member,
 		DatabaseURL:      store.DatabaseURL,
 		DB:               store.DB,
-		ControlPlaneDB:   controlPlaneStore.DB,
 		TenantDB:         store.DB,
 		Storage:          storageAPI,
 		Scheduler:        s.scheduler.For(projectID, activeTenant),

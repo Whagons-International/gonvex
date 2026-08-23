@@ -26,6 +26,8 @@ func run(args []string) error {
 		return fmt.Errorf("gonvex dev is provided by the TypeScript CLI; run `npx gonvex dev` from the application package")
 	case "migrate":
 		return runMigrate(args[1:])
+	case "internal":
+		return runInternal(args[1:])
 	default:
 		printHelp()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -36,4 +38,5 @@ func printHelp() {
 	fmt.Println("Gonvex CLI")
 	fmt.Println("  npx gonvex dev [options]")
 	fmt.Println("  gonvex migrate identity-v2 (--plan | --apply | --verify) [options]")
+	fmt.Println("  gonvex internal (provision-tenant | resolve-identity | e2e-setup) [options]")
 }

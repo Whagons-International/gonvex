@@ -24,7 +24,11 @@ describe("client package artifact", () => {
     const removed = /(?:browser-cache|cache(?:-coordinator)?|persistent-cache|query-cache|sync-store)/;
 
     expect(files).toContain("dist/index.js");
+    expect(files).toContain("dist/control.js");
+    expect(files).toContain("dist/control.d.ts");
     expect(files.filter((file) => removed.test(file))).toEqual([]);
     expect(readFileSync(resolve(packageRoot, "dist/index.js"), "utf8")).not.toContain("query-cache.js");
+    expect(readFileSync(resolve(packageRoot, "dist/index.d.ts"), "utf8")).toContain("control");
+    expect(readFileSync(resolve(packageRoot, "dist/local-replica.d.ts"), "utf8")).toContain("collectionState");
   });
 });

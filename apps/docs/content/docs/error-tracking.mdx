@@ -94,10 +94,11 @@ When PostgreSQL is unavailable in a minimal local runtime, Gonvex uses a bounded
 in-memory inbox. Production projects should configure PostgreSQL so groups
 survive restarts.
 
-## HTTP endpoints
+## Native reporting and operator endpoints
 
-The browser registers the project capability with `POST /errors/register` and
-sends envelopes to `POST /errors/envelope`. Authenticated dashboard clients use:
+The client registers error tracking and sends bounded envelopes over the same
+persistent Gonvex connection used for functions and Replica transactions.
+Project operators inspect errors through:
 
 - `GET /dev/errors/status`
 - `GET /dev/errors/groups`

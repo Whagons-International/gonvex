@@ -3,7 +3,7 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionState, FunctionReference, GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexProviderWithAuth, GonvexProvider, useGonvexAuthState, useGonvexConnectionState, useReducer, useQuery, useQueryResult, useReplicaCollection } from "./index";
+import { GonvexProviderWithAuth, GonvexProvider, useGonvexAuthState, useGonvexConnectionState, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaEntities, useRetainedLiveQuery } from "./index";
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
@@ -36,6 +36,15 @@ class FakeGonvexClient {
   subscribedRefs: FunctionReference[] = [];
   watchedReplicaRefs: FunctionReference[] = [];
   readonly replicaRows: unknown[] = [];
+  replicaState = { rows: [] as unknown[], ids: [] as string[], source: "cache", completeness: "partial", freshness: "verifying", truncated: false, computedRevision: 0 };
+  replicaVersion = 0;
+  readonly replicaListeners = new Set<() => void>();
+  readonly entityValues = new Map<string, Record<string, unknown>>();
+  retained = { rows: [] as Record<string, unknown>[], ids: [] as string[], source: "cache", completeness: "partial", freshness: "verifying" };
+  readonly localReplica = {
+    subscribe: (listener: () => void) => { this.replicaListeners.add(listener); return () => this.replicaListeners.delete(listener); },
+    version: () => this.replicaVersion,
+  };
   state: ConnectionState = {
     isWebSocketConnected: true,
     hasEverConnected: true,
@@ -60,9 +69,18 @@ class FakeGonvexClient {
     this.watchedReplicaRefs.push(ref);
     return {
       localReplicaResult: () => this.replicaRows,
-      onUpdate: () => () => undefined,
+      localReplicaState: () => this.replicaState,
+      onUpdate: (listener: () => void) => { this.replicaListeners.add(listener); return () => this.replicaListeners.delete(listener); },
     };
   }
+
+  replicaEntities(_entity: string, ids: readonly string[]) {
+    return ids.map((id) => this.entityValues.get(id));
+  }
+
+  replicaSignature(ref: FunctionReference) { return ref.path; }
+  retainedLiveQuery() { return this.retained; }
+  updateReplica() { this.replicaVersion += 1; for (const listener of this.replicaListeners) listener(); }
 
   onSessionScopeChange(handler: () => void) {
     this.scopeHandlers.add(handler);
@@ -270,6 +288,35 @@ describe("useReplicaCollection", () => {
     renderHook(() => useReplicaCollection(projectedRef, {}), { wrapper: wrapperFor(client) });
 
     expect(client.watchedReplicaRefs.at(-1)).toBe(projectedRef);
+  });
+
+  it("exposes protocol-owned completeness instead of inferring from row count", () => {
+    const client = new FakeGonvexClient();
+    client.replicaState = { rows:[{id:"a"}],ids:["a"],source:"cache",completeness:"partial",freshness:"offline",truncated:true,computedRevision:17 };
+    const { result } = renderHook(() => useReplicaCollectionState(ref, {}), { wrapper: wrapperFor(client) });
+    expect(result.current).toMatchObject({ completeness:"partial",freshness:"offline",truncated:true,computedRevision:17 });
+  });
+});
+
+describe("normalized Replica selectors", () => {
+  it("updates a batched entity selector with one Replica subscription", () => {
+    const client = new FakeGonvexClient();
+    client.entityValues.set("a", { id: "a", title: "A" });
+    const { result } = renderHook(() => useReplicaEntities<{ id: string; title: string }>("tasks", ["a", "b"]), { wrapper: wrapperFor(client) });
+    expect(result.current).toEqual([{ id: "a", title: "A" }, undefined]);
+    act(() => { client.entityValues.set("b", { id: "b", title: "B" }); client.updateReplica(); });
+    expect(result.current).toEqual([{ id: "a", title: "A" }, { id: "b", title: "B" }]);
+    expect(client.replicaListeners.size).toBe(1);
+  });
+
+  it("subscribes to retained membership without opening another query", () => {
+    const client = new FakeGonvexClient();
+    client.retained = { rows:[{id:"a"}],ids:["a"],source:"cache",completeness:"partial",freshness:"verifying" };
+    const { result } = renderHook(() => useRetainedLiveQuery("tasks:grid"), { wrapper: wrapperFor(client) });
+    expect(result.current.ids).toEqual(["a"]);
+    act(() => { client.retained = {...client.retained,rows:[{id:"b"}],ids:["b"]}; client.updateReplica(); });
+    expect(result.current.ids).toEqual(["b"]);
+    expect(client.subscribedRefs).toHaveLength(0);
   });
 });
 

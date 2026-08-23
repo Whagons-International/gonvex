@@ -83,6 +83,9 @@ type Server struct {
 	projectEnvCache         map[string]projectEnvCacheEntry
 	projectEnvLoads         singleflight.Group
 	tenantProvisions        singleflight.Group
+	tenantLocalSchemaMu     sync.Mutex
+	tenantLocalSchemaReady  map[string]bool
+	tenantLocalSchemaLoads  singleflight.Group
 	provisionTenant         func(context.Context, string, manifest.Schema) error
 	// syncLocks serializes /dev/sync work per project so overlapping replicas
 	// (e.g. a failed-then-retried push, or a client that fires twice) can't run
@@ -191,29 +194,30 @@ func newServer(cfg config.Config, cache *rowsCache) *Server {
 			PublicBaseURL:   cfg.StoragePublicURL,
 			URLSigningKey:   cfg.S3SecretAccessKey,
 		}),
-		cache:                 cache,
-		metrics:               newRuntimeMetrics(cfg.TelemetryLogPath),
-		telemetryWrites:       make(chan struct{}, 4),
-		telemetryDBs:          map[string]*sql.DB{},
-		subscriptionTelemetry: make(chan []transactionTelemetryEntry, 8192),
-		projects:              map[string]projectTarget{},
-		tenants:               map[string]tenantTarget{},
-		tenantHydrationAt:     map[string]time.Time{},
-		wsConns:               map[*wsConn]bool{},
-		tableChangeWait:       map[string]*time.Timer{},
-		tableChanges:          map[string]pendingTableChange{},
-		syncLocks:             map[string]*sync.Mutex{},
-		schemaHash:            map[string]string{},
-		replicaStartedAtMS:    time.Now().UTC().UnixMilli(),
-		errorTracker:          newErrorTracker(10000),
-		appAuthRequirements:   map[string]appAuthRequirementCacheEntry{},
-		appAuthLookups:        map[string]*appAuthRequirementLookup{},
-		appAuthVersions:       map[string]uint64{},
-		visibilityContexts:    map[string]*resolvedVisibilityContext{},
-		visibilityEpochs:      map[string]uint64{},
-		syncPrunedAt:          map[string]time.Time{},
-		runtimeHydrationFails: map[string]struct{}{},
-		provisionTenant:       provisionTenantDatabase,
+		cache:                  cache,
+		metrics:                newRuntimeMetrics(cfg.TelemetryLogPath),
+		telemetryWrites:        make(chan struct{}, 4),
+		telemetryDBs:           map[string]*sql.DB{},
+		subscriptionTelemetry:  make(chan []transactionTelemetryEntry, 8192),
+		projects:               map[string]projectTarget{},
+		tenants:                map[string]tenantTarget{},
+		tenantHydrationAt:      map[string]time.Time{},
+		wsConns:                map[*wsConn]bool{},
+		tableChangeWait:        map[string]*time.Timer{},
+		tableChanges:           map[string]pendingTableChange{},
+		syncLocks:              map[string]*sync.Mutex{},
+		schemaHash:             map[string]string{},
+		replicaStartedAtMS:     time.Now().UTC().UnixMilli(),
+		errorTracker:           newErrorTracker(10000),
+		appAuthRequirements:    map[string]appAuthRequirementCacheEntry{},
+		appAuthLookups:         map[string]*appAuthRequirementLookup{},
+		appAuthVersions:        map[string]uint64{},
+		visibilityContexts:     map[string]*resolvedVisibilityContext{},
+		visibilityEpochs:       map[string]uint64{},
+		syncPrunedAt:           map[string]time.Time{},
+		runtimeHydrationFails:  map[string]struct{}{},
+		provisionTenant:        provisionTenantDatabase,
+		tenantLocalSchemaReady: map[string]bool{},
 	}
 	server.dataFiles = datafiles.NewManager(os.Getenv("GONVEX_DATA_DIR"))
 	sandboxRoot := cfg.SandboxRoot
@@ -428,14 +432,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/google/authorize", s.handleGoogleAuthorize)
 	mux.HandleFunc("GET /auth/google/callback", s.handleGoogleCallback)
 	mux.HandleFunc("POST /auth/token", s.handleAppAuthToken)
-	mux.HandleFunc("POST /auth/logout", s.handleAppAuthLogout)
-	mux.HandleFunc("GET /auth/me", s.handleAppAuthMe)
-	mux.HandleFunc("GET /auth/tenants", s.handleAppAuthTenants)
-	mux.HandleFunc("POST /auth/tenants", s.handleAppAuthTenants)
-	mux.HandleFunc("GET /auth/tenants/{tenant}/members", s.handleAppAuthTenantMembers)
-	mux.HandleFunc("POST /auth/tenants/{tenant}/members", s.handleAppAuthTenantMembers)
-	mux.HandleFunc("DELETE /auth/tenants/{tenant}/members/{member}", s.handleDeleteAppAuthTenantMember)
-	mux.HandleFunc("DELETE /auth/tenants/{tenant}/invitations/{email}", s.handleDeleteAppAuthTenantInvitation)
+	// Optional external ingestion compatibility. First-party browser clients use
+	// native error.* frames over /ws; these routes are not an internal function transport.
 	mux.HandleFunc("POST /errors/register", s.handleErrorRegistration)
 	mux.HandleFunc("POST /errors/envelope", s.handleErrorEnvelope)
 	mux.HandleFunc("GET /dev/errors/status", s.handleErrorStatus)

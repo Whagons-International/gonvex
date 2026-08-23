@@ -6,6 +6,23 @@ persistent Local Replica, and telemetry.
 Most React apps should use `@gonvex/react`, which wraps this package with hooks.
 Use `@gonvex/client` directly when you want lower-level control.
 
+## Control Plane
+
+Host-owned account, tenant-directory, invitation, agent-auth, voice, and support
+functions use the same persistent connection as tenant functions:
+
+```ts
+import { control } from "@gonvex/client";
+
+const account = await client.query(control.accounts.me, {});
+const tenants = await client.query(control.tenants.mine, {});
+await client.reducer(control.tenants.updateTimezone, { timezone: "America/Los_Angeles" });
+```
+
+The references include argument/result schemas and their authorization class.
+They never accept database URLs. Tenant-admin references always operate on the
+active, authoritatively admitted tenant.
+
 ## Install
 
 ```bash
@@ -74,7 +91,9 @@ const watch = client.watchReplica<Task>(
 );
 
 const stop = watch.onUpdate(() => {
-  render(watch.localReplicaResult() ?? []);
+  const state = watch.localReplicaState();
+  render(state?.rows ?? []);
+  console.log(state?.completeness, state?.truncated, state?.computedRevision);
   console.log(watch.status()); // { isLoading, isUpToDate }
 });
 ```
@@ -148,9 +167,8 @@ const client = new GonvexClient(url, {
 });
 ```
 
-Use `GonvexErrorReporter` directly when integrating an existing application
-logger. See the Error Tracking guide in the full documentation for privacy,
-grouping, persistence, and dashboard details.
+Error registration and envelopes use native persistent-protocol frames. No
+browser HTTP ingestion endpoint is needed.
 
 ## Connection reliability
 
@@ -185,11 +203,11 @@ Override per client (`timeouts` option) or per call (`{ timeoutMs }`). Use `0` t
 
 Rejected operations throw `GonvexClientError` with `code`:
 
-- `server` — runtime executed the function and returned an error
-- `timeout` — no response within the timeout
-- `disconnected` — socket dropped while the operation was pending
-- `closed` — client was explicitly closed
-- `auth` — authentication rejected
+- `server`: runtime executed the function and returned an error
+- `timeout`: no response within the timeout
+- `disconnected`: socket dropped while the operation was pending
+- `closed`: client was explicitly closed
+- `auth`: authentication rejected
 
 ### Reducer / Action disconnect policy
 

@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/cli",
-  "version": "0.1.32",
+  "version": "0.2.0",
   "type": "module",
   "bin": {
     "gonvex": "./dist/index.js"

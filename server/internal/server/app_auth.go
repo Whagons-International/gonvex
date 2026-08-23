@@ -1288,21 +1288,41 @@ func (s *Server) refreshAppSession(ctx context.Context, projectID string, refres
 		return appAuthSessionGrant{}, appAuthAccount{}, err
 	}
 	defer tx.Rollback()
+	grant, account, revokedAccountID, err := refreshAppSessionTx(ctx, tx, projectID, refreshToken)
+	if err != nil {
+		if revokedAccountID != "" {
+			if commitErr := tx.Commit(); commitErr != nil {
+				return appAuthSessionGrant{}, appAuthAccount{}, commitErr
+			}
+			s.revokeAppAuthConnections(projectID, revokedAccountID)
+		}
+		return appAuthSessionGrant{}, appAuthAccount{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return appAuthSessionGrant{}, appAuthAccount{}, err
+	}
+	return grant, account, nil
+}
+
+// refreshAppSessionTx rotates one refresh token inside the caller's exact
+// transaction. revokedAccountID is non-empty only when replay detection wrote
+// a family revocation that the caller must commit before returning the error.
+func refreshAppSessionTx(ctx context.Context, tx *sql.Tx, projectID string, refreshToken string) (appAuthSessionGrant, appAuthAccount, string, error) {
 	var storedProject, accountID, familyID string
 	var refreshExpiresAt time.Time
 	var usedAt, revokedAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT project_id, account_id, family_id, expires_at, used_at, revoked_at
+	err := tx.QueryRowContext(ctx, `SELECT project_id, account_id, family_id, expires_at, used_at, revoked_at
 		FROM gonvex_auth_refresh_tokens WHERE token_hash = $1 FOR UPDATE`, sha256Hex(refreshToken)).Scan(
 		&storedProject, &accountID, &familyID, &refreshExpiresAt, &usedAt, &revokedAt,
 	)
 	if err == sql.ErrNoRows {
-		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("invalid or expired refresh token")
+		return appAuthSessionGrant{}, appAuthAccount{}, "", invalidAppAuthGrant("invalid or expired refresh token")
 	}
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthAccount{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, "", err
 	}
 	if storedProject != projectID || revokedAt.Valid || refreshExpiresAt.Before(time.Now()) {
-		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("invalid or expired refresh token")
+		return appAuthSessionGrant{}, appAuthAccount{}, "", invalidAppAuthGrant("invalid or expired refresh token")
 	}
 	if usedAt.Valid {
 		if time.Since(usedAt.Time) <= appRefreshReuseGrace {
@@ -1310,20 +1330,16 @@ func (s *Server) refreshAppSession(ctx context.Context, projectID string, refres
 			// duplicate request inside the short grace window is rejected without
 			// revoking the winner; older reuse is treated as replay and revokes the
 			// complete family.
-			return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("refresh token was already rotated; use the latest session")
+			return appAuthSessionGrant{}, appAuthAccount{}, "", invalidAppAuthGrant("refresh token was already rotated; use the latest session")
 		}
 		if err := revokeAppAuthFamilyTx(ctx, tx, familyID); err != nil {
-			return appAuthSessionGrant{}, appAuthAccount{}, err
+			return appAuthSessionGrant{}, appAuthAccount{}, "", err
 		}
-		if err := tx.Commit(); err != nil {
-			return appAuthSessionGrant{}, appAuthAccount{}, err
-		}
-		s.revokeAppAuthConnections(storedProject, accountID)
-		return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("refresh token reuse detected; this login was revoked")
+		return appAuthSessionGrant{}, appAuthAccount{}, accountID, invalidAppAuthGrant("refresh token reuse detected; this login was revoked")
 	} else {
 		if _, err := tx.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET used_at = now()
 			WHERE token_hash = $1 AND used_at IS NULL`, sha256Hex(refreshToken)); err != nil {
-			return appAuthSessionGrant{}, appAuthAccount{}, err
+			return appAuthSessionGrant{}, appAuthAccount{}, "", err
 		}
 	}
 	var account appAuthAccount
@@ -1340,18 +1356,15 @@ func (s *Server) refreshAppSession(ctx context.Context, projectID string, refres
 		&account.Provider, &account.CreatedAt, &account.LastSignedInAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
-			return appAuthSessionGrant{}, appAuthAccount{}, invalidAppAuthGrant("account is unavailable")
+			return appAuthSessionGrant{}, appAuthAccount{}, "", invalidAppAuthGrant("account is unavailable")
 		}
-		return appAuthSessionGrant{}, appAuthAccount{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, "", err
 	}
 	grant, err := issueAppAuthSessionGrant(ctx, tx, projectID, accountID, familyID, refreshExpiresAt)
 	if err != nil {
-		return appAuthSessionGrant{}, appAuthAccount{}, err
+		return appAuthSessionGrant{}, appAuthAccount{}, "", err
 	}
-	if err := tx.Commit(); err != nil {
-		return appAuthSessionGrant{}, appAuthAccount{}, err
-	}
-	return grant, account, nil
+	return grant, account, "", nil
 }
 
 func revokeAppAuthFamilyTx(ctx context.Context, tx *sql.Tx, familyID string) error {

@@ -8,6 +8,7 @@
     "projects-and-tenants",
     "frontend-multitenancy",
     "auth-and-membership",
+    "control-plane-functions",
     "schema",
     "functions-and-bindings",
     "realtime-subscriptions",

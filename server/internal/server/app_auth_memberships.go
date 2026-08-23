@@ -105,10 +105,41 @@ func (s *Server) tenantMemberDB(ctx context.Context, projectID string, tenantID 
 	if store.DB == nil {
 		return nil, fmt.Errorf("tenant database is unavailable")
 	}
-	if err := ensureTenantLocalTables(ctx, store.DB); err != nil {
+	if err := s.ensureTenantLocalSchema(ctx, databaseURL, store.DB); err != nil {
 		return nil, err
 	}
 	return store.DB, nil
+}
+
+// ensureTenantLocalSchema installs the framework-owned membership and
+// projection tables once per physical tenant database. Membership listeners,
+// provisioning, and foreground authorization can all arrive concurrently;
+// serializing the DDL prevents PostgreSQL catalog races such as "tuple
+// concurrently updated" without placing correctness on a timing assumption.
+func (s *Server) ensureTenantLocalSchema(ctx context.Context, databaseURL string, db *sql.DB) error {
+	key := strings.TrimSpace(databaseURL)
+	s.tenantLocalSchemaMu.Lock()
+	ready := s.tenantLocalSchemaReady[key]
+	s.tenantLocalSchemaMu.Unlock()
+	if ready {
+		return nil
+	}
+	_, err, _ := s.tenantLocalSchemaLoads.Do(key, func() (any, error) {
+		s.tenantLocalSchemaMu.Lock()
+		ready := s.tenantLocalSchemaReady[key]
+		s.tenantLocalSchemaMu.Unlock()
+		if ready {
+			return nil, nil
+		}
+		if err := ensureTenantLocalTables(ctx, db); err != nil {
+			return nil, err
+		}
+		s.tenantLocalSchemaMu.Lock()
+		s.tenantLocalSchemaReady[key] = true
+		s.tenantLocalSchemaMu.Unlock()
+		return nil, nil
+	})
+	return err
 }
 
 // tenantMemberRecord is the tenant's own view of a membership. memberID is the
@@ -610,7 +641,11 @@ func (s *Server) ensurePersonalAppAuthTenant(ctx context.Context, projectID stri
 	if name == "" {
 		name = "My"
 	}
-	return s.createAppAuthTenant(ctx, projectID, user.ID, name+"'s workspace")
+	return s.createControlTenant(ctx, &wsConn{
+		server:  s,
+		project: projectID,
+		user:    &gonvex.Account{ID: user.ID, Email: user.Email, Name: user.Name, AvatarURL: user.Picture},
+	}, name+"'s workspace", "personal-workspace:"+user.ID)
 }
 
 func (s *Server) createAppAuthTenant(ctx context.Context, projectID string, userID string, name string) (appAuthTenant, error) {
@@ -1325,7 +1360,9 @@ func (s *Server) listAppAuthTenantMembers(ctx context.Context, projectID string,
 		return nil, nil, err
 	}
 	inviteRows, err := db.QueryContext(ctx, `SELECT email, role, permissions, expires_at
-		FROM gonvex_auth_membership_invitations WHERE project_id = $1 AND tenant_id = $2 AND expires_at > now()
+		FROM gonvex_auth_membership_invitations
+		WHERE project_id = $1 AND tenant_id = $2 AND expires_at > now()
+		  AND revoked_at IS NULL AND accepted_at IS NULL
 		ORDER BY lower(email)`, projectID, tenantID)
 	if err != nil {
 		return nil, nil, err

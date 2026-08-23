@@ -459,18 +459,124 @@ func generatedEventID(event capturedError) string {
 }
 
 func (t *errorTracker) allow(key string, now time.Time) bool {
+	return t.allowLimit(key, now, 120)
+}
+
+func (t *errorTracker) allowLimit(key string, now time.Time, limit int) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	window := t.rateWindows[key]
 	if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
 		window = errorRateWindow{started: now}
 	}
-	if window.count >= 120 {
+	if window.count >= limit {
 		return false
 	}
 	window.count++
 	t.rateWindows[key] = window
 	return true
+}
+
+func (c *wsConn) handleNativeErrorTelemetry(ctx context.Context, message clientMessage) {
+	project := strings.TrimSpace(c.project)
+	if project == "" || !c.server.enableProjectErrorTracking(ctx, project) {
+		c.write(serverMessage{Type: "error.ack", ID: message.ID, Error: "error telemetry is unavailable"})
+		return
+	}
+	c.mu.Lock()
+	accountID, tenantID, authenticated := "", "", c.auth && c.user != nil
+	if c.user != nil {
+		accountID = c.user.ID
+	}
+	if authenticated {
+		tenantID = c.tenant
+	}
+	c.mu.Unlock()
+	limit := 20
+	if authenticated {
+		limit = 120
+	}
+	rateSubject := accountID
+	if !authenticated {
+		rateSubject = c.remoteIP
+		if strings.TrimSpace(rateSubject) == "" {
+			rateSubject = c.id
+		}
+	}
+	if !c.server.errorTracker.allowLimit("native:"+project+":"+rateSubject, time.Now(), limit) {
+		c.write(serverMessage{Type: "error.ack", ID: message.ID, Error: "error telemetry rate limit exceeded"})
+		return
+	}
+	if message.Type == "error.register" || message.Type == "error.heartbeat" {
+		if authenticated {
+			db, err := c.server.pooledProjectRegistry(ctx)
+			if err == nil && db != nil {
+				_, _ = db.ExecContext(ctx, `INSERT INTO gonvex_support_sessions(id,project_id,tenant_id,account_id,connection_id,release,environment)
+					VALUES($1,$2,$3,$4,$1,$5,$6) ON CONFLICT(id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id,
+					account_id=EXCLUDED.account_id,
+					release=CASE WHEN EXCLUDED.release<>'' THEN EXCLUDED.release ELSE gonvex_support_sessions.release END,
+					environment=CASE WHEN EXCLUDED.environment<>'' THEN EXCLUDED.environment ELSE gonvex_support_sessions.environment END,
+					last_seen_at=now()`,
+					c.id, project, tenantID, accountID, truncateErrorString(message.Release, 200), truncateErrorString(message.Environment, 100))
+			}
+		}
+		c.write(serverMessage{Type: "error.ack", ID: message.ID})
+		return
+	}
+	if len(message.Events) == 0 || len(message.Events) > 20 {
+		c.write(serverMessage{Type: "error.ack", ID: message.ID, Error: "invalid error envelope"})
+		return
+	}
+	total := 0
+	for _, raw := range message.Events {
+		total += len(raw)
+	}
+	if total > 256<<10 {
+		c.write(serverMessage{Type: "error.ack", ID: message.ID, Error: "error envelope is too large"})
+		return
+	}
+	accepted := 0
+	fingerprints := []string{}
+	for _, raw := range message.Events {
+		var event capturedError
+		if json.Unmarshal(raw, &event) != nil {
+			continue
+		}
+		// Connection context is authoritative. Browser payload attribution is ignored.
+		event.Project, event.Tenant, event.SessionID = project, tenantID, c.id
+		if authenticated {
+			event.Account = map[string]any{"id": accountID}
+		} else {
+			event.Account = nil
+			event.Context = nil
+			event.Breadcrumbs = nil
+		}
+		event = sanitizeCapturedError(event)
+		if event.Message == "" {
+			continue
+		}
+		if event.EventID == "" {
+			event.EventID = generatedEventID(event)
+		}
+		persistCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		available, persisted, persistErr := c.server.persistError(persistCtx, event)
+		cancel()
+		if persistErr != nil {
+			c.write(serverMessage{Type: "error.ack", ID: message.ID, Error: "error store unavailable"})
+			return
+		}
+		fingerprintValue, ok := fingerprint(event), persisted
+		if !available {
+			fingerprintValue, ok = c.server.errorTracker.capture(event)
+		} else if persisted {
+			_, _ = c.server.errorTracker.capture(event)
+		}
+		if ok {
+			accepted++
+			fingerprints = append(fingerprints, fingerprintValue)
+		}
+	}
+	c.write(serverMessage{Type: "error.ack", ID: message.ID, Accepted: accepted, Fingerprints: fingerprints})
 }
 
 func (s *Server) enableProjectErrorTracking(ctx context.Context, projectID string) bool {

@@ -537,6 +537,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const normalizePath = (path: string): string => {
   const normalized = path.trim();
   if (!normalized) throw new Error("module function path is required");
+  if (normalized === "control" || normalized.startsWith("control.")) {
+    throw new Error(`module function path ${JSON.stringify(normalized)} uses the host-reserved Control Plane namespace`);
+  }
   return normalized;
 };
 

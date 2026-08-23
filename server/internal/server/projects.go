@@ -991,6 +991,9 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 		ON gonvex_auth_membership_invitations (project_id, email)`); err != nil {
 		return err
 	}
+	if err := ensureControlPlaneFunctionSchema(ctx, db); err != nil {
+		return err
+	}
 	// Backfill the project-shaped membership scope used by single-database auth
 	// projects. This also upgrades projects enabled before that scope existed.
 	if _, err := db.ExecContext(ctx, `INSERT INTO gonvex_runtime_tenants (

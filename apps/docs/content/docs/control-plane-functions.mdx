@@ -1,0 +1,37 @@
+---
+title: Control Plane functions
+description: Typed account, tenant-directory, invitation, and support operations over the persistent Gonvex connection.
+---
+
+# Control Plane functions
+
+Gonvex clients use one persistent connection for Control Plane functions,
+tenant functions, Replica transactions, support commands, and error telemetry.
+Control Plane references are exported from `@gonvex/client`:
+
+```ts
+import { control } from "@gonvex/client";
+
+const account = await client.query(control.accounts.me, {});
+const tenants = await client.query(control.tenants.mine, {});
+```
+
+Each reference carries `scope: "control"`, its executable kind, argument and
+result schemas, and one authorization class: `public`, `account`,
+`tenantAdmin`, or `projectAdmin`.
+
+The host derives identity and authorization from the connection. Browser
+arguments cannot select a Control Plane database, tenant database, account,
+or project role. Tenant-admin operations are bound to the active tenant.
+Project-admin operations check the Control Plane project owner or project
+membership directly.
+
+OAuth redirects and authorization-code exchange remain HTTP because OAuth is
+a public protocol. First-party account directory, session refresh, sign-out,
+invitations, support, and error telemetry do not use HTTP as an application
+function transport.
+
+Tenant membership remains authoritative in the tenant database. Invitation
+acceptance activates the tenant `members` row first. The
+`account_tenant_index` remains an eventually updated directory projection and
+cannot grant tenant admission.

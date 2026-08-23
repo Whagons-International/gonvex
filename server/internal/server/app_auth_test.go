@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gonvex/gonvex/pkg/gonvex"
 	"github.com/gonvex/gonvex/server/internal/config"
 	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
@@ -296,12 +297,16 @@ func TestAppAuthCodeExchangeCreatesProjectScopedSession(t *testing.T) {
 	if tokenResponse.Code != http.StatusOK || tokenResponse.Header().Get("cache-control") != "no-store" || httpGrant.AccessToken == "" || httpGrant.RefreshToken == "" || len(httpGrant.Tenants) != 1 {
 		t.Fatalf("unexpected HTTP token response: status=%d headers=%v body=%s", tokenResponse.Code, tokenResponse.Header(), tokenResponse.Body.String())
 	}
-	meRequest := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
-	meRequest.Header.Set("authorization", "Bearer "+httpGrant.AccessToken)
-	meResponse := httptest.NewRecorder()
-	runtime.Handler().ServeHTTP(meResponse, meRequest)
-	if meResponse.Code != http.StatusOK || !strings.Contains(meResponse.Body.String(), user.ID) {
-		t.Fatalf("HTTP auth identity failed: %d %s", meResponse.Code, meResponse.Body.String())
+	identity, err := runtime.executeControlQuery(context.Background(), &wsConn{
+		server: runtime, project: projectID,
+		user: &gonvex.Account{ID: exchangedUser.ID, Email: exchangedUser.Email, Name: exchangedUser.Name, AvatarURL: exchangedUser.Picture},
+	}, "control.accounts.me", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityJSON, _ := json.Marshal(identity)
+	if !strings.Contains(string(identityJSON), user.ID) {
+		t.Fatalf("native Control Plane identity failed: %s", identityJSON)
 	}
 	if _, _, err := runtime.exchangeAppAuthCode(context.Background(), projectID, code, verifier, redirectURI); err == nil {
 		t.Fatal("expected an authorization code replay to be rejected")
@@ -550,12 +555,15 @@ func TestAppAuthMultiTenantPersonalWorkspaceInvitationsAndSwitching(t *testing.T
 	if err := runtime.inviteAppAuthMember(context.Background(), projectID, secondTenant.ID, cancelledEmail, "member", nil, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	cancelRequest := httptest.NewRequest(http.MethodDelete, "/auth/tenants/"+secondTenant.ID+"/invitations/cancelled%40example.test", nil)
-	cancelRequest.Header.Set("authorization", "Bearer "+grant.AccessToken)
-	cancelResponse := httptest.NewRecorder()
-	runtime.Handler().ServeHTTP(cancelResponse, cancelRequest)
-	if cancelResponse.Code != http.StatusOK {
-		t.Fatalf("could not cancel invitation through the public API: %d %s", cancelResponse.Code, cancelResponse.Body.String())
+	ownerMember, err := runtime.loadTenantMember(context.Background(), projectID, secondTenant.ID, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.executeControlReducer(context.Background(), &wsConn{
+		server: runtime, project: projectID, tenant: secondTenant.ID,
+		user: &gonvex.Account{ID: owner.ID, Email: owner.Email, Name: owner.Name, AvatarURL: owner.Picture}, member: ownerMember,
+	}, "control.invitations.revoke", json.RawMessage(`{"id":"","email":"cancelled@example.test"}`)); err != nil {
+		t.Fatalf("could not cancel invitation through the native Control Plane: %v", err)
 	}
 	_, pendingInvitations, err := runtime.listAppAuthTenantMembers(context.Background(), projectID, secondTenant.ID)
 	if err != nil || len(pendingInvitations) != 0 {

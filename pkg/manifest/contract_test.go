@@ -79,6 +79,17 @@ func TestModuleArtifactRejectsInvalidPortableSchemasAndReducerPolicies(t *testin
 	}
 }
 
+func TestModuleArtifactReservesControlPlaneFunctionNamespace(t *testing.T) {
+	artifact := validCronArtifact()
+	function := artifact.Functions["jobs.run"]
+	delete(artifact.Functions, "jobs.run")
+	artifact.Functions["control.accounts.me"] = function
+	artifact.Hash, _ = artifact.ComputedHash()
+	if err := artifact.Validate(); err == nil || !strings.Contains(err.Error(), "host-reserved Control Plane namespace") {
+		t.Fatalf("reserved namespace error = %v", err)
+	}
+}
+
 func TestModuleArtifactHashCoversSourcesAndFunctionContract(t *testing.T) {
 	for _, mutate := range []func(*ModuleArtifact){
 		func(artifact *ModuleArtifact) { artifact.Files["gonvex/index.ts"] = "dGFtcGVyZWQ=" },

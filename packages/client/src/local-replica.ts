@@ -84,6 +84,8 @@ export type ReplicaFreshness = "current" | "verifying" | "offline";
 
 export type LiveQueryResult<T extends ReplicaRow = ReplicaRow> = {
   rows: T[];
+  /** Ordered normalized entity IDs owned by the retained query window. */
+  ids: string[];
   total?: number;
   offset?: number;
   limit?: number;
@@ -92,6 +94,11 @@ export type LiveQueryResult<T extends ReplicaRow = ReplicaRow> = {
   freshness: ReplicaFreshness;
   supported?: boolean;
   unsupportedOperator?: string;
+};
+
+export type ReplicaCollectionState<T extends ReplicaRow = ReplicaRow> = LiveQueryResult<T> & {
+  truncated: boolean;
+  computedRevision: number;
 };
 
 /**
@@ -112,9 +119,11 @@ export interface LocalReplicaView {
   listWindows(): ReplicaWindow[];
   windowRows<T extends ReplicaRow = ReplicaRow>(signature: string): T[];
   entity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined;
+  entityBatch<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined>;
   entityRows<T extends ReplicaRow = ReplicaRow>(entity: string): T[];
   entityCompleteness(entity: string): "complete" | "partial";
   liveQuery<T extends ReplicaRow = ReplicaRow>(signature: string): LiveQueryResult<T>;
+  collectionState<T extends ReplicaRow = ReplicaRow>(signature: string): ReplicaCollectionState<T>;
   hasLiveQuery(signature: string): boolean;
   snapshot(): ReplicaSnapshot;
 }
@@ -406,7 +415,12 @@ export class LocalReplica implements LocalReplicaView {
       throw new Error("replica materialization requires signature, entity, and key");
     }
     const nextEntities = cloneEntities(this.entities);
-    const nextQueries = new Map(this.liveQueries);
+    // Clone memberships before changing them. Persistence may be asynchronous,
+    // and readers must continue to observe the prior complete version until the
+    // transaction commits locally and the single state swap below runs.
+    const nextQueries = new Map(
+      [...this.liveQueries.entries()].map(([signature, window]) => [signature, cloneWindow(window)]),
+    );
     if (input.cursor && this.cursorValue && input.cursor.epoch !== this.cursorValue.epoch) {
       nextEntities.clear();
       nextQueries.clear();
@@ -477,7 +491,11 @@ export class LocalReplica implements LocalReplicaView {
     }
 
     const nextEntities = cloneEntities(this.entities);
-    const nextQueries = new Map(this.liveQueries);
+    // A transaction is invisible until its storage write succeeds. Deep-clone
+    // memberships because row deletion edits their ordered ID arrays.
+    const nextQueries = new Map(
+      [...this.liveQueries.entries()].map(([signature, window]) => [signature, cloneWindow(window)]),
+    );
     if (this.cursorValue && this.cursorValue.epoch !== transaction.cursor.epoch) {
       nextEntities.clear();
       nextQueries.clear();
@@ -531,6 +549,11 @@ export class LocalReplica implements LocalReplicaView {
     return selected as T | undefined;
   }
 
+  /** Resolve several IDs from one atomic Local Replica version. */
+  entityBatch<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
+    return ids.map((id) => this.entity<T>(entity, id));
+  }
+
   /** All cached rows for one normalized entity, including optimistic overlays. */
   entityRows<T extends ReplicaRow = ReplicaRow>(entity: string): T[] {
     if (!this.scopeLoaded) return [];
@@ -558,11 +581,11 @@ export class LocalReplica implements LocalReplicaView {
 
   liveQuery<T extends ReplicaRow = ReplicaRow>(signature: string): LiveQueryResult<T> {
     if (!this.scopeLoaded) {
-      return { rows: [], source: "cache", completeness: "partial", freshness: this.freshnessValue };
+      return { rows: [], ids: [], source: "cache", completeness: "partial", freshness: this.freshnessValue };
     }
     const membership = this.liveQueries.get(signature);
     if (!membership) {
-      return { rows: [], source: "cache", completeness: "partial", freshness: this.freshnessValue };
+      return { rows: [], ids: [], source: "cache", completeness: "partial", freshness: this.freshnessValue };
     }
     const rows = membership.ids
       .map((id) => this.entity<T>(membership.entity, id))
@@ -570,10 +593,22 @@ export class LocalReplica implements LocalReplicaView {
     const metadata = windowResultMetadata(membership.resultSkeleton, membership.resultPath);
     return {
       rows,
+      ids: [...membership.ids],
       ...metadata,
       source: this.freshnessValue === "current" ? membership.source : "cache",
       completeness: membership.completeness,
       freshness: this.freshnessValue,
+    };
+  }
+
+  /** Rows and protocol-owned completeness for one Replica Collection window. */
+  collectionState<T extends ReplicaRow = ReplicaRow>(signature: string): ReplicaCollectionState<T> {
+    const result = this.liveQuery<T>(signature);
+    const window = this.scopeLoaded ? this.liveQueries.get(signature) : undefined;
+    return {
+      ...result,
+      truncated: window?.truncated === true,
+      computedRevision: window?.cursor?.revision ?? window?.subscriptionRevision?.sequence ?? 0,
     };
   }
 

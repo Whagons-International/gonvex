@@ -2,7 +2,8 @@ export type ErrorAccount = { id?: string; email?: string; name?: string };
 export type ErrorContext = Record<string, unknown>;
 
 export type ErrorReporterOptions = {
-  endpoint: string;
+  /** Native persistent-protocol sender supplied by GonvexClient. */
+  transport: (type: "register" | "envelope" | "heartbeat", payload: unknown) => Promise<void>;
   project: string;
   tenant?: string;
   release?: string;
@@ -48,6 +49,7 @@ export class GonvexErrorReporter {
   private readonly breadcrumbs: ErrorEventPayload["breadcrumbs"] = [];
   private queue: ErrorEventPayload[] = [];
   private timer?: ReturnType<typeof setTimeout>;
+  private heartbeatTimer?: ReturnType<typeof setTimeout>;
   private readonly deviceId = persistedId("gonvex-error-device");
   private readonly sessionId = randomId();
   private removeGlobal?: () => void;
@@ -59,6 +61,7 @@ export class GonvexErrorReporter {
     this.queue = readQueue(this.queueKey);
     this.registerProject();
     if (this.options.captureGlobalErrors && typeof window !== "undefined") this.installGlobalHandlers();
+    if (typeof window !== "undefined") this.scheduleHeartbeat();
     if (this.queue.length) this.scheduleFlush();
   }
 
@@ -95,6 +98,8 @@ export class GonvexErrorReporter {
     const prepared = this.options.beforeSend?.(event) ?? event;
     if (!prepared) return;
     this.queue.push(prepared);
+    const maxQueueSize = this.options.maxQueueSize ?? 100;
+    if (this.queue.length > maxQueueSize) this.queue.splice(0, this.queue.length - maxQueueSize);
     this.persistQueue();
     this.scheduleFlush();
     return event.eventId;
@@ -104,36 +109,47 @@ export class GonvexErrorReporter {
     if (!this.queue.length) return;
     const batch = this.queue.splice(0, 20);
     try {
-      const response = await fetch(errorEndpoint(this.options.endpoint), {
-        method: "POST", headers: { "content-type": "application/json", "x-gonvex-project-id": this.options.project, ...(this.options.tenant ? { "x-gonvex-tenant-id": this.options.tenant } : {}) }, keepalive: true,
-        body: JSON.stringify({ events: batch }),
-      });
-      if (!response.ok) throw new Error(`error ingestion returned ${response.status}`);
+      await this.options.transport("envelope", { events: batch });
       this.persistQueue();
+      if (this.queue.length) this.scheduleFlush();
     } catch {
       this.queue = [...batch, ...this.queue].slice(0, this.options.maxQueueSize ?? 100);
       this.persistQueue();
     }
   }
 
-  close() { this.removeGlobal?.(); if (this.timer) clearTimeout(this.timer); void this.flush(); }
+  close() {
+    this.removeGlobal?.();
+    if (this.timer) clearTimeout(this.timer);
+    if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
+    void this.flush();
+  }
+
+  connectionRestored() {
+    this.registerProject();
+    void this.options.transport("heartbeat", {}).catch(() => undefined);
+    if (this.queue.length) this.scheduleFlush();
+  }
 
   private registerProject() {
-    if (typeof fetch !== "function") return;
-    try {
-      void fetch(errorEndpoint(this.options.endpoint, "register"), {
-        method: "POST",
-        headers: { "x-gonvex-project-id": this.options.project },
-        keepalive: true,
-      }).catch(() => undefined);
-    } catch {
-      // Registration is capability discovery only and must never affect the app.
-    }
+    void this.options.transport("register", {
+      release: this.options.release,
+      environment: this.options.environment,
+    }).catch(() => undefined);
   }
 
   private scheduleFlush() {
     if (this.timer) return;
     this.timer = setTimeout(() => { this.timer = undefined; void this.flush(); }, 1000);
+  }
+
+  private scheduleHeartbeat() {
+    if (this.heartbeatTimer) return;
+    this.heartbeatTimer = setTimeout(() => {
+      this.heartbeatTimer = undefined;
+      void this.options.transport("heartbeat", {}).catch(() => undefined);
+      this.scheduleHeartbeat();
+    }, 30_000);
   }
 
   private installGlobalHandlers() {
@@ -170,4 +186,3 @@ function randomId() { return `${Date.now().toString(36)}${Math.random().toString
 function persistedId(key: string) { try { const current = localStorage.getItem(key); if (current) return current; const next = randomId(); localStorage.setItem(key, next); return next; } catch { return randomId(); } }
 function readQueue(key: string): ErrorEventPayload[] { try { const value = JSON.parse(localStorage.getItem(key) ?? "[]"); return Array.isArray(value) ? value.slice(0, 100) : []; } catch { return []; } }
 function writeQueue(key: string, queue: ErrorEventPayload[]) { try { if (queue.length) localStorage.setItem(key, JSON.stringify(queue)); else localStorage.removeItem(key); } catch { /* reporting must never break the app */ } }
-function errorEndpoint(raw: string, resource = "envelope") { const value = raw.replace(/\/$/, ""); if (value.startsWith("ws://")) return `http://${value.slice(5)}/errors/${resource}`; if (value.startsWith("wss://")) return `https://${value.slice(6)}/errors/${resource}`; return `${value}/errors/${resource}`; }

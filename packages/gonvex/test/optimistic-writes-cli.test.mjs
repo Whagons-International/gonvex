@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -11,6 +11,9 @@ const cli = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 function generateBindings(source) {
   const project = mkdtempSync(join(tmpdir(), "gonvex-cli-optimistic-writes-"));
   mkdirSync(join(project, "gonvex"));
+  mkdirSync(join(project, "node_modules", "@gonvex"), { recursive: true });
+  symlinkSync(fileURLToPath(new URL("../../client", import.meta.url)), join(project, "node_modules", "@gonvex", "client"), "dir");
+  symlinkSync(fileURLToPath(new URL("../../protocol", import.meta.url)), join(project, "node_modules", "@gonvex", "protocol"), "dir");
   writeFileSync(join(project, "gonvex.json"), JSON.stringify({ project: "optimistic-writes-test", module: { entrypoint: "gonvex/index.ts" } }));
   writeFileSync(join(project, "gonvex", "index.ts"), source);
 

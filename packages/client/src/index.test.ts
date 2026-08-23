@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GonvexClient, GonvexClientError, MemoryLocalReplicaStorage, type FunctionReference } from "./index";
+import { GonvexClient, GonvexClientError, MemoryLocalReplicaStorage, control, type FunctionReference } from "./index";
+import { replicaHashesDigest, replicaRowsHashes } from "./replica-integrity";
 
 const captureReportedError = vi.hoisted(() => vi.fn());
 vi.mock("./error-reporter.js", () => ({
@@ -606,6 +607,7 @@ describe("GonvexClient", () => {
 
     const [{ id: authID }] = sentMessages(socket);
     socket.receive({ type: "auth.result", id: authID, result: authenticatedResult({ accountId: "account-a" }) });
+    await vi.waitFor(() => expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(true));
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
   });
 
@@ -656,7 +658,35 @@ describe("GonvexClient", () => {
     // Subscriptions stay queued through the retry and flush once auth settles.
     expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
     socket.receive({ type: "auth.result", id: auths[1].id, result: authenticatedResult({ accountId: "account-a" }) });
+    await vi.waitFor(() => expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(true));
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
+  });
+
+  it("can refresh an expired access token through the same native Control Plane socket", async () => {
+    let client!: GonvexClient;
+    const fetchToken = vi.fn(async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => {
+      if (!forceRefreshToken) return "expired-token";
+      const session = await client.action(control.auth.refreshSession, { refreshToken: "refresh-token" });
+      return session.accessToken;
+    });
+    client = new GonvexClient("ws://runtime.test/ws", { project: "shop", tenant: "tenant-a", fetchToken });
+
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    await vi.advanceTimersByTimeAsync(0);
+    const firstAuth = sentMessages(socket).find((message) => message.type === "auth");
+    socket.receive({ type: "auth.error", id: firstAuth.id, error: "token expired" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const refresh = sentMessages(socket).find((message) => message.type === "action.call");
+    expect(refresh).toMatchObject({ path: "control.auth.refreshSession", scope: "control", args: { refreshToken: "refresh-token" } });
+    socket.receive({ type: "action.result", id: refresh.id, result: { accessToken: "fresh-token" } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const auths = sentMessages(socket).filter((message) => message.type === "auth");
+    expect(auths).toHaveLength(2);
+    expect(auths[1]).toMatchObject({ token: "fresh-token", tenant: "tenant-a" });
   });
 
   it("gives up and notifies onAuthError when the forced refresh returns the rejected token", async () => {
@@ -677,8 +707,8 @@ describe("GonvexClient", () => {
     // Re-sending the very token the server just refused would loop forever.
     expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(1);
     expect(onAuthError).toHaveBeenCalledWith("token expired");
-    // The session degrades to the unauthenticated flow: queued messages flush.
-    expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
+    // Tenant reads stay fail-closed until a valid authenticated scope exists.
+    expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(false);
   });
 
   it("retries a rejected token only once per rejection cycle", async () => {
@@ -915,6 +945,45 @@ describe("GonvexClient", () => {
 
     expect(secondWatch.localLiveQueryResult()).toEqual([{ id: "task-1", title: "Persisted" }]);
     second.close();
+  });
+
+  it("keeps Replica Collection state partial until ready and stable between revisions", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.recent",
+      delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"], maxRows: 1 },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const watch = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open").length).toBeGreaterThanOrEqual(2);
+    });
+    const open = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1);
+    expect(open).toBeDefined();
+    const rows = [{ id: "task-1", title: "Cached" }];
+    socket.receive({
+      type: "replica.snapshot", id: open.id, path: "tasks.recent", result: rows,
+      cursor: { epoch: "epoch:test", revision: 12 }, key: "id", maxRows: 1,
+    });
+    await vi.waitFor(() => expect(watch.localReplicaState()).toBeDefined());
+
+    const verifying = watch.localReplicaState();
+    expect(verifying).toMatchObject({ completeness: "partial", truncated: false, computedRevision: 12 });
+    expect(watch.localReplicaState()).toBe(verifying);
+
+    const digest = await replicaHashesDigest(await replicaRowsHashes(rows, "id"));
+    socket.receive({
+      type: "replica.ready", id: open.id, path: "tasks.recent",
+      cursor: { epoch: "epoch:test", revision: 12 }, digest, truncated: true,
+    });
+    await vi.waitFor(() => {
+      expect(watch.localReplicaState()).toMatchObject({ completeness: "partial", truncated: true, computedRevision: 12 });
+    });
+    client.close();
   });
 
   it("runs the generated Live Query plan against normalized cached entities while offline", async () => {
@@ -1528,5 +1597,117 @@ describe("GonvexClient", () => {
 
     expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("routes typed Control Plane queries over the existing socket", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop", token: "gvx_session_test" });
+    const pending = client.query(control.accounts.me, {});
+    const socket = latestSocket();
+    socket.open();
+    const auth = sentMessages(socket).find((message) => message.type === "auth");
+    expect(auth).toMatchObject({ project: "shop", controlOnly: true });
+    socket.receive({ type: "auth.result", id: auth.id, result: { accountId: "acct-1", projectId: "shop", tenantId: "" } });
+    const call = sentMessages(socket).find((message) => message.type === "query.call");
+    expect(call).toMatchObject({ path: "control.accounts.me", scope: "control" });
+    socket.receive({ type: "query.result", id: call.id, result: { id: "acct-1", email: "owner@example.test", name: "Owner", avatarUrl: "" } });
+    await expect(pending).resolves.toMatchObject({ id: "acct-1" });
+  });
+
+  it("binds signed-out clients to public Control Plane calls without an auth error", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop" });
+    const onAuthError = vi.fn();
+    client.onAuthError(onAuthError);
+    const pending = client.query(control.auth.publicSettings, {});
+    const socket = latestSocket();
+    socket.open();
+    const auth = sentMessages(socket).find((message) => message.type === "auth");
+    expect(auth).toMatchObject({ project: "shop", controlOnly: true });
+    expect(auth.token).toBeUndefined();
+    socket.receive({ type: "auth.result", id: auth.id, result: { accountId: "", projectId: "shop", tenantId: "" } });
+    const call = sentMessages(socket).find((message) => message.type === "query.call");
+    expect(call).toMatchObject({ path: "control.auth.publicSettings", scope: "control" });
+    socket.receive({ type: "query.result", id: call.id, result: { providers: ["google"] } });
+    await expect(pending).resolves.toEqual({ providers: ["google"] });
+    expect(onAuthError).not.toHaveBeenCalled();
+  });
+
+  it("replays a Control Plane reducer with the same idempotency key after reconnect", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop", token: "gvx_session_test" });
+    const pending = client.reducer(control.accounts.updatePassword, { currentPassword: "old-password", newPassword: "a-new-password" });
+    const first = latestSocket();
+    first.open();
+    const firstAuth = sentMessages(first).find((message) => message.type === "auth");
+    first.receive({ type: "auth.result", id: firstAuth.id, result: { accountId: "acct-1", projectId: "shop", tenantId: "" } });
+    const original = sentMessages(first).find((message) => message.type === "reducer.call");
+    first.disconnect();
+
+    await vi.advanceTimersByTimeAsync(250);
+    const second = latestSocket();
+    second.open();
+    const secondAuth = sentMessages(second).find((message) => message.type === "auth");
+    second.receive({ type: "auth.result", id: secondAuth.id, result: { accountId: "acct-1", projectId: "shop", tenantId: "" } });
+    const replay = sentMessages(second).find((message) => message.type === "reducer.call");
+    expect(replay).toMatchObject({ id: original.id, idempotencyKey: original.idempotencyKey, scope: "control" });
+    second.receive({ type: "reducer.result", id: replay.id, result: { updated: true } });
+    await expect(pending).resolves.toEqual({ updated: true });
+  });
+
+  it("replays an in-flight Control Plane query after reconnect", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop", token: "gvx_session_test" });
+    const pending = client.query(control.accounts.me, {});
+    const first = latestSocket();
+    first.open();
+    const firstAuth = sentMessages(first).find((message) => message.type === "auth");
+    first.receive({ type: "auth.result", id: firstAuth.id, result: { accountId: "acct-1", projectId: "shop", tenantId: "" } });
+    const original = sentMessages(first).find((message) => message.type === "query.call");
+    first.disconnect();
+
+    await vi.advanceTimersByTimeAsync(250);
+    const second = latestSocket();
+    second.open();
+    const secondAuth = sentMessages(second).find((message) => message.type === "auth");
+    second.receive({ type: "auth.result", id: secondAuth.id, result: { accountId: "acct-1", projectId: "shop", tenantId: "" } });
+    const replay = sentMessages(second).find((message) => message.type === "query.call");
+    expect(replay).toMatchObject({ id: original.id, scope: "control", path: "control.accounts.me" });
+    second.receive({ type: "query.result", id: replay.id, result: { id: "acct-1", email: "a@example.test", name: "A", avatarUrl: "" } });
+    await expect(pending).resolves.toMatchObject({ id: "acct-1" });
+  });
+
+  it("replays a Control Plane action with the same idempotency key after reconnect", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop", token: "gvx_session_test" });
+    const pending = client.action(control.auth.refreshSession, { refreshToken: "refresh-1" });
+    const first = latestSocket();
+    first.open();
+    const firstAuth = sentMessages(first).find((message) => message.type === "auth");
+    first.receive({ type: "auth.result", id: firstAuth.id, result: { accountId: "acct-1", projectId: "shop", tenantId: "" } });
+    const original = sentMessages(first).find((message) => message.type === "action.call");
+    first.disconnect();
+
+    await vi.advanceTimersByTimeAsync(250);
+    const second = latestSocket();
+    second.open();
+    const secondAuth = sentMessages(second).find((message) => message.type === "auth");
+    second.receive({ type: "auth.result", id: secondAuth.id, result: { accountId: "acct-1", projectId: "shop", tenantId: "" } });
+    const replay = sentMessages(second).find((message) => message.type === "action.call");
+    expect(replay).toMatchObject({ id: original.id, idempotencyKey: original.idempotencyKey, scope: "control" });
+    second.receive({ type: "action.result", id: replay.id, result: { accessToken: "next" } });
+    await expect(pending).resolves.toEqual({ accessToken: "next" });
+  });
+
+  it("rejects an in-flight Control Plane call instead of replaying it in another tenant", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "shop", tenant: "tenant-a", token: "gvx_session_a", identity: { sub: "acct-1", iss: "shop" },
+    });
+    const pending = client.reducer(control.tenants.updateTimezone, { timezone: "UTC" });
+    const rejected = expect(pending).rejects.toMatchObject({ code: "auth" });
+    const socket = latestSocket();
+    socket.open();
+    const auth = sentMessages(socket).find((message) => message.type === "auth");
+    socket.receive({ type: "auth.result", id: auth.id, result: authenticatedResult({ accountId: "acct-1", projectId: "shop", tenantId: "tenant-a" }) });
+    expect(sentMessages(socket).some((message) => message.type === "reducer.call")).toBe(true);
+
+    client.setAuth({ tenant: "tenant-b", token: "gvx_session_b", identity: { sub: "acct-1", iss: "shop" } });
+
+    await rejected;
   });
 });

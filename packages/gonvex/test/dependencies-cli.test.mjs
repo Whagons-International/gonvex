@@ -88,7 +88,8 @@ export const agentLookup = internalQuery({
     const apiSource = readFileSync(join(project, "gonvex", "_generated", "api.ts"), "utf8");
     assert.match(apiSource, /plan:\s*\{/);
     assert.match(apiSource, /table:\s*"locations"/);
-    assert.match(apiSource, /import type \{ LiveQueryPlan \} from "@gonvex\/client"/);
+    assert.match(apiSource, /import \{ control as gonvexControl, type LiveQueryPlan \} from "@gonvex\/client"/);
+    assert.match(apiSource, /export const control = gonvexControl/);
     const publicSection = apiSource.slice(apiSource.indexOf("export const api ="), apiSource.indexOf("export const internal ="));
     const internalSection = apiSource.slice(apiSource.indexOf("export const internal ="), apiSource.indexOf("export type Api ="));
     assert.doesNotMatch(publicSection, /agents/);

@@ -134,6 +134,9 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     const contents = await readFile(file);
     files[projectPath(options.root, file)] = contents.toString("base64");
     for (const [path, entry] of parseModuleFunctions(options.root, options.backendDir, file, contents.toString("utf8"))) {
+      if (path === "control" || path.startsWith("control.")) {
+        throw new Error(`module function path ${JSON.stringify(path)} uses the host-reserved Control Plane namespace`);
+      }
       if (functions[path]) throw new Error(`duplicate module function path ${JSON.stringify(path)}`);
       functions[path] = entry;
     }

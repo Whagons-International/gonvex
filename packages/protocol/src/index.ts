@@ -1,4 +1,5 @@
 export type FunctionKind = "query" | "reducer" | "action";
+export type ExecutionScope = "tenant" | "control";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -175,6 +176,7 @@ export type QuerySubscribeRequest = {
   id: string;
   path: string;
   args: JsonValue;
+  scope?: ExecutionScope;
   windowRevision?: string;
 };
 
@@ -182,6 +184,7 @@ export type ReducerCallRequest = {
   id: string;
   path: string;
   args: JsonValue;
+  scope?: ExecutionScope;
   trace?: MessageTrace;
   /** Stable key for a replayable command; see the `reducer.call` message. */
   idempotencyKey?: string;
@@ -241,9 +244,9 @@ export type GonvexManifest = {
 };
 
 export type ClientMessage =
-  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
-  | { type: "query.call"; id: string; path: string; args: JsonValue }
-  | { type: "query.subscribe"; id: string; path: string; args: JsonValue; windowRevision?: string }
+  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; controlOnly?: boolean; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
+  | { type: "query.call"; id: string; path: string; args: JsonValue; scope?: ExecutionScope }
+  | { type: "query.subscribe"; id: string; path: string; args: JsonValue; scope?: ExecutionScope; windowRevision?: string }
   | { type: "query.unsubscribe"; id: string }
   | {
     type: "replica.open";
@@ -264,6 +267,7 @@ export type ClientMessage =
     id: string;
     path: string;
     args: JsonValue;
+    scope?: ExecutionScope;
     trace?: MessageTrace;
     /**
      * Stable key for a replayable command from the client outbox. The runtime
@@ -273,7 +277,10 @@ export type ClientMessage =
     idempotencyKey?: string;
   }
   | { type: "reducer.callMany"; calls: ReducerCallRequest[] }
-  | { type: "action.call"; id: string; path: string; args: JsonValue; trace?: MessageTrace }
+  | { type: "action.call"; id: string; path: string; args: JsonValue; scope?: ExecutionScope; idempotencyKey?: string; trace?: MessageTrace }
+  | { type: "error.register"; id: string; release?: string; environment?: string }
+  | { type: "error.envelope"; id: string; events: JsonValue[] }
+  | { type: "error.heartbeat"; id: string }
   | {
     type: "telemetry.event";
     id: string;
@@ -331,6 +338,8 @@ export type ServerMessage =
   }
   | { type: "auth.result"; id: string; result: JsonValue }
   | { type: "auth.error"; id: string; error: string }
+  | { type: "error.ack"; id: string; accepted?: number; fingerprints?: string[]; error?: string }
+  | { type: "support.command"; id: string; result: JsonValue }
   | {
     type: "query.result";
     id: string;

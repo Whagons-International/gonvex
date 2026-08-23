@@ -90,17 +90,14 @@ type RuntimeContext struct {
 	Member      *Member
 	DatabaseURL string
 	DB          *sql.DB
-	// ControlPlaneDB is the global identity, directory, and routing database.
-	// Application business state must remain in the selected tenant DB.
-	ControlPlaneDB *sql.DB
-	TenantDB       *sql.DB
-	Tx             *sql.Tx
-	Storage        StorageAPI
-	Scheduler      Scheduler
-	Reducers       ReducerAPI
-	Queries        QueryAPI
-	Sandbox        SandboxAPI
-	Outbox         ActionOutbox
+	TenantDB    *sql.DB
+	Tx          *sql.Tx
+	Storage     StorageAPI
+	Scheduler   Scheduler
+	Reducers    ReducerAPI
+	Queries     QueryAPI
+	Sandbox     SandboxAPI
+	Outbox      ActionOutbox
 	// AgentActionsEnabled is an operator gate. A module declaration can narrow
 	// capabilities but cannot turn the agent runtime on by itself.
 	AgentActionsEnabled bool

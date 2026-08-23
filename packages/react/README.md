@@ -4,7 +4,8 @@ React bindings for Gonvex.
 
 This package provides the provider and hooks used by generated Gonvex bindings:
 `useQuery`, `useQueryResult`, `useLiveQuery`, `useLiveQueryState`, `useReducer`, `useAction`, `useEntity`,
-`useReplicaCollection`, and auth-aware providers.
+`useReplicaCollection`, `useReplicaCollectionState`, `useReplicaEntities`,
+`useRetainedLiveQuery`, and auth-aware providers.
 
 ## Install
 
@@ -59,7 +60,7 @@ if (status === "loading" && !data) return <Spinner />;
 if (status === "error") {
   return <button onClick={retry}>Retry: {error?.message}</button>;
 }
-// status success | timeout — data may still be last-good during a retry
+// status success | timeout, data may still be last-good during a retry
 ```
 
 Statuses: `skip` | `loading` | `success` | `error` | `timeout`.
@@ -82,6 +83,22 @@ Postgres cursor:
 
 ```tsx
 const tasks = useReplicaCollection<Task>(api.tasks.recent, { workspaceId });
+```
+
+Read completeness and truncation from the protocol instead of guessing from a
+row count:
+
+```tsx
+const state = useReplicaCollectionState<Task>(api.tasks.recent, { workspaceId });
+// state: { rows, source, completeness, freshness, truncated, computedRevision }
+```
+
+Virtualized grids retain query membership as ordered IDs and resolve all rows
+with one Replica subscription:
+
+```tsx
+const window = useRetainedLiveQuery<Task>(api.tasks.grid, args);
+const rows = useReplicaEntities<Task>("tasks", window.ids);
 ```
 
 Use `useReplicaSelector` when a component needs only derived state:

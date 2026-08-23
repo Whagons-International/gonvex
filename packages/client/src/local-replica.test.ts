@@ -18,6 +18,61 @@ describe("LocalReplica", () => {
     expect(replica.entity("taskMembers", "link-1")).toMatchObject({ memberId: "gabriel" });
   });
 
+  it("updates one batched entity selector for inserts, patches, and deletes", async () => {
+    const replica = new LocalReplica();
+    await replica.applyTransaction({
+      cursor: { epoch: "tenant-a", revision: 1 },
+      changes: [{ entity: "tasks", id: "a", operation: "insert", newValue: { id: "a", title: "A" } }],
+    });
+    expect(replica.entityBatch("tasks", ["a", "b"])).toEqual([{ id: "a", title: "A" }, undefined]);
+
+    await replica.applyTransaction({
+      cursor: { epoch: "tenant-a", revision: 2 },
+      changes: [
+        { entity: "tasks", id: "a", operation: "update", newValue: { id: "a", title: "A2" } },
+        { entity: "tasks", id: "b", operation: "insert", newValue: { id: "b", title: "B" } },
+      ],
+    });
+    expect(replica.entityBatch("tasks", ["a", "b"])).toEqual([{ id: "a", title: "A2" }, { id: "b", title: "B" }]);
+
+    await replica.applyTransaction({
+      cursor: { epoch: "tenant-a", revision: 3 },
+      changes: [{ entity: "tasks", id: "a", operation: "delete" }],
+    });
+    expect(replica.entityBatch("tasks", ["a", "b"])).toEqual([undefined, { id: "b", title: "B" }]);
+  });
+
+  it("does not expose query membership changes before local persistence commits", async () => {
+    let release!: () => void;
+    const persisted = new Promise<void>((resolve) => { release = resolve; });
+    const storage: LocalReplicaStorage = {
+      load: async () => undefined,
+      replaceSnapshot: async () => undefined,
+      applyTransaction: async () => persisted,
+    };
+    const replica = new LocalReplica(storage);
+    await replica.replaceWindow({
+      signature: "tasks:grid", entity: "tasks", key: "id",
+      rows: [{ id: "a" }, { id: "b" }], completeness: "complete", source: "server",
+      cursor: { epoch: "tenant-a", revision: 1 },
+    });
+    const listener = vi.fn();
+    replica.subscribe(listener);
+    const application = replica.applyTransaction({
+      cursor: { epoch: "tenant-a", revision: 2 },
+      changes: [{ entity: "tasks", id: "a", operation: "delete" }],
+    });
+
+    await Promise.resolve();
+    expect(replica.liveQuery("tasks:grid").ids).toEqual(["a", "b"]);
+    expect(listener).not.toHaveBeenCalled();
+
+    release();
+    await application;
+    expect(replica.liveQuery("tasks:grid").ids).toEqual(["b"]);
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps optimistic state until its committed revision is applied", async () => {
     const replica = new LocalReplica();
     await replica.applyTransaction({
@@ -104,6 +159,39 @@ describe("LocalReplica", () => {
     expect(replica.snapshot().liveQueries["tasks:grid"]).toMatchObject({ kind: "replica" });
     expect(JSON.stringify(replica.snapshot().liveQueries["tasks:grid"])).not.toContain("title");
     expect(replica.entity("tasks", "a")).toEqual({ id: "a", title: "A" });
+  });
+
+  it("hydrates authoritative collection completeness and batched normalized entities", async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const first = new LocalReplica(storage);
+    await first.replaceWindow({
+      signature: "tasks:recent",
+      kind: "replica",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "a", title: "A" }, { id: "b", title: "B" }],
+      completeness: "partial",
+      source: "server",
+      truncated: true,
+      cursor: { epoch: "tenant-a", revision: 42 },
+    });
+
+    const hydrated = new LocalReplica(storage);
+    await hydrated.hydrate();
+
+    expect(hydrated.collectionState("tasks:recent")).toMatchObject({
+      rows: [{ id: "a", title: "A" }, { id: "b", title: "B" }],
+      source: "cache",
+      completeness: "partial",
+      freshness: "verifying",
+      truncated: true,
+      computedRevision: 42,
+    });
+    expect(hydrated.entityBatch("tasks", ["b", "missing", "a"])).toEqual([
+      { id: "b", title: "B" },
+      undefined,
+      { id: "a", title: "A" },
+    ]);
   });
 
   it("applies a window delta and deletes revoked IDs from membership", async () => {

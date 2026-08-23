@@ -81,6 +81,9 @@ func (a ModuleArtifact) Validate() error {
 		if strings.TrimSpace(path) == "" {
 			return fmt.Errorf("module declares a function with an empty path")
 		}
+		if path == "control" || strings.HasPrefix(path, "control.") {
+			return fmt.Errorf("module function %q uses the host-reserved Control Plane namespace", path)
+		}
 		switch function.Kind {
 		case FunctionKindQuery, FunctionKindReducer, FunctionKindAction:
 		default:
