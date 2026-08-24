@@ -17,11 +17,19 @@ import { control } from "@gonvex/client";
 const account = await client.query(control.accounts.me, {});
 const tenants = await client.query(control.tenants.mine, {});
 await client.reducer(control.tenants.updateTimezone, { timezone: "America/Los_Angeles" });
+
+const stop = client.watchControlQuery(control.support.sessions, {}, (result) => {
+  renderSessions(result);
+});
 ```
 
 The references include argument/result schemas and their authorization class.
 They never accept database URLs. Tenant-admin references always operate on the
 active, authoritatively admitted tenant.
+
+Control Plane live Queries resubscribe on reconnect and refresh after an
+authorized Control Plane Reducer. Use `watchControlQuery` instead of refetching
+after a write.
 
 ## Install
 
@@ -170,6 +178,21 @@ const client = new GonvexClient(url, {
 Error registration and envelopes use native persistent-protocol frames. No
 browser HTTP ingestion endpoint is needed.
 
+Applications can report an explicit event through the public API:
+
+```ts
+await client.reportError("envelope", {
+  events: [{
+    message: "Task preview failed",
+    level: "error",
+    context: { component: "TaskPreview" },
+  }],
+});
+```
+
+`new GonvexErrorReporter({ client })` adds global browser error capture and
+re-registers its telemetry session after reconnect.
+
 ## Connection reliability
 
 The client reconnects automatically after an unexpected socket close (exponential
@@ -237,8 +260,9 @@ The package exports:
 - durable optimistic Reducer overlays reconciled by command ID and revision
 - opt-in command outbox replay with stable idempotency keys
 - `subscribeReplica`, `watchReplica`, and persistent Replica storage
+- `watchControlQuery` for authorized Control Plane live Queries
 - browser capability and telemetry helpers
-- `GonvexErrorReporter` and automatic operation error reporting
+- `reportError`, `GonvexErrorReporter`, and automatic operation error reporting
 
 ## Related Packages
 

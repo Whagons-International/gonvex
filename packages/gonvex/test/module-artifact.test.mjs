@@ -223,6 +223,18 @@ export const tenantSchedule = tenantCron({ name: "tenant-heartbeat", function: "
   ]);
 });
 
+test("TypeScript artifacts declare one internal invitation acceptance Reducer", async (t) => {
+  const project = await moduleProject(t, `
+const schema = { object: (fields) => ({ kind: "object", fields }), string: () => ({ kind: "string" }) };
+const internalReducer = (definition) => definition;
+const invitationAcceptance = (path) => ({ reducer: path });
+export const acceptInvitation = internalReducer({ args: schema.object({}), result: schema.string(), run: async () => "ok" });
+export const invitationLifecycle = invitationAcceptance("acceptInvitation");
+`);
+  const artifact = await buildModuleArtifact({root:project.root,backendDir:project.backendDir,files:[project.entrypoint],migrations:[]});
+  assert.equal(artifact.invitationAcceptanceReducer,"acceptInvitation");
+});
+
 test("ModuleBuilder artifacts retain executable default registrations and builder crons", async (t) => {
   const sdk = resolve(fileURLToPath(new URL("../../module-sdk/dist/index.js", import.meta.url)));
   const project = await moduleProject(t, `
@@ -304,7 +316,7 @@ export const run = action({
 });
 `);
   const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
-  assert.equal(artifact.generation, 6);
+  assert.equal(artifact.generation, 7);
   assert.equal(artifact.functions.searchTasks.internal, true);
   assert.equal(artifact.functions.run.actionProfile, "agent");
   assert.deepEqual(artifact.functions.run.actionCapabilities.tools.searchTasks, { kind: "query", function: "searchTasks" });

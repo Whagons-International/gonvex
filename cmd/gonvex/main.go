@@ -38,5 +38,5 @@ func printHelp() {
 	fmt.Println("Gonvex CLI")
 	fmt.Println("  npx gonvex dev [options]")
 	fmt.Println("  gonvex migrate identity-v2 (--plan | --apply | --verify) [options]")
-	fmt.Println("  gonvex internal (provision-tenant | resolve-identity | e2e-setup) [options]")
+	fmt.Println("  gonvex internal (provision-tenant | resolve-identity | e2e-setup | e2e-base | e2e-shard | clone-test-actor) [options]")
 }

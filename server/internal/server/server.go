@@ -420,6 +420,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/tenants", s.handleTenants)
 	mux.HandleFunc("POST /dev/tenants", s.handleCreateTenant)
 	mux.HandleFunc("DELETE /dev/tenants/{tenant}", s.handleDeleteTenant)
+	mux.HandleFunc("POST /dev/internal/e2e/members", s.handleInternalE2EMember)
 	mux.HandleFunc("GET /dev/storage/files", s.handleStorageFiles)
 	mux.HandleFunc("GET /dev/data/tables", s.handleDataTables)
 	mux.HandleFunc("GET /dev/data/tables/{table}/rows", s.handleDataRows)
@@ -431,6 +432,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/config", s.handleAuthConfig)
 	mux.HandleFunc("GET /auth/google/authorize", s.handleGoogleAuthorize)
 	mux.HandleFunc("GET /auth/google/callback", s.handleGoogleCallback)
+	mux.HandleFunc("GET /auth/microsoft/authorize", s.handleMicrosoftAuthorize)
+	mux.HandleFunc("GET /auth/microsoft/callback", s.handleMicrosoftCallback)
+	mux.HandleFunc("GET /auth/apple/authorize", s.handleAppleAuthorize)
+	mux.HandleFunc("GET /auth/apple/callback", s.handleAppleCallback)
+	mux.HandleFunc("POST /auth/apple/callback", s.handleAppleCallback)
 	mux.HandleFunc("POST /auth/token", s.handleAppAuthToken)
 	// Optional external ingestion compatibility. First-party browser clients use
 	// native error.* frames over /ws; these routes are not an internal function transport.

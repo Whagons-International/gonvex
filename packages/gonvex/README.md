@@ -105,8 +105,7 @@ npx gonvex env push .env.production
 npx gonvex env remove NAME
 ```
 
-Enable native Google login for an app without Firebase or a per-app Google Cloud
-project:
+Enable native authentication without Firebase or a browser provider SDK:
 
 ```bash
 npx gonvex auth add google --origin http://localhost:5173
@@ -116,9 +115,10 @@ npx gonvex auth accounts
 ```
 
 The command registers the exact callback with the runtime and writes
-`gonvex/auth.tsx`, which exports a configured provider, hook, and Google sign-in
-button. A Gonvex installation operator configures one central Google OAuth client;
-future app projects reuse it through the runtime.
+`gonvex/auth.tsx`, which exports a configured provider and hook. The hook exposes
+password login plus explicit Google, Microsoft, and Apple selection. A Gonvex
+operator stores provider credentials in the Control Plane. Client code receives
+only public provider settings and `hasClientSecret` flags.
 
 For a new app, provision and wire everything at once:
 

@@ -5,7 +5,7 @@ React bindings for Gonvex.
 This package provides the provider and hooks used by generated Gonvex bindings:
 `useQuery`, `useQueryResult`, `useLiveQuery`, `useLiveQueryState`, `useReducer`, `useAction`, `useEntity`,
 `useReplicaCollection`, `useReplicaCollectionState`, `useReplicaEntities`,
-`useRetainedLiveQuery`, and auth-aware providers.
+`useRetainedLiveQuery`, `useControlQuery`, and auth-aware providers.
 
 ## Install
 
@@ -115,9 +115,9 @@ Both hooks return `undefined` before any local/server snapshot is available and
 accept `"skip"` as the args value. Selectors use `Object.is` by default and
 accept a custom equality function as the fourth argument.
 
-## Native Google auth
+## Native authentication
 
-Enable Google for the project and generate a configured auth module:
+Configure the providers needed by the project and generate an auth module:
 
 ```bash
 npx gonvex auth add google --origin http://localhost:5173
@@ -135,16 +135,34 @@ function Root() {
 }
 
 function Account() {
-  const { account, activeTenant } = useGonvexAuth();
-  return <>{account?.email} · {activeTenant?.name}<GoogleSignInButton /></>;
+  const {
+    account,
+    activeTenant,
+    signInWithPassword,
+    signInWithProvider,
+  } = useGonvexAuth();
+
+  return (
+    <>
+      {account?.email} · {activeTenant?.name}
+      <button onClick={() => void signInWithProvider("microsoft")}>Microsoft</button>
+      <button onClick={() => void signInWithPassword(email, password)}>Password</button>
+      <GoogleSignInButton />
+    </>
+  );
 }
 ```
 
-The provider performs Authorization Code + PKCE against the Gonvex runtime and
-attaches the resulting project-scoped session to the realtime client. Access tokens
-are short-lived and refresh tokens rotate across tabs. Multi-tenant memberships are
-verified by the runtime and switched with `setActiveTenant`. The provider does not
-load a Google browser SDK.
+`signInWithProvider` accepts `google`, `microsoft`, or `apple` and performs
+Authorization Code + PKCE through Gonvex. `signInWithPassword` installs the
+native password session through the same path. Access tokens are short-lived,
+refresh tokens rotate across tabs, and the provider persists the active tenant.
+The host verifies tenant membership before switching with `setActiveTenant`.
+
+Use `useCurrentTenantProfile()` for subscribed domain, timezone, description,
+and public profile fields. Use `useControlQuery(reference, args)` for an
+authorized Control Plane live Query. Reducers refresh those subscriptions, so
+the application must not refetch them manually.
 
 ## Related Packages
 

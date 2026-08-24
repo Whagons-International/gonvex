@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -24,6 +25,7 @@ func runInternal(args []string) error {
 	tenantName := flags.String("tenant-name", "", "tenant name")
 	tenantID := flags.String("tenant-id", "", "optional UUIDv6 tenant id")
 	email := flags.String("email", "", "account email to resolve")
+	shard := flags.String("shard", "", "stable E2E shard name")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -32,15 +34,36 @@ func runInternal(args []string) error {
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	switch command {
-	case "provision-tenant", "e2e-setup":
+	case "provision-tenant", "e2e-setup", "e2e-base", "e2e-shard":
 		if strings.TrimSpace(*tenantName) == "" {
 			return fmt.Errorf("--tenant-name is required")
 		}
 		payload := map[string]string{"projectId": *project, "name": *tenantName}
+		if command != "provision-tenant" && *tenantID == "" {
+			*tenantID = deterministicE2ETenantID(*project, *tenantName, *shard)
+		}
 		if *tenantID != "" {
 			payload["id"] = *tenantID
 		}
-		return internalRequest(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/tenants", payload)
+		raw, err := internalRequestBytes(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/tenants", payload)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(*email) != "" {
+			memberRaw, memberErr := internalRequestBytes(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/internal/e2e/members", map[string]string{"projectId": *project, "tenantId": *tenantID, "email": *email})
+			if memberErr != nil {
+				return memberErr
+			}
+			fmt.Println(string(memberRaw))
+			return nil
+		}
+		fmt.Println(string(raw))
+		return nil
+	case "clone-test-actor":
+		if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*email) == "" {
+			return fmt.Errorf("--tenant-id and --email are required")
+		}
+		return internalRequest(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/internal/e2e/members", map[string]string{"projectId": *project, "tenantId": *tenantID, "email": *email})
 	case "resolve-identity":
 		if strings.TrimSpace(*email) == "" {
 			return fmt.Errorf("--email is required")
@@ -68,6 +91,15 @@ func runInternal(args []string) error {
 	default:
 		return fmt.Errorf("unknown internal command %q", command)
 	}
+}
+
+func deterministicE2ETenantID(project, name, shard string) string {
+	sum := sha256.Sum256([]byte("gonvex-e2e-v1\x00" + project + "\x00" + name + "\x00" + shard))
+	raw := sum[:16]
+	raw[6] = (raw[6] & 0x0f) | 0x60
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	hex := fmt.Sprintf("%x", raw)
+	return hex[:8] + "-" + hex[8:12] + "-" + hex[12:16] + "-" + hex[16:20] + "-" + hex[20:]
 }
 
 func internalRequest(client *http.Client, runtimeURL, adminKey, method, path string, payload any) error {

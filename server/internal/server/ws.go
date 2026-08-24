@@ -306,6 +306,12 @@ type querySubscription struct {
 	visibilityKey  string
 }
 
+type controlQuerySubscription struct {
+	id   string
+	path string
+	args json.RawMessage
+}
+
 type tableChange struct {
 	project string
 	tenant  string
@@ -379,6 +385,7 @@ type wsConn struct {
 	device            clientDeviceInfo
 	mu                sync.Mutex
 	subs              map[string]querySubscription
+	controlSubs       map[string]controlQuerySubscription
 	replicas          map[string]*replicaSubscription
 	replicaReadyMany  bool
 	replicaWatermark  bool
@@ -451,6 +458,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		lastActiveAt: connectedAt,
 		lastActivity: "connected",
 		subs:         map[string]querySubscription{},
+		controlSubs:  map[string]controlQuerySubscription{},
 		replicas:     map[string]*replicaSubscription{},
 	}
 	pingHandler := conn.PingHandler()
@@ -668,7 +676,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		}
 	case "query.subscribe":
 		if message.Scope == "control" {
-			c.write(serverMessage{Type: "query.error", ID: message.ID, Path: message.Path, Error: "Control Plane queries are one-shot"})
+			c.subscribeControlQuery(ctx, querySubscribeRequest{ID: message.ID, Path: message.Path, Args: message.Args, Scope: message.Scope})
 			return
 		}
 		if !c.requireAuth(ctx, "query.error", message.ID) {
@@ -701,13 +709,14 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		}
 		for _, subscribe := range message.Subscribes {
 			if subscribe.Scope == "control" {
-				c.write(serverMessage{Type: "query.error", ID: subscribe.ID, Path: subscribe.Path, Error: "Control Plane queries are one-shot"})
+				c.subscribeControlQuery(ctx, subscribe)
 				continue
 			}
 			c.subscribeQuery(ctx, subscribe)
 		}
 	case "query.unsubscribe":
 		c.mu.Lock()
+		delete(c.controlSubs, message.ID)
 		sub, ok := c.subs[message.ID]
 		if ok {
 			delete(c.subs, message.ID)
@@ -790,6 +799,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.server.recordTransactionTelemetry(transactionEntryFromClientTelemetry(c.project, c.tenant, message))
 	case "error.register", "error.heartbeat", "error.envelope":
 		c.handleNativeErrorTelemetry(ctx, message)
+		c.server.refreshControlSubscriptions(c.project)
 	default:
 		c.write(serverMessage{Type: "query.error", ID: message.ID, Error: "unknown websocket message type"})
 	}

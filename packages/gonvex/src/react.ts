@@ -5,6 +5,8 @@ export {
   GonvexProvider,
   GonvexProviderWithAuth,
   useAction,
+  useControlQuery,
+  useCurrentTenantProfile,
   useEntity,
   useGonvexAuth,
   useGonvexAuthState,
@@ -12,9 +14,13 @@ export {
   useGonvexConnectionState,
   useLiveQuery,
   useLiveQueryState,
+  useInvitationList,
   useQuery,
   useReducer,
   useReplicaCollection,
+  useReplicaCollectionState,
+  useReplicaEntities,
+  useRetainedLiveQuery,
   useReplicaSelector,
 } from "@gonvex/react";
-export type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthTenant, GonvexAuthValue } from "@gonvex/react";
+export type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthProviderName, GonvexAuthTenant, GonvexAuthValue } from "@gonvex/react";

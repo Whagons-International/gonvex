@@ -2,7 +2,7 @@ import type { JsonValue } from "@gonvex/protocol";
 import type { FunctionReference } from "./index.js";
 
 type JSONObject = { [key: string]: JsonValue };
-type Authorization = "public" | "account" | "tenantAdmin" | "projectAdmin";
+type Authorization = "public" | "account" | "tenantAdmin" | "developer" | "projectAdmin";
 const stringSchema = { kind: "string" } as const;
 const optionalStringSchema = { kind: "string", optional: true } as const;
 const booleanSchema = { kind: "boolean" } as const;
@@ -18,17 +18,18 @@ const authAccountSchema = objectSchema({
 const tenantSchema = objectSchema({ id:stringSchema,name:stringSchema,role:stringSchema,permissions:anySchema });
 const directoryTenantSchema = objectSchema({
   id:stringSchema,name:stringSchema,role:stringSchema,permissions:anySchema,
-  domain:stringSchema,timezone:stringSchema,profile:anySchema,
+  domain:stringSchema,timezone:stringSchema,description:stringSchema,profile:anySchema,
 });
 const sessionSchema = objectSchema({
   accessToken:stringSchema,tokenType:stringSchema,expiresIn:numberSchema,expiresAt:numberSchema,
   refreshToken:stringSchema,refreshExpiresAt:numberSchema,account:authAccountSchema,
-  tenants:arraySchema(tenantSchema),activeTenantId:stringSchema,
+  tenants:arraySchema(directoryTenantSchema),activeTenantId:stringSchema,
 });
 const updatedSchema = objectSchema({updated:booleanSchema});
 const idSchema = objectSchema({ id: stringSchema });
 const tokenSchema = objectSchema({ id: stringSchema, token: stringSchema });
-const invitationLookupSchema = objectSchema({ tenantName: stringSchema, role: stringSchema, expiresAt: stringSchema });
+const invitationLookupSchema = objectSchema({ tenantId:stringSchema,tenantName: stringSchema,email:stringSchema, role: stringSchema,teamIds:arraySchema(stringSchema),allowedAuthProviders:arraySchema(stringSchema), expiresAt: stringSchema });
+const invitationSchema = objectSchema({id:stringSchema,email:stringSchema,role:stringSchema,permissions:anySchema,teamIds:arraySchema(stringSchema),allowedAuthProviders:arraySchema(stringSchema),expiresAt:stringSchema,revoked:booleanSchema,accepted:booleanSchema,state:stringSchema,createdAt:stringSchema,updatedAt:stringSchema});
 const invitationAcceptanceSchema = objectSchema({ tenantId: stringSchema, memberId: stringSchema });
 const developerSchema = objectSchema({ email: stringSchema, name: stringSchema, role: stringSchema });
 const settingSchema = objectSchema({ kind: stringSchema, scopeId: stringSchema, value: anySchema });
@@ -49,18 +50,21 @@ const supportErrorGroupSchema = objectSchema({
 });
 const supportErrorsSchema = objectSchema({ groups: arraySchema(supportErrorGroupSchema), releases: arraySchema(stringSchema) });
 const impersonationSchema = objectSchema({ id: stringSchema, token: stringSchema, expiresAt: stringSchema });
+const developerStatusSchema = objectSchema({ developer:booleanSchema,mode:booleanSchema,tenantId:stringSchema,grantId:stringSchema });
 const memberResultSchema = objectSchema({ accountId: stringSchema, memberId: stringSchema });
 
 export const controlFunctionSchemas: Readonly<Record<string, { args: JsonValue; result: JsonValue }>> = Object.freeze({
   "control.accounts.me": { args: emptySchema, result: accountSchema },
   "control.accounts.updatePassword": { args: objectSchema({ currentPassword:stringSchema,newPassword:stringSchema }), result: updatedSchema },
+  "control.accounts.resetMemberPassword": { args: objectSchema({ memberId:stringSchema,newPassword:stringSchema }), result: updatedSchema },
   "control.accounts.provisionMemberLogin": { args: objectSchema({ email:stringSchema,name:stringSchema,password:stringSchema,role:stringSchema,permissions:anySchema }), result:objectSchema({updated:booleanSchema,accountId:stringSchema,memberId:stringSchema}) },
   "control.auth.passwordLogin": { args: objectSchema({ email:stringSchema,password:stringSchema }), result:sessionSchema },
   "control.auth.refreshSession": { args: objectSchema({ refreshToken:stringSchema }), result:sessionSchema },
   "control.auth.logout": { args: objectSchema({ refreshToken:stringSchema,all:booleanSchema }), result:updatedSchema },
   "control.auth.publicSettings": { args:emptySchema,result:objectSchema({providers:arraySchema(stringSchema)}) },
-  "control.auth.realms.list": { args:emptySchema,result:arraySchema(objectSchema({provider:stringSchema,enabled:booleanSchema,signupMode:stringSchema})) },
-  "control.auth.realms.configure": { args:objectSchema({provider:stringSchema,enabled:booleanSchema,signupMode:stringSchema}),result:updatedSchema },
+  "control.auth.realms.list": { args:emptySchema,result:arraySchema(objectSchema({provider:stringSchema,enabled:booleanSchema,signupMode:stringSchema,azureTenantId:optionalStringSchema,clientId:optionalStringSchema,hasClientSecret:booleanSchema})) },
+  "control.auth.realms.configure": { args:objectSchema({provider:stringSchema,enabled:booleanSchema,signupMode:stringSchema,azureTenantId:optionalStringSchema,clientId:optionalStringSchema,clientSecret:optionalStringSchema}),result:updatedSchema },
+  "control.auth.memberProviders": { args:objectSchema({memberIds:arraySchema(stringSchema)}),result:arraySchema(objectSchema({memberId:stringSchema,providers:arraySchema(stringSchema)})) },
   "control.tenants.mine": { args:emptySchema,result:arraySchema(directoryTenantSchema) },
   "control.tenants.create": { args:objectSchema({name:stringSchema}),result:tenantSchema },
   "control.tenants.getByDomain": { args:objectSchema({domain:stringSchema}),result:objectSchema({id:stringSchema,name:stringSchema,domain:stringSchema}) },
@@ -70,7 +74,9 @@ export const controlFunctionSchemas: Readonly<Record<string, { args: JsonValue; 
   "control.tenants.setException": { args:objectSchema({tenantId:stringSchema,value:anySchema}),result:objectSchema({updated:booleanSchema}) },
   "control.tenants.setSeatLimit": { args:objectSchema({tenantId:stringSchema,seatLimit:anySchema}),result:objectSchema({updated:booleanSchema}) },
   "control.invitations.lookup": { args:objectSchema({token:stringSchema}),result:invitationLookupSchema },
-  "control.invitations.create": { args:objectSchema({email:stringSchema,role:stringSchema,permissions:anySchema}),result:tokenSchema },
+  "control.invitations.list": { args:emptySchema,result:arraySchema(invitationSchema) },
+  "control.invitations.create": { args:objectSchema({email:stringSchema,role:stringSchema,permissions:anySchema,teamIds:arraySchema(stringSchema),allowedAuthProviders:arraySchema(stringSchema),payload:anySchema}),result:tokenSchema },
+  "control.invitations.update": { args:objectSchema({id:stringSchema,role:stringSchema,permissions:anySchema,teamIds:arraySchema(stringSchema),allowedAuthProviders:arraySchema(stringSchema),payload:anySchema}),result:updatedSchema },
   "control.invitations.accept": { args:objectSchema({token:stringSchema}),result:invitationAcceptanceSchema },
   "control.invitations.revoke": { args:objectSchema({id:stringSchema,email:stringSchema}),result:objectSchema({updated:booleanSchema}) },
   "control.agentAuth.issue": { args:objectSchema({permissions:arraySchema(stringSchema),expiresInSeconds:numberSchema}),result:tokenSchema },
@@ -79,6 +85,11 @@ export const controlFunctionSchemas: Readonly<Record<string, { args: JsonValue; 
   "control.project.developers.list": { args:emptySchema,result:arraySchema(developerSchema) },
   "control.project.developers.invite": { args:objectSchema({email:stringSchema,name:stringSchema,role:stringSchema}),result:objectSchema({updated:booleanSchema}) },
   "control.project.developers.remove": { args:objectSchema({email:stringSchema}),result:objectSchema({updated:booleanSchema}) },
+  "control.developer.status": { args:emptySchema,result:developerStatusSchema },
+  "control.developer.provisionSelf": { args:objectSchema({tenantId:stringSchema}),result:objectSchema({updated:booleanSchema,tenantId:stringSchema,memberId:stringSchema}) },
+  "control.developer.removeSelf": { args:objectSchema({tenantId:stringSchema}),result:updatedSchema },
+  "control.developer.enter": { args:objectSchema({tenantId:stringSchema}),result:impersonationSchema },
+  "control.developer.exit": { args:objectSchema({grantId:stringSchema}),result:updatedSchema },
   "control.assistant.getDefaults": { args:emptySchema,result:anySchema },
   "control.assistant.setDefaults": { args:objectSchema({scopeId:stringSchema,value:anySchema}),result:objectSchema({updated:booleanSchema}) },
   "control.voice.getConfiguration": { args:emptySchema,result:arraySchema(settingSchema) },
@@ -88,6 +99,10 @@ export const controlFunctionSchemas: Readonly<Record<string, { args: JsonValue; 
   "control.support.listSessions": { args:emptySchema,result:arraySchema(supportSessionSchema) },
   "control.support.listTenants": { args:emptySchema,result:arraySchema(supportTenantSchema) },
   "control.support.listErrors": { args:emptySchema,result:supportErrorsSchema },
+  "control.support.getSession": { args:objectSchema({id:stringSchema}),result:anySchema },
+  "control.support.getError": { args:objectSchema({fingerprint:stringSchema}),result:anySchema },
+  "control.support.getTenant": { args:objectSchema({tenantId:stringSchema}),result:anySchema },
+  "control.support.pruneSessions": { args:objectSchema({olderThanSeconds:numberSchema}),result:objectSchema({deleted:numberSchema}) },
   "control.support.heartbeat": { args:objectSchema({release:stringSchema,environment:stringSchema}),result:objectSchema({sessionId:stringSchema}) },
   "control.support.sendCommand": { args:objectSchema({sessionId:stringSchema,kind:stringSchema,payload:anySchema}),result:idSchema },
   "control.support.ackCommand": { args:objectSchema({id:stringSchema}),result:objectSchema({updated:booleanSchema}) },
@@ -95,6 +110,9 @@ export const controlFunctionSchemas: Readonly<Record<string, { args: JsonValue; 
   "control.demos.create": { args:objectSchema({tenantId:stringSchema,email:stringSchema,name:stringSchema,password:stringSchema,label:stringSchema}),result:memberResultSchema },
   "control.demos.resetPassword": { args:objectSchema({accountId:stringSchema,password:stringSchema}),result:objectSchema({updated:booleanSchema}) },
   "control.demos.delete": { args:objectSchema({accountId:stringSchema}),result:objectSchema({updated:booleanSchema}) },
+  "users.myTenants": { args:emptySchema,result:arraySchema(stringSchema) },
+  "tenants.getInvitationByToken": { args:objectSchema({token:optionalStringSchema,invitationToken:optionalStringSchema}),result:objectSchema({tenantId:stringSchema,invitationToken:stringSchema,userEmail:stringSchema,teamIds:arraySchema(stringSchema),allowedAuthProviders:arraySchema(stringSchema)}) },
+  "tenants.acceptInvitation": { args:objectSchema({token:optionalStringSchema,invitationToken:optionalStringSchema}),result:invitationAcceptanceSchema },
 });
 
 function ref<A extends JsonValue, R extends JsonValue>(kind: "query" | "reducer" | "action", path: string, authorization: Authorization) {
@@ -103,21 +121,27 @@ function ref<A extends JsonValue, R extends JsonValue>(kind: "query" | "reducer"
   return Object.freeze({ kind, path, scope: "control", delivery: "oneShot", authorization, argsSchema:schemas.args, resultSchema:schemas.result }) as FunctionReference<A, R>;
 }
 
+function liveRef<A extends JsonValue, R extends JsonValue>(path: string, authorization: Authorization) {
+  return Object.freeze({ ...ref<A, R>("query", path, authorization), delivery: "live" as const }) as FunctionReference<A, R>;
+}
+
 export type ControlAccount = JSONObject & { id: string; email: string; name: string; avatarUrl: string };
 export type ControlTenant = JSONObject & {
   id: string; name: string; role: string; permissions: JSONObject;
-  domain: string; timezone: string; profile: JsonValue;
+  domain: string; timezone: string; description: string; profile: JsonValue;
 };
 export type ControlTenantCreated = JSONObject & { id: string; name: string; role: string; permissions: JSONObject };
 export type ControlSession = JSONObject & {
   accessToken: string; tokenType: string; expiresIn: number; expiresAt: number;
   refreshToken: string; refreshExpiresAt: number; account: JSONObject;
-  tenants: ControlTenantCreated[]; activeTenantId: string;
+  tenants: ControlTenant[]; activeTenantId: string;
 };
-export type ControlAuthRealm = JSONObject & { provider: string; enabled: boolean; signupMode: string };
+export type ControlAuthRealm = JSONObject & { provider: string; enabled: boolean; signupMode: string; azureTenantId?: string; clientId?: string; hasClientSecret: boolean };
+export type ControlMemberProviders = JSONObject & { memberId: string; providers: string[] };
 export type ControlUpdated = JSONObject & { updated: boolean };
 export type ControlMemberProvisioned = ControlUpdated & { accountId: string; memberId: string };
-export type ControlInvitation = JSONObject & { tenantName: string; role: string; expiresAt: string };
+export type ControlInvitation = JSONObject & { tenantId:string;tenantName: string;email:string; role: string;teamIds:string[];allowedAuthProviders:string[]; expiresAt: string };
+export type ControlInvitationListItem = JSONObject & {id:string;email:string;role:string;permissions:JSONObject;teamIds:string[];allowedAuthProviders:string[];expiresAt:string;revoked:boolean;accepted:boolean;state:string;createdAt:string;updatedAt:string};
 export type ControlToken = JSONObject & { id: string; token: string };
 export type ControlInvitationAcceptance = JSONObject & { tenantId: string; memberId: string };
 export type ControlAgentClaim = JSONObject & { id: string; permissions: string[] };
@@ -139,6 +163,7 @@ export type ControlSupportErrorGroup = JSONObject & {
 };
 export type ControlSupportErrors = JSONObject & { groups: ControlSupportErrorGroup[]; releases: string[] };
 export type ControlImpersonation = JSONObject & { id: string; token: string; expiresAt: string };
+export type ControlDeveloperStatus = JSONObject & { developer: boolean; mode: boolean; tenantId: string; grantId: string };
 export type ControlMemberResult = JSONObject & { accountId: string; memberId: string };
 
 /** Typed references for Gonvex host-owned Control Plane functions. */
@@ -146,6 +171,7 @@ export const control = Object.freeze({
   accounts: Object.freeze({
     me: ref<JSONObject, ControlAccount>("query", "control.accounts.me", "account"),
     updatePassword: ref<JSONObject & { currentPassword: string; newPassword: string }, ControlUpdated>("reducer", "control.accounts.updatePassword", "account"),
+    resetMemberPassword: ref<JSONObject & { memberId: string; newPassword: string }, ControlUpdated>("reducer", "control.accounts.resetMemberPassword", "tenantAdmin"),
     provisionMemberLogin: ref<JSONObject & { email: string; name: string; password: string; role: string; permissions: JSONObject }, ControlMemberProvisioned>("reducer", "control.accounts.provisionMemberLogin", "tenantAdmin"),
   }),
   auth: Object.freeze({
@@ -154,12 +180,13 @@ export const control = Object.freeze({
     refreshSession: ref<JSONObject & { refreshToken: string }, ControlSession>("action", "control.auth.refreshSession", "public"),
     logout: ref<JSONObject & { refreshToken: string; all: boolean }, ControlUpdated>("reducer", "control.auth.logout", "account"),
     realms: Object.freeze({
-      list: ref<JSONObject, ControlAuthRealm[]>("query", "control.auth.realms.list", "projectAdmin"),
-      configure: ref<JSONObject & { provider: string; enabled: boolean; signupMode: string }, ControlUpdated>("reducer", "control.auth.realms.configure", "projectAdmin"),
+      list: liveRef<JSONObject, ControlAuthRealm[]>("control.auth.realms.list", "projectAdmin"),
+      configure: ref<JSONObject & { provider: string; enabled: boolean; signupMode: string; azureTenantId?: string; clientId?: string; clientSecret?: string }, ControlUpdated>("reducer", "control.auth.realms.configure", "projectAdmin"),
     }),
+    memberProviders: ref<JSONObject & { memberIds: string[] }, ControlMemberProviders[]>("query", "control.auth.memberProviders", "tenantAdmin"),
   }),
   tenants: Object.freeze({
-    mine: ref<JSONObject, ControlTenant[]>("query", "control.tenants.mine", "account"),
+    mine: liveRef<JSONObject, ControlTenant[]>("control.tenants.mine", "account"),
     create: ref<JSONObject & { name: string }, ControlTenantCreated>("reducer", "control.tenants.create", "account"),
     getByDomain: ref<JSONObject & { domain: string }, JSONObject & { id: string; name: string; domain: string }>("query", "control.tenants.getByDomain", "public"),
     updateProfile: ref<JSONObject & { name: string; domain: string; description: string }, ControlUpdated>("reducer", "control.tenants.updateProfile", "tenantAdmin"),
@@ -170,7 +197,9 @@ export const control = Object.freeze({
   }),
   invitations: Object.freeze({
     lookup: ref<JSONObject & { token: string }, ControlInvitation>("query", "control.invitations.lookup", "public"),
-    create: ref<JSONObject & { email: string; role: string; permissions: JSONObject }, ControlToken>("reducer", "control.invitations.create", "tenantAdmin"),
+    list: liveRef<JSONObject,ControlInvitationListItem[]>("control.invitations.list","tenantAdmin"),
+    create: ref<JSONObject & { email: string; role: string; permissions: JSONObject; teamIds:string[]; allowedAuthProviders:string[]; payload:JsonValue }, ControlToken>("reducer", "control.invitations.create", "tenantAdmin"),
+    update: ref<JSONObject & { id:string;role:string;permissions:JSONObject;teamIds:string[];allowedAuthProviders:string[];payload:JsonValue },ControlUpdated>("reducer","control.invitations.update","tenantAdmin"),
     accept: ref<JSONObject & { token: string }, ControlInvitationAcceptance>("reducer", "control.invitations.accept", "account"),
     revoke: ref<JSONObject & { id: string; email: string }, ControlUpdated>("reducer", "control.invitations.revoke", "tenantAdmin"),
   }),
@@ -180,24 +209,35 @@ export const control = Object.freeze({
     revoke: ref<JSONObject & { id: string }, ControlUpdated>("reducer", "control.agentAuth.revoke", "projectAdmin"),
   }),
   project: Object.freeze({ developers: Object.freeze({
-    list: ref<JSONObject, ControlDeveloper[]>("query", "control.project.developers.list", "projectAdmin"),
+    list: liveRef<JSONObject, ControlDeveloper[]>("control.project.developers.list", "projectAdmin"),
     invite: ref<JSONObject & { email: string; name: string; role: string }, ControlUpdated>("reducer", "control.project.developers.invite", "projectAdmin"),
     remove: ref<JSONObject & { email: string }, ControlUpdated>("reducer", "control.project.developers.remove", "projectAdmin"),
   }) }),
+  developer: Object.freeze({
+    status: liveRef<JSONObject, ControlDeveloperStatus>("control.developer.status", "account"),
+    provisionSelf: ref<JSONObject & { tenantId:string }, JSONObject & { updated:boolean; tenantId:string; memberId:string }>("reducer","control.developer.provisionSelf","developer"),
+    removeSelf: ref<JSONObject & { tenantId:string }, ControlUpdated>("reducer","control.developer.removeSelf","developer"),
+    enter: ref<JSONObject & { tenantId:string }, ControlImpersonation>("reducer","control.developer.enter","developer"),
+    exit: ref<JSONObject & { grantId:string }, ControlUpdated>("reducer","control.developer.exit","account"),
+  }),
   assistant: Object.freeze({
-    getDefaults: ref<JSONObject, JSONObject>("query", "control.assistant.getDefaults", "projectAdmin"),
+    getDefaults: liveRef<JSONObject, JSONObject>("control.assistant.getDefaults", "projectAdmin"),
     setDefaults: ref<JSONObject & { scopeId: string; value: JsonValue }, ControlUpdated>("reducer", "control.assistant.setDefaults", "projectAdmin"),
   }),
   voice: Object.freeze({
-    getConfiguration: ref<JSONObject, ControlSetting[]>("query", "control.voice.getConfiguration", "projectAdmin"),
+    getConfiguration: liveRef<JSONObject, ControlSetting[]>("control.voice.getConfiguration", "projectAdmin"),
     setRateCard: ref<JSONObject & { scopeId: string; value: JsonValue }, ControlUpdated>("reducer", "control.voice.setRateCard", "projectAdmin"),
     setTenantEntitlement: ref<JSONObject & { scopeId: string; value: JsonValue }, ControlUpdated>("reducer", "control.voice.setTenantEntitlement", "projectAdmin"),
     setUserOverride: ref<JSONObject & { scopeId: string; value: JsonValue }, ControlUpdated>("reducer", "control.voice.setUserOverride", "projectAdmin"),
   }),
   support: Object.freeze({
-    listTenants: ref<JSONObject, ControlSupportTenant[]>("query", "control.support.listTenants", "projectAdmin"),
-    listSessions: ref<JSONObject, ControlSupportSession[]>("query", "control.support.listSessions", "projectAdmin"),
-    listErrors: ref<JSONObject, ControlSupportErrors>("query", "control.support.listErrors", "projectAdmin"),
+    listTenants: liveRef<JSONObject, ControlSupportTenant[]>("control.support.listTenants", "projectAdmin"),
+    listSessions: liveRef<JSONObject, ControlSupportSession[]>("control.support.listSessions", "projectAdmin"),
+    listErrors: liveRef<JSONObject, ControlSupportErrors>("control.support.listErrors", "projectAdmin"),
+    getSession: ref<JSONObject & { id:string }, JSONObject>("query","control.support.getSession","projectAdmin"),
+    getError: ref<JSONObject & { fingerprint:string }, JSONObject>("query","control.support.getError","projectAdmin"),
+    getTenant: ref<JSONObject & { tenantId:string }, JSONObject>("query","control.support.getTenant","projectAdmin"),
+    pruneSessions: ref<JSONObject & { olderThanSeconds:number }, JSONObject & { deleted:number }>("reducer","control.support.pruneSessions","projectAdmin"),
     heartbeat: ref<JSONObject & { release: string; environment: string }, JSONObject & { sessionId: string }>("reducer", "control.support.heartbeat", "account"),
     sendCommand: ref<JSONObject & { sessionId: string; kind: string; payload: JsonValue }, JSONObject & { id: string }>("reducer", "control.support.sendCommand", "projectAdmin"),
     ackCommand: ref<JSONObject & { id: string }, ControlUpdated>("reducer", "control.support.ackCommand", "account"),
@@ -207,5 +247,12 @@ export const control = Object.freeze({
     create: ref<JSONObject & { tenantId: string; email: string; name: string; password: string; label: string }, ControlMemberResult>("reducer", "control.demos.create", "projectAdmin"),
     resetPassword: ref<JSONObject & { accountId: string; password: string }, ControlUpdated>("reducer", "control.demos.resetPassword", "projectAdmin"),
     delete: ref<JSONObject & { accountId: string }, ControlUpdated>("reducer", "control.demos.delete", "projectAdmin"),
+  }),
+  legacy: Object.freeze({
+    users: Object.freeze({ myTenants: liveRef<JSONObject,string[]>("users.myTenants","account") }),
+    tenants: Object.freeze({
+      getInvitationByToken: ref<JSONObject & {token?:string;invitationToken?:string},JSONObject & {tenantId:string;invitationToken:string;userEmail:string;teamIds:string[];allowedAuthProviders:string[]}>("query","tenants.getInvitationByToken","public"),
+      acceptInvitation: ref<JSONObject & {token?:string;invitationToken?:string},ControlInvitationAcceptance>("reducer","tenants.acceptInvitation","account"),
+    }),
   }),
 });

@@ -15,6 +15,21 @@ describe("GonvexErrorReporter", () => {
     expect(transport).toHaveBeenCalledTimes(2);
   });
 
+  it("accepts a public GonvexClient adapter without exposing a private sender", () => {
+    let connectionListener: ((state: { isWebSocketConnected: boolean }) => void) | undefined;
+    const client = {
+      reportError: vi.fn().mockResolvedValue(undefined),
+      connectionState: () => ({ isWebSocketConnected: false }),
+      subscribeToConnectionState: (listener: (state: { isWebSocketConnected: boolean }) => void) => { connectionListener = listener; return vi.fn(); },
+    };
+    const reporter = new GonvexErrorReporter({ client, project:"shop", captureGlobalErrors:false });
+    expect(client.reportError).toHaveBeenCalledWith("register",expect.any(Object));
+    connectionListener?.({ isWebSocketConnected: true });
+    expect(client.reportError.mock.calls.filter(([type]) => type === "register")).toHaveLength(2);
+    expect(client.reportError).toHaveBeenCalledWith("heartbeat", {});
+    reporter.close();
+  });
+
   it("batches errors with tenant, release and device context while filtering secrets", async () => {
     const transport = vi.fn().mockResolvedValue(undefined);
     const reporter = new GonvexErrorReporter({

@@ -6,6 +6,10 @@ import "context"
 // state. Tenant business data remains in tenant databases.
 func ensureControlPlaneFunctionSchema(ctx context.Context, db projectRegistryExecer) error {
 	statements := []string{
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS azure_tenant_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS client_secret_encrypted BYTEA`,
+		`ALTER TABLE gonvex_auth_transactions ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'google'`,
 		`ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC'`,
 		`ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS profile JSONB NOT NULL DEFAULT '{}'::jsonb`,
 		`ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS seat_limit INTEGER`,
@@ -17,6 +21,12 @@ func ensureControlPlaneFunctionSchema(ctx context.Context, db projectRegistryExe
 		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ`,
 		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS accepted_account_id TEXT`,
 		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS accepted_idempotency_key TEXT`,
+		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS team_ids JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS allowed_auth_providers JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS application_payload JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS handoff_state TEXT NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS handoff_command_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS gonvex_auth_membership_invitations_token ON gonvex_auth_membership_invitations(token_hash) WHERE token_hash IS NOT NULL AND token_hash <> ''`,
 		`CREATE TABLE IF NOT EXISTS gonvex_account_passwords (
 			project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,

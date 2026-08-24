@@ -54,6 +54,42 @@ export const startTask = reducer({
 host delivers it only after the business transaction commits and retries failed
 deliveries from the durable outbox.
 
+An application that accepts Control Plane invitations declares one internal
+Reducer as the tenant-side handoff:
+
+```ts
+import {
+  internalReducer,
+  invitationAcceptance,
+  schema,
+} from "@gonvex/module-sdk";
+
+export const applyInvitation = internalReducer({
+  args: schema.object({
+    accountId: schema.string(),
+    memberId: schema.string(),
+    invitationId: schema.string(),
+    teamIds: schema.array(schema.string()),
+    payload: schema.any(),
+  }),
+  result: schema.object({ applied: schema.boolean() }),
+  run: async ({ db }, args) => {
+    for (const teamId of args.teamIds) {
+      await db.insert("memberTeams", { memberId: args.memberId, teamId });
+    }
+    return { applied: true };
+  },
+});
+
+export const invitationLifecycle = invitationAcceptance(
+  "invitations.applyInvitation",
+);
+```
+
+The trusted host validates and claims the invitation, creates or activates the
+canonical member, and invokes this Reducer in the same tenant transaction. The
+Reducer never receives Control Plane credentials.
+
 The host-specific implementation is intentionally separate from this SDK.
 The manifest describes a TypeScript module executed by the bounded V8 host.
 

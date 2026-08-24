@@ -208,15 +208,16 @@ type VisibilityExpression struct {
 // TypeScript CLI. The fields describe the artifact rather than a runtime
 // implementation so other module languages can use the same wire shape.
 type ModuleArtifact struct {
-	Language   string                    `json:"language"`
-	Generation int                       `json:"generation"`
-	Hash       string                    `json:"hash,omitempty"`
-	Entrypoint string                    `json:"entrypoint"`
-	Functions  map[string]ModuleFunction `json:"functions"`
-	Crons      []ModuleCron              `json:"crons,omitempty"`
-	Files      map[string]string         `json:"files"`
-	JavaScript *ModuleJavaScript         `json:"javascript,omitempty"`
-	Visibility map[string]VisibilityPlan `json:"visibility,omitempty"`
+	Language                    string                    `json:"language"`
+	Generation                  int                       `json:"generation"`
+	Hash                        string                    `json:"hash,omitempty"`
+	Entrypoint                  string                    `json:"entrypoint"`
+	Functions                   map[string]ModuleFunction `json:"functions"`
+	Crons                       []ModuleCron              `json:"crons,omitempty"`
+	Files                       map[string]string         `json:"files"`
+	JavaScript                  *ModuleJavaScript         `json:"javascript,omitempty"`
+	Visibility                  map[string]VisibilityPlan `json:"visibility,omitempty"`
+	InvitationAcceptanceReducer string                    `json:"invitationAcceptanceReducer,omitempty"`
 }
 
 // ModuleCron is a language-neutral recurring Reducer or Action declaration.

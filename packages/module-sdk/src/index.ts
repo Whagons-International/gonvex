@@ -470,7 +470,14 @@ export type ModuleManifest = {
   readonly schema?: PortableSchema;
   readonly artifact?: { readonly hash: string; readonly mediaType: string; readonly entrypoint: string };
   readonly visibility?: Readonly<Record<string, VisibilityPlan>>;
+  readonly invitationAcceptanceReducer?: string;
 };
+
+/** Declare the host-invoked internal Reducer that applies invitation payloads. */
+export function invitationAcceptance(reducerPath: string): Readonly<{ reducer: string }> {
+  const reducer = normalizePath(reducerPath);
+  return freeze({ reducer });
+}
 
 export type ModuleArtifact = {
   readonly manifest: ModuleManifest;

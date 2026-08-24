@@ -226,6 +226,7 @@ export type ModuleArtifact = {
   javascript?: ModuleJavaScript;
   visibility: Record<string, VisibilityPlan>;
   crons?: ModuleCron[];
+  invitationAcceptanceReducer?: string;
 };
 
 export type ModuleCron = {

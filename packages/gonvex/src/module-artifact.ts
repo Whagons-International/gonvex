@@ -36,7 +36,7 @@ import type {
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
-export const moduleArtifactGeneration = 6;
+export const moduleArtifactGeneration = 7;
 
 /** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
@@ -80,6 +80,7 @@ const visibilityDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-
 const visibilityRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*visibility\s*\(/gi;
 const cronDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;]+)?=\s*(cron|tenantCron)\s*\(/gi;
 const cronRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*(cron|tenantCron)\s*\(/gi;
+const invitationAcceptancePattern = /\binvitationAcceptance\s*\(\s*(["'`])([^"'`]+)\1\s*\)/g;
 const identifierPattern = /[A-Za-z_$][A-Za-z0-9_$]*/y;
 const keywordPattern = /(?:true|false|null|undefined)\b/y;
 const numberPattern = /-?(?:0[xX][0-9a-fA-F_]+|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?)/y;
@@ -130,6 +131,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   const functions: Record<string, ModuleFunction> = {};
   const visibilityPlans: Record<string, VisibilityPlan> = {};
   const crons: ModuleCron[] = [];
+  let invitationAcceptanceReducer = "";
   for (const file of sources) {
     const contents = await readFile(file);
     files[projectPath(options.root, file)] = contents.toString("base64");
@@ -145,6 +147,11 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       visibilityPlans[plan.table] = plan;
     }
     crons.push(...parseCronDefinitions(contents.toString("utf8")));
+    invitationAcceptancePattern.lastIndex = 0;
+    for (const match of contents.toString("utf8").matchAll(invitationAcceptancePattern)) {
+      if (invitationAcceptanceReducer && invitationAcceptanceReducer !== match[2]) throw new Error("module declares more than one invitation acceptance Reducer");
+      invitationAcceptanceReducer = match[2];
+    }
   }
   // Versioned SQL migrations travel with the artifact so the runtime applies
   // the same schema changes as the source module.
@@ -172,6 +179,10 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   const sortedFunctions = sortedRecord(functions);
   const sortedVisibility = sortedRecord(visibilityPlans);
   const sortedCrons = crons.sort((left, right) => left.name.localeCompare(right.name));
+  if (invitationAcceptanceReducer) {
+    const target = sortedFunctions[invitationAcceptanceReducer];
+    if (!target || target.kind !== "reducer" || !target.internal) throw new Error("invitationAcceptance must target an internal Reducer");
+  }
   return {
     language: "typescript",
     generation: moduleArtifactGeneration,
@@ -182,6 +193,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       visibility: sortedVisibility,
       crons: sortedCrons,
       javascript,
+      invitationAcceptanceReducer,
     }),
     entrypoint: entrypoint.projectPath,
     functions: sortedFunctions,
@@ -189,6 +201,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     files: sortedFiles,
     javascript,
     ...(sortedCrons.length > 0 ? { crons: sortedCrons } : {}),
+    ...(invitationAcceptanceReducer ? { invitationAcceptanceReducer } : {}),
   };
 }
 
@@ -389,6 +402,7 @@ function artifactHash(input: {
   visibility: Record<string, VisibilityPlan>;
   crons: ModuleCron[];
   javascript: ModuleJavaScript;
+  invitationAcceptanceReducer?: string;
 }) {
   const contract = {
     generation: moduleArtifactGeneration,
@@ -399,6 +413,7 @@ function artifactHash(input: {
     visibility: input.visibility,
     crons: input.crons,
     javascript: { path: input.javascript.path, hash: input.javascript.hash },
+    invitationAcceptanceReducer: input.invitationAcceptanceReducer ?? "",
   };
   return createHash("sha256").update(canonicalJson(contract)).digest("hex");
 }

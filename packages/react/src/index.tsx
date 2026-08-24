@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { GonvexClient, GonvexClientError, control, type ConnectionState, type FunctionReference, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState } from "@gonvex/client";
@@ -25,7 +25,7 @@ export type GonvexAuthAccount = {
   emailVerified: boolean;
   name?: string;
   picture?: string;
-  provider: "google" | string;
+  provider: "password" | "google" | "microsoft" | "apple" | string;
 };
 
 export type GonvexAuthTenant = {
@@ -33,6 +33,10 @@ export type GonvexAuthTenant = {
   name: string;
   role: "owner" | "admin" | "member" | "viewer" | string;
   permissions?: Record<string, unknown>;
+  domain: string;
+  timezone: string;
+  description: string;
+  profile: JsonValue;
 };
 
 type GonvexAuthSession = {
@@ -45,7 +49,8 @@ type GonvexAuthSession = {
   activeTenantId?: string;
 };
 
-type PKCEState = { state: string; verifier: string; redirectUri: string; returnTo: string; createdAt: number };
+export type GonvexAuthProviderName = "google" | "microsoft" | "apple";
+type PKCEState = { state: string; verifier: string; redirectUri: string; returnTo: string; provider: GonvexAuthProviderName; createdAt: number };
 
 class GonvexAuthRequestError extends Error {
   readonly status: number;
@@ -62,12 +67,15 @@ export type GonvexAuthValue = AuthState & {
   tenants: GonvexAuthTenant[];
   activeTenant: GonvexAuthTenant | null;
   error: string | null;
-  signIn: () => Promise<void>;
+  signIn: (provider?: GonvexAuthProviderName) => Promise<void>;
+  signInWithProvider: (provider: GonvexAuthProviderName) => Promise<void>;
+  signInWithPassword: (email: string, password: string) => Promise<void>;
   signOut: (options?: { allDevices?: boolean }) => Promise<void>;
   setActiveTenant: (tenantId: string) => Promise<void>;
   refreshMemberships: () => Promise<GonvexAuthTenant[]>;
   createTenant: (name: string) => Promise<GonvexAuthTenant>;
-  inviteMember: (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown> }) => Promise<void>;
+  inviteMember: (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown>; teamIds?: string[]; allowedAuthProviders?: string[]; payload?: JsonValue }) => Promise<ControlToken>;
+  acceptInvitation: (token: string) => Promise<ControlInvitationAcceptance>;
   revokeInvitation: (tenantId: string, email: string) => Promise<void>;
 };
 
@@ -150,12 +158,7 @@ export function GonvexProviderWithAuth(props: {
   );
 }
 
-/**
- * Native Gonvex authentication. The runtime performs the one centrally
- * configured Google OAuth flow, while each app uses PKCE and receives a
- * project-scoped Gonvex session. No Firebase or Google SDK is loaded in the
- * browser.
- */
+/** Native Gonvex authentication with password or a configured OAuth provider. */
 // Dedupe callback bootstrap across React StrictMode remounts so the OAuth
 // code+PKCE exchange runs once. Without this, the first effect's finally
 // clears sessionStorage PKCE before the remount can finish verification.
@@ -209,7 +212,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     }).catch((cause) => {
       if (!cancelled) {
         installSession(null);
-        setError(cause instanceof Error ? cause.message : "Google sign-in failed.");
+        setError(cause instanceof Error ? cause.message : "Sign-in failed.");
       }
     }).finally(() => {
       if (!cancelled) setIsLoading(false);
@@ -276,6 +279,23 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     return () => window.clearTimeout(timeout);
   }, [refreshRetryAt, refreshSession, session]);
 
+  // Keep the account tenant directory authoritative without a reducer+manual
+  // refetch pair. The live Control Plane Query resumes on reconnect.
+  useEffect(() => {
+    if (!sessionRef.current) return;
+    const watch = props.client.watchControlQuery<ControlTenant[]>(control.tenants.mine, {});
+    return watch.onUpdate(() => {
+      const tenants = watch.getSnapshot().result as GonvexAuthTenant[] | undefined;
+      const current = sessionRef.current;
+      if (!current || !tenants) return;
+      const activeTenantId = tenants.some((tenant) => tenant.id === current.activeTenantId)
+        ? current.activeTenantId
+        : tenants[0]?.id;
+      if (JSON.stringify(current.tenants) === JSON.stringify(tenants) && current.activeTenantId === activeTenantId) return;
+      installSession({ ...current, tenants, activeTenantId });
+    });
+  }, [installSession, props.client, session?.account.id]);
+
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== storageKey) return;
@@ -285,7 +305,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     return () => window.removeEventListener("storage", onStorage);
   }, [installSession, storageKey]);
 
-  const signIn = useCallback(async () => {
+  const signInWithProvider = useCallback(async (provider: GonvexAuthProviderName) => {
     setError(null);
     const verifier = randomBase64Url(64);
     const state = randomBase64Url(32);
@@ -293,8 +313,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const challenge = bytesToBase64Url(new Uint8Array(challengeBytes));
     const redirectUri = new URL(callbackPath, window.location.origin).toString();
     const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    safeSessionStorageSet(pkceStorageKey, JSON.stringify({ state, verifier, redirectUri, returnTo, createdAt: Date.now() }));
-    const authorizeUrl = new URL(`${runtimeUrl}/auth/google/authorize`);
+    safeSessionStorageSet(pkceStorageKey, JSON.stringify({ state, verifier, redirectUri, returnTo, provider, createdAt: Date.now() }));
+    const authorizeUrl = new URL(`${runtimeUrl}/auth/${provider}/authorize`);
     authorizeUrl.searchParams.set("project", props.projectId);
     authorizeUrl.searchParams.set("redirect_uri", redirectUri);
     authorizeUrl.searchParams.set("state", state);
@@ -302,6 +322,15 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
     window.location.assign(authorizeUrl.toString());
   }, [callbackPath, pkceStorageKey, props.projectId, runtimeUrl]);
+
+  const signIn = useCallback((provider: GonvexAuthProviderName = "google") => signInWithProvider(provider), [signInWithProvider]);
+
+  const signInWithPassword = useCallback(async (email: string, password: string) => {
+    setError(null);
+    const grant = await props.client.action(control.auth.passwordLogin, { email, password });
+    const next = sessionFromNativeGrant(grant, sessionRef.current ?? undefined);
+    installSession(next);
+  }, [installSession, props.client]);
 
   const signOut = useCallback(async (options?: { allDevices?: boolean }) => {
     const current = sessionRef.current;
@@ -351,11 +380,17 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     return tenant;
   }, [fetchAccessToken, installSession, props.client]);
 
-  const inviteMember = useCallback(async (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown> }) => {
+  const inviteMember = useCallback(async (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown>; teamIds?: string[]; allowedAuthProviders?: string[]; payload?: JsonValue }) => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
     if (!token) throw new Error("Sign in before inviting a member.");
     if (tenantId !== sessionRef.current?.activeTenantId) throw new Error("Switch to the tenant before inviting a member.");
-    await props.client.reducer(control.invitations.create, { email, role: options?.role ?? "member", permissions: (options?.permissions ?? {}) as Record<string, JsonValue> });
+    return props.client.reducer(control.invitations.create, { email, role: options?.role ?? "member", permissions: (options?.permissions ?? {}) as Record<string, JsonValue>, teamIds: options?.teamIds ?? [], allowedAuthProviders: options?.allowedAuthProviders ?? [], payload: options?.payload ?? {} });
+  }, [fetchAccessToken, props.client]);
+
+  const acceptInvitation = useCallback(async (token: string) => {
+    const accessToken = await fetchAccessToken({ forceRefreshToken: false });
+    if (!accessToken) throw new Error("Sign in before accepting an invitation.");
+    return props.client.reducer(control.invitations.accept, { token });
   }, [fetchAccessToken, props.client]);
 
   const revokeInvitation = useCallback(async (tenantId: string, email: string) => {
@@ -376,13 +411,16 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     activeTenant,
     error,
     signIn,
+    signInWithProvider,
+    signInWithPassword,
     signOut,
     setActiveTenant,
     refreshMemberships,
     createTenant,
     inviteMember,
+    acceptInvitation,
     revokeInvitation,
-  }), [activeTenant, createTenant, error, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, setActiveTenant, signIn, signOut]);
+  }), [acceptInvitation, activeTenant, createTenant, error, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
 
   return (
     <ManagedAuthContext.Provider value={authValue}>
@@ -397,6 +435,16 @@ export function useGonvexAuth(): GonvexAuthValue {
   const value = useContext(ManagedAuthContext);
   if (!value) throw new Error("GonvexAuthProvider is required");
   return value;
+}
+
+/** Subscribed profile for the active tenant, reconciled by GonvexAuthProvider. */
+export function useCurrentTenantProfile(): GonvexAuthTenant | null {
+  return useGonvexAuth().activeTenant;
+}
+
+/** Live tenant-admin invitation list; reducer changes reconcile automatically. */
+export function useInvitationList(): ControlInvitationListItem[] | undefined {
+  return useControlQuery<ControlInvitationListItem[]>(control.invitations.list, {});
 }
 
 /** Read the auth state installed by either auth provider. */
@@ -482,26 +530,34 @@ async function bootstrapGonvexAuth(options: {
   }
 
   const pkce = readPKCE(options.pkceStorageKey);
-  // Prefer surfacing the runtime/Google error when PKCE is missing (e.g. after
-  // a StrictMode remount or a second tab), rather than always saying "verified".
+  const provider = pkce?.provider ?? "google";
+  const providerLabel = provider[0]!.toUpperCase() + provider.slice(1);
+  // Surface the runtime error even when another tab already consumed PKCE.
   if (callbackError) {
     const messages: Record<string, string> = {
-      access_denied: "Google sign-in was cancelled.",
-      invitation_required: "This app is invite-only. Ask an administrator to invite your verified Google email.",
+      access_denied: `${providerLabel} sign-in was cancelled.`,
+      invitation_required: `This app is invite-only. Ask an administrator to invite your verified ${providerLabel} email.`,
       verified_google_email_required: "Google must provide a verified email address for this app.",
+      verified_microsoft_email_required: "Microsoft must provide a verified email address for this app.",
       membership_setup_failed: "Your account was verified, but its workspace could not be prepared. Please try again.",
       google_exchange_failed: "Google rejected the sign-in code exchange. Check GONVEX_GOOGLE_CLIENT_ID/SECRET and the broker callback URI.",
+      microsoft_exchange_failed: "Microsoft rejected the sign-in code exchange. Check the project's Microsoft realm configuration.",
+      apple_exchange_failed: "Apple rejected the sign-in code exchange. Check the project's Apple realm configuration.",
       invalid_google_identity: "Google identity verification failed. Please try again.",
-      account_creation_failed: "Your Google account could not be linked. Please try again.",
+      invalid_microsoft_identity: "Microsoft identity verification failed. Please try again.",
+      invalid_apple_identity: "Apple identity verification failed. Please try again.",
+      microsoft_not_configured: "Microsoft sign-in is not configured for this project.",
+      apple_not_configured: "Apple sign-in is not configured for this project.",
+      account_creation_failed: `Your ${providerLabel} account could not be linked. Please try again.`,
       code_creation_failed: "Gonvex could not finish creating a sign-in code. Please try again.",
     };
     safeSessionStorageRemove(options.pkceStorageKey);
     clearAuthCallbackParams(url, pkce?.returnTo);
-    throw new Error(messages[callbackError] ?? `Google sign-in failed (${callbackError}). Please try again.`);
+    throw new Error(messages[callbackError] ?? `${providerLabel} sign-in failed (${callbackError}). Please try again.`);
   }
   if (!pkce || !returnedState || returnedState !== pkce.state || Date.now() - pkce.createdAt > 10 * 60 * 1000) {
     clearAuthCallbackParams(url, pkce?.returnTo);
-    throw new Error("The Google sign-in response could not be verified. Please try again.");
+    throw new Error(`The ${providerLabel} sign-in response could not be verified. Please try again.`);
   }
   // Consume PKCE only after validation so a concurrent remount still sees it.
   safeSessionStorageRemove(options.pkceStorageKey);
@@ -516,12 +572,12 @@ async function bootstrapGonvexAuth(options: {
   return session;
 }
 
-function sessionFromNativeGrant(value: JsonValue, previous: GonvexAuthSession): GonvexAuthSession {
+function sessionFromNativeGrant(value: JsonValue, previous?: GonvexAuthSession): GonvexAuthSession {
   if (!value || typeof value !== "object" || Array.isArray(value) || !isGonvexAuthSession(value as Partial<GonvexAuthSession>)) {
     throw new GonvexAuthRequestError("Gonvex returned an invalid native session.", 502);
   }
   const session = value as GonvexAuthSession;
-  const activeTenantId = session.tenants.some((tenant) => tenant.id === previous.activeTenantId)
+  const activeTenantId = previous && session.tenants.some((tenant) => tenant.id === previous.activeTenantId)
     ? previous.activeTenantId
     : session.activeTenantId;
   return { ...session, activeTenantId };
@@ -822,6 +878,23 @@ export function useLiveQuery<T extends JsonValue = JsonValue>(ref: FunctionRefer
   );
 
   return liveResult;
+}
+
+/** Subscribe to a host-owned Control Plane Query on the existing Gonvex connection. */
+export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
+  const client = useGonvexClient();
+  const argsKey = JSON.stringify(args);
+  const watch = useMemo(
+    () => args === "skip" ? undefined : client.watchControlQuery<T>(ref, args),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, ref.kind, ref.path, argsKey],
+  );
+  const snapshot = useSyncExternalStore(
+    useCallback((notify) => watch?.onUpdate(notify) ?? (() => undefined), [watch]),
+    useCallback(() => watch?.getSnapshot(), [watch]),
+    () => undefined,
+  );
+  return snapshot?.result;
 }
 
 /** Read one normalized entity from the single Gonvex Local Replica. */

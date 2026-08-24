@@ -1,55 +1,84 @@
 # Whagons Control Plane v2 handoff
 
-This is the migration contract for replacing Whagons' internal browser HTTP
-calls. Import `control` from the generated `gonvex/_generated/api` module. The
-generated value re-exports the same typed references from `@gonvex/client`.
-Use the existing `GonvexClient`. Do not add another client, transport, cache,
-or database selector.
+This is the migration contract for `@gonvex/*` version `0.3.0`. Whagons should
+use one `GonvexClient` for Control Plane calls, tenant calls, live Control Plane
+queries, and the Local Replica stream. OAuth callbacks and public customer APIs
+remain HTTP because their protocols require HTTP.
 
-## Generated Control Plane references
+Import `control` from `@gonvex/client` or the generated Gonvex API. Every
+reference below has `scope: "control"`, an argument schema, a result schema,
+and a host-enforced authorization class. Browser arguments cannot select a
+database, account, role, tenant membership, developer status, or telemetry
+attribution.
 
-Every reference has `scope: "control"`, `delivery: "oneShot"`, an argument
-schema, a result schema, and one host-enforced authorization class. The checked
-in schema source is `packages/client/src/control.ts`.
+## Authentication and tenant directory
 
-| Reference | Kind | Authorization | Arguments | Result |
+| Reference | Kind and delivery | Authorization | Arguments | Result |
 | --- | --- | --- | --- | --- |
 | `control.accounts.me` | Query | account | `{}` | `{ id, email, name, avatarUrl }` |
 | `control.accounts.updatePassword` | Reducer | account | `{ currentPassword, newPassword }` | `{ updated }` |
+| `control.accounts.resetMemberPassword` | Reducer | tenantAdmin | `{ memberId, newPassword }` | `{ updated }` |
 | `control.accounts.provisionMemberLogin` | Reducer | tenantAdmin | `{ email, name, password, role, permissions }` | `{ updated, accountId, memberId }` |
 | `control.auth.passwordLogin` | Action | public | `{ email, password }` | session grant |
 | `control.auth.refreshSession` | Action | public | `{ refreshToken }` | rotated session grant |
 | `control.auth.logout` | Reducer | account | `{ refreshToken, all }` | `{ updated }` |
 | `control.auth.publicSettings` | Query | public | `{}` | `{ providers: string[] }` |
-| `control.auth.realms.list` | Query | projectAdmin | `{}` | `{ provider, enabled, signupMode }[]` |
-| `control.auth.realms.configure` | Reducer | projectAdmin | `{ provider, enabled, signupMode }` | `{ updated }` |
-| `control.tenants.mine` | Query | account | `{}` | tenant directory rows without database URLs |
-| `control.tenants.create` | Reducer | account | `{ name }` | `{ id, name, role, permissions }` |
+| `control.auth.realms.list` | live Query | projectAdmin | `{}` | realm rows |
+| `control.auth.realms.configure` | Reducer | projectAdmin | `{ provider, enabled, signupMode, azureTenantId?, clientId?, clientSecret? }` | `{ updated }` |
+| `control.auth.memberProviders` | Query | tenantAdmin | `{ memberIds: string[] }` | `{ memberId, providers: string[] }[]` |
+| `control.tenants.mine` | live Query | account | `{}` | tenant directory rows |
+| `control.tenants.create` | Reducer | account | `{ name }` | tenant row |
 | `control.tenants.getByDomain` | Query | public | `{ domain }` | `{ id, name, domain }` |
 | `control.tenants.updateProfile` | Reducer | tenantAdmin | `{ name, domain, description }` | `{ updated }` |
 | `control.tenants.updateTimezone` | Reducer | tenantAdmin | `{ timezone }` | `{ updated }` |
-| `control.tenants.delete` | Reducer | tenant owner | `{}` | `{ updated }` |
+| `control.tenants.delete` | Reducer | tenantAdmin | `{}` | `{ updated }` |
 | `control.tenants.setException` | Reducer | projectAdmin | `{ tenantId, value }` | `{ updated }` |
 | `control.tenants.setSeatLimit` | Reducer | projectAdmin | `{ tenantId, seatLimit }` | `{ updated }` |
-| `control.invitations.lookup` | Query | public | `{ token }` | `{ tenantName, role, expiresAt }` |
-| `control.invitations.create` | Reducer | tenantAdmin | `{ email, role, permissions }` | `{ id, token }` |
-| `control.invitations.accept` | Reducer | account | `{ token }` | `{ tenantId, memberId }` |
-| `control.invitations.revoke` | Reducer | tenantAdmin | `{ id, email }` | `{ updated }` |
+
+A session grant contains access and refresh credentials, the global account,
+the active tenant ID, and tenant rows with `id`, `name`, `role`, `permissions`,
+`domain`, `timezone`, `description`, and `profile`.
+
+`resetMemberPassword` accepts only a tenant-local member ID. The host reloads
+that member from the active tenant database, resolves its global account ID,
+updates the password, revokes every access and refresh session for that
+account, then closes its live connections. A browser-supplied `accountId` fails
+argument decoding.
+
+Microsoft realm rows store `azureTenantId`, `clientId`, and an encrypted client
+secret. Realm queries return `hasClientSecret`, never the secret. Apple uses
+`clientId` and an encrypted Apple client-secret JWT. The runtime supports
+Google, Microsoft, and Apple authorize/callback flows. Apple callbacks accept
+the provider's required `form_post` response.
+
+## Developer and support operations
+
+| Reference | Kind and delivery | Authorization | Arguments | Result |
+| --- | --- | --- | --- | --- |
+| `control.developer.status` | live Query | account | `{}` | `{ developer, mode, tenantId, grantId }` |
+| `control.developer.provisionSelf` | Reducer | developer | `{ tenantId }` | `{ updated, tenantId, memberId }` |
+| `control.developer.removeSelf` | Reducer | developer | `{ tenantId }` | `{ updated }` |
+| `control.developer.enter` | Reducer | developer | `{ tenantId }` | `{ id, token, expiresAt }` |
+| `control.developer.exit` | Reducer | account | `{ grantId }` | `{ updated }` |
+| `control.project.developers.list` | live Query | projectAdmin | `{}` | `{ email, name, role }[]` |
+| `control.project.developers.invite` | Reducer | projectAdmin | `{ email, name, role }` | `{ updated }` |
+| `control.project.developers.remove` | Reducer | projectAdmin | `{ email }` | `{ updated }` |
 | `control.agentAuth.issue` | Reducer | projectAdmin | `{ permissions, expiresInSeconds }` | `{ id, token }` |
 | `control.agentAuth.claim` | Reducer | account | `{ token }` | `{ id, permissions }` |
 | `control.agentAuth.revoke` | Reducer | projectAdmin | `{ id }` | `{ updated }` |
-| `control.project.developers.list` | Query | projectAdmin | `{}` | `{ email, name, role }[]` |
-| `control.project.developers.invite` | Reducer | projectAdmin | `{ email, name, role }` | `{ updated }` |
-| `control.project.developers.remove` | Reducer | projectAdmin | `{ email }` | `{ updated }` |
-| `control.assistant.getDefaults` | Query | projectAdmin | `{}` | configured JSON value |
+| `control.assistant.getDefaults` | live Query | projectAdmin | `{}` | assistant defaults |
 | `control.assistant.setDefaults` | Reducer | projectAdmin | `{ scopeId, value }` | `{ updated }` |
-| `control.voice.getConfiguration` | Query | projectAdmin | `{}` | `{ kind, scopeId, value }[]` |
+| `control.voice.getConfiguration` | live Query | projectAdmin | `{}` | voice settings |
 | `control.voice.setRateCard` | Reducer | projectAdmin | `{ scopeId, value }` | `{ updated }` |
 | `control.voice.setTenantEntitlement` | Reducer | projectAdmin | `{ scopeId, value }` | `{ updated }` |
 | `control.voice.setUserOverride` | Reducer | projectAdmin | `{ scopeId, value }` | `{ updated }` |
-| `control.support.listSessions` | Query | projectAdmin | `{}` | `{ id, tenantId, accountId, release, environment, lastSeenAt }[]` |
-| `control.support.listTenants` | Query | projectAdmin | `{}` | `{ id, name, domain, status, timezone, seatLimit, createdAt }[]` |
-| `control.support.listErrors` | Query | projectAdmin | `{}` | `{ groups: ErrorGroup[], releases: string[] }` |
+| `control.support.listSessions` | live Query | projectAdmin | `{}` | support session summaries |
+| `control.support.getSession` | Query | projectAdmin | `{ id }` | support session detail |
+| `control.support.listErrors` | live Query | projectAdmin | `{}` | `{ groups, releases }` |
+| `control.support.getError` | Query | projectAdmin | `{ fingerprint }` | error detail |
+| `control.support.listTenants` | live Query | projectAdmin | `{}` | tenant summaries |
+| `control.support.getTenant` | Query | projectAdmin | `{ tenantId }` | tenant detail |
+| `control.support.pruneSessions` | Reducer | projectAdmin | `{ olderThanSeconds }` | `{ deleted }` |
 | `control.support.heartbeat` | Reducer | account | `{ release, environment }` | `{ sessionId }` |
 | `control.support.sendCommand` | Reducer | projectAdmin | `{ sessionId, kind, payload }` | `{ id }` |
 | `control.support.ackCommand` | Reducer | account | `{ id }` | `{ updated }` |
@@ -58,156 +87,252 @@ in schema source is `packages/client/src/control.ts`.
 | `control.demos.resetPassword` | Reducer | projectAdmin | `{ accountId, password }` | `{ updated }` |
 | `control.demos.delete` | Reducer | projectAdmin | `{ accountId }` | `{ updated }` |
 
-`ErrorGroup` contains `fingerprint`, `project`, `title`, `level`, optional
-`culprit`, `status`, `priority`, optional `assignee`, `firstSeen`, `lastSeen`,
-`count`, per-tenant/release/environment/account/device count maps, `regression`,
-and the latest redacted event. The exported TypeScript types and machine-readable
-schemas live in `packages/client/src/control.ts`.
+The `developer` authorization class is separate from `projectAdmin`. Project
+owners, project admins, and registered developers can use only the developer
+self-service calls. A `dev` project member cannot read support data, realm
+secrets, voice configuration, or project settings. Developer mode uses an
+audited, expiring, single-use grant.
 
-The host binds tenant-admin references to the active tenant. Only
-project-admin references accept a target `tenantId`. No reference accepts a
-database name, URL, connection string, role assertion, account override, or
-session attribution override.
+These existing configuration queries are now live, so their matching Reducers
+do not need a manual refetch:
 
-## Client and React APIs
+- `control.auth.realms.list`
+- `control.project.developers.list`
+- `control.assistant.getDefaults`
+- `control.voice.getConfiguration`
+- `control.support.listSessions`
+- `control.support.listTenants`
+- `control.support.listErrors`
 
-Use these public APIs instead of `client.localReplica` access or a grid row
-cache:
+## Invitations
+
+| Reference | Kind and delivery | Authorization | Arguments | Result |
+| --- | --- | --- | --- | --- |
+| `control.invitations.list` | live Query | tenantAdmin | `{}` | invitation rows |
+| `control.invitations.lookup` | Query | public | `{ token }` | public invitation detail |
+| `control.invitations.create` | Reducer | tenantAdmin | `{ email, role, permissions, teamIds, allowedAuthProviders, payload }` | `{ id, token }` |
+| `control.invitations.update` | Reducer | tenantAdmin | `{ id, role, permissions, teamIds, allowedAuthProviders, payload }` | `{ updated }` |
+| `control.invitations.revoke` | Reducer | tenantAdmin | `{ id, email }` | `{ updated }` |
+| `control.invitations.accept` | Reducer | account | `{ token }` | `{ tenantId, memberId }` |
+
+The public lookup result contains `tenantId`, `tenantName`, `email`, `role`,
+`teamIds`, `allowedAuthProviders`, and `expiresAt`. The list adds permissions,
+revoked/accepted state, handoff state, and timestamps. It never returns the
+token.
+
+Acceptance validates token hash, expiry, revocation, email ownership, replay
+state, and linked-provider policy. The host claims the invitation in the
+Control Plane. It then opens one tenant transaction, creates or activates the
+canonical member, and calls the module's declared internal Reducer in that same
+transaction. The Reducer applies team assignments and application payload.
+After the tenant commit, the host marks the Control Plane invitation complete
+and schedules the tenant-directory projection. A retry resumes at the recorded
+step and cannot duplicate the member or team rows.
+
+The Whagons TypeScript module must declare one internal Reducer:
 
 ```ts
-client.replicaCollectionState(reference, args)
-client.retainedLiveQuery(signature)
-client.replicaEntities(table, ids)
-client.onSupportCommand(handler)
+import { internalReducer, invitationAcceptance, schema } from "@gonvex/module-sdk";
+
+export const applyInvitation = internalReducer({
+  args: schema.object({
+    accountId: schema.string(),
+    memberId: schema.string(),
+    invitationId: schema.string(),
+    teamIds: schema.array(schema.string()),
+    payload: schema.any(),
+  }),
+  result: schema.any(),
+  async run(ctx, args) {
+    // Idempotently write memberTeams and other Whagons invitation state.
+  },
+});
+
+export const invitationLifecycle = invitationAcceptance("invitations.applyInvitation");
 ```
 
+Module artifact generation 7 signs this declaration into the canonical
+artifact hash. Gonvex rejects a declaration that does not target an internal
+Reducer. Tenant modules still receive no Control Plane credentials or API.
+
+## v5.1.39 mobile bridge
+
+The compatibility references live under `control.legacy`, but their wire paths
+remain unchanged. The bridge must call them with `scope: "control"`.
+
+| SDK reference | Wire path | Contract |
+| --- | --- | --- |
+| `control.legacy.users.myTenants` | `users.myTenants` | live Query returning `string[]` |
+| `control.legacy.tenants.getInvitationByToken` | `tenants.getInvitationByToken` | accepts `token` or `invitationToken`; returns `tenantId`, `invitationToken`, `userEmail`, `teamIds`, `allowedAuthProviders` |
+| `control.legacy.tenants.acceptInvitation` | `tenants.acceptInvitation` | accepts `token` or `invitationToken`; returns `{ tenantId, memberId }` |
+
+These are Control Plane compatibility references. They are not Go tenant
+functions and do not restore Go modules.
+
+## React, telemetry, and Replica APIs
+
+`GonvexAuthProvider` now exposes:
+
 ```ts
+signInWithPassword(email, password)
+signInWithProvider("google" | "microsoft" | "apple")
+signIn(provider?)
+signOut({ allDevices? })
+setActiveTenant(tenantId)
+refreshMemberships()
+createTenant(name)
+inviteMember(tenantId, email, options)
+acceptInvitation(token)
+revokeInvitation(tenantId, email)
+```
+
+Password login uses the same `installSession` path as OAuth. It persists and
+rotates the refresh token, installs account and active-tenant scope into the
+client, watches `control.tenants.mine`, and clears the same state on logout.
+
+New public hooks and client methods:
+
+```ts
+useControlQuery(reference, args)
+useCurrentTenantProfile()
+useInvitationList()
+
+client.reportError(type, payload)
+new GonvexErrorReporter({ client })
+
 useReplicaCollectionState(reference, args)
 useRetainedLiveQuery(referenceOrSignature, args)
 useReplicaEntities(table, ids)
 ```
 
-`useReplicaCollectionState` returns normalized rows plus `source`,
-`completeness`, `freshness`, `truncated`, and `computedRevision`. A collection
-is partial while its snapshot is verifying and remains partial when the server
-reports truncation. The metadata persists with the Local Replica.
+The error reporter registers again after reconnect and sends native
+`error.register`, `error.envelope`, and `error.heartbeat` frames. The server
+limits batch count and bytes, rate-limits each connection identity, strips
+pre-auth context, and overwrites project, tenant, account, and session fields
+with connection-owned values.
 
-`useRetainedLiveQuery` owns only ordered IDs and pagination metadata.
-`useReplicaEntities` resolves an ID batch from the normalized entity store with
-one subscription. A transaction updates all affected entities and memberships
-before React receives one notification.
+Replica collection state returns `rows`, `source`, `completeness`, `freshness`,
+`truncated`, and `computedRevision`. Retained Live Query windows persist IDs,
+ordering, and pagination metadata. `useReplicaEntities` resolves the whole ID
+batch with one Local Replica subscription. Entity values are not copied into
+window state.
 
-## Whagons replacements
+## CLI-only E2E setup
 
-Replace internal auth and directory fetches with `control.accounts.*`,
-`control.auth.*`, and `control.tenants.*`. Keep OAuth authorize, callback, and
-authorization-code exchange as HTTP because OAuth requires those public
-endpoints.
-
-Replace invitation HTTP with `control.invitations.*`. Membership management,
-roles, teams, assignments, and other tenant business state stay in Whagons
-tenant Reducers.
-
-Replace support/admin HTTP with `control.support.*`, `control.project.*`,
-`control.assistant.*`, `control.voice.*`, and `control.demos.*`. Subscribe to
-remote commands with `client.onSupportCommand` and acknowledge each command
-through `control.support.ackCommand`.
-
-Remove task-count completeness guesses. Render the value returned by
-`useReplicaCollectionState`. Remove the virtual-grid entity `rowCache`. Persist
-and retain the Live Query window, then resolve `window.ids` through
-`useReplicaEntities`.
-
-Do not copy Gonvex entities into React state, issue a manual refetch after a
-Reducer, open a second WebSocket, call internal auth HTTP, or read Local Replica
-storage directly.
-
-## Runtime and migration requirements
-
-The runtime applies the Control Plane schema additions during normal Control
-Plane migration/startup. Deploy the updated runtime before using the new
-references. Existing identity-v2 rules remain unchanged:
-
-1. `account.id` is global.
-2. `member.id` is tenant-local and is preserved when an existing member is
-   activated.
-3. The tenant `members` row is the admission authority.
-4. `account_tenant_index` is an asynchronous directory projection only.
-
-The update adds Control Plane tables for passwords, idempotency claims, tenant
-provisioning checkpoints, agent claims, support sessions and commands,
-impersonation grants, project settings, and demo accounts. It also adds tenant
-profile/timezone/deletion fields and invitation token lifecycle fields. No
-Whagons tenant business table is added to the Control Plane.
-
-The production image must include both `gonvex-runtime` and
-`gonvex-module-host`. The Go runtime currently owns HTTP, authentication,
-Postgres, the change feed, visibility, and the Replica protocol. The Rust/V8
-host owns TypeScript module execution and generation lifecycle. This change
-does not claim that the complete Gonvex runtime has moved to Rust.
-
-Control Plane calls terminate in the host before tenant module dispatch, so
-they never cross the Rust/V8 module ABI. The shared browser protocol gained the
-`control` execution scope. The Rust module protocol did not gain database or
-Control Plane capabilities, which preserves tenant-module isolation.
-
-Internal test automation uses the authenticated CLI surface:
+All commands require `--runtime`, `--project`, and `--admin-key`:
 
 ```text
-gonvex internal provision-tenant
-gonvex internal resolve-identity
-gonvex internal e2e-setup
+gonvex internal e2e-base --tenant-name E2E
+gonvex internal e2e-shard --tenant-name E2E --shard worker-1 --email actor@example.test
+gonvex internal clone-test-actor --tenant-id <id> --email actor@example.test
+gonvex internal resolve-identity --email actor@example.test
 ```
 
-All commands require `--runtime`, `--project`, and `--admin-key`. They are not
-browser APIs.
+`e2e-base` and `e2e-shard` derive a stable UUIDv6 tenant ID. Repeating a command
+resumes the same tenant. With `--email`, the CLI resolves the existing account
+inside the host and idempotently creates the tenant-local test member. The
+internal member endpoint accepts only the runtime admin key and is not part of
+the browser protocol.
 
-## Package versions
+## Configuration and migration
 
-The publish-ready package versions are:
+Deploy the updated runtime before updating Whagons packages. Startup installs
+the new Control Plane columns and tables. No Whagons application table moves
+into the Control Plane.
+
+Required configuration:
+
+- Set `GONVEX_DASHBOARD_SESSION_SECRET` to a stable random secret before saving
+  Microsoft or Apple credentials.
+- Register the Whagons callback origin through the existing project auth setup.
+  The runtime owns `/auth/google/callback`, `/auth/microsoft/callback`, and
+  `/auth/apple/callback`.
+- Supply Microsoft's Azure tenant ID, client ID, and client secret through
+  `control.auth.realms.configure`.
+- Supply Apple's service ID as `clientId` and a current signed Apple client
+  secret as `clientSecret`.
+- Set `GONVEX_ADMIN_KEY` only where the internal E2E CLI is needed.
+- Add the internal invitation Reducer declaration before creating invitations
+  with teams or application payload.
+
+Tenant admission still loads `members(account_id, status)` from the selected
+tenant database. `account_tenant_index` remains a resumable directory
+projection and cannot grant access. Invitation acceptance and member changes
+project only after the tenant transaction commits.
+
+## Package release
+
+The compatible unpublished version is `0.3.0` for:
 
 ```text
-@gonvex/protocol 0.2.0
-@gonvex/client   0.2.0
-@gonvex/react    0.2.0
-@gonvex/cli      0.2.0
-@gonvex/module-sdk 0.2.0
+@gonvex/protocol
+@gonvex/client
+@gonvex/expo-sqlite
+@gonvex/react
+@gonvex/module-sdk
+@gonvex/cli
+create-gonvex
 ```
 
-They have not been published. Use workspace packages or a release candidate
-until explicit publish approval is given.
+The packed manifests contain exact `0.3.0` Gonvex dependencies and no
+`workspace:*` entries. Do not publish until Gabriel approves. Publish in this
+order:
 
-## Verification
+```bash
+pnpm --dir packages/protocol publish --access public --no-git-checks
+pnpm --dir packages/client publish --access public --no-git-checks
+pnpm --dir packages/expo-sqlite publish --access public --no-git-checks
+pnpm --dir packages/react publish --access public --no-git-checks
+pnpm --dir packages/module-sdk publish --access public --no-git-checks
+pnpm --dir packages/gonvex publish --access public --no-git-checks
+pnpm --dir packages/create-gonvex publish --access public --no-git-checks
+```
 
-The release gate passed with these commands:
+## Validation
+
+The final tree passed these checks on August 23, 2026:
 
 ```text
 go test ./...
 go vet ./...
-go test -race ./server/internal/server -count=1
 GONVEX_TEST_POSTGRES_URL=... go test ./server/internal/server -count=1
-pnpm test
+  passed in 274.292s
+GONVEX_TEST_POSTGRES_URL=... go test -race ./server/internal/server -count=1
+  passed in 282.619s
+
 pnpm typecheck
-cargo test --workspace --locked -q
+pnpm test
+pnpm build
+
+cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+
+node --test scripts/production-compose.test.mjs scripts/runtime-dockerfile.test.mjs
 ```
 
-The final focused package run passed 129 client tests and 22 React tests. npm
-pack checks produced 0.2.0 tarballs with 6 protocol files, 36 client files, 9
-React files, 9 module SDK files, and 47 CLI files. The packed client and React
-manifests reference the matching 0.2.0 Gonvex dependencies instead of
-`workspace:*`.
+Package results were 16 module SDK tests, 131 client tests, 1 Expo SQLite
+test, 23 React tests, 24 CLI tests, 43 dashboard tests, and 9 deployment
+structure tests. The Rust workspace passed 14 unit and integration tests, with
+one documentation test intentionally ignored.
 
-## Remaining cutover conditions
+Actual `pnpm pack` tarballs were inspected in a temporary directory. Their
+file counts were protocol 6, client 36, Expo SQLite 7, React 9, module SDK 9,
+CLI 47, and create-gonvex 6. Every manifest reported version `0.3.0`, exact
+`0.3.0` Gonvex dependencies, and no `workspace:*` entry.
 
-There is no Gonvex-side blocker to removing Whagons' internal browser HTTP,
-task-count completeness heuristic, or virtual-grid entity cache. Whagons still
-has to replace its call sites and implement tenant business operations as
-TypeScript Reducers. The 0.2.0 packages must also be published or consumed from
-the workspace before a production build can import them.
+## Cutover status
 
-Do not remove Whagons' existing isolated code-execution sandbox during this
-cutover. Gonvex's host-owned agent sandbox and opt-in DuckDB capability are
-available, but replacing the old sandbox is a separate behavioral-parity gate.
-OAuth endpoints and customer-facing external REST are public protocols, not an
-internal function transport, and remain HTTP.
+Gonvex no longer needs a second browser transport or state store for these
+flows. Whagons can remove its internal browser HTTP calls after it replaces the
+call sites, declares the invitation Reducer, and consumes version `0.3.0`.
+OAuth callbacks and external customer REST remain HTTP.
+
+The runtime is still a Go server plus Rust/V8 module and sandbox workers. Go
+owns HTTP, WebSocket, Control Plane auth, PostgreSQL routing, visibility, and
+Replica delivery. Rust owns TypeScript execution, module generations, and the
+isolated sandbox. This work does not claim that the full runtime has moved to
+Rust. Control Plane calls terminate in the trusted Go host and never expose
+Control Plane credentials to Rust/V8 tenant modules.
+
+The packages are not published. That is the only repository-external release
+step left after this branch is merged.

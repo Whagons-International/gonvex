@@ -63,6 +63,10 @@ type appAuthTenant struct {
 	Name        string         `json:"name"`
 	Role        string         `json:"role"`
 	Permissions map[string]any `json:"permissions,omitempty"`
+	Domain      string         `json:"domain"`
+	Timezone    string         `json:"timezone"`
+	Description string         `json:"description"`
+	Profile     any            `json:"profile"`
 }
 
 type appAuthProviderConfiguration struct {
@@ -95,6 +99,7 @@ type authTransaction struct {
 	CodeChallenge     string
 	Nonce             string
 	GoogleRedirectURI string
+	Provider          string
 }
 
 type googleIdentity struct {
@@ -788,7 +793,7 @@ func (s *Server) handleGoogleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.saveAuthTransaction(r.Context(), transactionToken, authTransaction{
 		ProjectID: projectID, RedirectURI: redirectURI, AppState: state,
-		CodeChallenge: challenge, Nonce: nonce, GoogleRedirectURI: callbackURL,
+		CodeChallenge: challenge, Nonce: nonce, GoogleRedirectURI: callbackURL, Provider: googleProvider,
 	}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not start auth flow"})
 		return
@@ -817,10 +822,10 @@ func (s *Server) saveAuthTransaction(ctx context.Context, token string, transact
 	defer db.Close()
 	_, _ = db.ExecContext(ctx, `DELETE FROM gonvex_auth_transactions WHERE expires_at <= now()`)
 	_, err = db.ExecContext(ctx, `INSERT INTO gonvex_auth_transactions (
-		token_hash, project_id, redirect_uri, app_state, code_challenge, nonce, google_redirect_uri, expires_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		token_hash, project_id, redirect_uri, app_state, code_challenge, nonce, google_redirect_uri, provider, expires_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		sha256Hex(token), transaction.ProjectID, transaction.RedirectURI, transaction.AppState,
-		transaction.CodeChallenge, transaction.Nonce, transaction.GoogleRedirectURI, time.Now().Add(authTransactionTTL))
+		transaction.CodeChallenge, transaction.Nonce, transaction.GoogleRedirectURI, transaction.Provider, time.Now().Add(authTransactionTTL))
 	return err
 }
 
@@ -833,9 +838,9 @@ func (s *Server) consumeAuthTransaction(ctx context.Context, token string) (auth
 	var transaction authTransaction
 	err = db.QueryRowContext(ctx, `DELETE FROM gonvex_auth_transactions
 		WHERE token_hash = $1 AND expires_at > now()
-		RETURNING project_id, redirect_uri, app_state, code_challenge, nonce, google_redirect_uri`, sha256Hex(token)).Scan(
+		RETURNING project_id, redirect_uri, app_state, code_challenge, nonce, google_redirect_uri, provider`, sha256Hex(token)).Scan(
 		&transaction.ProjectID, &transaction.RedirectURI, &transaction.AppState,
-		&transaction.CodeChallenge, &transaction.Nonce, &transaction.GoogleRedirectURI,
+		&transaction.CodeChallenge, &transaction.Nonce, &transaction.GoogleRedirectURI, &transaction.Provider,
 	)
 	if err == sql.ErrNoRows {
 		return authTransaction{}, fmt.Errorf("invalid or expired OAuth state")
@@ -942,6 +947,10 @@ func (s *Server) exchangeGoogleCode(ctx context.Context, code string, redirectUR
 }
 
 func (s *Server) upsertAppAuthAccount(ctx context.Context, projectID string, identity googleIdentity) (appAuthAccount, error) {
+	return s.upsertOIDCAccount(ctx, projectID, googleProvider, "https://accounts.google.com", identity)
+}
+
+func (s *Server) upsertOIDCAccount(ctx context.Context, projectID, provider, issuer string, identity googleIdentity) (appAuthAccount, error) {
 	db, err := s.openProjectRegistry(ctx)
 	if err != nil || db == nil {
 		return appAuthAccount{}, fmt.Errorf("auth account store is unavailable")
@@ -956,14 +965,19 @@ func (s *Server) upsertAppAuthAccount(ctx context.Context, projectID string, ide
 	// Resolve the global Account independently of this project. Exact provider
 	// identity wins; a single verified-email account may be reused. Ambiguous
 	// email matches intentionally create no silent merge.
-	const googleIssuer = "https://accounts.google.com"
 	accountID := ""
 	err = tx.QueryRowContext(ctx, `SELECT identity.account_id FROM account_identities identity
 		JOIN accounts account ON account.id = identity.account_id
 		WHERE identity.provider = $1 AND identity.issuer = $2 AND identity.subject = $3
-			AND account.auth_realm_id = $4`, googleProvider, googleIssuer, identity.Subject, projectID).Scan(&accountID)
+			AND account.auth_realm_id = $4`, provider, issuer, identity.Subject, projectID).Scan(&accountID)
 	if err != nil && err != sql.ErrNoRows {
 		return appAuthAccount{}, err
+	}
+	if accountID != "" && strings.TrimSpace(identity.Email) == "" {
+		if err := tx.QueryRowContext(ctx, `SELECT email,name,avatar_url FROM accounts WHERE id=$1 AND auth_realm_id=$2`, accountID, projectID).Scan(&identity.Email, &identity.Name, &identity.Picture); err != nil {
+			return appAuthAccount{}, err
+		}
+		identity.EmailVerified = true
 	}
 	if accountID == "" && identity.EmailVerified && strings.TrimSpace(identity.Email) != "" {
 		rows, queryErr := tx.QueryContext(ctx, `SELECT DISTINCT identity.account_id FROM account_identities identity
@@ -990,6 +1004,9 @@ func (s *Server) upsertAppAuthAccount(ctx context.Context, projectID string, ide
 			accountID = matches[0]
 		}
 	}
+	if accountID == "" && strings.TrimSpace(identity.Email) == "" {
+		return appAuthAccount{}, fmt.Errorf("provider did not return an email for a new account")
+	}
 	if accountID == "" {
 		accountID, err = randomID("acct")
 		if err != nil {
@@ -1009,7 +1026,7 @@ func (s *Server) upsertAppAuthAccount(ctx context.Context, projectID string, ide
 	) VALUES ($1, $2, $3, $4, $5, $6, now())
 	ON CONFLICT (provider, issuer, subject) DO UPDATE SET
 		email = EXCLUDED.email, verified_email = EXCLUDED.verified_email, updated_at = now()
-	RETURNING account_id`, accountID, googleProvider, googleIssuer, identity.Subject, identity.Email, identity.EmailVerified).Scan(&accountID); err != nil {
+	RETURNING account_id`, accountID, provider, issuer, identity.Subject, identity.Email, identity.EmailVerified).Scan(&accountID); err != nil {
 		return appAuthAccount{}, err
 	}
 
@@ -1017,7 +1034,7 @@ func (s *Server) upsertAppAuthAccount(ctx context.Context, projectID string, ide
 	err = tx.QueryRowContext(ctx, `SELECT id, id, email, $3::boolean, name, avatar_url, $4::text,
 		disabled_at IS NOT NULL, created_at, updated_at
 		FROM accounts WHERE id = $1 AND auth_realm_id = $2 AND disabled_at IS NULL`,
-		accountID, projectID, identity.EmailVerified, googleProvider).Scan(
+		accountID, projectID, identity.EmailVerified, provider).Scan(
 		&account.ID, &account.AccountID, &account.Email, &account.EmailVerified, &account.Name,
 		&account.Picture, &account.Provider, &account.Disabled, &account.CreatedAt, &account.LastSignedInAt,
 	)

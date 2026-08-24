@@ -3,8 +3,13 @@ export type ErrorContext = Record<string, unknown>;
 
 export type ErrorReporterOptions = {
   /** Native persistent-protocol sender supplied by GonvexClient. */
-  transport: (type: "register" | "envelope" | "heartbeat", payload: unknown) => Promise<void>;
-  project: string;
+  transport?: (type: "register" | "envelope" | "heartbeat", payload: unknown) => Promise<void>;
+  client?: {
+    reportError: (type: "register" | "envelope" | "heartbeat", payload: unknown) => Promise<void>;
+    connectionState?: () => { isWebSocketConnected: boolean };
+    subscribeToConnectionState?: (listener: (state: { isWebSocketConnected: boolean }) => void) => () => void;
+  };
+  project?: string;
   tenant?: string;
   release?: string;
   environment?: string;
@@ -45,7 +50,7 @@ const REDACTED = "[Filtered]";
 const SECRET = /password|passwd|secret|token|authorization|cookie|api[-_]?key/i;
 
 export class GonvexErrorReporter {
-  private readonly options: ErrorReporterOptions;
+  private readonly options: ErrorReporterOptions & { transport: NonNullable<ErrorReporterOptions["transport"]>; project: string };
   private readonly breadcrumbs: ErrorEventPayload["breadcrumbs"] = [];
   private queue: ErrorEventPayload[] = [];
   private timer?: ReturnType<typeof setTimeout>;
@@ -53,13 +58,25 @@ export class GonvexErrorReporter {
   private readonly deviceId = persistedId("gonvex-error-device");
   private readonly sessionId = randomId();
   private removeGlobal?: () => void;
+  private removeConnectionListener?: () => void;
   private readonly queueKey: string;
 
   constructor(options: ErrorReporterOptions) {
-    this.options = { sampleRate: 1, captureGlobalErrors: true, maxQueueSize: 100, ...options };
-    this.queueKey = `gonvex-error-queue:${options.project}`;
+    if (!options.transport && !options.client) throw new Error("GonvexErrorReporter requires client or transport");
+    const transport = options.transport ?? ((type: "register" | "envelope" | "heartbeat", payload: unknown) => options.client!.reportError(type, payload));
+    options = { ...options, transport, project: options.project ?? "" };
+    this.options = { sampleRate: 1, captureGlobalErrors: true, maxQueueSize: 100, ...options, transport, project: options.project ?? "" };
+    this.queueKey = `gonvex-error-queue:${options.project ?? ""}`;
     this.queue = readQueue(this.queueKey);
     this.registerProject();
+    if (options.client?.subscribeToConnectionState) {
+      let connected = options.client.connectionState?.().isWebSocketConnected ?? false;
+      this.removeConnectionListener = options.client.subscribeToConnectionState((state) => {
+        const restored = !connected && state.isWebSocketConnected;
+        connected = state.isWebSocketConnected;
+        if (restored) this.connectionRestored();
+      });
+    }
     if (this.options.captureGlobalErrors && typeof window !== "undefined") this.installGlobalHandlers();
     if (typeof window !== "undefined") this.scheduleHeartbeat();
     if (this.queue.length) this.scheduleFlush();
@@ -120,6 +137,7 @@ export class GonvexErrorReporter {
 
   close() {
     this.removeGlobal?.();
+    this.removeConnectionListener?.();
     if (this.timer) clearTimeout(this.timer);
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
     void this.flush();

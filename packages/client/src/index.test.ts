@@ -111,6 +111,15 @@ function sentMessages(socket = latestSocket()) {
 }
 
 describe("GonvexClient", () => {
+	it("subscribes and resumes live Control Plane Queries on the persistent connection", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		client.setAuth({project:"shop",tenant:"tenant-a",token:"session"});
+		const socket=(client.connect(),latestSocket());socket.open();socket.receive({type:"session.ready",capabilities:{queryBatch:0},replica:testReplicaDirective});socket.receive(authenticatedResult({type:"auth.result",id:"auth"}));
+		const updates=vi.fn();client.subscribeLiveQuery(control.tenants.mine,{},updates);
+		expect(sentMessages(socket).at(-1)).toMatchObject({type:"query.subscribe",path:"control.tenants.mine",scope:"control"});
+		const subscription=sentMessages(socket).at(-1);socket.receive({type:"query.result",id:subscription.id,path:"control.tenants.mine",result:[],reason:"initial"});await flushMicrotasks();expect(updates).toHaveBeenCalled();
+		socket.disconnect();vi.advanceTimersByTime(1_000);const resumed=latestSocket();resumed.open();resumed.receive({type:"session.ready",capabilities:{queryBatch:0},replica:testReplicaDirective});resumed.receive(authenticatedResult({type:"auth.result",id:"auth-2"}));await flushMicrotasks();expect(sentMessages(resumed).some((message)=>message.type==="query.subscribe"&&message.scope==="control")).toBe(true);
+	});
 	it("batches query subscribes into one frame when the server advertises queryBatch", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const socket = (client.connect(), latestSocket());

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,29 @@ func TestTenantAdministratorCannotAdministerAnotherTenant(t *testing.T) {
 	}
 }
 
+func TestTenantAdministratorCannotEscalateInvitationOnUpdate(t *testing.T) {
+	runtime, db, project := controlPlaneTestRuntime(t)
+	if _, err := db.Exec(`INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,status) VALUES('rel-invite-role',$1,'tenant-invite-role','Tenant','active')`, project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO gonvex_auth_membership_invitations(project_id,tenant_id,email,role,invited_by,expires_at,id,token_hash) VALUES($1,'tenant-invite-role','member@example.test','member','acct-owner',now()+interval '1 hour','invite-role','hash')`, project); err != nil {
+		t.Fatal(err)
+	}
+	connection := &wsConn{
+		server: runtime, project: project, tenant: "tenant-invite-role",
+		user:   &gonvex.Account{ID: "acct-admin", Email: "admin@example.test"},
+		member: &gonvex.Member{ID: "member-admin", AccountID: "acct-admin", Role: "admin", Status: "active"},
+	}
+	ownerUpdate := json.RawMessage(`{"id":"invite-role","role":"owner","permissions":{},"teamIds":[],"allowedAuthProviders":[],"payload":{}}`)
+	if _, err := runtime.executeControlReducerWithStore(context.Background(), db, connection, "control.invitations.update", ownerUpdate, ""); err == nil || !strings.Contains(err.Error(), "tenant owner access") {
+		t.Fatalf("tenant admin escalated an invitation: %v", err)
+	}
+	memberUpdate := json.RawMessage(`{"id":"invite-role","role":"member","permissions":{"tasks.read":true},"teamIds":[],"allowedAuthProviders":[],"payload":{}}`)
+	if _, err := runtime.executeControlReducerWithStore(context.Background(), db, connection, "control.invitations.update", memberUpdate, ""); err != nil {
+		t.Fatalf("tenant admin could not update a member invitation: %v", err)
+	}
+}
+
 func TestControlPlaneProjectAdminComesFromControlPlaneMembership(t *testing.T) {
 	runtime, db, project := controlPlaneTestRuntime(t)
 	ctx := context.Background()
@@ -164,6 +188,77 @@ func TestControlPlaneProjectAdminComesFromControlPlaneMembership(t *testing.T) {
 	}
 	if !runtime.canManageControlProject(ctx, project, "admin@example.test") {
 		t.Fatal("project admin membership was denied")
+	}
+	if _, err := db.Exec(`INSERT INTO gonvex_project_members(project_id,email,name,role) VALUES($1,'developer@example.test','Developer','dev')`, project); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.canUseDeveloperAccess(ctx, project, "developer@example.test") {
+		t.Fatal("developer membership was denied self-service developer access")
+	}
+	if runtime.canManageControlProject(ctx, project, "developer@example.test") {
+		t.Fatal("developer membership gained project administration")
+	}
+	if controlFunctions["control.developer.enter"].auth != controlDeveloper {
+		t.Fatal("developer mode does not use its restricted host authorization class")
+	}
+}
+
+func TestRealmConfigurationEncryptsMicrosoftSecretAndNeverReturnsIt(t *testing.T) {
+	runtime, db, project := controlPlaneTestRuntime(t)
+	runtime.config.DashboardSecret = "realm-test-encryption-key"
+	connection := &wsConn{server: runtime, project: project, user: &gonvex.Account{ID: "acct-owner", Email: "owner@example.test"}}
+	secret := "microsoft-client-secret"
+	if _, err := runtime.executeControlCall(context.Background(), connection, "reducer", "control.auth.realms.configure", json.RawMessage(`{
+		"provider":"microsoft","enabled":true,"signupMode":"inviteOnly","azureTenantId":"organizations","clientId":"client-id","clientSecret":"microsoft-client-secret"
+	}`), "configure-microsoft"); err != nil {
+		t.Fatal(err)
+	}
+	var encrypted []byte
+	if err := db.QueryRow(`SELECT client_secret_encrypted FROM gonvex_auth_providers WHERE project_id=$1 AND provider='microsoft'`, project).Scan(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(encrypted, []byte(secret)) || len(encrypted) <= len(secret) {
+		t.Fatal("Microsoft client secret was not encrypted at rest")
+	}
+	result, err := runtime.executeControlQuery(context.Background(), connection, "control.auth.realms.list", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(result)
+	if bytes.Contains(raw, []byte(secret)) || bytes.Contains(raw, encrypted) {
+		t.Fatalf("realm response exposed secret material: %s", raw)
+	}
+	if !bytes.Contains(raw, []byte(`"hasClientSecret":true`)) {
+		t.Fatalf("realm response omitted hasClientSecret: %s", raw)
+	}
+	if _, err := runtime.executeControlCall(context.Background(), connection, "reducer", "control.auth.realms.configure", json.RawMessage(`{
+		"provider":"apple","enabled":true,"signupMode":"inviteOnly","clientId":"com.example.app","clientSecret":"signed-apple-client-secret"
+	}`), "configure-apple"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.appleConfig(context.Background(), project); err != nil {
+		t.Fatalf("Apple configuration could not be loaded: %v", err)
+	}
+}
+
+func TestInvitationProviderPolicyRejectsUnsupportedProviders(t *testing.T) {
+	providers, err := normalizeInvitationProviders([]string{"google", "microsoft", "google"})
+	if err != nil || !reflect.DeepEqual(providers, []string{"google", "microsoft"}) {
+		t.Fatalf("normalized providers=%v err=%v", providers, err)
+	}
+	if _, err := normalizeInvitationProviders([]string{"google", "browser-supplied-provider"}); err == nil {
+		t.Fatal("unsupported invitation provider was accepted")
+	}
+}
+
+func TestLegacyMobileControlReferencesKeepExactWirePaths(t *testing.T) {
+	for _, path := range []string{"users.myTenants", "tenants.getInvitationByToken", "tenants.acceptInvitation"} {
+		if _, ok := controlFunctions[path]; !ok {
+			t.Fatalf("legacy Control Plane wire path %q is missing", path)
+		}
+	}
+	if !controlFunctions["users.myTenants"].live {
+		t.Fatal("users.myTenants is not subscribable")
 	}
 }
 
@@ -381,6 +476,66 @@ func TestMemberLoginProvisioningCannotResetExistingAccountPassword(t *testing.T)
 	}
 }
 
+func TestTenantAdminPasswordResetResolvesMemberAccountAndRevokesSessions(t *testing.T) {
+	runtime, controlDB, project := controlPlaneTestRuntime(t)
+	tenantID := "tenant-password-reset"
+	tenantURL := createTenantRegistryTestDatabase(t, tenantRegistryTestPostgresURL(t), "gonvex_password_reset_"+tenantRegistryTestSuffix(t))
+	tenantDB, err := dbpool.Open(tenantURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tenantDB.Close()
+	if err := ensureTenantLocalTables(context.Background(), tenantDB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlDB.Exec(`UPDATE gonvex_runtime_projects SET database_mode='multiTenant' WHERE id=$1`, project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO accounts(id,auth_realm_id,email,name) VALUES
+		('acct-admin',$1,'admin@example.test','Admin'),('acct-member',$1,'member@example.test','Member')`, project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status,provisioned)
+		VALUES('rel-password',$1,$2,'Password tenant',$3,'active',TRUE)`, project, tenantID, tenantURL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tenantDB.Exec(`INSERT INTO members(id,account_id,status,role,permissions) VALUES
+		('member-admin','acct-admin','active','owner','{}'),('member-target','acct-member','active','member','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	oldHash, err := hashDashboardPassword("old-member-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash) VALUES($1,'acct-member',$2)`, project, oldHash); err != nil {
+		t.Fatal(err)
+	}
+	runtime.hydrateProjects()
+	if _, err := runtime.executeControlCall(context.Background(), &wsConn{server: runtime, project: project}, "action", "control.auth.passwordLogin", json.RawMessage(`{"email":"member@example.test","password":"old-member-password"}`), "member-login"); err != nil {
+		t.Fatal(err)
+	}
+	admin := &wsConn{server: runtime, project: project, tenant: tenantID, user: &gonvex.Account{ID: "acct-admin", Email: "admin@example.test"}, member: &gonvex.Member{ID: "member-admin", AccountID: "acct-admin", Role: "owner"}}
+	if _, err := runtime.executeControlCall(context.Background(), admin, "reducer", "control.accounts.resetMemberPassword", json.RawMessage(`{"memberId":"member-target","newPassword":"new-member-password","accountId":"acct-admin"}`), "reset-with-override"); err == nil {
+		t.Fatal("password reset accepted a browser-supplied account override")
+	}
+	if _, err := runtime.executeControlCall(context.Background(), admin, "reducer", "control.accounts.resetMemberPassword", json.RawMessage(`{"memberId":"member-target","newPassword":"new-member-password"}`), "reset-password"); err != nil {
+		t.Fatal(err)
+	}
+	var activeSessions int
+	if err := controlDB.QueryRow(`SELECT count(*) FROM gonvex_auth_sessions WHERE project_id=$1 AND account_id='acct-member' AND revoked_at IS NULL`, project).Scan(&activeSessions); err != nil {
+		t.Fatal(err)
+	}
+	if activeSessions != 0 {
+		t.Fatalf("password reset left %d active sessions", activeSessions)
+	}
+	if _, err := runtime.executeControlCall(context.Background(), &wsConn{server: runtime, project: project}, "action", "control.auth.passwordLogin", json.RawMessage(`{"email":"member@example.test","password":"old-member-password"}`), "old-password-login"); err == nil {
+		t.Fatal("old password remained valid")
+	}
+	if _, err := runtime.executeControlCall(context.Background(), &wsConn{server: runtime, project: project}, "action", "control.auth.passwordLogin", json.RawMessage(`{"email":"member@example.test","password":"new-member-password"}`), "new-password-login"); err != nil {
+		t.Fatalf("new password did not work: %v", err)
+	}
+}
+
 func TestDeveloperImpersonationIsPermissionGatedAuditedAndSingleUse(t *testing.T) {
 	runtime, controlDB, project := controlPlaneTestRuntime(t)
 	tenantID := "tenant-support"
@@ -468,9 +623,34 @@ func TestInvitationAcceptanceResumesOnlyTheSameCommandAndRejectsReplay(t *testin
 		VALUES($1,$2,'invited@example.test','member','{}','acct-owner',now()+interval '1 hour','invite-one',$3)`, project, tenantID, sha256Hex(token)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := controlDB.Exec(`UPDATE gonvex_auth_membership_invitations SET allowed_auth_providers='["microsoft"]' WHERE id='invite-one'`); err != nil {
+		t.Fatal(err)
+	}
 	runtime.hydrateProjects()
 	connection := &wsConn{server: runtime, project: project, user: &gonvex.Account{ID: "acct-invited", Email: "invited@example.test"}}
 	args := json.RawMessage(`{"token":"invitation-secret"}`)
+	if _, err := runtime.acceptControlInvitation(context.Background(), controlDB, connection, args, "accept-command"); err == nil || !strings.Contains(err.Error(), "linked authentication provider") {
+		t.Fatalf("provider policy was not enforced: %v", err)
+	}
+	if _, err := controlDB.Exec(`INSERT INTO account_identities(account_id,provider,issuer,subject,email,verified_email) VALUES('acct-invited','microsoft','issuer','subject','invited@example.test',TRUE)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlDB.Exec(`UPDATE gonvex_auth_membership_invitations SET handoff_state='claimed',accepted_account_id='acct-invited',accepted_idempotency_key='first-command' WHERE id='invite-one'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.acceptControlInvitation(context.Background(), controlDB, connection, args, "second-command"); err == nil || !strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("another command advanced a claimed invitation: %v", err)
+	}
+	var claimedMemberCount int
+	if err := tenantDB.QueryRow(`SELECT count(*) FROM members WHERE id='member_invite-one'`).Scan(&claimedMemberCount); err != nil {
+		t.Fatal(err)
+	}
+	if claimedMemberCount != 0 {
+		t.Fatal("another command reached the tenant invitation transaction")
+	}
+	if _, err := controlDB.Exec(`UPDATE gonvex_auth_membership_invitations SET handoff_state='pending',accepted_account_id=NULL,accepted_idempotency_key=NULL WHERE id='invite-one'`); err != nil {
+		t.Fatal(err)
+	}
 	first, err := runtime.acceptControlInvitation(context.Background(), controlDB, connection, args, "accept-command")
 	if err != nil {
 		t.Fatal(err)

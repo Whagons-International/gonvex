@@ -92,6 +92,9 @@ services:
       S3_FORCE_PATH_STYLE: "true"
       GONVEX_PUBLIC_URL: http://localhost:8080
       GONVEX_AUTH_URL: ${GONVEX_AUTH_URL:-http://localhost:8080}
+      # Local-only defaults. Production must provide stable random values.
+      GONVEX_ADMIN_KEY: ${GONVEX_ADMIN_KEY:-gonvex-local-admin}
+      GONVEX_DASHBOARD_SESSION_SECRET: ${GONVEX_DASHBOARD_SESSION_SECRET:-gonvex-local-dashboard-session-secret}
       GONVEX_GOOGLE_CLIENT_ID: ${GONVEX_GOOGLE_CLIENT_ID:-}
       GONVEX_GOOGLE_CLIENT_SECRET: ${GONVEX_GOOGLE_CLIENT_SECRET:-}
       GONVEX_DASHBOARD_AUTH_PROJECT_ID: ${GONVEX_DASHBOARD_AUTH_PROJECT_ID:-}

@@ -13,6 +13,8 @@ import type {
 } from "@gonvex/protocol";
 import { replicaHashesDigest, replicaRowsHashes, replicaRowKey } from "./replica-integrity.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
+export { GonvexErrorReporter } from "./error-reporter.js";
+export type { ErrorReporterOptions, ErrorEventPayload, ErrorContext, ErrorAccount } from "./error-reporter.js";
 import {
   optimisticPatchesFromReference,
   type OptimisticPatch,
@@ -199,7 +201,7 @@ export type FunctionReference<Args extends JsonValue = JsonValue, Result extends
   path: string;
   /** Core Control Plane functions share the same persistent connection. */
   scope?: ExecutionScope;
-  authorization?: "public" | "account" | "tenantAdmin" | "projectAdmin" | "internal";
+  authorization?: "public" | "account" | "tenantAdmin" | "developer" | "projectAdmin" | "internal";
   argsSchema?: JsonValue;
   resultSchema?: JsonValue;
   delivery?: "oneShot" | "live" | "replica";
@@ -886,7 +888,8 @@ export class GonvexClient {
   }
 
   subscribeLiveQuery<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue>(ref: FunctionReference<Args, Result>, args: Args = {} as Args, onMessage: SubscriptionHandler) {
-    if (!ref.live?.plan || ref.delivery !== "live") {
+    const isControlLiveQuery = ref.scope === "control" && ref.delivery === "live";
+    if ((!ref.live?.plan || ref.delivery !== "live") && !isControlLiveQuery) {
       throw new GonvexClientError(`Query ${ref.path} is not a structured Live Query`, { code: "server", path: ref.path, operation: "query" });
     }
     this.connect();
@@ -943,6 +946,47 @@ export class GonvexClient {
     this.sendSubscription(subscription);
 
     return () => this.unsubscribeQueryListener(key, onMessage);
+  }
+
+  /** Watch an authorized host-owned Control Plane Query on the persistent connection. */
+  watchControlQuery<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args) {
+    if (ref.scope !== "control" || ref.kind !== "query" || ref.delivery !== "live") {
+      throw new GonvexClientError(`Query ${ref.path} is not a live Control Plane Query`, { code: "server", path: ref.path, operation: "query" });
+    }
+    const listeners = new Set<WatchUpdateHandler>();
+    let result: T | undefined;
+    let error: Error | undefined;
+    let version = 0;
+    let snapshot: Readonly<{ result: T | undefined; version: number }> = { result, version };
+    const notify = () => queueMicrotask(() => listeners.forEach((listener) => listener()));
+    const unsubscribe = this.subscribeLiveQuery(ref, args, (message) => {
+      if (message.type === "query.result") {
+        result = message.result as T;
+        error = undefined;
+        version += 1;
+        snapshot = { result, version };
+        notify();
+      } else if (message.type === "query.error") {
+        error = new GonvexClientError(message.error, { code: "server", path: ref.path, operation: "query" });
+        version += 1;
+        snapshot = { result, version };
+        notify();
+      }
+    });
+    return {
+      getSnapshot() {
+        if (error) throw error;
+        return snapshot;
+      },
+      onUpdate(listener: WatchUpdateHandler) {
+        listeners.add(listener);
+        queueMicrotask(() => listeners.has(listener) && listener());
+        return () => {
+          listeners.delete(listener);
+          if (listeners.size === 0) unsubscribe();
+        };
+      },
+    };
   }
 
   private async handleQueryMessage(subscription: QuerySubscription, message: ServerMessage, scope = this.replicaScope) {
@@ -2494,6 +2538,11 @@ export class GonvexClient {
       trace: event.serverTrace,
       device: event.device ?? browserTelemetryInfo(),
     });
+  }
+
+  /** Send a bounded native error-telemetry frame using authenticated connection attribution. */
+  reportError(type: "register" | "envelope" | "heartbeat", payload: unknown): Promise<void> {
+    return this.sendNativeError(type, payload);
   }
 
   private sendNativeError(type: "register" | "envelope" | "heartbeat", payload: unknown): Promise<void> {

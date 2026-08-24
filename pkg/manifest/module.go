@@ -14,7 +14,7 @@ import (
 )
 
 const LanguageTypeScript = "typescript"
-const ModuleArtifactGeneration = 6
+const ModuleArtifactGeneration = 7
 
 // Language reports the artifact's normalized language, defaulting to
 // TypeScript because that is the only language the artifact pipeline emits.
@@ -168,6 +168,12 @@ func (a ModuleArtifact) Validate() error {
 			}
 		}
 	}
+	if path := strings.TrimSpace(a.InvitationAcceptanceReducer); path != "" {
+		target, ok := a.Functions[path]
+		if !ok || target.Kind != FunctionKindReducer || !target.Internal {
+			return fmt.Errorf("invitation acceptance function %q must be an internal reducer", path)
+		}
+	}
 	cronNames := make(map[string]struct{}, len(a.Crons))
 	for _, cron := range a.Crons {
 		name := strings.TrimSpace(cron.Name)
@@ -237,13 +243,14 @@ func (a ModuleArtifact) ComputedHash() (string, error) {
 		crons = []ModuleCron{}
 	}
 	payload := map[string]any{
-		"generation": a.Generation,
-		"language":   a.NormalizedLanguage(),
-		"entrypoint": a.Entrypoint,
-		"files":      files,
-		"functions":  hashFunctions,
-		"visibility": visibility,
-		"crons":      crons,
+		"generation":                  a.Generation,
+		"language":                    a.NormalizedLanguage(),
+		"entrypoint":                  a.Entrypoint,
+		"files":                       files,
+		"functions":                   hashFunctions,
+		"visibility":                  visibility,
+		"crons":                       crons,
+		"invitationAcceptanceReducer": strings.TrimSpace(a.InvitationAcceptanceReducer),
 		"javascript": map[string]any{
 			"path": a.JavaScript.Path,
 			"hash": strings.ToLower(strings.TrimSpace(a.JavaScript.Hash)),

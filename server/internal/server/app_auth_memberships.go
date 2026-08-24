@@ -359,7 +359,7 @@ func (s *Server) appAuthTenantCandidates(ctx context.Context, db *sql.DB, projec
 		}
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT i.tenant_id, t.name
+	rows, err := db.QueryContext(ctx, `SELECT i.tenant_id, t.name, t.domain, t.timezone, t.description, t.profile
 		FROM account_tenant_index i
 		JOIN gonvex_runtime_tenants t ON t.tenant_id = i.tenant_id
 		WHERE t.project_id = $1 AND i.account_id = $2 AND i.status = 'active'
@@ -371,10 +371,12 @@ func (s *Server) appAuthTenantCandidates(ctx context.Context, db *sql.DB, projec
 	seen := map[string]bool{}
 	for rows.Next() {
 		var tenant appAuthTenant
-		if err := rows.Scan(&tenant.ID, &tenant.Name); err != nil {
+		var profile []byte
+		if err := rows.Scan(&tenant.ID, &tenant.Name, &tenant.Domain, &tenant.Timezone, &tenant.Description, &profile); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		_ = json.Unmarshal(profile, &tenant.Profile)
 		if seen[tenant.ID] {
 			continue
 		}
@@ -411,7 +413,7 @@ func (s *Server) appAuthTenantCandidates(ctx context.Context, db *sql.DB, projec
 // the directory is intentionally eventual and therefore cannot prove that an
 // account has no tenant-local memberships left to revoke.
 func appAuthAllTenantCandidates(ctx context.Context, db *sql.DB, projectID string) ([]appAuthTenant, error) {
-	rows, err := db.QueryContext(ctx, `SELECT tenant_id, name
+	rows, err := db.QueryContext(ctx, `SELECT tenant_id, name, domain, timezone, description, profile
 		FROM gonvex_runtime_tenants
 		WHERE project_id = $1
 		ORDER BY lower(name), tenant_id`, projectID)
@@ -422,9 +424,11 @@ func appAuthAllTenantCandidates(ctx context.Context, db *sql.DB, projectID strin
 	candidates := []appAuthTenant{}
 	for rows.Next() {
 		var tenant appAuthTenant
-		if err := rows.Scan(&tenant.ID, &tenant.Name); err != nil {
+		var profile []byte
+		if err := rows.Scan(&tenant.ID, &tenant.Name, &tenant.Domain, &tenant.Timezone, &tenant.Description, &profile); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal(profile, &tenant.Profile)
 		candidates = append(candidates, tenant)
 	}
 	return candidates, rows.Err()
@@ -494,16 +498,20 @@ func (s *Server) resolveAppAuthTenant(ctx context.Context, projectID string, acc
 	if registryErr != nil || db == nil {
 		return appAuthTenant{}, err
 	}
-	var name string
-	if lookupErr := db.QueryRowContext(ctx, `SELECT name FROM gonvex_runtime_tenants
-		WHERE project_id = $1 AND tenant_id = $2`, projectID, requested).Scan(&name); lookupErr != nil {
+	var directoryTenant appAuthTenant
+	var profile []byte
+	if lookupErr := db.QueryRowContext(ctx, `SELECT tenant_id,name,domain,timezone,description,profile FROM gonvex_runtime_tenants
+		WHERE project_id = $1 AND tenant_id = $2`, projectID, requested).Scan(&directoryTenant.ID, &directoryTenant.Name, &directoryTenant.Domain, &directoryTenant.Timezone, &directoryTenant.Description, &profile); lookupErr != nil {
 		return appAuthTenant{}, err
 	}
+	_ = json.Unmarshal(profile, &directoryTenant.Profile)
 	member, memberErr := s.loadTenantMember(ctx, projectID, requested, accountID)
 	if memberErr != nil {
 		return appAuthTenant{}, err
 	}
-	return appAuthTenant{ID: requested, Name: name, Role: member.Role, Permissions: member.Permissions}, nil
+	directoryTenant.Role = member.Role
+	directoryTenant.Permissions = member.Permissions
+	return directoryTenant, nil
 }
 
 func (s *Server) ensureAppAuthMemberships(ctx context.Context, projectID string, user appAuthAccount) error {

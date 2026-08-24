@@ -3,7 +3,7 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionState, FunctionReference, GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexProviderWithAuth, GonvexProvider, useGonvexAuthState, useGonvexConnectionState, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaEntities, useRetainedLiveQuery } from "./index";
+import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaEntities, useRetainedLiveQuery } from "./index";
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
@@ -63,6 +63,14 @@ class FakeGonvexClient {
     return () => {
       this.queryListeners.delete(handler);
     };
+  }
+
+  watchControlQuery(ref: FunctionReference, args: unknown) {
+    let result: unknown;
+    let version = 0;
+    const listeners = new Set<() => void>();
+    const unsubscribe = this.subscribeLiveQuery(ref,args,(message)=>{if(message.type==="query.result"){result=message.result;version+=1;listeners.forEach((listener)=>listener());}});
+    return {getSnapshot:()=>({result,version}),onUpdate:(listener:()=>void)=>{listeners.add(listener);return()=>{listeners.delete(listener);if(!listeners.size)unsubscribe();}}};
   }
 
   watchReplica(ref: FunctionReference) {
@@ -442,5 +450,30 @@ describe("GonvexProviderWithAuth", () => {
     act(() => client.emitAuthError("token expired"));
 
     expect(view.getByTestId("auth-state").textContent).toBe('{"authenticated":false,"error":"token expired"}');
+  });
+});
+
+describe("GonvexAuthProvider", () => {
+  afterEach(() => { cleanup(); localStorage.clear(); sessionStorage.clear(); });
+
+  it("installs and persists a native password session through the OAuth session path", async () => {
+    const client = new FakeGonvexClient();
+    client.action.mockResolvedValue({
+      accessToken:"access",expiresAt:Date.now()+900_000,refreshToken:"refresh",refreshExpiresAt:Date.now()+86_400_000,
+      account:{id:"acct-1",email:"person@example.test",emailVerified:true,name:"Person",picture:"",provider:"password"},
+      tenants:[{id:"tenant-1",name:"Tenant",role:"admin",permissions:{},domain:"tenant",timezone:"UTC",profile:{}}],activeTenantId:"tenant-1",
+    });
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer(){auth=useGonvexAuth();return null;}
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://runtime.test" projectId="shop"><Consumer/></GonvexAuthProvider>);
+    await act(async()=>{await Promise.resolve();await Promise.resolve();});
+    await act(async()=>{await auth!.signInWithPassword("person@example.test","correct-password");});
+    expect(client.action).toHaveBeenCalledWith(expect.objectContaining({path:"control.auth.passwordLogin"}),{email:"person@example.test",password:"correct-password"});
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({project:"shop",tenant:"tenant-1",token:"access"}));
+    expect(JSON.parse(localStorage.getItem("gonvex-auth:https%3A%2F%2Fruntime.test:shop")!)).toMatchObject({refreshToken:"refresh",activeTenantId:"tenant-1"});
+    client.reducer.mockResolvedValue({tenantId:"tenant-2",memberId:"member-2"});
+    await act(async()=>{expect(await auth!.acceptInvitation("invite-token")).toEqual({tenantId:"tenant-2",memberId:"member-2"});});
+    expect(client.reducer).toHaveBeenCalledWith(expect.objectContaining({path:"control.invitations.accept"}),{token:"invite-token"});
+    expect(client.query).not.toHaveBeenCalled();
   });
 });
