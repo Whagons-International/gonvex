@@ -35,29 +35,39 @@ func (s *Server) authenticateControlSocket(ctx context.Context, requestedProject
 	}, session.ProjectID, nil
 }
 
-func (s *Server) authenticateImpersonationSocket(ctx context.Context, requestedProjectID, token, connectionID string) (*gonvex.Account, map[string]any, string, string, string, string, error) {
+func (s *Server) authenticateImpersonationSocket(ctx context.Context, requestedProjectID, token, connectionID string) (*gonvex.Account, map[string]any, string, string, string, string, string, error) {
 	db, err := s.pooledProjectRegistry(ctx)
 	if err != nil || db == nil {
-		return nil, nil, "", "", "", "", fmt.Errorf("Control Plane store is unavailable")
+		return nil, nil, "", "", "", "", "", fmt.Errorf("Control Plane store is unavailable")
+	}
+	nextToken, err := randomID("gvx_dev")
+	if err != nil {
+		return nil, nil, "", "", "", "", "", err
 	}
 	var grantID, projectID, actorID, accountID, tenantID string
-	err = db.QueryRowContext(ctx, `UPDATE gonvex_impersonation_grants SET used_at=now(),used_connection_id=$2
-		WHERE token_hash=$1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>now()
-		RETURNING id,project_id,actor_account_id,target_account_id,tenant_id`, sha256Hex(token), connectionID).Scan(&grantID, &projectID, &actorID, &accountID, &tenantID)
+	if strings.HasPrefix(strings.TrimSpace(token), "gvx_imp_") {
+		err = db.QueryRowContext(ctx, `UPDATE gonvex_impersonation_grants SET used_at=now(),used_connection_id=$2,reconnect_token_hash=$3
+			WHERE token_hash=$1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>now()
+			RETURNING id,project_id,actor_account_id,target_account_id,tenant_id`, sha256Hex(token), connectionID, sha256Hex(nextToken)).Scan(&grantID, &projectID, &actorID, &accountID, &tenantID)
+	} else {
+		err = db.QueryRowContext(ctx, `UPDATE gonvex_impersonation_grants SET used_connection_id=$2,reconnect_token_hash=$3
+			WHERE reconnect_token_hash=$1 AND used_at IS NOT NULL AND revoked_at IS NULL AND expires_at>now()
+			RETURNING id,project_id,actor_account_id,target_account_id,tenant_id`, sha256Hex(token), connectionID, sha256Hex(nextToken)).Scan(&grantID, &projectID, &actorID, &accountID, &tenantID)
+	}
 	if err == sql.ErrNoRows {
-		return nil, nil, "", "", "", "", fmt.Errorf("impersonation grant is invalid, expired, revoked, or already used")
+		return nil, nil, "", "", "", "", "", fmt.Errorf("impersonation grant is invalid, expired, revoked, or already used")
 	}
 	if err != nil {
-		return nil, nil, "", "", "", "", err
+		return nil, nil, "", "", "", "", "", err
 	}
 	if requestedProjectID != "" && requestedProjectID != projectID {
-		return nil, nil, "", "", "", "", fmt.Errorf("impersonation grant was issued for a different project")
+		return nil, nil, "", "", "", "", "", fmt.Errorf("impersonation grant was issued for a different project")
 	}
 	account, member, err := s.revalidateImpersonation(ctx, projectID, tenantID, grantID, connectionID)
 	if err != nil {
-		return nil, nil, "", "", "", "", err
+		return nil, nil, "", "", "", "", "", err
 	}
-	return account, member.Permissions, projectID, tenantID, grantID, actorID, nil
+	return account, member.Permissions, projectID, tenantID, grantID, actorID, nextToken, nil
 }
 
 func (s *Server) revalidateImpersonation(ctx context.Context, projectID, tenantID, grantID, connectionID string) (*gonvex.Account, *gonvex.Member, error) {

@@ -541,9 +541,9 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		var permissions map[string]any
 		var project, tenant string
 		var err error
-		impersonationID, impersonatorID := "", ""
-		if strings.HasPrefix(strings.TrimSpace(message.Token), "gvx_imp_") {
-			user, permissions, project, tenant, impersonationID, impersonatorID, err = c.server.authenticateImpersonationSocket(ctx, requestedProject, message.Token, c.id)
+		impersonationID, impersonatorID, developerSessionToken := "", "", ""
+		if token := strings.TrimSpace(message.Token); strings.HasPrefix(token, "gvx_imp_") || strings.HasPrefix(token, "gvx_dev_") {
+			user, permissions, project, tenant, impersonationID, impersonatorID, developerSessionToken, err = c.server.authenticateImpersonationSocket(ctx, requestedProject, message.Token, c.id)
 		} else if message.ControlOnly && strings.TrimSpace(message.Token) == "" {
 			// Bind an anonymous socket to one logical project so it can invoke only
 			// explicitly public Control Plane functions. This exposes no database
@@ -660,6 +660,9 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 			accountID = user.ID
 		}
 		authResult := map[string]any{"accountId": accountID, "projectId": project, "tenantId": tenant}
+		if developerSessionToken != "" {
+			authResult["developerSessionToken"] = developerSessionToken
+		}
 		if directive != nil {
 			authResult["replica"] = directive
 		}

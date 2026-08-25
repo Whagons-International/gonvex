@@ -1,6 +1,6 @@
 # Whagons Control Plane v2 handoff
 
-This is the migration contract for `@gonvex/*` version `0.3.0`. Whagons should
+This is the migration contract for `@gonvex/*` version `0.3.1`. Whagons should
 use one `GonvexClient` for Control Plane calls, tenant calls, live Control Plane
 queries, and the Local Replica stream. OAuth callbacks and public customer APIs
 remain HTTP because their protocols require HTTP.
@@ -33,6 +33,14 @@ attribution.
 | `control.tenants.updateTimezone` | Reducer | tenantAdmin | `{ timezone }` | `{ updated }` |
 | `control.tenants.delete` | Reducer | tenantAdmin | `{}` | `{ updated }` |
 | `control.tenants.setException` | Reducer | projectAdmin | `{ tenantId, value }` | `{ updated }` |
+
+`GonvexAuthProvider` owns developer mode. Applications call
+`enterDeveloperMode(tenantId)` and `exitDeveloperMode()` and read the safe
+`developerMode` state. The one-time activation credential and each rotating
+reconnect credential remain inside the provider/client process and are never
+written to storage or a URL. Account refresh continues underneath developer
+mode without replacing it. Expiry, revocation, reload, or an authentication
+error restores the normal account session and its original tenant.
 | `control.tenants.setSeatLimit` | Reducer | projectAdmin | `{ tenantId, seatLimit }` | `{ updated }` |
 
 A session grant contains access and refresh credentials, the global account,
@@ -262,7 +270,7 @@ project only after the tenant transaction commits.
 
 ## Package release
 
-The compatible unpublished version is `0.3.0` for:
+The compatible unpublished version is `0.3.1` for:
 
 ```text
 @gonvex/protocol
@@ -274,7 +282,7 @@ The compatible unpublished version is `0.3.0` for:
 create-gonvex
 ```
 
-The packed manifests contain exact `0.3.0` Gonvex dependencies and no
+The packed manifests contain exact `0.3.1` Gonvex dependencies and no
 `workspace:*` entries. Do not publish until Gabriel approves. Publish in this
 order:
 
@@ -310,21 +318,21 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 node --test scripts/production-compose.test.mjs scripts/runtime-dockerfile.test.mjs
 ```
 
-Package results were 16 module SDK tests, 131 client tests, 1 Expo SQLite
-test, 23 React tests, 24 CLI tests, 43 dashboard tests, and 9 deployment
+Package results were 16 module SDK tests, 133 client tests, 1 Expo SQLite
+test, 27 React tests, 24 CLI tests, 43 dashboard tests, and 9 deployment
 structure tests. The Rust workspace passed 14 unit and integration tests, with
 one documentation test intentionally ignored.
 
 Actual `pnpm pack` tarballs were inspected in a temporary directory. Their
 file counts were protocol 6, client 36, Expo SQLite 7, React 9, module SDK 9,
-CLI 47, and create-gonvex 6. Every manifest reported version `0.3.0`, exact
-`0.3.0` Gonvex dependencies, and no `workspace:*` entry.
+CLI 47, and create-gonvex 6. Every manifest reported version `0.3.1`, exact
+`0.3.1` Gonvex dependencies, and no `workspace:*` entry.
 
 ## Cutover status
 
 Gonvex no longer needs a second browser transport or state store for these
 flows. Whagons can remove its internal browser HTTP calls after it replaces the
-call sites, declares the invitation Reducer, and consumes version `0.3.0`.
+call sites, declares the invitation Reducer, and consumes version `0.3.1`.
 OAuth callbacks and external customer REST remain HTTP.
 
 The runtime is still a Go server plus Rust/V8 module and sandbox workers. Go

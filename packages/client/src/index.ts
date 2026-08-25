@@ -387,6 +387,11 @@ export class GonvexClient {
   // or a fresh send cycle starts, so a bad token can't refresh-loop forever.
   private authRetriedAfterError = false;
   private readonly authErrorHandlers = new Set<(error: string) => void>();
+  private managedAuthAttempt: {
+    ids: Set<string>;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  } | undefined;
   private telemetryEnabled = false;
   private readonly querySubscriptionRetentionMs: number;
   private readonly replicaSubscriptionRetentionMs: number;
@@ -543,6 +548,7 @@ export class GonvexClient {
   }
 
   setAuth(auth: GonvexClientAuth) {
+    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
     this.applyAuth(auth);
     // The caller owns auth now: a token fetch still in flight from the
     // previous installation must not clobber this one when it resolves.
@@ -552,6 +558,27 @@ export class GonvexClient {
       // send it as-is instead of paying another fetch round trip.
       this.sendAuth(true, { useFetcher: !hasOwn(auth, "token") });
     }
+  }
+
+  /**
+   * Atomically install credentials and wait for the runtime to accept them.
+   * This is used by provider-owned, memory-only authentication transitions
+   * such as developer mode. Applications should normally use their auth
+   * provider rather than calling this method directly.
+   */
+  authenticate(auth: GonvexClientAuth): Promise<void> {
+    this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
+    this.applyAuth(auth);
+    this.authFetchGeneration += 1;
+    const promise = new Promise<void>((resolve, reject) => {
+      this.managedAuthAttempt = { ids: new Set(), resolve, reject };
+    });
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.sendAuth(true, { useFetcher: !hasOwn(auth, "token") });
+    } else {
+      this.connect();
+    }
+    return promise;
   }
 
   /**
@@ -696,12 +723,20 @@ export class GonvexClient {
           this.authWatchdogTimer = undefined;
         }
         if (message.type === "auth.result") {
+          const developerSessionToken = developerSessionTokenFromAuthResult(message.result);
+          if (developerSessionToken) {
+            // The activation token is single-use. Keep its rotating successor
+            // only in process memory and use it for the next reconnect.
+            this.auth = { ...this.auth, token: developerSessionToken, fetchToken: undefined };
+          }
           this.authRetriedAfterError = false;
           const directive = replicaDirectiveFromAuthResult(message.result);
           if (!directive) {
             if (!this.auth.tenant) {
               this.resumeQuerySubscriptions();
+              this.settleManagedAuthAttempt(message.id);
             } else {
+              this.settleManagedAuthAttempt(message.id, "Runtime did not provide an authoritative Local Replica visibility scope");
               this.rejectMissingReplicaDirective();
             }
             this.flushPendingMessages();
@@ -712,8 +747,12 @@ export class GonvexClient {
             .then(() => {
               this.resumeQuerySubscriptions();
               this.resumeReplicaSubscriptions();
+              this.settleManagedAuthAttempt(message.id);
             })
-            .catch((error) => this.rejectReplicaDirective(error));
+            .catch((error) => {
+              this.settleManagedAuthAttempt(message.id, error instanceof Error ? error.message : "Runtime returned an invalid Local Replica scope");
+              this.rejectReplicaDirective(error);
+            });
         } else {
           const fetcher = this.auth.fetchToken;
           if (fetcher && !this.authRetriedAfterError) {
@@ -728,6 +767,7 @@ export class GonvexClient {
           }
           this.authRetriedAfterError = false;
           this.quarantineReplicaScope();
+          this.settleManagedAuthAttempt(message.id, message.error);
           this.notifyAuthError(message.error);
         }
         this.flushPendingMessages();
@@ -803,6 +843,7 @@ export class GonvexClient {
 
   close() {
     this.manuallyClosed = true;
+    this.cancelManagedAuthAttempt("Gonvex client was closed during authentication.");
     if (isEphemeralOutboxScope(this.outboxScope)) {
       void this.reducerOutbox.clear(this.outboxScope);
     }
@@ -2589,9 +2630,11 @@ export class GonvexClient {
   }
 
   private sendAuthFrame() {
+    const id = randomID();
+    this.managedAuthAttempt?.ids.add(id);
     this.sendNow({
       type: "auth",
-      id: randomID(),
+      id,
       token: this.auth.token,
       project: this.auth.project,
       tenant: this.auth.tenant,
@@ -2599,6 +2642,21 @@ export class GonvexClient {
       device: browserTelemetryInfo(),
 		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
     });
+  }
+
+  private settleManagedAuthAttempt(id: string, error?: string) {
+    const attempt = this.managedAuthAttempt;
+    if (!attempt || !attempt.ids.has(id)) return;
+    this.managedAuthAttempt = undefined;
+    if (error) attempt.reject(new GonvexClientError(error, { code: "auth" }));
+    else attempt.resolve();
+  }
+
+  private cancelManagedAuthAttempt(message: string) {
+    const attempt = this.managedAuthAttempt;
+    if (!attempt) return;
+    this.managedAuthAttempt = undefined;
+    attempt.reject(new GonvexClientError(message, { code: "auth" }));
   }
 
   // Tokens from a fetcher are typically short-lived while the socket (and any
@@ -3076,6 +3134,12 @@ function replicaDirectiveFromAuthResult(result: JsonValue): ReplicaDirective | u
     visibilityScope: directive.visibilityScope,
     epoch: directive.epoch,
   };
+}
+
+function developerSessionTokenFromAuthResult(result: JsonValue): string | undefined {
+  if (!isJsonRecord(result)) return undefined;
+  const token = result.developerSessionToken;
+  return typeof token === "string" && token.startsWith("gvx_dev_") ? token : undefined;
 }
 
 function hasOwn<T extends object>(value: T, key: PropertyKey) {

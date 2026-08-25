@@ -138,6 +138,9 @@ function Account() {
   const {
     account,
     activeTenant,
+    developerMode,
+    enterDeveloperMode,
+    exitDeveloperMode,
     signInWithPassword,
     signInWithProvider,
   } = useGonvexAuth();
@@ -147,6 +150,9 @@ function Account() {
       {account?.email} · {activeTenant?.name}
       <button onClick={() => void signInWithProvider("microsoft")}>Microsoft</button>
       <button onClick={() => void signInWithPassword(email, password)}>Password</button>
+      {developerMode.active
+        ? <button onClick={() => void exitDeveloperMode()}>Exit developer mode</button>
+        : <button onClick={() => void enterDeveloperMode("tenant-id")}>Enter developer mode</button>}
       <GoogleSignInButton />
     </>
   );
@@ -158,6 +164,14 @@ Authorization Code + PKCE through Gonvex. `signInWithPassword` installs the
 native password session through the same path. Access tokens are short-lived,
 refresh tokens rotate across tabs, and the provider persists the active tenant.
 The host verifies tenant membership before switching with `setActiveTenant`.
+
+Developer mode is provider-owned. Its activation and rotating reconnect
+credentials stay in memory and are never returned by these methods, persisted,
+or added to a URL. The provider preserves and refreshes the normal account
+session underneath the grant, then restores it on exit, expiry, reload, or an
+authentication rejection. Developer mode switches the existing Gonvex
+connection; it does not navigate to a tenant subdomain or require a browser
+handoff.
 
 Use `useCurrentTenantProfile()` for subscribed domain, timezone, description,
 and public profile fields. Use `useControlQuery(reference, args)` for an

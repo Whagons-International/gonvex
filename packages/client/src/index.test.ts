@@ -641,6 +641,50 @@ describe("GonvexClient", () => {
     expect(sentMessages(secondSocket)[0]).toMatchObject({ type: "auth", token: "token-2" });
   });
 
+  it("rotates a single-use developer credential in memory and uses it on reconnect", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    firstSocket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+
+    const activation = client.authenticate({ project: "shop", tenant: "tenant-a", token: "gvx_imp_activation" });
+    const firstAuth = sentMessages(firstSocket).at(-1);
+    expect(firstAuth).toMatchObject({ type: "auth", token: "gvx_imp_activation", tenant: "tenant-a" });
+    firstSocket.receive({ type: "auth.result", id: firstAuth.id, result: authenticatedResult({
+      accountId: "account-a", tenantId: "tenant-a", developerSessionToken: "gvx_dev_rotation_1",
+    }) });
+    await expect(activation).resolves.toBeUndefined();
+
+    firstSocket.disconnect();
+    await vi.advanceTimersByTimeAsync(250);
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    secondSocket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+    const secondAuth = sentMessages(secondSocket)[0];
+    expect(secondAuth).toMatchObject({ type: "auth", token: "gvx_dev_rotation_1", tenant: "tenant-a" });
+    secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: authenticatedResult({
+      accountId: "account-a", tenantId: "tenant-a", developerSessionToken: "gvx_dev_rotation_2",
+    }) });
+
+    secondSocket.disconnect();
+    await vi.advanceTimersByTimeAsync(250);
+    const thirdSocket = latestSocket();
+    thirdSocket.open();
+    expect(sentMessages(thirdSocket)[0]).toMatchObject({ type: "auth", token: "gvx_dev_rotation_2", tenant: "tenant-a" });
+  });
+
+  it("rejects an awaited authentication transition without installing a partial success", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    const activation = client.authenticate({ project: "shop", tenant: "tenant-a", token: "gvx_imp_rejected" });
+    const auth = sentMessages(socket).at(-1);
+    socket.receive({ type: "auth.error", id: auth.id, error: "grant already used" });
+    await expect(activation).rejects.toThrow("grant already used");
+  });
+
   it("force-refreshes the token and re-sends auth when the server rejects it", async () => {
     let current = "expired-token";
     const fetchToken = vi.fn(async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => {

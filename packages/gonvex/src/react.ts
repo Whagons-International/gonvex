@@ -23,4 +23,4 @@ export {
   useRetainedLiveQuery,
   useReplicaSelector,
 } from "@gonvex/react";
-export type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthProviderName, GonvexAuthTenant, GonvexAuthValue } from "@gonvex/react";
+export type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthProviderName, GonvexAuthTenant, GonvexAuthValue, GonvexDeveloperModeState } from "@gonvex/react";

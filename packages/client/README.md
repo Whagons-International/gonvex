@@ -31,6 +31,12 @@ Control Plane live Queries resubscribe on reconnect and refresh after an
 authorized Control Plane Reducer. Use `watchControlQuery` instead of refetching
 after a write.
 
+`authenticate` installs a new authentication scope and resolves only after the
+runtime accepts it. It exists for provider-owned transitions such as developer
+mode; React applications should use `GonvexAuthProvider`. The runtime rotates
+single-use developer credentials on every connection, and the client retains
+their successor only in memory.
+
 ## Install
 
 ```bash

@@ -124,9 +124,12 @@ func ensureControlPlaneFunctionSchema(ctx context.Context, db projectRegistryExe
 			expires_at TIMESTAMPTZ NOT NULL,
 			used_at TIMESTAMPTZ,
 			used_connection_id TEXT NOT NULL DEFAULT '',
+			reconnect_token_hash TEXT NOT NULL DEFAULT '',
 			revoked_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		`ALTER TABLE gonvex_impersonation_grants ADD COLUMN IF NOT EXISTS reconnect_token_hash TEXT NOT NULL DEFAULT ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS gonvex_impersonation_grants_reconnect_token ON gonvex_impersonation_grants(reconnect_token_hash) WHERE reconnect_token_hash <> ''`,
 		`CREATE TABLE IF NOT EXISTS gonvex_demo_accounts (
 			project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
 			account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

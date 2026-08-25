@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState } from "@gonvex/client";
@@ -50,6 +50,12 @@ type GonvexAuthSession = {
 };
 
 export type GonvexAuthProviderName = "google" | "microsoft" | "apple";
+export type GonvexDeveloperModeState = {
+  active: boolean;
+  tenantId?: string;
+  grantId?: string;
+  expiresAt?: string;
+};
 type PKCEState = { state: string; verifier: string; redirectUri: string; returnTo: string; provider: GonvexAuthProviderName; createdAt: number };
 
 class GonvexAuthRequestError extends Error {
@@ -77,6 +83,9 @@ export type GonvexAuthValue = AuthState & {
   inviteMember: (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown>; teamIds?: string[]; allowedAuthProviders?: string[]; payload?: JsonValue }) => Promise<ControlToken>;
   acceptInvitation: (token: string) => Promise<ControlInvitationAcceptance>;
   revokeInvitation: (tenantId: string, email: string) => Promise<void>;
+  developerMode: GonvexDeveloperModeState;
+  enterDeveloperMode: (tenantId: string) => Promise<void>;
+  exitDeveloperMode: () => Promise<void>;
 };
 
 export type GonvexAuthConfig = {
@@ -173,23 +182,54 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshRetryAt, setRefreshRetryAt] = useState(0);
+  const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>({ active: false });
   const sessionRef = useRef(session);
   const refreshRef = useRef<Promise<GonvexAuthSession | null> | null>(null);
+  const developerModeRef = useRef<(GonvexDeveloperModeState & { active: true; originalTenantId?: string }) | null>(null);
 
   const installSession = useCallback((next: GonvexAuthSession | null, persist = true) => {
     sessionRef.current = next;
     if (next) {
       if (persist) safeLocalStorageSet(storageKey, JSON.stringify(next));
-      props.client.setAuth({
-        project: props.projectId, tenant: next.activeTenantId, token: next.accessToken,
-        identity: { sub: next.account.id, iss: props.projectId },
-      });
+      if (!developerModeRef.current) {
+        props.client.setAuth({
+          project: props.projectId, tenant: next.activeTenantId, token: next.accessToken,
+          identity: { sub: next.account.id, iss: props.projectId },
+        });
+      }
     } else {
       if (persist) safeLocalStorageRemove(storageKey);
-      props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined, identity: undefined });
+      if (!developerModeRef.current) {
+        props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined, identity: undefined });
+      }
     }
     setSession(next);
   }, [props.client, props.projectId, storageKey]);
+
+  const restoreAccountSession = useCallback(() => {
+    const developer = developerModeRef.current;
+    if (!developer) return;
+    developerModeRef.current = null;
+    setDeveloperMode({ active: false });
+    const current = sessionRef.current;
+    const activeTenantId = current?.tenants.some((tenant) => tenant.id === developer.originalTenantId)
+      ? developer.originalTenantId
+      : current?.activeTenantId;
+    installSession(current ? { ...current, activeTenantId } : null);
+  }, [installSession]);
+
+  useEffect(() => props.client.onAuthError((message) => {
+    if (!developerModeRef.current) return;
+    restoreAccountSession();
+    setError(message || "Developer mode ended because its authorization is no longer valid.");
+  }), [props.client, restoreAccountSession]);
+
+  useEffect(() => {
+    if (!developerMode.active || !developerMode.expiresAt) return;
+    const delay = Math.max(0, Date.parse(developerMode.expiresAt) - Date.now());
+    const timeout = window.setTimeout(() => restoreAccountSession(), delay);
+    return () => window.clearTimeout(timeout);
+  }, [developerMode.active, developerMode.expiresAt, restoreAccountSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -349,6 +389,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   }, [refreshSession]);
 
   const setActiveTenant = useCallback(async (tenantId: string) => {
+    if (developerModeRef.current) throw new Error("Exit developer mode before switching tenants.");
     const current = sessionRef.current;
     if (!current || !current.tenants.some((tenant) => tenant.id === tenantId)) {
       throw new Error(`Your account does not have access to tenant ${tenantId}.`);
@@ -400,7 +441,51 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     await props.client.reducer(control.invitations.revoke, { id: "", email });
   }, [fetchAccessToken, props.client]);
 
-  const activeTenant = session?.tenants.find((tenant) => tenant.id === session.activeTenantId) ?? null;
+  const enterDeveloperMode = useCallback(async (tenantId: string) => {
+    const current = sessionRef.current;
+    if (!current) throw new Error("Sign in before entering developer mode.");
+    if (developerModeRef.current) throw new Error("Exit developer mode before entering another tenant.");
+    setError(null);
+    const grant = await props.client.reducer(control.developer.enter, { tenantId }) as ControlImpersonation;
+    const expiresAt = String(grant.expiresAt);
+    if (!grant.id || !grant.token || !Number.isFinite(Date.parse(expiresAt))) {
+      throw new Error("Gonvex returned an invalid developer grant.");
+    }
+    try {
+      await props.client.authenticate({
+        project: props.projectId,
+        tenant: tenantId,
+        token: grant.token,
+        fetchToken: undefined,
+        identity: { sub: current.account.id, iss: props.projectId },
+      });
+    } catch (cause) {
+      props.client.setAuth({
+        project: props.projectId,
+        tenant: current.activeTenantId,
+        token: current.accessToken,
+        fetchToken: undefined,
+        identity: { sub: current.account.id, iss: props.projectId },
+      });
+      throw cause;
+    }
+    const next = { active: true as const, tenantId, grantId: grant.id, expiresAt, originalTenantId: current.activeTenantId };
+    developerModeRef.current = next;
+    setDeveloperMode({ active: true, tenantId, grantId: grant.id, expiresAt });
+  }, [props.client, props.projectId]);
+
+  const exitDeveloperMode = useCallback(async () => {
+    const developer = developerModeRef.current;
+    if (!developer?.grantId) return;
+    setError(null);
+    // Remain in developer mode if revocation fails. Restoring first would leave
+    // an active grant detached from the provider's state.
+    await props.client.reducer(control.developer.exit, { grantId: developer.grantId });
+    restoreAccountSession();
+  }, [props.client, restoreAccountSession]);
+
+  const visibleTenantId = developerMode.active ? developerMode.tenantId : session?.activeTenantId;
+  const activeTenant = session?.tenants.find((tenant) => tenant.id === visibleTenantId) ?? null;
 
   const authValue = useMemo<GonvexAuthValue>(() => ({
     isLoading,
@@ -420,7 +505,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     inviteMember,
     acceptInvitation,
     revokeInvitation,
-  }), [acceptInvitation, activeTenant, createTenant, error, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
+    developerMode,
+    enterDeveloperMode,
+    exitDeveloperMode,
+  }), [acceptInvitation, activeTenant, createTenant, developerMode, enterDeveloperMode, error, exitDeveloperMode, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
 
   return (
     <ManagedAuthContext.Provider value={authValue}>

@@ -32,6 +32,7 @@ class FakeGonvexClient {
   readonly reducer = vi.fn(() => Promise.resolve(null));
   readonly action = vi.fn(() => Promise.resolve(null));
   readonly setAuth = vi.fn();
+  readonly authenticate = vi.fn(async (auth: unknown) => { this.setAuth(auth); });
   subscribedArgs: unknown[] = [];
   subscribedRefs: FunctionReference[] = [];
   watchedReplicaRefs: FunctionReference[] = [];
@@ -475,5 +476,115 @@ describe("GonvexAuthProvider", () => {
     await act(async()=>{expect(await auth!.acceptInvitation("invite-token")).toEqual({tenantId:"tenant-2",memberId:"member-2"});});
     expect(client.reducer).toHaveBeenCalledWith(expect.objectContaining({path:"control.invitations.accept"}),{token:"invite-token"});
     expect(client.query).not.toHaveBeenCalled();
+  });
+
+  it("owns the developer-mode enter/exit lifecycle without exposing or persisting its token", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const normalSession = {
+      accessToken:"account-access",expiresAt:now+900_000,refreshToken:"account-refresh",refreshExpiresAt:now+86_400_000,
+      account:{id:"acct-1",email:"dev@example.test",emailVerified:true,name:"Developer",picture:"",provider:"password"},
+      tenants:[
+        {id:"tenant-home",name:"Home",role:"admin",permissions:{},domain:"home",timezone:"UTC",description:"",profile:{}},
+        {id:"tenant-target",name:"Target",role:"member",permissions:{},domain:"target",timezone:"UTC",description:"",profile:{}},
+      ],activeTenantId:"tenant-home",
+    };
+    const storageKey = "gonvex-auth:https%3A%2F%2Fdeveloper-runtime.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify(normalSession));
+    client.reducer.mockImplementation((reference: FunctionReference) => {
+      if (reference.path === "control.developer.enter") return Promise.resolve({id:"grant-1",token:"gvx_imp_secret",expiresAt:new Date(now+300_000).toISOString()});
+      return Promise.resolve({updated:true});
+    });
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer(){auth=useGonvexAuth();return null;}
+    const originalURL = window.location.href;
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://developer-runtime.test" projectId="shop"><Consumer/></GonvexAuthProvider>);
+    await act(async()=>{await Promise.resolve();await Promise.resolve();});
+
+    await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
+    expect(auth!.developerMode).toEqual({active:true,tenantId:"tenant-target",grantId:"grant-1",expiresAt:new Date(now+300_000).toISOString()});
+    expect(client.authenticate).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-target",token:"gvx_imp_secret",fetchToken:undefined}));
+    expect(localStorage.getItem(storageKey)).toBe(JSON.stringify(normalSession));
+    expect(JSON.stringify(auth)).not.toContain("gvx_imp_secret");
+    expect(window.location.href).toBe(originalURL);
+    expect(window.location.search).not.toContain("gvx_imp_secret");
+
+    await act(async()=>{await auth!.exitDeveloperMode();});
+    expect(client.reducer).toHaveBeenCalledWith(expect.objectContaining({path:"control.developer.exit"}),{grantId:"grant-1"});
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({tenant:"tenant-home",token:"account-access"}));
+  });
+
+  it("rolls back failed entry and keeps developer mode active when exit fails", async () => {
+    const client = new FakeGonvexClient();
+    const session = {
+      accessToken:"account-access",expiresAt:Date.now()+900_000,refreshToken:"account-refresh",refreshExpiresAt:Date.now()+86_400_000,
+      account:{id:"acct-1",email:"dev@example.test",emailVerified:true,provider:"password"},
+      tenants:[{id:"tenant-home",name:"Home",role:"admin",domain:"home",timezone:"UTC",description:"",profile:{}},{id:"tenant-target",name:"Target",role:"member",domain:"target",timezone:"UTC",description:"",profile:{}}],activeTenantId:"tenant-home",
+    };
+    localStorage.setItem("gonvex-auth:https%3A%2F%2Fdeveloper-failure.test:shop",JSON.stringify(session));
+    client.reducer.mockResolvedValue({id:"grant-2",token:"gvx_imp_failed",expiresAt:new Date(Date.now()+300_000).toISOString()});
+    client.authenticate.mockRejectedValueOnce(new Error("grant rejected"));
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer(){auth=useGonvexAuth();return null;}
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://developer-failure.test" projectId="shop"><Consumer/></GonvexAuthProvider>);
+    await act(async()=>{await Promise.resolve();await Promise.resolve();});
+    await act(async()=>{await expect(auth!.enterDeveloperMode("tenant-target")).rejects.toThrow("grant rejected");});
+    expect(auth!.developerMode.active).toBe(false);
+    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({tenant:"tenant-home",token:"account-access"}));
+
+    client.authenticate.mockResolvedValueOnce(undefined);
+    await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
+    client.reducer.mockRejectedValueOnce(new Error("network down"));
+    await act(async()=>{await expect(auth!.exitDeveloperMode()).rejects.toThrow("network down");});
+    expect(auth!.developerMode.active).toBe(true);
+  });
+
+  it("restores normal authentication on grant expiry or an authentication error", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const session = {accessToken:"account-access",expiresAt:now+900_000,refreshToken:"account-refresh",refreshExpiresAt:now+86_400_000,account:{id:"acct-1",email:"dev@example.test",emailVerified:true,provider:"password"},tenants:[{id:"tenant-home",name:"Home",role:"admin",domain:"home",timezone:"UTC",description:"",profile:{}},{id:"tenant-target",name:"Target",role:"member",domain:"target",timezone:"UTC",description:"",profile:{}}],activeTenantId:"tenant-home"};
+    localStorage.setItem("gonvex-auth:https%3A%2F%2Fdeveloper-expiry.test:shop",JSON.stringify(session));
+    client.reducer.mockResolvedValue({id:"grant-3",token:"gvx_imp_expiring",expiresAt:new Date(now+1_000).toISOString()});
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer(){auth=useGonvexAuth();return null;}
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://developer-expiry.test" projectId="shop"><Consumer/></GonvexAuthProvider>);
+    await act(async()=>{await Promise.resolve();await Promise.resolve();});
+    await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
+    act(()=>vi.advanceTimersByTime(1_001));
+    expect(auth!.developerMode.active).toBe(false);
+    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({tenant:"tenant-home",token:"account-access"}));
+
+    client.reducer.mockResolvedValue({id:"grant-4",token:"gvx_imp_auth_error",expiresAt:new Date(now+300_000).toISOString()});
+    await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
+    act(()=>client.emitAuthError("grant revoked"));
+    expect(auth!.developerMode.active).toBe(false);
+    expect(auth!.error).toBe("grant revoked");
+  });
+
+  it("keeps refreshed account credentials separate and recovers the normal session after reload", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Fdeveloper-reload.test:shop";
+    const session = {accessToken:"account-access",expiresAt:now+61_000,refreshToken:"account-refresh",refreshExpiresAt:now+86_400_000,account:{id:"acct-1",email:"dev@example.test",emailVerified:true,provider:"password"},tenants:[{id:"tenant-home",name:"Home",role:"admin",domain:"home",timezone:"UTC",description:"",profile:{}},{id:"tenant-target",name:"Target",role:"member",domain:"target",timezone:"UTC",description:"",profile:{}}],activeTenantId:"tenant-home"};
+    localStorage.setItem(storageKey,JSON.stringify(session));
+    client.reducer.mockResolvedValue({id:"grant-5",token:"gvx_imp_memory_only",expiresAt:new Date(now+300_000).toISOString()});
+    client.action.mockResolvedValue({...session,accessToken:"refreshed-access",refreshToken:"refreshed-refresh",expiresAt:now+900_000});
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer(){auth=useGonvexAuth();return null;}
+    const view = render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://developer-reload.test" projectId="shop"><Consumer/></GonvexAuthProvider>);
+    await act(async()=>{await Promise.resolve();await Promise.resolve();});
+    await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
+    client.setAuth.mockClear();
+    await act(async()=>{vi.advanceTimersByTime(2_000);await Promise.resolve();await Promise.resolve();});
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({accessToken:"refreshed-access",refreshToken:"refreshed-refresh"});
+    expect(client.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"refreshed-access"}));
+    view.unmount();
+
+    const reloadedClient = new FakeGonvexClient();
+    render(<GonvexAuthProvider client={reloadedClient as unknown as GonvexClient} runtimeUrl="https://developer-reload.test" projectId="shop"><Consumer/></GonvexAuthProvider>);
+    await act(async()=>{await Promise.resolve();await Promise.resolve();});
+    expect(reloadedClient.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"refreshed-access"}));
+    expect(localStorage.getItem(storageKey)).not.toContain("gvx_imp_memory_only");
   });
 });

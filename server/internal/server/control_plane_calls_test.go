@@ -576,12 +576,15 @@ func TestDeveloperImpersonationIsPermissionGatedAuditedAndSingleUse(t *testing.T
 	}
 	grant := result.(map[string]any)
 	token := grant["token"].(string)
-	account, _, authenticatedProject, authenticatedTenant, grantID, actorID, err := runtime.authenticateImpersonationSocket(context.Background(), project, token, "conn-support")
+	account, _, authenticatedProject, authenticatedTenant, grantID, actorID, reconnectToken, err := runtime.authenticateImpersonationSocket(context.Background(), project, token, "conn-support")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if account.ID != "acct-target" || authenticatedProject != project || authenticatedTenant != tenantID || actorID != "acct-owner" {
 		t.Fatalf("unexpected impersonation identity: account=%#v project=%q tenant=%q actor=%q", account, authenticatedProject, authenticatedTenant, actorID)
+	}
+	if !strings.HasPrefix(reconnectToken, "gvx_dev_") {
+		t.Fatalf("reconnect token prefix = %q", reconnectToken)
 	}
 	var reason, auditedActor, usedConnection string
 	if err := controlDB.QueryRow(`SELECT reason,actor_account_id,used_connection_id FROM gonvex_impersonation_grants WHERE id=$1`, grantID).Scan(&reason, &auditedActor, &usedConnection); err != nil {
@@ -590,8 +593,16 @@ func TestDeveloperImpersonationIsPermissionGatedAuditedAndSingleUse(t *testing.T
 	if reason != "ticket support-42" || auditedActor != "acct-owner" || usedConnection != "conn-support" {
 		t.Fatalf("impersonation audit mismatch: reason=%q actor=%q connection=%q", reason, auditedActor, usedConnection)
 	}
-	if _, _, _, _, _, _, err := runtime.authenticateImpersonationSocket(context.Background(), project, token, "conn-replay"); err == nil {
+	if _, _, _, _, _, _, _, err := runtime.authenticateImpersonationSocket(context.Background(), project, token, "conn-replay"); err == nil {
 		t.Fatal("single-use impersonation token was replayed")
+	}
+	if _, _, _, _, _, _, nextReconnectToken, err := runtime.authenticateImpersonationSocket(context.Background(), project, reconnectToken, "conn-reconnect"); err != nil {
+		t.Fatalf("authenticate rotating reconnect token: %v", err)
+	} else if !strings.HasPrefix(nextReconnectToken, "gvx_dev_") || nextReconnectToken == reconnectToken {
+		t.Fatalf("rotated reconnect token = %q", nextReconnectToken)
+	}
+	if _, _, _, _, _, _, _, err := runtime.authenticateImpersonationSocket(context.Background(), project, reconnectToken, "conn-replay-2"); err == nil {
+		t.Fatal("single-use reconnect token was replayed")
 	}
 }
 
