@@ -120,6 +120,22 @@ password login plus explicit Google, Microsoft, and Apple selection. A Gonvex
 operator stores provider credentials in the Control Plane. Client code receives
 only public provider settings and `hasClientSecret` flags.
 
+Configure Firebase as the project's identity provider with a project key:
+
+```bash
+npx gonvex auth configure firebase \
+  --firebase-project-id whagons-prod \
+  --mode firebase \
+  --signup-mode inviteOnly
+npx gonvex auth status firebase
+```
+
+Add `--firebase-tenant-id` for Firebase Authentication multi-tenancy. An
+optional `--admin-credentials-file` uploads Firebase Admin credentials through
+the trusted project endpoint. The runtime encrypts them and never returns or
+prints their contents. Generic OIDC uses `auth configure external-oidc` with
+`--issuer`, `--audience`, and `--jwks-url`.
+
 For a new app, provision and wire everything at once:
 
 ```bash

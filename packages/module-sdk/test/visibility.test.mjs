@@ -70,6 +70,29 @@ test("visibility rejects unsupported operators, contexts, and incomplete express
   );
 });
 
+test("visibility supports explicit self-join aliases and rejects ambiguous duplicates", () => {
+  const plan = visibility({
+    table: "userLiveLocations",
+    key: "id",
+    sets: {
+      teammates: {
+        table: "memberTeams",
+        alias: "viewerTeams",
+        select: "memberId",
+        selectFrom: "peerTeams",
+        joins: [{ table: "memberTeams", alias: "peerTeams", leftAlias: "viewerTeams", leftColumn: "teamId", rightColumn: "teamId" }],
+        where: [{ table: "viewerTeams", column: "memberId", context: "member.id" }],
+      },
+    },
+    where: { operator: "inSet", column: "memberId", set: "teammates" },
+  });
+  assert.equal(plan.sets.teammates.selectFrom, "peerTeams");
+  assert.throws(() => visibility({
+    ...plan,
+    sets: { teammates: { ...plan.sets.teammates, alias: undefined } },
+  }), /every occurrence requires an explicit alias/);
+});
+
 test("ModuleBuilder emits plans keyed by their source table", () => {
   const module = createModule({ name: "whagons", version: "1" });
   const plan = module.visibility(validPlan());

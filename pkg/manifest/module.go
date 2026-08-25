@@ -256,7 +256,7 @@ func (a ModuleArtifact) ComputedHash() (string, error) {
 			"hash": strings.ToLower(strings.TrimSpace(a.JavaScript.Hash)),
 		},
 	}
-	raw, err := json.Marshal(payload)
+	raw, err := marshalCanonicalJSON(payload)
 	if err != nil {
 		return "", fmt.Errorf("encode module artifact hash contract: %w", err)
 	}
@@ -266,12 +266,25 @@ func (a ModuleArtifact) ComputedHash() (string, error) {
 	if err := decoder.Decode(&canonical); err != nil {
 		return "", fmt.Errorf("normalize module artifact hash contract: %w", err)
 	}
-	normalized, err := json.Marshal(canonical)
+	normalized, err := marshalCanonicalJSON(canonical)
 	if err != nil {
 		return "", fmt.Errorf("encode canonical module artifact hash contract: %w", err)
 	}
 	digest := sha256.Sum256(normalized)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// marshalCanonicalJSON matches the TypeScript CLI's canonicalJson contract:
+// object keys sort lexicographically, arrays retain order, and strings are
+// ordinary JSON strings without Go's optional HTML escaping.
+func marshalCanonicalJSON(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
 }
 
 // moduleFunctionHashContract mirrors the JavaScript object's omitted optional

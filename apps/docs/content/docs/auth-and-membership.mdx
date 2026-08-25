@@ -19,7 +19,39 @@ Member
 One Account can have many Members. Application assignments should store the
 tenant-local Member ID, not a global login ID.
 
-## Google authentication
+## Project authentication modules
+
+Each project selects one authentication mode:
+
+```txt
+gonvex-native
+firebase
+external-oidc
+hybrid
+```
+
+The provider module does one job. It verifies a credential and returns the
+provider, issuer, subject, and verified profile claims. Shared Gonvex host code
+then resolves the Account, issues the Gonvex session, routes the tenant, and
+checks the tenant's active Member row. Provider code cannot grant membership or
+select a database.
+
+Gonvex-native auth remains built in. Projects that already use Firebase can
+disable it and use Firebase as the only provider:
+
+```bash
+npx gonvex auth configure firebase \
+  --firebase-project-id my-firebase-project \
+  --mode firebase \
+  --signup-mode inviteOnly
+```
+
+The browser supplies a Firebase ID token through
+`createFirebaseAuthAdapter`. Gonvex does not bundle Firebase, store the
+Firebase password, or ask the user to sign in a second time. The same provider
+contract supports generic external OIDC and future trusted-host adapters.
+
+## Gonvex-native Google authentication
 
 Enable the installation's central Google OAuth broker for a project:
 
@@ -29,7 +61,7 @@ npx gonvex auth status
 npx gonvex auth doctor
 ```
 
-Apps use the generated auth provider and do not need Firebase or a per-app
+Projects using Gonvex-native Google login do not need Firebase or a per-app
 Google Cloud project. The runtime validates the account session before routing
 it to a tenant.
 

@@ -178,6 +178,44 @@ and public profile fields. Use `useControlQuery(reference, args)` for an
 authorized Control Plane live Query. Reducers refresh those subscriptions, so
 the application must not refetch them manually.
 
+## Firebase authentication
+
+Firebase projects keep their existing Firebase sign-in UI. Gonvex verifies the
+Firebase ID token and issues the same Gonvex Account session used by the rest
+of the client. The adapter does not add Firebase as a Gonvex dependency:
+
+```tsx
+import { onIdTokenChanged, signOut as firebaseSignOut } from "firebase/auth";
+import { createFirebaseAuthAdapter, GonvexAuthProvider } from "@gonvex/react";
+import { auth } from "./firebase";
+
+const firebaseAuth = createFirebaseAuthAdapter({
+  getIdToken: (forceRefresh) => auth.currentUser?.getIdToken(forceRefresh) ?? Promise.resolve(null),
+  onIdTokenChanged(listener) {
+    return onIdTokenChanged(auth, (user) => listener(user ? { uid: user.uid } : null));
+  },
+  signOut: () => firebaseSignOut(auth),
+});
+
+export function Root() {
+  return (
+    <GonvexAuthProvider
+      client={client}
+      runtimeUrl={runtimeUrl}
+      projectId={projectId}
+      externalAuth={firebaseAuth}
+    >
+      <App />
+    </GonvexAuthProvider>
+  );
+}
+```
+
+The provider keeps Firebase ID tokens in memory. It persists only the canonical
+Gonvex session, re-exchanges on Firebase token rotation, and restores that
+session after developer mode ends. Google, Microsoft, Apple, and password UX
+remain Firebase's responsibility when this adapter is configured.
+
 ## Related Packages
 
 - `@gonvex/client` - browser WebSocket client

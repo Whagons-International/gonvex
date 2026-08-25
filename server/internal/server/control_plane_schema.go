@@ -6,9 +6,26 @@ import "context"
 // state. Tenant business data remains in tenant databases.
 func ensureControlPlaneFunctionSchema(ctx context.Context, db projectRegistryExecer) error {
 	statements := []string{
+		`ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS auth_mode TEXT NOT NULL DEFAULT 'gonvex-native'`,
 		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS azure_tenant_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS client_secret_encrypted BYTEA`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS jwks_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS firebase_project_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS firebase_tenant_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE gonvex_auth_providers ADD COLUMN IF NOT EXISTS admin_credentials_encrypted BYTEA`,
+		`CREATE TABLE IF NOT EXISTS gonvex_auth_identity_events (
+			id BIGSERIAL PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
+			account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			provider TEXT NOT NULL,
+			issuer TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			resolution TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
 		`ALTER TABLE gonvex_auth_transactions ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'google'`,
 		`ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC'`,
 		`ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS profile JSONB NOT NULL DEFAULT '{}'::jsonb`,

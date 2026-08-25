@@ -116,6 +116,74 @@ test("auth add google registers the callback and writes the native auth module",
   assert.deepEqual(prunedConfig.auth.providers.google.redirectUris, ["https://app.example.com/"]);
 });
 
+test("auth configure firebase sends project-scoped configuration without printing credentials", async (t) => {
+  const previous = new Map(settingsKeys.map((key) => [key, process.env[key]]));
+  for (const key of settingsKeys) delete process.env[key];
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    requests.push({ body, headers: request.headers, method: request.method, url: request.url });
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      provider: "firebase",
+      authMode: "firebase",
+      enabled: true,
+      firebaseProjectId: "whagons-prod",
+      hasAdminCredentials: true,
+    }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const runtimeURL = `http://127.0.0.1:${address.port}`;
+
+  const root = await mkdtemp(join(tmpdir(), "gonvex-firebase-auth-cli-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "gonvex.json"), JSON.stringify({ project: "project-auth", runtime: runtimeURL }, null, 2));
+  await writeFile(join(root, ".env.local"), [
+    "GONVEX_PROJECT_ID=project-auth",
+    `GONVEX_RUNTIME_URL=${runtimeURL}`,
+    "GONVEX_PROJECT_KEY=gvx_project-auth-key",
+    "",
+  ].join("\n"));
+  await writeFile(join(root, "firebase-admin.json"), JSON.stringify({ private_key: "never-print-this", client_email: "admin@example.test" }));
+
+  const messages = [];
+  const originalLog = console.log;
+  console.log = (...args) => messages.push(args.join(" "));
+  t.after(() => { console.log = originalLog; });
+  await main([
+    "auth", "configure", "firebase", "--project", root,
+    "--firebase-project-id", "whagons-prod",
+    "--firebase-tenant-id", "tenant-one",
+    "--admin-credentials-file", "firebase-admin.json",
+  ]);
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "PUT");
+  assert.equal(requests[0].url, "/dev/projects/project-auth/auth/providers/firebase");
+  assert.equal(requests[0].headers.authorization, "Bearer gvx_project-auth-key");
+  assert.deepEqual(JSON.parse(requests[0].body), {
+    authMode: "firebase",
+    enabled: true,
+    signupMode: "inviteOnly",
+    firebaseProjectId: "whagons-prod",
+    firebaseTenantId: "tenant-one",
+    adminCredentials: JSON.stringify({ private_key: "never-print-this", client_email: "admin@example.test" }),
+  });
+  assert.doesNotMatch(messages.join("\n"), /never-print-this|admin@example\.test/);
+});
+
 test("create provisions and wires a multi-tenant Google app in one command", async (t) => {
   const previous = new Map(settingsKeys.map((key) => [key, process.env[key]]));
   for (const key of settingsKeys) delete process.env[key];

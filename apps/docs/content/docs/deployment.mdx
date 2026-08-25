@@ -176,9 +176,11 @@ for the browser bundle.
 
 ## One-time Google auth broker setup
 
-Individual Gonvex apps do not need Firebase or their own Google Cloud project. The
-operator of a Gonvex installation creates one Google OAuth client for the runtime.
-This is a one-time infrastructure setup, not a per-app step.
+This section applies only to projects using Gonvex-native Google auth. Firebase
+and external-OIDC projects keep their provider configuration per project and do
+not use this broker. For Gonvex-native projects, the operator creates one
+Google OAuth client for the runtime. This is a one-time infrastructure setup,
+not a per-app step.
 
 That OAuth client presents the Gonvex installation's shared verified brand and
 consent screen. The operator is responsible for ensuring every app using the broker

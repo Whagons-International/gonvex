@@ -1,5 +1,6 @@
 export {
   createGonvexAuth,
+  createFirebaseAuthAdapter,
   GonvexAuthProvider,
   GonvexGoogleAuthButton,
   GonvexProvider,
@@ -23,4 +24,4 @@ export {
   useRetainedLiveQuery,
   useReplicaSelector,
 } from "@gonvex/react";
-export type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthProviderName, GonvexAuthTenant, GonvexAuthValue, GonvexDeveloperModeState } from "@gonvex/react";
+export type { GonvexAuthAccount, GonvexAuthConfig, GonvexAuthProviderName, GonvexAuthTenant, GonvexAuthValue, GonvexDeveloperModeState, GonvexExternalAuthAdapter, GonvexExternalIdentityHint, GonvexFirebaseAuthAdapterOptions } from "@gonvex/react";

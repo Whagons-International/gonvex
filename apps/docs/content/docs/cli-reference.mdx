@@ -85,7 +85,22 @@ Pass `--json` to `project list` or `project create` for the complete API respons
 
 ## `gonvex auth`
 
-Enable project-scoped Google login without Firebase or a per-app Google Cloud setup:
+Select the project's authentication module. Firebase projects use their
+existing Firebase Authentication project:
+
+```bash
+npx gonvex auth configure firebase \
+  --firebase-project-id my-firebase-project \
+  --mode firebase \
+  --signup-mode inviteOnly
+npx gonvex auth status firebase
+```
+
+Optional Firebase flags are `--firebase-tenant-id`, `--issuer`, `--audience`,
+`--jwks-url`, and `--admin-credentials-file`. The Admin credentials file stays
+server-side and is never printed by the CLI.
+
+Use the built-in broker instead when the project selects Gonvex-native auth:
 
 ```bash
 npx gonvex auth add google --origin http://localhost:5173

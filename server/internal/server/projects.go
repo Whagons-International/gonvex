@@ -644,6 +644,9 @@ func ensureProjectRegistry(ctx context.Context, db projectRegistryExecer) error 
 	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS owner_email TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS auth_mode TEXT NOT NULL DEFAULT 'gonvex-native'`); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gonvex_runtime_tenants (
 		relationship_id TEXT PRIMARY KEY,
 		project_id TEXT NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,

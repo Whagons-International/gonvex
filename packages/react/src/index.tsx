@@ -1,8 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState } from "@gonvex/client";
+export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
 
 const GonvexContext = createContext<GonvexClient | null>(null);
 const GonvexAuthContext = createContext<AuthState>({ isLoading: false, isAuthenticated: true });
@@ -92,6 +93,8 @@ export type GonvexAuthConfig = {
   runtimeUrl: string;
   projectId: string;
   callbackPath?: string;
+  /** Trusted identity adapter such as createFirebaseAuthAdapter(). */
+  externalAuth?: GonvexExternalAuthAdapter;
 };
 
 const ManagedAuthContext = createContext<GonvexAuthValue | null>(null);
@@ -232,6 +235,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   }, [developerMode.active, developerMode.expiresAt, restoreAccountSession]);
 
   useEffect(() => {
+    if (props.externalAuth) return;
     let cancelled = false;
     let bootstrap = authBootstrapPromises.get(storageKey);
     if (!bootstrap) {
@@ -258,15 +262,81 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       if (!cancelled) setIsLoading(false);
     });
     return () => { cancelled = true; };
-  }, [callbackPath, installSession, pkceStorageKey, props.projectId, runtimeUrl, storageKey]);
+  }, [callbackPath, installSession, pkceStorageKey, props.externalAuth, props.projectId, runtimeUrl, storageKey]);
+
+  useEffect(() => {
+    const adapter = props.externalAuth;
+    if (!adapter) return;
+    let cancelled = false;
+    let generation = 0;
+    // A Firebase ID token is never persisted. The canonical Gonvex session is
+    // installed only after the trusted host verifies it and resolves Account.
+    const unsubscribe = adapter.onIdTokenChanged((identity) => {
+      const currentGeneration = ++generation;
+      if (!identity) {
+        installSession(null);
+        setError(null);
+        setIsLoading(false);
+        return;
+      }
+      setIsLoading(true);
+      void withBrowserAuthLock(`${storageKey}:external-exchange`, async () => {
+        const token = await adapter.getIdToken(false);
+        if (!token) throw new Error("The external identity provider did not return an ID token.");
+        if (!sessionRef.current) {
+          props.client.setAuth({
+            project: props.projectId, tenant: undefined, token: undefined,
+            identity: { sub: identity.uid, iss: identity.issuer ?? adapter.provider },
+          });
+        }
+        const tenantId = sessionRef.current?.activeTenantId;
+        const grant = await props.client.action(control.auth.exchangeExternalToken, {
+          provider: adapter.provider,
+          token,
+          ...(tenantId ? { tenantId } : {}),
+          ...(sessionRef.current?.refreshToken ? { previousRefreshToken: sessionRef.current.refreshToken } : {}),
+        });
+        return sessionFromNativeGrant(grant, sessionRef.current ?? undefined);
+      }).then((next) => {
+        if (cancelled || currentGeneration !== generation) return;
+        installSession(next);
+        setError(null);
+      }).catch((cause) => {
+        if (cancelled || currentGeneration !== generation) return;
+        installSession(null);
+        setError(cause instanceof Error ? cause.message : "External sign-in failed.");
+      }).finally(() => {
+        if (!cancelled && currentGeneration === generation) setIsLoading(false);
+      });
+    });
+    return () => {
+      cancelled = true;
+      generation += 1;
+      unsubscribe();
+    };
+  }, [installSession, props.client, props.externalAuth, props.projectId, storageKey]);
 
   const refreshSession = useCallback(async (force = false) => {
     if (refreshRef.current) return refreshRef.current;
     let attemptedRefreshToken = "";
     const request = withBrowserAuthLock(`${storageKey}:refresh`, async () => {
       const current = readAuthSession(storageKey) ?? sessionRef.current;
-      if (!current || current.refreshExpiresAt <= Date.now()) return null;
+      if (!current) return null;
       if (!force && current.expiresAt > Date.now() + 60_000) return current;
+      if (props.externalAuth) {
+        const token = await props.externalAuth.getIdToken(force);
+        if (!token) return null;
+        const grant = await props.client.action(control.auth.exchangeExternalToken, {
+          provider: props.externalAuth.provider,
+          token,
+          ...(current.activeTenantId ? { tenantId: current.activeTenantId } : {}),
+          previousRefreshToken: current.refreshToken,
+        });
+        const next = sessionFromNativeGrant(grant, current);
+        safeLocalStorageSet(storageKey, JSON.stringify(next));
+        return next;
+      }
+      if (current.refreshExpiresAt <= Date.now()) return null;
       attemptedRefreshToken = current.refreshToken;
       const grant = await props.client.action(control.auth.refreshSession, { refreshToken: current.refreshToken });
       const next = sessionFromNativeGrant(grant, current);
@@ -309,7 +379,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     });
     refreshRef.current = request;
     return request;
-  }, [installSession, props.client, storageKey]);
+  }, [installSession, props.client, props.externalAuth, storageKey]);
 
   useEffect(() => {
     if (!session) return;
@@ -346,6 +416,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   }, [installSession, storageKey]);
 
   const signInWithProvider = useCallback(async (provider: GonvexAuthProviderName) => {
+    if (props.externalAuth) throw new Error("Provider sign-in is owned by the configured external authentication adapter.");
     setError(null);
     const verifier = randomBase64Url(64);
     const state = randomBase64Url(32);
@@ -361,16 +432,17 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     authorizeUrl.searchParams.set("code_challenge", challenge);
     authorizeUrl.searchParams.set("code_challenge_method", "S256");
     window.location.assign(authorizeUrl.toString());
-  }, [callbackPath, pkceStorageKey, props.projectId, runtimeUrl]);
+  }, [callbackPath, pkceStorageKey, props.externalAuth, props.projectId, runtimeUrl]);
 
   const signIn = useCallback((provider: GonvexAuthProviderName = "google") => signInWithProvider(provider), [signInWithProvider]);
 
   const signInWithPassword = useCallback(async (email: string, password: string) => {
+    if (props.externalAuth) throw new Error("Password sign-in is owned by the configured external authentication adapter.");
     setError(null);
     const grant = await props.client.action(control.auth.passwordLogin, { email, password });
     const next = sessionFromNativeGrant(grant, sessionRef.current ?? undefined);
     installSession(next);
-  }, [installSession, props.client]);
+  }, [installSession, props.client, props.externalAuth]);
 
   const signOut = useCallback(async (options?: { allDevices?: boolean }) => {
     const current = sessionRef.current;
@@ -379,7 +451,8 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       await props.client.reducer(control.auth.logout, { refreshToken: current.refreshToken, all: options?.allDevices === true }).catch(() => undefined);
     }
     installSession(null);
-  }, [installSession, props.client]);
+    await props.externalAuth?.signOut?.();
+  }, [installSession, props.client, props.externalAuth]);
 
   const fetchAccessToken = useCallback(async (args: { forceRefreshToken: boolean }) => {
     const current = sessionRef.current;
@@ -387,6 +460,17 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (!args.forceRefreshToken && current.expiresAt > Date.now() + 60_000) return current.accessToken;
     return (await refreshSession(args.forceRefreshToken))?.accessToken ?? null;
   }, [refreshSession]);
+
+  useEffect(() => {
+    if (!session || developerModeRef.current) return;
+    props.client.setAuth({
+      project: props.projectId,
+      tenant: session.activeTenantId,
+      token: session.accessToken,
+      fetchToken: fetchAccessToken,
+      identity: { sub: session.account.id, iss: props.projectId },
+    });
+  }, [developerMode.active, fetchAccessToken, props.client, session?.account.id]);
 
   const setActiveTenant = useCallback(async (tenantId: string) => {
     if (developerModeRef.current) throw new Error("Exit developer mode before switching tenants.");

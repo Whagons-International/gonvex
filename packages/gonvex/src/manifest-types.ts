@@ -108,13 +108,17 @@ export type VisibilityPlan = {
 
 export type VisibilitySet = {
   table: string;
+  alias?: string;
   select: string;
+  selectFrom?: string;
   joins: VisibilityJoin[];
   where: VisibilityConstraint[];
 };
 
 export type VisibilityJoin = {
   table: string;
+  alias?: string;
+  leftAlias?: string;
   leftColumn: string;
   rightColumn: string;
 };

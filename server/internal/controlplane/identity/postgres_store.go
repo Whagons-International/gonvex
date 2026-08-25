@@ -243,13 +243,13 @@ func applyResolution(ctx context.Context, db MigrationDB, resolution LegacyAccou
 	identity := resolution.Identity
 	if strings.TrimSpace(identity.Provider) != "" && strings.TrimSpace(identity.Subject) != "" {
 		result, err := db.ExecContext(ctx, `INSERT INTO account_identities (
-			account_id, provider, issuer, subject, email, verified_email, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, now())
-		ON CONFLICT (provider, issuer, subject) DO UPDATE SET
+			project_id, account_id, provider, issuer, subject, email, verified_email, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+		ON CONFLICT (project_id, provider, issuer, subject) DO UPDATE SET
 			email = CASE WHEN EXCLUDED.email <> '' THEN EXCLUDED.email ELSE account_identities.email END,
 			verified_email = account_identities.verified_email OR EXCLUDED.verified_email,
 			updated_at = now()
-		WHERE account_identities.account_id = EXCLUDED.account_id`, identity.AccountID, identity.Provider, identity.Issuer, identity.Subject, identity.Email, identity.VerifiedEmail)
+		WHERE account_identities.account_id = EXCLUDED.account_id`, account.AuthRealmID, identity.AccountID, identity.Provider, identity.Issuer, identity.Subject, identity.Email, identity.VerifiedEmail)
 		if err != nil {
 			return err
 		}

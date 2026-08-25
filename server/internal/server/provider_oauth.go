@@ -282,7 +282,11 @@ func (s *Server) providerRedirectAllowed(ctx context.Context, project, provider,
 		return false, err
 	}
 	var allowed bool
-	err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM gonvex_auth_providers p JOIN gonvex_auth_redirect_uris r ON r.project_id=p.project_id AND r.provider=p.provider WHERE p.project_id=$1 AND p.provider=$2 AND p.enabled AND r.redirect_uri=$3)`, project, provider, redirect).Scan(&allowed)
+	err = db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM gonvex_auth_providers p
+		JOIN gonvex_auth_redirect_uris r ON r.project_id=p.project_id AND r.provider=p.provider
+		JOIN gonvex_runtime_projects project_row ON project_row.id=p.project_id
+		WHERE p.project_id=$1 AND p.provider=$2 AND p.enabled AND r.redirect_uri=$3
+		AND COALESCE(NULLIF(project_row.auth_mode,''),'gonvex-native') IN ('gonvex-native','hybrid'))`, project, provider, redirect).Scan(&allowed)
 	return allowed, err
 }
 
@@ -374,6 +378,9 @@ func fetchOIDCKey(ctx context.Context, endpoint, keyID string) (*rsa.PublicKey, 
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("OIDC key endpoint returned HTTP %d", response.StatusCode)
+	}
 	var document struct {
 		Keys []struct {
 			KeyType  string `json:"kty"`

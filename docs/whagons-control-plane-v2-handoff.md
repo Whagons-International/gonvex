@@ -1,6 +1,6 @@
 # Whagons Control Plane v2 handoff
 
-This is the migration contract for `@gonvex/*` version `0.3.1`. Whagons should
+This is the migration contract for `@gonvex/*` version `0.4.0`. Whagons should
 use one `GonvexClient` for Control Plane calls, tenant calls, live Control Plane
 queries, and the Local Replica stream. OAuth callbacks and public customer APIs
 remain HTTP because their protocols require HTTP.
@@ -20,11 +20,12 @@ attribution.
 | `control.accounts.resetMemberPassword` | Reducer | tenantAdmin | `{ memberId, newPassword }` | `{ updated }` |
 | `control.accounts.provisionMemberLogin` | Reducer | tenantAdmin | `{ email, name, password, role, permissions }` | `{ updated, accountId, memberId }` |
 | `control.auth.passwordLogin` | Action | public | `{ email, password }` | session grant |
+| `control.auth.exchangeExternalToken` | Action | public | `{ provider, token, tenantId?, previousRefreshToken? }` | session grant |
 | `control.auth.refreshSession` | Action | public | `{ refreshToken }` | rotated session grant |
 | `control.auth.logout` | Reducer | account | `{ refreshToken, all }` | `{ updated }` |
-| `control.auth.publicSettings` | Query | public | `{}` | `{ providers: string[] }` |
+| `control.auth.publicSettings` | Query | public | `{}` | `{ mode, providers: string[] }` |
 | `control.auth.realms.list` | live Query | projectAdmin | `{}` | realm rows |
-| `control.auth.realms.configure` | Reducer | projectAdmin | `{ provider, enabled, signupMode, azureTenantId?, clientId?, clientSecret? }` | `{ updated }` |
+| `control.auth.realms.configure` | Reducer | projectAdmin | `{ provider, authMode?, enabled, signupMode, azureTenantId?, clientId?, clientSecret?, issuer?, audience?, jwksUrl?, firebaseProjectId?, firebaseTenantId?, adminCredentials? }` | `{ updated }` |
 | `control.auth.memberProviders` | Query | tenantAdmin | `{ memberIds: string[] }` | `{ memberId, providers: string[] }[]` |
 | `control.tenants.mine` | live Query | account | `{}` | tenant directory rows |
 | `control.tenants.create` | Reducer | account | `{ name }` | tenant row |
@@ -33,6 +34,7 @@ attribution.
 | `control.tenants.updateTimezone` | Reducer | tenantAdmin | `{ timezone }` | `{ updated }` |
 | `control.tenants.delete` | Reducer | tenantAdmin | `{}` | `{ updated }` |
 | `control.tenants.setException` | Reducer | projectAdmin | `{ tenantId, value }` | `{ updated }` |
+| `control.tenants.setSeatLimit` | Reducer | projectAdmin | `{ tenantId, seatLimit }` | `{ updated }` |
 
 `GonvexAuthProvider` owns developer mode. Applications call
 `enterDeveloperMode(tenantId)` and `exitDeveloperMode()` and read the safe
@@ -41,7 +43,6 @@ reconnect credential remain inside the provider/client process and are never
 written to storage or a URL. Account refresh continues underneath developer
 mode without replacing it. Expiry, revocation, reload, or an authentication
 error restores the normal account session and its original tenant.
-| `control.tenants.setSeatLimit` | Reducer | projectAdmin | `{ tenantId, seatLimit }` | `{ updated }` |
 
 A session grant contains access and refresh credentials, the global account,
 the active tenant ID, and tenant rows with `id`, `name`, `role`, `permissions`,
@@ -58,6 +59,69 @@ secret. Realm queries return `hasClientSecret`, never the secret. Apple uses
 `clientId` and an encrypted Apple client-secret JWT. The runtime supports
 Google, Microsoft, and Apple authorize/callback flows. Apple callbacks accept
 the provider's required `form_post` response.
+
+## Firebase and pluggable project auth
+
+Project `authMode` is one of `gonvex-native`, `firebase`, `external-oidc`, or
+`hybrid`. Gonvex-native remains available, but Whagons should set `firebase`.
+The host provider interface verifies an external credential and returns a
+trusted identity. Shared host code then resolves the Account, issues a
+`gvx_session_*` session, lists tenants, and enforces tenant-local Member
+admission. Tenant modules never receive Firebase configuration, Control Plane
+credentials, or a way to select another database.
+
+Configure Whagons with a project key:
+
+```bash
+gonvex auth configure firebase \
+  --firebase-project-id whagons-prod \
+  --mode firebase \
+  --signup-mode inviteOnly
+gonvex auth status firebase
+```
+
+Optional flags are `--firebase-tenant-id`, `--issuer`, `--audience`,
+`--jwks-url`, and `--admin-credentials-file`. The defaults use Firebase's
+Secure Token issuer, Firebase project ID audience, and Google signing-key URL.
+The runtime encrypts Admin credentials. Status and realm queries return only
+`hasAdminCredentials`.
+
+The browser adapter uses the existing Firebase SDK:
+
+```ts
+import { onIdTokenChanged, signOut } from "firebase/auth";
+import { createFirebaseAuthAdapter } from "@gonvex/react";
+
+const externalAuth = createFirebaseAuthAdapter({
+  getIdToken: (forceRefresh) => auth.currentUser?.getIdToken(forceRefresh) ?? Promise.resolve(null),
+  onIdTokenChanged(listener) {
+    return onIdTokenChanged(auth, (user) => listener(user ? { uid: user.uid } : null));
+  },
+  signOut: () => signOut(auth),
+});
+```
+
+Pass `externalAuth` to `GonvexAuthProvider`. Firebase owns the Google,
+Microsoft, Apple, password, and linked-provider UI. Gonvex stores no Firebase
+password. The provider keeps the Firebase ID token in memory and persists only
+the canonical Gonvex session. Token rotation calls
+`control.auth.exchangeExternalToken`, retires the previous Gonvex refresh
+family, and keeps the active tenant when that Member remains active.
+
+Gonvex access tokens last 15 minutes. Canonical refresh families last 30 days,
+but the Firebase adapter re-verifies the Firebase ID token for rotation and
+forced reconnect refresh. A Firebase sign-out removes the canonical session.
+
+The host keys Firebase identities by project, provider `firebase`, issuer, and
+Firebase UID. Linked Firebase sign-in providers therefore resolve to one
+Account. A verified email may link one existing Account when the match is
+unique; unverified email never merges identities. The host records each
+resolution decision in `gonvex_auth_identity_events`.
+
+Firebase invitation acceptance uses the already authenticated Account and the
+same host-to-module invitation handoff described below. It does not create a
+Gonvex password. Native password operations return a provider-owned error when
+the project mode disables Gonvex-native auth.
 
 ## Developer and support operations
 
@@ -242,6 +306,25 @@ inside the host and idempotently creates the tenant-local test member. The
 internal member endpoint accepts only the runtime admin key and is not part of
 the browser protocol.
 
+Firebase E2E uses the production boundary. Start a Firebase Auth emulator or a
+dedicated Firebase test project, sign in the test user through the Firebase
+SDK, and pass its Firebase ID token through the adapter. The remaining path is:
+
+```text
+Firebase ID token
+control.auth.exchangeExternalToken
+control.tenants.mine
+tenant selection and Member admission
+TypeScript Reducer
+change feed
+Local Replica
+```
+
+Do not pass a Firebase custom token to Gonvex. Exchange it with Firebase first.
+The CLI commands above may create the tenant shard and clone an already
+resolved test Account, but they do not mint browser credentials or expose a
+tenant database URL.
+
 ## Configuration and migration
 
 Deploy the updated runtime before updating Whagons packages. Startup installs
@@ -251,10 +334,13 @@ into the Control Plane.
 Required configuration:
 
 - Set `GONVEX_DASHBOARD_SESSION_SECRET` to a stable random secret before saving
-  Microsoft or Apple credentials.
-- Register the Whagons callback origin through the existing project auth setup.
-  The runtime owns `/auth/google/callback`, `/auth/microsoft/callback`, and
-  `/auth/apple/callback`.
+  Microsoft, Apple, or Firebase Admin credentials.
+- Run `gonvex auth configure firebase --firebase-project-id <id> --mode firebase`
+  for Whagons. This endpoint requires the exact project key and works before the
+  first project-admin Account exists.
+- Register callback origins only for projects that use Gonvex-native Google,
+  Microsoft, or Apple login. Firebase projects keep provider login and callback
+  handling in Firebase.
 - Supply Microsoft's Azure tenant ID, client ID, and client secret through
   `control.auth.realms.configure`.
 - Supply Apple's service ID as `clientId` and a current signed Apple client
@@ -263,6 +349,28 @@ Required configuration:
 - Add the internal invitation Reducer declaration before creating invitations
   with teams or application payload.
 
+For an existing Firebase user without a Gonvex Account, the first ID-token
+exchange creates the project Account and its Firebase identity mapping. No SQL
+insert is required. If the user already has a migrated Gonvex Account, include
+the reviewed Firebase UID mapping in the identity-v2 migration plan so the
+first exchange resolves that Account. Use provider `firebase`, the accepted
+issuer, and Firebase UID as the identity key. Never use a linked-provider
+subject or an unverified email. The concurrent first-login lock prevents
+duplicate Accounts during normal exchange.
+
+The reference runtime image builds and installs `gonvex-module-host` and sets
+`GONVEX_MODULE_HOST_BINARY`. Local `pnpm dev:runtime` builds the same Rust host
+before starting the Go process. `/healthz` reports module-host readiness and
+fails once an active TypeScript project requires a missing host. A clean
+multi-tenant setup creates the project, configures Firebase with its project
+key, installs the TypeScript artifact, then creates the first tenant through a
+Control Plane Reducer. No manual Control Plane SQL is part of this sequence.
+
+Visibility plans may self-join one physical table with literal `alias`,
+`leftAlias`, and `selectFrom` fields. Gonvex rejects an unaliased repeated
+table. It emits safe SQL aliases and records the physical table once as a
+dependency, so changes on either logical side rebuild the context.
+
 Tenant admission still loads `members(account_id, status)` from the selected
 tenant database. `account_tenant_index` remains a resumable directory
 projection and cannot grant access. Invitation acceptance and member changes
@@ -270,7 +378,7 @@ project only after the tenant transaction commits.
 
 ## Package release
 
-The compatible unpublished version is `0.3.1` for:
+The compatible unpublished version is `0.4.0` for:
 
 ```text
 @gonvex/protocol
@@ -282,7 +390,7 @@ The compatible unpublished version is `0.3.1` for:
 create-gonvex
 ```
 
-The packed manifests contain exact `0.3.1` Gonvex dependencies and no
+The packed manifests contain exact `0.4.0` Gonvex dependencies and no
 `workspace:*` entries. Do not publish until Gabriel approves. Publish in this
 order:
 
@@ -298,41 +406,43 @@ pnpm --dir packages/create-gonvex publish --access public --no-git-checks
 
 ## Validation
 
-The final tree passed these checks on August 23, 2026:
+The final tree passed these checks on August 25, 2026:
 
 ```text
 go test ./...
 go vet ./...
+go test -race ./...
 GONVEX_TEST_POSTGRES_URL=... go test ./server/internal/server -count=1
-  passed in 274.292s
+  passed in 170.444s
 GONVEX_TEST_POSTGRES_URL=... go test -race ./server/internal/server -count=1
-  passed in 282.619s
+  passed in 159.897s
 
-pnpm typecheck
-pnpm test
+pnpm -r typecheck
+pnpm -r test
 pnpm build
 
-cargo test --workspace --locked
+cargo test --workspace --all-targets --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 
-node --test scripts/production-compose.test.mjs scripts/runtime-dockerfile.test.mjs
+node --test scripts/production-compose.test.mjs scripts/runtime-dockerfile.test.mjs \
+  scripts/deploy-coolify.test.mjs scripts/release-cli.test.mjs
 ```
 
-Package results were 16 module SDK tests, 133 client tests, 1 Expo SQLite
-test, 27 React tests, 24 CLI tests, 43 dashboard tests, and 9 deployment
-structure tests. The Rust workspace passed 14 unit and integration tests, with
-one documentation test intentionally ignored.
+The TypeScript package run passed 17 module SDK tests, 134 client tests, one
+Expo SQLite test, 29 React tests, 26 CLI tests, 38 dashboard tests, and five
+dashboard server tests. Rust passed 14 unit and integration tests. The four
+deployment and release scripts passed 19 tests.
 
-Actual `pnpm pack` tarballs were inspected in a temporary directory. Their
-file counts were protocol 6, client 36, Expo SQLite 7, React 9, module SDK 9,
-CLI 47, and create-gonvex 6. Every manifest reported version `0.3.1`, exact
-`0.3.1` Gonvex dependencies, and no `workspace:*` entry.
+Each of the seven npm packages passed `pnpm pack --dry-run`. Inspection of the
+packed `package.json` files confirmed version `0.4.0`, exact `0.4.0` Gonvex
+dependencies, and no `workspace:*` entry. The client tarball contains the
+external-auth adapter declarations and JavaScript implementation.
 
 ## Cutover status
 
 Gonvex no longer needs a second browser transport or state store for these
 flows. Whagons can remove its internal browser HTTP calls after it replaces the
-call sites, declares the invitation Reducer, and consumes version `0.3.1`.
+call sites, declares the invitation Reducer, and consumes version `0.4.0`.
 OAuth callbacks and external customer REST remain HTTP.
 
 The runtime is still a Go server plus Rust/V8 module and sandbox workers. Go

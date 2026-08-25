@@ -408,6 +408,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
 	mux.HandleFunc("PUT /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
 	mux.HandleFunc("DELETE /dev/projects/{project}/auth/google", s.handleProjectGoogleAuth)
+	mux.HandleFunc("GET /dev/projects/{project}/auth/providers/{provider}", s.handleProjectAuthProvider)
+	mux.HandleFunc("PUT /dev/projects/{project}/auth/providers/{provider}", s.handleProjectAuthProvider)
 	mux.HandleFunc("GET /dev/projects/{project}/auth/accounts", s.handleProjectAuthAccounts)
 	mux.HandleFunc("PATCH /dev/projects/{project}/auth/accounts/{account}", s.handleProjectAuthAccount)
 	mux.HandleFunc("DELETE /dev/projects/{project}/auth/accounts/{account}", s.handleProjectAuthAccount)

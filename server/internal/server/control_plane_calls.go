@@ -65,6 +65,7 @@ var controlFunctions = map[string]controlFunction{
 	"control.accounts.resetMemberPassword":  {kind: "reducer", auth: controlTenantAdmin},
 	"control.accounts.provisionMemberLogin": {kind: "reducer", auth: controlTenantAdmin},
 	"control.auth.passwordLogin":            {kind: "action", auth: controlPublic},
+	"control.auth.exchangeExternalToken":    {kind: "action", auth: controlPublic},
 	"control.auth.refreshSession":           {kind: "action", auth: controlPublic},
 	"control.auth.logout":                   {kind: "reducer", auth: controlAccount},
 	"control.auth.publicSettings":           {kind: "query", auth: controlPublic},
@@ -139,6 +140,19 @@ func (c *wsConn) callControlPlane(ctx context.Context, kind, id, path string, ra
 		if allowed, _ := c.server.authRateLimiter.allow("control:"+path+":"+rateSubject, limit, window); !allowed {
 			c.write(serverMessage{Type: kind + ".error", ID: id, Path: path, Error: "Control Plane rate limit exceeded"})
 			return
+		}
+		if path == "control.auth.exchangeExternalToken" {
+			var args struct {
+				Provider string `json:"provider"`
+				Token    string `json:"token"`
+			}
+			if json.Unmarshal(raw, &args) == nil && strings.TrimSpace(args.Token) != "" {
+				tokenSubject := sha256Hex(strings.ToLower(strings.TrimSpace(args.Provider)) + "\x00" + strings.TrimSpace(args.Token))
+				if allowed, _ := c.server.authRateLimiter.allow("control:external-token:"+tokenSubject, 10, 15*time.Minute); !allowed {
+					c.write(serverMessage{Type: kind + ".error", ID: id, Path: path, Error: "Control Plane rate limit exceeded"})
+					return
+				}
+			}
 		}
 	}
 	if err := c.authorizeControlCall(ctx, definition.auth); err != nil {
@@ -392,6 +406,17 @@ func (s *Server) executeControlCall(ctx context.Context, connection *wsConn, kin
 	if connection.user != nil {
 		accountID = connection.user.ID
 	}
+	if path == "control.auth.exchangeExternalToken" {
+		var args struct {
+			Provider             string `json:"provider"`
+			Token                string `json:"token"`
+			TenantID             string `json:"tenantId"`
+			PreviousRefreshToken string `json:"previousRefreshToken"`
+		}
+		if decodeControlArgs(raw, &args) == nil {
+			accountID = "external:" + sha256Hex(args.Provider+"\x00"+args.Token)
+		}
+	}
 	if definition, ok := controlFunctions[path]; ok && definition.auth == controlTenantAdmin {
 		accountID += "|tenant:" + connection.tenant
 	}
@@ -481,7 +506,7 @@ func (s *Server) afterControlCommit(connection *wsConn, path string, raw json.Ra
 func controlCallUsesAtomicStore(path string) bool {
 	switch path {
 	case "control.accounts.updatePassword", "control.accounts.resetMemberPassword",
-		"control.auth.passwordLogin", "control.auth.refreshSession",
+		"control.auth.passwordLogin", "control.auth.exchangeExternalToken", "control.auth.refreshSession",
 		"control.auth.realms.configure",
 		"control.tenants.updateProfile", "control.tenants.updateTimezone",
 		"control.tenants.setException", "control.tenants.setSeatLimit",
@@ -585,40 +610,56 @@ func (s *Server) executeControlQuery(ctx context.Context, c *wsConn, path string
 		if err := validateEmptyControlArgs(raw); err != nil {
 			return nil, err
 		}
+		var mode string
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(auth_mode,''),'gonvex-native') FROM gonvex_runtime_projects WHERE id=$1`, c.project).Scan(&mode); err != nil {
+			return nil, err
+		}
+		mode, err = normalizeProjectAuthMode(mode)
+		if err != nil {
+			return nil, err
+		}
 		rows, err := db.QueryContext(ctx, `SELECT provider FROM gonvex_auth_providers WHERE project_id=$1 AND enabled=TRUE ORDER BY provider`, c.project)
 		if err != nil {
 			return nil, err
 		}
 		defer rows.Close()
-		providers := []string{"password"}
+		providers := []string{}
+		if mode == authModeNative || mode == authModeHybrid {
+			providers = append(providers, "password")
+		}
 		for rows.Next() {
 			var provider string
 			if err := rows.Scan(&provider); err != nil {
 				return nil, err
 			}
-			if provider != "password" {
+			if provider != "password" && (mode == authModeHybrid || authModeAllowsProvider(mode, provider) || (mode == authModeNative && provider != "firebase" && provider != authModeExternalOIDC)) {
 				providers = append(providers, provider)
 			}
 		}
-		return map[string]any{"providers": providers}, rows.Err()
+		return map[string]any{"mode": mode, "providers": providers}, rows.Err()
 	case "control.auth.realms.list":
 		if err := validateEmptyControlArgs(raw); err != nil {
 			return nil, err
 		}
-		rows, err := db.QueryContext(ctx, `SELECT provider, enabled, signup_mode, azure_tenant_id, client_id, client_secret_encrypted IS NOT NULL FROM gonvex_auth_providers WHERE project_id=$1 ORDER BY provider`, c.project)
+		rows, err := db.QueryContext(ctx, `SELECT provider, enabled, signup_mode, azure_tenant_id, client_id,
+			client_secret_encrypted IS NOT NULL,issuer,audience,jwks_url,firebase_project_id,firebase_tenant_id,
+			admin_credentials_encrypted IS NOT NULL FROM gonvex_auth_providers WHERE project_id=$1 ORDER BY provider`, c.project)
 		if err != nil {
 			return nil, err
 		}
 		defer rows.Close()
-		items := []map[string]any{{"provider": "password", "enabled": true, "signupMode": "inviteOnly", "hasClientSecret": false}}
+		var mode string
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(auth_mode,''),'gonvex-native') FROM gonvex_runtime_projects WHERE id=$1`, c.project).Scan(&mode); err != nil {
+			return nil, err
+		}
+		items := []map[string]any{{"provider": "password", "enabled": mode == authModeNative || mode == authModeHybrid, "signupMode": "inviteOnly", "hasClientSecret": false, "hasAdminCredentials": false, "authMode": mode}}
 		for rows.Next() {
-			var provider, signup, azureTenantID, clientID string
-			var enabled bool
-			var hasClientSecret bool
-			if err := rows.Scan(&provider, &enabled, &signup, &azureTenantID, &clientID, &hasClientSecret); err != nil {
+			var provider, signup, azureTenantID, clientID, issuer, audience, jwksURL, firebaseProjectID, firebaseTenantID string
+			var enabled, hasClientSecret, hasAdminCredentials bool
+			if err := rows.Scan(&provider, &enabled, &signup, &azureTenantID, &clientID, &hasClientSecret, &issuer, &audience, &jwksURL, &firebaseProjectID, &firebaseTenantID, &hasAdminCredentials); err != nil {
 				return nil, err
 			}
-			items = append(items, map[string]any{"provider": provider, "enabled": enabled, "signupMode": signup, "azureTenantId": azureTenantID, "clientId": clientID, "hasClientSecret": hasClientSecret})
+			items = append(items, map[string]any{"provider": provider, "enabled": enabled, "signupMode": signup, "azureTenantId": azureTenantID, "clientId": clientID, "hasClientSecret": hasClientSecret, "issuer": issuer, "audience": audience, "jwksUrl": jwksURL, "firebaseProjectId": firebaseProjectID, "firebaseTenantId": firebaseTenantID, "hasAdminCredentials": hasAdminCredentials, "authMode": mode})
 		}
 		return items, rows.Err()
 	case "control.auth.memberProviders":
@@ -897,6 +938,11 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		if err := decodeControlArgs(raw, &args); err != nil {
 			return nil, err
 		}
+		if allowed, err := projectAllowsNativeAuth(ctx, db, c.project); err != nil {
+			return nil, err
+		} else if !allowed {
+			return nil, fmt.Errorf("password management is owned by the configured external identity provider")
+		}
 		if len(args.NewPassword) < 12 {
 			return nil, fmt.Errorf("newPassword must contain at least 12 characters")
 		}
@@ -921,6 +967,11 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		}
 		if err := decodeControlArgs(raw, &args); err != nil {
 			return nil, err
+		}
+		if allowed, err := projectAllowsNativeAuth(ctx, db, c.project); err != nil {
+			return nil, err
+		} else if !allowed {
+			return nil, fmt.Errorf("password management is owned by the configured external identity provider")
 		}
 		if len(args.NewPassword) < 12 {
 			return nil, fmt.Errorf("newPassword must contain at least 12 characters")
@@ -960,6 +1011,11 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		}
 		if err := decodeControlArgs(raw, &args); err != nil {
 			return nil, err
+		}
+		if allowed, err := projectAllowsNativeAuth(ctx, db, c.project); err != nil {
+			return nil, err
+		} else if !allowed {
+			return nil, fmt.Errorf("login provisioning is owned by the configured external identity provider; invite the account instead")
 		}
 		if len(args.Password) < 12 {
 			return nil, fmt.Errorf("password must contain at least 12 characters")
@@ -1011,7 +1067,7 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 			if _, err = tx.ExecContext(ctx, `INSERT INTO accounts(id,auth_realm_id,email,name,updated_at) VALUES($1,$2,$3,$4,now())`, accountID, c.project, email, strings.TrimSpace(args.Name)); err != nil {
 				return nil, err
 			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO account_identities(account_id,provider,issuer,subject,email,verified_email,updated_at) VALUES($1,'password',$2,$3,$3,TRUE,now())`, accountID, c.project, email); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO account_identities(project_id,account_id,provider,issuer,subject,email,verified_email,updated_at) VALUES($1,$2,'password',$1,$3,$3,TRUE,now())`, c.project, accountID, email); err != nil {
 				return nil, err
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash) VALUES($1,$2,$3)`, c.project, accountID, hash); err != nil {
@@ -1040,6 +1096,11 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		if err := decodeControlArgs(raw, &args); err != nil {
 			return nil, err
 		}
+		if allowed, err := projectAllowsNativeAuth(ctx, db, c.project); err != nil {
+			return nil, err
+		} else if !allowed {
+			return nil, fmt.Errorf("password authentication is disabled; use the project's external identity provider")
+		}
 		var accountID, passwordHash string
 		err := db.QueryRowContext(ctx, `SELECT account.id,password.password_hash FROM accounts account JOIN gonvex_account_passwords password ON password.project_id=account.auth_realm_id AND password.account_id=account.id WHERE account.auth_realm_id=$1 AND lower(account.email)=lower($2) AND account.disabled_at IS NULL`, c.project, normalizeDashboardEmail(args.Email)).Scan(&accountID, &passwordHash)
 		if err != nil || !verifyDashboardPassword(args.Password, passwordHash) {
@@ -1062,6 +1123,55 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 			return nil, err
 		}
 		return s.controlSessionResult(ctx, c.project, grant, account)
+	case "control.auth.exchangeExternalToken":
+		var args struct {
+			Provider             string `json:"provider"`
+			Token                string `json:"token"`
+			TenantID             string `json:"tenantId"`
+			PreviousRefreshToken string `json:"previousRefreshToken"`
+		}
+		if err := decodeControlArgs(raw, &args); err != nil {
+			return nil, err
+		}
+		configuration, err := s.externalAuthConfiguration(ctx, db, c.project, args.Provider)
+		if err != nil {
+			return nil, err
+		}
+		provider, err := s.externalIdentityProviderFor(configuration.Provider)
+		if err != nil {
+			return nil, err
+		}
+		identity, err := provider.Verify(ctx, configuration, strings.TrimSpace(args.Token))
+		if err != nil {
+			return nil, err
+		}
+		tx, err := concreteControlTx(db)
+		if err != nil {
+			return nil, err
+		}
+		account, err := s.resolveExternalAccountTx(ctx, tx, c.project, identity)
+		if err != nil {
+			return nil, err
+		}
+		familyID, err := randomID("family")
+		if err != nil {
+			return nil, err
+		}
+		grant, err := issueAppAuthSessionGrant(ctx, tx, c.project, account.ID, familyID, time.Now().Add(appRefreshSessionTTL).UTC())
+		if err != nil {
+			return nil, err
+		}
+		if previous := strings.TrimSpace(args.PreviousRefreshToken); previous != "" {
+			_, err = tx.ExecContext(ctx, `UPDATE gonvex_auth_refresh_tokens SET revoked_at=COALESCE(revoked_at,now())
+				WHERE project_id=$1 AND account_id=$2 AND family_id=(
+					SELECT family_id FROM gonvex_auth_refresh_tokens
+					WHERE project_id=$1 AND account_id=$2 AND token_hash=$3 LIMIT 1
+				)`, c.project, account.ID, sha256Hex(previous))
+			if err != nil {
+				return nil, err
+			}
+		}
+		return s.controlSessionResultForTenant(ctx, c.project, grant, account, strings.TrimSpace(args.TenantID))
 	case "control.auth.refreshSession":
 		var args struct {
 			RefreshToken string `json:"refreshToken"`
@@ -1095,12 +1205,19 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		return map[string]any{"updated": err == nil}, err
 	case "control.auth.realms.configure":
 		var args struct {
-			Provider      string `json:"provider"`
-			Enabled       bool   `json:"enabled"`
-			SignupMode    string `json:"signupMode"`
-			AzureTenantID string `json:"azureTenantId"`
-			ClientID      string `json:"clientId"`
-			ClientSecret  string `json:"clientSecret"`
+			Provider          string `json:"provider"`
+			AuthMode          string `json:"authMode"`
+			Enabled           bool   `json:"enabled"`
+			SignupMode        string `json:"signupMode"`
+			AzureTenantID     string `json:"azureTenantId"`
+			ClientID          string `json:"clientId"`
+			ClientSecret      string `json:"clientSecret"`
+			Issuer            string `json:"issuer"`
+			Audience          string `json:"audience"`
+			JWKSURL           string `json:"jwksUrl"`
+			FirebaseProjectID string `json:"firebaseProjectId"`
+			FirebaseTenantID  string `json:"firebaseTenantId"`
+			AdminCredentials  string `json:"adminCredentials"`
 		}
 		if err := decodeControlArgs(raw, &args); err != nil {
 			return nil, err
@@ -1110,8 +1227,53 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		if err != nil {
 			return nil, err
 		}
-		if args.Provider != googleProvider && args.Provider != "microsoft" && args.Provider != "apple" {
+		if args.Provider != googleProvider && args.Provider != "microsoft" && args.Provider != "apple" && args.Provider != "firebase" && args.Provider != authModeExternalOIDC {
 			return nil, fmt.Errorf("provider is unsupported")
+		}
+		mode := strings.TrimSpace(args.AuthMode)
+		if mode == "" {
+			if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(auth_mode,''),'gonvex-native') FROM gonvex_runtime_projects WHERE id=$1`, c.project).Scan(&mode); err != nil {
+				return nil, err
+			}
+		}
+		mode, err = normalizeProjectAuthMode(mode)
+		if err != nil {
+			return nil, err
+		}
+		if args.Enabled {
+			externalProvider := args.Provider == "firebase" || args.Provider == authModeExternalOIDC
+			if externalProvider && !authModeAllowsProvider(mode, args.Provider) {
+				return nil, fmt.Errorf("authMode %s does not enable provider %s", mode, args.Provider)
+			}
+			if !externalProvider && mode != authModeNative && mode != authModeHybrid {
+				return nil, fmt.Errorf("authMode %s does not enable Gonvex-native providers", mode)
+			}
+		}
+		if args.Provider == "firebase" && args.Enabled {
+			if strings.TrimSpace(args.FirebaseProjectID) == "" {
+				return nil, fmt.Errorf("firebaseProjectId is required when Firebase auth is enabled")
+			}
+			if strings.TrimSpace(args.JWKSURL) != "" {
+				if err := validateExternalAuthURL(args.JWKSURL); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if strings.TrimSpace(args.AdminCredentials) != "" {
+			if args.Provider != "firebase" {
+				return nil, fmt.Errorf("adminCredentials is supported only for Firebase")
+			}
+			if _, err := parseFirebaseAdminCredentials(args.AdminCredentials, strings.TrimSpace(args.FirebaseProjectID)); err != nil {
+				return nil, err
+			}
+		}
+		if args.Provider == authModeExternalOIDC && args.Enabled {
+			if strings.TrimSpace(args.Issuer) == "" || strings.TrimSpace(args.Audience) == "" || strings.TrimSpace(args.JWKSURL) == "" {
+				return nil, fmt.Errorf("issuer, audience, and jwksUrl are required when external OIDC is enabled")
+			}
+			if err := validateExternalAuthURL(args.JWKSURL); err != nil {
+				return nil, err
+			}
 		}
 		if args.Provider == "microsoft" && args.Enabled {
 			if strings.TrimSpace(args.AzureTenantID) == "" || strings.TrimSpace(args.ClientID) == "" {
@@ -1149,7 +1311,33 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 			}
 			encrypted = ciphertext
 		}
-		_, err = db.ExecContext(ctx, `INSERT INTO gonvex_auth_providers(project_id,provider,enabled,signup_mode,azure_tenant_id,client_id,client_secret_encrypted) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(project_id,provider) DO UPDATE SET enabled=EXCLUDED.enabled,signup_mode=EXCLUDED.signup_mode,azure_tenant_id=EXCLUDED.azure_tenant_id,client_id=EXCLUDED.client_id,client_secret_encrypted=COALESCE(EXCLUDED.client_secret_encrypted,gonvex_auth_providers.client_secret_encrypted),updated_at=now()`, c.project, args.Provider, args.Enabled, normalizedSignupMode, strings.TrimSpace(args.AzureTenantID), strings.TrimSpace(args.ClientID), encrypted)
+		var encryptedAdmin any
+		if strings.TrimSpace(args.AdminCredentials) != "" {
+			ciphertext, cipherErr := s.encryptControlSecret(args.AdminCredentials)
+			if cipherErr != nil {
+				return nil, cipherErr
+			}
+			encryptedAdmin = ciphertext
+		}
+		issuer := strings.TrimSpace(args.Issuer)
+		audience := strings.TrimSpace(args.Audience)
+		jwksURL := strings.TrimSpace(args.JWKSURL)
+		firebaseProject := strings.TrimSpace(args.FirebaseProjectID)
+		if args.Provider == "firebase" {
+			if issuer == "" {
+				issuer = "https://securetoken.google.com/" + firebaseProject
+			}
+			if audience == "" {
+				audience = firebaseProject
+			}
+			if jwksURL == "" {
+				jwksURL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"
+			}
+		}
+		_, err = db.ExecContext(ctx, `INSERT INTO gonvex_auth_providers(project_id,provider,enabled,signup_mode,azure_tenant_id,client_id,client_secret_encrypted,issuer,audience,jwks_url,firebase_project_id,firebase_tenant_id,admin_credentials_encrypted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(project_id,provider) DO UPDATE SET enabled=EXCLUDED.enabled,signup_mode=EXCLUDED.signup_mode,azure_tenant_id=EXCLUDED.azure_tenant_id,client_id=EXCLUDED.client_id,client_secret_encrypted=COALESCE(EXCLUDED.client_secret_encrypted,gonvex_auth_providers.client_secret_encrypted),issuer=EXCLUDED.issuer,audience=EXCLUDED.audience,jwks_url=EXCLUDED.jwks_url,firebase_project_id=EXCLUDED.firebase_project_id,firebase_tenant_id=EXCLUDED.firebase_tenant_id,admin_credentials_encrypted=COALESCE(EXCLUDED.admin_credentials_encrypted,gonvex_auth_providers.admin_credentials_encrypted),updated_at=now()`, c.project, args.Provider, args.Enabled, normalizedSignupMode, strings.TrimSpace(args.AzureTenantID), strings.TrimSpace(args.ClientID), encrypted, issuer, audience, jwksURL, firebaseProject, strings.TrimSpace(args.FirebaseTenantID), encryptedAdmin)
+		if err == nil {
+			_, err = db.ExecContext(ctx, `UPDATE gonvex_runtime_projects SET auth_mode=$2,updated_at=now() WHERE id=$1`, c.project, mode)
+		}
 		if err == nil && args.Provider != googleProvider {
 			_, err = db.ExecContext(ctx, `INSERT INTO gonvex_auth_redirect_uris(project_id,provider,redirect_uri) SELECT project_id,$2,redirect_uri FROM gonvex_auth_redirect_uris WHERE project_id=$1 AND provider='google' ON CONFLICT DO NOTHING`, c.project, args.Provider)
 		}
@@ -1175,11 +1363,11 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		if err := decodeControlArgs(raw, &args); err != nil {
 			return nil, err
 		}
-		configuration, err := s.appAuthProviderConfiguration(ctx, c.project)
+		signupMode, err := projectAuthSignupMode(ctx, db, c.project)
 		if err != nil {
 			return nil, err
 		}
-		if configuration.SignupMode == appAuthSignupInviteOnly {
+		if signupMode == appAuthSignupInviteOnly {
 			return nil, fmt.Errorf("this project allows tenant creation only through its control plane")
 		}
 		return s.createControlTenant(ctx, c, args.Name, idempotencyKey)
@@ -1586,7 +1774,7 @@ func (s *Server) executeControlReducerWithStore(ctx context.Context, db controlS
 		if err != nil {
 			return nil, err
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO account_identities(account_id,provider,issuer,subject,email,verified_email,updated_at) VALUES($1,'password',$2,$3,$3,TRUE,now()) ON CONFLICT(provider,issuer,subject) DO UPDATE SET account_id=EXCLUDED.account_id,email=EXCLUDED.email,verified_email=TRUE,updated_at=now()`, accountID, c.project, email)
+		_, err = tx.ExecContext(ctx, `INSERT INTO account_identities(project_id,account_id,provider,issuer,subject,email,verified_email,updated_at) VALUES($1,$2,'password',$1,$3,$3,TRUE,now()) ON CONFLICT(project_id,provider,issuer,subject) DO UPDATE SET account_id=EXCLUDED.account_id,email=EXCLUDED.email,verified_email=TRUE,updated_at=now()`, c.project, accountID, email)
 		if err != nil {
 			return nil, err
 		}
@@ -1757,6 +1945,10 @@ func loadControlAccount(ctx context.Context, db controlStore, project, accountID
 }
 
 func (s *Server) controlSessionResult(ctx context.Context, project string, grant appAuthSessionGrant, account appAuthAccount) (any, error) {
+	return s.controlSessionResultForTenant(ctx, project, grant, account, "")
+}
+
+func (s *Server) controlSessionResultForTenant(ctx context.Context, project string, grant appAuthSessionGrant, account appAuthAccount, requestedTenantID string) (any, error) {
 	tenants, err := s.listAppAuthTenants(ctx, project, account.ID)
 	if err != nil {
 		return nil, err
@@ -1765,7 +1957,45 @@ func (s *Server) controlSessionResult(ctx context.Context, project string, grant
 	if len(tenants) > 0 {
 		activeTenantID = tenants[0].ID
 	}
+	if requestedTenantID != "" {
+		activeTenantID = ""
+		for _, tenant := range tenants {
+			if tenant.ID == requestedTenantID {
+				activeTenantID = tenant.ID
+				break
+			}
+		}
+		if activeTenantID == "" {
+			return nil, fmt.Errorf("requested tenant membership is not active")
+		}
+	}
 	return map[string]any{"accessToken": grant.AccessToken, "tokenType": "Bearer", "expiresIn": int(appSessionTTL.Seconds()), "expiresAt": grant.AccessExpiresAt.UnixMilli(), "refreshToken": grant.RefreshToken, "refreshExpiresAt": grant.RefreshExpiresAt.UnixMilli(), "account": map[string]any{"id": account.ID, "email": account.Email, "emailVerified": account.EmailVerified, "name": account.Name, "picture": account.Picture, "provider": account.Provider}, "tenants": tenants, "activeTenantId": activeTenantID}, nil
+}
+
+func projectAllowsNativeAuth(ctx context.Context, db controlStore, project string) (bool, error) {
+	var mode string
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(auth_mode,''),'gonvex-native') FROM gonvex_runtime_projects WHERE id=$1`, project).Scan(&mode); err != nil {
+		return false, err
+	}
+	mode, err := normalizeProjectAuthMode(mode)
+	if err != nil {
+		return false, err
+	}
+	return mode == authModeNative || mode == authModeHybrid, nil
+}
+
+func projectAuthSignupMode(ctx context.Context, db controlStore, project string) (string, error) {
+	var inviteOnly bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM gonvex_auth_providers
+		WHERE project_id=$1 AND enabled=TRUE AND signup_mode='inviteOnly'
+	)`, project).Scan(&inviteOnly); err != nil {
+		return "", err
+	}
+	if inviteOnly {
+		return appAuthSignupInviteOnly, nil
+	}
+	return appAuthSignupPersonal, nil
 }
 
 func controlSetting(ctx context.Context, db controlStore, project, kind, scope string) (any, error) {
@@ -1933,7 +2163,7 @@ func normalizeInvitationProviders(values []string) ([]string, error) {
 	providers := uniqueStrings(values)
 	for _, provider := range providers {
 		switch provider {
-		case "password", "google", "microsoft", "apple":
+		case "password", "google", "microsoft", "apple", "firebase", authModeExternalOIDC:
 		default:
 			return nil, fmt.Errorf("allowedAuthProviders contains unsupported provider %q", provider)
 		}

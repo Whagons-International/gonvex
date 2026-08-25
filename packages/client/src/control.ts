@@ -59,11 +59,12 @@ export const controlFunctionSchemas: Readonly<Record<string, { args: JsonValue; 
   "control.accounts.resetMemberPassword": { args: objectSchema({ memberId:stringSchema,newPassword:stringSchema }), result: updatedSchema },
   "control.accounts.provisionMemberLogin": { args: objectSchema({ email:stringSchema,name:stringSchema,password:stringSchema,role:stringSchema,permissions:anySchema }), result:objectSchema({updated:booleanSchema,accountId:stringSchema,memberId:stringSchema}) },
   "control.auth.passwordLogin": { args: objectSchema({ email:stringSchema,password:stringSchema }), result:sessionSchema },
+  "control.auth.exchangeExternalToken": { args:objectSchema({provider:stringSchema,token:stringSchema,tenantId:optionalStringSchema,previousRefreshToken:optionalStringSchema}),result:sessionSchema },
   "control.auth.refreshSession": { args: objectSchema({ refreshToken:stringSchema }), result:sessionSchema },
   "control.auth.logout": { args: objectSchema({ refreshToken:stringSchema,all:booleanSchema }), result:updatedSchema },
-  "control.auth.publicSettings": { args:emptySchema,result:objectSchema({providers:arraySchema(stringSchema)}) },
-  "control.auth.realms.list": { args:emptySchema,result:arraySchema(objectSchema({provider:stringSchema,enabled:booleanSchema,signupMode:stringSchema,azureTenantId:optionalStringSchema,clientId:optionalStringSchema,hasClientSecret:booleanSchema})) },
-  "control.auth.realms.configure": { args:objectSchema({provider:stringSchema,enabled:booleanSchema,signupMode:stringSchema,azureTenantId:optionalStringSchema,clientId:optionalStringSchema,clientSecret:optionalStringSchema}),result:updatedSchema },
+  "control.auth.publicSettings": { args:emptySchema,result:objectSchema({mode:stringSchema,providers:arraySchema(stringSchema)}) },
+  "control.auth.realms.list": { args:emptySchema,result:arraySchema(objectSchema({provider:stringSchema,enabled:booleanSchema,signupMode:stringSchema,azureTenantId:optionalStringSchema,clientId:optionalStringSchema,hasClientSecret:booleanSchema,authMode:stringSchema,issuer:optionalStringSchema,audience:optionalStringSchema,jwksUrl:optionalStringSchema,firebaseProjectId:optionalStringSchema,firebaseTenantId:optionalStringSchema,hasAdminCredentials:booleanSchema})) },
+  "control.auth.realms.configure": { args:objectSchema({provider:stringSchema,authMode:optionalStringSchema,enabled:booleanSchema,signupMode:stringSchema,azureTenantId:optionalStringSchema,clientId:optionalStringSchema,clientSecret:optionalStringSchema,issuer:optionalStringSchema,audience:optionalStringSchema,jwksUrl:optionalStringSchema,firebaseProjectId:optionalStringSchema,firebaseTenantId:optionalStringSchema,adminCredentials:optionalStringSchema}),result:updatedSchema },
   "control.auth.memberProviders": { args:objectSchema({memberIds:arraySchema(stringSchema)}),result:arraySchema(objectSchema({memberId:stringSchema,providers:arraySchema(stringSchema)})) },
   "control.tenants.mine": { args:emptySchema,result:arraySchema(directoryTenantSchema) },
   "control.tenants.create": { args:objectSchema({name:stringSchema}),result:tenantSchema },
@@ -136,7 +137,13 @@ export type ControlSession = JSONObject & {
   refreshToken: string; refreshExpiresAt: number; account: JSONObject;
   tenants: ControlTenant[]; activeTenantId: string;
 };
-export type ControlAuthRealm = JSONObject & { provider: string; enabled: boolean; signupMode: string; azureTenantId?: string; clientId?: string; hasClientSecret: boolean };
+export type ControlAuthMode = "gonvex-native" | "firebase" | "external-oidc" | "hybrid";
+export type ControlAuthRealm = JSONObject & {
+  provider: string; enabled: boolean; signupMode: string; authMode: ControlAuthMode;
+  azureTenantId?: string; clientId?: string; hasClientSecret: boolean;
+  issuer?: string; audience?: string; jwksUrl?: string; firebaseProjectId?: string;
+  firebaseTenantId?: string; hasAdminCredentials: boolean;
+};
 export type ControlMemberProviders = JSONObject & { memberId: string; providers: string[] };
 export type ControlUpdated = JSONObject & { updated: boolean };
 export type ControlMemberProvisioned = ControlUpdated & { accountId: string; memberId: string };
@@ -175,13 +182,14 @@ export const control = Object.freeze({
     provisionMemberLogin: ref<JSONObject & { email: string; name: string; password: string; role: string; permissions: JSONObject }, ControlMemberProvisioned>("reducer", "control.accounts.provisionMemberLogin", "tenantAdmin"),
   }),
   auth: Object.freeze({
-    publicSettings: ref<JSONObject, JSONObject & { providers: string[] }>("query", "control.auth.publicSettings", "public"),
+    publicSettings: ref<JSONObject, JSONObject & { mode: ControlAuthMode; providers: string[] }>("query", "control.auth.publicSettings", "public"),
     passwordLogin: ref<JSONObject & { email: string; password: string }, ControlSession>("action", "control.auth.passwordLogin", "public"),
+    exchangeExternalToken: ref<JSONObject & { provider: "firebase" | "external-oidc"; token: string; tenantId?: string; previousRefreshToken?: string }, ControlSession>("action", "control.auth.exchangeExternalToken", "public"),
     refreshSession: ref<JSONObject & { refreshToken: string }, ControlSession>("action", "control.auth.refreshSession", "public"),
     logout: ref<JSONObject & { refreshToken: string; all: boolean }, ControlUpdated>("reducer", "control.auth.logout", "account"),
     realms: Object.freeze({
       list: liveRef<JSONObject, ControlAuthRealm[]>("control.auth.realms.list", "projectAdmin"),
-      configure: ref<JSONObject & { provider: string; enabled: boolean; signupMode: string; azureTenantId?: string; clientId?: string; clientSecret?: string }, ControlUpdated>("reducer", "control.auth.realms.configure", "projectAdmin"),
+      configure: ref<JSONObject & { provider: string; authMode?: ControlAuthMode; enabled: boolean; signupMode: string; azureTenantId?: string; clientId?: string; clientSecret?: string; issuer?: string; audience?: string; jwksUrl?: string; firebaseProjectId?: string; firebaseTenantId?: string; adminCredentials?: string }, ControlUpdated>("reducer", "control.auth.realms.configure", "projectAdmin"),
     }),
     memberProviders: ref<JSONObject & { memberIds: string[] }, ControlMemberProviders[]>("query", "control.auth.memberProviders", "tenantAdmin"),
   }),

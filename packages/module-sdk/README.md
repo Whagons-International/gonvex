@@ -122,6 +122,37 @@ export const taskVisibility = visibility({
 });
 ```
 
+A structured set can use one physical table more than once. Every occurrence
+must have a distinct literal alias, and joins name the left alias explicitly:
+
+```ts
+export const locationVisibility = visibility({
+  table: "userLiveLocations",
+  key: "id",
+  sets: {
+    teammates: {
+      table: "memberTeams",
+      alias: "viewerTeams",
+      select: "memberId",
+      selectFrom: "peerTeams",
+      joins: [{
+        table: "memberTeams",
+        alias: "peerTeams",
+        leftAlias: "viewerTeams",
+        leftColumn: "teamId",
+        rightColumn: "teamId",
+      }],
+      where: [{ table: "viewerTeams", column: "memberId", context: "member.id" }],
+    },
+  },
+  where: { operator: "inSet", column: "memberId", set: "teammates" },
+});
+```
+
+The host records `memberTeams` once as a dependency. A change on either alias
+invalidates the same visibility context. An unaliased repeated table fails
+manifest validation.
+
 Executable handlers stay in a host-side registry. The registry dispatches only
 when both the path and function kind match; it never creates database or
 network capabilities itself:

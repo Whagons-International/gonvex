@@ -29,6 +29,7 @@ var SchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS accounts_by_email ON accounts (lower(email)) WHERE email <> ''`,
 	`CREATE TABLE IF NOT EXISTS account_identities (
 		account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+		project_id TEXT NOT NULL DEFAULT '',
 		provider TEXT NOT NULL,
 		issuer TEXT NOT NULL DEFAULT '',
 		subject TEXT NOT NULL,
@@ -38,6 +39,18 @@ var SchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (provider, issuer, subject)
 	)`,
+	`ALTER TABLE account_identities ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT ''`,
+	`UPDATE account_identities identity SET project_id=account.auth_realm_id FROM accounts account WHERE account.id=identity.account_id AND identity.project_id=''`,
+	`DO $$ BEGIN
+		IF EXISTS (
+			SELECT 1 FROM pg_constraint
+			WHERE conrelid='account_identities'::regclass AND conname='account_identities_pkey'
+			AND pg_get_constraintdef(oid) NOT LIKE '%project_id%'
+		) THEN
+			ALTER TABLE account_identities DROP CONSTRAINT account_identities_pkey;
+			ALTER TABLE account_identities ADD PRIMARY KEY(project_id,provider,issuer,subject);
+		END IF;
+	END $$`,
 	`CREATE INDEX IF NOT EXISTS account_identities_by_account ON account_identities (account_id)`,
 	`CREATE INDEX IF NOT EXISTS account_identities_by_verified_email
 		ON account_identities (lower(email)) WHERE verified_email AND email <> ''`,

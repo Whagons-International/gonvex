@@ -478,6 +478,77 @@ describe("GonvexAuthProvider", () => {
     expect(client.query).not.toHaveBeenCalled();
   });
 
+  it("exchanges Firebase tokens, rotates them, and restores Firebase-backed auth after developer mode", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const grants = ["firebase-access-1", "firebase-access-2"].map((accessToken, index) => ({
+      accessToken, expiresAt: now + 900_000, refreshToken: `firebase-refresh-${index + 1}`, refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    client.action.mockResolvedValueOnce(grants[0]).mockResolvedValueOnce(grants[1]);
+    client.reducer.mockImplementation((reference: FunctionReference) => reference.path === "control.developer.enter"
+      ? Promise.resolve({ id: "grant-firebase", token: "developer-secret", expiresAt: new Date(now + 300_000).toISOString() })
+      : Promise.resolve({ updated: true }));
+    let tokenListener: ((identity: { uid: string; issuer?: string } | null) => void) | undefined;
+    const getIdToken = vi.fn(async (force: boolean) => force ? "firebase-id-token-2" : "firebase-id-token-1");
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken,
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+      signOut: vi.fn(async () => undefined),
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-runtime.test" projectId="shop" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
+    await act(async () => { tokenListener?.({ uid: "firebase-uid", issuer: "firebase-project" }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(client.action).toHaveBeenCalledWith(expect.objectContaining({ path: "control.auth.exchangeExternalToken" }), {
+      provider: "firebase", token: "firebase-id-token-1",
+    });
+    expect(auth?.account?.provider).toBe("firebase");
+    expect(localStorage.getItem("gonvex-auth:https%3A%2F%2Ffirebase-runtime.test:shop")).not.toContain("firebase-id-token");
+
+    const installedFetcher = [...client.setAuth.mock.calls].map((call) => call[0] as { fetchToken?: (args: { forceRefreshToken: boolean }) => Promise<string | null> }).find((value) => value.fetchToken)?.fetchToken;
+    expect(installedFetcher).toBeTypeOf("function");
+    await act(async () => { expect(await installedFetcher!({ forceRefreshToken: true })).toBe("firebase-access-2"); });
+    expect(getIdToken).toHaveBeenLastCalledWith(true);
+    expect(client.action).toHaveBeenLastCalledWith(expect.objectContaining({ path: "control.auth.exchangeExternalToken" }), {
+      provider: "firebase", token: "firebase-id-token-2", tenantId: "tenant-1", previousRefreshToken: "firebase-refresh-1",
+    });
+
+    await act(async () => { await auth!.enterDeveloperMode("tenant-1"); });
+    await act(async () => { await auth!.exitDeveloperMode(); });
+    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({ fetchToken: expect.any(Function) }));
+  });
+
+  it("hydrates the canonical Firebase-backed session without persisting or replaying an ID token", async () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-reload.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "canonical-access", expiresAt: Date.now() + 900_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "rotated-firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-reload.test" projectId="shop" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
+    await act(async () => { await Promise.resolve(); });
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({ token: "canonical-access", tenant: "tenant-1", fetchToken: expect.any(Function) }));
+    expect(localStorage.getItem(storageKey)).not.toContain("firebase-id-token");
+    await act(async () => { tokenListener?.(null); await Promise.resolve(); });
+    expect(auth?.isAuthenticated).toBe(false);
+    expect(localStorage.getItem(storageKey)).toBeNull();
+  });
+
   it("owns the developer-mode enter/exit lifecycle without exposing or persisting its token", async () => {
     const client = new FakeGonvexClient();
     const now = Date.now();

@@ -9,8 +9,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/gonvex/gonvex/pkg/manifest"
 )
 
 func runInternal(args []string) error {
@@ -26,8 +29,27 @@ func runInternal(args []string) error {
 	tenantID := flags.String("tenant-id", "", "optional UUIDv6 tenant id")
 	email := flags.String("email", "", "account email to resolve")
 	shard := flags.String("shard", "", "stable E2E shard name")
+	artifactFile := flags.String("file", "", "module artifact JSON file")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
+	}
+	if command == "verify-module-artifact" {
+		if strings.TrimSpace(*artifactFile) == "" {
+			return fmt.Errorf("--file is required")
+		}
+		raw, err := os.ReadFile(*artifactFile)
+		if err != nil {
+			return err
+		}
+		var artifact manifest.ModuleArtifact
+		if err := json.Unmarshal(raw, &artifact); err != nil {
+			return fmt.Errorf("decode module artifact: %w", err)
+		}
+		if err := artifact.Validate(); err != nil {
+			return err
+		}
+		fmt.Println(artifact.Hash)
+		return nil
 	}
 	if strings.TrimSpace(*runtimeURL) == "" || strings.TrimSpace(*project) == "" || strings.TrimSpace(*adminKey) == "" {
 		return fmt.Errorf("--runtime, --project, and --admin-key are required")

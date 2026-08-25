@@ -158,15 +158,33 @@ func validateVisibilityPlan(table string, plan manifest.VisibilityPlan) error {
 		if err := validateVisibilityIdentifier(set.Select); err != nil {
 			return fmt.Errorf("set %q select: %w", name, err)
 		}
-		seenTables := map[string]bool{set.Table: true}
+		baseAlias := strings.TrimSpace(set.Alias)
+		if baseAlias == "" {
+			baseAlias = set.Table
+		} else if err := validateVisibilityIdentifier(baseAlias); err != nil {
+			return fmt.Errorf("set %q alias: %w", name, err)
+		}
+		seenAliases := map[string]bool{baseAlias: true}
+		physicalCounts := map[string]int{set.Table: 1}
 		for _, join := range set.Joins {
 			if err := validateVisibilityIdentifier(join.Table); err != nil {
 				return fmt.Errorf("set %q join table: %w", name, err)
 			}
-			if seenTables[join.Table] {
-				return fmt.Errorf("set %q uses table %q more than once", name, join.Table)
+			alias := strings.TrimSpace(join.Alias)
+			if alias == "" {
+				alias = join.Table
+			} else if err := validateVisibilityIdentifier(alias); err != nil {
+				return fmt.Errorf("set %q join alias: %w", name, err)
 			}
-			seenTables[join.Table] = true
+			physicalCounts[join.Table]++
+			if seenAliases[alias] {
+				return fmt.Errorf("set %q uses logical alias %q more than once", name, alias)
+			}
+			leftAlias := strings.TrimSpace(join.LeftAlias)
+			if leftAlias != "" && !seenAliases[leftAlias] {
+				return fmt.Errorf("set %q join leftAlias %q is not an earlier occurrence", name, leftAlias)
+			}
+			seenAliases[alias] = true
 			if err := validateVisibilityIdentifier(join.LeftColumn); err != nil {
 				return fmt.Errorf("set %q join left column: %w", name, err)
 			}
@@ -174,9 +192,24 @@ func validateVisibilityPlan(table string, plan manifest.VisibilityPlan) error {
 				return fmt.Errorf("set %q join right column: %w", name, err)
 			}
 		}
+		if physicalCounts[set.Table] > 1 && strings.TrimSpace(set.Alias) == "" {
+			return fmt.Errorf("set %q repeats table %q; every occurrence requires an explicit alias", name, set.Table)
+		}
+		for _, join := range set.Joins {
+			if physicalCounts[join.Table] > 1 && strings.TrimSpace(join.Alias) == "" {
+				return fmt.Errorf("set %q repeats table %q; every occurrence requires an explicit alias", name, join.Table)
+			}
+		}
+		selectFrom := strings.TrimSpace(set.SelectFrom)
+		if selectFrom == "" {
+			selectFrom = baseAlias
+		}
+		if !seenAliases[selectFrom] {
+			return fmt.Errorf("set %q selectFrom references unknown alias %q", name, selectFrom)
+		}
 		for _, constraint := range set.Where {
-			if constraint.Table != "" && !seenTables[constraint.Table] {
-				return fmt.Errorf("set %q constraint references table %q outside the set", name, constraint.Table)
+			if constraint.Table != "" && !seenAliases[constraint.Table] {
+				return fmt.Errorf("set %q constraint references alias %q outside the set", name, constraint.Table)
 			}
 			if err := validateVisibilityIdentifier(constraint.Column); err != nil {
 				return fmt.Errorf("set %q constraint column: %w", name, err)
@@ -476,9 +509,17 @@ func compileVisibilitySetUsing(set manifest.VisibilitySet, direct map[string]str
 	if err != nil {
 		return "", err
 	}
-	aliases := map[string]string{set.Table: "v0"}
-	query := `SELECT DISTINCT v0.` + selected + ` FROM ` + baseTable + ` AS v0`
-	previousAlias := "v0"
+	baseLogicalAlias := strings.TrimSpace(set.Alias)
+	if baseLogicalAlias == "" {
+		baseLogicalAlias = set.Table
+	}
+	aliases := map[string]string{baseLogicalAlias: "v0"}
+	selectFrom := strings.TrimSpace(set.SelectFrom)
+	if selectFrom == "" {
+		selectFrom = baseLogicalAlias
+	}
+	from := baseTable + ` AS v0`
+	previousLogicalAlias := baseLogicalAlias
 	for index, join := range set.Joins {
 		table, tableErr := quoteVisibilityIdentifier(join.Table)
 		left, leftErr := quoteVisibilityIdentifier(join.LeftColumn)
@@ -486,11 +527,28 @@ func compileVisibilitySetUsing(set manifest.VisibilitySet, direct map[string]str
 		if tableErr != nil || leftErr != nil || rightErr != nil {
 			return "", fmt.Errorf("invalid join")
 		}
-		alias := "v" + strconv.Itoa(index+1)
-		query += ` JOIN ` + table + ` AS ` + alias + ` ON ` + previousAlias + `.` + left + ` = ` + alias + `.` + right
-		aliases[join.Table] = alias
-		previousAlias = alias
+		sqlAlias := "v" + strconv.Itoa(index+1)
+		logicalAlias := strings.TrimSpace(join.Alias)
+		if logicalAlias == "" {
+			logicalAlias = join.Table
+		}
+		leftLogicalAlias := strings.TrimSpace(join.LeftAlias)
+		if leftLogicalAlias == "" {
+			leftLogicalAlias = previousLogicalAlias
+		}
+		leftSQLAlias := aliases[leftLogicalAlias]
+		if leftSQLAlias == "" {
+			return "", fmt.Errorf("invalid left alias")
+		}
+		from += ` JOIN ` + table + ` AS ` + sqlAlias + ` ON ` + leftSQLAlias + `.` + left + ` = ` + sqlAlias + `.` + right
+		aliases[logicalAlias] = sqlAlias
+		previousLogicalAlias = logicalAlias
 	}
+	selectedAlias := aliases[selectFrom]
+	if selectedAlias == "" {
+		return "", fmt.Errorf("invalid select alias")
+	}
+	query := `SELECT DISTINCT ` + selectedAlias + `.` + selected + ` FROM ` + from
 	predicates := []string{}
 	for _, constraint := range set.Where {
 		alias := "v0"

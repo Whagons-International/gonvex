@@ -46,6 +46,7 @@ export * from "./optimistic.js";
 export * from "./outbox.js";
 export * from "./kv-stores.js";
 export * from "./signals.js";
+export * from "./external-auth.js";
 // Keep the mutable LocalReplica implementation private to GonvexClient. The
 // public package exposes only the read-only view plus storage/value types.
 export {

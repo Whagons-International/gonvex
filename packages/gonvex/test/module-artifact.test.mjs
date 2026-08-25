@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -90,6 +91,31 @@ export const rename = reducer<RenameArgs, RenameResult>({
     migrations: [],
   });
 
+  const artifactFile = join(project.root, "artifact.json");
+  await writeFile(artifactFile, JSON.stringify(artifact));
+  const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+  const verifiedHash = execFileSync("go", ["run", "./cmd/gonvex", "internal", "verify-module-artifact", "--file", artifactFile], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  }).trim();
+  assert.equal(verifiedHash, artifact.hash, "TypeScript CLI and Go runtime must hash the same artifact contract");
+  const tamperedArtifacts = [
+    { ...artifact, entrypoint: "gonvex/tampered.ts" },
+    { ...artifact, files: { ...artifact.files, "gonvex/extra.ts": "export {};" } },
+    { ...artifact, functions: { ...artifact.functions, grid: { ...artifact.functions.grid, handler: "differentHandler" } } },
+    { ...artifact, visibility: { ...artifact.visibility, tasks: { ...artifact.visibility.tasks, key: "anotherId" } } },
+    { ...artifact, crons: [{ name: "tampered", function: "rename", scope: "project", intervalMs: 60_000 }] },
+    { ...artifact, javascript: { ...artifact.javascript, path: "gonvex/_build/another.js" } },
+    { ...artifact, invitationAcceptanceReducer: "rename" },
+  ];
+  for (const tampered of tamperedArtifacts) {
+    await writeFile(artifactFile, JSON.stringify(tampered));
+    assert.throws(() => execFileSync("go", ["run", "./cmd/gonvex", "internal", "verify-module-artifact", "--file", artifactFile], {
+      cwd: repositoryRoot,
+      stdio: "pipe",
+    }), /Command failed/);
+  }
+
   assert.equal(artifact.javascript?.path, "gonvex/_build/module.js");
   const bundled = Buffer.from(artifact.javascript.code, "base64").toString("utf8");
   assert.match(bundled, /-bundled/);
@@ -154,6 +180,48 @@ export const broken = replicaCollection({
     buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }),
     /requires a replica definition/,
   );
+});
+
+test("TypeScript artifacts retain explicit visibility self-join aliases", async (t) => {
+  const project = await moduleProject(t, `
+const visibility = (definition) => definition;
+export const locationVisibility = visibility({
+  table: "userLiveLocations",
+  key: "id",
+  sets: {
+    teammates: {
+      table: "memberTeams",
+      alias: "viewerTeams",
+      select: "memberId",
+      selectFrom: "peerTeams",
+      joins: [{
+        table: "memberTeams",
+        alias: "peerTeams",
+        leftAlias: "viewerTeams",
+        leftColumn: "teamId",
+        rightColumn: "teamId",
+      }],
+      where: [{ table: "viewerTeams", column: "memberId", context: "member.id" }],
+    },
+  },
+  where: { operator: "inSet", column: "memberId", set: "teammates" },
+});
+`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.visibility.userLiveLocations.sets.teammates, {
+    table: "memberTeams",
+    alias: "viewerTeams",
+    select: "memberId",
+    selectFrom: "peerTeams",
+    joins: [{
+      table: "memberTeams",
+      alias: "peerTeams",
+      leftAlias: "viewerTeams",
+      leftColumn: "teamId",
+      rightColumn: "teamId",
+    }],
+    where: [{ table: "viewerTeams", column: "memberId", context: "member.id" }],
+  });
 });
 
 test("TypeScript artifacts reject missing and non-static function schemas", async (t) => {

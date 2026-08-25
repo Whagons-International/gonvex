@@ -31,6 +31,13 @@ Control Plane live Queries resubscribe on reconnect and refresh after an
 authorized Control Plane Reducer. Use `watchControlQuery` instead of refetching
 after a write.
 
+Projects may use Gonvex-native auth, Firebase, external OIDC, or an explicit
+hybrid mode. `createFirebaseAuthAdapter` defines the small client boundary used
+by `@gonvex/react`; it does not import or bundle Firebase. The public
+`control.auth.exchangeExternalToken` Action accepts a Firebase ID token, never
+a Firebase custom token, and returns a canonical Gonvex Account session before
+tenant selection.
+
 `authenticate` installs a new authentication scope and resolves only after the
 runtime accepts it. It exists for provider-owned transitions such as developer
 mode; React applications should use `GonvexAuthProvider`. The runtime rotates

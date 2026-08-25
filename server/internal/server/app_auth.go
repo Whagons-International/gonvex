@@ -635,7 +635,9 @@ func (s *Server) googleRedirectAllowed(ctx context.Context, projectID string, re
 	err = db.QueryRowContext(ctx, `SELECT EXISTS (
 		SELECT 1 FROM gonvex_auth_providers p
 		JOIN gonvex_auth_redirect_uris r ON r.project_id = p.project_id AND r.provider = p.provider
+		JOIN gonvex_runtime_projects project_row ON project_row.id = p.project_id
 		WHERE p.project_id = $1 AND p.provider = $2 AND p.enabled = TRUE AND r.redirect_uri = $3
+		AND COALESCE(NULLIF(project_row.auth_mode, ''), 'gonvex-native') IN ('gonvex-native', 'hybrid')
 	)`, projectID, googleProvider, redirectURI).Scan(&allowed)
 	return allowed, err
 }
@@ -962,13 +964,13 @@ func (s *Server) upsertOIDCAccount(ctx context.Context, projectID, provider, iss
 	}
 	defer tx.Rollback()
 
-	// Resolve the global Account independently of this project. Exact provider
+	// Resolve the Account inside this project's auth realm. Exact provider
 	// identity wins; a single verified-email account may be reused. Ambiguous
 	// email matches intentionally create no silent merge.
 	accountID := ""
 	err = tx.QueryRowContext(ctx, `SELECT identity.account_id FROM account_identities identity
 		JOIN accounts account ON account.id = identity.account_id
-		WHERE identity.provider = $1 AND identity.issuer = $2 AND identity.subject = $3
+		WHERE identity.provider = $1 AND identity.issuer = $2 AND identity.subject = $3 AND identity.project_id = $4
 			AND account.auth_realm_id = $4`, provider, issuer, identity.Subject, projectID).Scan(&accountID)
 	if err != nil && err != sql.ErrNoRows {
 		return appAuthAccount{}, err
@@ -982,7 +984,7 @@ func (s *Server) upsertOIDCAccount(ctx context.Context, projectID, provider, iss
 	if accountID == "" && identity.EmailVerified && strings.TrimSpace(identity.Email) != "" {
 		rows, queryErr := tx.QueryContext(ctx, `SELECT DISTINCT identity.account_id FROM account_identities identity
 			JOIN accounts account ON account.id = identity.account_id
-			WHERE identity.verified_email AND lower(identity.email) = lower($1)
+			WHERE identity.project_id = $2 AND identity.verified_email AND lower(identity.email) = lower($1)
 				AND account.auth_realm_id = $2
 			ORDER BY identity.account_id LIMIT 2`, identity.Email, projectID)
 		if queryErr != nil {
@@ -1022,11 +1024,11 @@ func (s *Server) upsertOIDCAccount(ctx context.Context, projectID, provider, iss
 		return appAuthAccount{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `INSERT INTO account_identities (
-		account_id, provider, issuer, subject, email, verified_email, updated_at
-	) VALUES ($1, $2, $3, $4, $5, $6, now())
-	ON CONFLICT (provider, issuer, subject) DO UPDATE SET
+		project_id, account_id, provider, issuer, subject, email, verified_email, updated_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+	ON CONFLICT (project_id, provider, issuer, subject) DO UPDATE SET
 		email = EXCLUDED.email, verified_email = EXCLUDED.verified_email, updated_at = now()
-	RETURNING account_id`, accountID, provider, issuer, identity.Subject, identity.Email, identity.EmailVerified).Scan(&accountID); err != nil {
+	RETURNING account_id`, projectID, accountID, provider, issuer, identity.Subject, identity.Email, identity.EmailVerified).Scan(&accountID); err != nil {
 		return appAuthAccount{}, err
 	}
 

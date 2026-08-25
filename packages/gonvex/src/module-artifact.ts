@@ -313,12 +313,16 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
   for (const name of Object.keys(rawSets).sort()) {
     const candidate = rawSets[name];
     const setTable = stringMember(candidate, "table");
+    const alias = stringMember(candidate, "alias");
     const select = stringMember(candidate, "select");
+    const selectFrom = stringMember(candidate, "selectFrom");
     const rawJoins = readMember(candidate, "joins");
     const rawWhere = readMember(candidate, "where");
     if (!setTable || !select || !Array.isArray(rawJoins) || !Array.isArray(rawWhere)) return undefined;
     const joins = rawJoins.map((join) => ({
       table: stringMember(join, "table") ?? "",
+      ...(stringMember(join, "alias") ? { alias: stringMember(join, "alias")! } : {}),
+      ...(stringMember(join, "leftAlias") ? { leftAlias: stringMember(join, "leftAlias")! } : {}),
       leftColumn: stringMember(join, "leftColumn") ?? "",
       rightColumn: stringMember(join, "rightColumn") ?? "",
     }));
@@ -331,7 +335,14 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
       constraints.some((constraint) => !constraint.table || !constraint.column || !["account.id", "member.id", "tenant.id"].includes(constraint.context))) {
       return undefined;
     }
-    sets[name] = { table: setTable, select, joins, where: constraints };
+    sets[name] = {
+      table: setTable,
+      ...(alias ? { alias } : {}),
+      select,
+      ...(selectFrom ? { selectFrom } : {}),
+      joins,
+      where: constraints,
+    };
   }
   if (!visibilityExpressionSetsExist(where, sets)) return undefined;
   return { table, key, sets, where };

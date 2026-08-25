@@ -3,8 +3,14 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -241,9 +247,94 @@ func TestRealmConfigurationEncryptsMicrosoftSecretAndNeverReturnsIt(t *testing.T
 	}
 }
 
+func TestFirebaseRealmConfigurationEncryptsAdminCredentialsAndDisablesNativePasswords(t *testing.T) {
+	runtime, db, project := controlPlaneTestRuntime(t)
+	runtime.config.DashboardSecret = "firebase-realm-test-encryption-key"
+	connection := &wsConn{server: runtime, project: project, user: &gonvex.Account{ID: "acct-owner", Email: "owner@example.test"}}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretBytes, _ := json.Marshal(map[string]any{
+		"type": "service_account", "project_id": "whagons-prod", "client_email": "firebase-admin@whagons-prod.iam.gserviceaccount.com",
+		"private_key": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKey})),
+		"token_uri":   "https://oauth2.googleapis.com/token",
+	})
+	secret := string(secretBytes)
+	configurationBytes, _ := json.Marshal(map[string]any{
+		"provider": "firebase", "authMode": "firebase", "enabled": true, "signupMode": "inviteOnly",
+		"firebaseProjectId": "whagons-prod", "firebaseTenantId": "tenant-one", "adminCredentials": secret,
+	})
+	configuration := json.RawMessage(configurationBytes)
+	if _, err := runtime.executeControlCall(context.Background(), connection, "reducer", "control.auth.realms.configure", configuration, "configure-firebase"); err != nil {
+		t.Fatal(err)
+	}
+	var encrypted []byte
+	if err := db.QueryRow(`SELECT admin_credentials_encrypted FROM gonvex_auth_providers WHERE project_id=$1 AND provider='firebase'`, project).Scan(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(encrypted, []byte(secret)) || len(encrypted) <= len(secret) {
+		t.Fatal("Firebase Admin credentials were not encrypted at rest")
+	}
+	result, err := runtime.executeControlQuery(context.Background(), connection, "control.auth.realms.list", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(result)
+	if bytes.Contains(raw, []byte("firebase-admin@whagons-prod")) || bytes.Contains(raw, []byte("PRIVATE KEY")) || bytes.Contains(raw, encrypted) {
+		t.Fatalf("realm response exposed Firebase Admin credentials: %s", raw)
+	}
+	if !bytes.Contains(raw, []byte(`"hasAdminCredentials":true`)) {
+		t.Fatalf("realm response omitted hasAdminCredentials: %s", raw)
+	}
+	if _, err := runtime.executeControlCall(context.Background(), &wsConn{server: runtime, project: project}, "action", "control.auth.passwordLogin", json.RawMessage(`{"email":"owner@example.test","password":"password"}`), "firebase-password-login"); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("Firebase-only project accepted native password login: %v", err)
+	}
+}
+
+func TestProjectKeyCanBootstrapFirebaseWithoutExposingSecrets(t *testing.T) {
+	runtime, db, project := controlPlaneTestRuntime(t)
+	runtime.config.ProjectKeys = map[string]string{project: "project-firebase-key"}
+	payload := `{"authMode":"firebase","enabled":true,"signupMode":"inviteOnly","firebaseProjectId":"whagons-prod"}`
+	request := httptest.NewRequest(http.MethodPut, "/dev/projects/"+project+"/auth/providers/firebase", strings.NewReader(payload))
+	request.Header.Set("x-gonvex-key", "project-firebase-key")
+	recorder := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("configure Firebase: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var mode, issuer, audience, jwksURL string
+	if err := db.QueryRow(`SELECT project.auth_mode,provider.issuer,provider.audience,provider.jwks_url
+		FROM gonvex_runtime_projects project JOIN gonvex_auth_providers provider
+		ON provider.project_id=project.id AND provider.provider='firebase' WHERE project.id=$1`, project).Scan(&mode, &issuer, &audience, &jwksURL); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "firebase" || issuer != "https://securetoken.google.com/whagons-prod" || audience != "whagons-prod" || !strings.HasPrefix(jwksURL, "https://") {
+		t.Fatalf("unexpected Firebase bootstrap config: mode=%q issuer=%q audience=%q jwks=%q", mode, issuer, audience, jwksURL)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/dev/projects/"+project+"/auth/providers/firebase", nil)
+	request.Header.Set("authorization", "Bearer project-firebase-key")
+	recorder = httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || bytes.Contains(recorder.Body.Bytes(), []byte("adminCredentials")) {
+		t.Fatalf("Firebase status leaked a secret field: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPut, "/dev/projects/"+project+"/auth/providers/firebase", strings.NewReader(payload))
+	request.Header.Set("x-gonvex-key", "another-project-key")
+	recorder = httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong project key configured Firebase: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestInvitationProviderPolicyRejectsUnsupportedProviders(t *testing.T) {
-	providers, err := normalizeInvitationProviders([]string{"google", "microsoft", "google"})
-	if err != nil || !reflect.DeepEqual(providers, []string{"google", "microsoft"}) {
+	providers, err := normalizeInvitationProviders([]string{"firebase", "microsoft", "firebase"})
+	if err != nil || !reflect.DeepEqual(providers, []string{"firebase", "microsoft"}) {
 		t.Fatalf("normalized providers=%v err=%v", providers, err)
 	}
 	if _, err := normalizeInvitationProviders([]string{"google", "browser-supplied-provider"}); err == nil {
@@ -297,8 +388,13 @@ func TestControlPlanePublicAuthSettingsExposeOnlyPublicFields(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if len(fields) != 1 || fields["providers"] == nil {
+	if len(fields) != 2 || fields["mode"] != authModeNative || fields["providers"] == nil {
 		t.Fatalf("public auth settings leaked non-public fields: %s", raw)
+	}
+	for _, privateField := range []string{"clientId", "clientSecret", "issuer", "audience", "jwksUrl", "firebaseProjectId", "firebaseTenantId", "adminCredentials"} {
+		if _, exists := fields[privateField]; exists {
+			t.Fatalf("public auth settings exposed %q: %s", privateField, raw)
+		}
 	}
 }
 
@@ -634,7 +730,7 @@ func TestInvitationAcceptanceResumesOnlyTheSameCommandAndRejectsReplay(t *testin
 		VALUES($1,$2,'invited@example.test','member','{}','acct-owner',now()+interval '1 hour','invite-one',$3)`, project, tenantID, sha256Hex(token)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controlDB.Exec(`UPDATE gonvex_auth_membership_invitations SET allowed_auth_providers='["microsoft"]' WHERE id='invite-one'`); err != nil {
+	if _, err := controlDB.Exec(`UPDATE gonvex_auth_membership_invitations SET allowed_auth_providers='["firebase"]' WHERE id='invite-one'`); err != nil {
 		t.Fatal(err)
 	}
 	runtime.hydrateProjects()
@@ -643,7 +739,7 @@ func TestInvitationAcceptanceResumesOnlyTheSameCommandAndRejectsReplay(t *testin
 	if _, err := runtime.acceptControlInvitation(context.Background(), controlDB, connection, args, "accept-command"); err == nil || !strings.Contains(err.Error(), "linked authentication provider") {
 		t.Fatalf("provider policy was not enforced: %v", err)
 	}
-	if _, err := controlDB.Exec(`INSERT INTO account_identities(account_id,provider,issuer,subject,email,verified_email) VALUES('acct-invited','microsoft','issuer','subject','invited@example.test',TRUE)`); err != nil {
+	if _, err := controlDB.Exec(`INSERT INTO account_identities(project_id,account_id,provider,issuer,subject,email,verified_email) VALUES($1,'acct-invited','firebase','https://securetoken.google.com/whagons-prod','firebase-uid-invited','invited@example.test',TRUE)`, project); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := controlDB.Exec(`UPDATE gonvex_auth_membership_invitations SET handoff_state='claimed',accepted_account_id='acct-invited',accepted_idempotency_key='first-command' WHERE id='invite-one'`); err != nil {

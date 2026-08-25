@@ -214,6 +214,58 @@ func TestVisibilityDependenciesIncludeSetsJoinsAndIdentityAuthority(t *testing.T
 	}
 }
 
+func TestVisibilitySelfJoinUsesExplicitAliasesAndOnePhysicalDependency(t *testing.T) {
+	set := manifest.VisibilitySet{
+		Table: "memberTeams", Alias: "viewerTeams", Select: "memberId", SelectFrom: "peerTeams",
+		Joins: []manifest.VisibilityJoin{{
+			Table: "memberTeams", Alias: "peerTeams", LeftAlias: "viewerTeams",
+			LeftColumn: "teamId", RightColumn: "teamId",
+		}},
+		Where: []manifest.VisibilityConstraint{{Table: "viewerTeams", Column: "memberId", Context: "member.id"}},
+	}
+	plan := manifest.VisibilityPlan{
+		Table: "userLiveLocations", Key: "id", Sets: map[string]manifest.VisibilitySet{"teammates": set},
+		Where: &manifest.VisibilityExpression{Operator: "inSet", Column: "memberId", Set: "teammates"},
+	}
+	if err := validateVisibilityPlan("userLiveLocations", plan); err != nil {
+		t.Fatal(err)
+	}
+	query, args, err := compileVisibilitySet(set, map[string]string{"member.id": "member-viewer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		`SELECT DISTINCT v1."memberId"`, `FROM "memberTeams" AS v0`,
+		`JOIN "memberTeams" AS v1 ON v0."teamId" = v1."teamId"`, `v0."memberId" = $1`,
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("self-join SQL %q is missing %q", query, fragment)
+		}
+	}
+	if len(args) != 1 || args[0] != "member-viewer" {
+		t.Fatalf("self-join arguments = %#v", args)
+	}
+	dependencies := visibilityPlanDependencies(plan)
+	count := 0
+	for _, dependency := range dependencies {
+		if dependency == "memberTeams" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("physical self-join dependency must occur once: %#v", dependencies)
+	}
+
+	ambiguous := set
+	ambiguous.Alias = ""
+	ambiguous.Joins[0].LeftAlias = ""
+	if err := validateVisibilityPlan("userLiveLocations", manifest.VisibilityPlan{
+		Table: plan.Table, Key: plan.Key, Sets: map[string]manifest.VisibilitySet{"teammates": ambiguous}, Where: plan.Where,
+	}); err == nil || !strings.Contains(err.Error(), "alias") {
+		t.Fatalf("ambiguous duplicate table error = %v", err)
+	}
+}
+
 func TestVisibilityInvalidationIsScopedAndDependencyAware(t *testing.T) {
 	server := New(config.Config{})
 	t.Cleanup(server.Close)
@@ -295,6 +347,16 @@ func TestVisibilitySQLAndFingerprintFollowLatestCommittedMembership(t *testing.T
 			workspace_id TEXT NOT NULL,
 			title TEXT NOT NULL
 		);
+		CREATE TABLE member_teams (
+			id TEXT PRIMARY KEY,
+			member_id TEXT NOT NULL,
+			team_id TEXT NOT NULL
+		);
+		CREATE TABLE user_live_locations (
+			id TEXT PRIMARY KEY,
+			member_id TEXT NOT NULL,
+			latitude DOUBLE PRECISION NOT NULL
+		);
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -339,9 +401,17 @@ func TestVisibilitySQLAndFingerprintFollowLatestCommittedMembership(t *testing.T
 
 	if _, err := db.Exec(`
 		INSERT INTO members (id, account_id, status, role, permissions)
-		VALUES ('member-a', 'account-a', 'active', 'member', '{}');
+		VALUES
+			('member-a', 'account-a', 'active', 'member', '{}'),
+			('member-peer', 'account-peer', 'active', 'member', '{}');
 		INSERT INTO workspace_members (id, member_id, workspace_id)
 		VALUES ('membership-a', 'member-a', 'workspace-a');
+		INSERT INTO member_teams (id, member_id, team_id) VALUES
+			('team-viewer', 'member-a', 'team-one'),
+			('team-peer', 'member-peer', 'team-one');
+		INSERT INTO user_live_locations (id, member_id, latitude) VALUES
+			('location-viewer', 'member-a', 1),
+			('location-peer', 'member-peer', 2);
 		INSERT INTO tasks (id, workspace_id, title) VALUES
 			('task-a', 'workspace-a', 'Visible A'),
 			('task-b', 'workspace-b', 'Visible B');
@@ -351,6 +421,38 @@ func TestVisibilitySQLAndFingerprintFollowLatestCommittedMembership(t *testing.T
 	caller := callerContext{user: &gonvex.Account{ID: "account-a"}}
 	assertVisibleTaskIDs(t, mustStructuredReplicaRows(t, server, project, tenant, caller, replicaDefinition), "task-a")
 	assertVisibleTaskIDs(t, mustStructuredLiveRows(t, server, project, tenant, caller, livePlan), "task-a")
+
+	selfJoinPlan := manifest.VisibilityPlan{
+		Table: "user_live_locations", Key: "id",
+		Sets: map[string]manifest.VisibilitySet{
+			"teammates": {
+				Table: "member_teams", Alias: "viewerTeams", Select: "member_id", SelectFrom: "peerTeams",
+				Joins: []manifest.VisibilityJoin{{
+					Table: "member_teams", Alias: "peerTeams", LeftAlias: "viewerTeams",
+					LeftColumn: "team_id", RightColumn: "team_id",
+				}},
+				Where: []manifest.VisibilityConstraint{{Table: "viewerTeams", Column: "member_id", Context: "member.id"}},
+			},
+		},
+		Where: &manifest.VisibilityExpression{Operator: "inSet", Column: "member_id", Set: "teammates"},
+	}
+	resolved, err := loadVisibilityContextFrom(context.Background(), db, project, tenant, caller, selfJoinPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !visibilityRawRowMatches(json.RawMessage(`{"id":"location-peer","member_id":"member-peer"}`), selfJoinPlan, resolved) {
+		t.Fatal("self-join visibility did not include a teammate")
+	}
+	if _, err := db.Exec(`DELETE FROM member_teams WHERE id='team-peer'`); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err = loadVisibilityContextFrom(context.Background(), db, project, tenant, caller, selfJoinPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if visibilityRawRowMatches(json.RawMessage(`{"id":"location-peer","member_id":"member-peer"}`), selfJoinPlan, resolved) {
+		t.Fatal("self-join visibility retained a teammate after membership deletion")
+	}
 	countPlan := livePlan
 	countPlan.ResultPath = []string{"rows"}
 	countPlan.Window = &manifest.LiveWindow{OffsetArgument: "offset", LimitArgument: "limit", DefaultLimit: 100, MaxLimit: 100, Count: "exact"}

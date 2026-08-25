@@ -177,14 +177,18 @@ type VisibilityPlan struct {
 }
 
 type VisibilitySet struct {
-	Table  string                 `json:"table"`
-	Select string                 `json:"select"`
-	Joins  []VisibilityJoin       `json:"joins"`
-	Where  []VisibilityConstraint `json:"where"`
+	Table      string                 `json:"table"`
+	Alias      string                 `json:"alias,omitempty"`
+	Select     string                 `json:"select"`
+	SelectFrom string                 `json:"selectFrom,omitempty"`
+	Joins      []VisibilityJoin       `json:"joins"`
+	Where      []VisibilityConstraint `json:"where"`
 }
 
 type VisibilityJoin struct {
 	Table       string `json:"table"`
+	Alias       string `json:"alias,omitempty"`
+	LeftAlias   string `json:"leftAlias,omitempty"`
 	LeftColumn  string `json:"leftColumn"`
 	RightColumn string `json:"rightColumn"`
 }

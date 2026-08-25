@@ -402,13 +402,21 @@ export type VisibilityPlan = {
 
 export type VisibilitySet = {
   readonly table: string;
+  /** Logical SQL name. Required when the same physical table occurs twice. */
+  readonly alias?: string;
   readonly select: string;
+  /** Logical alias that owns `select`; defaults to the base occurrence. */
+  readonly selectFrom?: string;
   readonly joins: readonly VisibilityJoin[];
   readonly where: readonly VisibilityConstraint[];
 };
 
 export type VisibilityJoin = {
   readonly table: string;
+  /** Logical SQL name. Required when the same physical table occurs twice. */
+  readonly alias?: string;
+  /** Logical occurrence joined on the left; defaults to the previous occurrence. */
+  readonly leftAlias?: string;
   readonly leftColumn: string;
   readonly rightColumn: string;
 };
@@ -782,22 +790,48 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
   for (const [name, candidate] of Object.entries(value.sets)) {
     requireVisibilityString(name, `${path}.sets key`);
     const setPath = `${path}.sets.${name}`;
-    validateExactObject(candidate, setPath, ["table", "select", "joins", "where"]);
+    validateExactObject(candidate, setPath, ["table", "alias", "select", "selectFrom", "joins", "where"]);
     requireVisibilityString(candidate.table, `${setPath}.table`);
+    if (candidate.alias !== undefined) requireVisibilityString(candidate.alias, `${setPath}.alias`);
     requireVisibilityString(candidate.select, `${setPath}.select`);
+    if (candidate.selectFrom !== undefined) requireVisibilityString(candidate.selectFrom, `${setPath}.selectFrom`);
     if (!Array.isArray(candidate.joins)) throw new Error(`${setPath}.joins must be an array`);
-    candidate.joins.forEach((join, index) => {
+    const joins = candidate.joins as unknown as VisibilityJoin[];
+    joins.forEach((join, index) => {
       const joinPath = `${setPath}.joins[${index}]`;
-      validateExactObject(join, joinPath, ["table", "leftColumn", "rightColumn"]);
+      validateExactObject(join, joinPath, ["table", "alias", "leftAlias", "leftColumn", "rightColumn"]);
       requireVisibilityString(join.table, `${joinPath}.table`);
+      if (join.alias !== undefined) requireVisibilityString(join.alias, `${joinPath}.alias`);
+      if (join.leftAlias !== undefined) requireVisibilityString(join.leftAlias, `${joinPath}.leftAlias`);
       requireVisibilityString(join.leftColumn, `${joinPath}.leftColumn`);
       requireVisibilityString(join.rightColumn, `${joinPath}.rightColumn`);
     });
+    const occurrences = [
+      { table: candidate.table as string, alias: (candidate.alias as string | undefined) ?? candidate.table as string, explicit: candidate.alias !== undefined },
+      ...joins.map((join) => ({ table: join.table, alias: join.alias ?? join.table, explicit: join.alias !== undefined })),
+    ];
+    const aliases = new Set<string>();
+    const tableCounts = new Map<string, number>();
+    for (const occurrence of occurrences) tableCounts.set(occurrence.table, (tableCounts.get(occurrence.table) ?? 0) + 1);
+    occurrences.forEach((occurrence, index) => {
+      if ((tableCounts.get(occurrence.table) ?? 0) > 1 && !occurrence.explicit) {
+        throw new Error(`${setPath} repeats table ${occurrence.table}; every occurrence requires an explicit alias`);
+      }
+      if (aliases.has(occurrence.alias)) throw new Error(`${setPath} repeats logical alias ${occurrence.alias}`);
+      if (index > 0) {
+        const leftAlias = joins[index - 1]!.leftAlias;
+        if (leftAlias !== undefined && !aliases.has(leftAlias)) throw new Error(`${setPath}.joins[${index - 1}].leftAlias must reference an earlier occurrence`);
+      }
+      aliases.add(occurrence.alias);
+    });
+    const selectFrom = (candidate.selectFrom as string | undefined) ?? occurrences[0]!.alias;
+    if (!aliases.has(selectFrom)) throw new Error(`${setPath}.selectFrom references unknown alias ${selectFrom}`);
     if (!Array.isArray(candidate.where)) throw new Error(`${setPath}.where must be an array`);
     candidate.where.forEach((constraint, index) => {
       const constraintPath = `${setPath}.where[${index}]`;
       validateExactObject(constraint, constraintPath, ["table", "column", "context"]);
       requireVisibilityString(constraint.table, `${constraintPath}.table`);
+      if (!aliases.has(constraint.table as string)) throw new Error(`${constraintPath}.table references unknown alias ${constraint.table}`);
       requireVisibilityString(constraint.column, `${constraintPath}.column`);
       validateVisibilityContext(constraint.context, `${constraintPath}.context`);
     });
