@@ -378,7 +378,7 @@ project only after the tenant transaction commits.
 
 ## Package release
 
-The compatible unpublished version is `0.4.0` for:
+The compatible published version is `0.4.0` for:
 
 ```text
 @gonvex/protocol
@@ -390,9 +390,8 @@ The compatible unpublished version is `0.4.0` for:
 create-gonvex
 ```
 
-The packed manifests contain exact `0.4.0` Gonvex dependencies and no
-`workspace:*` entries. Do not publish until Gabriel approves. Publish in this
-order:
+The npm registry manifests contain exact `0.4.0` Gonvex dependencies and no
+`workspace:*` entries. The packages were published in this order:
 
 ```bash
 pnpm --dir packages/protocol publish --access public --no-git-checks
@@ -452,5 +451,4 @@ isolated sandbox. This work does not claim that the full runtime has moved to
 Rust. Control Plane calls terminate in the trusted Go host and never expose
 Control Plane credentials to Rust/V8 tenant modules.
 
-The packages are not published. That is the only repository-external release
-step left after this branch is merged.
+All seven packages are published under npm's `latest` tag at `0.4.0`.
