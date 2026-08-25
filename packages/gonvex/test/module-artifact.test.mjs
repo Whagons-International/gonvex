@@ -69,7 +69,12 @@ export const grid = liveQuery<GridArgs, GridRow[]>({
 export const oneShot = query<GridArgs, GridRow[]>({
   args: schema.object({ workspaceId: schema.string() }),
   result: schema.array(schema.object({ id: schema.id("tasks") })),
-  liveQueryPlan: { table: "tasks", key: "id", columns: ["id", "workspaceId"] },
+  liveQueryPlan: {
+    table: "tasks",
+    key: "id",
+    columns: ["id", "workspaceId", "deletedAt"],
+    where: { operator: "eq", column: "deletedAt", value: { literal: null } },
+  },
   run: async () => [],
 });
 
@@ -128,6 +133,7 @@ export const rename = reducer<RenameArgs, RenameResult>({
   assert.equal(functions.grid.dependencies.liveQueryPlan.table, "tasks");
   assert.equal(functions.oneShot.delivery, "oneShot");
   assert.equal(functions.oneShot.dependencies.liveQueryPlan.table, "tasks");
+  assert.deepEqual(functions.oneShot.dependencies.liveQueryPlan.where.value, { literal: null });
   assert.deepEqual(artifact.visibility.tasks, {
     table: "tasks",
     key: "id",

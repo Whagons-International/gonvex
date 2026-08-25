@@ -120,8 +120,46 @@ type LiveExpression struct {
 }
 
 type LiveValue struct {
-	Argument string `json:"argument,omitempty"`
-	Literal  any    `json:"literal,omitempty"`
+	Argument       string `json:"-"`
+	Literal        any    `json:"-"`
+	literalPresent bool
+}
+
+// MarshalJSON preserves an explicitly declared null literal. A plain
+// `json:"literal,omitempty"` tag cannot distinguish {"literal":null} from an
+// absent literal field, but that distinction is part of the signed TypeScript
+// module artifact contract.
+func (value LiveValue) MarshalJSON() ([]byte, error) {
+	fields := map[string]any{}
+	if value.Argument != "" {
+		fields["argument"] = value.Argument
+	}
+	if value.literalPresent || value.Literal != nil {
+		fields["literal"] = value.Literal
+	}
+	return json.Marshal(fields)
+}
+
+// UnmarshalJSON records whether literal appeared even when its value was
+// null, so decoding and re-encoding an uploaded artifact is lossless.
+func (value *LiveValue) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*value = LiveValue{}
+	if raw, exists := fields["argument"]; exists {
+		if err := json.Unmarshal(raw, &value.Argument); err != nil {
+			return err
+		}
+	}
+	if raw, exists := fields["literal"]; exists {
+		value.literalPresent = true
+		if err := json.Unmarshal(raw, &value.Literal); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type LiveSearch struct {

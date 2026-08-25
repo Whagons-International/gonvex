@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -106,5 +107,31 @@ func TestModuleArtifactHashCoversSourcesAndFunctionContract(t *testing.T) {
 		if err := artifact.Validate(); err == nil || !strings.Contains(err.Error(), "canonical contract hash") {
 			t.Fatalf("tampered artifact error = %v", err)
 		}
+	}
+}
+
+func TestLiveValueJSONPreservesExplicitNullLiteral(t *testing.T) {
+	var literal LiveValue
+	if err := json.Unmarshal([]byte(`{"literal":null}`), &literal); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(literal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"literal":null}` {
+		t.Fatalf("explicit null literal encoded as %s", raw)
+	}
+
+	var argument LiveValue
+	if err := json.Unmarshal([]byte(`{"argument":"workspaceId"}`), &argument); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(argument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"argument":"workspaceId"}` {
+		t.Fatalf("argument value encoded as %s", raw)
 	}
 }

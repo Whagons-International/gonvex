@@ -1,6 +1,6 @@
 # Whagons Control Plane v2 handoff
 
-This is the migration contract for `@gonvex/*` version `0.4.0`. Whagons should
+This is the migration contract for `@gonvex/*` version `0.4.1`. Whagons should
 use one `GonvexClient` for Control Plane calls, tenant calls, live Control Plane
 queries, and the Local Replica stream. OAuth callbacks and public customer APIs
 remain HTTP because their protocols require HTTP.
@@ -378,7 +378,7 @@ project only after the tenant transaction commits.
 
 ## Package release
 
-The compatible published version is `0.4.0` for:
+The compatible release version is `0.4.1` for:
 
 ```text
 @gonvex/protocol
@@ -390,8 +390,8 @@ The compatible published version is `0.4.0` for:
 create-gonvex
 ```
 
-The npm registry manifests contain exact `0.4.0` Gonvex dependencies and no
-`workspace:*` entries. The packages were published in this order:
+The npm registry manifests must contain exact `0.4.1` Gonvex dependencies and
+no `workspace:*` entries. Publish the packages in this order:
 
 ```bash
 pnpm --dir packages/protocol publish --access public --no-git-checks
@@ -433,7 +433,7 @@ dashboard server tests. Rust passed 14 unit and integration tests. The four
 deployment and release scripts passed 19 tests.
 
 Each of the seven npm packages passed `pnpm pack --dry-run`. Inspection of the
-packed `package.json` files confirmed version `0.4.0`, exact `0.4.0` Gonvex
+packed `package.json` files confirmed version `0.4.1`, exact `0.4.1` Gonvex
 dependencies, and no `workspace:*` entry. The client tarball contains the
 external-auth adapter declarations and JavaScript implementation.
 
@@ -441,7 +441,7 @@ external-auth adapter declarations and JavaScript implementation.
 
 Gonvex no longer needs a second browser transport or state store for these
 flows. Whagons can remove its internal browser HTTP calls after it replaces the
-call sites, declares the invitation Reducer, and consumes version `0.4.0`.
+call sites, declares the invitation Reducer, and consumes version `0.4.1`.
 OAuth callbacks and external customer REST remain HTTP.
 
 The runtime is still a Go server plus Rust/V8 module and sandbox workers. Go
@@ -451,4 +451,6 @@ isolated sandbox. This work does not claim that the full runtime has moved to
 Rust. Control Plane calls terminate in the trusted Go host and never expose
 Control Plane credentials to Rust/V8 tenant modules.
 
-All seven packages are published under npm's `latest` tag at `0.4.0`.
+Version `0.4.1` also fixes canonical artifact hashing for explicit null query
+values such as `{ literal: null }`. The TypeScript CLI and Go runtime now sign
+the same contract without rewriting the query.
