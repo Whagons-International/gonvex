@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gonvex_postgres::{
     token_hash, ControlPlane, DatabaseError, MigrationScope, PoolLimits, PoolRegistry,
-    SqlMigration, TenantRoute,
+    SqlMigration, TenantRoute, TransactionAttribution,
 };
 use sqlx::{postgres::PgPoolOptions, Row};
 
@@ -128,7 +128,7 @@ async fn tenant_database_is_the_final_membership_authority() {
     .unwrap();
     tenant_b.close().await;
 
-    let (_, member) = control
+    let (_, member, _) = control
         .admit_member("project", "tenant-a", "account-1")
         .await
         .expect("active membership grants tenant A");
@@ -214,14 +214,15 @@ async fn tenant_database_is_the_final_membership_authority() {
         .unwrap();
     attributed.set_command_id("agent-command").await.unwrap();
     attributed
-        .set_invocation_provenance(
-            "root-agent-command",
-            "agent",
-            Some("account-1"),
-            Some("member-a"),
-            Some("member-a"),
-            Some("agent_execution_1"),
-        )
+        .set_invocation_provenance(TransactionAttribution {
+            root_command_id: "root-agent-command",
+            root_channel: "ui",
+            channel: "agent",
+            actor_account_id: Some("account-1"),
+            actor_member_id: Some("member-a"),
+            on_behalf_of_member_id: Some("member-a"),
+            agent_execution_id: Some("agent_execution_1"),
+        })
         .await
         .unwrap();
     sqlx::query("INSERT INTO tasks VALUES ('task-agent', 'Agent change')")
@@ -237,6 +238,7 @@ async fn tenant_database_is_the_final_membership_authority() {
         .unwrap();
     let metadata = sqlx::query(
         r#"SELECT transaction.root_command_id,transaction.origin_command_id,
+                  transaction.root_invocation_channel,
                   transaction.invocation_channel,transaction.actor_account_id,
                   transaction.actor_member_id,transaction.on_behalf_of_member_id,
                   transaction.agent_execution_id
@@ -256,6 +258,7 @@ async fn tenant_database_is_the_final_membership_authority() {
         "agent-command"
     );
     assert_eq!(metadata.get::<String, _>("invocation_channel"), "agent");
+    assert_eq!(metadata.get::<String, _>("root_invocation_channel"), "ui");
     assert_eq!(metadata.get::<String, _>("actor_account_id"), "account-1");
     assert_eq!(metadata.get::<String, _>("actor_member_id"), "member-a");
     assert_eq!(
@@ -276,14 +279,15 @@ async fn tenant_database_is_the_final_membership_authority() {
         .await
         .unwrap();
     rolled_back
-        .set_invocation_provenance(
-            "rollback-root",
-            "agent",
-            Some("account-1"),
-            Some("member-a"),
-            Some("member-a"),
-            Some("agent_execution_rollback"),
-        )
+        .set_invocation_provenance(TransactionAttribution {
+            root_command_id: "rollback-root",
+            root_channel: "ui",
+            channel: "agent",
+            actor_account_id: Some("account-1"),
+            actor_member_id: Some("member-a"),
+            on_behalf_of_member_id: Some("member-a"),
+            agent_execution_id: Some("agent_execution_rollback"),
+        })
         .await
         .unwrap();
     sqlx::query("INSERT INTO tasks VALUES ('task-rollback', 'Must roll back')")

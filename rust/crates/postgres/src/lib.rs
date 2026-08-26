@@ -103,6 +103,18 @@ pub struct PoolRegistry {
     pools: Arc<RwLock<BTreeMap<String, PgPool>>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolRegistrySnapshot {
+    pub pools: usize,
+    pub open_connections: u32,
+    pub in_use: u32,
+    pub idle: usize,
+    pub max_open_connections: u32,
+    pub admission_limit: usize,
+    pub admission_active: usize,
+}
+
 impl PoolRegistry {
     pub fn new(limits: PoolLimits) -> Self {
         let limits = limits.bounded();
@@ -141,6 +153,26 @@ impl PoolRegistry {
         .await
         .map_err(|_| DatabaseError::AdmissionTimeout)?
         .map_err(|_| DatabaseError::AdmissionTimeout)
+    }
+
+    pub async fn snapshot(&self) -> PoolRegistrySnapshot {
+        let pools = self.pools.read().await;
+        let open_connections = pools.values().map(PgPool::size).sum::<u32>();
+        let idle = pools.values().map(PgPool::num_idle).sum::<usize>();
+        PoolRegistrySnapshot {
+            pools: pools.len(),
+            open_connections,
+            in_use: open_connections.saturating_sub(u32::try_from(idle).unwrap_or(u32::MAX)),
+            idle,
+            max_open_connections: u32::try_from(pools.len())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(self.limits.max_connections_per_database),
+            admission_limit: self.limits.max_total_connections,
+            admission_active: self
+                .limits
+                .max_total_connections
+                .saturating_sub(self.admission.available_permits()),
+        }
     }
 
     pub async fn close(&self) {
@@ -228,6 +260,8 @@ pub struct TenantSession {
     pub identity: SessionIdentity,
     pub route: TenantRoute,
     pub member: Member,
+    /// Durable tenant change-feed revision covered by the admission snapshot.
+    pub admission_revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -407,13 +441,14 @@ impl ControlPlane {
             self.first_admitted_tenant(&identity.project_id, &identity.account.id)
                 .await?
         };
-        let (route, member) = self
+        let (route, member, admission_revision) = self
             .admit_member(&identity.project_id, &tenant_id, &identity.account.id)
             .await?;
         Ok(TenantSession {
             identity,
             route,
             member,
+            admission_revision,
         })
     }
 
@@ -487,7 +522,7 @@ impl ControlPlane {
         .ok_or(DatabaseError::InvalidSession)?;
         transaction.commit().await?;
         drop(_admission);
-        let (route, member) = self
+        let (route, member, admission_revision) = self
             .admit_member(&project_id, &tenant_id, &account_id)
             .await?;
         Ok(ImpersonationSession {
@@ -505,6 +540,7 @@ impl ControlPlane {
                 },
                 route,
                 member,
+                admission_revision,
             },
             grant_id,
             actor_account_id,
@@ -586,7 +622,7 @@ impl ControlPlane {
             avatar_url: row.get("avatar_url"),
             provider: row.get("provider"),
         };
-        let (route, member) = self
+        let (route, member, admission_revision) = self
             .admit_member(project_id, tenant_id, &account.id)
             .await?;
         Ok(TenantSession {
@@ -596,6 +632,7 @@ impl ControlPlane {
             },
             route,
             member,
+            admission_revision,
         })
     }
 
@@ -809,11 +846,15 @@ impl ControlPlane {
         project_id: &str,
         tenant_id: &str,
         account_id: &str,
-    ) -> Result<(TenantRoute, Member), DatabaseError> {
+    ) -> Result<(TenantRoute, Member, u64), DatabaseError> {
         let account_id = required(account_id, DatabaseError::MissingAccount)?;
         let route = self.resolve_tenant(project_id, tenant_id).await?;
         let tenant_pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit().await?;
+        let mut transaction = tenant_pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
         let row = sqlx::query(
             r#"SELECT id, account_id, status, display_name, avatar_url, role,
                       permissions, membership_revision
@@ -821,10 +862,19 @@ impl ControlPlane {
                WHERE account_id = $1 AND status = 'active'"#,
         )
         .bind(account_id)
-        .fetch_optional(&tenant_pool)
+        .fetch_optional(&mut *transaction)
         .await?
         .ok_or_else(|| DatabaseError::MemberNotFound(account_id.to_owned()))?;
-        Ok((route, member_from_row(row)))
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton=true")
+                .fetch_one(&mut *transaction)
+                .await?;
+        transaction.commit().await?;
+        Ok((
+            route,
+            member_from_row(row),
+            u64::try_from(revision).unwrap_or_default(),
+        ))
     }
 
     pub async fn begin_tenant_transaction(
@@ -1009,6 +1059,17 @@ impl ControlPlane {
     }
 }
 
+/// Host-owned attribution installed on one Reducer transaction before commit.
+pub struct TransactionAttribution<'a> {
+    pub root_command_id: &'a str,
+    pub root_channel: &'a str,
+    pub channel: &'a str,
+    pub actor_account_id: Option<&'a str>,
+    pub actor_member_id: Option<&'a str>,
+    pub on_behalf_of_member_id: Option<&'a str>,
+    pub agent_execution_id: Option<&'a str>,
+}
+
 /// One invocation-scoped tenant transaction. The admission permit is held for
 /// the transaction lifetime so a burst of module calls cannot bypass the
 /// runtime-wide database limit.
@@ -1037,28 +1098,25 @@ impl TenantTransaction {
 
     pub async fn set_invocation_provenance(
         &mut self,
-        root_command_id: &str,
-        channel: &str,
-        actor_account_id: Option<&str>,
-        actor_member_id: Option<&str>,
-        on_behalf_of_member_id: Option<&str>,
-        agent_execution_id: Option<&str>,
+        attribution: TransactionAttribution<'_>,
     ) -> Result<(), DatabaseError> {
         sqlx::query(
             r#"SELECT
                  set_config('gonvex.root_command_id',$1,true),
-                 set_config('gonvex.invocation_channel',$2,true),
-                 set_config('gonvex.actor_account_id',$3,true),
-                 set_config('gonvex.actor_member_id',$4,true),
-                 set_config('gonvex.on_behalf_of_member_id',$5,true),
-                 set_config('gonvex.agent_execution_id',$6,true)"#,
+                 set_config('gonvex.root_invocation_channel',$2,true),
+                 set_config('gonvex.invocation_channel',$3,true),
+                 set_config('gonvex.actor_account_id',$4,true),
+                 set_config('gonvex.actor_member_id',$5,true),
+                 set_config('gonvex.on_behalf_of_member_id',$6,true),
+                 set_config('gonvex.agent_execution_id',$7,true)"#,
         )
-        .bind(root_command_id)
-        .bind(channel)
-        .bind(actor_account_id.unwrap_or_default())
-        .bind(actor_member_id.unwrap_or_default())
-        .bind(on_behalf_of_member_id.unwrap_or_default())
-        .bind(agent_execution_id.unwrap_or_default())
+        .bind(attribution.root_command_id)
+        .bind(attribution.root_channel)
+        .bind(attribution.channel)
+        .bind(attribution.actor_account_id.unwrap_or_default())
+        .bind(attribution.actor_member_id.unwrap_or_default())
+        .bind(attribution.on_behalf_of_member_id.unwrap_or_default())
+        .bind(attribution.agent_execution_id.unwrap_or_default())
         .execute(&mut *self.transaction)
         .await?;
         Ok(())

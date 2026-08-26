@@ -16,7 +16,7 @@ jobs:
   test:
     name: CI
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16-alpine
@@ -42,6 +42,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy,rustfmt
       - name: Enable pinned pnpm
         run: corepack enable && corepack prepare pnpm@11.1.2 --activate
       - name: Install workspace
@@ -50,6 +53,12 @@ jobs:
         run: node --test scripts/*.test.mjs
       - name: Test Go runtime
         run: go test -count=1 -p 1 ./...
+        env:
+          GOMAXPROCS: "2"
+      - name: Vet Go compatibility and migration tooling
+        run: go vet ./...
+      - name: Race-test Go compatibility and migration tooling
+        run: go test -race -count=1 -p 1 ./...
         env:
           GOMAXPROCS: "2"
       - name: Test PostgreSQL scheduler durability and rolling migration
@@ -62,3 +71,16 @@ jobs:
         run: pnpm -r test
       - name: Type-check JavaScript workspace
         run: pnpm typecheck
+      - name: Verify publishable npm tarballs
+        run: pnpm verify:package-tarballs
+      - name: Check Rust formatting
+        working-directory: rust
+        run: cargo fmt --all -- --check
+      - name: Test Rust runtime with PostgreSQL
+        working-directory: rust
+        run: cargo test --locked --workspace --all-targets -- --test-threads=1
+        env:
+          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+      - name: Lint Rust runtime
+        working-directory: rust
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings

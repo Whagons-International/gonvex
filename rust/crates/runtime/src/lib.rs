@@ -8,10 +8,12 @@ pub mod external_auth;
 pub mod host_calls;
 pub mod live_query;
 pub mod membership_projector;
+mod metrics;
 pub mod module_host;
 pub mod modules;
 mod native_auth;
 mod operations;
+mod operator_data;
 pub mod replica;
 pub mod sandbox;
 pub mod scheduler;
@@ -63,6 +65,7 @@ struct RuntimeInner {
     storage: storage::StorageManager,
     live_query_cache: live_query::SharedLiveQueryCache,
     membership_projector: membership_projector::MembershipProjector,
+    metrics: metrics::RuntimeMetrics,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +127,49 @@ struct RuntimeManifestHealth {
 }
 
 impl Runtime {
+    async fn provision_runtime_tenant(
+        &self,
+        project_id: &str,
+        tenant_id: Option<&str>,
+        name: &str,
+    ) -> Result<serde_json::Value, String> {
+        let base_url = self
+            .inner
+            .config
+            .default_database_url
+            .as_deref()
+            .ok_or_else(|| "DATABASE_URL is not configured".to_owned())?;
+        let control = self
+            .inner
+            .control_plane
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| "Control Plane is unavailable".to_owned())?;
+        let module = self
+            .inner
+            .modules
+            .project(project_id)
+            .await
+            .ok_or_else(|| {
+                "install the TypeScript module before creating the first tenant shard".to_owned()
+            })?;
+        let (route, tenant) = control
+            .create_runtime_tenant(base_url, project_id, tenant_id, name)
+            .await
+            .map_err(|error| error.to_string())?;
+        control
+            .clone()
+            .provision_tenant_database(route, module.migrations.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        control
+            .mark_runtime_tenant_provisioned(project_id, tenant["id"].as_str().unwrap_or_default())
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(tenant)
+    }
+
     pub fn new(config: Config) -> Self {
         let module_host = ModuleHost::new(config.module_host.clone());
         let pools = PoolRegistry::new(PoolLimits {
@@ -151,6 +197,7 @@ impl Runtime {
                 storage,
                 live_query_cache: live_query::SharedLiveQueryCache::default(),
                 membership_projector: membership_projector::MembershipProjector::default(),
+                metrics: metrics::RuntimeMetrics::default(),
             }),
         }
     }
@@ -249,6 +296,7 @@ impl Runtime {
             .route("/ws", get(websocket_upgrade))
             .merge(native_auth::router())
             .merge(operations::router())
+            .merge(operator_data::router())
             .route(
                 "/storage/{*key}",
                 get(storage_download)
@@ -597,37 +645,9 @@ async fn create_tenant_shard(
     {
         return response;
     }
-    let Some(base_url) = runtime.inner.config.default_database_url.as_deref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"DATABASE_URL is not configured"})),
-        )
-            .into_response();
-    };
-    let Some(control) = runtime.inner.control_plane.read().await.clone() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"Control Plane is unavailable"})),
-        )
-            .into_response();
-    };
-    let Some(module) = runtime.inner.modules.project(project_id).await else {
-        return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"install the TypeScript module before creating the first tenant shard"}))).into_response();
-    };
-    let result = async {
-        let (route, tenant) = control
-            .create_runtime_tenant(base_url, project_id, tenant_id, name)
-            .await?;
-        control
-            .clone()
-            .provision_tenant_database(route, module.migrations.clone())
-            .await?;
-        control
-            .mark_runtime_tenant_provisioned(project_id, tenant["id"].as_str().unwrap_or_default())
-            .await?;
-        Ok::<_, gonvex_postgres::DatabaseError>(tenant)
-    }
-    .await;
+    let result = runtime
+        .provision_runtime_tenant(project_id, tenant_id, name)
+        .await;
     match result {
         Ok(tenant) => (StatusCode::CREATED, Json(tenant)).into_response(),
         Err(error) => (
@@ -1045,7 +1065,8 @@ async fn health(State(runtime): State<Runtime>) -> Response {
             ok: ready,
             version: runtime.inner.config.runtime_version.clone(),
             time: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
-            postgres_set: runtime.inner.config.default_database_url.is_some(),
+            postgres_set: runtime.inner.config.control_plane_database_url.is_some()
+                || runtime.inner.config.default_database_url.is_some(),
             valkey_set: false,
             rows_cache: false,
             runtime_manifests: RuntimeManifestHealth {
@@ -1078,6 +1099,7 @@ async fn websocket_upgrade(
 async fn websocket(mut socket: WebSocket, runtime: Runtime) {
     let mut tenant_session: Option<TenantSession> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
+    let _connection_presence = runtime.inner.metrics.register(&connection_id);
     let mut control_connection = control::ControlConnection {
         connection_id: connection_id.clone(),
         ..control::ControlConnection::default()
@@ -1122,6 +1144,15 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
                     };
+                    runtime.inner.metrics.authenticated(
+                        &connection_id,
+                        &control_connection,
+                        None,
+                    );
+                    runtime
+                        .inner
+                        .metrics
+                        .subscriptions(&connection_id, std::iter::empty::<&str>());
                     let response = ServerMessage::AuthError {
                         id: "session-expired".to_owned(),
                         error: "authentication expired or was revoked".to_owned(),
@@ -1145,6 +1176,18 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                 control_queries.clear();
                                 tenant_session = None;
                                 feed = None;
+                                runtime.inner.metrics.authenticated(
+                                    &connection_id,
+                                    &control::ControlConnection {
+                                        connection_id: connection_id.clone(),
+                                        ..control::ControlConnection::default()
+                                    },
+                                    None,
+                                );
+                                runtime
+                                    .inner
+                                    .metrics
+                                    .subscriptions(&connection_id, std::iter::empty::<&str>());
                                 let response = ServerMessage::AuthError {
                                     id: "membership-changed".to_owned(),
                                     error: "tenant membership changed; authenticate again".to_owned(),
@@ -1258,6 +1301,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     project,
                     tenant,
                     control_only,
+                    device,
                     ..
                 }) => {
                     let (response, authenticated_control) = authenticate(
@@ -1280,6 +1324,15 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     }
                     tenant_session = authenticated_control.tenant.clone();
                     control_connection = authenticated_control;
+                    runtime.inner.metrics.authenticated(
+                        &connection_id,
+                        &control_connection,
+                        device.as_ref(),
+                    );
+                    runtime
+                        .inner
+                        .metrics
+                        .subscriptions(&connection_id, std::iter::empty::<&str>());
                     if send_json(&mut socket, &response).await.is_err() {
                         break;
                     }
@@ -1290,6 +1343,10 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     args,
                     scope,
                 }) => {
+                    runtime
+                        .inner
+                        .metrics
+                        .activity(&connection_id, "Query", Some(&path));
                     let response = if scope == Some(ExecutionScope::Control) {
                         match runtime
                             .execute_control_query(&control_connection, &path, &args)
@@ -1330,6 +1387,11 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     scope,
                     ..
                 }) => {
+                    runtime.inner.metrics.activity(
+                        &connection_id,
+                        "Live Query subscribed",
+                        Some(&path),
+                    );
                     let (response, subscription) = if scope == Some(ExecutionScope::Control) {
                         match runtime
                             .open_control_query(&control_connection, id.clone(), path.clone(), args)
@@ -1376,6 +1438,13 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     if let Some(subscription) = subscription {
                         live_queries.insert(subscription.id.clone(), subscription);
                     }
+                    record_connection_subscriptions(
+                        &runtime,
+                        &connection_id,
+                        &replicas,
+                        &live_queries,
+                        &control_queries,
+                    );
                     if send_json(&mut socket, &response).await.is_err() {
                         break;
                     }
@@ -1455,12 +1524,30 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             return;
                         }
                     }
+                    record_connection_subscriptions(
+                        &runtime,
+                        &connection_id,
+                        &replicas,
+                        &live_queries,
+                        &control_queries,
+                    );
                 }
                 Ok(ClientMessage::QueryUnsubscribe { id }) => {
                     live_queries.remove(&id);
                     control_queries.remove(&id);
+                    record_connection_subscriptions(
+                        &runtime,
+                        &connection_id,
+                        &replicas,
+                        &live_queries,
+                        &control_queries,
+                    );
                 }
                 Ok(ClientMessage::ReducerCall(call)) => {
+                    runtime
+                        .inner
+                        .metrics
+                        .activity(&connection_id, "Reducer", Some(&call.path));
                     let control_write = call.scope == Some(ExecutionScope::Control);
                     let response =
                         call_reducer(&runtime, tenant_session.as_ref(), &control_connection, call)
@@ -1486,6 +1573,10 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         continue;
                     }
                     for call in calls {
+                        runtime
+                            .inner
+                            .metrics
+                            .activity(&connection_id, "Reducer", Some(&call.path));
                         let control_write = call.scope == Some(ExecutionScope::Control);
                         let response = call_reducer(
                             &runtime,
@@ -1511,6 +1602,10 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     trace,
                     idempotency_key,
                 }) => {
+                    runtime
+                        .inner
+                        .metrics
+                        .activity(&connection_id, "Action", Some(&path));
                     let response = if scope == Some(ExecutionScope::Control) {
                         match runtime
                             .execute_control_action(
@@ -1568,6 +1663,11 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     }
                 }
                 Ok(ClientMessage::ReplicaOpen(request)) => {
+                    runtime.inner.metrics.activity(
+                        &connection_id,
+                        "Replica Collection opened",
+                        Some(&request.path),
+                    );
                     let messages = if let Some(session) = tenant_session.as_ref() {
                         match runtime.open_replica(session, request.clone()).await {
                             Ok(opened) => {
@@ -1594,6 +1694,13 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             return;
                         }
                     }
+                    record_connection_subscriptions(
+                        &runtime,
+                        &connection_id,
+                        &replicas,
+                        &live_queries,
+                        &control_queries,
+                    );
                 }
                 Ok(ClientMessage::ReplicaOpenMany { opens }) => {
                     if opens.len() > 256 {
@@ -1608,6 +1715,11 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         continue;
                     }
                     for request in opens {
+                        runtime.inner.metrics.activity(
+                            &connection_id,
+                            "Replica Collection opened",
+                            Some(&request.path),
+                        );
                         let messages = if let Some(session) = tenant_session.as_ref() {
                             match runtime.open_replica(session, request.clone()).await {
                                 Ok(opened) => {
@@ -1635,9 +1747,23 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             }
                         }
                     }
+                    record_connection_subscriptions(
+                        &runtime,
+                        &connection_id,
+                        &replicas,
+                        &live_queries,
+                        &control_queries,
+                    );
                 }
                 Ok(ClientMessage::ReplicaClose { id }) => {
                     replicas.remove(&id);
+                    record_connection_subscriptions(
+                        &runtime,
+                        &connection_id,
+                        &replicas,
+                        &live_queries,
+                        &control_queries,
+                    );
                 }
                 Ok(ClientMessage::ErrorRegister {
                     id,
@@ -1841,9 +1967,15 @@ async fn next_feed_event(
 }
 
 fn membership_affects(session: &TenantSession, event: &change_feed::FeedEvent) -> bool {
-    let change_feed::FeedEvent::Transaction { changes, .. } = event else {
+    let change_feed::FeedEvent::Transaction {
+        revision, changes, ..
+    } = event
+    else {
         return false;
     };
+    if *revision <= session.admission_revision {
+        return false;
+    }
     changes
         .iter()
         .filter(|change| change.table == "members")
@@ -2172,6 +2304,31 @@ async fn call_reducer(
     }
 }
 
+fn record_connection_subscriptions(
+    runtime: &Runtime,
+    connection_id: &str,
+    replicas: &BTreeMap<String, replica::ReplicaSubscription>,
+    live_queries: &BTreeMap<String, live_query::LiveQuerySubscription>,
+    control_queries: &BTreeMap<String, control::ControlSubscription>,
+) {
+    runtime.inner.metrics.subscriptions(
+        connection_id,
+        replicas
+            .values()
+            .map(|subscription| subscription.path.as_str())
+            .chain(
+                live_queries
+                    .values()
+                    .map(|subscription| subscription.path.as_str()),
+            )
+            .chain(
+                control_queries
+                    .values()
+                    .map(|subscription| subscription.path.as_str()),
+            ),
+    );
+}
+
 async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
     let encoded = serde_json::to_string(message).map_err(|_| ())?;
     socket
@@ -2248,6 +2405,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_reports_the_canonical_control_plane_database_before_startup() {
+        let mut canonical = config(false);
+        canonical.control_plane_database_url = canonical.default_database_url.take();
+        let runtime = Runtime::new(canonical);
+        let response = runtime
+            .router()
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["postgresSet"], true);
+    }
+
+    #[tokio::test]
     async fn required_module_host_fails_closed() {
         let runtime = Runtime::new(config(true));
         assert!(runtime.start().await.is_err());
@@ -2257,5 +2431,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn membership_replay_before_the_admission_snapshot_does_not_revoke_a_new_socket() {
+        let session = TenantSession {
+            identity: gonvex_postgres::SessionIdentity {
+                project_id: "project".to_owned(),
+                account: gonvex_postgres::Account {
+                    id: "account".to_owned(),
+                    email: "account@example.test".to_owned(),
+                    email_verified: true,
+                    name: "Account".to_owned(),
+                    avatar_url: String::new(),
+                    provider: "firebase".to_owned(),
+                },
+            },
+            route: gonvex_postgres::TenantRoute {
+                project_id: "project".to_owned(),
+                tenant_id: "tenant".to_owned(),
+                database_url: "postgres://tenant".to_owned(),
+            },
+            member: gonvex_postgres::Member {
+                id: "member".to_owned(),
+                account_id: "account".to_owned(),
+                status: "active".to_owned(),
+                display_name: "Account".to_owned(),
+                avatar_url: String::new(),
+                role: "member".to_owned(),
+                permissions: serde_json::json!({}),
+                membership_revision: 1,
+            },
+            admission_revision: 5,
+        };
+        let event = |revision| change_feed::FeedEvent::Transaction {
+            database_epoch: "epoch".to_owned(),
+            revision,
+            changes: vec![change_feed::LogChange {
+                revision,
+                ordinal: 0,
+                origin_command_id: "command".to_owned(),
+                table: "members".to_owned(),
+                row_id: "member".to_owned(),
+                operation: "UPDATE".to_owned(),
+                changed_columns: vec!["status".to_owned()],
+                old_value: serde_json::json!({"id":"member","account_id":"account","status":"active"}),
+                new_value: serde_json::json!({"id":"member","account_id":"account","status":"revoked"}),
+                provenance: change_feed::TransactionProvenance::default(),
+            }],
+        };
+
+        assert!(!membership_affects(&session, &event(5)));
+        assert!(membership_affects(&session, &event(6)));
     }
 }

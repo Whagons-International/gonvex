@@ -413,6 +413,7 @@ impl Runtime {
                     origin_command_id,
                     provenance: changes.first().map(|change| PublicInvocationProvenance {
                         root_command_id: change.provenance.root_command_id.clone(),
+                        root_channel: Some(change.provenance.root_channel.clone()),
                         channel: change.provenance.channel.clone(),
                         actor_account_id: change.provenance.actor_account_id.clone(),
                         actor_member_id: change.provenance.actor_member_id.clone(),

@@ -45,6 +45,7 @@ pub fn router() -> Router<Runtime> {
         .route("/dev/manifest", get(manifest))
         .route("/dev/metrics", get(metrics))
         .route("/dev/metrics/stream", get(metrics_stream))
+        .route("/dev/logs/stream", get(log_stream))
         .route("/dev/logs", delete(clear_logs))
         .route("/dev/cache", delete(clear_cache))
         .route("/dev/storage/files", get(storage_files))
@@ -87,8 +88,14 @@ pub fn router() -> Router<Runtime> {
             patch(update_project_auth_account).delete(delete_project_auth_account),
         )
         .route(
+            "/dev/projects/{project}/auth/memberships",
+            get(project_auth_memberships)
+                .put(put_project_auth_membership)
+                .delete(delete_project_auth_membership),
+        )
+        .route(
             "/dev/projects/{project}/auth/tenants",
-            get(project_auth_tenants),
+            get(project_auth_tenants).post(create_project_auth_tenant),
         )
         .route("/dev/errors/status", get(error_status))
         .route("/dev/errors/groups", get(error_groups))
@@ -694,6 +701,339 @@ async fn project_auth_tenants(
 }
 
 #[derive(Deserialize)]
+struct ProjectAuthTenantRequest {
+    name: String,
+    #[serde(default, rename = "ownerEmail")]
+    owner_email: String,
+}
+
+async fn create_project_auth_tenant(
+    State(runtime): State<Runtime>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ProjectAuthTenantRequest>,
+) -> Response {
+    if let Err(response) =
+        authorize_project_resource(&runtime, &headers, &project, "projects:update", true).await
+    {
+        return response;
+    }
+    let name = request.name.trim();
+    if name.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "tenant name is required");
+    }
+    let tenant = match runtime.provision_runtime_tenant(&project, None, name).await {
+        Ok(tenant) => tenant,
+        Err(cause) => return error(StatusCode::UNPROCESSABLE_ENTITY, cause),
+    };
+    let tenant_id = tenant.get("id").and_then(Value::as_str).unwrap_or_default();
+    if !request.owner_email.trim().is_empty() {
+        if let Err(cause) = store_operator_membership_invitation(
+            &runtime,
+            &project,
+            tenant_id,
+            &request.owner_email,
+            "owner",
+            json!({}),
+        )
+        .await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error":cause,"tenant":tenant})),
+            )
+                .into_response();
+        }
+    }
+    runtime.notify_control_changed(&project);
+    (StatusCode::CREATED, Json(json!({"tenant":tenant}))).into_response()
+}
+
+#[derive(Default, Deserialize)]
+struct MembershipQuery {
+    #[serde(default)]
+    tenant: String,
+    #[serde(default)]
+    member: String,
+    #[serde(default)]
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct MembershipRequest {
+    email: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    permissions: Value,
+}
+
+async fn project_auth_memberships(
+    State(runtime): State<Runtime>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<MembershipQuery>,
+) -> Response {
+    if let Err(response) =
+        authorize_project_resource(&runtime, &headers, &project, "projects:read", false).await
+    {
+        return response;
+    }
+    let tenant = query.tenant.trim();
+    if tenant.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "tenant is required");
+    }
+    let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project auth store is unavailable",
+        );
+    };
+    let route = match control.resolve_tenant(&project, tenant).await {
+        Ok(route) => route,
+        Err(cause) => return error(StatusCode::NOT_FOUND, cause.to_string()),
+    };
+    let pool = match runtime.inner.pools.pool(&route.database_url).await {
+        Ok(pool) => pool,
+        Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
+    };
+    let member_rows = {
+        let _admission = match runtime.inner.pools.admit().await {
+            Ok(admission) => admission,
+            Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
+        };
+        match sqlx::query(
+            "SELECT id,account_id,display_name,role,permissions FROM members WHERE status='active' ORDER BY lower(display_name),id",
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
+        }
+    };
+    let Ok(mut transaction) = control.begin_control_transaction(true).await else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project auth store is unavailable",
+        );
+    };
+    let mut members = Vec::new();
+    for row in member_rows {
+        let account_id = row.get::<String, _>("account_id");
+        let account =
+            sqlx::query("SELECT email,name FROM accounts WHERE auth_realm_id=$1 AND id=$2")
+                .bind(&project)
+                .bind(&account_id)
+                .fetch_optional(&mut **transaction.transaction())
+                .await
+                .ok()
+                .flatten();
+        members.push(json!({
+            "memberId":row.get::<String,_>("id"),
+            "email":account.as_ref().map(|account|account.get::<String,_>("email")).unwrap_or_default(),
+            "name":account.as_ref().map(|account|account.get::<String,_>("name")).filter(|value|!value.is_empty()).unwrap_or_else(||row.get::<String,_>("display_name")),
+            "role":row.get::<String,_>("role"),
+            "permissions":row.get::<SqlJson<Value>,_>("permissions").0,
+        }));
+    }
+    let invitation_rows = match sqlx::query(
+        r#"SELECT email,role,permissions,expires_at FROM gonvex_auth_membership_invitations
+           WHERE project_id=$1 AND tenant_id=$2 AND expires_at>now()
+             AND revoked_at IS NULL AND accepted_at IS NULL ORDER BY lower(email)"#,
+    )
+    .bind(&project)
+    .bind(tenant)
+    .fetch_all(&mut **transaction.transaction())
+    .await
+    {
+        Ok(rows) => rows,
+        Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
+    };
+    let invitations = invitation_rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "email":row.get::<String,_>("email"),
+                "role":row.get::<String,_>("role"),
+                "permissions":row.get::<SqlJson<Value>,_>("permissions").0,
+                "expiresAt":row.get::<DateTime<Utc>,_>("expires_at"),
+            })
+        })
+        .collect::<Vec<_>>();
+    if transaction.commit().await.is_err() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project auth store is unavailable",
+        );
+    }
+    Json(json!({"members":members,"invitations":invitations})).into_response()
+}
+
+async fn put_project_auth_membership(
+    State(runtime): State<Runtime>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<MembershipQuery>,
+    Json(request): Json<MembershipRequest>,
+) -> Response {
+    if let Err(response) =
+        authorize_project_resource(&runtime, &headers, &project, "projects:update", true).await
+    {
+        return response;
+    }
+    let tenant = query.tenant.trim();
+    if tenant.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "tenant is required");
+    }
+    let role = match request.role.trim() {
+        "" => "member",
+        "owner" => "owner",
+        "admin" => "admin",
+        "member" => "member",
+        _ => return error(StatusCode::BAD_REQUEST, "invalid member role"),
+    };
+    let permissions = if request.permissions.is_null() {
+        json!({})
+    } else if request.permissions.is_object() {
+        request.permissions
+    } else {
+        return error(StatusCode::BAD_REQUEST, "permissions must be an object");
+    };
+    match store_operator_membership_invitation(
+        &runtime,
+        &project,
+        tenant,
+        &request.email,
+        role,
+        permissions,
+    )
+    .await
+    {
+        Ok(()) => {
+            runtime.notify_control_changed(&project);
+            Json(json!({"ok":true})).into_response()
+        }
+        Err(cause) => error(StatusCode::BAD_REQUEST, cause),
+    }
+}
+
+async fn store_operator_membership_invitation(
+    runtime: &Runtime,
+    project: &str,
+    tenant: &str,
+    email: &str,
+    role: &str,
+    permissions: Value,
+) -> Result<(), String> {
+    let email = normalize_email(email);
+    if email.is_empty() {
+        return Err("email is required".to_owned());
+    }
+    let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+        return Err("project auth store is unavailable".to_owned());
+    };
+    control
+        .tenant_directory_entry(project, tenant)
+        .await
+        .map_err(|error| error.to_string())?;
+    let id = format!("invite_{}", uuid::Uuid::new_v4());
+    let token = format!("invite_{}", random_secret());
+    let mut transaction = control
+        .begin_control_transaction(false)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query(
+        r#"INSERT INTO gonvex_auth_membership_invitations
+           (project_id,tenant_id,email,role,permissions,invited_by,expires_at,id,token_hash,
+            revoked_at,accepted_at,accepted_account_id,accepted_idempotency_key,handoff_state,
+            handoff_command_id,completed_at,updated_at)
+           VALUES($1,$2,$3,$4,$5,'project-admin',now()+interval '7 days',$6,$7,
+                  NULL,NULL,NULL,NULL,'pending','',NULL,now())
+           ON CONFLICT(project_id,tenant_id,email) DO UPDATE SET role=EXCLUDED.role,
+             permissions=EXCLUDED.permissions,invited_by=EXCLUDED.invited_by,
+             expires_at=EXCLUDED.expires_at,id=EXCLUDED.id,token_hash=EXCLUDED.token_hash,
+             revoked_at=NULL,accepted_at=NULL,accepted_account_id=NULL,
+             accepted_idempotency_key=NULL,handoff_state='pending',handoff_command_id='',
+             completed_at=NULL,updated_at=now()"#,
+    )
+    .bind(project)
+    .bind(tenant)
+    .bind(email)
+    .bind(role)
+    .bind(SqlJson(permissions))
+    .bind(id)
+    .bind(sha256_hex(token.as_bytes()))
+    .execute(&mut **transaction.transaction())
+    .await
+    .map_err(|error| error.to_string())?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn delete_project_auth_membership(
+    State(runtime): State<Runtime>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<MembershipQuery>,
+) -> Response {
+    if let Err(response) =
+        authorize_project_resource(&runtime, &headers, &project, "projects:update", true).await
+    {
+        return response;
+    }
+    let tenant = query.tenant.trim();
+    if tenant.is_empty() || (query.member.trim().is_empty() && query.email.trim().is_empty()) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "tenant and member or invitation email are required",
+        );
+    }
+    let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project auth store is unavailable",
+        );
+    };
+    if !query.member.trim().is_empty() {
+        let route = match control.resolve_tenant(&project, tenant).await {
+            Ok(route) => route,
+            Err(cause) => return error(StatusCode::NOT_FOUND, cause.to_string()),
+        };
+        let pool = match runtime.inner.pools.pool(&route.database_url).await {
+            Ok(pool) => pool,
+            Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
+        };
+        let _admission = match runtime.inner.pools.admit().await {
+            Ok(admission) => admission,
+            Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
+        };
+        match sqlx::query("UPDATE members SET status='revoked',membership_revision=membership_revision+1,updated_at=now() WHERE id=$1")
+            .bind(query.member.trim()).execute(&pool).await {
+            Ok(result) if result.rows_affected() > 0 => {}
+            Ok(_) => return error(StatusCode::BAD_REQUEST, "member was not found"),
+            Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
+        }
+    } else {
+        let Ok(mut transaction) = control.begin_control_transaction(false).await else {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "project auth store is unavailable",
+            );
+        };
+        let result = sqlx::query("UPDATE gonvex_auth_membership_invitations SET revoked_at=now(),updated_at=now() WHERE project_id=$1 AND tenant_id=$2 AND lower(email)=lower($3) AND accepted_at IS NULL")
+            .bind(&project).bind(tenant).bind(query.email.trim()).execute(&mut **transaction.transaction()).await;
+        if result.is_err() || transaction.commit().await.is_err() {
+            return error(StatusCode::BAD_REQUEST, "invitation could not be removed");
+        }
+    }
+    runtime.notify_control_changed(&project);
+    Json(json!({"ok":true})).into_response()
+}
+
+#[derive(Deserialize)]
 struct ProjectQuery {
     #[serde(default)]
     project: String,
@@ -1121,8 +1461,81 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
             _ => {}
         }
     }
+    let crons = sqlx::query(
+        r#"SELECT cron_name,tenant_id,function_path,min(run_at) AS next_run,count(*)::bigint AS runs
+           FROM gonvex_scheduled_jobs
+           WHERE project_id=$1 AND cron_name<>'' AND status='pending'
+           GROUP BY cron_name,tenant_id,function_path
+           ORDER BY cron_name,tenant_id,function_path"#,
+    )
+    .bind(project)
+    .fetch_all(&mut **transaction.transaction())
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| {
+        json!({
+            "name":row.get::<String,_>("cron_name"),
+            "project":project,
+            "tenant":row.get::<String,_>("tenant_id"),
+            "function":row.get::<String,_>("function_path"),
+            "schedule":"managed by active module",
+            "nextRun":row.get::<Option<DateTime<Utc>>,_>("next_run"),
+            "status":"scheduled",
+            "runs":row.get::<i64,_>("runs"),
+            "failures":0,
+        })
+    })
+    .collect::<Vec<_>>();
+    let recent_jobs = sqlx::query(
+        r#"SELECT function_path,cron_name,tenant_id,scheduled_for,completed_at,
+                  GREATEST(EXTRACT(EPOCH FROM (created_at-scheduled_for))*1000,0)::double precision AS lag_ms,
+                  GREATEST(EXTRACT(EPOCH FROM (completed_at-updated_at))*1000,0)::double precision AS duration_ms
+           FROM gonvex_scheduled_jobs
+           WHERE project_id=$1 AND status='completed'
+           ORDER BY completed_at DESC NULLS LAST LIMIT 100"#,
+    )
+    .bind(project)
+    .fetch_all(&mut **transaction.transaction())
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|row| json!({
+        "time":row.get::<Option<DateTime<Utc>>,_>("completed_at"),
+        "project":project,
+        "tenant":row.get::<String,_>("tenant_id"),
+        "function":row.get::<String,_>("function_path"),
+        "cron":row.get::<String,_>("cron_name"),
+        "outcome":"completed",
+        "lagMs":row.get::<f64,_>("lag_ms"),
+        "durationMs":row.get::<f64,_>("duration_ms"),
+    }))
+    .collect::<Vec<_>>();
+    let websocket = runtime.inner.metrics.snapshot(project);
+    let database = runtime.inner.pools.snapshot().await;
+    let database_json = json!({
+        "pools":database.pools,
+        "openConnections":database.open_connections,
+        "inUse":database.in_use,
+        "idle":database.idle,
+        "maxOpenConnections":database.max_open_connections,
+        "waitCount":0,
+        "waitDurationMs":0,
+        "series":[],
+    });
+    let query_admission = json!({
+        "enabled":database.admission_limit > 0,
+        "totalPermits":database.admission_limit,
+        "active":database.admission_active,
+        "bootstrapPermits":0,
+        "bootstrapActive":0,
+        "reactive":{"active":0,"queueDepth":0,"admitted":0,"waited":0,"cancelled":0,"waitMs":0,"maxWaitMs":0,"tenantsQueued":0,"largestTenantQueue":0},
+        "foreground":{"active":database.admission_active,"queueDepth":0,"admitted":0,"waited":0,"cancelled":0,"waitMs":0,"maxWaitMs":0,"tenantsQueued":0,"largestTenantQueue":0},
+        "bootstrap":{"active":0,"queueDepth":0,"admitted":0,"waited":0,"cancelled":0,"waitMs":0,"maxWaitMs":0,"tenantsQueued":0,"largestTenantQueue":0},
+        "reactiveDelayedByBootstrap":0,
+    });
     Some(
-        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":{"connections":0,"subscriptions":0,"accounts":0,"details":[]},"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":[],"recent":[],"series":[]},"logs":logs}),
+        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs}),
     )
 }
 
@@ -1177,6 +1590,138 @@ async fn metrics_stream(
             let message = json!({"type":"metrics","metrics":metrics}).to_string();
             if socket.send(Message::Text(message.into())).await.is_err() {
                 break;
+            }
+        }
+    })
+}
+
+#[derive(Deserialize)]
+struct LogStreamQuery {
+    #[serde(default)]
+    project: String,
+    #[serde(default)]
+    key: String,
+    #[serde(default = "default_log_replay")]
+    replay: String,
+}
+
+fn default_log_replay() -> String {
+    "1".to_owned()
+}
+
+async fn log_stream(
+    State(runtime): State<Runtime>,
+    Query(query): Query<LogStreamQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let project = query.project.trim().to_owned();
+    if project.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "project id is required");
+    }
+    let configured_admin = runtime.inner.config.admin_key.as_deref().unwrap_or("");
+    let allowed = (!configured_admin.is_empty()
+        && constant_time_eq(configured_admin, query.key.trim()))
+        || if let Some(control) = runtime.inner.control_plane.read().await.clone() {
+            control
+                .project_accepts_sync_key(&project, query.key.trim(), None)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+    if !allowed {
+        return error(StatusCode::UNAUTHORIZED, "invalid Gonvex sync key");
+    }
+    let replay = !matches!(
+        query.replay.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    );
+    upgrade.on_upgrade(move |mut socket| async move {
+        if socket
+            .send(Message::Text(json!({"type":"ready"}).to_string().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mut last_time: Option<DateTime<Utc>> = None;
+        let mut last_id = String::new();
+        let mut first = true;
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+                break;
+            };
+            let Ok(mut transaction) = control.begin_control_transaction(true).await else {
+                break;
+            };
+            let rows = if first && replay {
+                sqlx::query(
+                    r#"SELECT kind,path,outcome,error,client_duration_ms,reason,tenant_id,account_id,created_at,event_id
+                       FROM gonvex_performance_events WHERE project_id=$1
+                       ORDER BY created_at DESC,event_id DESC LIMIT 200"#,
+                )
+                .bind(&project)
+                .fetch_all(&mut **transaction.transaction())
+                .await
+                .map(|mut rows| {
+                    rows.reverse();
+                    rows
+                })
+            } else if let Some(last_time) = last_time {
+                sqlx::query(
+                    r#"SELECT kind,path,outcome,error,client_duration_ms,reason,tenant_id,account_id,created_at,event_id
+                       FROM gonvex_performance_events WHERE project_id=$1
+                         AND (created_at>$2 OR (created_at=$2 AND event_id>$3))
+                       ORDER BY created_at,event_id LIMIT 200"#,
+                )
+                .bind(&project)
+                .bind(last_time)
+                .bind(&last_id)
+                .fetch_all(&mut **transaction.transaction())
+                .await
+            } else {
+                sqlx::query(
+                    r#"SELECT kind,path,outcome,error,client_duration_ms,reason,tenant_id,account_id,created_at,event_id
+                       FROM gonvex_performance_events WHERE project_id=$1 AND FALSE"#,
+                )
+                .bind(&project)
+                .fetch_all(&mut **transaction.transaction())
+                .await
+            };
+            first = false;
+            let Ok(rows) = rows else {
+                break;
+            };
+            for row in rows {
+                let created_at = row.get::<DateTime<Utc>, _>("created_at");
+                let event_id = row.get::<String, _>("event_id");
+                let log = json!({
+                    "time":created_at,
+                    "operationId":event_id,
+                    "project":project,
+                    "tenant":row.get::<String,_>("tenant_id"),
+                    "accountId":row.get::<String,_>("account_id"),
+                    "path":row.get::<String,_>("path"),
+                    "kind":row.get::<String,_>("kind"),
+                    "outcome":row.get::<String,_>("outcome"),
+                    "durationMs":row.get::<Option<f64>,_>("client_duration_ms").unwrap_or(0.0),
+                    "error":row.get::<String,_>("error"),
+                    "reason":row.get::<String,_>("reason"),
+                    "source":"client",
+                });
+                if socket
+                    .send(Message::Text(
+                        json!({"type":"log","log":log}).to_string().into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                last_time = Some(created_at);
+                last_id = event_id;
             }
         }
     })

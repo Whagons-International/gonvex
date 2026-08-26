@@ -11,7 +11,9 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use gonvex_postgres::{Member, SessionIdentity, TenantSession, TenantTransaction};
+use gonvex_postgres::{
+    Member, SessionIdentity, TenantSession, TenantTransaction, TransactionAttribution,
+};
 use gonvex_protocol::ServerMessage;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
@@ -1679,6 +1681,17 @@ impl Runtime {
         .fetch_optional(&mut **tenant_tx.transaction())
         .await?
         .unwrap_or_else(|| format!("member_{invitation_id}"));
+        tenant_tx
+            .set_invocation_provenance(TransactionAttribution {
+                root_command_id: &command_id,
+                root_channel: "ui",
+                channel: "ui",
+                actor_account_id: Some(&identity.account.id),
+                actor_member_id: Some(&member_id),
+                on_behalf_of_member_id: None,
+                agent_execution_id: None,
+            })
+            .await?;
         if claimed {
             sqlx::query(
                 r#"INSERT INTO members
@@ -1744,6 +1757,7 @@ impl Runtime {
                     identity: identity.clone(),
                     route: route.clone(),
                     member,
+                    admission_revision: 0,
                 };
                 let mut handler = DatabaseHostCalls::new(tenant_tx, DatabaseCapability::Reducer)
                     .with_actor(&identity.account.id, &identity.account.email);
@@ -1914,7 +1928,7 @@ impl Runtime {
                 .as_ref()
                 .ok_or(ControlError::TenantAdminRequired)?;
             let control = self.control_plane().await?;
-            let (_, member) = control
+            let (_, member, _) = control
                 .admit_member(
                     &identity.project_id,
                     &tenant.route.tenant_id,
@@ -3147,7 +3161,7 @@ async fn list_account_tenants(
     transaction.commit().await?;
     let mut items = Vec::new();
     for (id, name, domain, timezone, description, profile) in candidates {
-        let Ok((_, member)) = control
+        let Ok((_, member, _)) = control
             .admit_member(&connection.project_id, &id, &identity.account.id)
             .await
         else {
@@ -3802,7 +3816,8 @@ pub(crate) async fn session_result_from_directory(
         .collect::<Vec<_>>();
     let mut tenants = Vec::new();
     for (tenant_id, name, domain, timezone, description, profile) in candidates {
-        let Ok((_, member)) = control.admit_member(project, &tenant_id, &account.id).await else {
+        let Ok((_, member, _)) = control.admit_member(project, &tenant_id, &account.id).await
+        else {
             continue;
         };
         tenants.push(serde_json::json!({

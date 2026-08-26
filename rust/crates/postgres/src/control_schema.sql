@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS gonvex_runtime_projects (
   auth_mode text NOT NULL DEFAULT 'gonvex-native',
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS test_tab boolean NOT NULL DEFAULT false;
+ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS error_tracking_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS database_mode text NOT NULL DEFAULT 'single';
+ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS owner_email text NOT NULL DEFAULT '';
+ALTER TABLE gonvex_runtime_projects ADD COLUMN IF NOT EXISTS auth_mode text NOT NULL DEFAULT 'gonvex-native';
 CREATE TABLE IF NOT EXISTS accounts (
   id text PRIMARY KEY, auth_realm_id text NOT NULL DEFAULT '', email text NOT NULL DEFAULT '',
   name text NOT NULL DEFAULT '', avatar_url text NOT NULL DEFAULT '', disabled_at timestamptz,
@@ -35,6 +40,11 @@ CREATE TABLE IF NOT EXISTS gonvex_runtime_tenants (
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,tenant_id)
 );
+ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS timezone text NOT NULL DEFAULT 'UTC';
+ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS profile jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS seat_limit integer;
+ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+ALTER TABLE gonvex_runtime_tenants ADD COLUMN IF NOT EXISTS deletion_idempotency_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS gonvex_runtime_tenants_project_database
   ON gonvex_runtime_tenants(project_id,database_name) WHERE database_name<>'';
 CREATE TABLE IF NOT EXISTS account_tenant_index (
@@ -47,6 +57,33 @@ CREATE TABLE IF NOT EXISTS gonvex_runtime_manifests (
   project_id text PRIMARY KEY, manifest jsonb NOT NULL, module_hash text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
 );
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema=current_schema() AND table_name='gonvex_runtime_manifests' AND column_name='bundle_hash'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema=current_schema() AND table_name='gonvex_runtime_manifests' AND column_name='module_hash'
+  ) THEN
+    ALTER TABLE gonvex_runtime_manifests RENAME COLUMN bundle_hash TO module_hash;
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF to_regclass('gonvex_runtime_mutation_logs') IS NOT NULL
+    AND to_regclass('gonvex_runtime_reducer_logs') IS NULL THEN
+    ALTER TABLE gonvex_runtime_mutation_logs RENAME TO gonvex_runtime_reducer_logs;
+  END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS gonvex_runtime_reducer_logs (
+  id bigserial PRIMARY KEY, project_id text NOT NULL DEFAULT '', kind text NOT NULL,
+  entry jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE gonvex_runtime_reducer_logs DROP CONSTRAINT IF EXISTS gonvex_runtime_mutation_logs_kind_check;
+UPDATE gonvex_runtime_reducer_logs
+SET kind='reducer',entry=jsonb_set(entry,'{kind}',to_jsonb('reducer'::text),true)
+WHERE kind IN ('mutation','internalMutation');
+CREATE INDEX IF NOT EXISTS gonvex_runtime_reducer_logs_by_project
+  ON gonvex_runtime_reducer_logs(project_id,id DESC);
 CREATE TABLE IF NOT EXISTS gonvex_project_members (
   project_id text NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
   email text NOT NULL, name text NOT NULL DEFAULT '', role text NOT NULL DEFAULT 'dev',
@@ -163,6 +200,22 @@ CREATE TABLE IF NOT EXISTS gonvex_auth_membership_invitations (
   PRIMARY KEY(project_id,tenant_id,email),
   FOREIGN KEY(project_id,tenant_id) REFERENCES gonvex_runtime_tenants(project_id,tenant_id) ON DELETE CASCADE
 );
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS expires_at timestamptz NOT NULL DEFAULT(now()+interval '7 days');
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS id text;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS token_hash text;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS revoked_at timestamptz;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS accepted_at timestamptz;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS accepted_account_id text;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS accepted_idempotency_key text;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS team_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS allowed_auth_providers jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS application_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS handoff_state text NOT NULL DEFAULT 'pending';
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS handoff_command_id text NOT NULL DEFAULT '';
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+ALTER TABLE gonvex_auth_membership_invitations ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS gonvex_auth_membership_invitations_by_email
+  ON gonvex_auth_membership_invitations(project_id,email);
 CREATE UNIQUE INDEX IF NOT EXISTS gonvex_auth_membership_invitations_token
   ON gonvex_auth_membership_invitations(token_hash) WHERE token_hash IS NOT NULL AND token_hash<>'';
 CREATE TABLE IF NOT EXISTS gonvex_member_login_provisioning (

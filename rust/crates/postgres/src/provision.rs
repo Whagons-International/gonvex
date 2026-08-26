@@ -971,10 +971,11 @@ CREATE INDEX IF NOT EXISTS gonvex_sync_changes_created_at ON _gonvex_sync_change
 CREATE TABLE IF NOT EXISTS _gonvex_sync_transactions (
   revision bigint PRIMARY KEY, transaction_id bigint NOT NULL UNIQUE,
   root_command_id text NOT NULL, origin_command_id text NOT NULL,
-  invocation_channel text NOT NULL,
+  root_invocation_channel text NOT NULL DEFAULT 'system', invocation_channel text NOT NULL,
   actor_account_id text, actor_member_id text, on_behalf_of_member_id text,
   agent_execution_id text, created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+ALTER TABLE _gonvex_sync_transactions ADD COLUMN IF NOT EXISTS root_invocation_channel text NOT NULL DEFAULT 'system';
 CREATE TABLE IF NOT EXISTS _gonvex_action_outbox (
   id text PRIMARY KEY, action_path text NOT NULL, args jsonb NOT NULL, actor_user_id text,
   actor_email text, provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -1002,12 +1003,13 @@ BEGIN
     SELECT array_agg(DISTINCT table_name ORDER BY table_name) INTO changed_tables
       FROM _gonvex_sync_changes WHERE transaction_id=txid_current()::bigint AND revision=next_revision;
     INSERT INTO _gonvex_sync_transactions
-      (revision,transaction_id,root_command_id,origin_command_id,invocation_channel,
+      (revision,transaction_id,root_command_id,origin_command_id,root_invocation_channel,invocation_channel,
        actor_account_id,actor_member_id,on_behalf_of_member_id,agent_execution_id)
     VALUES(
       next_revision,txid_current()::bigint,
       COALESCE(NULLIF(current_setting('gonvex.root_command_id',true),''),NULLIF(current_setting('gonvex.command_id',true),''),''),
       COALESCE(NULLIF(current_setting('gonvex.command_id',true),''),''),
+      COALESCE(NULLIF(current_setting('gonvex.root_invocation_channel',true),''),NULLIF(current_setting('gonvex.invocation_channel',true),''),'system'),
       COALESCE(NULLIF(current_setting('gonvex.invocation_channel',true),''),'system'),
       NULLIF(current_setting('gonvex.actor_account_id',true),''),
       NULLIF(current_setting('gonvex.actor_member_id',true),''),

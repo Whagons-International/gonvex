@@ -79,6 +79,7 @@ export type ReplicaCursor = {
 
 export type PublicInvocationProvenance = {
   rootCommandId: string;
+  rootChannel?: "ui" | "agent" | "api" | "scheduler" | "system" | (string & {});
   channel: "ui" | "agent" | "api" | "scheduler" | "system" | (string & {});
   actorAccountId?: string;
   actorMemberId?: string;

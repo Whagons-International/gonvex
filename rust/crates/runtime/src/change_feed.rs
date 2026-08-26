@@ -33,6 +33,7 @@ pub struct LogChange {
 #[derive(Clone, Debug, Default)]
 pub struct TransactionProvenance {
     pub root_command_id: String,
+    pub root_channel: String,
     pub channel: String,
     pub actor_account_id: Option<String>,
     pub actor_member_id: Option<String>,
@@ -298,6 +299,7 @@ pub async fn read_changes(
                   COALESCE(old_value, 'null'::jsonb) AS old_value,
                   COALESCE(new_value, 'null'::jsonb) AS new_value,
                   COALESCE(tx.root_command_id,COALESCE(changes.command_id,'')) AS root_command_id,
+                  COALESCE(tx.root_invocation_channel,tx.invocation_channel,'system') AS root_invocation_channel,
                   COALESCE(tx.invocation_channel,'system') AS invocation_channel,
                   tx.actor_account_id,tx.actor_member_id,tx.on_behalf_of_member_id,tx.agent_execution_id
            FROM _gonvex_sync_changes changes
@@ -323,6 +325,7 @@ pub async fn read_changes(
             new_value: row.get("new_value"),
             provenance: TransactionProvenance {
                 root_command_id: row.get("root_command_id"),
+                root_channel: row.get("root_invocation_channel"),
                 channel: row.get("invocation_channel"),
                 actor_account_id: row.get("actor_account_id"),
                 actor_member_id: row.get("actor_member_id"),

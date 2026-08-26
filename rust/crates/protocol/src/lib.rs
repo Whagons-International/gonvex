@@ -30,6 +30,8 @@ pub struct ReplicaCursor {
 #[serde(rename_all = "camelCase")]
 pub struct PublicInvocationProvenance {
     pub root_command_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_channel: Option<String>,
     pub channel: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_account_id: Option<String>,
@@ -590,6 +592,7 @@ mod tests {
             r#"{"type":"query.result","id":"q-1","path":"tasks.grid","result":{"page":[]},"reason":"initial","subscriptionRevision":{"epoch":"epoch-1","sequence":42}}"#,
             r#"{"type":"reducer.result","id":"r-1","path":"tasks.start","result":null,"originCommandId":"command-1","committedRevision":42}"#,
             r#"{"type":"replica.transaction","cursor":{"epoch":"epoch-1","revision":42},"originCommandId":"command-1","changes":[{"entity":"tasks","id":"task-1","operation":"update","oldValue":{"status":"ready"},"newValue":{"status":"started"},"changedColumns":["status"]}]}"#,
+            r#"{"type":"replica.transaction","cursor":{"epoch":"epoch-1","revision":43},"originCommandId":"agent-child","provenance":{"rootCommandId":"agent-root","rootChannel":"ui","channel":"agent","actorAccountId":"account-1","actorMemberId":"member-1","onBehalfOfMemberId":"member-1","agentExecutionId":"agent-1"},"changes":[{"entity":"tasks","id":"task-1","operation":"update","newValue":{"status":"started"}}]}"#,
             r#"{"type":"replica.ready","id":"replica-1","cursor":{"epoch":"epoch-1","revision":42},"digest":"digest-2","truncated":false}"#,
         ] {
             round_trip_server(frame);

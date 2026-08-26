@@ -10,7 +10,9 @@ use gonvex_module_runtime::{
     validate_portable_schema, AccountIdentity, InvocationChannel, InvocationProvenance,
     MemberIdentity, TenantIdentity,
 };
-use gonvex_postgres::{Account, Member, SessionIdentity, TenantRoute, TenantSession};
+use gonvex_postgres::{
+    Account, Member, SessionIdentity, TenantRoute, TenantSession, TransactionAttribution,
+};
 use serde_json::Value;
 use sqlx::Row;
 use thiserror::Error;
@@ -215,14 +217,15 @@ impl Runtime {
         });
         install_execution_deadline(self, &mut provenance);
         transaction
-            .set_invocation_provenance(
-                &provenance.root_command_id,
-                invocation_channel_name(provenance.channel),
-                provenance.actor_account_id.as_deref(),
-                provenance.actor_member_id.as_deref(),
-                provenance.on_behalf_of_member_id.as_deref(),
-                provenance.agent_execution_id.as_deref(),
-            )
+            .set_invocation_provenance(TransactionAttribution {
+                root_command_id: &provenance.root_command_id,
+                root_channel: invocation_channel_name(provenance.root_channel),
+                channel: invocation_channel_name(provenance.channel),
+                actor_account_id: provenance.actor_account_id.as_deref(),
+                actor_member_id: provenance.actor_member_id.as_deref(),
+                on_behalf_of_member_id: provenance.on_behalf_of_member_id.as_deref(),
+                agent_execution_id: provenance.agent_execution_id.as_deref(),
+            })
             .await?;
         let mut handler = DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
             .with_actor(
@@ -312,21 +315,18 @@ impl Runtime {
             }
         })?;
         let command_id = format!("action-{}", uuid::Uuid::new_v4());
-        let mut provenance = access.provenance.unwrap_or_else(|| {
-            let channel = if definition.action_profile == "agent" {
-                InvocationChannel::Agent
-            } else {
-                InvocationChannel::Ui
-            };
-            direct_provenance(session, channel, &command_id, &module.artifact_hash)
-        });
-        if definition.action_profile == "agent" && provenance.agent_execution_id.is_none() {
-            if provenance.on_behalf_of_member_id.is_none() {
-                provenance.on_behalf_of_member_id = Some(session.member.id.clone());
-            }
-            provenance.agent_execution_id =
-                Some(format!("agent_{}", uuid::Uuid::new_v4().simple()));
-        }
+        // The browser starts every ordinary application invocation as `ui`,
+        // including the agent-profile Action that owns an agent turn. Only
+        // host-authorized child calls made through `ctx.functions.invoke`
+        // become `agent`. This preserves the real root initiator instead of
+        // relabeling a client call merely because of its Action profile.
+        let mut provenance = initial_action_provenance(
+            session,
+            access.provenance,
+            &command_id,
+            &module.artifact_hash,
+            definition.action_profile == "agent",
+        );
         install_execution_deadline(self, &mut provenance);
         if !provenance.action_stack.iter().any(|item| item == path) {
             provenance.action_stack.push(path.to_owned());
@@ -442,32 +442,7 @@ impl Runtime {
             }
         })?;
         let command_id = format!("agent-{}", uuid::Uuid::new_v4());
-        let root_command_id = if parent.root_command_id.trim().is_empty() {
-            parent.command_id.clone()
-        } else {
-            parent.root_command_id.clone()
-        };
-        let child = InvocationProvenance {
-            channel: InvocationChannel::Agent,
-            root_channel: parent.root_channel,
-            actor_account_id: Some(fresh.identity.account.id.clone()),
-            actor_member_id: Some(fresh.member.id.clone()),
-            on_behalf_of_member_id: Some(fresh.member.id.clone()),
-            root_command_id,
-            command_id: command_id.clone(),
-            parent_command_id: Some(parent.command_id.clone()),
-            agent_execution_id: parent
-                .agent_execution_id
-                .clone()
-                .or_else(|| Some(format!("agent_{}", uuid::Uuid::new_v4().simple()))),
-            thread_id: parent.thread_id.clone(),
-            turn_id: parent.turn_id.clone(),
-            tool_call_id: parent.tool_call_id.clone(),
-            artifact_hash: module.artifact_hash.clone(),
-            depth: parent.depth.saturating_add(1),
-            action_stack: parent.action_stack.clone(),
-            deadline_unix_ms: parent.deadline_unix_ms,
-        };
+        let child = delegated_provenance(&fresh, parent, &command_id, &module.artifact_hash);
         let result = match definition.kind.as_str() {
             "query" => {
                 self.execute_tenant_query_with_access(
@@ -647,6 +622,7 @@ pub(crate) fn system_tenant_session(project: &str, route: TenantRoute) -> Tenant
             permissions: serde_json::json!({}),
             membership_revision: 0,
         },
+        admission_revision: 0,
     }
 }
 
@@ -759,6 +735,61 @@ pub(crate) fn direct_provenance(
     }
 }
 
+fn initial_action_provenance(
+    session: &TenantSession,
+    inherited: Option<InvocationProvenance>,
+    command_id: &str,
+    artifact_hash: &str,
+    agent_profile: bool,
+) -> InvocationProvenance {
+    let mut provenance = inherited.unwrap_or_else(|| {
+        direct_provenance(session, InvocationChannel::Ui, command_id, artifact_hash)
+    });
+    if agent_profile && provenance.agent_execution_id.is_none() {
+        if provenance.on_behalf_of_member_id.is_none() {
+            provenance.on_behalf_of_member_id = Some(session.member.id.clone());
+        }
+        provenance.agent_execution_id = Some(format!("agent_{}", uuid::Uuid::new_v4().simple()));
+    }
+    provenance
+}
+
+fn delegated_provenance(
+    session: &TenantSession,
+    parent: &InvocationProvenance,
+    command_id: &str,
+    artifact_hash: &str,
+) -> InvocationProvenance {
+    let root_command_id = if parent.root_command_id.trim().is_empty() {
+        parent.command_id.clone()
+    } else {
+        parent.root_command_id.clone()
+    };
+    InvocationProvenance {
+        channel: InvocationChannel::Agent,
+        root_channel: parent.root_channel,
+        // Actor identity is always replaced with the freshly admitted tenant
+        // session. No field inherited from a client or model is authoritative.
+        actor_account_id: Some(session.identity.account.id.clone()),
+        actor_member_id: Some(session.member.id.clone()),
+        on_behalf_of_member_id: Some(session.member.id.clone()),
+        root_command_id,
+        command_id: command_id.to_owned(),
+        parent_command_id: Some(parent.command_id.clone()),
+        agent_execution_id: parent
+            .agent_execution_id
+            .clone()
+            .or_else(|| Some(format!("agent_{}", uuid::Uuid::new_v4().simple()))),
+        thread_id: parent.thread_id.clone(),
+        turn_id: parent.turn_id.clone(),
+        tool_call_id: parent.tool_call_id.clone(),
+        artifact_hash: artifact_hash.to_owned(),
+        depth: parent.depth.saturating_add(1),
+        action_stack: parent.action_stack.clone(),
+        deadline_unix_ms: parent.deadline_unix_ms,
+    }
+}
+
 fn install_execution_deadline(runtime: &Runtime, provenance: &mut InvocationProvenance) {
     if provenance.deadline_unix_ms.is_none() {
         provenance.deadline_unix_ms = Some(
@@ -817,6 +848,7 @@ fn require_interactive_target<'a>(
 mod tests {
     use std::collections::BTreeMap;
 
+    use gonvex_postgres::{Account, Member, SessionIdentity, TenantRoute};
     use serde_json::json;
 
     use super::*;
@@ -862,6 +894,70 @@ mod tests {
             artifact_hash: "active-hash".to_owned(),
             ..InvocationProvenance::default()
         }
+    }
+
+    fn session() -> TenantSession {
+        TenantSession {
+            identity: SessionIdentity {
+                project_id: "project".to_owned(),
+                account: Account {
+                    id: "account".to_owned(),
+                    email: "account@example.test".to_owned(),
+                    email_verified: true,
+                    name: "Account".to_owned(),
+                    avatar_url: String::new(),
+                    provider: "firebase".to_owned(),
+                },
+            },
+            route: TenantRoute {
+                project_id: "project".to_owned(),
+                tenant_id: "tenant".to_owned(),
+                database_url: "postgres://tenant".to_owned(),
+            },
+            member: Member {
+                id: "member".to_owned(),
+                account_id: "account".to_owned(),
+                status: "active".to_owned(),
+                display_name: "Account".to_owned(),
+                avatar_url: String::new(),
+                role: "member".to_owned(),
+                permissions: json!({}),
+                membership_revision: 1,
+            },
+            admission_revision: 7,
+        }
+    }
+
+    #[test]
+    fn agent_profile_action_preserves_ui_root_until_host_delegation() {
+        let direct =
+            initial_action_provenance(&session(), None, "action-command", "active-hash", true);
+        assert_eq!(direct.channel, InvocationChannel::Ui);
+        assert_eq!(direct.root_channel, InvocationChannel::Ui);
+        assert_eq!(direct.actor_account_id.as_deref(), Some("account"));
+        assert_eq!(direct.actor_member_id.as_deref(), Some("member"));
+        assert_eq!(direct.on_behalf_of_member_id.as_deref(), Some("member"));
+        assert!(direct
+            .agent_execution_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("agent_")));
+
+        let mut untrusted_parent = direct.clone();
+        untrusted_parent.actor_account_id = Some("forged-account".to_owned());
+        untrusted_parent.actor_member_id = Some("forged-member".to_owned());
+        untrusted_parent.channel = InvocationChannel::System;
+        let child = delegated_provenance(
+            &session(),
+            &untrusted_parent,
+            "child-command",
+            "active-hash",
+        );
+        assert_eq!(child.channel, InvocationChannel::Agent);
+        assert_eq!(child.root_channel, InvocationChannel::Ui);
+        assert_eq!(child.actor_account_id.as_deref(), Some("account"));
+        assert_eq!(child.actor_member_id.as_deref(), Some("member"));
+        assert_eq!(child.on_behalf_of_member_id.as_deref(), Some("member"));
+        assert_eq!(child.parent_command_id.as_deref(), Some("action-command"));
     }
 
     #[test]
