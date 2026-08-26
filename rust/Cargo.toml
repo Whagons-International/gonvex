@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/admin-cli",
   "crates/protocol",
   "crates/postgres",
   "crates/runtime",

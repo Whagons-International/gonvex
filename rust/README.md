@@ -26,6 +26,7 @@ before its isolates are destroyed.
 
 ## Crates
 
+- `admin-cli`: explicit, resumable database migration commands.
 - `module-runtime`: language-neutral invocation ABI and capability model.
 - `module-runtime-v8`: JavaScript/V8 implementation.
 - `module-host`: process protocol, artifact verification, generation lifecycle,
@@ -41,17 +42,24 @@ before its isolates are destroyed.
 
 The runtime owns every database transaction. The V8 process receives scoped
 host operations over a local socket and never receives a database URL or
-credential. The Go server remains only as migration reference code and is not
-included in the runtime image.
+credential.
 
 ## Development
 
 ```bash
-cargo fmt --check
+cargo fmt --all -- --check
 cargo test --workspace
-cargo build -p gonvex-runtime -p gonvex-module-host -p gonvex-sandbox-worker
+cargo build -p gonvex-admin -p gonvex-runtime -p gonvex-module-host -p gonvex-sandbox-worker
 ```
 
-The production runtime image installs all three binaries. The sandbox remains off
+The production runtime image installs all four binaries. The sandbox remains off
 until the operator enables `GONVEX_SANDBOX_ENABLED`; the module host remains
 selected through `GONVEX_MODULE_HOST_BINARY`.
+
+Run the identity upgrade with the shipped admin binary:
+
+```bash
+gonvex-admin migrate identity-v2 --plan --source PROJECT --run-id RUN --input identities.json
+gonvex-admin migrate identity-v2 --apply --plan-file identity-v2-plan.json
+gonvex-admin migrate identity-v2 --verify --plan-file identity-v2-plan.json
+```

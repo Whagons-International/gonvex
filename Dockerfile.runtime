@@ -6,6 +6,7 @@ WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/crates ./crates
 RUN cargo build --locked --release \
+    -p gonvex-admin \
     -p gonvex-runtime \
     -p gonvex-module-host \
     -p gonvex-sandbox-worker
@@ -17,6 +18,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/gonvex/data /var/lib/gonvex/tmp
 COPY --from=rust-build /src/rust/target/release/gonvex-runtime /usr/local/bin/gonvex-runtime
+COPY --from=rust-build /src/rust/target/release/gonvex-admin /usr/local/bin/gonvex-admin
 COPY --from=rust-build /src/rust/target/release/gonvex-module-host /usr/local/bin/gonvex-module-host
 COPY --from=rust-build /src/rust/target/release/gonvex-sandbox-worker /usr/local/bin/gonvex-sandbox-worker
 # Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)

@@ -1,0 +1,16 @@
+[package]
+name = "gonvex-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

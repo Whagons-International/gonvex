@@ -1,9 +1,8 @@
 //! The server-side representation of the published Gonvex 0.5.0 wire contract.
 //!
-//! This crate deliberately contains no database or transport code. Both the
-//! former Go runtime and the Rust runtime are tested against the
-//! same JSON fixtures. A client-visible protocol change belongs in a new npm
-//! release, not in the implementation migration.
+//! This crate deliberately contains no database or transport code. The Rust
+//! runtime and TypeScript packages use the same JSON fixtures. A client-visible
+//! protocol change belongs in a new npm release.
 
 use std::collections::BTreeMap;
 

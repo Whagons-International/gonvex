@@ -1,7 +1,0 @@
-{
-  "name": "List_Skill_Files",
-  "description": "List_Skill_Files lists all available skill markdown files from both default and custom directories.\nReturns a newline-separated list of filenames. Custom skills that override defaults are marked [custom].\nCustom-only skills (not overriding anything) are marked [custom-only].",
-  "parameters": {
-    "type": "object"
-  }
-}

@@ -238,8 +238,8 @@ remain unchanged. The bridge must call them with `scope: "control"`.
 | `control.legacy.tenants.getInvitationByToken` | `tenants.getInvitationByToken` | accepts `token` or `invitationToken`; returns `tenantId`, `invitationToken`, `userEmail`, `teamIds`, `allowedAuthProviders` |
 | `control.legacy.tenants.acceptInvitation` | `tenants.acceptInvitation` | accepts `token` or `invitationToken`; returns `{ tenantId, memberId }` |
 
-These are Control Plane compatibility references. They are not Go tenant
-functions and do not restore Go modules.
+These are Control Plane compatibility references, not tenant application
+functions. They remain inside the trusted host.
 
 ## React, telemetry, and Replica APIs
 
@@ -494,32 +494,26 @@ pnpm --dir packages/create-gonvex publish --access public --no-git-checks
 
 ## Validation
 
-The final tree passed these checks on August 25, 2026:
+The final tree passed these checks on August 26, 2026:
 
 ```text
-go test ./...
-go vet ./...
-go test -race ./...
-GONVEX_TEST_POSTGRES_URL=... go test ./server/internal/server -count=1
-  passed in 170.444s
-GONVEX_TEST_POSTGRES_URL=... go test -race ./server/internal/server -count=1
-  passed in 159.897s
-
 pnpm -r typecheck
 pnpm -r test
 pnpm build
 
-cargo test --workspace --all-targets --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
+GONVEX_TEST_POSTGRES_URL=... cargo test --manifest-path rust/Cargo.toml \
+  --workspace --all-targets --locked -- --test-threads=1
+cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets \
+  --locked -- -D warnings
 
 node --test scripts/production-compose.test.mjs scripts/runtime-dockerfile.test.mjs \
   scripts/deploy-coolify.test.mjs scripts/release-cli.test.mjs
 ```
 
 The TypeScript package run passed 19 module SDK tests, 135 client tests, one
-Expo SQLite test, 29 React tests, 30 CLI tests, and 38 dashboard tests. The
+Expo SQLite test, 29 React tests, 28 CLI tests, and 38 dashboard tests. The
 complete Rust workspace, real PostgreSQL tests, and Clippy with warnings denied
-passed. The deployment and release script run passed 24 tests.
+passed. The deployment and release script suite also passed.
 
 Each of the seven npm packages produced a real tarball with `pnpm pack`.
 Inspection of the packed `package.json` files confirmed version `0.5.0`, exact

@@ -100,11 +100,6 @@ export const rename = reducer<RenameArgs, RenameResult>({
   const artifactFile = join(project.root, "artifact.json");
   await writeFile(artifactFile, JSON.stringify(artifact));
   const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
-  const verifiedHash = execFileSync("go", ["run", "./cmd/gonvex", "internal", "verify-module-artifact", "--file", artifactFile], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-  }).trim();
-  assert.equal(verifiedHash, artifact.hash, "TypeScript CLI and migration verifier must hash the same artifact contract");
   let rustVerifiedHash;
   try {
     rustVerifiedHash = execFileSync("cargo", [
@@ -126,16 +121,14 @@ export const rename = reducer<RenameArgs, RenameResult>({
   ];
   for (const tampered of tamperedArtifacts) {
     await writeFile(artifactFile, JSON.stringify(tampered));
-    assert.throws(() => execFileSync("go", ["run", "./cmd/gonvex", "internal", "verify-module-artifact", "--file", artifactFile], {
+    assert.throws(() => execFileSync("cargo", [
+      "run", "--quiet", "--manifest-path", join(repositoryRoot, "rust", "Cargo.toml"),
+      "-p", "gonvex-runtime", "--", "verify-module-artifact", "--file", artifactFile,
+    ], {
       cwd: repositoryRoot,
       stdio: "pipe",
     }), /Command failed/);
   }
-  await writeFile(artifactFile, JSON.stringify(tamperedArtifacts[0]));
-  assert.throws(() => execFileSync("cargo", [
-    "run", "--quiet", "--manifest-path", join(repositoryRoot, "rust", "Cargo.toml"),
-    "-p", "gonvex-runtime", "--", "verify-module-artifact", "--file", artifactFile,
-  ], { cwd: repositoryRoot, stdio: "pipe" }), /Command failed/);
 
   assert.equal(artifact.javascript?.path, "gonvex/_build/module.js");
   const bundled = Buffer.from(artifact.javascript.code, "base64").toString("utf8");

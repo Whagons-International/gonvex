@@ -1,0 +1,17 @@
+[
+  {
+    "legacyUserId": "legacy-firebase",
+    "provider": "firebase",
+    "issuer": "https://securetoken.google.com/project-a",
+    "subject": "firebase-uid",
+    "email": "verified@example.com",
+    "emailVerified": true,
+    "name": "Verified User"
+  },
+  {
+    "legacyUserId": "legacy-unverified",
+    "email": "unverified@example.com",
+    "emailVerified": false,
+    "name": "Unverified User"
+  }
+]

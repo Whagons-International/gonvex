@@ -8,7 +8,6 @@
     "build:packages": "pnpm --filter @gonvex/protocol build && pnpm --filter @gonvex/client build && pnpm --filter @gonvex/expo-sqlite build && pnpm --filter @gonvex/react build && pnpm --filter @gonvex/module-sdk build && pnpm --filter @gonvex/cli build && pnpm --filter create-gonvex build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "test:go": "go test ./...",
     "test:production-compose": "node --test scripts/production-compose.test.mjs",
     "test:coolify-deploy": "node --test scripts/deploy-coolify.test.mjs",
     "test:release": "node --test scripts/release-cli.test.mjs",
@@ -21,8 +20,7 @@
     "dev:dashboard": "pnpm --filter @gonvex/dashboard dev",
     "dev:cli": "pnpm --filter @gonvex/cli exec gonvex dev --project apps/dashboard",
     "dev:runtime": "cargo build --locked --manifest-path rust/Cargo.toml -p gonvex-module-host -p gonvex-sandbox-worker && GONVEX_MODULE_HOST_BINARY=\"$PWD/rust/target/debug/gonvex-module-host\" GONVEX_SANDBOX_WORKER_BINARY=\"$PWD/rust/target/debug/gonvex-sandbox-worker\" cargo run --locked --manifest-path rust/Cargo.toml -p gonvex-runtime",
-    "seed:tasks": "go run ./cmd/seed-tasks",
-    "seed:tasks:10m": "go run ./cmd/seed-tasks --count 10000000 --batch 50000 --seed 42 --clear --fast --no-trgm --analyze"
+    "admin": "cargo run --locked --manifest-path rust/Cargo.toml -p gonvex-admin --"
   },
   "pnpm": {
     "ignoredBuiltDependencies": [

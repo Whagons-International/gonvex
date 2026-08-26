@@ -64,7 +64,14 @@ async function releaseCLI() {
     // workspace exports during consumer typechecks.
     run("pnpm", [...releaseFilters, "build"]);
     run("pnpm", [...releaseFilters, "typecheck"]);
-    run("go", ["test", "./..."]);
+    run("cargo", [
+      "test",
+      "--locked",
+      "--manifest-path",
+      "rust/Cargo.toml",
+      "--workspace",
+      "--all-targets",
+    ]);
 
     console.log("=== Step 4: Generate release notes ===");
     const notesFile = dryRun ? `/tmp/gonvex-release-notes-${version}.md` : join(ROOT, "releases", `${tagName}.md`);

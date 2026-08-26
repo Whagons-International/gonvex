@@ -19,12 +19,14 @@ test("runtime image contains no application compiler or Go plugin state", () => 
 
   assert.match(build, /^FROM rust:1\.94-bookworm AS rust-build$/m);
   assert.match(build, /cargo build --locked --release/);
+  assert.match(build, /-p gonvex-admin/);
   assert.match(build, /-p gonvex-runtime/);
   assert.match(runtime, /^FROM debian:bookworm-slim/m);
   assert.match(runtime, /GONVEX_DATA_DIR=\/var\/lib\/gonvex\/data/);
   assert.doesNotMatch(runtime, /GOCACHE|GOMODCACHE|GOPATH|GONVEX_PLUGIN_CACHE_DIR|GONVEX_MODULE_ROOT/);
   assert.doesNotMatch(dockerfile, /^FROM golang:/m);
   assert.doesNotMatch(dockerfile, /buildmode=plugin|plugin\.Open|project bundle|synced project bundles/i);
+  assert.match(runtime, /COPY --from=rust-build \/src\/rust\/target\/release\/gonvex-admin \/usr\/local\/bin\/gonvex-admin/);
   assert.match(runtime, /WORKDIR \/var\/lib\/gonvex\nUSER 0:0/);
   assert.doesNotMatch(runtime, /useradd|groupadd|chown/);
 });

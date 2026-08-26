@@ -35,10 +35,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.26.x"
-          cache: true
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -51,20 +47,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Validate repository script contracts
         run: node --test scripts/*.test.mjs
-      - name: Test Go runtime
-        run: go test -count=1 -p 1 ./...
-        env:
-          GOMAXPROCS: "2"
-      - name: Vet Go compatibility and migration tooling
-        run: go vet ./...
-      - name: Race-test Go compatibility and migration tooling
-        run: go test -race -count=1 -p 1 ./...
-        env:
-          GOMAXPROCS: "2"
-      - name: Test PostgreSQL scheduler durability and rolling migration
-        run: go test -count=1 ./server/internal/server -run '^(TestPostgresScheduled|TestMigratingScheduler)'
-        env:
-          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+      - name: Reject retired Go sources
+        run: test -z "$(find . -path ./node_modules -prune -o -path ./rust/target -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -print)"
       - name: Build JavaScript packages
         run: pnpm build:packages
       - name: Test JavaScript workspace

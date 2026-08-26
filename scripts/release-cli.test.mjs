@@ -17,6 +17,13 @@ test("release builds workspace declarations before typechecking consumers", () =
   assert.ok(typecheck > build, "consumer typechecks must run after dependency declarations are built");
 });
 
+test("release validates the Rust workspace", () => {
+  const source = readFileSync(resolve(ROOT, "scripts/release-cli.mjs"), "utf8");
+  assert.match(source, /"rust\/Cargo\.toml"/);
+  assert.match(source, /"--workspace"/);
+  assert.doesNotMatch(source, /run\("go"/);
+});
+
 test("release includes every public Gonvex SDK needed by TypeScript modules and mobile replicas", () => {
   const source = readFileSync(resolve(ROOT, "scripts/release-cli.mjs"), "utf8");
   assert.match(source, /"module-sdk"/);

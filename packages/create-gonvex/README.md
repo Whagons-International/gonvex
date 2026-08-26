@@ -15,8 +15,8 @@ npm run dev
 ```
 
 The generated app expects a running Gonvex runtime. `npm run dev` watches and
-syncs the backend and starts Vite; it does not start Postgres, Valkey, or the Go
-runtime. New local projects receive
+syncs the backend and starts Vite; it does not start Postgres, Valkey, or the
+Rust runtime. New local projects receive
 `VALKEY_URL=redis://127.0.0.1:6380/0`; Gonvex requires that service to be
 reachable when the runtime starts.
 
@@ -60,8 +60,8 @@ the first workspace invitation.
 ```txt
 my-app/
   gonvex/
-    schema.go
-    messages.go
+    index.ts
+    messages.ts
     _generated/
   src/
   gonvex.json

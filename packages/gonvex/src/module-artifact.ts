@@ -108,13 +108,7 @@ export async function detectProjectLanguage(backendDir: string, declared?: strin
   if (normalized === "ts" || normalized === "typescript") return "typescript";
   if (normalized) throw new Error(`unknown gonvex.json language ${JSON.stringify(declared)}; expected "typescript"`);
   if (!existsSync(backendDir)) return "typescript";
-  const [goSources, moduleSources] = await Promise.all([
-    walkFiles(backendDir, (name) => name.endsWith(".go")),
-    moduleSourceFiles(backendDir),
-  ]);
-  if (goSources.length > 0) {
-    throw new Error("Go application modules were removed in Gonvex v2; migrate gonvex/*.go to TypeScript");
-  }
+  const moduleSources = await moduleSourceFiles(backendDir);
   if (moduleSources.length === 0) throw new Error("Gonvex backend has no TypeScript module sources");
   return "typescript";
 }

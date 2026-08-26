@@ -28,6 +28,10 @@ persistent Local Replica to web and mobile clients.
 > rollouts, fleet backup/restore, deployment automation, and a public hosted
 > service are still stabilizing before 1.0.
 
+The current source tree has one server implementation: Rust. Application
+modules are TypeScript executed in the bounded V8 host; there is no alternate
+runtime or plugin fallback.
+
 ## Why Gonvex
 
 - **Three executable kinds**: define read-only Queries, transactional Reducers, and external-work Actions in TypeScript.
@@ -394,10 +398,8 @@ packages/protocol/       Shared TypeScript protocol types
 packages/gonvex/         CLI package
 packages/create-gonvex/  App initializer
 packages/module-sdk/     TypeScript Query/Reducer/Action module SDK
-pkg/manifest/            Runtime manifest model
 templates/vite-react/    Default starter template
-cmd/gonvex/              Migration-only command-line utilities
-cmd/gonvex-load/         Persistent WebSocket and Reducer load runner
+rust/crates/admin-cli/   Database migration and operator CLI
 rust/crates/runtime/     Rust HTTP, WebSocket, Control Plane, tenant, and execution runtime
 rust/crates/module-host/ Rust process supervising bounded V8 module generations
 rust/crates/postgres/    Rust Postgres routing, transactions, and provisioning
@@ -448,8 +450,8 @@ Useful checks:
 ```bash
 pnpm typecheck
 pnpm test
-pnpm test:go
 pnpm build
+cd rust && cargo test --workspace --all-targets
 ```
 
 Useful development commands:

@@ -72,8 +72,8 @@ export const runTaskAgent = action({
 
 The artifact validator requires every Query tool to target an internal Query.
 At runtime, V8 exposes only the declared tool names. Rust rejects an undeclared
-tool call before it crosses the process boundary. Go then resolves the signed
-binding and enters the normal Query or Reducer executor with the original
+tool call before it crosses the process boundary, resolves the signed binding,
+and enters the normal Query or Reducer executor with the original
 account, member, tenant, permissions, visibility plan, admission limits, and
 telemetry.
 

@@ -1,7 +1,0 @@
-{
-  "name": "List_Workflows",
-  "description": "List_Workflows returns a list of all workflows and their statuses",
-  "parameters": {
-    "type": "object"
-  }
-}
