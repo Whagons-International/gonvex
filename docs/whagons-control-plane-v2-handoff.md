@@ -466,7 +466,8 @@ for its normal authorization checks.
 
 ## Package release
 
-The compatible, unpublished release version is `0.5.0` for:
+The compatible release version is `0.5.0`, published to npm on August 26,
+2026, for:
 
 ```text
 @gonvex/protocol
@@ -479,8 +480,7 @@ create-gonvex
 ```
 
 The packed npm manifests contain exact `0.5.0` Gonvex dependencies and no
-`workspace:*` entries. Publish the packages in this order only after Gabriel
-approves publication:
+`workspace:*` entries. The packages were published in this dependency order:
 
 ```bash
 pnpm --dir packages/protocol publish --access public --no-git-checks
