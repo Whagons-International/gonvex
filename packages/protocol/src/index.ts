@@ -48,6 +48,13 @@ export type FunctionManifestEntry = {
   offline?: JsonValue;
   /** Ordered atomic optimistic transaction declared by a TypeScript module. */
   optimistic?: JsonValue;
+  interactive?: boolean;
+  classification?: "interactive" | "system" | "internal";
+  description?: string;
+  agent?: {
+    tags?: string[];
+    confirmation?: "none" | "required" | "destructive";
+  };
 };
 
 export type ReplicaCollectionDefinition = {
@@ -68,6 +75,15 @@ export type ReplicaCollectionDefinition = {
 export type ReplicaCursor = {
   epoch: string;
   revision: number;
+};
+
+export type PublicInvocationProvenance = {
+  rootCommandId: string;
+  channel: "ui" | "agent" | "api" | "scheduler" | "system" | (string & {});
+  actorAccountId?: string;
+  actorMemberId?: string;
+  onBehalfOfMemberId?: string;
+  agentExecutionId?: string;
 };
 
 export type ReplicaChange = {
@@ -327,6 +343,7 @@ export type ServerMessage =
     type: "replica.transaction";
     cursor: ReplicaCursor;
     originCommandId?: string;
+    provenance?: PublicInvocationProvenance;
     changes: ReplicaChange[];
   }
   | {
@@ -460,4 +477,4 @@ export type ServerMessage =
   | { type: "reducer.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "action.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }
   | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
-  | { type: "system.reload"; reason: string };
+  | { type: "system.reload"; reason: string; artifactHash?: string };

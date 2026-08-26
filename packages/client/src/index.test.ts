@@ -111,6 +111,24 @@ function sentMessages(socket = latestSocket()) {
 }
 
 describe("GonvexClient", () => {
+	it("tracks the active artifact hash across authentication and hot reload without reconnecting", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		client.setAuth({ project: "shop", tenant: "tenant-a", token: "session" });
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+		const auth = sentMessages(socket).find((message) => message.type === "auth");
+		socket.receive({ type: "auth.result", id: auth.id, result: authenticatedResult({ artifactHash: "artifact-1" }) });
+		await flushMicrotasks();
+		expect(client.activeArtifactHash()).toBe("artifact-1");
+
+		socket.receive({ type: "system.reload", reason: "module generation changed", artifactHash: "artifact-2" });
+		await flushMicrotasks();
+		expect(client.activeArtifactHash()).toBe("artifact-2");
+		expect(FakeWebSocket.instances).toHaveLength(1);
+	});
+
 	it("subscribes and resumes live Control Plane Queries on the persistent connection", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		client.setAuth({project:"shop",tenant:"tenant-a",token:"session"});

@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/protocol",
+  "crates/postgres",
+  "crates/runtime",
   "crates/module-runtime",
   "crates/module-runtime-v8",
   "crates/module-host",
@@ -18,16 +21,32 @@ version = "0.1.0"
 # so the V8 adapter tracks one version deliberately instead of floating.
 deno_core = "0.320"
 base64 = "0.22"
+axum = { version = "0.8", features = ["ws"] }
+async-trait = "0.1"
+aes-gcm = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+cron = "0.15"
+futures-util = "0.3"
+hmac = "0.12"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json", "chrono", "uuid", "bigdecimal"] }
+bigdecimal = "0.4"
+calamine = "0.36.1"
+uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
+pbkdf2 = "0.12"
+subtle = "2"
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 url = "2"
 thiserror = "2"
 deno_ast = { version = "0.53.3", features = ["transpiling"] }
 duckdb = { version = "=1.4.1", features = ["bundled"] }
 tokio = { version = "1", features = [
+  "fs",
   "io-util",
   "macros",
   "net",
@@ -38,3 +57,6 @@ tokio = { version = "1", features = [
   "sync",
   "time",
 ] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

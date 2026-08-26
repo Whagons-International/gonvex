@@ -377,6 +377,7 @@ export class GonvexClient {
   private replicaOpenFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
+  private activeArtifactHashValue = "";
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
   private authWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
@@ -531,6 +532,11 @@ export class GonvexClient {
   /** Metadata advertised by the runtime in its latest session.ready frame. */
   serverInfo(): Readonly<ServerCapabilities> {
     return { ...this.serverCapabilities };
+  }
+
+  /** Hash of the atomically active TypeScript module generation. */
+  activeArtifactHash(): string {
+    return this.activeArtifactHashValue;
   }
 
   subscribeToConnectionState(handler: ConnectionStateHandler): () => void {
@@ -717,6 +723,14 @@ export class GonvexClient {
         }
         return;
       }
+      if (message.type === "system.reload") {
+        if (typeof message.artifactHash === "string") {
+          this.activeArtifactHashValue = message.artifactHash;
+        }
+        this.resumeQuerySubscriptions();
+        this.resumeReplicaSubscriptions();
+        return;
+      }
       if (message.type === "auth.result" || message.type === "auth.error") {
         this.authInFlight = false;
         if (this.authWatchdogTimer) {
@@ -724,6 +738,7 @@ export class GonvexClient {
           this.authWatchdogTimer = undefined;
         }
         if (message.type === "auth.result") {
+          this.activeArtifactHashValue = artifactHashFromAuthResult(message.result) ?? this.activeArtifactHashValue;
           const developerSessionToken = developerSessionTokenFromAuthResult(message.result);
           if (developerSessionToken) {
             // The activation token is single-use. Keep its rotating successor
@@ -788,6 +803,7 @@ export class GonvexClient {
         void this.replica.applyTransaction({
           cursor: message.cursor,
           originCommandId: message.originCommandId,
+          provenance: message.provenance,
           changes: message.changes.map((change) => ({
             ...change,
             oldValue: asReplicaRow(change.oldValue),
@@ -3141,6 +3157,12 @@ function developerSessionTokenFromAuthResult(result: JsonValue): string | undefi
   if (!isJsonRecord(result)) return undefined;
   const token = result.developerSessionToken;
   return typeof token === "string" && token.startsWith("gvx_dev_") ? token : undefined;
+}
+
+function artifactHashFromAuthResult(result: JsonValue): string | undefined {
+  if (!isJsonRecord(result)) return undefined;
+  const hash = result.artifactHash;
+  return typeof hash === "string" && hash.length > 0 ? hash : undefined;
 }
 
 function hasOwn<T extends object>(value: T, key: PropertyKey) {

@@ -1,19 +1,14 @@
 //! The Gonvex module host.
 //!
-//! One process, one listener, every project. The Go runtime keeps ownership of
+//! One process, one listener, every project. The Rust runtime keeps ownership of
 //! HTTP, Postgres, tenancy, and identity; this host owns module generations and
-//! the isolates that run them, and reaches back into Go for anything a module
+//! the isolates that run them, and reaches back into the trusted runtime for anything a module
 //! asks for. It is deliberately a local-only service: a Unix domain socket
 //! where one exists, loopback TCP as the portable fallback.
 //!
 //! Nothing here is per tenant. Spawning a process per tenant would multiply V8
 //! heaps by the number of tenants for no isolation the invocation context does
 //! not already provide.
-
-mod artifact;
-mod framing;
-mod protocol;
-mod session;
 
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -22,17 +17,17 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gonvex_module_host::framing::DEFAULT_MAX_FRAME_BYTES;
+use gonvex_module_host::protocol::PROTOCOL_VERSION;
+use gonvex_module_host::session;
+use gonvex_module_host::session::{log, HostConfig, HostState};
 use gonvex_module_runtime_v8::{initialize_v8_platform, V8Config};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
-use crate::framing::DEFAULT_MAX_FRAME_BYTES;
-use crate::protocol::PROTOCOL_VERSION;
-use crate::session::{log, HostConfig, HostState};
-
 const USAGE: &str = "\
-gonvex-module-host — executes Gonvex TypeScript modules for the Go runtime
+gonvex-module-host — executes Gonvex TypeScript modules for the Rust runtime
 
   --listen <endpoint>          unix:/path/to.sock | tcp:127.0.0.1:7787 (required)
   --max-frame-bytes <n>        largest accepted protocol frame
@@ -329,7 +324,7 @@ fn cleanup(endpoint: &Endpoint) {
 }
 
 /// A managed host is started with a pipe on stdin it never reads. EOF on that
-/// pipe means the Go runtime is gone, which is the one orphan signal that works
+/// pipe means the parent runtime is gone, which is the one orphan signal that works
 /// the same way on every platform.
 fn watch_parent_exit(state: Arc<HostState>) {
     let spawned = std::thread::Builder::new()

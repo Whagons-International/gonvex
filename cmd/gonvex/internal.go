@@ -28,6 +28,8 @@ func runInternal(args []string) error {
 	tenantName := flags.String("tenant-name", "", "tenant name")
 	tenantID := flags.String("tenant-id", "", "optional UUIDv6 tenant id")
 	email := flags.String("email", "", "account email to resolve")
+	actorName := flags.String("actor-name", "", "name used when creating a missing E2E actor")
+	password := flags.String("password", "", "password used only when creating a missing E2E actor")
 	shard := flags.String("shard", "", "stable E2E shard name")
 	artifactFile := flags.String("file", "", "module artifact JSON file")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -72,7 +74,7 @@ func runInternal(args []string) error {
 			return err
 		}
 		if strings.TrimSpace(*email) != "" {
-			memberRaw, memberErr := internalRequestBytes(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/internal/e2e/members", map[string]string{"projectId": *project, "tenantId": *tenantID, "email": *email})
+			memberRaw, memberErr := internalRequestBytes(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/internal/e2e/members", e2eMemberPayload(*project, *tenantID, *email, *actorName, *password))
 			if memberErr != nil {
 				return memberErr
 			}
@@ -85,7 +87,7 @@ func runInternal(args []string) error {
 		if strings.TrimSpace(*tenantID) == "" || strings.TrimSpace(*email) == "" {
 			return fmt.Errorf("--tenant-id and --email are required")
 		}
-		return internalRequest(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/internal/e2e/members", map[string]string{"projectId": *project, "tenantId": *tenantID, "email": *email})
+		return internalRequest(client, *runtimeURL, *adminKey, http.MethodPost, "/dev/internal/e2e/members", e2eMemberPayload(*project, *tenantID, *email, *actorName, *password))
 	case "resolve-identity":
 		if strings.TrimSpace(*email) == "" {
 			return fmt.Errorf("--email is required")
@@ -113,6 +115,17 @@ func runInternal(args []string) error {
 	default:
 		return fmt.Errorf("unknown internal command %q", command)
 	}
+}
+
+func e2eMemberPayload(project, tenant, email, name, password string) map[string]string {
+	payload := map[string]string{"projectId": project, "tenantId": tenant, "email": email}
+	if strings.TrimSpace(name) != "" {
+		payload["name"] = name
+	}
+	if password != "" {
+		payload["password"] = password
+	}
+	return payload
 }
 
 func deterministicE2ETenantID(project, name, shard string) string {

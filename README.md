@@ -22,8 +22,8 @@ export function Tasks() {
 Gonvex keeps application state in Postgres while delivering an instant,
 persistent Local Replica to web and mobile clients.
 
-> **Status: beta.** The runtime, self-hosted stack, TypeScript module execution,
-> native Google auth, multi-tenant routing, Live Queries,
+> **Status: beta.** The Rust runtime, self-hosted stack, TypeScript module execution,
+> modular authentication, multi-tenant routing, Live Queries,
 > Replica Collections, scheduling, and dashboard are implemented. Migration
 > rollouts, fleet backup/restore, deployment automation, and a public hosted
 > service are still stabilizing before 1.0.
@@ -36,7 +36,8 @@ persistent Local Replica to web and mobile clients.
 - **Local Replica**: render normalized entities from IndexedDB or SQLite and apply each server transaction atomically.
 - **Live Queries**: keep exact indexed server windows over datasets too large to replicate.
 - **Postgres underneath**: keep your data in a database you already know how to run, back up, inspect, and tune.
-- **Projects, tenants, and auth**: route isolated tenant databases, verify Members, and add native Google OAuth without a per-app identity SDK.
+- **Projects, tenants, and auth**: route isolated tenant databases, verify Members, and select Gonvex-native, Firebase, external OIDC, or hybrid project authentication.
+- **Agent API catalogs**: emit a deterministic, signed inventory of interactive functions and invoke them through the acting Member's normal authorization path.
 - **Background work**: commit Action outbox rows with business data and process external work after commit.
 - **Operational tooling**: inspect functions, data, files, errors, metrics, connections, and scheduler health in the dashboard.
 - **Self-hostable runtime**: run Gonvex with Postgres, Valkey/Redis, and optional S3-compatible object storage.
@@ -44,18 +45,16 @@ persistent Local Replica to web and mobile clients.
 
 ## Gonvex v2 model
 
-The v2 public execution model has three executable kinds: `Query`, `Reducer`,
+The public execution model has three executable kinds: `Query`, `Reducer`,
 and `Action`. Reads are delivered through Replica Collections and Live Queries.
-The old declared `Writes` contract, manual invalidation hooks, and generic
-reactive-query API are removed; applications should use Reducers for durable
+Applications use Reducers for durable
 writes, Actions for external work, Replica Collections for bounded local data,
 and Live Queries for indexed server-computed windows.
 
-The target identity model is Control Plane plus isolated tenant databases. The
+The identity model is a Control Plane plus isolated tenant databases. The
 Control Plane owns Accounts, auth identities, the tenant directory and routing,
 and the `account_tenant_index` projection. A tenant database owns Members and
-tenant roles, teams, and permissions. This is the v2 architecture and migration
-target.
+tenant roles, teams, and permissions.
 
 ## Quickstart
 
@@ -104,7 +103,7 @@ my-app/
   package.json
 ```
 
-## Define Your Backend
+## Define your backend
 
 Application functions are TypeScript. Versioned SQL migrations own the tenant
 schema:
@@ -125,6 +124,38 @@ export const create = reducer({
 During development, `gonvex dev` watches the `gonvex/` folder, regenerates
 client bindings, bundles the TypeScript module for the bounded V8 host, applies
 versioned SQL migrations, and optionally runs your app dev server.
+
+## Agent function catalogs
+
+Interactive functions carry literal metadata in their normal declaration:
+
+```ts
+export const start = reducer({
+  interactive: true,
+  description: "Start a task and assign the acting member.",
+  agent: { tags: ["tasks", "workflow"], confirmation: "none" },
+  args: schema.object({ taskId: schema.id("tasks") }),
+  result: schema.object({ taskId: schema.id("tasks") }),
+  offline: { mode: "onlineOnly", reason: "requires current workflow state" },
+  nonOptimisticReason: "workflow state is server-authoritative",
+  run: async (ctx, args) => { /* normal authorization and business logic */ },
+});
+```
+
+Generate grep-friendly NDJSON and readable TypeScript signatures from the
+compiled, hashed artifact:
+
+```bash
+gonvex functions emit --format ndjson --output agent-api.ndjson
+gonvex functions emit --format typescript --output agent-api.d.ts
+gonvex functions check
+```
+
+An Agent Action may declare `capabilities: { functions: true }` and call
+`ctx.functions.invoke({ path, args, artifactHash })`. The Rust host accepts only
+functions classified as interactive, validates their schemas and active artifact
+hash, rechecks tenant membership, and runs the same Query, Reducer, or Action
+used by the UI. The catalog describes the callable API. It does not grant access.
 
 ## Live Queries and Replica Collections
 
@@ -224,9 +255,14 @@ transactions are overlaid on normalized entities and reconcile through the
 origin command ID plus committed revision; callers can opt into offline replay with
 `{ offline: "queue" }`.
 
-## Native Google Login
+## Authentication
 
-Create, provision, and wire a production-origin Google app through Gonvex itself:
+Authentication is project-scoped. Gonvex-native auth can be enabled on its own,
+or a project can exchange Firebase or external OIDC identity tokens for a
+canonical Gonvex session. Tenant admission always checks the tenant database's
+active `members.account_id` row.
+
+Native Google OAuth remains available:
 
 ```bash
 npm create gonvex@latest my-app -- \
@@ -254,12 +290,17 @@ server-side, and issues project-scoped accounts and rotating sessions using
 Authorization Code + PKCE. Enabling the provider also makes the runtime enforce
 authentication for that project; the sign-in screen is not the security boundary.
 
-## Self-Hosting
+Firebase projects keep provider-specific login UX in Firebase and install the
+optional client adapter instead of using Gonvex's provider buttons. Gonvex
+verifies each Firebase ID token, resolves the project Account identity, issues a
+rotating Gonvex session, and preserves tenant-local Member authorization.
+
+## Self-hosting
 
 Gonvex is designed to be self-hosted. A full deployment has:
 
 ```txt
-Gonvex runtime       Executes functions, serves HTTP/WebSocket traffic, routes projects and tenants
+Gonvex Rust runtime  Executes functions, serves HTTP/WebSocket traffic, routes projects and tenants
 Postgres            Stores app data and Gonvex control-plane data
 Valkey or Redis     Optional cache for dashboard data-explorer reads
 Object storage      Optional S3-compatible storage for apps that use file APIs
@@ -291,7 +332,7 @@ For production self-hosting, put the runtime behind TLS, provide managed Postgre
 `VALKEY_URL` is optional. It accelerates dashboard data-explorer reads and has
 no role in reducer, change-feed, visibility, Live Query, or Local Replica correctness.
 
-## Current Scope
+## Current scope
 
 Gonvex currently includes:
 
@@ -306,8 +347,8 @@ Gonvex currently includes:
 - transparent, scope-isolated persistent Local Replica
 - a normalized Local Replica backed by Postgres revisions and IndexedDB or SQLite
 - multi-project and database-per-tenant routing
-- native Google OAuth with PKCE, memberships, invitations, roles, and live
-  session revocation
+- pluggable Gonvex-native, Firebase, external OIDC, and hybrid authentication,
+  with memberships, invitations, roles, and live session revocation
 - recurring and one-shot scheduled work
 - optional S3-compatible files, browser error reporting, and uploaded data-file
   analysis
@@ -320,7 +361,7 @@ Still in progress before a stable production release:
   rollout controls
 - automated tenant database backup/restore, moves, and fleet operations
 - deployment records, zero-downtime upgrade automation, and rollback tooling
-- enterprise identity providers, organization policy, SSO, and audit export
+- organization policy, SSO administration, and audit export
 - a generally available hosted control plane
 
 ## Documentation
@@ -332,6 +373,7 @@ Still in progress before a stable production release:
 - Current limits: https://desarso.github.io/gonvex/docs/current-limits/
 - Replica Collections and Local Replica: https://desarso.github.io/gonvex/docs/replica-collections/
 - Scheduling: https://desarso.github.io/gonvex/docs/scheduling/
+- Agent function catalog and attribution: [docs/agent-function-catalog-and-attribution.md](docs/agent-function-catalog-and-attribution.md)
 
 Run the docs locally:
 
@@ -340,7 +382,7 @@ pnpm install
 pnpm dev:docs
 ```
 
-## Repository Layout
+## Repository layout
 
 ```txt
 apps/dashboard/          Dashboard and local integration harness
@@ -351,12 +393,14 @@ packages/react/          React provider and hooks
 packages/protocol/       Shared TypeScript protocol types
 packages/gonvex/         CLI package
 packages/create-gonvex/  App initializer
-packages/module-sdk/    TypeScript Query/Reducer/Action module SDK
+packages/module-sdk/     TypeScript Query/Reducer/Action module SDK
 pkg/manifest/            Runtime manifest model
 templates/vite-react/    Default starter template
 cmd/gonvex/              Migration-only command-line utilities
 cmd/gonvex-load/         Persistent WebSocket and Reducer load runner
-server/                  Runtime host server
+rust/crates/runtime/     Rust HTTP, WebSocket, Control Plane, tenant, and execution runtime
+rust/crates/module-host/ Rust process supervising bounded V8 module generations
+rust/crates/postgres/    Rust Postgres routing, transactions, and provisioning
 infra/                   Local infrastructure helpers
 releases/                Versioned release notes
 ```

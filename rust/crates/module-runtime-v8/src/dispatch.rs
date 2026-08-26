@@ -34,6 +34,7 @@ fn structural_capabilities(kind: &FunctionKind) -> Capabilities {
         // storage, and mutate only by calling a reducer.
         FunctionKind::Action => Capabilities {
             action_tools: true,
+            functions: true,
             scheduler: true,
             network: true,
             storage: true,
@@ -57,6 +58,7 @@ pub(crate) fn effective_capabilities(kind: &FunctionKind, granted: &Capabilities
         storage: structural.storage && granted.storage,
         sandbox: structural.sandbox && granted.sandbox,
         secrets: structural.secrets && granted.secrets,
+        functions: structural.functions && granted.functions,
     }
 }
 
@@ -80,6 +82,7 @@ pub(crate) struct CapabilityFlags {
     storage: bool,
     sandbox: bool,
     secrets: bool,
+    functions: bool,
 }
 
 impl From<&Capabilities> for CapabilityFlags {
@@ -94,6 +97,7 @@ impl From<&Capabilities> for CapabilityFlags {
             storage: capabilities.storage,
             sandbox: capabilities.sandbox,
             secrets: capabilities.secrets,
+            functions: capabilities.functions,
         }
     }
 }
@@ -130,6 +134,7 @@ pub(crate) struct DispatchRequest<'a> {
     pub(crate) kind: &'static str,
     pub(crate) capabilities: CapabilityFlags,
     pub(crate) identity: IdentityView<'a>,
+    pub(crate) invocation: &'a gonvex_module_runtime::InvocationInfo,
     pub(crate) environment: &'a std::collections::BTreeMap<String, String>,
     pub(crate) action_tools: &'a [String],
     /// Wall-clock milliseconds the host stamped on the invocation, surfaced as
@@ -179,6 +184,13 @@ pub(crate) enum HostCallRequest {
         tool: String,
         #[serde(default)]
         args: serde_json::Value,
+    },
+    FunctionInvoke {
+        path: String,
+        #[serde(default)]
+        args: serde_json::Value,
+        #[serde(rename = "artifactHash")]
+        artifact_hash: String,
     },
     ScheduleAfter {
         #[serde(rename = "delayMs")]
@@ -254,6 +266,15 @@ impl HostCallRequest {
             Self::ToolInvoke { tool, args } => HostCall::ToolInvoke {
                 tool,
                 args: encode(args)?,
+            },
+            Self::FunctionInvoke {
+                path,
+                args,
+                artifact_hash,
+            } => HostCall::FunctionInvoke {
+                path,
+                args: encode(args)?,
+                artifact_hash,
             },
             Self::ScheduleAfter {
                 delay_ms,
@@ -416,5 +437,33 @@ mod tests {
         assert!(!effective_capabilities(&FunctionKind::Query, &granted).sandbox);
         assert!(!effective_capabilities(&FunctionKind::Reducer, &granted).sandbox);
         assert!(effective_capabilities(&FunctionKind::Action, &granted).sandbox);
+    }
+
+    #[test]
+    fn interactive_function_invocation_is_structurally_action_only() {
+        let granted = Capabilities {
+            functions: true,
+            ..Capabilities::default()
+        };
+        assert!(!effective_capabilities(&FunctionKind::Query, &granted).functions);
+        assert!(!effective_capabilities(&FunctionKind::Reducer, &granted).functions);
+        assert!(effective_capabilities(&FunctionKind::Action, &granted).functions);
+
+        let request: HostCallRequest = serde_json::from_value(serde_json::json!({
+            "kind":"functionInvoke",
+            "path":"tasks.start",
+            "args":{"taskId":"task-1"},
+            "artifactHash":"artifact-1"
+        }))
+        .expect("function invocation should decode");
+        let call = request
+            .into_host_call()
+            .expect("function invocation should lower");
+        assert_eq!(call.capability(), "functions");
+        assert!(matches!(
+            call,
+            HostCall::FunctionInvoke { path, artifact_hash, .. }
+                if path == "tasks.start" && artifact_hash == "artifact-1"
+        ));
     }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/expo-sqlite",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "type": "module",
   "publishConfig": { "access": "public" },
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },

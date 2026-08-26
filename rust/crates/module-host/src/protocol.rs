@@ -1,4 +1,4 @@
-//! The wire contract between the Go runtime and this module host.
+//! The wire contract between the Gonvex Rust runtime and this module host.
 //!
 //! Every frame is one explicitly named shape. There is no free-form envelope
 //! and no operation the host has to guess at: an unknown `type` or `op` is a
@@ -15,15 +15,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gonvex_module_runtime::{
     AccountIdentity, Capabilities, FunctionKind, HostCall, IdentityContext, InvocationContext,
-    MemberIdentity, TenantIdentity,
+    InvocationInfo, MemberIdentity, TenantIdentity,
 };
 use serde::{Deserialize, Serialize};
 
 /// Bumped when a frame's meaning changes in a way an older peer would
-/// misread. The Go client refuses a host whose protocol it does not know.
+/// misread. The runtime refuses a host whose protocol it does not know.
 pub const PROTOCOL_VERSION: u32 = 2;
 
-/// Precise, stable error codes. The Go host maps them onto its own dispatch
+/// Precise, stable error codes. The Rust host maps them onto its own dispatch
 /// errors, so a caller can tell "this function does not exist" from "the
 /// module timed out" without parsing prose.
 pub mod codes {
@@ -75,8 +75,8 @@ impl WireError {
     }
 }
 
-/// Frames the Go runtime sends.
-#[derive(Debug, Deserialize)]
+/// Frames the Gonvex runtime sends.
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 // Frames are decoded once and dispatched immediately; boxing individual wire
 // variants would add protocol plumbing without reducing retained host memory.
@@ -108,7 +108,7 @@ pub enum ClientFrame {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 #[allow(clippy::large_enum_variant)]
 pub enum RequestOp {
@@ -121,18 +121,18 @@ pub enum RequestOp {
     Shutdown(ShutdownRequest),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadRequest {
     pub module_id: String,
-    /// Absent lets the host allocate the next generation, which is what a Go
+    /// Absent lets the host allocate the next generation, which is what the
     /// runtime that does not track host state should do.
     #[serde(default)]
     pub generation: Option<u64>,
     pub artifact: ModuleArtifactWire,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivateRequest {
     pub module_id: String,
@@ -143,13 +143,13 @@ pub struct ActivateRequest {
     pub drain_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DescribeRequest {
     pub module_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnloadRequest {
     pub module_id: String,
@@ -157,14 +157,14 @@ pub struct UnloadRequest {
     pub drain_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShutdownRequest {
     #[serde(default)]
     pub grace_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvokeRequest {
     pub module_id: String,
@@ -181,7 +181,7 @@ pub struct InvokeRequest {
     pub context: InvocationContextWire,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilitiesWire {
     #[serde(default)]
@@ -202,6 +202,8 @@ pub struct CapabilitiesWire {
     pub sandbox: bool,
     #[serde(default)]
     pub secrets: bool,
+    #[serde(default)]
+    pub functions: bool,
 }
 
 impl From<CapabilitiesWire> for Capabilities {
@@ -216,11 +218,12 @@ impl From<CapabilitiesWire> for Capabilities {
             storage: wire.storage,
             sandbox: wire.sandbox,
             secrets: wire.secrets,
+            functions: wire.functions,
         }
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContextWire {
     #[serde(default)]
@@ -237,6 +240,8 @@ pub struct InvocationContextWire {
     pub member: Option<MemberIdentity>,
     #[serde(default)]
     pub permissions: serde_json::Value,
+    #[serde(default)]
+    pub invocation: InvocationInfo,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
@@ -268,6 +273,7 @@ impl InvocationContextWire {
                 member: self.member,
                 permissions: self.permissions,
             },
+            invocation: self.invocation,
             environment: self.environment,
             action_tools: self.action_tools,
             generation,
@@ -308,10 +314,10 @@ pub fn kind_name(kind: &FunctionKind) -> &'static str {
     }
 }
 
-/// The module payload as the Go runtime holds it: the manifest's declarative
+/// The module payload as the Gonvex runtime holds it: the manifest's declarative
 /// function metadata plus the bundled JavaScript, base64 encoded with the hash
 /// the build recorded. The host verifies the hash before it evaluates anything.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleArtifactWire {
     #[serde(default)]
@@ -328,7 +334,7 @@ pub struct ModuleArtifactWire {
     pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JavaScriptWire {
     #[serde(default)]
@@ -339,7 +345,7 @@ pub struct JavaScriptWire {
     pub code: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionWire {
     pub path: String,
@@ -365,7 +371,7 @@ pub struct FunctionWire {
 }
 
 /// Frames this process sends.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerFrame {
     /// Sent once per connection so the client can check protocol agreement
@@ -390,7 +396,7 @@ pub enum ServerFrame {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "result", rename_all = "camelCase")]
 pub enum ResponsePayload {
     Pong {
@@ -429,7 +435,7 @@ pub enum ResponsePayload {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionSummary {
     pub path: String,
@@ -440,8 +446,8 @@ pub struct FunctionSummary {
 
 /// Host calls, named one by one. Values travel as JSON, never as SQL text a
 /// module built: `dbInsert`/`dbUpdate`/`dbDelete` name a table, a key and an
-/// object, and the Go host quotes the identifiers and binds the values.
-#[derive(Debug, Serialize)]
+/// object, and the Rust host quotes the identifiers and binds the values.
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum HostCallFrame {
     DbQuery {
@@ -470,6 +476,12 @@ pub enum HostCallFrame {
     ToolInvoke {
         tool: String,
         args: serde_json::Value,
+    },
+    FunctionInvoke {
+        path: String,
+        args: serde_json::Value,
+        #[serde(rename = "artifactHash")]
+        artifact_hash: String,
     },
     ScheduleAfter {
         #[serde(rename = "delayMs")]
@@ -543,6 +555,15 @@ impl HostCallFrame {
             HostCall::ToolInvoke { tool, args } => Self::ToolInvoke {
                 tool,
                 args: decode(args, "args")?,
+            },
+            HostCall::FunctionInvoke {
+                path,
+                args,
+                artifact_hash,
+            } => Self::FunctionInvoke {
+                path,
+                args: decode(args, "args")?,
+                artifact_hash,
             },
             HostCall::ScheduleAfter {
                 delay_ms,
@@ -623,5 +644,20 @@ mod tests {
         assert_eq!(encoded["kind"], "sandbox");
         assert_eq!(encoded["operation"], "create");
         assert_eq!(encoded["payload"]["ttlMs"], 30000);
+    }
+
+    #[test]
+    fn interactive_function_host_call_preserves_path_args_and_artifact_hash() {
+        let frame = HostCallFrame::from_host_call(HostCall::FunctionInvoke {
+            path: "tasks.start".to_owned(),
+            args: br#"{"taskId":"task-1"}"#.to_vec(),
+            artifact_hash: "artifact-1".to_owned(),
+        })
+        .expect("function invocation payload should be valid JSON");
+        let encoded = serde_json::to_value(frame).expect("host call frame should serialize");
+        assert_eq!(encoded["kind"], "functionInvoke");
+        assert_eq!(encoded["path"], "tasks.start");
+        assert_eq!(encoded["args"]["taskId"], "task-1");
+        assert_eq!(encoded["artifactHash"], "artifact-1");
     }
 }

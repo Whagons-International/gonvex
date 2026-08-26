@@ -2,9 +2,9 @@
 
 The Gonvex CLI for app-local development with the Gonvex runtime.
 
-Gonvex gives you a Convex-style workflow with TypeScript backend functions,
-generated TypeScript bindings, React hooks, realtime subscriptions,
-and a local runtime backed by Postgres.
+Gonvex provides TypeScript backend functions, generated TypeScript bindings,
+React hooks, transaction-ordered realtime delivery, and a persistent Local
+Replica backed by Postgres.
 
 ## Install
 
@@ -87,6 +87,21 @@ Run a one-shot sync for CI or Docker builds:
 ```bash
 npx gonvex dev --once
 ```
+
+Emit or verify the deterministic interactive-function catalog used by agent
+orchestration:
+
+```bash
+npx gonvex functions emit --format ndjson --output agent-api.ndjson
+npx gonvex functions emit --format typescript --output agent-api.d.ts
+npx gonvex functions check
+```
+
+Both files are derived from the compiled module artifact, sorted by public
+function path, and contain the artifact hash. The NDJSON format stores one
+complete function contract per line. The TypeScript declaration renders the
+same schemas, classification, offline policy, optimistic transaction,
+description, tags, and confirmation requirement as literal types.
 
 By default, `gonvex dev` streams only runtime warnings and errors to the
 terminal. To tail every Query, Reducer, and Action:

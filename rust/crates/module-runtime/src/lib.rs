@@ -122,6 +122,82 @@ pub struct IdentityContext {
     pub permissions: serde_json::Value,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InvocationChannel {
+    #[default]
+    Ui,
+    Agent,
+    Api,
+    Scheduler,
+    System,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationProvenance {
+    pub channel: InvocationChannel,
+    pub root_channel: InvocationChannel,
+    pub actor_account_id: Option<String>,
+    pub actor_member_id: Option<String>,
+    pub on_behalf_of_member_id: Option<String>,
+    pub root_command_id: String,
+    pub command_id: String,
+    pub parent_command_id: Option<String>,
+    pub agent_execution_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub artifact_hash: String,
+    #[serde(default)]
+    pub depth: u8,
+    #[serde(default)]
+    pub action_stack: Vec<String>,
+    /// Root in-process execution deadline. The host copies this into the
+    /// invocation envelope but never exposes it through `ctx.invocation` or
+    /// persists it across an outbox or scheduler boundary.
+    #[serde(skip)]
+    pub deadline_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationInfo {
+    pub channel: InvocationChannel,
+    pub root_channel: InvocationChannel,
+    pub actor_account_id: Option<String>,
+    pub actor_member_id: Option<String>,
+    pub on_behalf_of_member_id: Option<String>,
+    pub root_command_id: String,
+    pub command_id: String,
+    pub parent_command_id: Option<String>,
+    pub agent_execution_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub artifact_hash: String,
+}
+
+impl InvocationProvenance {
+    pub fn public_info(&self) -> InvocationInfo {
+        InvocationInfo {
+            channel: self.channel,
+            root_channel: self.root_channel,
+            actor_account_id: self.actor_account_id.clone(),
+            actor_member_id: self.actor_member_id.clone(),
+            on_behalf_of_member_id: self.on_behalf_of_member_id.clone(),
+            root_command_id: self.root_command_id.clone(),
+            command_id: self.command_id.clone(),
+            parent_command_id: self.parent_command_id.clone(),
+            agent_execution_id: self.agent_execution_id.clone(),
+            thread_id: self.thread_id.clone(),
+            turn_id: self.turn_id.clone(),
+            tool_call_id: self.tool_call_id.clone(),
+            artifact_hash: self.artifact_hash.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContext {
@@ -131,6 +207,7 @@ pub struct InvocationContext {
     #[serde(default)]
     pub tenant: Option<TenantIdentity>,
     pub identity: IdentityContext,
+    pub invocation: InvocationInfo,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
@@ -157,6 +234,7 @@ pub struct Capabilities {
     pub storage: bool,
     pub sandbox: bool,
     pub secrets: bool,
+    pub functions: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -216,6 +294,11 @@ pub enum HostCall {
         tool: String,
         args: Vec<u8>,
     },
+    FunctionInvoke {
+        path: String,
+        args: Vec<u8>,
+        artifact_hash: String,
+    },
     ScheduleAfter {
         delay_ms: u64,
         function: String,
@@ -261,6 +344,7 @@ impl HostCall {
             Self::DbInsert { .. } | Self::DbUpdate { .. } | Self::DbDelete { .. } => "db_write",
             Self::ActionEnqueue { .. } => "action_outbox",
             Self::ToolInvoke { .. } => "action_tools",
+            Self::FunctionInvoke { .. } => "functions",
             Self::ScheduleAfter { .. } | Self::ScheduleAt { .. } => "scheduler",
             Self::Fetch { .. } => "network",
             Self::Storage { .. } => "storage",
@@ -279,6 +363,7 @@ impl HostCall {
             "network" => capabilities.network,
             "storage" => capabilities.storage,
             "sandbox" => capabilities.sandbox,
+            "functions" => capabilities.functions,
             _ => false,
         };
         if allowed {

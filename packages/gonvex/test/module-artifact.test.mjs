@@ -7,6 +7,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { buildModuleArtifact, moduleManifestFunctions } from "../dist/module-artifact.js";
+import { renderFunctionCatalog } from "../dist/function-catalog.js";
 
 async function moduleProject(t, source, supportingFiles = {}) {
   const root = await mkdtemp(join(tmpdir(), "gonvex-module-artifact-"));
@@ -103,7 +104,17 @@ export const rename = reducer<RenameArgs, RenameResult>({
     cwd: repositoryRoot,
     encoding: "utf8",
   }).trim();
-  assert.equal(verifiedHash, artifact.hash, "TypeScript CLI and Go runtime must hash the same artifact contract");
+  assert.equal(verifiedHash, artifact.hash, "TypeScript CLI and migration verifier must hash the same artifact contract");
+  let rustVerifiedHash;
+  try {
+    rustVerifiedHash = execFileSync("cargo", [
+      "run", "--quiet", "--manifest-path", join(repositoryRoot, "rust", "Cargo.toml"),
+      "-p", "gonvex-runtime", "--", "verify-module-artifact", "--file", artifactFile,
+    ], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+  } catch (error) {
+    throw new Error(`Rust artifact verifier failed (status ${String(error?.status)}): ${String(error?.stdout ?? "")} ${String(error?.stderr ?? error)}`);
+  }
+  assert.equal(rustVerifiedHash, artifact.hash, "TypeScript CLI and Rust runtime must hash the same artifact contract");
   const tamperedArtifacts = [
     { ...artifact, entrypoint: "gonvex/tampered.ts" },
     { ...artifact, files: { ...artifact.files, "gonvex/extra.ts": "export {};" } },
@@ -120,6 +131,11 @@ export const rename = reducer<RenameArgs, RenameResult>({
       stdio: "pipe",
     }), /Command failed/);
   }
+  await writeFile(artifactFile, JSON.stringify(tamperedArtifacts[0]));
+  assert.throws(() => execFileSync("cargo", [
+    "run", "--quiet", "--manifest-path", join(repositoryRoot, "rust", "Cargo.toml"),
+    "-p", "gonvex-runtime", "--", "verify-module-artifact", "--file", artifactFile,
+  ], { cwd: repositoryRoot, stdio: "pipe" }), /Command failed/);
 
   assert.equal(artifact.javascript?.path, "gonvex/_build/module.js");
   const bundled = Buffer.from(artifact.javascript.code, "base64").toString("utf8");
@@ -167,6 +183,71 @@ export const rename = reducer<RenameArgs, RenameResult>({
     },
   });
   assert.deepEqual(functions.rename.result, { kind: "object", fields: { ok: { kind: "boolean" } } });
+});
+
+test("literal agent metadata is signed and checkout-path independent", async (t) => {
+  const source = `
+const schema = { object: (fields) => ({ kind: "object", fields }), string: () => ({ kind: "string" }) };
+const reducer = (definition) => definition;
+const action = (definition) => definition;
+export const start = reducer({
+  interactive: true,
+  description: "Start a task",
+  agent: { tags: ["workflow", "tasks"], confirmation: "required" },
+  args: schema.object({ taskId: schema.string() }),
+  result: schema.object({ taskId: schema.string() }),
+  offline: { mode: "onlineOnly", reason: "test" },
+  nonOptimisticReason: "test",
+  run: async (_ctx, args) => args,
+});
+export const callback = action({
+  args: schema.object({}),
+  result: schema.object({}),
+  run: async () => ({}),
+});
+`;
+  const left = await moduleProject(t, source);
+  const right = await moduleProject(t, source);
+  const leftArtifact = await buildModuleArtifact({ root: left.root, backendDir: left.backendDir, files: [left.entrypoint], migrations: [] });
+  const rightArtifact = await buildModuleArtifact({ root: right.root, backendDir: right.backendDir, files: [right.entrypoint], migrations: [] });
+  assert.equal(leftArtifact.hash, rightArtifact.hash);
+  assert.equal(renderFunctionCatalog(leftArtifact, "ndjson"), renderFunctionCatalog(rightArtifact, "ndjson"));
+  assert.equal(renderFunctionCatalog(leftArtifact, "typescript"), renderFunctionCatalog(rightArtifact, "typescript"));
+  assert.deepEqual(leftArtifact.functions.start.agent, { tags: ["tasks", "workflow"], confirmation: "required" });
+  assert.equal(leftArtifact.functions.start.classification, "interactive");
+  assert.equal(leftArtifact.functions.callback.classification, "system");
+  await writeFile(left.entrypoint, source.replace("Start a task", "Begin a task"));
+  const changed = await buildModuleArtifact({ root: left.root, backendDir: left.backendDir, files: [left.entrypoint], migrations: [] });
+  assert.notEqual(changed.hash, leftArtifact.hash);
+});
+
+test("agent classification metadata rejects values that static extraction cannot prove", async (t) => {
+  for (const declaration of [
+    "interactive: runtimeChoice",
+    "internal: runtimeChoice",
+    "description: runtimeDescription",
+    "agent: runtimeAgentMetadata",
+  ]) {
+    const project = await moduleProject(t, `
+const schema = { object: (fields) => ({ kind: "object", fields }) };
+const reducer = (definition) => definition;
+const runtimeChoice = true;
+const runtimeDescription = "unsafe";
+const runtimeAgentMetadata = { tags: ["unsafe"], confirmation: "none" };
+export const update = reducer({
+  ${declaration},
+  args: schema.object({}),
+  result: schema.object({}),
+  offline: { mode: "onlineOnly", reason: "test" },
+  nonOptimisticReason: "test",
+  run: async () => ({}),
+});
+`);
+    await assert.rejects(
+      buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }),
+      /must be (?:a boolean literal|a string literal|an object literal)/,
+    );
+  }
 });
 
 test("Replica delivery requires the canonical replica definition", async (t) => {
@@ -390,7 +471,7 @@ export const run = action({
 });
 `);
   const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
-  assert.equal(artifact.generation, 7);
+  assert.equal(artifact.generation, 8);
   assert.equal(artifact.functions.searchTasks.internal, true);
   assert.equal(artifact.functions.run.actionProfile, "agent");
   assert.deepEqual(artifact.functions.run.actionCapabilities.tools.searchTasks, { kind: "query", function: "searchTasks" });

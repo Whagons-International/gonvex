@@ -1,6 +1,6 @@
 # Whagons Control Plane v2 handoff
 
-This is the migration contract for `@gonvex/*` version `0.4.1`. Whagons should
+This is the migration contract for `@gonvex/*` version `0.5.0`. Whagons should
 use one `GonvexClient` for Control Plane calls, tenant calls, live Control Plane
 queries, and the Local Replica stream. OAuth callbacks and public customer APIs
 remain HTTP because their protocols require HTTP.
@@ -359,8 +359,8 @@ subject or an unverified email. The concurrent first-login lock prevents
 duplicate Accounts during normal exchange.
 
 The reference runtime image builds and installs `gonvex-module-host` and sets
-`GONVEX_MODULE_HOST_BINARY`. Local `pnpm dev:runtime` builds the same Rust host
-before starting the Go process. `/healthz` reports module-host readiness and
+`GONVEX_MODULE_HOST_BINARY`. Local `pnpm dev:runtime` builds the workers and
+starts the Rust server. `/healthz` reports module-host readiness and
 fails once an active TypeScript project requires a missing host. A clean
 multi-tenant setup creates the project, configures Firebase with its project
 key, installs the TypeScript artifact, then creates the first tenant through a
@@ -376,9 +376,97 @@ tenant database. `account_tenant_index` remains a resumable directory
 projection and cannot grant access. Invitation acceptance and member changes
 project only after the tenant transaction commits.
 
+## Agent function catalog and invocation
+
+Whagons should remove `assistantApprovedActions.ts`. The compiled Gonvex module
+is the only function inventory. Add literal metadata to each function that an
+agent may call:
+
+```ts
+export const start = reducer({
+  interactive: true,
+  description: "Start a task and assign the acting member.",
+  agent: {
+    tags: ["tasks", "workflow"],
+    confirmation: "none",
+  },
+  args: schema.object({
+    taskId: schema.id("tasks"),
+    expectedVersion: schema.number(),
+  }),
+  result: schema.object({
+    taskId: schema.id("tasks"),
+    version: schema.number(),
+  }),
+  async run(ctx, args) {
+    // Existing business implementation and authorization.
+  },
+});
+```
+
+Public Queries and Reducers retain their current interactive default. Public
+Actions must set `interactive: true` before they enter the agent catalog.
+Internal and system functions never enter it. Gonvex rejects computed metadata
+because the artifact builder must extract exact literal values.
+
+Generate and verify both catalog formats from the compiled artifact:
+
+```bash
+gonvex functions emit --format ndjson --output agent-api.ndjson
+gonvex functions emit --format typescript --output agent-api.d.ts
+gonvex functions check
+```
+
+NDJSON has one complete, grep-friendly JSON object per line. The TypeScript
+file renders portable schemas, including `Id<"tasks">`, optional values,
+records, literals, null, and `JsonValue` for `schema.any()`. Both files contain
+the signed module artifact hash.
+
+The agent-profile Action requests the host capability once:
+
+```ts
+export const runAgent = action({
+  profile: "agent",
+  capabilities: { functions: true },
+  async run(ctx, input) {
+    return ctx.functions.invoke({
+      path: input.path,
+      args: input.args,
+      artifactHash: input.artifactHash,
+    });
+  },
+});
+```
+
+The host validates the path, schema, classification, active artifact hash,
+tenant, active Member, recursion depth, deadline, and normal target
+authorization. It then calls the same Query, Reducer, or Action implementation
+used by the UI. A hash mismatch returns the stable `STALE_AGENT_CATALOG` error.
+Regenerate the catalog and retry the model turn.
+
+`ctx.invocation` contains host-owned channel, actor, root command, current
+command, parent command, and agent execution attribution. Reducer transaction
+metadata keeps that root attribution across durable Actions and scheduled
+work. Clients cannot supply trusted actor IDs or channels. Local Replica
+messages receive only the sanitized provenance needed for audit display.
+
+Whagons integration is mechanical:
+
+1. Upgrade every Gonvex package to `0.5.0`.
+2. Add literal metadata to functions that the agent may call.
+3. Regenerate bindings and the two catalog files.
+4. Give the agent ordinary grep and file-read access to the generated catalog.
+5. Replace the handwritten allowlist with `ctx.functions.invoke`.
+6. Handle `STALE_AGENT_CATALOG` by loading the new catalog.
+7. Keep Markdown skills limited to product and workflow knowledge.
+
+Skills do not define function names, parameters, or permission. The generated
+catalog defines the executable API, and the target function remains responsible
+for its normal authorization checks.
+
 ## Package release
 
-The compatible release version is `0.4.1` for:
+The compatible, unpublished release version is `0.5.0` for:
 
 ```text
 @gonvex/protocol
@@ -390,8 +478,9 @@ The compatible release version is `0.4.1` for:
 create-gonvex
 ```
 
-The npm registry manifests must contain exact `0.4.1` Gonvex dependencies and
-no `workspace:*` entries. Publish the packages in this order:
+The packed npm manifests contain exact `0.5.0` Gonvex dependencies and no
+`workspace:*` entries. Publish the packages in this order only after Gabriel
+approves publication:
 
 ```bash
 pnpm --dir packages/protocol publish --access public --no-git-checks
@@ -427,30 +516,32 @@ node --test scripts/production-compose.test.mjs scripts/runtime-dockerfile.test.
   scripts/deploy-coolify.test.mjs scripts/release-cli.test.mjs
 ```
 
-The TypeScript package run passed 17 module SDK tests, 134 client tests, one
-Expo SQLite test, 29 React tests, 26 CLI tests, 38 dashboard tests, and five
-dashboard server tests. Rust passed 14 unit and integration tests. The four
-deployment and release scripts passed 19 tests.
+The TypeScript package run passed 19 module SDK tests, 135 client tests, one
+Expo SQLite test, 29 React tests, 30 CLI tests, and 38 dashboard tests. The
+complete Rust workspace, real PostgreSQL tests, and Clippy with warnings denied
+passed. The deployment and release script run passed 24 tests.
 
-Each of the seven npm packages passed `pnpm pack --dry-run`. Inspection of the
-packed `package.json` files confirmed version `0.4.1`, exact `0.4.1` Gonvex
-dependencies, and no `workspace:*` entry. The client tarball contains the
-external-auth adapter declarations and JavaScript implementation.
+Each of the seven npm packages produced a real tarball with `pnpm pack`.
+Inspection of the packed `package.json` files confirmed version `0.5.0`, exact
+`0.5.0` Gonvex dependencies, and no `workspace:*` entry. The CLI tarball
+contains the function catalog generator and both starter catalog files. The
+client tarball contains the external-auth adapter declarations and JavaScript
+implementation.
 
 ## Cutover status
 
 Gonvex no longer needs a second browser transport or state store for these
 flows. Whagons can remove its internal browser HTTP calls after it replaces the
-call sites, declares the invitation Reducer, and consumes version `0.4.1`.
+call sites, declares the invitation Reducer, and consumes version `0.5.0`.
 OAuth callbacks and external customer REST remain HTTP.
 
-The runtime is still a Go server plus Rust/V8 module and sandbox workers. Go
-owns HTTP, WebSocket, Control Plane auth, PostgreSQL routing, visibility, and
-Replica delivery. Rust owns TypeScript execution, module generations, and the
-isolated sandbox. This work does not claim that the full runtime has moved to
-Rust. Control Plane calls terminate in the trusted Go host and never expose
-Control Plane credentials to Rust/V8 tenant modules.
+The reference runtime is a Rust HTTP/WebSocket server with separate Rust/V8
+module and sandbox workers. Rust owns Control Plane auth, PostgreSQL routing,
+transactions, visibility, Live Queries, Replica delivery, scheduling, storage,
+and telemetry. Control Plane calls terminate in the trusted Rust host. Tenant
+TypeScript modules receive capability-scoped operations and never receive
+Control Plane or tenant database credentials.
 
-Version `0.4.1` also fixes canonical artifact hashing for explicit null query
-values such as `{ literal: null }`. The TypeScript CLI and Go runtime now sign
-the same contract without rewriting the query.
+Version `0.5.0` includes the explicit-null artifact hashing fix first shipped in
+`0.4.1`. The TypeScript CLI and Rust runtime sign the same contract without
+rewriting the query.

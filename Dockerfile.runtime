@@ -1,24 +1,14 @@
-# TypeScript application modules execute in the bounded Rust/V8 module host.
-# The Go process currently owns HTTP, Postgres transactions, the change feed,
-# visibility routing, and the replica protocol; it never compiles application
-# source or loads Go plugins.
-FROM rust:1.94-bookworm AS module-host-build
+# The Rust runtime owns HTTP, authentication, tenant routing, Postgres
+# transactions, the change feed, visibility, and the replica protocol. The
+# separately bounded V8 process owns TypeScript application execution only.
+FROM rust:1.94-bookworm AS rust-build
 WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/crates ./crates
-RUN cargo build --locked --release -p gonvex-module-host -p gonvex-sandbox-worker
-
-# Build the CGO-enabled runtime against the same Debian release as the final
-# image. The unqualified Go tag may advance to a newer glibc and produce a
-# binary that cannot start in Bookworm.
-FROM golang:1.26-bookworm@sha256:6ef6e30f0ea5c384f6d111cf856e024e3086bbdcb1779da3f3b3fbba0aea53d2 AS build
-WORKDIR /src
-ENV GOMAXPROCS=2 \
-    GOFLAGS="-mod=mod -p=2"
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=1 go build -o /out/gonvex-runtime ./server/cmd/gonvex-runtime
+RUN cargo build --locked --release \
+    -p gonvex-runtime \
+    -p gonvex-module-host \
+    -p gonvex-sandbox-worker
 
 FROM debian:bookworm-slim
 WORKDIR /app
@@ -26,12 +16,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/gonvex/data /var/lib/gonvex/tmp
-COPY --from=build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
-# TypeScript application functions execute in the bounded Rust/V8 module host.
-# The Go runtime supervises this one process lazily when the first TypeScript
-# artifact is synced; keeping the path explicit avoids PATH-dependent fallback.
-COPY --from=module-host-build /src/rust/target/release/gonvex-module-host /usr/local/bin/gonvex-module-host
-COPY --from=module-host-build /src/rust/target/release/gonvex-sandbox-worker /usr/local/bin/gonvex-sandbox-worker
+COPY --from=rust-build /src/rust/target/release/gonvex-runtime /usr/local/bin/gonvex-runtime
+COPY --from=rust-build /src/rust/target/release/gonvex-module-host /usr/local/bin/gonvex-module-host
+COPY --from=rust-build /src/rust/target/release/gonvex-sandbox-worker /usr/local/bin/gonvex-sandbox-worker
 # Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
 # live here; mount a volume to keep them across deploys. Artifacts re-ingest
 # from object storage on miss, so an ephemeral dir also works (just slower on
@@ -42,8 +29,7 @@ ENV GONVEX_ADDR=0.0.0.0:8080 \
     GONVEX_SANDBOX_WORKER_BINARY=/usr/local/bin/gonvex-sandbox-worker \
     GONVEX_DATA_DIR=/var/lib/gonvex/data \
     GONVEX_TELEMETRY_LOG=/var/lib/gonvex/telemetry.jsonl \
-    TMPDIR=/var/lib/gonvex/tmp \
-    GOMAXPROCS=2
+    TMPDIR=/var/lib/gonvex/tmp
 WORKDIR /var/lib/gonvex
 USER 0:0
 EXPOSE 8080

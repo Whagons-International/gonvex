@@ -480,6 +480,7 @@ impl ModuleIsolate {
             kind: kind_name(&spec.contract.kind),
             capabilities: CapabilityFlags::from(&spec.capabilities),
             identity: IdentityView::from(&spec.invocation.context),
+            invocation: &spec.invocation.context.invocation,
             environment: &spec.invocation.context.environment,
             action_tools: &spec.invocation.context.action_tools,
             now: spec.now_unix_ms,

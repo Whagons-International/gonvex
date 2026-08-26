@@ -84,3 +84,54 @@ test("agent Actions may opt into the isolated TypeScript sandbox and DuckDB", ()
   });
   assert.deepEqual(definition.options.capabilities.sandbox, { duckdb: true });
 });
+
+test("agent Actions may invoke the signed interactive catalog only when explicitly declared", () => {
+  const definition = action({
+    profile: "agent",
+    capabilities: { functions: true },
+    interactive: false,
+    description: "Run one catalog function",
+    agent: { tags: ["orchestration"], confirmation: "required" },
+  });
+  assert.equal(definition.options.capabilities.functions, true);
+  assert.equal(definition.options.interactive, false);
+  assert.equal(definition.options.description, "Run one catalog function");
+  assert.deepEqual(definition.options.agent, {
+    tags: ["orchestration"],
+    confirmation: "required",
+  });
+
+  assert.throws(
+    () => action({ capabilities: { functions: true } }),
+    /functions require profile "agent"/,
+  );
+});
+
+test("ModuleBuilder preserves signed catalog metadata and classification defaults", () => {
+  const app = createModule({ name: "catalog", version: "1" });
+  app.query("tasks.get", {
+    liveQueryPlan: queryPlan,
+    description: "Get a task",
+    agent: { tags: ["tasks", "lookup", "tasks"], confirmation: "none" },
+  });
+  app.action("tasks.export", {
+    description: "Export tasks",
+  });
+  app.action("tasks.startExport", {
+    interactive: true,
+    description: "Start a task export",
+    agent: { tags: ["tasks", "export"], confirmation: "required" },
+  });
+
+  const functions = app.manifest().functions;
+  assert.deepEqual(functions["tasks.get"].agent, {
+    tags: ["lookup", "tasks"],
+    confirmation: "none",
+  });
+  assert.equal(functions["tasks.get"].classification, "interactive");
+  assert.equal(functions["tasks.get"].description, "Get a task");
+  assert.equal(functions["tasks.export"].classification, "system");
+  assert.equal(functions["tasks.export"].interactive, undefined);
+  assert.equal(functions["tasks.startExport"].classification, "interactive");
+  assert.equal(functions["tasks.startExport"].interactive, true);
+});

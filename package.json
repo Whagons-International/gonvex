@@ -19,8 +19,7 @@
     "dev:packages": "pnpm --parallel --filter @gonvex/protocol --filter @gonvex/client --filter @gonvex/expo-sqlite --filter @gonvex/react --filter @gonvex/module-sdk --filter @gonvex/cli --filter create-gonvex dev",
     "dev:dashboard": "pnpm --filter @gonvex/dashboard dev",
     "dev:cli": "pnpm --filter @gonvex/cli exec gonvex dev --project apps/dashboard",
-    "dev:runtime": "cargo build --locked --manifest-path rust/Cargo.toml -p gonvex-module-host -p gonvex-sandbox-worker && GONVEX_MODULE_HOST_BINARY=\"$PWD/rust/target/debug/gonvex-module-host\" GONVEX_SANDBOX_WORKER_BINARY=\"$PWD/rust/target/debug/gonvex-sandbox-worker\" air -c .air.toml",
-    "dev:runtime:air": "air -c .air.toml",
+    "dev:runtime": "cargo build --locked --manifest-path rust/Cargo.toml -p gonvex-module-host -p gonvex-sandbox-worker && GONVEX_MODULE_HOST_BINARY=\"$PWD/rust/target/debug/gonvex-module-host\" GONVEX_SANDBOX_WORKER_BINARY=\"$PWD/rust/target/debug/gonvex-sandbox-worker\" cargo run --locked --manifest-path rust/Cargo.toml -p gonvex-runtime",
     "seed:tasks": "go run ./cmd/seed-tasks",
     "seed:tasks:10m": "go run ./cmd/seed-tasks --count 10000000 --batch 50000 --seed 42 --clear --fast --no-trgm --analyze"
   },

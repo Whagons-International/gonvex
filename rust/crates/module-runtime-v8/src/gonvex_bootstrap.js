@@ -12,7 +12,7 @@
 // only its declared tools, network origins, secrets, scheduler, and storage,
 // but no database handle at all. Writes
 // travel as a table name, a key and a JSON object — never as SQL text a module
-// interpolated values into. The Go host quotes the identifiers and binds the
+// interpolated values into. The Rust host quotes the identifiers and binds the
 // values as parameters.
 //
 // Reaching `Deno.core.ops.op_gonvex_host_call` directly is not a privilege
@@ -375,6 +375,9 @@
       super(message);
       this.name = status === "denied" ? "GonvexCapabilityError" : "GonvexHostError";
       this.status = status;
+      this.code = String(message).includes("STALE_AGENT_CATALOG:")
+        ? "STALE_AGENT_CATALOG"
+        : status === "denied" ? "CAPABILITY_DENIED" : "HOST_CALL_FAILED";
     }
   }
 
@@ -469,6 +472,7 @@
       auth: Object.freeze({ account }),
       tenant: identity.tenant ?? null,
       member: identity.member ?? null,
+      invocation: Object.freeze({ ...(request.invocation ?? {}) }),
     };
 
     const db = {};
@@ -511,6 +515,19 @@
         tools[name] = (args) => hostCall({ kind: "toolInvoke", tool: name, args: optional(args) });
       }
       context.tools = Object.freeze(tools);
+    }
+    if (granted.functions) {
+      context.functions = Object.freeze({
+        invoke: (input) => {
+          const request = plainObject("function invocation", input);
+          return hostCall({
+            kind: "functionInvoke",
+            path: text("function path", request.path),
+            args: optional(request.args),
+            artifactHash: text("artifact hash", request.artifactHash),
+          });
+        },
+      });
     }
     if (granted.scheduler) {
       context.scheduler = Object.freeze({
@@ -560,7 +577,7 @@
         readText: (sandboxId, path) => sandbox("readText", { sandboxId: text("sandbox id", sandboxId), path: text("sandbox path", path) }),
         writeText: (sandboxId, path, content) => sandbox("writeText", { sandboxId: text("sandbox id", sandboxId), path: text("sandbox path", path), content: String(content) }),
         importFile: (sandboxId, options) => sandbox("importFile", { sandboxId: text("sandbox id", sandboxId), ...(options ?? {}) }),
-        // Used only by the separate sandbox-worker process. The ordinary Go
+        // Used only by the separate sandbox-worker process. The ordinary Rust
         // Action host rejects these operations, so this does not expand an
         // application module's authority.
         __worker: Object.freeze({

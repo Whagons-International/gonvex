@@ -2,7 +2,7 @@
 //!
 //! This crate is intentionally independent of HTTP, Postgres, and an engine
 //! implementation. The production module host embeds these primitives while
-//! the Go network/database host retains transaction ownership.
+//! the Rust network/database host retains transaction ownership.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, RwLock};

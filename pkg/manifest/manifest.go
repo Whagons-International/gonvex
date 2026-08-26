@@ -290,6 +290,15 @@ type ModuleFunction struct {
 	Optimistic         any                          `json:"optimistic,omitempty"`
 	ActionProfile      string                       `json:"actionProfile,omitempty"`
 	ActionCapabilities *ActionCapabilities          `json:"actionCapabilities,omitempty"`
+	Interactive        bool                         `json:"interactive,omitempty"`
+	Classification     string                       `json:"classification,omitempty"`
+	Description        string                       `json:"description,omitempty"`
+	Agent              *FunctionAgentMetadata       `json:"agent,omitempty"`
+}
+
+type FunctionAgentMetadata struct {
+	Tags         []string `json:"tags,omitempty"`
+	Confirmation string   `json:"confirmation,omitempty"`
 }
 
 type ModuleJavaScript struct {

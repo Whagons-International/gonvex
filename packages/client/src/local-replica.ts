@@ -1,4 +1,4 @@
-import type { JsonValue, ReplicaCursor, SubscriptionRevision } from "@gonvex/protocol";
+import type { JsonValue, PublicInvocationProvenance, ReplicaCursor, SubscriptionRevision } from "@gonvex/protocol";
 import type { OptimisticPatch } from "./optimistic.js";
 
 export type ReplicaRow = Record<string, JsonValue>;
@@ -38,6 +38,7 @@ export type ReplicaWindow = {
 export type ReplicaTransaction = {
   cursor: ReplicaCursor;
   originCommandId?: string;
+  provenance?: PublicInvocationProvenance;
   changes: ReplicaChange[];
   memberships?: ReplicaWindow[];
 };

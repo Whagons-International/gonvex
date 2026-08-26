@@ -14,7 +14,7 @@ import (
 )
 
 const LanguageTypeScript = "typescript"
-const ModuleArtifactGeneration = 7
+const ModuleArtifactGeneration = 8
 
 // Language reports the artifact's normalized language, defaulting to
 // TypeScript because that is the only language the artifact pipeline emits.
@@ -329,6 +329,18 @@ func moduleFunctionHashContract(function ModuleFunction) map[string]any {
 	}
 	if function.ActionCapabilities != nil {
 		contract["actionCapabilities"] = function.ActionCapabilities
+	}
+	if function.Interactive {
+		contract["interactive"] = true
+	}
+	if function.Classification != "" {
+		contract["classification"] = function.Classification
+	}
+	if function.Description != "" {
+		contract["description"] = function.Description
+	}
+	if function.Agent != nil {
+		contract["agent"] = function.Agent
 	}
 	return contract
 }

@@ -76,10 +76,12 @@ export const send = action({
 });
 ```
 
-Agent-only reads use `internalQuery(...)` and an Action with `profile: "agent"`.
-The runtime must also enable `GONVEX_AGENT_ACTIONS_ENABLED=true`. The Query runs
-through the normal read-only, admission-controlled, visibility-injected Query
-executor; the Action cannot select SQL or choose an arbitrary function path.
+An agent-profile Action may declare `capabilities: { functions: true }` and
+invoke an interactive Query, Reducer, or Action by its signed catalog path. The
+Rust host checks the active artifact hash, schema, tenant Member, and function
+classification before dispatch. The target still runs through its normal
+visibility and authorization path. This capability does not expose SQL or
+database credentials.
 
 ## Generated React surface
 

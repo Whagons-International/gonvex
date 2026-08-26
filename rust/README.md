@@ -1,7 +1,7 @@
-# Gonvex Rust module host
+# Gonvex Rust runtime
 
-The Rust workspace contains the sandboxed TypeScript execution layer used by
-the Gonvex runtime.
+The Rust workspace contains the Gonvex server and its isolated TypeScript
+execution processes.
 
 ```text
 TypeScript module
@@ -30,23 +30,28 @@ before its isolates are destroyed.
 - `module-runtime-v8`: JavaScript/V8 implementation.
 - `module-host`: process protocol, artifact verification, generation lifecycle,
   and host-call forwarding.
+- `protocol`: server representation of the published WebSocket contract.
+- `postgres`: Control Plane, tenant routing, transactions, change feed, and
+  provisioning.
+- `runtime`: HTTP/WebSocket server, authentication, visibility, Live Queries,
+  Replica delivery, scheduling, storage, telemetry, and worker supervision.
 - `server`: generation-registry primitives shared by the Rust components.
 - `sandbox-worker`: disposable TypeScript code-execution process with a
   workspace-only file API and an optional, locked-down DuckDB binding.
 
-The HTTP/WebSocket server, Postgres pools and transaction ownership currently
-remain in Go. Rust owns TypeScript evaluation and module lifecycle. That is a
-deliberate intermediate boundary, not a claim that the complete Gonvex host has
-already moved to Rust.
+The runtime owns every database transaction. The V8 process receives scoped
+host operations over a local socket and never receives a database URL or
+credential. The Go server remains only as migration reference code and is not
+included in the runtime image.
 
 ## Development
 
 ```bash
 cargo fmt --check
 cargo test --workspace
-cargo build -p gonvex-module-host -p gonvex-sandbox-worker
+cargo build -p gonvex-runtime -p gonvex-module-host -p gonvex-sandbox-worker
 ```
 
-The production runtime image installs both binaries. The sandbox remains off
+The production runtime image installs all three binaries. The sandbox remains off
 until the operator enables `GONVEX_SANDBOX_ENABLED`; the module host remains
 selected through `GONVEX_MODULE_HOST_BINARY`.

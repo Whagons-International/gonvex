@@ -152,6 +152,27 @@ export type AuthContext = {
 /** Tenant and tenant-local member identity, both nullable at the ABI boundary. */
 export type TenantContext = { readonly tenant: Tenant | null; readonly member: Member | null };
 
+export type InvocationChannel = "ui" | "agent" | "api" | "scheduler" | "system";
+
+/** Immutable, host-authenticated provenance for the current execution. */
+export type InvocationInfo = {
+  readonly channel: InvocationChannel;
+  readonly rootChannel: InvocationChannel;
+  readonly actorAccountId: string | null;
+  readonly actorMemberId: string | null;
+  readonly onBehalfOfMemberId: string | null;
+  readonly rootCommandId: string;
+  readonly commandId: string;
+  readonly parentCommandId?: string;
+  readonly agentExecutionId?: string;
+  readonly threadId?: string;
+  readonly turnId?: string;
+  readonly toolCallId?: string;
+  readonly artifactHash: string;
+};
+
+type InvocationAware = { readonly invocation: InvocationInfo };
+
 export type ReadDB = {
   readonly query: <T = JsonValue>(statement: string, parameters?: readonly JsonValue[]) => Promise<readonly T[]>;
 };
@@ -173,9 +194,9 @@ export type Scheduler = {
   readonly runAt: (unixMs: number, functionPath: string, args?: JsonValue) => Promise<string>;
 };
 
-export type QueryContext = AuthContext & TenantContext & { readonly db: ReadDB; readonly now: number };
+export type QueryContext = AuthContext & TenantContext & InvocationAware & { readonly db: ReadDB; readonly now: number };
 
-export type ReducerContext = AuthContext & TenantContext & {
+export type ReducerContext = AuthContext & TenantContext & InvocationAware & {
   readonly db: WriteDB;
   readonly actions: ReducerActions;
   readonly scheduler: Scheduler;
@@ -255,13 +276,23 @@ export type ActionCapabilities<Tools extends ActionToolBindings = ActionToolBind
   readonly storage?: true;
   /** Run untrusted TypeScript in an out-of-process, tenant-scoped sandbox. Agent Actions only. */
   readonly sandbox?: SandboxCapability;
+  /** Invoke any active interactive function with normal Member authorization. Agent Actions only. */
+  readonly functions?: true;
+};
+
+export type InteractiveFunctionInvoker = {
+  readonly invoke: <Result = JsonValue>(request: {
+    readonly path: string;
+    readonly args?: JsonValue;
+    readonly artifactHash: string;
+  }) => Promise<Result>;
 };
 
 type ActionToolFunctions<Tools extends ActionToolBindings> = {
   readonly [Name in keyof Tools]: <Result = JsonValue>(args?: JsonValue) => Promise<Result>;
 };
 
-export type ActionContext<Capabilities extends ActionCapabilities = ActionCapabilities> = AuthContext & TenantContext & {
+export type ActionContext<Capabilities extends ActionCapabilities = ActionCapabilities> = AuthContext & TenantContext & InvocationAware & {
   readonly now: number;
 } & (Capabilities extends { readonly networkOrigins: readonly string[] }
   ? { readonly fetch: (input: string | URL, init?: RequestInit) => Promise<Response> }
@@ -274,7 +305,8 @@ export type ActionContext<Capabilities extends ActionCapabilities = ActionCapabi
     : {})
   & (Capabilities extends { readonly scheduler: true } ? { readonly scheduler: Scheduler } : {})
   & (Capabilities extends { readonly storage: true } ? { readonly storage: ActionStorage } : {})
-  & (Capabilities extends { readonly sandbox: SandboxCapability } ? { readonly sandbox: ActionSandbox } : {});
+  & (Capabilities extends { readonly sandbox: SandboxCapability } ? { readonly sandbox: ActionSandbox } : {})
+  & (Capabilities extends { readonly functions: true } ? { readonly functions: InteractiveFunctionInvoker } : {});
 
 export type Handler<Context, Args, Result> = (context: Context, args: Args) => Result | Promise<Result>;
 
@@ -298,7 +330,21 @@ export type OptimisticTransaction = {
   readonly expectedRevision?: number;
 };
 
-export type QueryOptions<Args, Result> = {
+export type AgentConfirmation = "none" | "required" | "destructive";
+export type FunctionAgentMetadata = {
+  readonly tags?: readonly string[];
+  readonly confirmation?: AgentConfirmation;
+};
+
+export type FunctionMetadata = {
+  /** Include this function in the generated agent catalog. */
+  readonly interactive?: boolean;
+  /** Literal catalog description. Gonvex never guesses one. */
+  readonly description?: string;
+  readonly agent?: FunctionAgentMetadata;
+};
+
+export type QueryOptions<Args, Result> = FunctionMetadata & {
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
   readonly delivery?: "oneShot" | "live" | "replica";
@@ -332,7 +378,7 @@ export type ReplicaCollectionOptions<Args, Result> = Omit<QueryOptions<Args, Res
   readonly replica: ReplicaCollectionDefinition;
 };
 
-export type ReducerOptions<Args, Result> = {
+export type ReducerOptions<Args, Result> = FunctionMetadata & {
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
   readonly offline: OfflinePolicy;
@@ -349,7 +395,7 @@ export type InternalReducerOptions<Args, Result> = Omit<ReducerOptions<Args, Res
   readonly offline?: OfflinePolicy;
 };
 
-export type ActionOptions<Args, Result, Capabilities extends ActionCapabilities = ActionCapabilities> = {
+export type ActionOptions<Args, Result, Capabilities extends ActionCapabilities = ActionCapabilities> = FunctionMetadata & {
   /** Optional explicit public path used by static module artifact extraction. */
   readonly name?: string;
   readonly args?: PortableSchema;
@@ -461,6 +507,9 @@ export type ModuleFunctionManifest = {
   readonly replica?: ReplicaCollectionDefinition;
   readonly offline?: OfflinePolicy;
   readonly interactive?: boolean;
+  readonly classification?: "interactive" | "system" | "internal";
+  readonly description?: string;
+  readonly agent?: FunctionAgentMetadata;
   readonly optimistic?: OptimisticTransaction;
   readonly nonOptimisticReason?: string;
   readonly actionProfile?: "standard" | "agent";
@@ -620,7 +669,7 @@ const validateReplicaCollection: (value: unknown, path: string) => asserts value
 const validateActionCapabilities = (profile: "standard" | "agent", value: ActionCapabilities | undefined, path: string): void => {
   if (value === undefined) return;
   if (!isRecord(value)) throw new Error(`action ${path} capabilities must be an object`);
-  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage", "sandbox"]);
+  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage", "sandbox", "functions"]);
   for (const field of Object.keys(value)) {
     if (!allowed.has(field)) throw new Error(`action ${path} capabilities has unsupported field ${field}`);
   }
@@ -659,6 +708,10 @@ const validateActionCapabilities = (profile: "standard" | "agent", value: Action
   }
   if (value.scheduler !== undefined && value.scheduler !== true) throw new Error(`action ${path} scheduler must be true when declared`);
   if (value.storage !== undefined && value.storage !== true) throw new Error(`action ${path} storage must be true when declared`);
+  if (value.functions !== undefined) {
+    if (profile !== "agent") throw new Error(`action ${path} functions require profile "agent"`);
+    if (value.functions !== true) throw new Error(`action ${path} functions must be true when declared`);
+  }
   if (value.sandbox !== undefined) {
     if (profile !== "agent") throw new Error(`action ${path} sandbox requires profile "agent"`);
     if (!isRecord(value.sandbox)) throw new Error(`action ${path} sandbox must be an object`);
@@ -965,7 +1018,7 @@ export class ModuleManifestCollector {
     for (const path of [...this.entries.keys()].sort()) functions[path] = this.entries.get(path)!;
     const visibilityPlans: Record<string, VisibilityPlan> = {};
     for (const table of [...this.visibilityEntries.keys()].sort()) visibilityPlans[table] = this.visibilityEntries.get(table)!;
-    const crons = [...this.cronEntries.values()].sort((left, right) => left.name.localeCompare(right.name));
+    const crons = [...this.cronEntries.values()].sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const spec of crons) {
       const target = this.entries.get(spec.function);
       if (!target) throw new Error(`cron ${JSON.stringify(spec.name)} targets unknown function ${JSON.stringify(spec.function)}`);
@@ -1023,6 +1076,37 @@ export type ReducerDefinition<Args, Result> = ModuleDefinition<"reducer", Reduce
 export type ActionDefinition<Args, Result, Capabilities extends ActionCapabilities = ActionCapabilities> = ModuleDefinition<"action", ActionOptions<Args, Result, Capabilities>>;
 
 const executableOptions = <T extends object>(options: T): Readonly<T> => freeze({ ...options });
+
+function functionManifestMetadata(
+  kind: ModuleFunctionKind,
+  options: FunctionMetadata,
+  internal: boolean,
+): Pick<ModuleFunctionManifest, "interactive" | "classification" | "description" | "agent"> {
+  if (options.description !== undefined && typeof options.description !== "string") {
+    throw new Error(`${kind} description must be a string`);
+  }
+  const tags = options.agent?.tags;
+  if (tags !== undefined && (!Array.isArray(tags) || tags.some((tag) => typeof tag !== "string" || !tag.trim()))) {
+    throw new Error(`${kind} agent tags must be non-empty strings`);
+  }
+  const confirmation = options.agent?.confirmation;
+  if (confirmation !== undefined && confirmation !== "none" && confirmation !== "required" && confirmation !== "destructive") {
+    throw new Error(`${kind} agent confirmation is invalid`);
+  }
+  const interactive = !internal && (options.interactive === true || (options.interactive === undefined && kind !== "action"));
+  const agent = options.agent === undefined
+    ? undefined
+    : freeze({
+      ...(tags === undefined ? {} : { tags: freeze([...new Set(tags)].sort()) }),
+      ...(confirmation === undefined ? {} : { confirmation }),
+    });
+  return {
+    ...(interactive ? { interactive: true } : {}),
+    classification: internal ? "internal" : interactive ? "interactive" : "system",
+    ...(options.description === undefined ? {} : { description: options.description }),
+    ...(agent === undefined ? {} : { agent }),
+  };
+}
 
 const queryDefinition = <Args, Result>(
   options: QueryOptions<Args, Result>,
@@ -1168,6 +1252,7 @@ export class ModuleBuilder {
       liveQueryPlan,
       replica,
       internal: options.internal,
+      ...functionManifestMetadata("query", options, options.internal === true),
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
@@ -1199,8 +1284,8 @@ export class ModuleBuilder {
       args: options.args,
       result: options.result,
       offline: options.offline,
-      interactive: options.interactive ?? true,
       internal: options.internal,
+      ...functionManifestMetadata("reducer", options, options.internal === true),
       optimistic: options.optimistic,
       nonOptimisticReason: options.nonOptimisticReason?.trim() || undefined,
     });
@@ -1228,6 +1313,7 @@ export class ModuleBuilder {
       result: options.result,
       actionProfile: profile,
       actionCapabilities: options.capabilities,
+      ...functionManifestMetadata("action", options, false),
     });
     const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
@@ -1244,7 +1330,7 @@ export class ModuleBuilder {
 
   /** Executable registrations sorted by path for deterministic host loading. */
   runtimeRegistrations(): readonly RuntimeFunctionRegistration[] {
-    return Object.freeze([...this.runtimeEntries.values()].sort((a, b) => a.path.localeCompare(b.path)));
+    return Object.freeze([...this.runtimeEntries.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 
   runtimePayload(): ModuleRuntimeRegistrationPayload {
@@ -1318,7 +1404,7 @@ export class ModuleRuntimeRegistry {
   }
 
   registrations(): readonly RuntimeFunctionRegistration[] {
-    return Object.freeze([...this.entries.values()].sort((a, b) => a.path.localeCompare(b.path)));
+    return Object.freeze([...this.entries.values()].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 
   manifest(): ModuleManifest {

@@ -17,6 +17,7 @@ import {
   isModuleSchema,
   type ProjectLanguage,
 } from "./module-artifact.js";
+import { renderFunctionCatalog, type FunctionCatalogFormat } from "./function-catalog.js";
 import type {
   FunctionEntry,
   JsonValue,
@@ -28,6 +29,7 @@ import type {
 
 export type * from "./manifest-types.js";
 export type { ProjectLanguage } from "./module-artifact.js";
+export * from "./function-catalog.js";
 
 type BackendSources = {
   moduleFiles: string[];
@@ -241,6 +243,10 @@ export async function main(argv = process.argv.slice(2)) {
     await runCodegen(argv.slice(1));
     return;
   }
+  if (command === "functions") {
+    await runFunctions(argv.slice(1));
+    return;
+  }
   if (command === "init") {
     await runInit(argv.slice(1));
     return;
@@ -280,6 +286,42 @@ export async function main(argv = process.argv.slice(2)) {
 
   printHelp();
   throw new Error(`unknown command ${command}`);
+}
+
+async function runFunctions(argv: string[]) {
+  const action = argv[0];
+  if (!action || !["emit", "check"].includes(action)) {
+    throw new Error("usage: gonvex functions <emit|check> [--format ndjson|typescript] [--output FILE] [--project PATH]");
+  }
+  const root = resolve(valueFor(argv, "--project") ?? ".");
+  const sources = await collectBackendSources(root);
+  const settings = await loadSettings(root, {});
+  const manifest = await buildManifest(root, sources, settings.projectID);
+  const targets: Array<{ format: FunctionCatalogFormat; output: string }> = action === "check"
+    ? [
+      { format: "ndjson", output: resolve(root, "agent-api.ndjson") },
+      { format: "typescript", output: resolve(root, "agent-api.d.ts") },
+    ]
+    : [{
+      format: normalizeCatalogFormat(valueFor(argv, "--format") ?? "ndjson"),
+      output: resolve(root, valueFor(argv, "--output") ?? (valueFor(argv, "--format") === "typescript" ? "agent-api.d.ts" : "agent-api.ndjson")),
+    }];
+  for (const target of targets) {
+    const expected = renderFunctionCatalog(manifest.module, target.format);
+    if (action === "check") {
+      const actual = await readFile(target.output, "utf8").catch(() => "");
+      if (actual !== expected) throw new Error(`${relative(root, target.output)} is stale; run gonvex functions emit --format ${target.format} --output ${relative(root, target.output)}`);
+      continue;
+    }
+    await mkdir(dirname(target.output), { recursive: true });
+    await writeFile(target.output, expected);
+    console.log(`[gonvex] wrote ${relative(root, target.output)} for artifact ${manifest.module.hash}`);
+  }
+}
+
+function normalizeCatalogFormat(value: string): FunctionCatalogFormat {
+  if (value === "ndjson" || value === "typescript") return value;
+  throw new Error("--format must be ndjson or typescript");
 }
 
 export async function runCreate(argv: string[]) {
@@ -1356,7 +1398,7 @@ function renderAPI(manifest: Manifest) {
   const internalRoot: Record<string, any> = {};
   const optimisticTransactions: Record<string, JsonValue> = {};
   const functionTypes: Array<{ path: string; args: string; result: string }> = [];
-  for (const [path, entry] of Object.entries(manifest.functions).sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [path, entry] of Object.entries(manifest.functions).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     const parts = path.split(".").filter(Boolean);
     if (parts.length === 0) continue;
     let target = entry.internal ? internalRoot : publicRoot;
@@ -1586,7 +1628,7 @@ function renderSchemaObject(scope: "control-plane" | "tenant", tables: Record<st
 
 function renderObject(value: any, depth: number): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return JSON.stringify(value);
-  const entries = Object.entries(value).sort(([a], [b]) => a.localeCompare(b));
+  const entries = Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   if (isFunctionRef(value)) {
     const visible = Object.fromEntries(entries.filter(([key]) => !key.startsWith("__")));
     return `${renderObject(visible, depth)} as unknown as FunctionReference<${JSON.stringify(value.kind)}, ${value.__argsType}, ${value.__resultType}>`;
@@ -2338,9 +2380,11 @@ function sleep(ms: number, signal?: AbortSignal) {
 }
 
 function printHelp() {
-  console.log("Usage: gonvex <dev|codegen|init|create|env|auth|login|logout|whoami|project|token> [options]");
+  console.log("Usage: gonvex <dev|codegen|functions|init|create|env|auth|login|logout|whoami|project|token> [options]");
   console.log("  gonvex dev [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>] [--once] [--verbose-logs] [-- <command>]");
   console.log("  gonvex codegen [--project <path>] [--project-id <id>]");
+  console.log("  gonvex functions emit --format ndjson|typescript [--output FILE] [--project <path>]");
+  console.log("  gonvex functions check [--project <path>]");
   console.log("  gonvex init [--template vite-react] [--project <id>] [--runtime <url>]");
   console.log("  gonvex create <app-name> [--runtime-url <url>] [--provision] [--database-mode single|multiTenant] [--google-auth] [--origin <url>]... [--signup-mode personal|inviteOnly] [--owner <email>]");
   console.log("  gonvex env <list|get|set|push|remove> [--project <path>] [--runtime-url <url>] [--project-id <id>] [--key <key>]");

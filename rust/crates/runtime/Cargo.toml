@@ -1,0 +1,41 @@
+[package]
+name = "gonvex-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+async-trait.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+bigdecimal.workspace = true
+calamine.workspace = true
+chrono.workspace = true
+cron.workspace = true
+futures-util.workspace = true
+hmac.workspace = true
+gonvex-module-host = { path = "../module-host" }
+gonvex-module-runtime = { path = "../module-runtime" }
+gonvex-protocol = { path = "../protocol" }
+gonvex-postgres = { path = "../postgres" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+pbkdf2.workspace = true
+subtle.workspace = true
+jsonwebtoken.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+url.workspace = true
+duckdb.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

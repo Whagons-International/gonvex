@@ -1,10 +1,11 @@
-//! One connection between the Go runtime and this host.
+//! One connection between the Gonvex Rust runtime and this host.
 //!
-//! A connection is bidirectional and multiplexed: the Go runtime sends requests
+//! A connection is bidirectional and multiplexed: the runtime sends requests
 //! by id, and while an invocation is running this host sends host calls back on
 //! the same connection tagged with the invocation they belong to. That is what
 //! lets a module read through the caller's Postgres transaction — the
-//! transaction never leaves Go, and the module reaches it only by asking.
+//! transaction never leaves the trusted runtime, and the module reaches it only
+//! through capability-checked host calls.
 //!
 //! Nothing here is per tenant. One process serves every project: engines are
 //! per module generation, and tenancy travels on the invocation context.
@@ -201,7 +202,7 @@ impl Connection {
     }
 }
 
-/// The `ModuleHost` an invocation sees. It carries the request id so the Go
+/// The `ModuleHost` an invocation sees. It carries the request id so the Rust
 /// runtime can bind a host call to the exact invocation — and therefore to the
 /// exact transaction and identity — that asked for it.
 struct ConnectionHost {

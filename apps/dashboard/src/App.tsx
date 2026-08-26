@@ -118,6 +118,10 @@ type FunctionInfo = {
   status: string;
   actionProfile?: "standard" | "agent";
   capabilities?: string;
+  classification?: "interactive" | "system" | "internal";
+  description?: string;
+  tags?: string[];
+  confirmation?: "none" | "required" | "destructive";
 };
 
 type ManifestResponse = {
@@ -129,6 +133,10 @@ type ManifestResponse = {
     replica?: { table?: string };
     dependencies?: { liveQueryPlan?: { table?: string } };
     actionProfile?: "standard" | "agent";
+    interactive?: boolean;
+    classification?: "interactive" | "system" | "internal";
+    description?: string;
+    agent?: { tags?: string[]; confirmation?: "none" | "required" | "destructive" };
     actionCapabilities?: {
       networkOrigins?: string[];
       secrets?: string[];
@@ -136,6 +144,7 @@ type ManifestResponse = {
       scheduler?: boolean;
       storage?: boolean;
       sandbox?: { duckdb?: boolean };
+      functions?: boolean;
     };
   }>;
   schema?: ManifestSchema;
@@ -726,6 +735,10 @@ function manifestFunctionsToRows(payload: ManifestResponse): FunctionInfo[] {
       source: entry.file || entry.handler,
       status: "ready",
       actionProfile: entry.actionProfile,
+      classification: entry.classification,
+      description: entry.description,
+      tags: entry.agent?.tags ?? [],
+      confirmation: entry.agent?.confirmation ?? "none",
       capabilities: (() => {
         const declared = entry.actionCapabilities;
         if (!declared) return "none";
@@ -736,6 +749,7 @@ function manifestFunctionsToRows(payload: ManifestResponse): FunctionInfo[] {
           ...(declared.scheduler ? ["scheduler"] : []),
           ...(declared.storage ? ["storage"] : []),
           ...(declared.sandbox ? [declared.sandbox.duckdb ? "sandbox + DuckDB" : "sandbox"] : []),
+          ...(declared.functions ? ["interactive catalog"] : []),
         ];
         return values.join(", ") || "none";
       })(),
@@ -5262,7 +5276,8 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
   const functionStats = buildFunctionStats(selectedFunction ? runtimeMetrics?.functions[selectedFunction.name] : undefined, runtimeMetrics?.cache);
   const recentLogs = (runtimeMetrics?.logs ?? []).slice(0, 20);
   const visibleFunctions = runtimeFunctions.filter((item) =>
-    [item.name, item.kind, item.realtime, item.visibility, item.source].some((value) => value.toLowerCase().includes(search.toLowerCase())),
+    [item.name, item.kind, item.realtime, item.visibility, item.source, item.classification ?? "", item.description ?? "", ...(item.tags ?? [])]
+      .some((value) => value.toLowerCase().includes(search.toLowerCase())),
   );
   const runtimeFunctionRows = functionInfosToRows(runtimeFunctions);
 
@@ -5323,6 +5338,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
                 {item.kind === "reducer" ? "r" : item.kind === "action" ? "a" : "q"}
               </span>
               <span>{item.name}</span>
+              {item.classification === "interactive" ? <span className="function-agent-marker">agent</span> : null}
             </Button>
           ))}
         </div>
@@ -5338,7 +5354,8 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
                   {selectedFunction.kind}
                 </Chip>
               </div>
-              <p>{selectedFunction.realtime} · visibility {selectedFunction.visibility} · capabilities {selectedFunction.capabilities ?? "none"} · {selectedFunction.source}</p>
+              <p>{selectedFunction.description || "No description declared."}</p>
+              <p>{selectedFunction.realtime} · {selectedFunction.classification ?? "system"} · confirmation {selectedFunction.confirmation ?? "none"} · visibility {selectedFunction.visibility} · capabilities {selectedFunction.capabilities ?? "none"} · {selectedFunction.source}</p>
             </div>
             <Button size="sm" variant="primary" onPress={() => props.onAction(`${selectedFunction.name} queued for local execution MVP`)}>
               Run Function

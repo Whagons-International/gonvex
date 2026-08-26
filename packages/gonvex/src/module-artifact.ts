@@ -36,7 +36,7 @@ import type {
 } from "./manifest-types.js";
 
 /** Bumped whenever the artifact layout changes; mixed into the hash. */
-export const moduleArtifactGeneration = 7;
+export const moduleArtifactGeneration = 8;
 
 /** Deterministic ESM output when gonvex.json does not name one. */
 const defaultBundlePath = join("_build", "module.js");
@@ -178,7 +178,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   const sortedFiles = sortedRecord(files);
   const sortedFunctions = sortedRecord(functions);
   const sortedVisibility = sortedRecord(visibilityPlans);
-  const sortedCrons = crons.sort((left, right) => left.name.localeCompare(right.name));
+  const sortedCrons = crons.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
   if (invitationAcceptanceReducer) {
     const target = sortedFunctions[invitationAcceptanceReducer];
     if (!target || target.kind !== "reducer" || !target.internal) throw new Error("invitationAcceptance must target an internal Reducer");
@@ -401,6 +401,10 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
       ...(entry.optimistic === undefined ? {} : { optimistic: entry.optimistic }),
       ...(entry.actionProfile === undefined ? {} : { actionProfile: entry.actionProfile }),
       ...(entry.actionCapabilities === undefined ? {} : { actionCapabilities: entry.actionCapabilities }),
+      ...(entry.interactive === undefined ? {} : { interactive: entry.interactive }),
+      ...(entry.classification === undefined ? {} : { classification: entry.classification }),
+      ...(entry.description === undefined ? {} : { description: entry.description }),
+      ...(entry.agent === undefined ? {} : { agent: entry.agent }),
     };
   }
   return functions;
@@ -637,7 +641,31 @@ function moduleFunction(input: {
   }
   const offline = input.options?.get("offline")?.value;
   const optimistic = input.options?.get("optimistic")?.value;
-  const internal = input.internal || input.options?.get("internal")?.value === true;
+  const internalEntry = input.options?.get("internal");
+  if (internalEntry && typeof internalEntry.value !== "boolean") {
+    throw new Error(`${input.kind} ${input.path} internal must be a boolean literal`);
+  }
+  const internal = input.internal || internalEntry?.value === true;
+  const interactiveEntry = input.options?.get("interactive");
+  const interactiveValue = interactiveEntry?.value;
+  if (interactiveEntry && typeof interactiveValue !== "boolean") {
+    throw new Error(`${input.kind} ${input.path} interactive must be a boolean literal`);
+  }
+  const interactive = !internal && (interactiveValue === true || (interactiveValue === undefined && input.kind !== "action"));
+  const classification = internal ? "internal" : interactive ? "interactive" : "system";
+  const descriptionEntry = input.options?.get("description");
+  let description: string | undefined;
+  if (descriptionEntry) {
+    if (typeof descriptionEntry.value !== "string") {
+      throw new Error(`${input.kind} ${input.path} description must be a string literal`);
+    }
+    description = descriptionEntry.value;
+  }
+  const agentEntry = input.options?.get("agent");
+  if (agentEntry && agentEntry.value === undefined) {
+    throw new Error(`function ${input.path} agent metadata must be an object literal`);
+  }
+  const agent = parseAgentMetadata(agentEntry?.value, input.path);
   const actionProfileValue = input.options?.get("profile")?.value;
   const actionProfile: "standard" | "agent" = actionProfileValue === "agent" ? "agent" : "standard";
   const actionCapabilities = input.options?.get("capabilities")?.value;
@@ -665,14 +693,39 @@ function moduleFunction(input: {
     ...(replica ? { replica } : {}),
     ...(offline === undefined ? {} : { offline }),
     ...(optimistic === undefined ? {} : { optimistic }),
+    ...(interactive ? { interactive: true } : {}),
+    classification,
+    ...(description === undefined ? {} : { description }),
+    ...(agent === undefined ? {} : { agent }),
     ...(input.kind === "action" ? { actionProfile, ...(actionCapabilities === undefined ? {} : { actionCapabilities: actionCapabilities as ActionCapabilities }) } : {}),
+  };
+}
+
+function parseAgentMetadata(value: JsonValue | undefined, path: string) {
+  if (value === undefined) return undefined;
+  if (!isJsonObject(value)) throw new Error(`function ${path} agent metadata must be an object literal`);
+  const allowed = new Set(["tags", "confirmation"]);
+  for (const field of Object.keys(value)) {
+    if (!allowed.has(field)) throw new Error(`function ${path} agent metadata has unsupported field ${field}`);
+  }
+  const tags = value.tags;
+  if (tags !== undefined && (!Array.isArray(tags) || tags.some((tag) => typeof tag !== "string" || !tag.trim()))) {
+    throw new Error(`function ${path} agent tags must be non-empty string literals`);
+  }
+  const confirmation = value.confirmation;
+  if (confirmation !== undefined && !["none", "required", "destructive"].includes(String(confirmation))) {
+    throw new Error(`function ${path} agent confirmation is invalid`);
+  }
+  return {
+    ...(tags === undefined ? {} : { tags: [...new Set(tags as string[])].sort() }),
+    ...(confirmation === undefined ? {} : { confirmation: confirmation as "none" | "required" | "destructive" }),
   };
 }
 
 function validateActionCapabilities(profile: "standard" | "agent", value: JsonValue | undefined, path: string): void {
   if (value === undefined) return;
   if (!isJsonObject(value)) throw new Error(`action ${path} capabilities must be an object literal`);
-  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage", "sandbox"]);
+  const allowed = new Set(["networkOrigins", "secrets", "tools", "scheduler", "storage", "sandbox", "functions"]);
   for (const field of Object.keys(value)) {
     if (!allowed.has(field)) throw new Error(`action ${path} capabilities has unsupported field ${field}`);
   }
@@ -708,6 +761,10 @@ function validateActionCapabilities(profile: "standard" | "agent", value: JsonVa
   }
   if (value.scheduler !== undefined && value.scheduler !== true) throw new Error(`action ${path} scheduler must be true when declared`);
   if (value.storage !== undefined && value.storage !== true) throw new Error(`action ${path} storage must be true when declared`);
+  if (value.functions !== undefined) {
+    if (profile !== "agent") throw new Error(`action ${path} functions require profile "agent"`);
+    if (value.functions !== true) throw new Error(`action ${path} functions must be true when declared`);
+  }
   if (value.sandbox !== undefined) {
     if (profile !== "agent") throw new Error(`action ${path} sandbox requires profile "agent"`);
     if (!isJsonObject(value.sandbox)) throw new Error(`action ${path} sandbox must be an object literal`);
