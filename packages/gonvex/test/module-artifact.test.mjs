@@ -68,6 +68,7 @@ export const grid = liveQuery<GridArgs, GridRow[]>({
 });
 
 export const oneShot = query<GridArgs, GridRow[]>({
+  interactive: false,
   args: schema.object({ workspaceId: schema.string() }),
   result: schema.array(schema.object({ id: schema.id("tasks") })),
   liveQueryPlan: {
@@ -80,6 +81,7 @@ export const oneShot = query<GridArgs, GridRow[]>({
 });
 
 export const rename = reducer<RenameArgs, RenameResult>({
+  interactive: false,
   args: schema.object({ taskId: schema.id("tasks"), title: schema.string({ minLength: 1 }) }),
   result: schema.object({ ok: schema.boolean() }),
   offline: { mode: "allowed", conflict: "expectedVersion" },
@@ -141,6 +143,9 @@ export const rename = reducer<RenameArgs, RenameResult>({
   assert.equal(functions.grid.delivery, "live");
   assert.equal(functions.grid.dependencies.liveQueryPlan.table, "tasks");
   assert.equal(functions.oneShot.delivery, "oneShot");
+  assert.equal(artifact.functions.oneShot.interactive, false);
+  assert.equal(functions.oneShot.interactive, false);
+  assert.equal(functions.oneShot.classification, "system");
   assert.equal(functions.oneShot.dependencies.liveQueryPlan.table, "tasks");
   assert.deepEqual(functions.oneShot.dependencies.liveQueryPlan.where.value, { literal: null });
   assert.deepEqual(artifact.visibility.tasks, {
@@ -150,6 +155,9 @@ export const rename = reducer<RenameArgs, RenameResult>({
     where: { operator: "public" },
   });
   assert.deepEqual(functions.rename.offline, { mode: "allowed", conflict: "expectedVersion" });
+  assert.equal(artifact.functions.rename.interactive, false);
+  assert.equal(functions.rename.interactive, false);
+  assert.equal(functions.rename.classification, "system");
   assert.deepEqual(functions.rename.optimistic.effects[0], {
     operation: "patch",
     entity: "tasks",

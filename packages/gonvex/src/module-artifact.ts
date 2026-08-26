@@ -687,7 +687,7 @@ function moduleFunction(input: {
     ...(replica ? { replica } : {}),
     ...(offline === undefined ? {} : { offline }),
     ...(optimistic === undefined ? {} : { optimistic }),
-    ...(interactive ? { interactive: true } : {}),
+    ...(interactiveEntry ? { interactive } : interactive ? { interactive: true } : {}),
     classification,
     ...(description === undefined ? {} : { description }),
     ...(agent === undefined ? {} : { agent }),

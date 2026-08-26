@@ -1,6 +1,6 @@
 # Whagons Control Plane v2 handoff
 
-This is the migration contract for `@gonvex/*` version `0.5.0`. Whagons should
+This is the migration contract for `@gonvex/*` version `0.5.1`. Whagons should
 use one `GonvexClient` for Control Plane calls, tenant calls, live Control Plane
 queries, and the Local Replica stream. OAuth callbacks and public customer APIs
 remain HTTP because their protocols require HTTP.
@@ -452,7 +452,7 @@ messages receive only the sanitized provenance needed for audit display.
 
 Whagons integration is mechanical:
 
-1. Upgrade every Gonvex package to `0.5.0`.
+1. Upgrade every Gonvex package to `0.5.1`.
 2. Add literal metadata to functions that the agent may call.
 3. Regenerate bindings and the two catalog files.
 4. Give the agent ordinary grep and file-read access to the generated catalog.
@@ -466,7 +466,7 @@ for its normal authorization checks.
 
 ## Package release
 
-The compatible release version is `0.5.0`, published to npm on August 26,
+The compatible release version is `0.5.1`, published to npm on August 26,
 2026, for:
 
 ```text
@@ -479,7 +479,7 @@ The compatible release version is `0.5.0`, published to npm on August 26,
 create-gonvex
 ```
 
-The packed npm manifests contain exact `0.5.0` Gonvex dependencies and no
+The packed npm manifests contain exact `0.5.1` Gonvex dependencies and no
 `workspace:*` entries. The packages were published in this dependency order:
 
 ```bash
@@ -516,8 +516,8 @@ complete Rust workspace, real PostgreSQL tests, and Clippy with warnings denied
 passed. The deployment and release script suite also passed.
 
 Each of the seven npm packages produced a real tarball with `pnpm pack`.
-Inspection of the packed `package.json` files confirmed version `0.5.0`, exact
-`0.5.0` Gonvex dependencies, and no `workspace:*` entry. The CLI tarball
+Inspection of the packed `package.json` files confirmed version `0.5.1`, exact
+`0.5.1` Gonvex dependencies, and no `workspace:*` entry. The CLI tarball
 contains the function catalog generator and both starter catalog files. The
 client tarball contains the external-auth adapter declarations and JavaScript
 implementation.
@@ -526,7 +526,7 @@ implementation.
 
 Gonvex no longer needs a second browser transport or state store for these
 flows. Whagons can remove its internal browser HTTP calls after it replaces the
-call sites, declares the invitation Reducer, and consumes version `0.5.0`.
+call sites, declares the invitation Reducer, and consumes version `0.5.1`.
 OAuth callbacks and external customer REST remain HTTP.
 
 The reference runtime is a Rust HTTP/WebSocket server with separate Rust/V8
@@ -539,3 +539,7 @@ Control Plane or tenant database credentials.
 Version `0.5.0` includes the explicit-null artifact hashing fix first shipped in
 `0.4.1`. The TypeScript CLI and Rust runtime sign the same contract without
 rewriting the query.
+
+Version `0.5.1` preserves explicit `interactive: false` declarations. The Rust
+runtime also accepts signed 0.5.0 artifacts that encode the same intent as
+`classification: "system"` without an interactive field.

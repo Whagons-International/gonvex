@@ -975,6 +975,14 @@ mod tests {
                 "tasks.callback".to_owned(),
                 function("action", "system", false),
             ),
+            (
+                "advancedVoice.getCheckpointCapability".to_owned(),
+                function("query", "system", false),
+            ),
+            (
+                "advancedVoice.clearCheckpointCapability".to_owned(),
+                function("reducer", "system", false),
+            ),
         ]));
         assert!(matches!(
             require_interactive_target(&module, &provenance(), "tasks.start", "stale-hash"),
@@ -988,6 +996,19 @@ mod tests {
             require_interactive_target(&module, &provenance(), "tasks.callback", "active-hash"),
             Err(ExecutionError::NotInteractive(path)) if path == "tasks.callback"
         ));
+        for (path, kind) in [
+            ("advancedVoice.getCheckpointCapability", "query"),
+            ("advancedVoice.clearCheckpointCapability", "reducer"),
+        ] {
+            assert!(
+                require_function(&module, path, kind, false).is_ok(),
+                "normal UI invocation must remain available for {path}"
+            );
+            assert!(matches!(
+                require_interactive_target(&module, &provenance(), path, "active-hash"),
+                Err(ExecutionError::NotInteractive(rejected)) if rejected == path
+            ));
+        }
     }
 
     #[test]

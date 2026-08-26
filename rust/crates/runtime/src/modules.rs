@@ -537,10 +537,33 @@ fn artifact_from_manifest(
             .get("internal")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let interactive = function
+        let declared_interactive = function
             .get("interactive")
-            .and_then(Value::as_bool)
-            .unwrap_or(!internal && kind != "action");
+            .map(|value| {
+                value.as_bool().ok_or_else(|| {
+                    invalid(format!("function {path:?} interactive must be a boolean"))
+                })
+            })
+            .transpose()?;
+        let declared_classification = function
+            .get("classification")
+            .map(|value| {
+                value.as_str().ok_or_else(|| {
+                    invalid(format!("function {path:?} classification must be a string"))
+                })
+            })
+            .transpose()?;
+        let interactive = match (declared_interactive, declared_classification) {
+            (Some(value), _) => value,
+            (None, Some("interactive")) => true,
+            (None, Some("system" | "internal")) => false,
+            (None, Some(value)) => {
+                return Err(invalid(format!(
+                    "function {path:?} has unknown classification {value:?}"
+                )))
+            }
+            (None, None) => !internal && kind != "action",
+        };
         let expected_classification = if internal {
             "internal"
         } else if interactive {
@@ -548,10 +571,7 @@ fn artifact_from_manifest(
         } else {
             "system"
         };
-        let classification = function
-            .get("classification")
-            .and_then(Value::as_str)
-            .unwrap_or(expected_classification);
+        let classification = declared_classification.unwrap_or(expected_classification);
         if classification != expected_classification {
             return Err(invalid(format!(
                 "function {path:?} classification does not match its internal and interactive flags"
@@ -871,6 +891,16 @@ mod tests {
                     "kind":"action","handler":"receive","file":"gonvex/callbacks.ts",
                     "classification":"system",
                     "args":{"kind":"object","fields":{}},"result":{"kind":"any"}
+                },
+                "advancedVoice.getCheckpointCapability":{
+                    "kind":"query","handler":"get_checkpoint","file":"gonvex/advancedVoice.ts",
+                    "classification":"system",
+                    "args":{"kind":"object","fields":{}},"result":{"kind":"any"}
+                },
+                "advancedVoice.clearCheckpointCapability":{
+                    "kind":"reducer","handler":"clear_checkpoint","file":"gonvex/advancedVoice.ts",
+                    "classification":"system",
+                    "args":{"kind":"object","fields":{}},"result":{"kind":"any"}
                 }
             }
         });
@@ -890,5 +920,15 @@ mod tests {
         assert_eq!(start.confirmation, "required");
         assert_eq!(start.args_schema["fields"]["taskId"]["entity"], "tasks");
         assert!(!functions["callbacks.receive"].interactive);
+        assert!(!functions["advancedVoice.getCheckpointCapability"].interactive);
+        assert_eq!(
+            functions["advancedVoice.getCheckpointCapability"].classification,
+            "system"
+        );
+        assert!(!functions["advancedVoice.clearCheckpointCapability"].interactive);
+        assert_eq!(
+            functions["advancedVoice.clearCheckpointCapability"].classification,
+            "system"
+        );
     }
 }
