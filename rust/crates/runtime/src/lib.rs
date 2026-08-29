@@ -73,6 +73,12 @@ const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
 // tenant-pool and visibility work. Bound fan-out below both the runtime's
 // normal module concurrency and the default per-database pool size.
 const REPLICA_OPEN_CONCURRENCY: usize = 8;
+// Tenant databases are independent shards. Provisioning them serially makes
+// rolling startup time grow linearly with the tenant count and can keep the
+// readiness endpoint unavailable long enough for the deployer to roll back a
+// healthy candidate. Keep the work bounded, but provision independent shards
+// concurrently so startup remains proportional to the slowest batch.
+const STARTUP_TENANT_PROVISION_CONCURRENCY: usize = 8;
 
 #[derive(Clone, Debug)]
 enum RuntimeEvent {
@@ -278,11 +284,18 @@ impl Runtime {
                     .clone()
                     .apply_control_migrations(module.migrations.clone())
                     .await?;
-                for route in control.tenant_routes(&project).await? {
-                    control
-                        .clone()
-                        .provision_tenant_database(route, module.migrations.clone())
-                        .await?;
+                let provisioned = collect_bounded_ordered(
+                    control.tenant_routes(&project).await?,
+                    STARTUP_TENANT_PROVISION_CONCURRENCY,
+                    |route| {
+                        let control = control.clone();
+                        let migrations = module.migrations.clone();
+                        async move { control.provision_tenant_database(route, migrations).await }
+                    },
+                )
+                .await;
+                for result in provisioned {
+                    result?;
                 }
             }
             *self.inner.control_plane.write().await = Some(control);
