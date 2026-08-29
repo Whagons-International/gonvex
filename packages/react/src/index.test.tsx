@@ -1070,6 +1070,76 @@ describe("GonvexAuthProvider", () => {
     await act(async () => { await logout; });
   });
 
+  it("does not auto-select a tenant from the live directory before createTenant settles", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ftenant-create.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "account-access",
+      expiresAt: now + 900_000,
+      refreshToken: "account-refresh",
+      refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-1", email: "owner@example.test", emailVerified: true, provider: "password" },
+      tenants: [],
+    }));
+    const createdTenant = {
+      id: "tenant-new",
+      name: "New Tenant",
+      role: "owner",
+      permissions: {},
+      domain: "new-tenant",
+      timezone: "UTC",
+      description: "",
+      profile: {},
+    };
+    let finishCreate: ((tenant: typeof createdTenant) => void) | undefined;
+    client.reducer.mockImplementation((reference: FunctionReference) => (
+      reference.path === "control.tenants.create"
+        ? new Promise((resolve) => { finishCreate = resolve; })
+        : Promise.resolve({ updated: true })
+    ));
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(
+      <GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://tenant-create.test" projectId="shop">
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    let create: Promise<unknown> | undefined;
+    await act(async () => {
+      create = auth!.createTenant("New Tenant");
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      client.emitQuery({
+        type: "query.result",
+        id: "tenant-directory",
+        path: "control.tenants.mine",
+        result: [createdTenant],
+        reason: "update",
+      });
+      await Promise.resolve();
+    });
+
+    expect(auth?.tenants).toEqual([createdTenant]);
+    expect(auth?.activeTenant).toBeNull();
+    expect(client.setAuth.mock.calls.some(([value]) => (
+      (value as { tenant?: string }).tenant === createdTenant.id
+    ))).toBe(false);
+
+    finishCreate?.(createdTenant);
+    await act(async () => { await create; });
+
+    expect(auth?.activeTenant).toEqual(createdTenant);
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({
+      tenant: createdTenant.id,
+      token: "account-access",
+    }));
+  });
+
   it("keeps the canonical Firebase-backed session through a transient provider-null callback", async () => {
     const client = new FakeGonvexClient();
     const controlWatch = vi.spyOn(client, "watchControlQuery");

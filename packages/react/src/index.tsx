@@ -541,9 +541,18 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       const tenants = watch.getSnapshot().result as GonvexAuthTenant[] | undefined;
       const current = sessionRef.current;
       if (!current || !tenants) return;
-      const activeTenantId = tenants.some((tenant) => tenant.id === current.activeTenantId)
-        ? current.activeTenantId
-        : tenants[0]?.id;
+      // A live directory update is not a tenant-selection intent. In
+      // particular, tenants.create refreshes this query before its reducer
+      // result/control watermark. Auto-selecting the first newly visible
+      // tenant here changes client auth scope and cancels the still-pending
+      // create call. Preserve landlord scope until createTenant or
+      // setActiveTenant explicitly selects the tenant. An already-selected
+      // tenant may still fall back when its membership is revoked.
+      const activeTenantId = current.activeTenantId === undefined
+        ? undefined
+        : tenants.some((tenant) => tenant.id === current.activeTenantId)
+          ? current.activeTenantId
+          : tenants[0]?.id;
       if (JSON.stringify(current.tenants) === JSON.stringify(tenants) && current.activeTenantId === activeTenantId) return;
       installSession({ ...current, tenants, activeTenantId });
     });
