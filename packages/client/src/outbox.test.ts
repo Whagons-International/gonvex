@@ -168,6 +168,21 @@ describe("DexieReducerOutbox", () => {
     await expect(outbox.count(scope)).resolves.toBe(0);
   });
 
+  it("returns an admitted inflight row to pending without backoff", async () => {
+    const outbox = createOutbox("admitted-pending");
+    const entry = await outbox.enqueue({ scope: "scope", path: "tasks.update", args: {}, state: "inflight" });
+    await outbox.markPending(entry.id);
+
+    const pending = await outbox.nextReady("scope", Date.now());
+    expect(pending).toMatchObject({
+      id: entry.id,
+      state: "pending",
+      attempts: 0,
+      lastError: undefined,
+    });
+    expect(pending?.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+  });
+
   it("does not delete an entry enqueued after scoped clearing starts", async () => {
     const outbox = createOutbox("clear-enqueue-race");
     const oldEntry = await outbox.enqueue({ scope, path: "tasks.update", args: { value: 1 } });

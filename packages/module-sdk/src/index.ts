@@ -181,6 +181,7 @@ export type WriteDB = ReadDB & {
   readonly insert: <T = JsonValue>(table: string, row: JsonObject) => Promise<T>;
   readonly update: <T = JsonValue>(table: string, id: string, patch: JsonObject) => Promise<T>;
   readonly delete: (table: string, id: string) => Promise<void>;
+  readonly deleteMany: (table: string, ids: readonly JsonValue[]) => Promise<{ deleted: number }>;
 };
 
 /** Durable external work recorded in the Reducer's current transaction. */
@@ -214,7 +215,7 @@ export type ActionStorage = {
 };
 
 export type ActionToolBinding = {
-  readonly kind: "query" | "reducer";
+  readonly kind: "query" | "reducer" | "internalReducer";
   readonly function: string;
 };
 
@@ -408,6 +409,7 @@ export type ActionOptions<Args, Result, Capabilities extends ActionCapabilities 
 
 export type LiveQueryValue = { readonly argument?: string; readonly literal?: JsonValue };
 export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
+export type FilterColumnType = "text" | "number";
 export type LiveQueryExpression = {
   readonly operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "range" | "in" | "contains" | "containsInsensitive" | "and" | "or" | "not" | "server";
   readonly column?: string;
@@ -423,7 +425,7 @@ export type LiveQueryPlan = {
   readonly resultPath?: readonly string[];
   readonly where?: LiveQueryExpression;
   readonly search?: { readonly argument: string; readonly columns: readonly string[] };
-  readonly filters?: { readonly argument: string; readonly allowedColumns: readonly string[]; readonly allowedOperators: readonly FilterOperator[] };
+  readonly filters?: { readonly argument: string; readonly allowedColumns: readonly string[]; readonly allowedOperators: readonly FilterOperator[]; readonly columnTypes?: Readonly<Record<string, FilterColumnType>> };
   readonly sort?: { readonly columnArgument?: string; readonly directionArgument?: string; readonly defaultColumn: string; readonly defaultDirection: "asc" | "desc"; readonly allowedColumns: readonly string[] };
   readonly window?: {
     readonly offsetArgument: string;
@@ -436,8 +438,9 @@ export type LiveQueryPlan = {
   readonly serverOnly?: boolean;
 };
 
-export type VisibilityOperator = "public" | "permission" | "role" | "eqContext" | "inSet" | "and" | "or" | "not";
+export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "and" | "or" | "not";
 export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
+export type VisibilityLiteral = { readonly literal: JsonValue };
 
 export type VisibilityPlan = {
   readonly table: string;
@@ -470,17 +473,18 @@ export type VisibilityJoin = {
 export type VisibilityConstraint = {
   readonly table: string;
   readonly column: string;
-  readonly context: VisibilityContextKey;
+  readonly context?: VisibilityContextKey;
+  readonly value?: VisibilityLiteral;
 };
 
-export type VisibilityExpression = {
-  readonly operator: VisibilityOperator;
-  readonly column?: string;
-  readonly context?: VisibilityContextKey;
-  readonly set?: string;
-  readonly value?: string;
-  readonly children?: readonly VisibilityExpression[];
-};
+export type VisibilityExpression =
+  | { readonly operator: "public" }
+  | { readonly operator: "permission" | "role"; readonly value: string }
+  | { readonly operator: "eq"; readonly column: string; readonly value: VisibilityLiteral }
+  | { readonly operator: "eqContext"; readonly column: string; readonly context: VisibilityContextKey }
+  | { readonly operator: "inSet"; readonly column: string; readonly set: string }
+  | { readonly operator: "and" | "or"; readonly children: readonly VisibilityExpression[] }
+  | { readonly operator: "not"; readonly children: readonly [VisibilityExpression] };
 
 export type ModuleFunctionKind = "query" | "reducer" | "action";
 
@@ -701,7 +705,7 @@ const validateActionCapabilities = (profile: "standard" | "agent", value: Action
     }
     for (const [name, binding] of Object.entries(value.tools)) {
       if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) || !isRecord(binding) ||
-        (binding.kind !== "query" && binding.kind !== "reducer") || typeof binding.function !== "string" || !binding.function.trim()) {
+        (binding.kind !== "query" && binding.kind !== "reducer" && binding.kind !== "internalReducer") || typeof binding.function !== "string" || !binding.function.trim()) {
         throw new Error(`agent action ${path} has an invalid tool binding ${JSON.stringify(name)}`);
       }
     }
@@ -744,10 +748,17 @@ const validateStructuredQueryPlan: (value: unknown, path: string) => asserts val
     if (value.filters.allowedOperators.some((operator) => typeof operator !== "string" || !operators.has(operator as FilterOperator))) {
       throw new Error(`structured query plan ${path} filters contains an unsupported operator`);
     }
+    if (value.filters.columnTypes !== undefined) {
+      const allowedColumns = value.filters.allowedColumns as string[];
+      if (!isRecord(value.filters.columnTypes) || Object.entries(value.filters.columnTypes).some(([column, type]) =>
+        !allowedColumns.includes(column) || (type !== "text" && type !== "number"))) {
+        throw new Error(`structured query plan ${path} filter column types must reference allowed columns and use text or number`);
+      }
+    }
   }
 };
 
-const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eqContext", "inSet", "and", "or", "not"]);
+const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eq", "eqContext", "inSet", "and", "or", "not"]);
 const visibilityContexts = new Set<VisibilityContextKey>(["account.id", "member.id", "tenant.id"]);
 
 const validateExactObject: (
@@ -771,6 +782,12 @@ const validateVisibilityContext = (value: unknown, path: string): VisibilityCont
     throw new Error(`${path} must be account.id, member.id, or tenant.id`);
   }
   return value as VisibilityContextKey;
+};
+
+const validateVisibilityLiteral = (value: unknown, path: string): VisibilityLiteral => {
+  validateExactObject(value, path, ["literal"]);
+  if (!("literal" in value)) throw new Error(`${path}.literal is required`);
+  return value as VisibilityLiteral;
 };
 
 type VisibilityExpressionValidator = (
@@ -803,6 +820,11 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
     case "role":
       validateExactObject(value, path, ["operator", "value"]);
       requireVisibilityString(value.value, `${path}.value`);
+      return;
+    case "eq":
+      validateExactObject(value, path, ["operator", "column", "value"]);
+      requireVisibilityString(value.column, `${path}.column`);
+      validateVisibilityLiteral(value.value, `${path}.value`);
       return;
     case "eqContext":
       validateExactObject(value, path, ["operator", "column", "context"]);
@@ -882,11 +904,15 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
     if (!Array.isArray(candidate.where)) throw new Error(`${setPath}.where must be an array`);
     candidate.where.forEach((constraint, index) => {
       const constraintPath = `${setPath}.where[${index}]`;
-      validateExactObject(constraint, constraintPath, ["table", "column", "context"]);
+      validateExactObject(constraint, constraintPath, ["table", "column", "context", "value"]);
       requireVisibilityString(constraint.table, `${constraintPath}.table`);
       if (!aliases.has(constraint.table as string)) throw new Error(`${constraintPath}.table references unknown alias ${constraint.table}`);
       requireVisibilityString(constraint.column, `${constraintPath}.column`);
-      validateVisibilityContext(constraint.context, `${constraintPath}.context`);
+      const hasContext = constraint.context !== undefined;
+      const hasValue = constraint.value !== undefined;
+      if (hasContext === hasValue) throw new Error(`${constraintPath} requires exactly one of context or value`);
+      if (hasContext) validateVisibilityContext(constraint.context, `${constraintPath}.context`);
+      if (hasValue) validateVisibilityLiteral(constraint.value, `${constraintPath}.value`);
     });
   }
 
@@ -896,10 +922,11 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
 const freezeVisibilityExpression = (expression: VisibilityExpression): VisibilityExpression =>
   freeze({
     ...expression,
-    children: expression.children === undefined
-      ? undefined
-      : freeze(expression.children.map(freezeVisibilityExpression)),
-  });
+    ...(expression.operator === "eq" ? { value: freeze({ ...expression.value }) } : {}),
+    ...("children" in expression
+      ? { children: freeze(expression.children.map(freezeVisibilityExpression)) }
+      : {}),
+  } as VisibilityExpression);
 
 const freezeVisibilityPlan = (plan: VisibilityPlan): VisibilityPlan => {
   const sets: Record<string, VisibilitySet> = {};
@@ -908,7 +935,10 @@ const freezeVisibilityPlan = (plan: VisibilityPlan): VisibilityPlan => {
     sets[name] = freeze({
       ...set,
       joins: freeze(set.joins.map((join) => freeze({ ...join }))),
-      where: freeze(set.where.map((constraint) => freeze({ ...constraint }))),
+      where: freeze(set.where.map((constraint) => freeze({
+        ...constraint,
+        value: constraint.value === undefined ? undefined : freeze({ ...constraint.value }),
+      }))),
     });
   }
   return freeze({
@@ -1028,9 +1058,11 @@ export class ModuleManifestCollector {
       for (const [name, binding] of Object.entries(definition.actionCapabilities?.tools ?? {})) {
         const target = this.entries.get(binding.function);
         if (!target) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} targets unknown function ${JSON.stringify(binding.function)}`);
-        if (target.kind !== binding.kind) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} kind does not match ${JSON.stringify(binding.function)}`);
+        const targetKind = binding.kind === "internalReducer" ? "reducer" : binding.kind;
+        if (target.kind !== targetKind) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} kind does not match ${JSON.stringify(binding.function)}`);
         if (binding.kind === "query" && (!target.internal || target.delivery !== "oneShot")) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target an internal one-shot Query`);
         if (binding.kind === "reducer" && target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target a public business-intent Reducer`);
+        if (binding.kind === "internalReducer" && !target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target an internal Reducer`);
       }
     }
     return freeze({

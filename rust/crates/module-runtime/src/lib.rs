@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+/// Root calls use depth zero. Each host-mediated nested function call advances
+/// the depth and must remain bounded so runtimes cannot recurse forever.
+pub const MAX_INVOCATION_DEPTH: u8 = 8;
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type ModuleGeneration = u64;
 
@@ -208,6 +212,10 @@ pub struct InvocationContext {
     pub tenant: Option<TenantIdentity>,
     pub identity: IdentityContext,
     pub invocation: InvocationInfo,
+    /// Host-only scheduling metadata. This is not exposed through
+    /// `ctx.invocation`, but it keeps nested calls out of the root isolate pool.
+    #[serde(default)]
+    pub nesting_depth: u8,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
@@ -286,6 +294,11 @@ pub enum HostCall {
         key: String,
         id: Vec<u8>,
     },
+    DbDeleteMany {
+        table: String,
+        key: String,
+        ids: Vec<u8>,
+    },
     ActionEnqueue {
         function: String,
         args: Vec<u8>,
@@ -341,7 +354,10 @@ impl HostCall {
     pub fn capability(&self) -> &'static str {
         match self {
             Self::DbQuery { .. } => "db_read",
-            Self::DbInsert { .. } | Self::DbUpdate { .. } | Self::DbDelete { .. } => "db_write",
+            Self::DbInsert { .. }
+            | Self::DbUpdate { .. }
+            | Self::DbDelete { .. }
+            | Self::DbDeleteMany { .. } => "db_write",
             Self::ActionEnqueue { .. } => "action_outbox",
             Self::ToolInvoke { .. } => "action_tools",
             Self::FunctionInvoke { .. } => "functions",

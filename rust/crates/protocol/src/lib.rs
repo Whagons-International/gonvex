@@ -325,6 +325,8 @@ pub struct ServerCapabilities {
     pub reducer_batch: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_watermark: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_watermark: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +421,8 @@ pub enum ServerMessage {
         path: Option<String>,
         error: String,
     },
+    #[serde(rename = "control.watermark")]
+    ControlWatermark { id: String },
     #[serde(rename = "reducer.result")]
     ReducerResult {
         id: String,
@@ -451,6 +455,12 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         result: Value,
+        #[serde(
+            default,
+            rename = "committedRevision",
+            skip_serializing_if = "Option::is_none"
+        )]
+        committed_revision: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trace: Option<MessageTrace>,
     },
@@ -589,7 +599,9 @@ mod tests {
         for frame in [
             r#"{"type":"session.ready","project":"shop","tenant":"tenant-a","replica":{"protocolVersion":1,"scope":"shop:tenant-a","visibilityScope":"vf-1","epoch":"epoch-1"},"capabilities":{"protocolVersion":2,"runtimeVersion":"0.4.1","replicaBatch":1,"replicaIntegrity":1,"queryBatch":1,"reducerBatch":1,"replicaWatermark":1}}"#,
             r#"{"type":"query.result","id":"q-1","path":"tasks.grid","result":{"page":[]},"reason":"initial","subscriptionRevision":{"epoch":"epoch-1","sequence":42}}"#,
+            r#"{"type":"control.watermark","id":"r-control-1"}"#,
             r#"{"type":"reducer.result","id":"r-1","path":"tasks.start","result":null,"originCommandId":"command-1","committedRevision":42}"#,
+            r#"{"type":"action.result","id":"a-1","path":"testing.invoke","result":{"ok":true},"committedRevision":43}"#,
             r#"{"type":"replica.transaction","cursor":{"epoch":"epoch-1","revision":42},"originCommandId":"command-1","changes":[{"entity":"tasks","id":"task-1","operation":"update","oldValue":{"status":"ready"},"newValue":{"status":"started"},"changedColumns":["status"]}]}"#,
             r#"{"type":"replica.transaction","cursor":{"epoch":"epoch-1","revision":43},"originCommandId":"agent-child","provenance":{"rootCommandId":"agent-root","rootChannel":"ui","channel":"agent","actorAccountId":"account-1","actorMemberId":"member-1","onBehalfOfMemberId":"member-1","agentExecutionId":"agent-1"},"changes":[{"entity":"tasks","id":"task-1","operation":"update","newValue":{"status":"started"}}]}"#,
             r#"{"type":"replica.ready","id":"replica-1","cursor":{"epoch":"epoch-1","revision":42},"digest":"digest-2","truncated":false}"#,

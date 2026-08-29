@@ -43,6 +43,14 @@ struct ScheduledJob {
     provenance: Value,
 }
 
+struct ScheduleRequest {
+    id: Option<String>,
+    function: String,
+    args: Value,
+    run_at: DateTime<Utc>,
+    provenance: Value,
+}
+
 impl Scheduler {
     pub fn new() -> Self {
         let (stop, _) = watch::channel(false);
@@ -111,15 +119,19 @@ impl Scheduler {
         }
     }
 
-    pub async fn enqueue(
+    async fn enqueue(
         &self,
         runtime: &Runtime,
         session: &TenantSession,
-        function: &str,
-        args: Value,
-        run_at: DateTime<Utc>,
-        provenance: Value,
+        request: ScheduleRequest,
     ) -> Result<String, String> {
+        let ScheduleRequest {
+            id,
+            function,
+            args,
+            run_at,
+            provenance,
+        } = request;
         let module = runtime
             .inner
             .modules
@@ -136,7 +148,7 @@ impl Scheduler {
         let Some(control) = runtime.inner.control_plane.read().await.clone() else {
             return Err("scheduler storage is unavailable".to_owned());
         };
-        let id = format!("job_{}", Uuid::new_v4());
+        let id = id.unwrap_or_else(|| format!("job_{}", Uuid::new_v4()));
         let mut transaction = control
             .begin_control_transaction(false)
             .await
@@ -149,7 +161,8 @@ impl Scheduler {
         sqlx::query(
             r#"INSERT INTO gonvex_scheduled_jobs
                (id,project_id,tenant_id,function_path,args,run_at,scheduled_for,provenance)
-               VALUES($1,$2,$3,$4,$5,$6,$6,$7)"#,
+               VALUES($1,$2,$3,$4,$5,$6,$6,$7)
+               ON CONFLICT(id) DO NOTHING"#,
         )
         .bind(&id)
         .bind(&session.identity.project_id)
@@ -329,6 +342,7 @@ impl Scheduler {
                         allow_internal: true,
                         provenance: Some(provenance),
                         module: Some(module.clone()),
+                        ..ExecutionAccess::default()
                     },
                 )
                 .await
@@ -343,6 +357,7 @@ impl Scheduler {
                         allow_internal: true,
                         provenance: Some(provenance),
                         module: Some(module.clone()),
+                        ..ExecutionAccess::default()
                     },
                 )
                 .await
@@ -520,10 +535,39 @@ impl Runtime {
             .enqueue(
                 self,
                 session,
-                function,
-                args,
-                run_at,
-                serde_json::to_value(provenance).unwrap_or(Value::Null),
+                ScheduleRequest {
+                    id: None,
+                    function: function.to_owned(),
+                    args,
+                    run_at,
+                    provenance: serde_json::to_value(provenance).unwrap_or(Value::Null),
+                },
+            )
+            .await
+            .map(Value::String)
+    }
+
+    pub(crate) async fn enqueue_scheduled_with_id(
+        &self,
+        session: &TenantSession,
+        job_id: &str,
+        function: &str,
+        args: Value,
+        run_at: DateTime<Utc>,
+        provenance: &InvocationProvenance,
+    ) -> Result<Value, String> {
+        self.inner
+            .scheduler
+            .enqueue(
+                self,
+                session,
+                ScheduleRequest {
+                    id: Some(job_id.to_owned()),
+                    function: function.to_owned(),
+                    args,
+                    run_at,
+                    provenance: serde_json::to_value(provenance).unwrap_or(Value::Null),
+                },
             )
             .await
             .map(Value::String)

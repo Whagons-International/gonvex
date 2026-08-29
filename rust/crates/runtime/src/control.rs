@@ -120,6 +120,11 @@ pub enum ControlError {
     InvalidArguments(String),
     #[error("Control Plane operation is not yet implemented in Rust: {0}")]
     NotImplemented(String),
+    #[error("Control Plane database invariant failed during {operation}: {detail}")]
+    DatabaseInvariant {
+        operation: &'static str,
+        detail: String,
+    },
     #[error(transparent)]
     Database(#[from] gonvex_postgres::DatabaseError),
     #[error(transparent)]
@@ -3257,6 +3262,7 @@ async fn claim_control_idempotency(
         ControlKind::Action => "action",
         ControlKind::Query => "query",
     };
+    lock_control_idempotency(transaction, project, subject, key).await?;
     let inserted = sqlx::query(
         r#"INSERT INTO gonvex_control_idempotency
            (project_id,subject_id,idempotency_key,kind,path)
@@ -3280,8 +3286,12 @@ async fn claim_control_idempotency(
     .bind(project)
     .bind(subject)
     .bind(key)
-    .fetch_one(&mut **transaction.transaction())
-    .await?;
+    .fetch_optional(&mut **transaction.transaction())
+    .await?
+    .ok_or_else(|| ControlError::DatabaseInvariant {
+        operation: "Control Plane idempotency claim",
+        detail: format!("record for {path:?} disappeared after a conflicting insert"),
+    })?;
     if row.get::<String, _>("kind") != kind || row.get::<String, _>("path") != path {
         return Err(ControlError::InvalidArguments(
             "idempotency key was already used for another operation".to_owned(),
@@ -3318,6 +3328,7 @@ async fn claim_control_saga(
         ControlKind::Action => "action",
         ControlKind::Query => "query",
     };
+    lock_control_idempotency(transaction, project, subject, key).await?;
     sqlx::query(
         r#"INSERT INTO gonvex_control_idempotency
            (project_id,subject_id,idempotency_key,kind,path)
@@ -3337,8 +3348,12 @@ async fn claim_control_saga(
     .bind(project)
     .bind(subject)
     .bind(key)
-    .fetch_one(&mut **transaction.transaction())
-    .await?;
+    .fetch_optional(&mut **transaction.transaction())
+    .await?
+    .ok_or_else(|| ControlError::DatabaseInvariant {
+        operation: "Control Plane saga idempotency claim",
+        detail: format!("record for {path:?} disappeared after insert"),
+    })?;
     if row.get::<String, _>("kind") != kind_name || row.get::<String, _>("path") != path {
         return Err(ControlError::InvalidArguments(
             "idempotency key was already used for another operation".to_owned(),
@@ -3355,6 +3370,20 @@ async fn claim_control_saga(
         .get::<Option<Json<Value>>, _>("result")
         .map(|result| result.0)
         .or(Some(Value::Null)))
+}
+
+async fn lock_control_idempotency(
+    transaction: &mut TenantTransaction,
+    project: &str,
+    subject: &str,
+    key: &str,
+) -> Result<(), ControlError> {
+    let lock_key = advisory_lock_key("control-idempotency", &[project, subject, key]);
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(lock_key)
+        .execute(&mut **transaction.transaction())
+        .await?;
+    Ok(())
 }
 
 async fn complete_control_idempotency(
@@ -3450,9 +3479,14 @@ pub(crate) async fn resolve_external_account(
     project: &str,
     identity: &VerifiedExternalIdentity,
 ) -> Result<AuthAccount, ControlError> {
-    let lock_key = format!(
-        "external-identity\0{project}\0{}\0{}\0{}",
-        identity.provider, identity.issuer, identity.subject
+    let lock_key = advisory_lock_key(
+        "external-identity",
+        &[
+            project,
+            &identity.provider,
+            &identity.issuer,
+            &identity.subject,
+        ],
     );
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
         .bind(lock_key)
@@ -3460,9 +3494,9 @@ pub(crate) async fn resolve_external_account(
         .await?;
     if identity.email_verified && !identity.email.is_empty() {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-            .bind(format!(
-                "verified-email\0{project}\0{}",
-                identity.email.to_lowercase()
+            .bind(advisory_lock_key(
+                "verified-email",
+                &[project, &identity.email.to_lowercase()],
             ))
             .execute(&mut **transaction.transaction())
             .await?;
@@ -4522,6 +4556,20 @@ fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339()
 }
 
+fn advisory_lock_key(namespace: &str, components: &[&str]) -> String {
+    let mut material = Vec::new();
+    append_lock_component(&mut material, namespace);
+    for component in components {
+        append_lock_component(&mut material, component);
+    }
+    format!("gonvex-lock-v1:{}", sha256_hex(&material))
+}
+
+fn append_lock_component(material: &mut Vec<u8>, component: &str) {
+    material.extend_from_slice(&(component.len() as u64).to_be_bytes());
+    material.extend_from_slice(component.as_bytes());
+}
+
 fn sha256_hex(value: &[u8]) -> String {
     Sha256::digest(value)
         .iter()
@@ -4559,5 +4607,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("databaseUrl"));
+    }
+
+    #[test]
+    fn external_identity_lock_keys_are_safe_deterministic_and_field_delimited() {
+        let first = advisory_lock_key(
+            "external-identity",
+            &["project", "firebase", "issuer", "subject"],
+        );
+        let same = advisory_lock_key(
+            "external-identity",
+            &["project", "firebase", "issuer", "subject"],
+        );
+        let different_project = advisory_lock_key(
+            "external-identity",
+            &["other-project", "firebase", "issuer", "subject"],
+        );
+        let different_provider = advisory_lock_key(
+            "external-identity",
+            &["project", "external-oidc", "issuer", "subject"],
+        );
+        let different_subject = advisory_lock_key(
+            "external-identity",
+            &["project", "firebase", "issuer", "other-subject"],
+        );
+        let ambiguous_without_lengths = advisory_lock_key("external-identity", &["ab", "c"])
+            != advisory_lock_key("external-identity", &["a", "bc"]);
+
+        assert_eq!(first, same);
+        assert!(different_project != first);
+        assert!(different_provider != first);
+        assert!(different_subject != first);
+        assert!(ambiguous_without_lengths);
+        assert!(first.is_ascii());
+        assert!(!first.contains('\0'));
+        assert!(first
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == ':'));
     }
 }

@@ -56,7 +56,10 @@ pub struct VisibilityConstraint {
     #[serde(default)]
     pub table: String,
     pub column: String,
+    #[serde(default)]
     pub context: String,
+    #[serde(default)]
+    pub value: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -70,7 +73,7 @@ pub struct VisibilityExpression {
     #[serde(default)]
     pub set: String,
     #[serde(default)]
-    pub value: String,
+    pub value: Option<Value>,
     #[serde(default)]
     pub children: Vec<VisibilityExpression>,
 }
@@ -83,6 +86,29 @@ pub struct ResolvedVisibility {
     pub permissions: Value,
     pub sets: BTreeMap<String, BTreeSet<String>>,
     pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VisibilityDependencies {
+    columns: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl VisibilityDependencies {
+    pub fn tables(&self) -> BTreeSet<String> {
+        self.columns.keys().cloned().collect()
+    }
+
+    pub fn change_affects(&self, table: &str, operation: &str, changed_columns: &[String]) -> bool {
+        let Some(relevant_columns) = self.columns.get(table) else {
+            return false;
+        };
+        if !operation.eq_ignore_ascii_case("update") {
+            return true;
+        }
+        changed_columns
+            .iter()
+            .any(|column| relevant_columns.contains(column))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -109,14 +135,79 @@ impl VisibilityPlan {
     }
 
     pub fn dependencies(&self) -> BTreeSet<String> {
-        let mut result = BTreeSet::from(["members".to_owned()]);
+        self.dependency_columns().tables()
+    }
+
+    pub fn dependency_columns(&self) -> VisibilityDependencies {
+        let mut columns = BTreeMap::<String, BTreeSet<String>>::new();
+        columns.insert(
+            "members".to_owned(),
+            BTreeSet::from([
+                "id".to_owned(),
+                "account_id".to_owned(),
+                "status".to_owned(),
+                "role".to_owned(),
+                "permissions".to_owned(),
+            ]),
+        );
         for set in self.sets.values() {
-            result.insert(set.table.clone());
+            let base_alias = if set.alias.is_empty() {
+                set.table.as_str()
+            } else {
+                set.alias.as_str()
+            };
+            let mut aliases = BTreeMap::from([(base_alias.to_owned(), set.table.clone())]);
+            let mut previous = base_alias.to_owned();
             for join in &set.joins {
-                result.insert(join.table.clone());
+                let left_alias = if join.left_alias.is_empty() {
+                    previous.as_str()
+                } else {
+                    join.left_alias.as_str()
+                };
+                if let Some(left_table) = aliases.get(left_alias) {
+                    columns
+                        .entry(left_table.clone())
+                        .or_default()
+                        .insert(join.left_column.clone());
+                }
+                columns
+                    .entry(join.table.clone())
+                    .or_default()
+                    .insert(join.right_column.clone());
+                let alias = if join.alias.is_empty() {
+                    join.table.as_str()
+                } else {
+                    join.alias.as_str()
+                };
+                aliases.insert(alias.to_owned(), join.table.clone());
+                previous = alias.to_owned();
+            }
+            let select_from = if set.select_from.is_empty() {
+                base_alias
+            } else {
+                set.select_from.as_str()
+            };
+            if let Some(select_table) = aliases.get(select_from) {
+                columns
+                    .entry(select_table.clone())
+                    .or_default()
+                    .insert(set.select.clone());
+            }
+            for constraint in &set.constraints {
+                let table = if constraint.table.is_empty() {
+                    Some(&set.table)
+                } else {
+                    aliases.get(&constraint.table)
+                };
+                if let Some(table) = table {
+                    columns
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(constraint.column.clone());
+                }
             }
         }
-        result
+        VisibilityDependencies { columns }
     }
 }
 
@@ -227,6 +318,30 @@ fn validate_set(set: &VisibilitySet) -> Result<(), VisibilityError> {
             "every occurrence of a repeated visibility table requires an alias".to_owned(),
         ));
     }
+    for constraint in &set.constraints {
+        identifier(&constraint.column)?;
+        if !constraint.table.is_empty() {
+            identifier(&constraint.table)?;
+            if !aliases.contains(&constraint.table) {
+                return Err(VisibilityError::Invalid(format!(
+                    "unknown constraint alias {:?}",
+                    constraint.table
+                )));
+            }
+        }
+        let has_context = !constraint.context.is_empty();
+        let has_value = constraint.value.is_some();
+        if has_context == has_value {
+            return Err(VisibilityError::Invalid(
+                "visibility constraint requires exactly one of context or value".to_owned(),
+            ));
+        }
+        if has_context {
+            context_key(&constraint.context)?;
+        } else {
+            visibility_literal(constraint.value.as_ref())?;
+        }
+    }
     Ok(())
 }
 
@@ -236,13 +351,23 @@ fn validate_expression(
 ) -> Result<(), VisibilityError> {
     match expression.operator.as_str() {
         "public" => {}
-        "permission" | "role" if expression.value.trim().is_empty() => {
+        "permission" | "role"
+            if expression
+                .value
+                .as_ref()
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty()) =>
+        {
             return Err(VisibilityError::Invalid(format!(
                 "{} requires a value",
                 expression.operator
             )))
         }
         "permission" | "role" => {}
+        "eq" => {
+            identifier(&expression.column)?;
+            visibility_literal(expression.value.as_ref())?;
+        }
         "eqContext" => {
             identifier(&expression.column)?;
             context_key(&expression.context)?;
@@ -299,7 +424,17 @@ fn compile_expression(
                 parameters,
                 Value::String(resolved.direct["account.id"].clone()),
             );
-            let permission = argument(parameters, Value::String(expression.value.clone()));
+            let permission = argument(
+                parameters,
+                Value::String(
+                    expression
+                        .value
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                ),
+            );
             format!(
                 "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = {account} AND _gonvex_member.status = 'active' AND lower(COALESCE(_gonvex_member.permissions ->> {permission}::text, '')) IN ('true', '1'))"
             )
@@ -309,7 +444,17 @@ fn compile_expression(
                 parameters,
                 Value::String(resolved.direct["account.id"].clone()),
             );
-            let role = argument(parameters, Value::String(expression.value.clone()));
+            let role = argument(
+                parameters,
+                Value::String(
+                    expression
+                        .value
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                ),
+            );
             format!(
                 "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = {account} AND _gonvex_member.status = 'active' AND _gonvex_member.role = {role})"
             )
@@ -322,6 +467,12 @@ fn compile_expression(
             );
             format!("{row_alias}.{column} = {value}")
         }
+        "eq" => compile_literal_equality(
+            row_alias,
+            &expression.column,
+            visibility_literal(expression.value.as_ref())?,
+            parameters,
+        )?,
         "inSet" => {
             let column = quote(&expression.column)?;
             let set = plan.sets.get(&expression.set).ok_or_else(|| {
@@ -338,11 +489,12 @@ fn compile_expression(
                     compile_expression(child, plan, resolved, row_alias, parameters)?
                 ));
             }
-            children.join(if expression.operator == "and" {
+            let joined = children.join(if expression.operator == "and" {
                 " AND "
             } else {
                 " OR "
-            })
+            });
+            format!("({joined})")
         }
         "not" => format!(
             "NOT ({})",
@@ -418,7 +570,6 @@ fn compile_set_with_parameters(
     );
     let mut predicates = Vec::new();
     for constraint in &set.constraints {
-        context_key(&constraint.context)?;
         let alias = if constraint.table.is_empty() {
             "v0"
         } else {
@@ -432,12 +583,29 @@ fn compile_set_with_parameters(
                 })?
                 .as_str()
         };
-        parameters.push(Value::String(direct[&constraint.context].clone()));
-        predicates.push(format!(
-            "{alias}.{} = ${}",
-            quote(&constraint.column)?,
-            parameters.len()
-        ));
+        let has_context = !constraint.context.is_empty();
+        let has_value = constraint.value.is_some();
+        if has_context == has_value {
+            return Err(VisibilityError::Invalid(
+                "visibility constraint requires exactly one of context or value".to_owned(),
+            ));
+        }
+        if has_context {
+            context_key(&constraint.context)?;
+            parameters.push(Value::String(direct[&constraint.context].clone()));
+            predicates.push(format!(
+                "{alias}.{} = ${}",
+                quote(&constraint.column)?,
+                parameters.len()
+            ));
+        } else {
+            predicates.push(compile_literal_equality(
+                alias,
+                &constraint.column,
+                visibility_literal(constraint.value.as_ref())?,
+                parameters,
+            )?);
+        }
     }
     if !predicates.is_empty() {
         query.push_str(" WHERE ");
@@ -453,8 +621,19 @@ fn match_expression(
 ) -> bool {
     match expression.operator.as_str() {
         "public" => true,
-        "permission" => truthy(resolved.permissions.get(&expression.value)),
-        "role" => resolved.role == expression.value,
+        "permission" => expression
+            .value
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|permission| truthy(resolved.permissions.get(permission))),
+        "role" => expression
+            .value
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|role| resolved.role == role),
+        "eq" => visibility_literal(expression.value.as_ref())
+            .ok()
+            .is_some_and(|literal| row.get(&expression.column) == Some(literal)),
         "eqContext" => scalar(row.get(&expression.column)) == resolved.direct[&expression.context],
         "inSet" => resolved
             .sets
@@ -488,6 +667,32 @@ fn scalar(value: Option<&Value>) -> String {
         Some(Value::String(value)) => value.clone(),
         Some(value) => serde_json::to_string(value).unwrap_or_default(),
     }
+}
+
+fn visibility_literal(value: Option<&Value>) -> Result<&Value, VisibilityError> {
+    let object = value.and_then(Value::as_object).ok_or_else(|| {
+        VisibilityError::Invalid("visibility literal must be an object".to_owned())
+    })?;
+    if object.len() != 1 || !object.contains_key("literal") {
+        return Err(VisibilityError::Invalid(
+            "visibility literal must contain only literal".to_owned(),
+        ));
+    }
+    Ok(&object["literal"])
+}
+
+fn compile_literal_equality(
+    row_alias: &str,
+    column: &str,
+    literal: &Value,
+    parameters: &mut Vec<Value>,
+) -> Result<String, VisibilityError> {
+    let column = quote(column)?;
+    if literal.is_null() {
+        return Ok(format!("{row_alias}.{column} IS NULL"));
+    }
+    parameters.push(literal.clone());
+    Ok(format!("{row_alias}.{column} = ${}", parameters.len()))
 }
 
 fn visibility_fingerprint(
@@ -563,6 +768,7 @@ mod tests {
                 table: "viewerTeams".to_owned(),
                 column: "memberId".to_owned(),
                 context: "member.id".to_owned(),
+                value: None,
             }],
         };
         validate_set(&set).unwrap();
@@ -574,5 +780,180 @@ mod tests {
         assert!(sql.contains("\"memberTeams\" AS v0 JOIN \"memberTeams\" AS v1"));
         assert!(sql.contains("v0.\"teamId\" = v1.\"teamId\""));
         assert_eq!(parameters, vec![Value::String("member-1".to_owned())]);
+    }
+
+    #[test]
+    fn literal_predicates_compile_for_source_and_joined_rows() {
+        let set = VisibilitySet {
+            table: "boardMessages".to_owned(),
+            alias: String::new(),
+            select: "id".to_owned(),
+            select_from: String::new(),
+            joins: vec![VisibilityJoin {
+                table: "boards".to_owned(),
+                alias: String::new(),
+                left_alias: String::new(),
+                left_column: "boardId".to_owned(),
+                right_column: "id".to_owned(),
+            }],
+            constraints: vec![VisibilityConstraint {
+                table: "boards".to_owned(),
+                column: "visibility".to_owned(),
+                context: String::new(),
+                value: Some(serde_json::json!({"literal": "public"})),
+            }],
+        };
+        validate_set(&set).unwrap();
+        let (sql, parameters) = compile_set(&set, &BTreeMap::new()).unwrap();
+        assert!(sql.contains("v1.\"visibility\" = $1"));
+        assert_eq!(parameters, vec![Value::String("public".to_owned())]);
+
+        let plan = VisibilityPlan {
+            table: "boards".to_owned(),
+            key: "id".to_owned(),
+            sets: BTreeMap::new(),
+            predicate: VisibilityExpression {
+                operator: "eq".to_owned(),
+                column: "deletedAt".to_owned(),
+                context: String::new(),
+                set: String::new(),
+                value: Some(serde_json::json!({"literal": null})),
+                children: Vec::new(),
+            },
+        };
+        let resolved = ResolvedVisibility {
+            revision: 1,
+            direct: BTreeMap::new(),
+            role: String::new(),
+            permissions: Value::Null,
+            sets: BTreeMap::new(),
+            fingerprint: String::new(),
+        };
+        let mut predicate_parameters = Vec::new();
+        let predicate =
+            compile_predicate(&plan, &resolved, "row", &mut predicate_parameters).unwrap();
+        assert_eq!(predicate, "row.\"deletedAt\" IS NULL");
+        assert!(predicate_parameters.is_empty());
+        assert!(row_matches(
+            &plan,
+            &resolved,
+            &serde_json::json!({"deletedAt": null})
+        ));
+    }
+
+    #[test]
+    fn composite_predicates_are_grouped_before_callers_append_filters() {
+        let plan = VisibilityPlan {
+            table: "tasks".to_owned(),
+            key: "id".to_owned(),
+            sets: BTreeMap::new(),
+            predicate: VisibilityExpression {
+                operator: "or".to_owned(),
+                column: String::new(),
+                context: String::new(),
+                set: String::new(),
+                value: None,
+                children: vec![
+                    VisibilityExpression {
+                        operator: "role".to_owned(),
+                        column: String::new(),
+                        context: String::new(),
+                        set: String::new(),
+                        value: Some(Value::String("admin".to_owned())),
+                        children: Vec::new(),
+                    },
+                    VisibilityExpression {
+                        operator: "eqContext".to_owned(),
+                        column: "createdBy".to_owned(),
+                        context: "member.id".to_owned(),
+                        set: String::new(),
+                        value: None,
+                        children: Vec::new(),
+                    },
+                ],
+            },
+        };
+        let resolved = ResolvedVisibility {
+            revision: 1,
+            direct: BTreeMap::from([
+                ("account.id".to_owned(), "account-1".to_owned()),
+                ("member.id".to_owned(), "member-1".to_owned()),
+                ("tenant.id".to_owned(), "tenant-1".to_owned()),
+            ]),
+            role: "admin".to_owned(),
+            permissions: Value::Null,
+            sets: BTreeMap::new(),
+            fingerprint: String::new(),
+        };
+        let mut parameters = Vec::new();
+        let predicate = compile_predicate(&plan, &resolved, "row", &mut parameters).unwrap();
+        let statement = format!("WHERE {predicate} AND row.\"id\" = $4");
+
+        assert!(statement.starts_with("WHERE ((EXISTS"));
+        assert!(statement.contains(") OR (row.\"createdBy\" = $3)) AND row.\"id\" = $4"));
+    }
+
+    #[test]
+    fn dependency_columns_resolve_aliases_to_physical_tables() {
+        let plan = VisibilityPlan {
+            table: "tasks".to_owned(),
+            key: "id".to_owned(),
+            sets: BTreeMap::from([(
+                "audienceTasks".to_owned(),
+                VisibilitySet {
+                    table: "taskAudiences".to_owned(),
+                    alias: "taskAudience".to_owned(),
+                    select: "taskId".to_owned(),
+                    select_from: "taskAudience".to_owned(),
+                    joins: vec![VisibilityJoin {
+                        table: "memberAudiences".to_owned(),
+                        alias: "memberAudience".to_owned(),
+                        left_alias: "taskAudience".to_owned(),
+                        left_column: "audienceId".to_owned(),
+                        right_column: "audienceId".to_owned(),
+                    }],
+                    constraints: vec![VisibilityConstraint {
+                        table: "memberAudience".to_owned(),
+                        column: "memberId".to_owned(),
+                        context: "member.id".to_owned(),
+                        value: None,
+                    }],
+                },
+            )]),
+            predicate: VisibilityExpression {
+                operator: "inSet".to_owned(),
+                column: "id".to_owned(),
+                context: String::new(),
+                set: "audienceTasks".to_owned(),
+                value: None,
+                children: Vec::new(),
+            },
+        };
+
+        let dependencies = plan.dependency_columns();
+        assert_eq!(
+            dependencies.columns["taskAudiences"],
+            BTreeSet::from(["audienceId".to_owned(), "taskId".to_owned()]),
+        );
+        assert_eq!(
+            dependencies.columns["memberAudiences"],
+            BTreeSet::from(["audienceId".to_owned(), "memberId".to_owned()]),
+        );
+        assert_eq!(
+            dependencies.columns["members"],
+            BTreeSet::from([
+                "account_id".to_owned(),
+                "id".to_owned(),
+                "permissions".to_owned(),
+                "role".to_owned(),
+                "status".to_owned(),
+            ]),
+        );
+        assert!(dependencies.change_affects("memberAudiences", "update", &["memberId".to_owned()],));
+        assert!(!dependencies.change_affects(
+            "memberAudiences",
+            "update",
+            &["displayName".to_owned()],
+        ));
     }
 }

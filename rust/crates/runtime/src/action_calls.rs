@@ -12,7 +12,7 @@ use serde_json::Value;
 use url::Url;
 use uuid::Uuid;
 
-use crate::execution::ExecutionAccess;
+use crate::execution::{CommittedRevisionTracker, ExecutionAccess, NestedExecutionAccess};
 use crate::module_host::HostCallHandler;
 use crate::modules::FunctionDefinition;
 use crate::modules::ModuleCallLease;
@@ -52,15 +52,17 @@ pub struct ActionHostCalls {
     capabilities: ActionCapabilities,
     provenance: gonvex_module_runtime::InvocationProvenance,
     module: ModuleCallLease,
+    committed_revisions: CommittedRevisionTracker,
 }
 
 impl ActionHostCalls {
-    pub fn new(
+    pub(crate) fn new(
         runtime: Runtime,
         session: TenantSession,
         definition: &FunctionDefinition,
         provenance: gonvex_module_runtime::InvocationProvenance,
         module: ModuleCallLease,
+        committed_revisions: CommittedRevisionTracker,
     ) -> Result<Self, String> {
         let capabilities = if definition.action_capabilities.is_null() {
             ActionCapabilities::default()
@@ -79,6 +81,7 @@ impl ActionHostCalls {
             capabilities,
             provenance,
             module,
+            committed_revisions,
         })
     }
 
@@ -123,13 +126,19 @@ impl ActionHostCalls {
                 path,
                 args,
                 artifact_hash,
-                self.module.clone(),
+                NestedExecutionAccess {
+                    module: self.module.clone(),
+                    committed_revisions: self.committed_revisions.clone(),
+                },
             )
             .await
             .map_err(|error| error.to_string())
     }
 
     async fn invoke_tool(&self, name: &str, args: Value) -> Result<Value, String> {
+        if self.provenance.depth >= gonvex_module_runtime::MAX_INVOCATION_DEPTH {
+            return Err("nested function invocation exceeded the maximum depth".to_owned());
+        }
         let binding = self
             .capabilities
             .tools
@@ -153,11 +162,12 @@ impl ActionHostCalls {
                         allow_internal: true,
                         provenance: Some(provenance),
                         module: Some(self.module.clone()),
+                        committed_revisions: Some(self.committed_revisions.clone()),
                     },
                 )
                 .await
                 .map_err(|error| error.to_string()),
-            "reducer" => self
+            "reducer" | "internalReducer" => self
                 .runtime
                 .execute_tenant_reducer_with_access(
                     &self.session,
@@ -166,9 +176,10 @@ impl ActionHostCalls {
                     &binding.function,
                     args,
                     ExecutionAccess {
+                        allow_internal: binding.kind == "internalReducer",
                         provenance: Some(provenance),
                         module: Some(self.module.clone()),
-                        ..ExecutionAccess::default()
+                        committed_revisions: Some(self.committed_revisions.clone()),
                     },
                 )
                 .await

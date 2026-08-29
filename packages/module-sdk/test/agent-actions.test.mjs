@@ -9,7 +9,7 @@ const queryPlan = {
   columns: ["id", "title"],
 };
 
-test("agent Actions expose only declared internal Query and Reducer tools", () => {
+test("agent Actions expose explicitly declared Query, Reducer, and internal Reducer tools", () => {
   const app = createModule({ name: "agents", version: "1" });
   app.query("agents.searchTasks", {
     internal: true,
@@ -23,6 +23,13 @@ test("agent Actions expose only declared internal Query and Reducer tools", () =
     offline: { mode: "forbidden" },
     interactive: false,
   });
+  app.reducer("agents.seedFixture", {
+    internal: true,
+    interactive: false,
+    args: schema.object({ name: schema.string() }),
+    result: schema.object({ ok: schema.boolean() }),
+    offline: { mode: "forbidden" },
+  });
   app.action("agents.run", {
     profile: "agent",
     capabilities: {
@@ -31,6 +38,7 @@ test("agent Actions expose only declared internal Query and Reducer tools", () =
       tools: {
         searchTasks: { kind: "query", function: "agents.searchTasks" },
         renameTask: { kind: "reducer", function: "agents.renameTask" },
+        seedFixture: { kind: "internalReducer", function: "agents.seedFixture" },
       },
     },
   });
@@ -40,6 +48,10 @@ test("agent Actions expose only declared internal Query and Reducer tools", () =
   assert.deepEqual(definition.actionCapabilities.tools.searchTasks, {
     kind: "query",
     function: "agents.searchTasks",
+  });
+  assert.deepEqual(definition.actionCapabilities.tools.seedFixture, {
+    kind: "internalReducer",
+    function: "agents.seedFixture",
   });
 });
 
@@ -51,6 +63,23 @@ test("agent Query tools must target internal Queries", () => {
     capabilities: { tools: { searchTasks: { kind: "query", function: "tasks.public" } } },
   });
   assert.throws(() => app.manifest(), /must target an internal one-shot Query/);
+});
+
+test("internal Reducer tools must target internal Reducers", () => {
+  const app = createModule({ name: "agents", version: "1" });
+  app.reducer("tasks.public", {
+    offline: { mode: "forbidden" },
+    interactive: false,
+  });
+  app.action("agents.run", {
+    profile: "agent",
+    capabilities: {
+      tools: {
+        seedFixture: { kind: "internalReducer", function: "tasks.public" },
+      },
+    },
+  });
+  assert.throws(() => app.manifest(), /must target an internal Reducer/);
 });
 
 test("standard Actions are capability-empty unless explicitly declared", () => {

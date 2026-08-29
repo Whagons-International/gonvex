@@ -49,6 +49,8 @@ export const tasks = replicaCollection({
       maxRows: 100,
       maxBytes: 4194304,
     });
+    const apiSource = readFileSync(join(project, "gonvex", "_generated", "api.ts"), "utf8");
+    assert.match(apiSource, /replica:\s*\{[\s\S]*?key:\s*"id"[\s\S]*?table:\s*"tasks"/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

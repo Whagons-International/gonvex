@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { LocalReplica, MemoryLocalReplicaStorage, type LocalReplicaStorage, type ReplicaSnapshot, type ReplicaTransaction } from "./local-replica";
+import { replicaRowsHashes } from "./replica-integrity";
 
 describe("LocalReplica", () => {
   it("publishes a multi-entity server transaction once", async () => {
@@ -91,6 +92,136 @@ describe("LocalReplica", () => {
     expect(replica.entity("tasks", "task-1")).toMatchObject({ status: "started" });
   });
 
+  it("projects an optimistic unfiltered create into a complete Replica Collection", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "priorities:list", kind: "replica", entity: "priorities", key: "id",
+      rows: [{ id: "a", name: "A", order: 2 }], completeness: "complete", source: "server",
+    });
+    replica.registerReplicaCollection("priorities:list", {
+      table: "priorities", key: "id", orderBy: "order", orderDirection: "asc",
+    });
+
+    replica.applyOptimistic("create-priority", [{
+      entity: "priorities", rowId: "b", op: "upsert", fields: { id: "b", name: "B", order: 1 },
+    }]);
+
+    expect(replica.getWindow("priorities:list")?.ids).toEqual(["a"]);
+    expect(replica.committedWindowRows("priorities:list").map((row) => row.id)).toEqual(["a"]);
+    expect(replica.windowRows("priorities:list").map((row) => row.id)).toEqual(["b", "a"]);
+  });
+
+  it("only projects optimistic rows matching Replica equalFilters", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "tasks:workspace-1", kind: "replica", entity: "tasks", key: "id",
+      rows: [{ id: "existing", workspace: "workspace-1" }], completeness: "complete", source: "server",
+    });
+    replica.registerReplicaCollection("tasks:workspace-1", {
+      table: "tasks", key: "id", equalFilters: { workspaceId: "workspace" },
+    }, { workspaceId: "workspace-1" });
+
+    replica.applyOptimistic("create-matching", [{
+      entity: "tasks", rowId: "matching", op: "upsert", fields: { id: "matching", workspace: "workspace-1" },
+    }]);
+    replica.applyOptimistic("create-other", [{
+      entity: "tasks", rowId: "other", op: "upsert", fields: { id: "other", workspace: "workspace-2" },
+    }]);
+
+    expect(replica.windowRows("tasks:workspace-1").map((row) => row.id)).toEqual(["existing", "matching"]);
+  });
+
+  it("removes an optimistic row when excludeWhenSet becomes set", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "priorities:list", kind: "replica", entity: "priorities", key: "id",
+      rows: [{ id: "p1", name: "P1", deletedAt: null }], completeness: "complete", source: "server",
+    });
+    replica.registerReplicaCollection("priorities:list", {
+      table: "priorities", key: "id", excludeWhenSet: ["deletedAt"],
+    });
+
+    replica.applyOptimistic("archive-priority", [{
+      entity: "priorities", rowId: "p1", op: "patch", fields: { deletedAt: "2026-08-29T00:00:00Z" },
+    }]);
+    expect(replica.windowRows("priorities:list")).toEqual([]);
+    replica.rejectCommand("archive-priority");
+    expect(replica.windowRows("priorities:list").map((row) => row.id)).toEqual(["p1"]);
+  });
+
+  it("orders optimistic membership by the declared field and stable key", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "priorities:list", kind: "replica", entity: "priorities", key: "id",
+      rows: [{ id: "a", order: 2 }, { id: "c", order: 1 }], completeness: "complete", source: "server",
+    });
+    replica.registerReplicaCollection("priorities:list", {
+      table: "priorities", key: "id", orderBy: "order", orderDirection: "asc",
+    });
+    replica.applyOptimistic("create-priority", [{
+      entity: "priorities", rowId: "b", op: "upsert", fields: { id: "b", order: 1 },
+    }]);
+
+    expect(replica.windowRows("priorities:list").map((row) => row.id)).toEqual(["b", "c", "a"]);
+  });
+
+  it("reconciles an optimistic create with its committed membership exactly once", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "priorities:list", kind: "replica", entity: "priorities", key: "id",
+      rows: [{ id: "a", order: 1 }], completeness: "complete", source: "server",
+      cursor: { epoch: "tenant-a", revision: 1 },
+    });
+    replica.registerReplicaCollection("priorities:list", {
+      table: "priorities", key: "id", orderBy: "order", orderDirection: "asc",
+    });
+    replica.applyOptimistic("create-priority", [{
+      entity: "priorities", rowId: "b", op: "upsert", fields: { id: "b", order: 2 },
+    }]);
+    replica.acknowledgeCommand("create-priority", 2);
+
+    await replica.applyTransaction({
+      cursor: { epoch: "tenant-a", revision: 2 }, originCommandId: "create-priority",
+      changes: [{ entity: "priorities", id: "b", operation: "insert", newValue: { id: "b", order: 2 } }],
+      memberships: [{
+        signature: "priorities:list", kind: "replica", entity: "priorities", key: "id",
+        ids: ["a", "b"], completeness: "complete", source: "server",
+        cursor: { epoch: "tenant-a", revision: 2 },
+      }],
+    });
+
+    expect(replica.hasPendingCommand("create-priority")).toBe(false);
+    expect(replica.getWindow("priorities:list")?.ids).toEqual(["a", "b"]);
+    expect(replica.windowRows("priorities:list").map((row) => row.id)).toEqual(["a", "b"]);
+  });
+
+  it("keeps reconnect integrity state committed while rendering optimistic overlays", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "priorities:list", kind: "replica", entity: "priorities", key: "id",
+      rows: [{ id: "old", order: 1 }], completeness: "complete", source: "server",
+      cursor: { epoch: "tenant-a", revision: 1 }, hashes: { old: "old-hash" },
+    });
+    replica.registerReplicaCollection("priorities:list", {
+      table: "priorities", key: "id", orderBy: "order", orderDirection: "asc",
+    });
+    replica.applyOptimistic("offline-create", [{
+      entity: "priorities", rowId: "offline", op: "upsert", fields: { id: "offline", order: 2 },
+    }]);
+
+    const committedRows = [{ id: "old", order: 1 }, { id: "online", order: 3 }];
+    await replica.applyWindowDelta({
+      signature: "priorities:list", kind: "replica", entity: "priorities", key: "id",
+      upserts: [committedRows[1]!], deleted: [], completeness: "complete", source: "server",
+      cursor: { epoch: "tenant-a", revision: 2 },
+      hashes: await replicaRowsHashes(committedRows, "id"),
+    });
+
+    expect(replica.committedWindowRows("priorities:list").map((row) => row.id)).toEqual(["old", "online"]);
+    expect(replica.windowRows("priorities:list").map((row) => row.id)).toEqual(["old", "offline", "online"]);
+    expect(replica.getWindow("priorities:list")?.ids).toEqual(["old", "online"]);
+  });
+
   it("stores Live Query membership as IDs over normalized entities", async () => {
     const replica = new LocalReplica();
     await replica.applyTransaction({
@@ -133,6 +264,38 @@ describe("LocalReplica", () => {
     expect(hydrated.liveQuery("tasks.grid:{}").rows).toHaveLength(2);
   });
 
+  it("merges different projections of the same normalized entity", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "tasks:recent",
+      kind: "replica",
+      entity: "tasks",
+      key: "_id",
+      rows: [{ _id: "task-1", name: "Inspect freezer", workspaceId: "workspace-1", approvalId: "approval-1" }],
+      completeness: "complete",
+      source: "server",
+    });
+    await replica.replaceWindow({
+      signature: "workplans:tasks",
+      kind: "replica",
+      entity: "tasks",
+      key: "_id",
+      rows: [{ _id: "task-1", name: "Inspect freezer", workplanId: "workplan-1" }],
+      completeness: "complete",
+      source: "server",
+    });
+
+    expect(replica.entity("tasks", "task-1")).toEqual({
+      _id: "task-1",
+      name: "Inspect freezer",
+      workspaceId: "workspace-1",
+      approvalId: "approval-1",
+      workplanId: "workplan-1",
+    });
+    expect(replica.liveQuery("tasks:recent").ids).toEqual(["task-1"]);
+    expect(replica.liveQuery("workplans:tasks").ids).toEqual(["task-1"]);
+  });
+
   it("persists window metadata without duplicating row payloads", async () => {
     const storage = new MemoryLocalReplicaStorage();
     const replica = new LocalReplica(storage);
@@ -159,6 +322,74 @@ describe("LocalReplica", () => {
     expect(replica.snapshot().liveQueries["tasks:grid"]).toMatchObject({ kind: "replica" });
     expect(JSON.stringify(replica.snapshot().liveQueries["tasks:grid"])).not.toContain("title");
     expect(replica.entity("tasks", "a")).toEqual({ id: "a", title: "A" });
+  });
+
+  it("advances many Replica windows with one metadata write and no entity rewrite", async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const advanceWatermark = vi.spyOn(storage, "advanceWatermark");
+    const replaceWindow = vi.spyOn(storage, "replaceWindow");
+    const replica = new LocalReplica(storage);
+    for (const signature of ["tasks:one", "tasks:two", "statuses:all"]) {
+      await replica.replaceWindow({
+        signature,
+        kind: "replica",
+        entity: signature.startsWith("tasks") ? "tasks" : "statuses",
+        key: "id",
+        rows: [{ id: `${signature}:row`, title: "Cached" }],
+        completeness: "complete",
+        source: "server",
+        cursor: { epoch: "tenant-a", revision: 4 },
+        hashes: { [`${signature}:row`]: "hash" },
+      });
+    }
+    replaceWindow.mockClear();
+
+    await replica.advanceWatermark(9, ["tasks:one", "tasks:two", "statuses:all"]);
+
+    expect(advanceWatermark).toHaveBeenCalledTimes(1);
+    expect(advanceWatermark.mock.calls[0]?.[0]).toHaveLength(3);
+    expect(replaceWindow).not.toHaveBeenCalled();
+    expect(replica.cursor()).toEqual({ epoch: "tenant-a", revision: 9 });
+    expect(replica.getWindow("tasks:one")?.cursor?.revision).toBe(9);
+    expect(replica.entity("tasks", "tasks:one:row")).toEqual({ id: "tasks:one:row", title: "Cached" });
+    const hydrated = new LocalReplica(storage);
+    await hydrated.hydrate();
+    expect(hydrated.cursor()).toEqual({ epoch: "tenant-a", revision: 9 });
+    expect(hydrated.entity("tasks", "tasks:two:row")).toEqual({ id: "tasks:two:row", title: "Cached" });
+  });
+
+  it("keeps watermark metadata durable for replaceWindow-only storage adapters", async () => {
+    let persisted: ReplicaSnapshot | undefined;
+    const replaceWindow = vi.fn(async (_window: Parameters<NonNullable<LocalReplicaStorage["replaceWindow"]>>[0], snapshot: ReplicaSnapshot) => {
+      persisted = structuredClone(snapshot);
+    });
+    const storage: LocalReplicaStorage = {
+      load: async () => persisted,
+      applyTransaction: async () => undefined,
+      replaceWindow,
+    };
+    const replica = new LocalReplica(storage);
+    await replica.replaceWindow({
+      signature: "tasks:legacy",
+      kind: "replica",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "task-1", title: "Cached" }],
+      completeness: "complete",
+      source: "server",
+      cursor: { epoch: "tenant-a", revision: 4 },
+      hashes: { "task-1": "hash" },
+    });
+    replaceWindow.mockClear();
+
+    await replica.advanceWatermark(9, ["tasks:legacy"]);
+
+    expect(replaceWindow).toHaveBeenCalledTimes(1);
+    expect(replaceWindow.mock.calls[0]?.[1]).toMatchObject({ cursor: { revision: 9 } });
+    const hydrated = new LocalReplica(storage);
+    await hydrated.hydrate();
+    expect(hydrated.cursor()).toEqual({ epoch: "tenant-a", revision: 9 });
+    expect(hydrated.entity("tasks", "task-1")).toEqual({ id: "task-1", title: "Cached" });
   });
 
   it("hydrates authoritative collection completeness and batched normalized entities", async () => {
@@ -245,6 +476,70 @@ describe("LocalReplica", () => {
     expect(replica.getWindow("tasks:a")).toBeUndefined();
     expect(replica.entity("tasks", "shared")).toEqual({ id: "shared" });
     expect((await storage.load())?.liveQueries["tasks:b"]).toBeDefined();
+  });
+
+  it("does not let an unrelated newer snapshot suppress an older unapplied transaction", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "tasks:recent",
+      kind: "replica",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "task-1", title: "Before" }],
+      completeness: "complete",
+      source: "server",
+      cursor: { epoch: "tenant-a", revision: 5 },
+    });
+    await replica.replaceWindow({
+      signature: "statuses:all",
+      kind: "replica",
+      entity: "statuses",
+      key: "id",
+      rows: [{ id: "status-1", name: "Working" }],
+      completeness: "complete",
+      source: "server",
+      cursor: { epoch: "tenant-a", revision: 10 },
+    });
+
+    expect(replica.cursor()).toEqual({ epoch: "tenant-a", revision: 5 });
+    await replica.applyTransaction({
+      cursor: { epoch: "tenant-a", revision: 9 },
+      changes: [{
+        entity: "tasks",
+        id: "task-1",
+        operation: "update",
+        newValue: { id: "task-1", title: "Committed" },
+      }],
+    });
+
+    expect(replica.entity("tasks", "task-1")).toMatchObject({ title: "Committed" });
+    expect(replica.cursor()).toEqual({ epoch: "tenant-a", revision: 9 });
+  });
+
+  it("still suppresses a transaction already covered by every Replica window", async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({
+      signature: "tasks:recent",
+      kind: "replica",
+      entity: "tasks",
+      key: "id",
+      rows: [{ id: "task-1", title: "Current" }],
+      completeness: "complete",
+      source: "server",
+      cursor: { epoch: "tenant-a", revision: 10 },
+    });
+    await replica.applyTransaction({
+      cursor: { epoch: "tenant-a", revision: 9 },
+      changes: [{
+        entity: "tasks",
+        id: "task-1",
+        operation: "update",
+        newValue: { id: "task-1", title: "Stale" },
+      }],
+    });
+
+    expect(replica.entity("tasks", "task-1")).toMatchObject({ title: "Current" });
+    expect(replica.cursor()).toEqual({ epoch: "tenant-a", revision: 10 });
   });
 
   it("persists and hydrates the same authoritative snapshot", async () => {

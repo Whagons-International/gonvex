@@ -116,6 +116,7 @@ pub struct ModuleHostConfig {
     pub shutdown_timeout: Duration,
     pub max_frame_bytes: usize,
     pub max_concurrent_calls: usize,
+    pub max_host_calls: usize,
     pub isolate_pool_size: usize,
     pub execution_timeout: Duration,
 }
@@ -214,6 +215,11 @@ impl Config {
                     "GONVEX_MODULE_HOST_MAX_CONCURRENT_CALLS",
                     lookup("GONVEX_MODULE_HOST_MAX_CONCURRENT_CALLS"),
                     32,
+                )?,
+                max_host_calls: integer(
+                    "GONVEX_MODULE_HOST_MAX_HOST_CALLS",
+                    lookup("GONVEX_MODULE_HOST_MAX_HOST_CALLS"),
+                    100,
                 )?,
                 isolate_pool_size: integer(
                     "GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE",
@@ -468,10 +474,17 @@ mod tests {
         assert_eq!(config.tenant_database_urls["tenant-a"], "postgres://a");
         assert!(config.require_auth);
         assert_eq!(config.database_max_total_connections, 20);
+        assert_eq!(config.module_host.max_host_calls, 100);
         assert_eq!(
             config.runtime_version,
             "0123456789abcdef0123456789abcdef01234567"
         );
+    }
+
+    #[test]
+    fn reads_module_host_call_budget() {
+        let config = config(&[("GONVEX_MODULE_HOST_MAX_HOST_CALLS", "17")]).expect("config");
+        assert_eq!(config.module_host.max_host_calls, 17);
     }
 
     #[test]

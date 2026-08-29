@@ -1561,6 +1561,7 @@ dependencies = [
  "pbkdf2",
  "rand 0.8.7",
  "reqwest",
+ "ryu-js",
  "serde",
  "serde_json",
  "sha2",

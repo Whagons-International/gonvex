@@ -31,11 +31,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body, body::Body, Json, Router};
 use chrono::{SecondsFormat, Utc};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_protocol::{
-    ClientMessage, ExecutionScope, ReducerCallRequest, ServerCapabilities, ServerMessage,
-    PROTOCOL_VERSION,
+    ClientMessage, ExecutionScope, ReducerCallRequest, ReplicaOpenRequest, ServerCapabilities,
+    ServerMessage, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -67,6 +67,12 @@ struct RuntimeInner {
     membership_projector: membership_projector::MembershipProjector,
     metrics: metrics::RuntimeMetrics,
 }
+
+const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
+// Replica snapshots are independent read-only plans, but each one consumes
+// tenant-pool and visibility work. Bound fan-out below both the runtime's
+// normal module concurrency and the default per-database pool size.
+const REPLICA_OPEN_CONCURRENCY: usize = 8;
 
 #[derive(Clone, Debug)]
 enum RuntimeEvent {
@@ -301,7 +307,8 @@ impl Runtime {
                 "/storage/{*key}",
                 get(storage_download)
                     .post(storage_upload)
-                    .put(storage_upload),
+                    .put(storage_upload)
+                    .options(storage_options),
             )
             .route("/dev/sync", post(dev_sync))
             .route("/dev/projects", get(list_projects).post(create_project))
@@ -335,6 +342,15 @@ struct StorageProxyQuery {
 }
 
 async fn storage_download(
+    state: State<Runtime>,
+    path: Path<String>,
+    query: Query<StorageProxyQuery>,
+    headers: HeaderMap,
+) -> Response {
+    storage_cors(storage_download_inner(state, path, query, headers).await)
+}
+
+async fn storage_download_inner(
     State(runtime): State<Runtime>,
     Path(key): Path<String>,
     Query(query): Query<StorageProxyQuery>,
@@ -396,6 +412,16 @@ async fn storage_download(
 }
 
 async fn storage_upload(
+    state: State<Runtime>,
+    path: Path<String>,
+    query: Query<StorageProxyQuery>,
+    headers: HeaderMap,
+    request_body: Body,
+) -> Response {
+    storage_cors(storage_upload_inner(state, path, query, headers, request_body).await)
+}
+
+async fn storage_upload_inner(
     State(runtime): State<Runtime>,
     Path(key): Path<String>,
     Query(query): Query<StorageProxyQuery>,
@@ -442,6 +468,49 @@ async fn storage_upload(
         )
             .into_response(),
     }
+}
+
+async fn storage_options(
+    State(runtime): State<Runtime>,
+    Path(key): Path<String>,
+    Query(query): Query<StorageProxyQuery>,
+) -> Response {
+    let response = if query.upload == Some(1)
+        && runtime
+            .inner
+            .storage
+            .verify_proxy(&key, query.exp, &query.sig, true)
+    {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            "invalid or expired storage signature",
+        )
+            .into_response()
+    };
+    storage_cors(response)
+}
+
+fn storage_cors(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PUT, OPTIONS"),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Content-Type"),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+    response
 }
 
 async fn list_projects(State(runtime): State<Runtime>, headers: HeaderMap) -> Response {
@@ -775,14 +844,15 @@ async fn provision_e2e_member(
         .fetch_optional(&mut **control_tx.transaction())
         .await?;
         if row.is_none() {
-            if !matches!(auth_mode.as_str(), "gonvex-native" | "hybrid") {
+            if !matches!(auth_mode.as_str(), "gonvex-native" | "hybrid" | "firebase") {
                 return Err(sqlx::Error::Protocol(
-                    "test actor creation requires gonvex-native or hybrid authentication"
+                    "test actor creation requires gonvex-native, hybrid, or firebase authentication"
                         .to_owned(),
                 )
                 .into());
             }
-            if password.len() < 12 {
+            let password_identity = matches!(auth_mode.as_str(), "gonvex-native" | "hybrid");
+            if password_identity && password.len() < 12 {
                 return Err(sqlx::Error::Protocol(
                     "a password containing at least 12 characters is required to create the test actor"
                         .to_owned(),
@@ -804,24 +874,26 @@ async fn provision_e2e_member(
             .bind(name)
             .execute(&mut **control_tx.transaction())
             .await?;
-            sqlx::query(
-                r#"INSERT INTO account_identities
-                   (project_id,account_id,provider,issuer,subject,email,verified_email,updated_at)
-                   VALUES($1,$2,'password',$1,$3,$3,TRUE,now())"#,
-            )
-            .bind(project_id)
-            .bind(&account_id)
-            .bind(&email)
-            .execute(&mut **control_tx.transaction())
-            .await?;
-            sqlx::query(
-                "INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash) VALUES($1,$2,$3)",
-            )
-            .bind(project_id)
-            .bind(&account_id)
-            .bind(control::hash_password(password))
-            .execute(&mut **control_tx.transaction())
-            .await?;
+            if password_identity {
+                sqlx::query(
+                    r#"INSERT INTO account_identities
+                       (project_id,account_id,provider,issuer,subject,email,verified_email,updated_at)
+                       VALUES($1,$2,'password',$1,$3,$3,TRUE,now())"#,
+                )
+                .bind(project_id)
+                .bind(&account_id)
+                .bind(&email)
+                .execute(&mut **control_tx.transaction())
+                .await?;
+                sqlx::query(
+                    "INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash) VALUES($1,$2,$3)",
+                )
+                .bind(project_id)
+                .bind(&account_id)
+                .bind(control::hash_password(password))
+                .execute(&mut **control_tx.transaction())
+                .await?;
+            }
             row = sqlx::query(
                 "SELECT id,name,avatar_url FROM accounts WHERE id=$1 AND auth_realm_id=$2",
             )
@@ -1105,6 +1177,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
         ..control::ControlConnection::default()
     };
     let mut feed = None;
+    let mut feed_scheduler = FeedFirstScheduler::default();
     let mut replicas = BTreeMap::new();
     let mut live_queries = BTreeMap::new();
     let mut control_queries = BTreeMap::new();
@@ -1125,6 +1198,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
             query_result_batch: Some(1),
             reducer_batch: Some(1),
             replica_watermark: Some(1),
+            control_watermark: Some(1),
         }),
     };
     if send_json(&mut socket, &ready).await.is_err() {
@@ -1140,6 +1214,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     control_queries.clear();
                     tenant_session = None;
                     feed = None;
+                    feed_scheduler.reset();
                     control_connection = control::ControlConnection {
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
@@ -1161,14 +1236,28 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                 }
                 continue;
             }
-            message = socket.next() => {
-                let Some(message) = message else { break; };
-                message
-            }
-            event = next_feed_event(&mut feed) => {
-                match event {
+            transport = next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler) => {
+                match transport {
+                    ScheduledTransport::Socket(message) => {
+                        let Some(message) = message else { break; };
+                        message
+                    }
+                    ScheduledTransport::Feed(event) => match event {
                     Ok(event) => {
+                        let feed_revision = match &event {
+                            change_feed::FeedEvent::Transaction { revision, .. } => Some(*revision),
+                            change_feed::FeedEvent::Reset { .. } => None,
+                        };
+                        let feed_apply_started = std::time::Instant::now();
+                        tracing::debug!(
+                            target: "gonvex_runtime::ws_trace",
+                            connection = %connection_id,
+                            tenant = tenant_session.as_ref().map(|session| session.route.tenant_id.as_str()),
+                            revision = feed_revision,
+                            "websocket feed apply started"
+                        );
                         let reset = matches!(event, change_feed::FeedEvent::Reset { .. });
+                        let transaction_watermark = replica_watermark(&event);
                         if let Some(session) = tenant_session.as_ref() {
                             if membership_affects(session, &event) {
                                 replicas.clear();
@@ -1176,6 +1265,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                 control_queries.clear();
                                 tenant_session = None;
                                 feed = None;
+                                feed_scheduler.reset();
                                 runtime.inner.metrics.authenticated(
                                     &connection_id,
                                     &control::ControlConnection {
@@ -1206,6 +1296,18 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                     for message in messages {
                                         if send_json(&mut socket, &message).await.is_err() { return; }
                                     }
+                                    // This is the connection-level commit
+                                    // boundary. A transaction frame updates
+                                    // normalized entities first; collection
+                                    // deltas that follow update membership.
+                                    // Emit the watermark only after every Live
+                                    // Query and Replica frame for the revision
+                                    // has been written, including the case
+                                    // where this connection has no visible
+                                    // subscription changes.
+                                    if let Some(watermark) = transaction_watermark {
+                                        if send_json(&mut socket, &watermark).await.is_err() { return; }
+                                    }
                                     if reset {
                                         replicas.clear();
                                     }
@@ -1223,6 +1325,14 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                 }
                             }
                         }
+                        tracing::debug!(
+                            target: "gonvex_runtime::ws_trace",
+                            connection = %connection_id,
+                            tenant = tenant_session.as_ref().map(|session| session.route.tenant_id.as_str()),
+                            revision = feed_revision,
+                            apply_ms = feed_apply_started.elapsed().as_secs_f64() * 1_000.0,
+                            "websocket feed apply finished"
+                        );
                         continue;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -1240,8 +1350,10 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         feed = None;
+                        feed_scheduler.reset();
                         continue;
                     }
+                    },
                 }
             }
             event = runtime_events.recv() => {
@@ -1322,6 +1434,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     } else {
                         feed = None;
                     }
+                    feed_scheduler.reset();
                     tenant_session = authenticated_control.tenant.clone();
                     control_connection = authenticated_control;
                     runtime.inner.metrics.authenticated(
@@ -1544,6 +1657,16 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     );
                 }
                 Ok(ClientMessage::ReducerCall(call)) => {
+                    let call_path = call.path.clone();
+                    let call_id = call.id.clone();
+                    let call_started = std::time::Instant::now();
+                    tracing::debug!(
+                        target: "gonvex_runtime::ws_trace",
+                        connection = %connection_id,
+                        path = %call_path,
+                        id = %call_id,
+                        "websocket reducer call started"
+                    );
                     runtime
                         .inner
                         .metrics
@@ -1552,12 +1675,47 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     let response =
                         call_reducer(&runtime, tenant_session.as_ref(), &control_connection, call)
                             .await;
-                    if send_json(&mut socket, &response).await.is_err() {
-                        break;
+                    let terminal_watermark = call_watermark_without_replica_work(
+                        &response,
+                        !control_write && tenant_session.is_some(),
+                        !replicas.is_empty() || !live_queries.is_empty(),
+                    );
+                    let control_succeeded =
+                        control_write && matches!(response, ServerMessage::ReducerResult { .. });
+                    let control_updates = if control_succeeded {
+                        runtime
+                            .refresh_control_queries(
+                                &control_connection,
+                                &mut control_queries,
+                                "control-change",
+                            )
+                            .await
+                    } else {
+                        Vec::new()
+                    };
+                    for message in
+                        ordered_control_completion(response, control_updates, control_succeeded)
+                    {
+                        if send_json(&mut socket, &message).await.is_err() {
+                            return;
+                        }
                     }
-                    if control_write && matches!(response, ServerMessage::ReducerResult { .. }) {
+                    if let Some(watermark) = terminal_watermark {
+                        if send_json(&mut socket, &watermark).await.is_err() {
+                            break;
+                        }
+                    }
+                    if control_succeeded {
                         runtime.notify_control_changed(&control_connection.project_id);
                     }
+                    tracing::debug!(
+                        target: "gonvex_runtime::ws_trace",
+                        connection = %connection_id,
+                        path = %call_path,
+                        id = %call_id,
+                        call_ms = call_started.elapsed().as_secs_f64() * 1_000.0,
+                        "websocket reducer call finished"
+                    );
                 }
                 Ok(ClientMessage::ReducerCallMany { calls }) => {
                     if calls.len() > 256 {
@@ -1585,11 +1743,37 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             call,
                         )
                         .await;
-                        if send_json(&mut socket, &response).await.is_err() {
-                            return;
-                        }
-                        if control_write && matches!(response, ServerMessage::ReducerResult { .. })
+                        let terminal_watermark = call_watermark_without_replica_work(
+                            &response,
+                            !control_write && tenant_session.is_some(),
+                            !replicas.is_empty() || !live_queries.is_empty(),
+                        );
+                        let control_succeeded = control_write
+                            && matches!(response, ServerMessage::ReducerResult { .. });
+                        let control_updates = if control_succeeded {
+                            runtime
+                                .refresh_control_queries(
+                                    &control_connection,
+                                    &mut control_queries,
+                                    "control-change",
+                                )
+                                .await
+                        } else {
+                            Vec::new()
+                        };
+                        for message in
+                            ordered_control_completion(response, control_updates, control_succeeded)
                         {
+                            if send_json(&mut socket, &message).await.is_err() {
+                                return;
+                            }
+                        }
+                        if let Some(watermark) = terminal_watermark {
+                            if send_json(&mut socket, &watermark).await.is_err() {
+                                return;
+                            }
+                        }
+                        if control_succeeded {
                             runtime.notify_control_changed(&control_connection.project_id);
                         }
                     }
@@ -1620,6 +1804,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                 id,
                                 path: Some(path),
                                 result,
+                                committed_revision: None,
                                 trace,
                             },
                             Err(error) => ServerMessage::ActionError {
@@ -1634,7 +1819,8 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             Ok(result) => ServerMessage::ActionResult {
                                 id,
                                 path: Some(path),
-                                result,
+                                result: result.value,
+                                committed_revision: result.committed_revision,
                                 trace,
                             },
                             Err(error) => ServerMessage::ActionError {
@@ -1653,12 +1839,37 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             trace,
                         }
                     };
-                    if send_json(&mut socket, &response).await.is_err() {
-                        break;
-                    }
-                    if scope == Some(ExecutionScope::Control)
-                        && matches!(response, ServerMessage::ActionResult { .. })
+                    let terminal_watermark = call_watermark_without_replica_work(
+                        &response,
+                        scope != Some(ExecutionScope::Control) && tenant_session.is_some(),
+                        !replicas.is_empty() || !live_queries.is_empty(),
+                    );
+                    let control_succeeded = scope == Some(ExecutionScope::Control)
+                        && matches!(response, ServerMessage::ActionResult { .. });
+                    let control_updates = if control_succeeded {
+                        runtime
+                            .refresh_control_queries(
+                                &control_connection,
+                                &mut control_queries,
+                                "control-change",
+                            )
+                            .await
+                    } else {
+                        Vec::new()
+                    };
+                    for message in
+                        ordered_control_completion(response, control_updates, control_succeeded)
                     {
+                        if send_json(&mut socket, &message).await.is_err() {
+                            return;
+                        }
+                    }
+                    if let Some(watermark) = terminal_watermark {
+                        if send_json(&mut socket, &watermark).await.is_err() {
+                            break;
+                        }
+                    }
+                    if control_succeeded {
                         runtime.notify_control_changed(&control_connection.project_id);
                     }
                 }
@@ -1703,48 +1914,42 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     );
                 }
                 Ok(ClientMessage::ReplicaOpenMany { opens }) => {
-                    if opens.len() > 256 {
+                    if opens.len() > REPLICA_OPEN_BATCH_LIMIT {
                         let response = ServerMessage::ReplicaError {
                             id: String::new(),
                             path: None,
-                            error: "replica batch cannot contain more than 256 opens".to_owned(),
+                            error: format!(
+                                "replica batch cannot contain more than {REPLICA_OPEN_BATCH_LIMIT} opens"
+                            ),
                         };
                         if send_json(&mut socket, &response).await.is_err() {
                             break;
                         }
                         continue;
                     }
-                    for request in opens {
+                    for request in &opens {
                         runtime.inner.metrics.activity(
                             &connection_id,
                             "Replica Collection opened",
                             Some(&request.path),
                         );
-                        let messages = if let Some(session) = tenant_session.as_ref() {
-                            match runtime.open_replica(session, request.clone()).await {
-                                Ok(opened) => {
-                                    if let Some(subscription) = opened.subscription {
-                                        replicas.insert(subscription.id.clone(), subscription);
-                                    }
-                                    opened.messages
-                                }
-                                Err(error) => vec![ServerMessage::ReplicaError {
-                                    id: request.id,
-                                    path: Some(request.path),
-                                    error: error.to_string(),
-                                }],
-                            }
-                        } else {
-                            vec![ServerMessage::ReplicaError {
+                    }
+                    let messages = if let Some(session) = tenant_session.as_ref() {
+                        let outcomes = open_replica_batch(&runtime, session, opens).await;
+                        install_replica_open_outcomes(&mut replicas, outcomes)
+                    } else {
+                        opens
+                            .into_iter()
+                            .map(|request| ServerMessage::ReplicaError {
                                 id: request.id,
                                 path: Some(request.path),
                                 error: "authenticate with an active tenant before opening a Replica Collection".to_owned(),
-                            }]
-                        };
-                        for response in messages {
-                            if send_json(&mut socket, &response).await.is_err() {
-                                return;
-                            }
+                            })
+                            .collect()
+                    };
+                    for response in messages {
+                        if send_json(&mut socket, &response).await.is_err() {
+                            return;
                         }
                     }
                     record_connection_subscriptions(
@@ -1957,6 +2162,87 @@ impl Runtime {
     }
 }
 
+#[derive(Default)]
+struct FeedFirstScheduler {
+    remaining_snapshot_feed_events: usize,
+    socket_turn: bool,
+}
+
+impl FeedFirstScheduler {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn selected_first_feed(&mut self, additional_ready_feed_events: usize) {
+        self.remaining_snapshot_feed_events = additional_ready_feed_events;
+        self.socket_turn = additional_ready_feed_events == 0;
+    }
+
+    fn selected_snapshot_feed(&mut self) {
+        self.remaining_snapshot_feed_events = self.remaining_snapshot_feed_events.saturating_sub(1);
+        if self.remaining_snapshot_feed_events == 0 {
+            self.socket_turn = true;
+        }
+    }
+
+    fn selected_socket(&mut self) {
+        self.socket_turn = false;
+    }
+}
+
+enum ScheduledTransport<T> {
+    Socket(Option<T>),
+    Feed(Result<change_feed::FeedEvent, broadcast::error::RecvError>),
+}
+
+/// Select connection work in stable commit order without letting a busy tenant
+/// feed monopolize the socket. The first ready feed event wins over a queued
+/// socket message. We then drain only the additional events that were already
+/// queued at that instant. New feed traffic does not extend that snapshot, and
+/// the socket gets the next priority turn.
+async fn next_socket_or_feed<S>(
+    socket: &mut S,
+    receiver: &mut Option<broadcast::Receiver<change_feed::FeedEvent>>,
+    scheduler: &mut FeedFirstScheduler,
+) -> ScheduledTransport<S::Item>
+where
+    S: Stream + Unpin,
+{
+    if scheduler.remaining_snapshot_feed_events > 0 {
+        let event = next_feed_event(receiver).await;
+        scheduler.selected_snapshot_feed();
+        return ScheduledTransport::Feed(event);
+    }
+
+    if scheduler.socket_turn {
+        tokio::select! {
+            biased;
+            message = socket.next() => {
+                scheduler.selected_socket();
+                ScheduledTransport::Socket(message)
+            }
+            event = next_feed_event(receiver) => {
+                let additional_ready = receiver.as_ref().map_or(0, broadcast::Receiver::len);
+                scheduler.selected_first_feed(additional_ready);
+                ScheduledTransport::Feed(event)
+            }
+        }
+    } else {
+        tokio::select! {
+            biased;
+            event = next_feed_event(receiver) => {
+                let additional_ready = receiver.as_ref().map_or(0, broadcast::Receiver::len);
+                scheduler.selected_first_feed(additional_ready);
+                ScheduledTransport::Feed(event)
+            }
+            message = socket.next() => {
+                scheduler.selected_socket();
+                ScheduledTransport::Socket(message)
+            }
+        }
+    }
+}
+
 async fn next_feed_event(
     receiver: &mut Option<broadcast::Receiver<change_feed::FeedEvent>>,
 ) -> Result<change_feed::FeedEvent, broadcast::error::RecvError> {
@@ -1964,6 +2250,44 @@ async fn next_feed_event(
         Some(receiver) => receiver.recv().await,
         None => std::future::pending().await,
     }
+}
+
+fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
+    match event {
+        change_feed::FeedEvent::Transaction { revision, .. } => {
+            Some(ServerMessage::ReplicaWatermark {
+                revision: *revision,
+            })
+        }
+        change_feed::FeedEvent::Reset { .. } => None,
+    }
+}
+
+/// A connection with no Replica or Live Query work has no local server state
+/// to reconcile. Complete a successful durable call with an explicit terminal
+/// watermark instead of depending on a later change-feed broadcast. Connections
+/// that do have synchronized state continue to receive their watermark only
+/// after the feed has written every entity and membership frame for the commit.
+fn call_watermark_without_replica_work(
+    response: &ServerMessage,
+    is_authenticated_tenant_call: bool,
+    has_replica_work: bool,
+) -> Option<ServerMessage> {
+    if !is_authenticated_tenant_call || has_replica_work {
+        return None;
+    }
+    let committed_revision = match response {
+        ServerMessage::ReducerResult {
+            committed_revision, ..
+        }
+        | ServerMessage::ActionResult {
+            committed_revision, ..
+        } => *committed_revision,
+        _ => None,
+    }?;
+    Some(ServerMessage::ReplicaWatermark {
+        revision: committed_revision,
+    })
 }
 
 fn membership_affects(session: &TenantSession, event: &change_feed::FeedEvent) -> bool {
@@ -1978,7 +2302,15 @@ fn membership_affects(session: &TenantSession, event: &change_feed::FeedEvent) -
     }
     changes
         .iter()
-        .filter(|change| change.table == "members")
+        .filter(|change| {
+            change.table == "members"
+                && change.changed_columns.iter().any(|column| {
+                    matches!(
+                        column.as_str(),
+                        "account_id" | "status" | "role" | "permissions" | "membership_revision"
+                    )
+                })
+        })
         .any(|change| {
             [&change.old_value, &change.new_value].iter().any(|row| {
                 row.get("account_id").and_then(serde_json::Value::as_str)
@@ -2304,6 +2636,93 @@ async fn call_reducer(
     }
 }
 
+fn ordered_control_completion(
+    response: ServerMessage,
+    control_updates: Vec<ServerMessage>,
+    control_succeeded: bool,
+) -> Vec<ServerMessage> {
+    if !control_succeeded {
+        return vec![response];
+    }
+    let id = match &response {
+        ServerMessage::ReducerResult { id, .. } | ServerMessage::ActionResult { id, .. } => {
+            id.clone()
+        }
+        _ => return vec![response],
+    };
+    let mut messages = Vec::with_capacity(control_updates.len() + 2);
+    messages.extend(control_updates);
+    messages.push(response);
+    messages.push(ServerMessage::ControlWatermark { id });
+    messages
+}
+
+type PreparedReplicaOpen<S> = (Vec<ServerMessage>, Option<(String, S)>);
+type ReplicaOpenOutcome<S, E> = (ReplicaOpenRequest, Result<PreparedReplicaOpen<S>, E>);
+
+async fn collect_bounded_ordered<T, U, F, Fut>(
+    inputs: Vec<T>,
+    concurrency: usize,
+    operation: F,
+) -> Vec<U>
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = U>,
+{
+    futures_util::stream::iter(inputs)
+        .map(operation)
+        .buffered(concurrency.max(1))
+        .collect()
+        .await
+}
+
+async fn open_replica_batch(
+    runtime: &Runtime,
+    session: &TenantSession,
+    opens: Vec<ReplicaOpenRequest>,
+) -> Vec<ReplicaOpenOutcome<replica::ReplicaSubscription, replica::ReplicaError>> {
+    collect_bounded_ordered(opens, REPLICA_OPEN_CONCURRENCY, |request| async move {
+        let request_for_open = request.clone();
+        let opened = runtime
+            .open_replica(session, request_for_open)
+            .await
+            .map(|opened| {
+                let subscription = opened
+                    .subscription
+                    .map(|subscription| (subscription.id.clone(), subscription));
+                (opened.messages, subscription)
+            });
+        (request, opened)
+    })
+    .await
+}
+
+fn install_replica_open_outcomes<S, E>(
+    replicas: &mut BTreeMap<String, S>,
+    outcomes: Vec<ReplicaOpenOutcome<S, E>>,
+) -> Vec<ServerMessage>
+where
+    E: std::fmt::Display,
+{
+    let mut messages = Vec::new();
+    for (request, outcome) in outcomes {
+        match outcome {
+            Ok((opened_messages, subscription)) => {
+                if let Some((id, subscription)) = subscription {
+                    replicas.insert(id, subscription);
+                }
+                messages.extend(opened_messages);
+            }
+            Err(error) => messages.push(ServerMessage::ReplicaError {
+                id: request.id,
+                path: Some(request.path),
+                error: error.to_string(),
+            }),
+        }
+    }
+    messages
+}
+
 fn record_connection_subscriptions(
     runtime: &Runtime,
     connection_id: &str,
@@ -2340,10 +2759,15 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use tokio::sync::{mpsc, Semaphore};
     use tower::ServiceExt;
 
     use super::*;
@@ -2377,6 +2801,7 @@ mod tests {
                 shutdown_timeout: Duration::from_secs(1),
                 max_frame_bytes: 64 << 20,
                 max_concurrent_calls: 32,
+                max_host_calls: 100,
                 isolate_pool_size: 4,
                 execution_timeout: Duration::from_secs(10),
             },
@@ -2384,6 +2809,299 @@ mod tests {
             sandbox: Default::default(),
             storage: Default::default(),
         }
+    }
+
+    fn upload_signature(secret: &str, key: &str, expires: i64) -> String {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(format!("gonvex-storage-upload:{secret}").as_bytes())
+                .unwrap();
+        mac.update(format!("{key}\n{expires}").as_bytes());
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn feed_transaction(revision: u64) -> change_feed::FeedEvent {
+        change_feed::FeedEvent::Transaction {
+            database_epoch: "epoch".to_owned(),
+            revision,
+            changes: Vec::new(),
+        }
+    }
+
+    fn replica_open_request(id: &str) -> ReplicaOpenRequest {
+        ReplicaOpenRequest {
+            id: id.to_owned(),
+            path: format!("settings.{id}"),
+            args: serde_json::json!({}),
+            cursor: None,
+            keys: Vec::new(),
+            hashes: BTreeMap::new(),
+            digest: None,
+            full_integrity: false,
+        }
+    }
+
+    fn replica_marker(id: &str) -> ServerMessage {
+        ServerMessage::ReplicaError {
+            id: id.to_owned(),
+            path: None,
+            error: "marker".to_owned(),
+        }
+    }
+
+    fn replica_message_id(message: &ServerMessage) -> &str {
+        match message {
+            ServerMessage::ReplicaError { id, .. } => id,
+            _ => panic!("expected replica marker or error"),
+        }
+    }
+
+    fn scheduled_feed_revision<T>(transport: ScheduledTransport<T>) -> u64 {
+        match transport {
+            ScheduledTransport::Feed(Ok(change_feed::FeedEvent::Transaction {
+                revision, ..
+            })) => revision,
+            _ => panic!("expected committed feed transaction"),
+        }
+    }
+
+    fn scheduled_socket<T>(transport: ScheduledTransport<T>) -> T {
+        match transport {
+            ScheduledTransport::Socket(Some(message)) => message,
+            _ => panic!("expected socket message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn replica_open_work_never_exceeds_the_database_concurrency_cap() {
+        let input_count = REPLICA_OPEN_CONCURRENCY + 5;
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Semaphore::new(0));
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+
+        let worker = {
+            let active = active.clone();
+            let peak = peak.clone();
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                collect_bounded_ordered(
+                    (0..input_count).collect(),
+                    REPLICA_OPEN_CONCURRENCY,
+                    move |index| {
+                        let active = active.clone();
+                        let peak = peak.clone();
+                        let gate = gate.clone();
+                        let started_tx = started_tx.clone();
+                        async move {
+                            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            started_tx.send(index).unwrap();
+                            let permit = gate.acquire_owned().await.unwrap();
+                            permit.forget();
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            index
+                        }
+                    },
+                )
+                .await
+            })
+        };
+
+        for _ in 0..REPLICA_OPEN_CONCURRENCY {
+            started_rx.recv().await.unwrap();
+        }
+        assert!(started_rx.try_recv().is_err());
+        assert_eq!(active.load(Ordering::SeqCst), REPLICA_OPEN_CONCURRENCY);
+        gate.add_permits(input_count);
+
+        let output = worker.await.unwrap();
+        assert_eq!(output, (0..input_count).collect::<Vec<_>>());
+        assert_eq!(peak.load(Ordering::SeqCst), REPLICA_OPEN_CONCURRENCY);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn replica_open_work_preserves_request_order_after_reverse_completion() {
+        let input_count = 4;
+        let gates = Arc::new(
+            (0..input_count)
+                .map(|_| Arc::new(Semaphore::new(0)))
+                .collect::<Vec<_>>(),
+        );
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+        let worker = {
+            let gates = gates.clone();
+            tokio::spawn(async move {
+                collect_bounded_ordered((0..input_count).collect(), input_count, move |index| {
+                    let gate = gates[index].clone();
+                    let started_tx = started_tx.clone();
+                    let completed_tx = completed_tx.clone();
+                    async move {
+                        started_tx.send(index).unwrap();
+                        let permit = gate.acquire_owned().await.unwrap();
+                        permit.forget();
+                        completed_tx.send(index).unwrap();
+                        index
+                    }
+                })
+                .await
+            })
+        };
+
+        for _ in 0..input_count {
+            started_rx.recv().await.unwrap();
+        }
+        for index in (0..input_count).rev() {
+            gates[index].add_permits(1);
+            assert_eq!(completed_rx.recv().await.unwrap(), index);
+        }
+
+        assert_eq!(worker.await.unwrap(), (0..input_count).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn replica_open_installation_is_ordered_and_excludes_failed_subscriptions() {
+        let outcomes: Vec<ReplicaOpenOutcome<String, &str>> = vec![
+            (
+                replica_open_request("first"),
+                Ok((
+                    vec![replica_marker("first")],
+                    Some(("first".to_owned(), "first-subscription".to_owned())),
+                )),
+            ),
+            (replica_open_request("failed"), Err("planned failure")),
+            (
+                replica_open_request("last"),
+                Ok((
+                    vec![replica_marker("last")],
+                    Some(("last".to_owned(), "last-subscription".to_owned())),
+                )),
+            ),
+        ];
+        let mut replicas = BTreeMap::new();
+
+        let messages = install_replica_open_outcomes(&mut replicas, outcomes);
+
+        assert_eq!(
+            messages.iter().map(replica_message_id).collect::<Vec<_>>(),
+            vec!["first", "failed", "last"],
+        );
+        assert_eq!(
+            replicas,
+            BTreeMap::from([
+                ("first".to_owned(), "first-subscription".to_owned()),
+                ("last".to_owned(), "last-subscription".to_owned()),
+            ]),
+        );
+        assert!(matches!(
+            &messages[1],
+            ServerMessage::ReplicaError { path: Some(path), error, .. }
+                if path == "settings.failed" && error == "planned failure"
+        ));
+    }
+
+    #[tokio::test]
+    async fn committed_feed_event_runs_between_back_to_back_socket_calls() {
+        let (sender, receiver) = broadcast::channel(8);
+        let mut feed = Some(receiver);
+        let mut socket = futures_util::stream::iter(["call-one", "call-two"]);
+        let mut scheduler = FeedFirstScheduler::default();
+
+        assert_eq!(
+            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await),
+            "call-one"
+        );
+        sender.send(feed_transaction(41)).unwrap();
+        assert_eq!(
+            scheduled_feed_revision(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+            ),
+            41
+        );
+        assert_eq!(
+            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await),
+            "call-two"
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_first_snapshot_is_bounded_under_continuous_feed_traffic() {
+        let (sender, receiver) = broadcast::channel(8);
+        let mut feed = Some(receiver);
+        let mut socket = futures_util::stream::iter(["queued-call"]);
+        let mut scheduler = FeedFirstScheduler::default();
+
+        sender.send(feed_transaction(51)).unwrap();
+        sender.send(feed_transaction(52)).unwrap();
+        assert_eq!(
+            scheduled_feed_revision(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+            ),
+            51
+        );
+
+        // This event arrived after the scheduler captured its ready-feed
+        // snapshot. It cannot extend the batch and starve the queued call.
+        sender.send(feed_transaction(53)).unwrap();
+        assert_eq!(
+            scheduled_feed_revision(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+            ),
+            52
+        );
+        assert_eq!(
+            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await),
+            "queued-call"
+        );
+        assert_eq!(
+            scheduled_feed_revision(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+            ),
+            53
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_storage_upload_preflight_is_cors_enabled() {
+        let key = "project/tenant/file";
+        let expires = Utc::now().timestamp() + 60;
+        let secret = "storage-test-secret";
+        let signature = upload_signature(secret, key, expires);
+        let mut runtime_config = config(false);
+        runtime_config.storage.secret_access_key = secret.to_owned();
+        let runtime = Runtime::new(runtime_config);
+        let response = runtime
+            .router()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri(format!(
+                        "/storage/{key}?exp={expires}&sig={signature}&upload=1"
+                    ))
+                    .header("origin", "http://testing.localhost:5184")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert_eq!(
+            response.headers()["access-control-allow-methods"],
+            "GET, POST, PUT, OPTIONS"
+        );
+        assert_eq!(
+            response.headers()["access-control-allow-headers"],
+            "Content-Type"
+        );
     }
 
     #[tokio::test]
@@ -2434,6 +3152,151 @@ mod tests {
     }
 
     #[test]
+    fn committed_feed_transactions_have_a_terminal_replica_watermark() {
+        let transaction = change_feed::FeedEvent::Transaction {
+            database_epoch: "epoch".to_owned(),
+            revision: 535,
+            changes: Vec::new(),
+        };
+        assert!(matches!(
+            replica_watermark(&transaction),
+            Some(ServerMessage::ReplicaWatermark { revision: 535 })
+        ));
+        assert!(replica_watermark(&change_feed::FeedEvent::Reset {
+            reason: "reset".to_owned(),
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn authenticated_tenant_calls_without_replica_work_get_a_terminal_watermark() {
+        let action = ServerMessage::ActionResult {
+            id: "action".to_owned(),
+            path: Some("testing.invoke".to_owned()),
+            result: serde_json::Value::Null,
+            committed_revision: Some(541),
+            trace: None,
+        };
+        let reducer = ServerMessage::ReducerResult {
+            id: "command".to_owned(),
+            path: Some("tasks.rename".to_owned()),
+            result: serde_json::Value::Null,
+            origin_command_id: "command".to_owned(),
+            committed_revision: Some(542),
+            trace: None,
+        };
+        assert!(matches!(
+            call_watermark_without_replica_work(&action, true, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 541 })
+        ));
+        assert!(matches!(
+            call_watermark_without_replica_work(&reducer, true, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 542 })
+        ));
+    }
+
+    #[test]
+    fn subscribed_connections_wait_for_the_feed_ordered_watermark() {
+        let reducer = ServerMessage::ReducerResult {
+            id: "command".to_owned(),
+            path: Some("tasks.rename".to_owned()),
+            result: serde_json::Value::Null,
+            origin_command_id: "command".to_owned(),
+            committed_revision: Some(542),
+            trace: None,
+        };
+        let action = ServerMessage::ActionResult {
+            id: "action".to_owned(),
+            path: Some("testing.invoke".to_owned()),
+            result: serde_json::Value::Null,
+            committed_revision: Some(543),
+            trace: None,
+        };
+        assert!(call_watermark_without_replica_work(&reducer, true, true).is_none());
+        assert!(call_watermark_without_replica_work(&action, true, true).is_none());
+        assert!(call_watermark_without_replica_work(&action, false, false).is_none());
+    }
+
+    #[test]
+    fn read_only_and_failed_calls_do_not_synthesize_watermarks() {
+        let no_commit = ServerMessage::ActionResult {
+            id: "action".to_owned(),
+            path: Some("exports.prepare".to_owned()),
+            result: serde_json::Value::Null,
+            committed_revision: None,
+            trace: None,
+        };
+        let failed = ServerMessage::ActionError {
+            id: "action".to_owned(),
+            path: Some("testing.invoke".to_owned()),
+            error: "failed".to_owned(),
+            trace: None,
+        };
+        assert!(call_watermark_without_replica_work(&no_commit, true, false).is_none());
+        assert!(call_watermark_without_replica_work(&failed, true, false).is_none());
+    }
+
+    #[test]
+    fn control_completion_closes_after_every_refreshed_control_query() {
+        let response = ServerMessage::ReducerResult {
+            id: "control-command".to_owned(),
+            path: Some("control.invitations.update".to_owned()),
+            result: serde_json::json!({"updated":true}),
+            origin_command_id: "control-command".to_owned(),
+            committed_revision: None,
+            trace: None,
+        };
+        let updates = [
+            ("tenant-profile", "control.tenants.mine"),
+            ("invitations", "control.invitations.list"),
+        ]
+        .into_iter()
+        .map(|(id, path)| ServerMessage::QueryResult {
+            id: id.to_owned(),
+            payload: BTreeMap::from([
+                (
+                    "path".to_owned(),
+                    serde_json::Value::String(path.to_owned()),
+                ),
+                ("result".to_owned(), serde_json::json!([])),
+                (
+                    "reason".to_owned(),
+                    serde_json::Value::String("control-change".to_owned()),
+                ),
+            ]),
+        })
+        .collect();
+
+        let messages = ordered_control_completion(response, updates, true);
+        assert!(
+            matches!(messages.first(), Some(ServerMessage::QueryResult { id, .. }) if id == "tenant-profile")
+        );
+        assert!(
+            matches!(messages.get(1), Some(ServerMessage::QueryResult { id, .. }) if id == "invitations")
+        );
+        assert!(matches!(
+            messages.get(2),
+            Some(ServerMessage::ReducerResult { .. })
+        ));
+        assert!(
+            matches!(messages.last(), Some(ServerMessage::ControlWatermark { id }) if id == "control-command")
+        );
+    }
+
+    #[test]
+    fn failed_or_tenant_calls_do_not_emit_control_watermarks() {
+        let response = ServerMessage::ReducerError {
+            id: "control-command".to_owned(),
+            path: Some("control.invitations.update".to_owned()),
+            error: "denied".to_owned(),
+            trace: None,
+        };
+        let messages = ordered_control_completion(response, Vec::new(), false);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(messages[0], ServerMessage::ReducerError { .. }));
+    }
+
+    #[test]
     fn membership_replay_before_the_admission_snapshot_does_not_revoke_a_new_socket() {
         let session = TenantSession {
             identity: gonvex_postgres::SessionIdentity {
@@ -2464,7 +3327,7 @@ mod tests {
             },
             admission_revision: 5,
         };
-        let event = |revision| change_feed::FeedEvent::Transaction {
+        let event = |revision, changed_columns: Vec<&str>| change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision,
             changes: vec![change_feed::LogChange {
@@ -2474,14 +3337,22 @@ mod tests {
                 table: "members".to_owned(),
                 row_id: "member".to_owned(),
                 operation: "UPDATE".to_owned(),
-                changed_columns: vec!["status".to_owned()],
+                changed_columns: changed_columns.into_iter().map(str::to_owned).collect(),
                 old_value: serde_json::json!({"id":"member","account_id":"account","status":"active"}),
                 new_value: serde_json::json!({"id":"member","account_id":"account","status":"revoked"}),
                 provenance: change_feed::TransactionProvenance::default(),
             }],
         };
 
-        assert!(!membership_affects(&session, &event(5)));
-        assert!(membership_affects(&session, &event(6)));
+        assert!(!membership_affects(&session, &event(5, vec!["status"])));
+        assert!(!membership_affects(
+            &session,
+            &event(6, vec!["display_name", "avatar_url", "updated_at"]),
+        ));
+        assert!(membership_affects(&session, &event(6, vec!["status"]),));
+        assert!(membership_affects(
+            &session,
+            &event(6, vec!["role", "permissions"]),
+        ));
     }
 }

@@ -1,9 +1,9 @@
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConnectionState, FunctionReference, GonvexClient } from "@gonvex/client";
+import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaEntities, useRetainedLiveQuery } from "./index";
+import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery } from "./index";
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
@@ -69,9 +69,10 @@ class FakeGonvexClient {
   watchControlQuery(ref: FunctionReference, args: unknown) {
     let result: unknown;
     let version = 0;
+    let snapshot = { result, version };
     const listeners = new Set<() => void>();
-    const unsubscribe = this.subscribeLiveQuery(ref,args,(message)=>{if(message.type==="query.result"){result=message.result;version+=1;listeners.forEach((listener)=>listener());}});
-    return {getSnapshot:()=>({result,version}),onUpdate:(listener:()=>void)=>{listeners.add(listener);return()=>{listeners.delete(listener);if(!listeners.size)unsubscribe();}}};
+    const unsubscribe = this.subscribeLiveQuery(ref,args,(message)=>{if(message.type==="query.result"){result=message.result;version+=1;snapshot={result,version};listeners.forEach((listener)=>listener());}});
+    return {getSnapshot:()=>snapshot,onUpdate:(listener:()=>void)=>{listeners.add(listener);return()=>{listeners.delete(listener);if(!listeners.size)unsubscribe();}}};
   }
 
   watchReplica(ref: FunctionReference) {
@@ -134,11 +135,16 @@ function wrapperFor(client: FakeGonvexClient) {
   };
 }
 
+let navigatorLocksDescriptor: PropertyDescriptor | undefined;
+
 beforeEach(() => {
+  navigatorLocksDescriptor = Object.getOwnPropertyDescriptor(navigator, "locks");
   vi.useFakeTimers();
 });
 
 afterEach(() => {
+  if (navigatorLocksDescriptor) Object.defineProperty(navigator, "locks", navigatorLocksDescriptor);
+  else delete (navigator as Navigator & { locks?: unknown }).locks;
   vi.useRealTimers();
 });
 
@@ -239,6 +245,32 @@ describe("useQuery", () => {
     expect(result.current).toEqual(["task"]);
   });
 
+  it("reissues a Query after auth scope changes without throwing the superseded request", async () => {
+    const client = new FakeGonvexClient();
+    const requests: Array<{ resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
+    client.query.mockImplementation((queryRef: FunctionReference, args: unknown) => {
+      client.subscribedRefs.push(queryRef);
+      client.subscribedArgs.push(args);
+      return new Promise((resolve, reject) => requests.push({ resolve, reject }));
+    });
+    const { result } = renderHook(() => useQuery<string[]>(ref, {}), { wrapper: wrapperFor(client) });
+    expect(client.query).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      for (const handler of client.scopeHandlers) handler();
+      requests[0]!.reject(new GonvexClientError(
+        "Authentication scope changed while waiting for Query tasks.list",
+        { code: "superseded", path: "tasks.list", operation: "query" },
+      ));
+      await Promise.resolve();
+    });
+
+    expect(result.current).toBeUndefined();
+    expect(client.query).toHaveBeenCalledTimes(2);
+    await act(async () => { requests[1]!.resolve(["new-scope-task"]); await Promise.resolve(); });
+    expect(result.current).toEqual(["new-scope-task"]);
+  });
+
   it("throws server query errors so error boundaries can catch them", async () => {
     const client = new FakeGonvexClient();
     const caught: Error[] = [];
@@ -301,13 +333,40 @@ describe("useReplicaCollection", () => {
 
   it("exposes protocol-owned completeness instead of inferring from row count", () => {
     const client = new FakeGonvexClient();
-    client.replicaState = { rows:[{id:"a"}],ids:["a"],source:"cache",completeness:"partial",freshness:"offline",truncated:true,computedRevision:17 };
+    client.replicaState = { rows:[{id:"a"}],ids:["a"],source:"cache",completeness:"partial",freshness:"offline",isUpToDate:false,truncated:true,computedRevision:17 };
     const { result } = renderHook(() => useReplicaCollectionState(ref, {}), { wrapper: wrapperFor(client) });
-    expect(result.current).toMatchObject({ completeness:"partial",freshness:"offline",truncated:true,computedRevision:17 });
+    expect(result.current).toMatchObject({ completeness:"partial",freshness:"offline",isUpToDate:false,truncated:true,computedRevision:17 });
+  });
+
+  it("publishes a collection's own authority transition", () => {
+    const client = new FakeGonvexClient();
+    client.replicaState = { rows:[{id:"a"}],ids:["a"],source:"cache",completeness:"complete",freshness:"verifying",isUpToDate:false,truncated:false,computedRevision:17 };
+    const { result } = renderHook(() => useReplicaCollectionState(ref, {}), { wrapper: wrapperFor(client) });
+
+    expect(result.current).toMatchObject({ source:"cache",freshness:"verifying",isUpToDate:false });
+    act(() => {
+      client.replicaState = { ...client.replicaState, source:"server", freshness:"current", isUpToDate:true };
+      client.updateReplica();
+    });
+    expect(result.current).toMatchObject({ source:"server",freshness:"current",isUpToDate:true });
   });
 });
 
 describe("normalized Replica selectors", () => {
+  it("keeps a derived snapshot stable while the source rows are unchanged", () => {
+    const client = new FakeGonvexClient();
+    client.replicaRows.push({ id: "a", title: "A" });
+    const selector = vi.fn((rows: unknown[]) => rows.map((row) => ({ ...(row as Record<string, unknown>) })));
+
+    const { result, rerender } = renderHook(() => useReplicaSelector(ref, {}, selector), { wrapper: wrapperFor(client) });
+    const initial = result.current;
+    const callsAfterMount = selector.mock.calls.length;
+    rerender();
+
+    expect(result.current).toBe(initial);
+    expect(selector).toHaveBeenCalledTimes(callsAfterMount);
+  });
+
   it("updates a batched entity selector with one Replica subscription", () => {
     const client = new FakeGonvexClient();
     client.entityValues.set("a", { id: "a", title: "A" });
@@ -357,6 +416,69 @@ describe("useReducer", () => {
     });
 
     expect(client.reducer).toHaveBeenCalledWith({ kind: "reducer", path: "tasks.create" }, { title: "Ship" }, { timeoutMs: 5_000 });
+  });
+
+  it("keeps reducer and action callbacks stable across rerenders", () => {
+    const client = new FakeGonvexClient();
+    const { result, rerender } = renderHook(
+      () => ({
+        reducer: useReducer({ kind: "reducer", path: "tasks.create" }),
+        action: useAction({ kind: "action", path: "tasks.export" }),
+      }),
+      { wrapper: wrapperFor(client) },
+    );
+    const first = result.current;
+
+    rerender();
+
+    expect(result.current.reducer).toBe(first.reducer);
+    expect(result.current.action).toBe(first.action);
+  });
+
+  it("exposes refreshed invitations before a Control Reducer follow-up runs", async () => {
+    const client = new FakeGonvexClient();
+    let finishReducer: ((result: { updated: boolean }) => void) | undefined;
+    client.reducer.mockImplementation(() => new Promise((resolve) => {
+      finishReducer = resolve;
+    }));
+    const { result } = renderHook(
+      () => ({
+        invitations: useInvitationList(),
+        update: useReducer(control.invitations.update),
+      }),
+      { wrapper: wrapperFor(client) },
+    );
+    const before = [{
+      id: "invitation-1", email: "person@example.test", role: "member",
+      permissions: {}, teamIds: ["team-old"], allowedAuthProviders: ["firebase"],
+      expiresAt: "2026-09-01T00:00:00Z", revoked: false, accepted: false,
+      state: "pending", createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z",
+    }];
+    act(() => client.emitQuery({
+      type: "query.result", id: "invitations", path: "control.invitations.list",
+      result: before, reason: "initial",
+    }));
+
+    const reducer = result.current.update({
+      id: "invitation-1", role: "member", permissions: {}, teamIds: ["team-new"],
+      allowedAuthProviders: ["firebase"], payload: {},
+    });
+    const after = [{ ...before[0], teamIds: ["team-new"], updatedAt: "2026-08-29T00:00:00Z" }];
+    act(() => client.emitQuery({
+      type: "query.result", id: "invitations", path: "control.invitations.list",
+      result: after, reason: "control-change",
+    }));
+    expect(result.current.invitations).toEqual(after);
+
+    let invitationsAtSettlement: unknown;
+    const observed = reducer.then(() => {
+      invitationsAtSettlement = result.current.invitations;
+    });
+    await act(async () => {
+      finishReducer?.({ updated: true });
+      await observed;
+    });
+    expect(invitationsAtSettlement).toEqual(after);
   });
 });
 
@@ -457,6 +579,160 @@ describe("GonvexProviderWithAuth", () => {
 describe("GonvexAuthProvider", () => {
   afterEach(() => { cleanup(); localStorage.clear(); sessionStorage.clear(); });
 
+  it("renders a current persisted external session before the provider identity callback", () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-warm.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "canonical-access", expiresAt: Date.now() + 900_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "rotated-firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() {
+      auth = useGonvexAuth();
+      return <div data-testid="warm-application">Application</div>;
+    }
+
+    const rendered = render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-warm.test"
+        projectId="shop"
+        initialTenantId="tenant-1"
+        externalAuth={externalAuth}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    expect(tokenListener).toBeTypeOf("function");
+    expect(rendered.queryByTestId("warm-application")).not.toBeNull();
+    expect(auth).toMatchObject({
+      isAuthenticated: true,
+      isLoading: false,
+      sessionState: "reconnecting",
+    });
+    expect(client.setAuth).toHaveBeenCalledWith({
+      project: "shop",
+      tenant: "tenant-1",
+      token: "canonical-access",
+      identity: { sub: "acct-firebase", iss: "shop" },
+    });
+    expect(client.action).not.toHaveBeenCalled();
+  });
+
+  it("keeps expired, provider-mismatched, and tenant-mismatched sessions private", () => {
+    const session = {
+      accessToken: "canonical-access", expiresAt: Date.now() + 10_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    };
+    const cases = [
+      { runtime: "expired", session },
+      { runtime: "provider", session: { ...session, expiresAt: Date.now() + 900_000, account: { ...session.account, provider: "password" } } },
+      { runtime: "tenant", session: { ...session, expiresAt: Date.now() + 900_000 } },
+    ];
+
+    for (const testCase of cases) {
+      const client = new FakeGonvexClient();
+      localStorage.setItem(
+        `gonvex-auth:https%3A%2F%2Ffirebase-${testCase.runtime}.test:shop`,
+        JSON.stringify(testCase.session),
+      );
+      const externalAuth = {
+        provider: "firebase" as const,
+        getIdToken: vi.fn(async () => "firebase-id-token"),
+        onIdTokenChanged() { return vi.fn(); },
+      };
+      const rendered = render(
+        <GonvexAuthProvider
+          client={client as unknown as GonvexClient}
+          runtimeUrl={`https://firebase-${testCase.runtime}.test`}
+          projectId="shop"
+          initialTenantId={testCase.runtime === "tenant" ? "tenant-2" : "tenant-1"}
+          externalAuth={externalAuth}
+        >
+          <div data-testid="private-application">Application</div>
+        </GonvexAuthProvider>,
+      );
+
+      expect(rendered.queryByTestId("private-application"), testCase.runtime).toBeNull();
+      expect(client.setAuth, testCase.runtime).not.toHaveBeenCalled();
+      rendered.unmount();
+      localStorage.clear();
+    }
+
+    const noSessionClient = new FakeGonvexClient();
+    const noSession = render(
+      <GonvexAuthProvider
+        client={noSessionClient as unknown as GonvexClient}
+        runtimeUrl="https://firebase-empty.test"
+        projectId="shop"
+        initialTenantId="tenant-1"
+        externalAuth={{
+          provider: "firebase",
+          getIdToken: vi.fn(async () => "firebase-id-token"),
+          onIdTokenChanged() { return vi.fn(); },
+        }}
+      >
+        <div data-testid="private-application">Application</div>
+      </GonvexAuthProvider>,
+    );
+    expect(noSession.queryByTestId("private-application")).toBeNull();
+    expect(noSessionClient.setAuth).not.toHaveBeenCalled();
+  });
+
+  it("publishes a selected tenant only after its authoritative Replica scope is active", async () => {
+    const client = new FakeGonvexClient();
+    client.action.mockResolvedValue({
+      accessToken: "access", expiresAt: Date.now() + 900_000, refreshToken: "refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-1", email: "person@example.test", emailVerified: true, name: "Person", picture: "", provider: "password" },
+      tenants: [
+        { id: "tenant-1", name: "First", role: "admin", permissions: {}, domain: "first", timezone: "UTC", profile: {} },
+        { id: "tenant-2", name: "Second", role: "admin", permissions: {}, domain: "second", timezone: "UTC", profile: {} },
+      ],
+      activeTenantId: "tenant-1",
+    });
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://runtime.test" projectId="shop"><Consumer /></GonvexAuthProvider>);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { await auth!.signInWithPassword("person@example.test", "correct-password"); });
+
+    const refreshRegistration = client.setAuth.mock.calls
+      .map(([value]) => value as Record<string, unknown>)
+      .findLast((value) => typeof value.fetchToken === "function");
+    expect(refreshRegistration).toEqual({
+      token: "access",
+      fetchToken: expect.any(Function),
+    });
+
+    let acceptTenant!: () => void;
+    client.authenticate.mockImplementationOnce(() => new Promise<void>((resolve) => { acceptTenant = resolve; }));
+    let switching!: Promise<void>;
+    act(() => { switching = auth!.setActiveTenant("tenant-2"); });
+
+    expect(auth!.activeTenant?.id).toBe("tenant-1");
+    expect(client.authenticate).toHaveBeenCalledWith(expect.objectContaining({
+      project: "shop",
+      tenant: "tenant-2",
+      token: "access",
+    }));
+
+    await act(async () => { acceptTenant(); await switching; });
+    expect(auth!.activeTenant?.id).toBe("tenant-2");
+  });
+
   it("installs and persists a native password session through the OAuth session path", async () => {
     const client = new FakeGonvexClient();
     client.action.mockResolvedValue({
@@ -480,6 +756,16 @@ describe("GonvexAuthProvider", () => {
 
   it("exchanges Firebase tokens, rotates them, and restores Firebase-backed auth after developer mode", async () => {
     const client = new FakeGonvexClient();
+    const authLockNames: string[] = [];
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: async <T,>(name: string, action: () => Promise<T>) => {
+          authLockNames.push(name);
+          return action();
+        },
+      },
+    });
     const now = Date.now();
     const grants = ["firebase-access-1", "firebase-access-2"].map((accessToken, index) => ({
       accessToken, expiresAt: now + 900_000, refreshToken: `firebase-refresh-${index + 1}`, refreshExpiresAt: now + 86_400_000,
@@ -501,10 +787,10 @@ describe("GonvexAuthProvider", () => {
     };
     let auth: ReturnType<typeof useGonvexAuth> | undefined;
     function Consumer() { auth = useGonvexAuth(); return null; }
-    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-runtime.test" projectId="shop" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-runtime.test" projectId="shop" initialTenantId="tenant-1" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
     await act(async () => { tokenListener?.({ uid: "firebase-uid", issuer: "firebase-project" }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
     expect(client.action).toHaveBeenCalledWith(expect.objectContaining({ path: "control.auth.exchangeExternalToken" }), {
-      provider: "firebase", token: "firebase-id-token-1",
+      provider: "firebase", token: "firebase-id-token-1", tenantId: "tenant-1",
     });
     expect(auth?.account?.provider).toBe("firebase");
     expect(localStorage.getItem("gonvex-auth:https%3A%2F%2Ffirebase-runtime.test:shop")).not.toContain("firebase-id-token");
@@ -516,14 +802,277 @@ describe("GonvexAuthProvider", () => {
     expect(client.action).toHaveBeenLastCalledWith(expect.objectContaining({ path: "control.auth.exchangeExternalToken" }), {
       provider: "firebase", token: "firebase-id-token-2", tenantId: "tenant-1", previousRefreshToken: "firebase-refresh-1",
     });
+    expect(new Set(authLockNames)).toEqual(new Set([
+      "gonvex-auth:https%3A%2F%2Ffirebase-runtime.test:shop:external-session",
+    ]));
 
     await act(async () => { await auth!.enterDeveloperMode("tenant-1"); });
     await act(async () => { await auth!.exitDeveloperMode(); });
     expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({ fetchToken: expect.any(Function) }));
   });
 
-  it("hydrates the canonical Firebase-backed session without persisting or replaying an ID token", async () => {
+  it("uses the newest cross-tab Firebase session when exchanging an identity token", async () => {
     const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-tabs.test:shop";
+    const account = { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" };
+    const tenants = [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }];
+    const staleSession = {
+      accessToken: "access-stale", expiresAt: now + 900_000,
+      refreshToken: "refresh-stale", refreshExpiresAt: now + 86_400_000,
+      account, tenants, activeTenantId: "tenant-1",
+    };
+    const crossTabSession = {
+      ...staleSession,
+      accessToken: "access-cross-tab",
+      refreshToken: "refresh-cross-tab",
+    };
+    client.action.mockResolvedValue({
+      ...crossTabSession,
+      accessToken: "access-current",
+      refreshToken: "refresh-current",
+    });
+    localStorage.setItem(storageKey, JSON.stringify(staleSession));
+
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-tabs.test" projectId="shop" externalAuth={externalAuth}><div /></GonvexAuthProvider>);
+    localStorage.setItem(storageKey, JSON.stringify(crossTabSession));
+
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(client.action).toHaveBeenCalledWith(expect.objectContaining({ path: "control.auth.exchangeExternalToken" }), {
+      provider: "firebase",
+      token: "firebase-id-token",
+      tenantId: "tenant-1",
+      previousRefreshToken: "refresh-cross-tab",
+    });
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({
+      accessToken: "access-current",
+      refreshToken: "refresh-current",
+    });
+  });
+
+  it("keeps children mounted while an existing Firebase-backed session rotates", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-background.test:shop";
+    const current = {
+      accessToken: "access-current", expiresAt: now + 900_000,
+      refreshToken: "refresh-current", refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    };
+    localStorage.setItem(storageKey, JSON.stringify(current));
+    let finishExchange: ((session: typeof current) => void) | undefined;
+    client.action.mockImplementation(() => new Promise((resolve) => { finishExchange = resolve; }));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    const rendered = render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-background.test"
+        projectId="shop"
+        externalAuth={externalAuth}
+      >
+        <div data-testid="application">Application</div>
+      </GonvexAuthProvider>,
+    );
+
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+    });
+
+    expect(rendered.queryByTestId("application")).not.toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({
+      project: "shop",
+      tenant: "tenant-1",
+      token: "access-current",
+    }));
+
+    await act(async () => {
+      finishExchange?.({ ...current, accessToken: "access-rotated", refreshToken: "refresh-rotated" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(rendered.queryByTestId("application")).not.toBeNull();
+  });
+
+  it("preserves a canonical Firebase session when background exchange has a transient host failure", async () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-degraded.test:shop";
+    const current = {
+      accessToken: "access-current", expiresAt: Date.now() + 900_000,
+      refreshToken: "refresh-current", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    };
+    localStorage.setItem(storageKey, JSON.stringify(current));
+    client.action.mockRejectedValue(new GonvexClientError(
+      "Control Plane database invariant failed during Control Plane idempotency claim",
+      { code: "server", path: "control.auth.exchangeExternalToken", operation: "action" },
+    ));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return <div data-testid="application">Application</div>; }
+    const rendered = render(
+      <GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-degraded.test" projectId="shop" externalAuth={externalAuth}>
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    expect(rendered.queryByTestId("application")).not.toBeNull();
+    expect(auth).toMatchObject({ isAuthenticated: true, sessionState: "reconnecting" });
+
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(rendered.queryByTestId("application")).not.toBeNull();
+    expect(auth).toMatchObject({ isAuthenticated: true, sessionState: "degraded" });
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({
+      accessToken: "access-current",
+      refreshToken: "refresh-current",
+    });
+    expect(client.setAuth.mock.calls.some(([value]) => (
+      (value as { token?: string }).token === undefined
+    ))).toBe(false);
+  });
+
+  it("clears a canonical Firebase session after a fatal identity rejection", async () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-rejected.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "access-current", expiresAt: Date.now() + 900_000,
+      refreshToken: "refresh-current", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    client.action.mockRejectedValue(new GonvexClientError(
+      "external identity token is expired",
+      { code: "server", path: "control.auth.exchangeExternalToken", operation: "action" },
+    ));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "expired-firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-rejected.test" projectId="shop" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
+
+    expect(auth).toMatchObject({ isAuthenticated: true, sessionState: "reconnecting" });
+
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
+    expect(localStorage.getItem(storageKey)).toBeNull();
+    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({ token: undefined }));
+  });
+
+  it("keeps initial Firebase exchange failures signed out", async () => {
+    const client = new FakeGonvexClient();
+    client.action.mockRejectedValue(new GonvexClientError(
+      "Control Plane database connection failed",
+      { code: "server", path: "control.auth.exchangeExternalToken", operation: "action" },
+    ));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-initial-failure.test" projectId="shop" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
+
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(auth).toMatchObject({ isAuthenticated: false, sessionState: "signedOut" });
+    expect(localStorage.getItem("gonvex-auth:https%3A%2F%2Ffirebase-initial-failure.test:shop")).toBeNull();
+  });
+
+  it("clears Firebase and local auth before remote session revocation finishes", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    client.action.mockResolvedValue({
+      accessToken: "firebase-access", expiresAt: now + 900_000,
+      refreshToken: "firebase-refresh", refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    });
+    let finishRevocation: (() => void) | undefined;
+    const revocation = new Promise<void>((resolve) => { finishRevocation = resolve; });
+    client.reducer.mockImplementation((reference: FunctionReference) => (
+      reference.path === "control.auth.logout" ? revocation : Promise.resolve({ updated: true })
+    ));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+      signOut: vi.fn(async () => undefined),
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-logout.test" projectId="shop" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
+    await act(async () => { tokenListener?.({ uid: "firebase-uid" }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(auth?.isAuthenticated).toBe(true);
+
+    let logout: Promise<void> | undefined;
+    await act(async () => {
+      logout = auth!.signOut();
+      await Promise.resolve();
+    });
+
+    expect(externalAuth.signOut).toHaveBeenCalledOnce();
+    expect(auth?.isAuthenticated).toBe(false);
+    expect(localStorage.getItem("gonvex-auth:https%3A%2F%2Ffirebase-logout.test:shop")).toBeNull();
+
+    finishRevocation?.();
+    await act(async () => { await logout; });
+  });
+
+  it("keeps the canonical Firebase-backed session through a transient provider-null callback", async () => {
+    const client = new FakeGonvexClient();
+    const controlWatch = vi.spyOn(client, "watchControlQuery");
     const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-reload.test:shop";
     localStorage.setItem(storageKey, JSON.stringify({
       accessToken: "canonical-access", expiresAt: Date.now() + 900_000,
@@ -542,11 +1091,66 @@ describe("GonvexAuthProvider", () => {
     function Consumer() { auth = useGonvexAuth(); return null; }
     render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl="https://firebase-reload.test" projectId="shop" externalAuth={externalAuth}><Consumer /></GonvexAuthProvider>);
     await act(async () => { await Promise.resolve(); });
-    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({ token: "canonical-access", tenant: "tenant-1", fetchToken: expect.any(Function) }));
+    // A current canonical session already owns an exact project, tenant, and
+    // account scope. Its cached Replica can render while Firebase hydrates.
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({
+      project: "shop",
+      tenant: "tenant-1",
+      token: "canonical-access",
+      identity: { sub: "acct-firebase", iss: "shop" },
+    }));
+    expect(controlWatch).toHaveBeenCalledOnce();
+    expect(auth).toMatchObject({ isAuthenticated: true, sessionState: "reconnecting" });
     expect(localStorage.getItem(storageKey)).not.toContain("firebase-id-token");
     await act(async () => { tokenListener?.(null); await Promise.resolve(); });
-    expect(auth?.isAuthenticated).toBe(false);
-    expect(localStorage.getItem(storageKey)).toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({
+      project: "shop",
+      tenant: "tenant-1",
+      token: "canonical-access",
+    }));
+    expect(client.setAuth).toHaveBeenCalledWith({ token: "canonical-access", fetchToken: expect.any(Function) });
+    expect(controlWatch).toHaveBeenCalledOnce();
+    expect(auth?.isAuthenticated).toBe(true);
+    expect(localStorage.getItem(storageKey)).not.toBeNull();
+  });
+
+  it("does not sign out when a forced Firebase refresh runs before provider hydration", async () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-hydration.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "canonical-access", expiresAt: Date.now() + 900_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => null),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-hydration.test"
+        projectId="shop"
+        externalAuth={externalAuth}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    await act(async () => { tokenListener?.(null); await Promise.resolve(); });
+    await act(async () => {
+      expect(await auth!.fetchAccessToken!({ forceRefreshToken: true })).toBe("canonical-access");
+    });
+
+    expect(auth?.isAuthenticated).toBe(true);
+    expect(localStorage.getItem(storageKey)).toContain("canonical-refresh");
+    expect(client.action).not.toHaveBeenCalled();
   });
 
   it("owns the developer-mode enter/exit lifecycle without exposing or persisting its token", async () => {
@@ -583,7 +1187,8 @@ describe("GonvexAuthProvider", () => {
     await act(async()=>{await auth!.exitDeveloperMode();});
     expect(client.reducer).toHaveBeenCalledWith(expect.objectContaining({path:"control.developer.exit"}),{grantId:"grant-1"});
     expect(auth!.developerMode).toEqual({active:false});
-    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({tenant:"tenant-home",token:"account-access"}));
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"account-access"}));
+    expect(client.setAuth).toHaveBeenLastCalledWith({token:"account-access",fetchToken:expect.any(Function)});
   });
 
   it("rolls back failed entry and keeps developer mode active when exit fails", async () => {
@@ -624,7 +1229,8 @@ describe("GonvexAuthProvider", () => {
     await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
     act(()=>vi.advanceTimersByTime(1_001));
     expect(auth!.developerMode.active).toBe(false);
-    expect(client.setAuth).toHaveBeenLastCalledWith(expect.objectContaining({tenant:"tenant-home",token:"account-access"}));
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"account-access"}));
+    expect(client.setAuth).toHaveBeenLastCalledWith({token:"account-access",fetchToken:expect.any(Function)});
 
     client.reducer.mockResolvedValue({id:"grant-4",token:"gvx_imp_auth_error",expiresAt:new Date(now+300_000).toISOString()});
     await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});

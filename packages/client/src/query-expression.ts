@@ -19,7 +19,7 @@ export type LiveQueryPlan = {
   resultPath?: readonly string[];
   where?: LiveQueryExpression;
   search?: { argument: string; columns: readonly string[] };
-  filters?: { argument: string; allowedColumns: readonly string[]; allowedOperators: readonly FilterOperator[] };
+  filters?: { argument: string; allowedColumns: readonly string[]; allowedOperators: readonly FilterOperator[]; columnTypes?: Readonly<Record<string, "text" | "number">> };
   sort?: {
     columnArgument?: string;
     directionArgument?: string;

@@ -134,13 +134,62 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     });
   }
 
+  async advanceWatermark(
+    windows: readonly ReplicaWindow[],
+    cursor: ReplicaSnapshot["cursor"],
+    scope: ReplicaScope = defaultReplicaScope,
+  ): Promise<void> {
+    await this.initialize();
+    const normalizedScope = normalizeScope(scope);
+    // A watermark contains no entity changes. Keep this transaction limited to
+    // window metadata and the shared cursor so large normalized replicas are
+    // never rewritten once per retained collection.
+    await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
+      for (const window of windows) {
+        await this.database.windows.put({
+          scope: normalizedScope,
+          signature: window.signature,
+          value: JSON.stringify(normalizeWindow(window)),
+        });
+      }
+      if (cursor) {
+        await this.database.meta.put({ scope: normalizedScope, key: "cursor", value: JSON.stringify(cursor) });
+      }
+    });
+  }
+
   async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
     await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
-      for (const [entity, rows] of Object.entries(snapshot.entities)) {
-        for (const [id, value] of Object.entries(rows)) {
-          await this.database.entities.put({ scope: normalizedScope, entity, id, value: JSON.stringify(value) });
+      // A window replacement owns only its projected entity rows. Rewriting the
+      // complete normalized replica for every snapshot made startup quadratic:
+      // each newly opened collection persisted every entity loaded by all prior
+      // collections, and `replica.ready` repeated the same work. Persist this
+      // window atomically while leaving unrelated entity tables untouched.
+      const rows = snapshot.entities[window.entity] ?? {};
+      const previousRecord = await this.database.windows.get([normalizedScope, window.signature]);
+      if (previousRecord) {
+        const previous = JSON.parse(previousRecord.value) as ReplicaWindow;
+        const nextIDs = new Set(window.ids);
+        for (const id of previous.ids) {
+          // The in-memory snapshot already accounts for every other window and
+          // transaction owner. Absence here means the entity is no longer
+          // authorized/referenced and must not survive restart hydration.
+          if (!nextIDs.has(id) && rows[id] === undefined) {
+            await this.database.entities.delete([normalizedScope, window.entity, id]);
+          }
+        }
+      }
+      for (const id of window.ids) {
+        const value = rows[id];
+        if (value !== undefined) {
+          await this.database.entities.put({
+            scope: normalizedScope,
+            entity: window.entity,
+            id,
+            value: JSON.stringify(value),
+          });
         }
       }
       await this.database.windows.put({ scope: normalizedScope, signature: window.signature, value: JSON.stringify(normalizeWindow(window)) });

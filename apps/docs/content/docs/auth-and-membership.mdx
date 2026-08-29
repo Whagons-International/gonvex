@@ -113,6 +113,20 @@ The server applies visibility to initial snapshots, Live Query windows, and
 committed row changes. A row becoming invisible produces a client-local delete;
 the database row itself is not deleted.
 
+Use an explicit literal wrapper when access depends on stored state:
+
+```ts
+where: {
+  operator: "eq",
+  column: "visibility",
+  value: { literal: "public" },
+}
+```
+
+Set constraints accept the same `value: { literal: ... }` form on a joined
+table. This lets a child row inherit access from a public parent while keeping
+the rule in one visibility plan.
+
 ## Terminology
 
 - `Account`: global identity and authentication profile.

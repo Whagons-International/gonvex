@@ -162,6 +162,32 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     });
   }
 
+  async advanceWatermark(
+    windows: readonly ReplicaWindow[],
+    cursor: ReplicaSnapshot["cursor"],
+    scope: ReplicaScope = defaultReplicaScope,
+  ): Promise<void> {
+    await this.initialize();
+    // Watermarks carry no row changes. Keep this transaction metadata-only so
+    // advancing many retained windows does not rewrite the normalized corpus.
+    await this.database.withTransactionAsync(async () => {
+      for (const window of windows) {
+        await this.database.runAsync(
+          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+           ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
+          scope, window.signature, JSON.stringify(normalizeWindow(window)),
+        );
+      }
+      if (cursor) {
+        await this.database.runAsync(
+          `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
+           ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`,
+          scope, JSON.stringify(cursor),
+        );
+      }
+    });
+  }
+
   async replaceSnapshot(snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
     await this.initialize();
     await this.database.withTransactionAsync(async () => {

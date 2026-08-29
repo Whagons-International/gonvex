@@ -33,7 +33,7 @@ export type FunctionAgentMetadata = {
   confirmation?: "none" | "required" | "destructive";
 };
 
-export type ActionToolBinding = { kind: "query" | "reducer"; function: string };
+export type ActionToolBinding = { kind: "query" | "reducer" | "internalReducer"; function: string };
 export type ActionCapabilities = {
   networkOrigins?: string[];
   secrets?: string[];
@@ -74,7 +74,7 @@ export type LiveQueryPlan = {
   resultPath?: string[];
   where?: LiveExpression;
   search?: { argument: string; columns: string[] };
-  filters?: { argument: string; allowedColumns: string[]; allowedOperators: FilterOperator[] };
+  filters?: { argument: string; allowedColumns: string[]; allowedOperators: FilterOperator[]; columnTypes?: Record<string, "text" | "number"> };
   sort?: { columnArgument?: string; directionArgument?: string; defaultColumn: string; defaultDirection: "asc" | "desc"; allowedColumns: string[] };
   window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number; count?: "exact" };
   serverOnly?: boolean;

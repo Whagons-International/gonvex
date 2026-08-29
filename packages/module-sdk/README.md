@@ -153,6 +153,41 @@ The host records `memberTeams` once as a dependency. A change on either alias
 invalidates the same visibility context. An unaliased repeated table fails
 manifest validation.
 
+Literal predicates use an explicit wrapper. They can apply to the delivered
+row or to any logical table occurrence inside a set:
+
+```ts
+export const boardMessageVisibility = visibility({
+  table: "boardMessages",
+  key: "id",
+  sets: {
+    messagesOnPublicBoards: {
+      table: "boardMessages",
+      select: "id",
+      joins: [{
+        table: "boards",
+        leftColumn: "boardId",
+        rightColumn: "id",
+      }],
+      where: [{
+        table: "boards",
+        column: "visibility",
+        value: { literal: "public" },
+      }],
+    },
+  },
+  where: {
+    operator: "inSet",
+    column: "id",
+    set: "messagesOnPublicBoards",
+  },
+});
+```
+
+Use `{ operator: "eq", column: "deletedAt", value: { literal: null } }`
+for a literal predicate on the delivered row. Gonvex compiles null equality
+to `IS NULL`.
+
 Executable handlers stay in a host-side registry. The registry dispatches only
 when both the path and function kind match; it never creates database or
 network capabilities itself:

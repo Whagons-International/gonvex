@@ -164,9 +164,11 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     for (const [name, binding] of Object.entries(definition.actionCapabilities?.tools ?? {})) {
       const target = functions[binding.function];
       if (!target) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} targets unknown function ${JSON.stringify(binding.function)}`);
-      if (target.kind !== binding.kind) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} kind does not match ${JSON.stringify(binding.function)}`);
+      const targetKind = binding.kind === "internalReducer" ? "reducer" : binding.kind;
+      if (target.kind !== targetKind) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} kind does not match ${JSON.stringify(binding.function)}`);
       if (binding.kind === "query" && (!target.internal || (target.delivery ?? "oneShot") !== "oneShot")) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target an internal one-shot Query`);
       if (binding.kind === "reducer" && target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target a public business-intent Reducer`);
+      if (binding.kind === "internalReducer" && !target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target an internal Reducer`);
     }
   }
   const sortedFiles = sortedRecord(files);
@@ -748,7 +750,7 @@ function validateActionCapabilities(profile: "standard" | "agent", value: JsonVa
     if (!isJsonObject(tools) || Object.keys(tools).length === 0) throw new Error(`agent action ${path} tools must be a non-empty object`);
     for (const [name, binding] of Object.entries(tools)) {
       if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) || !isJsonObject(binding) ||
-        (binding.kind !== "query" && binding.kind !== "reducer") || typeof binding.function !== "string" || !binding.function.trim()) {
+        (binding.kind !== "query" && binding.kind !== "reducer" && binding.kind !== "internalReducer") || typeof binding.function !== "string" || !binding.function.trim()) {
         throw new Error(`agent action ${path} has an invalid tool binding ${JSON.stringify(name)}`);
       }
     }
@@ -1042,7 +1044,17 @@ function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undef
   const filtersColumns = stringArray(readMember(filtersValue, "allowedColumns"));
   const filtersOperators = stringArray(readMember(filtersValue, "allowedOperators"));
   if (filtersArgument && filtersColumns && filtersOperators) {
-    plan.filters = { argument: filtersArgument, allowedColumns: filtersColumns, allowedOperators: filtersOperators as FilterOperator[] };
+    const rawColumnTypes = readMember(filtersValue, "columnTypes");
+    const columnTypes = isJsonObject(rawColumnTypes)
+      ? Object.fromEntries(Object.entries(rawColumnTypes).filter((entry): entry is [string, "text" | "number"] =>
+        entry[1] === "text" || entry[1] === "number"))
+      : undefined;
+    plan.filters = {
+      argument: filtersArgument,
+      allowedColumns: filtersColumns,
+      allowedOperators: filtersOperators as FilterOperator[],
+      ...(columnTypes && Object.keys(columnTypes).length > 0 ? { columnTypes } : {}),
+    };
   }
   const sortValue = readMember(value, "sort");
   const sortDefaultColumn = stringMember(sortValue, "defaultColumn");

@@ -1,6 +1,8 @@
 //! Tenant Query and Reducer execution through the shared TypeScript host.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use gonvex_module_host::protocol::{
@@ -18,7 +20,7 @@ use sqlx::Row;
 use thiserror::Error;
 
 use crate::action_calls::ActionHostCalls;
-use crate::host_calls::{DatabaseCapability, DatabaseHostCalls};
+use crate::host_calls::{DatabaseCapability, DatabaseHostCalls, SCHEDULE_OUTBOX_PATH};
 use crate::modules::ModuleCallLease;
 use crate::Runtime;
 
@@ -65,11 +67,40 @@ pub struct ReducerExecution {
     pub committed_revision: Option<u64>,
 }
 
+pub struct ActionExecution {
+    pub value: Value,
+    pub committed_revision: Option<u64>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CommittedRevisionTracker(Arc<AtomicU64>);
+
+impl CommittedRevisionTracker {
+    fn observe(&self, revision: Option<u64>) {
+        if let Some(revision) = revision {
+            self.0.fetch_max(revision, Ordering::AcqRel);
+        }
+    }
+
+    fn maximum(&self) -> Option<u64> {
+        match self.0.load(Ordering::Acquire) {
+            0 => None,
+            revision => Some(revision),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ExecutionAccess {
     pub allow_internal: bool,
     pub provenance: Option<InvocationProvenance>,
     pub module: Option<ModuleCallLease>,
+    pub committed_revisions: Option<CommittedRevisionTracker>,
+}
+
+pub(crate) struct NestedExecutionAccess {
+    pub module: ModuleCallLease,
+    pub committed_revisions: CommittedRevisionTracker,
 }
 
 impl Runtime {
@@ -159,6 +190,7 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
+        let committed_revisions = access.committed_revisions.clone();
         let module = match access.module {
             Some(module) => module,
             None => self
@@ -228,6 +260,16 @@ impl Runtime {
             })
             .await?;
         let mut handler = DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
+            .with_schema(&module.schema)
+            .with_schedulable_functions(
+                module
+                    .functions
+                    .iter()
+                    .filter(|(_, definition)| {
+                        matches!(definition.kind.as_str(), "reducer" | "action")
+                    })
+                    .map(|(path, _)| path.clone()),
+            )
             .with_actor(
                 &session.identity.account.id,
                 &session.identity.account.email,
@@ -243,6 +285,7 @@ impl Runtime {
             provenance,
         );
         invocation.context.capabilities.action_outbox = true;
+        invocation.context.capabilities.scheduler = true;
         let result = self
             .inner
             .module_host
@@ -262,6 +305,9 @@ impl Runtime {
                     .map_err(ExecutionError::HostCall)?;
                 let committed_revision =
                     control.command_revision(&session.route, command_id).await?;
+                if let Some(tracker) = committed_revisions {
+                    tracker.observe(committed_revision);
+                }
                 let runtime = self.clone();
                 let session = session.clone();
                 tokio::spawn(async move {
@@ -284,7 +330,7 @@ impl Runtime {
         session: &TenantSession,
         path: &str,
         args: Value,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<ActionExecution, ExecutionError> {
         self.execute_tenant_action_with_access(session, path, args, ExecutionAccess::default())
             .await
     }
@@ -295,7 +341,8 @@ impl Runtime {
         path: &str,
         args: Value,
         access: ExecutionAccess,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<ActionExecution, ExecutionError> {
+        let committed_revisions = access.committed_revisions.clone().unwrap_or_default();
         let module = match access.module {
             Some(module) => module,
             None => self
@@ -337,6 +384,7 @@ impl Runtime {
             definition,
             provenance.clone(),
             module.clone(),
+            committed_revisions.clone(),
         )
         .map_err(ExecutionError::HostCall)?;
         let environment = self
@@ -360,11 +408,16 @@ impl Runtime {
         invocation.context.capabilities.functions = handler.functions();
         invocation.context.environment = environment;
         invocation.context.action_tools = handler.tools();
-        self.inner
+        let value = self
+            .inner
             .module_host
             .invoke(invocation, &mut handler)
             .await
-            .map_err(Into::into)
+            .map_err(ExecutionError::from)?;
+        Ok(ActionExecution {
+            value,
+            committed_revision: committed_revisions.maximum(),
+        })
     }
 
     async fn load_action_secrets(
@@ -415,8 +468,12 @@ impl Runtime {
         path: &str,
         args: Value,
         artifact_hash: &str,
-        module: ModuleCallLease,
+        access: NestedExecutionAccess,
     ) -> Result<Value, ExecutionError> {
+        let NestedExecutionAccess {
+            module,
+            committed_revisions,
+        } = access;
         let control = self
             .inner
             .control_plane
@@ -452,6 +509,7 @@ impl Runtime {
                     ExecutionAccess {
                         provenance: Some(child),
                         module: Some(module.clone()),
+                        committed_revisions: Some(committed_revisions.clone()),
                         ..ExecutionAccess::default()
                     },
                 )
@@ -467,24 +525,26 @@ impl Runtime {
                     ExecutionAccess {
                         provenance: Some(child),
                         module: Some(module.clone()),
+                        committed_revisions: Some(committed_revisions.clone()),
                         ..ExecutionAccess::default()
                     },
                 )
                 .await
                 .map(|result| result.value),
-            "action" => {
-                self.execute_tenant_action_with_access(
+            "action" => self
+                .execute_tenant_action_with_access(
                     &fresh,
                     path,
                     args,
                     ExecutionAccess {
                         provenance: Some(child),
                         module: Some(module.clone()),
+                        committed_revisions: Some(committed_revisions),
                         ..ExecutionAccess::default()
                     },
                 )
                 .await
-            }
+                .map(|result| result.value),
             _ => Err(ExecutionError::FunctionMissing(path.to_owned())),
         }?;
         validate_portable_schema(&definition.result_schema, &result).map_err(|message| {
@@ -505,6 +565,37 @@ impl Runtime {
                 Ok(Some(claimed)) => claimed,
                 Ok(None) | Err(_) => return,
             };
+            if claimed.path == SCHEDULE_OUTBOX_PATH {
+                let result = self
+                    .promote_scheduled_outbox(&fallback_session, &claimed)
+                    .await;
+                match result {
+                    Ok(()) => {
+                        if control
+                            .complete_action(&fallback_session.route, &claimed.id)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = control
+                            .retry_action(
+                                &fallback_session.route,
+                                &claimed.id,
+                                claimed.attempts,
+                                &error,
+                            )
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            claimed.attempts.clamp(1, 10) as u64,
+                        ))
+                        .await;
+                    }
+                }
+                continue;
+            }
             let session = if claimed.actor_account_id.starts_with("_gonvex_") {
                 Ok(fallback_session.clone())
             } else {
@@ -574,6 +665,40 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    async fn promote_scheduled_outbox(
+        &self,
+        session: &TenantSession,
+        claimed: &gonvex_postgres::ClaimedAction,
+    ) -> Result<(), String> {
+        let object = claimed
+            .args
+            .as_object()
+            .ok_or_else(|| "scheduled outbox payload must be an object".to_owned())?;
+        let job_id = object
+            .get("jobId")
+            .and_then(Value::as_str)
+            .filter(|value| value.starts_with("job_") && value.len() <= 128)
+            .ok_or_else(|| "scheduled outbox payload has an invalid jobId".to_owned())?;
+        let function = object
+            .get("function")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "scheduled outbox payload has no function".to_owned())?;
+        let args = object.get("args").cloned().unwrap_or(Value::Null);
+        let run_at = object
+            .get("runAtUnixMs")
+            .and_then(Value::as_i64)
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .ok_or_else(|| "scheduled outbox payload has an invalid runAtUnixMs".to_owned())?;
+        let provenance = serde_json::from_value::<InvocationProvenance>(claimed.provenance.clone())
+            .unwrap_or_else(|_| {
+                direct_provenance(session, InvocationChannel::System, &claimed.id, "")
+            });
+        self.enqueue_scheduled_with_id(session, job_id, function, args, run_at, &provenance)
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn drain_all_action_outboxes(&self) {
@@ -691,6 +816,7 @@ pub(crate) fn invocation(
             }),
             permissions: session.member.permissions.clone(),
             invocation: invocation_info,
+            nesting_depth: provenance.depth,
             environment: BTreeMap::new(),
             action_tools: Vec::new(),
             capabilities: CapabilitiesWire {
@@ -821,7 +947,7 @@ fn require_interactive_target<'a>(
     path: &str,
     artifact_hash: &str,
 ) -> Result<&'a crate::modules::FunctionDefinition, ExecutionError> {
-    if parent.depth >= 8 {
+    if parent.depth >= gonvex_module_runtime::MAX_INVOCATION_DEPTH {
         return Err(ExecutionError::InvocationDepth);
     }
     if artifact_hash != module.artifact_hash {
@@ -926,6 +1052,17 @@ mod tests {
             },
             admission_revision: 7,
         }
+    }
+
+    #[test]
+    fn action_revision_tracker_keeps_the_highest_nested_reducer_revision() {
+        let tracker = CommittedRevisionTracker::default();
+        assert_eq!(tracker.maximum(), None);
+        tracker.observe(Some(17));
+        tracker.clone().observe(Some(9));
+        tracker.clone().observe(None);
+        tracker.clone().observe(Some(23));
+        assert_eq!(tracker.maximum(), Some(23));
     }
 
     #[test]

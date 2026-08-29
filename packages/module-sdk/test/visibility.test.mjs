@@ -93,6 +93,63 @@ test("visibility supports explicit self-join aliases and rejects ambiguous dupli
   }), /every occurrence requires an explicit alias/);
 });
 
+test("visibility supports literal predicates on source and joined rows", () => {
+  const plan = visibility({
+    table: "boardMessages",
+    key: "id",
+    sets: {
+      publicMessages: {
+        table: "boardMessages",
+        select: "id",
+        joins: [{ table: "boards", leftColumn: "boardId", rightColumn: "id" }],
+        where: [{ table: "boards", column: "visibility", value: { literal: "public" } }],
+      },
+    },
+    where: {
+      operator: "or",
+      children: [
+        { operator: "eq", column: "visibility", value: { literal: "public" } },
+        { operator: "inSet", column: "id", set: "publicMessages" },
+      ],
+    },
+  });
+
+  assert.deepEqual(plan.sets.publicMessages.where[0].value, { literal: "public" });
+  assert.deepEqual(plan.where.children[0].value, { literal: "public" });
+  assert.ok(Object.isFrozen(plan.sets.publicMessages.where[0].value));
+  assert.ok(Object.isFrozen(plan.where.children[0].value));
+});
+
+test("visibility literal constraints require an explicit literal wrapper", () => {
+  assert.throws(() => visibility({
+    ...validPlan(),
+    where: { operator: "eq", column: "visibility", value: "public" },
+  }), /must be an object/);
+  assert.throws(() => visibility({
+    ...validPlan(),
+    sets: {
+      teams: {
+        ...validPlan().sets.teams,
+        where: [{ table: "members", column: "status" }],
+      },
+    },
+  }), /requires exactly one of context or value/);
+  assert.throws(() => visibility({
+    ...validPlan(),
+    sets: {
+      teams: {
+        ...validPlan().sets.teams,
+        where: [{
+          table: "members",
+          column: "status",
+          context: "member.id",
+          value: { literal: "active" },
+        }],
+      },
+    },
+  }), /requires exactly one of context or value/);
+});
+
 test("ModuleBuilder emits plans keyed by their source table", () => {
   const module = createModule({ name: "whagons", version: "1" });
   const plan = module.visibility(validPlan());

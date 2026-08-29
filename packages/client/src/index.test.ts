@@ -111,6 +111,115 @@ function sentMessages(socket = latestSocket()) {
 }
 
 describe("GonvexClient", () => {
+	function installBrowserOnlineEvents() {
+		const listeners = new Set<() => void>();
+		vi.stubGlobal("addEventListener", (type: string, listener: () => void) => {
+			if (type === "online") listeners.add(listener);
+		});
+		vi.stubGlobal("removeEventListener", (type: string, listener: () => void) => {
+			if (type === "online") listeners.delete(listener);
+		});
+		return () => { for (const listener of listeners) listener(); };
+	}
+
+	it("admits offline reducers without sending on an open stale socket and replays once online", async () => {
+		const emitOnline = installBrowserOnlineEvents();
+		vi.stubGlobal("navigator", { onLine: false });
+		const client = new GonvexClient("ws://runtime.test/ws", { outbox: { enabled: false } });
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		await flushMicrotasks();
+		const reducerRef: FunctionReference = {
+			kind: "reducer",
+			path: "tasks.update",
+			offline: { mode: "allowed", conflict: "merge" },
+			optimistic: {
+				transaction: {
+					effects: [{
+						operation: "upsert",
+						entity: "tasks",
+						id: ["id"],
+						value: { id: { $arg: "id" }, title: { $arg: "title" } },
+					}],
+				},
+			},
+		};
+
+		await expect(client.reducer(reducerRef, { id: "task-a", title: "Offline" })).resolves.toMatchObject({ status: "queued" });
+		expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(0);
+		expect(client.localReplica.entity("tasks", "task-a")).toMatchObject({ title: "Offline" });
+		expect(await client.outboxCount()).toBe(1);
+
+		vi.stubGlobal("navigator", { onLine: true });
+		emitOnline();
+		await vi.waitFor(() => expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1));
+		const call = sentMessages(socket).find((message) => message.type === "reducer.call")!;
+		socket.receive({ type: "reducer.result", id: call.id, path: call.path, result: "task-a" });
+		await vi.waitFor(() => expect(client.outboxCount()).resolves.toBe(0));
+		expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1);
+		client.close();
+	});
+
+	it("queues an offline reducer before opening a socket when the current socket is closed", async () => {
+		installBrowserOnlineEvents();
+		vi.stubGlobal("navigator", { onLine: false });
+		const client = new GonvexClient("ws://runtime.test/ws", { outbox: { enabled: false } });
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.close();
+		const reducerRef: FunctionReference = {
+			kind: "reducer",
+			path: "tasks.update",
+			offline: { mode: "allowed" },
+			optimistic: { transaction: { effects: [{ operation: "upsert", entity: "tasks", id: ["id"], value: { id: { $arg: "id" }, title: { $arg: "title" } } }] } },
+		};
+		await expect(client.reducer(reducerRef, { id: "task-a", title: "Offline" })).resolves.toMatchObject({ status: "queued" });
+		expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(0);
+		expect(await client.outboxCount()).toBe(1);
+		client.close();
+	});
+
+	it("wakes a queued reducer after same-scope reauthentication succeeds", async () => {
+		vi.stubGlobal("navigator", { onLine: true });
+		const client = new GonvexClient("ws://runtime.test/ws", {
+			project: "shop", tenant: "tenant-a", token: "initial-token", outbox: { enabled: false },
+		});
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		const initialAuth = sentMessages(socket).find((message) => message.type === "auth")!;
+		socket.receive({ type: "auth.result", id: initialAuth.id, result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }) });
+		await flushMicrotasks();
+
+		client.setAuth({ token: "rotated-token" });
+		const rotatingAuth = sentMessages(socket).filter((message) => message.type === "auth").at(-1)!;
+		const reducerRef: FunctionReference = {
+			kind: "reducer", path: "priorities.create", offline: { mode: "allowed" },
+			optimistic: {
+				transaction: {
+					effects: [{ operation: "upsert", entity: "priorities", id: ["id"], value: { id: { $arg: "id" }, name: { $arg: "name" } } }],
+				},
+			},
+		};
+		const queued = await client.reducer(reducerRef, { id: "offline-priority", name: "Offline" });
+		expect(queued).toMatchObject({ status: "queued" });
+		expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(0);
+
+		socket.receive({ type: "auth.result", id: rotatingAuth.id, result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }) });
+		await vi.waitFor(() => expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1));
+		const replay = sentMessages(socket).find((message) => message.type === "reducer.call")!;
+		socket.receive({ type: "reducer.result", id: replay.id, path: replay.path, result: "offline-priority", originCommandId: (queued as { reducerId: string }).reducerId, committedRevision: 2 });
+		socket.receive({
+			type: "replica.transaction", cursor: { epoch: "epoch:test", revision: 2 },
+			originCommandId: (queued as { reducerId: string }).reducerId,
+			changes: [{ entity: "priorities", id: "offline-priority", operation: "insert", newValue: { id: "offline-priority", name: "Offline" } }],
+		});
+		await vi.waitFor(() => expect(client.localReplica.hasPendingCommand((queued as { reducerId: string }).reducerId)).toBe(false));
+		client.close();
+	});
+
 	it("tracks the active artifact hash across authentication and hot reload without reconnecting", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		client.setAuth({ project: "shop", tenant: "tenant-a", token: "session" });
@@ -132,11 +241,16 @@ describe("GonvexClient", () => {
 	it("subscribes and resumes live Control Plane Queries on the persistent connection", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		client.setAuth({project:"shop",tenant:"tenant-a",token:"session"});
-		const socket=(client.connect(),latestSocket());socket.open();socket.receive({type:"session.ready",capabilities:{queryBatch:0},replica:testReplicaDirective});socket.receive(authenticatedResult({type:"auth.result",id:"auth"}));
+		const socket=(client.connect(),latestSocket());socket.open();socket.receive({type:"session.ready",capabilities:{queryBatch:0},replica:testReplicaDirective});
+		const firstAuth = sentMessages(socket).find((message) => message.type === "auth")!;
+		socket.receive({type:"auth.result",id:firstAuth.id,result:authenticatedResult({accountId:"account-a",tenantId:"tenant-a"})});
+		await flushMicrotasks();
 		const updates=vi.fn();client.subscribeLiveQuery(control.tenants.mine,{},updates);
-		expect(sentMessages(socket).at(-1)).toMatchObject({type:"query.subscribe",path:"control.tenants.mine",scope:"control"});
+		await vi.waitFor(() => expect(sentMessages(socket).at(-1)).toMatchObject({type:"query.subscribe",path:"control.tenants.mine",scope:"control"}));
 		const subscription=sentMessages(socket).at(-1);socket.receive({type:"query.result",id:subscription.id,path:"control.tenants.mine",result:[],reason:"initial"});await flushMicrotasks();expect(updates).toHaveBeenCalled();
-		socket.disconnect();vi.advanceTimersByTime(1_000);const resumed=latestSocket();resumed.open();resumed.receive({type:"session.ready",capabilities:{queryBatch:0},replica:testReplicaDirective});resumed.receive(authenticatedResult({type:"auth.result",id:"auth-2"}));await flushMicrotasks();expect(sentMessages(resumed).some((message)=>message.type==="query.subscribe"&&message.scope==="control")).toBe(true);
+		socket.disconnect();vi.advanceTimersByTime(1_000);const resumed=latestSocket();resumed.open();resumed.receive({type:"session.ready",capabilities:{queryBatch:0},replica:testReplicaDirective});
+		const resumedAuth = sentMessages(resumed).find((message) => message.type === "auth")!;
+		resumed.receive({type:"auth.result",id:resumedAuth.id,result:authenticatedResult({accountId:"account-a",tenantId:"tenant-a"})});await flushMicrotasks();expect(sentMessages(resumed).some((message)=>message.type==="query.subscribe"&&message.scope==="control")).toBe(true);
 	});
 	it("batches query subscribes into one frame when the server advertises queryBatch", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
@@ -256,6 +370,60 @@ describe("GonvexClient", () => {
 		expect(oneShotCall.idempotencyKey).toBeUndefined();
 		socket.receive({ type: "reducer.result", id: oneShotCall.id, path: oneShotCall.path, result: "id-x" });
 		await expect(oneShot).resolves.toBe("id-x");
+	});
+
+	it("does not replay a new optimistic reducer while its Replica scope is restoring", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws", {
+			project: "shop",
+			tenant: "tenant-a",
+			token: "session-token",
+			outbox: { enabled: false },
+		});
+		client.connect();
+		const reducer = client.reducer(
+			{ kind: "reducer", path: "tasks.update" },
+			{ id: "task-a", title: "Updated" },
+			{
+				offline: "reject",
+				optimistic: [{
+					collection: "tasks",
+					rowId: "task-a",
+					op: "patch",
+					fields: { title: "Updated" },
+				}],
+			},
+		);
+		const socket = latestSocket();
+		socket.open();
+		const auth = sentMessages(socket).find((message) => message.type === "auth")!;
+
+		// The runtime sends the connection directive before the accepted auth
+		// result. Both can activate the same Replica scope while the reducer is
+		// already waiting behind authentication.
+		socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+		socket.receive({
+			type: "auth.result",
+			id: auth.id,
+			result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }),
+		});
+
+		await vi.waitFor(() => {
+			expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1);
+		});
+		const call = sentMessages(socket).find((message) => message.type === "reducer.call")!;
+		socket.receive({
+			type: "reducer.result",
+			id: call.id,
+			path: call.path,
+			result: { id: "task-a" },
+			originCommandId: call.id,
+			committedRevision: 2,
+		});
+
+		await expect(reducer).resolves.toEqual({ id: "task-a" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1);
+		client.close();
 	});
 
 	it("rejects stale revisions and advances progress without notifying listeners", async () => {
@@ -450,7 +618,7 @@ describe("GonvexClient", () => {
     });
   });
 
-  it("reauthenticates before restoring subscriptions after reconnect", () => {
+  it("reauthenticates before restoring subscriptions after reconnect", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token", tenant: "tenant-a" });
 
     client.subscribeLiveQuery(ref, {}, () => undefined);
@@ -458,6 +626,9 @@ describe("GonvexClient", () => {
     firstSocket.open();
     const [firstAuth] = sentMessages(firstSocket);
     firstSocket.receive({ type: "auth.result", id: firstAuth.id, result: authenticatedResult({ accountId: "account-a" }) });
+    await vi.waitFor(() => {
+      expect(sentMessages(firstSocket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
+    });
 
     firstSocket.disconnect();
     vi.advanceTimersByTime(250);
@@ -471,7 +642,9 @@ describe("GonvexClient", () => {
       tenant: "tenant-a",
     });
     secondSocket.receive({ type: "auth.result", id: sentMessages(secondSocket)[0].id, result: authenticatedResult({ accountId: "account-a" }) });
-    expect(sentMessages(secondSocket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(sentMessages(secondSocket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
+    });
   });
 
   it("does not reconnect after an explicit close", () => {
@@ -500,7 +673,7 @@ describe("GonvexClient", () => {
     ]);
   });
 
-  it("sends auth before queued messages when the socket opens", () => {
+  it("sends auth before queued messages when the socket opens", async () => {
     const client = new GonvexClient("ws://runtime.test/ws", { token: "session-token", tenant: "tenant-a" });
 
     client.subscribeLiveQuery(ref, { status: "open" }, () => undefined);
@@ -519,10 +692,12 @@ describe("GonvexClient", () => {
     const [{ id: authID }] = sentMessages(socket);
     socket.receive({ type: "auth.result", id: authID, result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }) });
 
-    expect(sentMessages(socket)).toMatchObject([
-      { type: "auth", token: "session-token", tenant: "tenant-a" },
-      { type: "query.subscribe", path: "tasks.list", args: { status: "open" } },
-    ]);
+    await vi.waitFor(() => {
+      expect(sentMessages(socket)).toMatchObject([
+        { type: "auth", token: "session-token", tenant: "tenant-a" },
+        { type: "query.subscribe", path: "tasks.list", args: { status: "open" } },
+      ]);
+    });
   });
 
   it("identifies a project before signed-out queries so project auth can be enforced", () => {
@@ -570,6 +745,68 @@ describe("GonvexClient", () => {
     expect(client.localReplica.entity("tasks", "task-a")).toBeUndefined();
   });
 
+  it("rotates Replica subscriptions when membership changes during reauthentication", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.recent",
+      delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"], maxRows: 100 },
+    };
+    const identity = { sub: "account-a", iss: "https://identity.test" };
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "secure-app",
+      tenant: "tenant-a",
+      token: "session-token-1",
+      identity,
+    });
+    const watch = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    const initialAuth = sentMessages(socket).find((message) => message.type === "auth");
+    socket.receive({
+      type: "auth.result",
+      id: initialAuth.id,
+      result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }),
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    const firstOpen = sentMessages(socket).find((message) => message.type === "replica.open");
+
+    client.setAuth({ token: "session-token-2", identity });
+    const rotatingAuth = sentMessages(socket).filter((message) => message.type === "auth").at(-1);
+    expect(rotatingAuth.id).not.toBe(initialAuth.id);
+
+    socket.receive({
+      type: "auth.error",
+      id: "membership-changed",
+      error: "tenant membership changed; authenticate again",
+    });
+    expect(client.localReplica.entity("tasks", "task-a")).toBeUndefined();
+
+    // The runtime can still emit failures for opens it discarded with the old
+    // scope. Their retired IDs must not become errors in the current watch.
+    socket.receive({
+      type: "replica.error",
+      id: firstOpen.id,
+      path: collectionRef.path,
+      error: "authenticate with an active tenant before opening a Replica Collection",
+    });
+    expect(() => watch.localReplicaResult()).not.toThrow();
+
+    socket.receive({
+      type: "auth.result",
+      id: rotatingAuth.id,
+      result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }),
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    });
+    const reopened = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1);
+    expect(reopened.id).not.toBe(firstOpen.id);
+    client.close();
+  });
+
   it("exposes a runtime read-only Local Replica facade", () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const replica = client.localReplica as unknown as Record<string, unknown>;
@@ -582,7 +819,7 @@ describe("GonvexClient", () => {
     expect(replica.clear).toBeUndefined();
   });
 
-  it("queues subscription messages while an auth update is in flight", () => {
+  it("queues subscription messages while an auth update is in flight", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     client.connect();
     const socket = latestSocket();
@@ -598,10 +835,48 @@ describe("GonvexClient", () => {
     const [{ id: authID }] = sentMessages(socket);
     socket.receive({ type: "auth.result", id: authID, result: authenticatedResult({ accountId: "account-b", tenantId: "tenant-b" }) });
 
-    expect(sentMessages(socket)).toMatchObject([
-      { type: "auth", token: "next-token", tenant: "tenant-b" },
-      { type: "query.subscribe", path: "tasks.list", args: { status: "open" } },
-    ]);
+    await vi.waitFor(() => {
+      expect(sentMessages(socket)).toMatchObject([
+        { type: "auth", token: "next-token", tenant: "tenant-b" },
+        { type: "query.subscribe", path: "tasks.list", args: { status: "open" } },
+      ]);
+    });
+  });
+
+  it("opens tenant Replica Collections only after the accepted auth scope is active", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.recent",
+      delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"], maxRows: 100 },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.watchReplica(collectionRef, {});
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+
+    client.setAuth({ project: "shop", token: "next-token", tenant: "tenant-b" });
+    expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+
+    const auth = sentMessages(socket).findLast((message) => message.type === "auth");
+    socket.receive({
+      type: "auth.result",
+      id: auth.id,
+      result: authenticatedResult({ accountId: "account-b", tenantId: "tenant-b" }),
+    });
+
+    // Receiving auth.result starts Local Replica scope activation. It does not
+    // make tenant subscriptions sendable in the middle of that state change.
+    expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    });
+    client.close();
   });
 
   it("sends auth updates on an open socket", () => {
@@ -613,6 +888,64 @@ describe("GonvexClient", () => {
     client.setAuth({ token: "next-token", tenant: "tenant-b" });
 
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "auth", token: "next-token", tenant: "tenant-b" });
+  });
+
+  it("does not send another auth frame when only local refresh metadata changes", () => {
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "shop",
+      tenant: "tenant-b",
+      token: "next-token",
+    });
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    const initialAuth = sentMessages(socket).filter((message) => message.type === "auth");
+    const fetchToken = vi.fn(async () => "next-token");
+
+    client.setAuth({ token: "next-token", fetchToken });
+
+    expect(sentMessages(socket).filter((message) => message.type === "auth")).toEqual(initialAuth);
+  });
+
+  it("ignores an obsolete project-only auth response after a newer tenant auth frame", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws", { project: "shop" });
+    const authErrors = vi.fn();
+    client.onAuthError(authErrors);
+    client.subscribeLiveQuery(ref, {}, vi.fn());
+    const socket = latestSocket();
+    socket.open();
+    const projectOnlyAuth = sentMessages(socket).find((message) => message.type === "auth")!;
+
+    client.setAuth({
+      project: "shop",
+      tenant: "tenant-b",
+      token: "tenant-token",
+      identity: { sub: "account-b", iss: "shop" },
+    });
+    expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(1);
+
+    socket.receive({
+      type: "auth.result",
+      id: projectOnlyAuth.id,
+      result: authenticatedResult({ accountId: "account-b" }),
+    });
+    const authFrames = sentMessages(socket).filter((message) => message.type === "auth");
+    expect(authFrames).toHaveLength(2);
+    const tenantAuth = authFrames.at(-1)!;
+    expect(tenantAuth.id).not.toBe(projectOnlyAuth.id);
+
+    socket.receive({
+      type: "auth.result",
+      id: tenantAuth.id,
+      result: authenticatedResult({ accountId: "account-b", tenantId: "tenant-b" }),
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
+    });
+
+    socket.receive({ type: "auth.error", id: projectOnlyAuth.id, error: "authentication is required" });
+    expect(authErrors).not.toHaveBeenCalled();
+    expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
   });
 
   it("fetches a token through the installed fetcher before sending auth", async () => {
@@ -703,6 +1036,31 @@ describe("GonvexClient", () => {
     await expect(activation).rejects.toThrow("grant already used");
   });
 
+  it("keeps an awaited tenant transition when React installs its fetcher for the same credentials", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    const fetchToken = vi.fn(async () => "session-token");
+    const activation = client.authenticate({
+      project: "shop",
+      tenant: "tenant-a",
+      token: "session-token",
+      identity: { sub: "account-a", iss: "shop" },
+    });
+    const auth = sentMessages(socket).at(-1);
+
+    client.setAuth({ token: "session-token", fetchToken });
+
+    expect(sentMessages(socket).filter((message) => message.type === "auth")).toHaveLength(1);
+    socket.receive({
+      type: "auth.result",
+      id: auth.id,
+      result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }),
+    });
+    await expect(activation).resolves.toBeUndefined();
+  });
+
   it("force-refreshes the token and re-sends auth when the server rejects it", async () => {
     let current = "expired-token";
     const fetchToken = vi.fn(async ({ forceRefreshToken }: { forceRefreshToken: boolean }) => {
@@ -731,6 +1089,42 @@ describe("GonvexClient", () => {
     socket.receive({ type: "auth.result", id: auths[1].id, result: authenticatedResult({ accountId: "account-a" }) });
     await vi.waitFor(() => expect(sentMessages(socket).some((message) => message.type === "query.subscribe")).toBe(true));
     expect(sentMessages(socket).at(-1)).toMatchObject({ type: "query.subscribe", path: "tasks.list" });
+  });
+
+  it("re-subscribes Live Queries after same-socket token rotation", async () => {
+    const token = (marker: string) => {
+      const payload = globalThis.btoa(JSON.stringify({ sub: "account-a", iss: "shop", marker }));
+      return `header.${payload}.signature`;
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "shop",
+      tenant: "tenant-a",
+      token: token("first"),
+    });
+
+    client.subscribeLiveQuery(ref, {}, vi.fn());
+    const socket = latestSocket();
+    socket.open();
+    const firstAuth = sentMessages(socket).find((message) => message.type === "auth");
+    socket.receive({
+      type: "auth.result",
+      id: firstAuth.id,
+      result: authenticatedResult({ accountId: "account-a" }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const initialSubscribeCount = sentMessages(socket).filter((message) => message.type === "query.subscribe").length;
+    expect(initialSubscribeCount).toBeGreaterThan(0);
+
+    client.setAuth({ token: token("second") });
+    const secondAuth = sentMessages(socket).filter((message) => message.type === "auth").at(-1);
+    socket.receive({
+      type: "auth.result",
+      id: secondAuth.id,
+      result: authenticatedResult({ accountId: "account-a" }),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(initialSubscribeCount + 1);
   });
 
   it("can refresh an expired access token through the same native Control Plane socket", async () => {
@@ -1031,7 +1425,7 @@ describe("GonvexClient", () => {
     socket.open();
     socket.receive({ type: "session.ready", replica: testReplicaDirective });
     await vi.waitFor(() => {
-      expect(sentMessages(socket).filter((message) => message.type === "replica.open").length).toBeGreaterThanOrEqual(2);
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
     });
     const open = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1);
     expect(open).toBeDefined();
@@ -1054,6 +1448,858 @@ describe("GonvexClient", () => {
     await vi.waitFor(() => {
       expect(watch.localReplicaState()).toMatchObject({ completeness: "partial", truncated: true, computedRevision: 12 });
     });
+    client.close();
+  });
+
+  it("keeps a ready Replica Collection authoritative while applying its delta", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.recent",
+      delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"], maxRows: 100 },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const watch = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    const open = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1)!;
+    const initialRows = [{ id: "task-1", title: "Pending" }];
+    const initialHashes = await replicaRowsHashes(initialRows, "id");
+    const initialDigest = await replicaHashesDigest(initialHashes);
+    socket.receive({
+      type: "replica.snapshot", id: open.id, path: collectionRef.path,
+      result: initialRows, cursor: { epoch: "epoch:test", revision: 1 }, key: "id",
+      maxRows: 100, hashes: initialHashes, digest: initialDigest, truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready", id: open.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 1 }, digest: initialDigest, truncated: false,
+    });
+    await vi.waitFor(() => {
+      expect(watch.localReplicaState()).toMatchObject({
+        source: "server", freshness: "current", isUpToDate: true,
+      });
+    });
+
+    const states: Array<{ source: string; freshness: string; isUpToDate: boolean }> = [];
+    const stop = watch.onUpdate(() => {
+      const state = watch.localReplicaState();
+      if (state) states.push({
+        source: state.source,
+        freshness: state.freshness,
+        isUpToDate: state.isUpToDate,
+      });
+    });
+    await flushMicrotasks();
+    states.length = 0;
+
+    const updatedRows = [{ id: "task-1", title: "In progress" }];
+    const updatedHashes = await replicaRowsHashes(updatedRows, "id");
+    const updatedDigest = await replicaHashesDigest(updatedHashes);
+    socket.receive({
+      type: "replica.delta", id: open.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 2 }, upserts: updatedRows, deleted: [],
+    });
+    await vi.waitFor(() => {
+      expect(watch.localReplicaState()).toMatchObject({
+        source: "server", freshness: "current", isUpToDate: true,
+      });
+      expect(watch.localReplicaResult()).toEqual(updatedRows);
+    });
+    expect(states.length).toBeGreaterThan(0);
+    expect(states.some((state) => state.source === "cache" || state.freshness === "verifying" || !state.isUpToDate)).toBe(false);
+
+    socket.receive({
+      type: "replica.ready", id: open.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 2 }, digest: updatedDigest, truncated: false,
+    });
+    await vi.waitFor(() => expect(watch.localReplicaState()).toMatchObject({
+      source: "server", freshness: "current", isUpToDate: true,
+    }));
+    stop();
+    client.close();
+  });
+
+  it("keeps each hydrated Replica window verifying until its own ready frame", async () => {
+    const statusesRef: FunctionReference = {
+      kind: "query",
+      path: "statuses.all",
+      delivery: "replica",
+      replica: { table: "statuses", key: "id", columns: ["id", "name"], maxRows: 100 },
+    };
+    const teamsRef: FunctionReference = {
+      kind: "query",
+      path: "teams.all",
+      delivery: "replica",
+      replica: { table: "teams", key: "id", columns: ["id", "name"], maxRows: 100 },
+    };
+    const statusesRows = [{ id: "status-1", name: "Open" }];
+    const teamsRows = [{ id: "team-1", name: "Team A" }];
+    const statusesHashes = await replicaRowsHashes(statusesRows, "id");
+    const teamsHashes = await replicaRowsHashes(teamsRows, "id");
+    const statusesDigest = await replicaHashesDigest(statusesHashes);
+    const teamsDigest = await replicaHashesDigest(teamsHashes);
+    const storage = new MemoryLocalReplicaStorage();
+
+    const first = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const firstStatuses = first.watchReplica(statusesRef, {});
+    const firstTeams = first.watchReplica(teamsRef, {});
+    const firstSocket = latestSocket();
+    firstSocket.open();
+    firstSocket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(firstSocket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    });
+    const firstOpens = sentMessages(firstSocket).filter((message) => message.type === "replica.open");
+    const firstStatusesOpen = firstOpens.find((message) => message.path === statusesRef.path)!;
+    const firstTeamsOpen = firstOpens.find((message) => message.path === teamsRef.path)!;
+    firstSocket.receive({
+      type: "replica.snapshot", id: firstStatusesOpen.id, path: statusesRef.path,
+      result: statusesRows, cursor: { epoch: "epoch:test", revision: 10 }, key: "id",
+      maxRows: 100, hashes: statusesHashes, digest: statusesDigest, truncated: false,
+    });
+    firstSocket.receive({
+      type: "replica.ready", id: firstStatusesOpen.id, path: statusesRef.path,
+      cursor: { epoch: "epoch:test", revision: 10 }, digest: statusesDigest, truncated: false,
+    });
+    firstSocket.receive({
+      type: "replica.snapshot", id: firstTeamsOpen.id, path: teamsRef.path,
+      result: teamsRows, cursor: { epoch: "epoch:test", revision: 10 }, key: "id",
+      maxRows: 100, hashes: teamsHashes, digest: teamsDigest, truncated: false,
+    });
+    firstSocket.receive({
+      type: "replica.ready", id: firstTeamsOpen.id, path: teamsRef.path,
+      cursor: { epoch: "epoch:test", revision: 10 }, digest: teamsDigest, truncated: false,
+    });
+    await vi.waitFor(() => {
+      expect(firstStatuses.localReplicaState()?.isUpToDate).toBe(true);
+      expect(firstTeams.localReplicaState()?.isUpToDate).toBe(true);
+    });
+    first.close();
+
+    const second = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const secondStatuses = second.watchReplica(statusesRef, {});
+    const secondTeams = second.watchReplica(teamsRef, {});
+    const secondSocket = latestSocket();
+    secondSocket.open();
+    secondSocket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(secondStatuses.localReplicaState()).toMatchObject({
+        rows: statusesRows, source: "cache", freshness: "verifying", isUpToDate: false,
+      });
+      expect(secondTeams.localReplicaState()).toMatchObject({
+        rows: teamsRows, source: "cache", freshness: "verifying", isUpToDate: false,
+      });
+      expect(sentMessages(secondSocket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    });
+    const secondOpens = sentMessages(secondSocket).filter((message) => message.type === "replica.open");
+    const secondStatusesOpen = secondOpens.find((message) => message.path === statusesRef.path)!;
+    const secondTeamsOpen = secondOpens.find((message) => message.path === teamsRef.path)!;
+
+    secondSocket.receive({
+      type: "replica.ready", id: secondStatusesOpen.id, path: statusesRef.path,
+      cursor: { epoch: "epoch:test", revision: 10 }, digest: statusesDigest, truncated: false,
+    });
+    await vi.waitFor(() => {
+      expect(second.localReplica.freshness()).toBe("current");
+      expect(secondStatuses.localReplicaState()).toMatchObject({
+        source: "server", freshness: "current", isUpToDate: true,
+      });
+      expect(secondTeams.localReplicaState()).toMatchObject({
+        source: "cache", freshness: "verifying", isUpToDate: false,
+      });
+    });
+
+    secondSocket.receive({
+      type: "replica.ready", id: secondTeamsOpen.id, path: teamsRef.path,
+      cursor: { epoch: "epoch:test", revision: 10 }, digest: teamsDigest, truncated: false,
+    });
+    await vi.waitFor(() => {
+      expect(secondTeams.localReplicaState()).toMatchObject({
+        source: "server", freshness: "current", isUpToDate: true,
+      });
+    });
+    second.close();
+  });
+
+  it("persists a bounded snapshot only once when inline integrity already proves ready", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "statuses.all",
+      delivery: "replica",
+      replica: { table: "statuses", key: "id", columns: ["id", "name"], maxRows: 100 },
+    };
+    const storage = new MemoryLocalReplicaStorage();
+    const replaceWindow = vi.spyOn(storage, "replaceWindow");
+    const client = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const watch = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    const open = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1)!;
+    const rows = [{ id: "status-1", name: "Working" }];
+    const hashes = await replicaRowsHashes(rows, "id");
+    const digest = await replicaHashesDigest(hashes);
+
+    socket.receive({
+      type: "replica.snapshot", id: open.id, path: collectionRef.path,
+      result: rows, cursor: { epoch: "epoch:test", revision: 18 }, key: "id",
+      maxRows: 100, hashes, digest, truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready", id: open.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 18 }, digest, truncated: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(watch.localReplicaState()).toMatchObject({ completeness: "complete", computedRevision: 18 });
+      expect(replaceWindow).toHaveBeenCalledTimes(1);
+    });
+    client.close();
+  });
+
+  it("applies a received transaction before a following Replica watermark", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "statuses.all",
+      delivery: "replica",
+      replica: { table: "statuses", key: "id", columns: ["id", "name"], maxRows: 100 },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      localReplica: { storage: new MemoryLocalReplicaStorage() },
+    });
+    const watch = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({
+      type: "session.ready",
+      capabilities: { replicaWatermark: 1 },
+      replica: testReplicaDirective,
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    const open = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1)!;
+    const rows = [{ id: "status-1", name: "Working" }];
+    const hashes = await replicaRowsHashes(rows, "id");
+    const digest = await replicaHashesDigest(hashes);
+
+    socket.receive({
+      type: "replica.snapshot",
+      id: open.id,
+      path: collectionRef.path,
+      result: rows,
+      cursor: { epoch: "epoch:test", revision: 18 },
+      key: "id",
+      maxRows: 100,
+      hashes,
+      digest,
+      truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready",
+      id: open.id,
+      path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 18 },
+      digest,
+      truncated: false,
+    });
+    await vi.waitFor(() => {
+      expect(watch.localReplicaState()).toMatchObject({ completeness: "complete", computedRevision: 18 });
+    });
+
+    // These frames arrive back-to-back. The transaction is queued for durable
+    // application, so the following watermark must wait behind it instead of
+    // raising the cursor first and making revision 19 look stale.
+    socket.receive({
+      type: "replica.transaction",
+      cursor: { epoch: "epoch:test", revision: 19 },
+      changes: [{
+        entity: "statuses",
+        id: "status-2",
+        operation: "insert",
+        newValue: { id: "status-2", name: "Blocked" },
+      }],
+    });
+    socket.receive({ type: "replica.watermark", revision: 19 });
+
+    await vi.waitFor(() => {
+      expect(client.localReplica.entity("statuses", "status-2")).toEqual({
+        id: "status-2",
+        name: "Blocked",
+      });
+      expect(watch.localReplicaState()).toMatchObject({ computedRevision: 19 });
+    });
+    client.close();
+  });
+
+  it("settles a tenant Reducer only after its collection membership delta is durable", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "members.listMemberSpots",
+      delivery: "replica",
+      replica: {
+        table: "memberSpots",
+        key: "_id",
+        columns: ["_id", "memberId", "spotId"],
+        maxRows: 10_000,
+      },
+    };
+    const storage = new MemoryLocalReplicaStorage();
+    let releaseWatermark!: () => void;
+    const watermarkPersisted = new Promise<void>((resolve) => { releaseWatermark = resolve; });
+    const persistWatermark = storage.advanceWatermark.bind(storage);
+    const advanceWatermark = vi.spyOn(storage, "advanceWatermark").mockImplementation(async (...args) => {
+      await watermarkPersisted;
+      await persistWatermark(...args);
+    });
+    const client = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const memberSpots = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({
+      type: "session.ready",
+      capabilities: { replicaWatermark: 1 },
+      replica: testReplicaDirective,
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    const open = sentMessages(socket).find((message) => message.type === "replica.open")!;
+    const emptyDigest = await replicaHashesDigest({});
+    socket.receive({
+      type: "replica.snapshot",
+      id: open.id,
+      path: collectionRef.path,
+      result: [],
+      cursor: { epoch: "epoch:test", revision: 1 },
+      key: "_id",
+      hashes: {},
+      digest: emptyDigest,
+      truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready",
+      id: open.id,
+      path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 1 },
+      digest: emptyDigest,
+      truncated: false,
+    });
+    await vi.waitFor(() => expect(memberSpots.localReplicaResult()).toEqual([]));
+
+    const reducer = client.reducer(
+      { kind: "reducer", path: "members.saveProfileAndTeams" },
+      { memberId: "member-1", spots: ["spot-1"] },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const call = sentMessages(socket).findLast((message) => message.type === "reducer.call")!;
+    let settled = false;
+    void reducer.then(() => { settled = true; });
+    socket.receive({
+      type: "reducer.result",
+      id: call.id,
+      path: call.path,
+      result: { memberId: "member-1" },
+      originCommandId: call.id,
+      committedRevision: 4,
+    });
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
+    const rows = [{ _id: "member-spot-1", memberId: "member-1", spotId: "spot-1" }];
+    const digest = await replicaHashesDigest(await replicaRowsHashes(rows, "_id"));
+    socket.receive({
+      type: "replica.transaction",
+      cursor: { epoch: "epoch:test", revision: 3 },
+      originCommandId: call.id,
+      changes: [{
+        entity: "memberSpots",
+        id: "member-spot-1",
+        operation: "insert",
+        newValue: rows[0],
+      }],
+    });
+    socket.receive({
+      type: "replica.delta",
+      id: open.id,
+      path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 3 },
+      upserts: rows,
+      deleted: [],
+      digest,
+    });
+    socket.receive({
+      type: "replica.ready",
+      id: open.id,
+      path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 3 },
+      digest,
+      truncated: false,
+    });
+    await vi.waitFor(() => expect(memberSpots.localReplicaResult()).toEqual(rows));
+    expect(settled).toBe(false);
+
+    socket.receive({ type: "replica.watermark", revision: 4 });
+    await flushMicrotasks();
+    expect(advanceWatermark).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+    releaseWatermark();
+    await expect(reducer).resolves.toEqual({ memberId: "member-1" });
+    expect(settled).toBe(true);
+    client.close();
+  });
+
+  it("settles a Control Reducer only after refreshed Control Query state is applied", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const invitations = client.watchControlQuery(control.invitations.list, {});
+    const stop = invitations.onUpdate(() => undefined);
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({
+      type: "session.ready",
+      capabilities: { controlWatermark: 1 },
+      replica: testReplicaDirective,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await flushMicrotasks();
+    const subscribe = sentMessages(socket).findLast(
+      (message) => message.type === "query.subscribe" && message.path === "control.invitations.list",
+    )!;
+    expect(subscribe).toBeDefined();
+    const before = [{
+      id: "invitation-1",
+      email: "person@example.test",
+      role: "member",
+      permissions: {},
+      teamIds: ["team-old"],
+      allowedAuthProviders: ["firebase"],
+      expiresAt: "2026-09-01T00:00:00Z",
+      revoked: false,
+      accepted: false,
+      state: "pending",
+      createdAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    }];
+    socket.receive({
+      type: "query.result",
+      id: subscribe.id,
+      path: subscribe.path,
+      result: before,
+      reason: "initial",
+    });
+    await flushMicrotasks();
+    expect(invitations.getSnapshot().result).toEqual(before);
+
+    const reducer = client.reducer(control.invitations.update, {
+      id: "invitation-1",
+      role: "member",
+      permissions: {},
+      teamIds: ["team-new"],
+      allowedAuthProviders: ["firebase"],
+      payload: {},
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const call = sentMessages(socket).findLast(
+      (message) => message.type === "reducer.call" && message.path === "control.invitations.update",
+    )!;
+    let settled = false;
+    void reducer.then(() => { settled = true; });
+    const after = [{ ...before[0], teamIds: ["team-new"], updatedAt: "2026-08-29T00:00:00Z" }];
+    socket.receive({
+      type: "query.result",
+      id: subscribe.id,
+      path: subscribe.path,
+      result: after,
+      reason: "control-change",
+    });
+    await flushMicrotasks();
+    expect(invitations.getSnapshot().result).toEqual(after);
+    expect(settled).toBe(false);
+
+    socket.receive({
+      type: "reducer.result",
+      id: call.id,
+      path: call.path,
+      result: { updated: true },
+      originCommandId: call.id,
+    });
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
+    socket.receive({ type: "control.watermark", id: call.id });
+    await expect(reducer).resolves.toEqual({ updated: true });
+    expect(settled).toBe(true);
+    stop();
+    client.close();
+  });
+
+  it("settles Control Reducers immediately for runtimes without Control watermarks", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const reducer = client.reducer(control.invitations.revoke, {
+      id: "invitation-1",
+      email: "person@example.test",
+    });
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+    await vi.advanceTimersByTimeAsync(0);
+    const call = sentMessages(socket).findLast(
+      (message) => message.type === "reducer.call" && message.path === "control.invitations.revoke",
+    )!;
+    socket.receive({
+      type: "reducer.result",
+      id: call.id,
+      path: call.path,
+      result: { updated: true },
+      originCommandId: call.id,
+    });
+    await expect(reducer).resolves.toEqual({ updated: true });
+    client.close();
+  });
+
+  it("uses a Replica watermark to settle Reducers with no visible subscriptions", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({
+      type: "session.ready",
+      capabilities: { replicaWatermark: 1 },
+      replica: testReplicaDirective,
+    });
+    const reducer = client.reducer({ kind: "reducer", path: "preferences.save" }, { value: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const call = sentMessages(socket).findLast((message) => message.type === "reducer.call")!;
+    let settled = false;
+    void reducer.then(() => { settled = true; });
+    socket.receive({
+      type: "reducer.result",
+      id: call.id,
+      path: call.path,
+      result: { saved: true },
+      originCommandId: call.id,
+      committedRevision: 7,
+    });
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
+    socket.receive({ type: "replica.watermark", revision: 7 });
+    await expect(reducer).resolves.toEqual({ saved: true });
+    client.close();
+  });
+
+  it("settles an Action that invoked Reducers only after their Replica watermark", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({
+      type: "session.ready",
+      capabilities: { replicaWatermark: 1 },
+      replica: testReplicaDirective,
+    });
+    const action = client.action(
+      { kind: "action", path: "testing.invoke" },
+      { operation: "seedE2ESettingRow", args: { kind: "teams", name: "Team A" } },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const call = sentMessages(socket).findLast((message) => message.type === "action.call")!;
+    let settled = false;
+    void action.then(() => { settled = true; });
+    socket.receive({
+      type: "action.result",
+      id: call.id,
+      path: call.path,
+      result: { _id: "team-a", name: "Team A" },
+      committedRevision: 8,
+    });
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
+    socket.receive({ type: "replica.watermark", revision: 7 });
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+
+    socket.receive({ type: "replica.watermark", revision: 8 });
+    await expect(action).resolves.toEqual({ _id: "team-a", name: "Team A" });
+    expect(settled).toBe(true);
+    client.close();
+  });
+
+  it("settles Reducers immediately when an older runtime does not advertise watermarks", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
+    const reducer = client.reducer({ kind: "reducer", path: "preferences.save" }, { value: true });
+    await vi.advanceTimersByTimeAsync(0);
+    const call = sentMessages(socket).findLast((message) => message.type === "reducer.call")!;
+    socket.receive({
+      type: "reducer.result",
+      id: call.id,
+      path: call.path,
+      result: { saved: true },
+      originCommandId: call.id,
+      committedRevision: 7,
+    });
+    await expect(reducer).resolves.toEqual({ saved: true });
+    client.close();
+  });
+
+  it("waits for an authoritative visibility scope before opening a Replica Collection", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.recent",
+      delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"], maxRows: 1 },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+
+    expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(0);
+
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    client.close();
+  });
+
+  it("applies transaction, delta, and ready frames in order without clearing other collections", async () => {
+    const reactionsRef: FunctionReference = {
+      kind: "query",
+      path: "chat.messageReactions",
+      delivery: "replica",
+      replica: { table: "messageReactions", key: "_id", columns: ["_id", "emoji"] },
+    };
+    const workspacesRef: FunctionReference = {
+      kind: "query",
+      path: "workspaces.list",
+      delivery: "replica",
+      replica: { table: "workspaces", key: "_id", columns: ["_id", "name"] },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const reactions = client.watchReplica(reactionsRef, {});
+    const workspaces = client.watchReplica(workspacesRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    });
+    const opens = sentMessages(socket).filter((message) => message.type === "replica.open");
+    const reactionsOpen = opens.filter((message) => message.path === reactionsRef.path).at(-1)!;
+    const workspacesOpen = opens.filter((message) => message.path === workspacesRef.path).at(-1)!;
+    const reactionRows = [{ _id: "reaction-1", emoji: "thumbs-up" }];
+    const workspaceRows = [{ _id: "workspace-1", name: "Operations" }];
+    const reactionDigest = await replicaHashesDigest(await replicaRowsHashes(reactionRows, "_id"));
+    const workspaceDigest = await replicaHashesDigest(await replicaRowsHashes(workspaceRows, "_id"));
+
+    socket.receive({
+      type: "replica.snapshot", id: reactionsOpen.id, path: reactionsRef.path,
+      result: reactionRows, cursor: { epoch: "epoch:test", revision: 1 }, key: "_id",
+    });
+    socket.receive({
+      type: "replica.snapshot", id: workspacesOpen.id, path: workspacesRef.path,
+      result: workspaceRows, cursor: { epoch: "epoch:test", revision: 1 }, key: "_id",
+    });
+    socket.receive({
+      type: "replica.ready", id: reactionsOpen.id, path: reactionsRef.path,
+      cursor: { epoch: "epoch:test", revision: 1 }, digest: reactionDigest, truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready", id: workspacesOpen.id, path: workspacesRef.path,
+      cursor: { epoch: "epoch:test", revision: 1 }, digest: workspaceDigest, truncated: false,
+    });
+    await vi.waitFor(() => {
+      expect(reactions.localReplicaResult()).toEqual(reactionRows);
+      expect(workspaces.localReplicaResult()).toEqual(workspaceRows);
+    });
+    const stableWorkspaceRows = workspaces.localReplicaResult();
+
+    const nextReactionRows = [...reactionRows, { _id: "reaction-2", emoji: "heart" }];
+    const nextReactionDigest = await replicaHashesDigest(await replicaRowsHashes(nextReactionRows, "_id"));
+    socket.receive({
+      type: "replica.transaction",
+      cursor: { epoch: "epoch:test", revision: 2 },
+      changes: [{
+        entity: "messageReactions", id: "reaction-2", operation: "insert",
+        newValue: { _id: "reaction-2", emoji: "heart" },
+      }],
+    });
+    socket.receive({
+      type: "replica.delta", id: reactionsOpen.id, path: reactionsRef.path,
+      cursor: { epoch: "epoch:test", revision: 2 },
+      upserts: [{ _id: "reaction-2", emoji: "heart" }], deleted: [],
+    });
+    socket.receive({
+      type: "replica.ready", id: reactionsOpen.id, path: reactionsRef.path,
+      cursor: { epoch: "epoch:test", revision: 2 }, digest: nextReactionDigest, truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready", id: workspacesOpen.id, path: workspacesRef.path,
+      cursor: { epoch: "epoch:test", revision: 2 }, digest: workspaceDigest, truncated: false,
+    });
+
+    await flushMicrotasks();
+    await vi.waitFor(() => {
+      expect(reactions.localReplicaResult()).toEqual(nextReactionRows);
+      expect(workspaces.localReplicaResult()).toEqual(workspaceRows);
+      expect(workspaces.localReplicaResult()).toBe(stableWorkspaceRows);
+      expect(client.localReplica.entity("messageReactions", "reaction-2")).toMatchObject({ emoji: "heart" });
+    });
+    client.close();
+  });
+
+  it("keeps Replica delta and ready ordered after same-socket authentication rotation", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.recent",
+      delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"], maxRows: 100 },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "shop",
+      tenant: "tenant-a",
+      token: "first-token",
+      identity: { sub: "account-a", iss: "shop" },
+    });
+    const tasks = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    const firstAuth = sentMessages(socket).find((message) => message.type === "auth");
+    socket.receive({
+      type: "auth.result",
+      id: firstAuth.id,
+      result: authenticatedResult({ accountId: "account-a" }),
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    const firstOpen = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1)!;
+    const initialRows = [{ id: "task-1", title: "Pending" }];
+    const initialDigest = await replicaHashesDigest(await replicaRowsHashes(initialRows, "id"));
+    socket.receive({
+      type: "replica.snapshot", id: firstOpen.id, path: collectionRef.path,
+      result: initialRows, cursor: { epoch: "epoch:test", revision: 1 }, key: "id", maxRows: 100,
+    });
+    socket.receive({
+      type: "replica.ready", id: firstOpen.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 1 }, digest: initialDigest, truncated: false,
+    });
+    await vi.waitFor(() => expect(tasks.localReplicaResult()).toEqual(initialRows));
+
+    client.setAuth({ token: "second-token", identity: { sub: "account-a", iss: "shop" } });
+    const secondAuth = sentMessages(socket).filter((message) => message.type === "auth").at(-1)!;
+    socket.receive({
+      type: "auth.result",
+      id: secondAuth.id,
+      result: authenticatedResult({ accountId: "account-a" }),
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    });
+    const secondOpen = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1)!;
+    expect(secondOpen).toMatchObject({ hashes: await replicaRowsHashes(initialRows, "id"), fullIntegrity: true });
+    const updatedRows = [{ id: "task-1", title: "Working" }];
+    const updatedDigest = await replicaHashesDigest(await replicaRowsHashes(updatedRows, "id"));
+    socket.receive({
+      type: "replica.delta", id: secondOpen.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 2 }, upserts: updatedRows, deleted: [],
+    });
+    socket.receive({
+      type: "replica.ready", id: secondOpen.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 2 }, digest: updatedDigest, truncated: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(tasks.localReplicaResult()).toEqual(updatedRows);
+      expect(client.localReplica.entity("tasks", "task-1")).toEqual(updatedRows[0]);
+    });
+    expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    client.close();
+  });
+
+  it("validates each Replica Collection against its own table projection", async () => {
+    const tasksRef: FunctionReference = {
+      kind: "query",
+      path: "tasks.recent",
+      delivery: "replica",
+      replica: { table: "tasks", key: "_id", columns: ["_id", "name", "workspaceId", "approvalId"] },
+    };
+    const workplanTasksRef: FunctionReference = {
+      kind: "query",
+      path: "workplans.tasks",
+      delivery: "replica",
+      replica: { table: "tasks", key: "_id", columns: ["_id", "name", "workplanId"] },
+    };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const tasks = client.watchReplica(tasksRef, {});
+    const workplanTasks = client.watchReplica(workplanTasksRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(2);
+    });
+    const opens = sentMessages(socket).filter((message) => message.type === "replica.open");
+    const tasksOpen = opens.filter((message) => message.path === tasksRef.path).at(-1)!;
+    const workplanTasksOpen = opens.filter((message) => message.path === workplanTasksRef.path).at(-1)!;
+    const initialTaskOpenCount = opens.filter((message) => message.path === tasksRef.path).length;
+    const initialWorkplanTaskOpenCount = opens.filter((message) => message.path === workplanTasksRef.path).length;
+    const taskRows = [{ _id: "task-1", name: "Inspect freezer", workspaceId: "workspace-1", approvalId: "approval-1" }];
+    const workplanRows = [{ _id: "task-1", name: "Inspect freezer", workplanId: "workplan-1" }];
+    const taskDigest = await replicaHashesDigest(await replicaRowsHashes(taskRows, "_id"));
+    const workplanDigest = await replicaHashesDigest(await replicaRowsHashes(workplanRows, "_id"));
+
+    socket.receive({
+      type: "replica.snapshot", id: tasksOpen.id, path: tasksRef.path,
+      result: taskRows, cursor: { epoch: "epoch:test", revision: 1 }, key: "_id",
+    });
+    socket.receive({
+      type: "replica.snapshot", id: workplanTasksOpen.id, path: workplanTasksRef.path,
+      result: workplanRows, cursor: { epoch: "epoch:test", revision: 1 }, key: "_id",
+    });
+    await vi.waitFor(() => {
+      expect(client.localReplica.entity("tasks", "task-1")).toMatchObject({
+        workspaceId: "workspace-1",
+        approvalId: "approval-1",
+        workplanId: "workplan-1",
+      });
+    });
+    socket.receive({
+      type: "replica.ready", id: tasksOpen.id, path: tasksRef.path,
+      cursor: { epoch: "epoch:test", revision: 1 }, digest: taskDigest, truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready", id: workplanTasksOpen.id, path: workplanTasksRef.path,
+      cursor: { epoch: "epoch:test", revision: 1 }, digest: workplanDigest, truncated: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(client.localReplica.entity("tasks", "task-1")).toEqual({
+        _id: "task-1",
+        name: "Inspect freezer",
+        workspaceId: "workspace-1",
+        approvalId: "approval-1",
+        workplanId: "workplan-1",
+      });
+      expect(tasks.localReplicaState()?.freshness).toBe("current");
+      expect(workplanTasks.localReplicaState()?.freshness).toBe("current");
+    });
+    expect(sentMessages(socket).filter((message) => message.type === "replica.open" && message.path === tasksRef.path)).toHaveLength(initialTaskOpenCount);
+    expect(sentMessages(socket).filter((message) => message.type === "replica.open" && message.path === workplanTasksRef.path)).toHaveLength(initialWorkplanTaskOpenCount);
     client.close();
   });
 
@@ -1283,6 +2529,9 @@ describe("GonvexClient", () => {
     expect(sentMessages(secondSocket).some((message) => message.type === "query.call")).toBe(false);
 
     secondSocket.receive({ type: "auth.result", id: secondAuth.id, result: authenticatedResult({ accountId: "account-a" }) });
+    await vi.waitFor(() => {
+      expect(sentMessages(secondSocket).filter((message) => message.type === "query.call")).toHaveLength(1);
+    });
     const calls = sentMessages(secondSocket).filter((message) => message.type === "query.call");
     expect(calls).toHaveLength(1);
     secondSocket.receive({ type: "query.result", id: calls[0].id, result: { count: 4 } });
@@ -1384,6 +2633,9 @@ describe("GonvexClient", () => {
     socket.open();
     const [auth] = sentMessages(socket);
     socket.receive({ type: "auth.result", id: auth.id, result: authenticatedResult({ ok: true }) });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).some((message) => message.type === "reducer.call")).toBe(true);
+    });
     const call = sentMessages(socket).at(-1)!;
     socket.receive({ type: "reducer.error", id: call.id, error: "permission denied" });
     await expect(reducer).rejects.toThrow("permission denied");
@@ -1770,12 +3022,14 @@ describe("GonvexClient", () => {
       project: "shop", tenant: "tenant-a", token: "gvx_session_a", identity: { sub: "acct-1", iss: "shop" },
     });
     const pending = client.reducer(control.tenants.updateTimezone, { timezone: "UTC" });
-    const rejected = expect(pending).rejects.toMatchObject({ code: "auth" });
+    const rejected = expect(pending).rejects.toMatchObject({ code: "superseded" });
     const socket = latestSocket();
     socket.open();
     const auth = sentMessages(socket).find((message) => message.type === "auth");
     socket.receive({ type: "auth.result", id: auth.id, result: authenticatedResult({ accountId: "acct-1", projectId: "shop", tenantId: "tenant-a" }) });
-    expect(sentMessages(socket).some((message) => message.type === "reducer.call")).toBe(true);
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).some((message) => message.type === "reducer.call")).toBe(true);
+    });
 
     client.setAuth({ tenant: "tenant-b", token: "gvx_session_b", identity: { sub: "acct-1", iss: "shop" } });
 

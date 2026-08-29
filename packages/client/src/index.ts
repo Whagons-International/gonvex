@@ -11,7 +11,7 @@ import type {
   ReplicaDirective,
   ReplicaOpenRequest,
 } from "@gonvex/protocol";
-import { replicaHashesDigest, replicaRowsHashes, replicaRowKey } from "./replica-integrity.js";
+import { replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
 export { GonvexErrorReporter } from "./error-reporter.js";
 export type { ErrorReporterOptions, ErrorEventPayload, ErrorContext, ErrorAccount } from "./error-reporter.js";
@@ -39,6 +39,8 @@ import {
   type ReplicaWindow,
   type LiveQueryResult,
   type ReplicaCollectionState,
+  type ReplicaCollectionSubscriptionState,
+  type ReplicaCollectionPlan,
 } from "./local-replica.js";
 import { runOfflineLiveQuery, type LiveQueryPlan, type OfflineLiveQueryResult } from "./query-expression.js";
 export * from "./error-reporter.js";
@@ -62,6 +64,8 @@ export {
   type ReplicaWindow,
   type LiveQueryResult,
   type ReplicaCollectionState,
+  type ReplicaCollectionSubscriptionState,
+  type ReplicaCollectionPlan,
 } from "./local-replica.js";
 export * from "./query-expression.js";
 export * from "./indexeddb-replica.js";
@@ -71,6 +75,20 @@ function asReplicaRow(value: JsonValue | undefined): ReplicaRow | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as ReplicaRow
     : undefined;
+}
+
+function projectReplicaIntegrityRows(
+  rows: readonly ReplicaRow[],
+  columns: readonly string[] | undefined,
+): ReplicaRow[] {
+  if (!columns?.length) return rows.map((row) => ({ ...row }));
+  return rows.map((row) => {
+    const projected: ReplicaRow = {};
+    for (const column of columns) {
+      if (hasOwn(row, column)) projected[column] = row[column]!;
+    }
+    return projected;
+  });
 }
 
 type SubscriptionHandler = (message: ServerMessage) => void;
@@ -136,6 +154,7 @@ type ReplicaSubscription = {
   key: string;
   path: string;
   entity: string;
+  columns?: readonly string[];
   args: JsonValue;
   listeners: Set<ReplicaSubscriptionHandler>;
   unsubscribeTimer?: ReturnType<typeof setTimeout>;
@@ -195,6 +214,17 @@ type PendingCall = {
   socketGeneration?: number;
   reject: (error: Error) => void;
   timeoutTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * New runtimes close each committed tenant revision with a Replica
+   * watermark after every entity and membership frame for that revision.
+   * Keep a successful Reducer, or an Action that invoked Reducers, pending
+   * until that ordered boundary is applied locally. An awaited write-bearing
+   * call cannot outrun its entity or collection membership changes.
+   */
+  committedRevision?: number;
+  completeAfterReplicaWatermark?: () => void;
+  /** Successful Control writes settle after the runtime refreshes this connection's Control Queries. */
+  completeAfterControlWatermark?: () => void;
 };
 
 export type FunctionReference<Args extends JsonValue = JsonValue, Result extends JsonValue = JsonValue> = {
@@ -212,12 +242,18 @@ export type FunctionReference<Args extends JsonValue = JsonValue, Result extends
     reason?: string;
   };
   live?: { entity: string; key: string; resultPath?: readonly string[]; plan: LiveQueryPlan };
+  replica?: ReplicaCollectionPlan & {
+    columns?: readonly string[];
+    mode?: "eager" | "progressive";
+    maxRows?: number;
+    maxBytes?: number;
+  };
   optimistic?: {
     transaction?: OptimisticTransactionDefinition;
   };
 };
 
-export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "closed" | "auth";
+export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "closed" | "auth" | "superseded";
 
 /**
  * Typed error for every rejected Gonvex operation. `code` distinguishes
@@ -231,6 +267,8 @@ export type GonvexClientErrorCode = "server" | "timeout" | "disconnected" | "clo
  *   Reducers/actions fail closed unless a reducer opted into the outbox.
  * - `closed`: the client was explicitly closed.
  * - `auth`: authentication was rejected.
+ * - `superseded`: the operation belonged to an authentication scope that the
+ *   caller replaced before the operation completed.
  */
 export class GonvexClientError extends Error {
   readonly code: GonvexClientErrorCode;
@@ -380,6 +418,12 @@ export class GonvexClient {
   private activeArtifactHashValue = "";
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
+  // Only the newest auth frame may change socket authorization. The runtime
+  // can finish an earlier project-only frame after a newer tenant frame; its
+  // response is obsolete even though both travelled on the same WebSocket.
+  private latestAuthFrameId: string | undefined;
+  private activeAuthFrameId: string | undefined;
+  private authResendRequired = false;
   private authWatchdogTimer: ReturnType<typeof setTimeout> | undefined;
   // Monotonic guard for async token fetches: a resolve whose generation is no
   // longer current was superseded (newer setAuth, watchdog re-issue, or a
@@ -401,6 +445,8 @@ export class GonvexClient {
   private readonly replica: LocalReplica;
   private readonly replicaView: LocalReplicaView;
   private readonly optimisticReducerIds = new Set<string>();
+  /** Reducers currently owned by the foreground send path, never by recovery. */
+  private readonly directOutboxReducerIds = new Set<string>();
   private readonly optimisticOutboxEntryIds = new Map<string, number>();
   private outboxReady: Promise<void>;
   private outboxScope = "";
@@ -409,7 +455,11 @@ export class GonvexClient {
   private replicaScope: ReplicaScope = "";
   private hasAuthoritativeReplicaScope = false;
   private replicaReady: Promise<void> = Promise.resolve();
+  private replicaFrames: Promise<void> = Promise.resolve();
+  private processedReplicaWatermarkRevision = 0;
+  private readonly pendingReplicaTransactions: Array<Extract<ServerMessage, { type: "replica.transaction" }>> = [];
   private readonly unsubscribeOutbox: () => void;
+  private readonly unsubscribeBrowserOnline: (() => void) | undefined;
   private drainingOutbox = false;
   private outboxDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly sessionScopeHandlers = new Set<() => void>();
@@ -417,6 +467,7 @@ export class GonvexClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempt = 0;
   private socketGeneration = 0;
+  private authenticatedSocketGeneration: number | undefined;
   private manuallyClosed = false;
   private readonly pendingCalls = new Map<string, PendingCall>();
   private readonly connectionStateHandlers = new Set<ConnectionStateHandler>();
@@ -441,6 +492,15 @@ export class GonvexClient {
     this.unsubscribeOutbox = this.reducerOutbox.subscribe(() => {
       void this.drainOutbox();
     });
+    if (typeof globalThis.addEventListener === "function") {
+      const onBrowserOnline = () => {
+        if (this.manuallyClosed) return;
+        this.connect();
+        void this.drainOutbox();
+      };
+      globalThis.addEventListener("online", onBrowserOnline);
+      this.unsubscribeBrowserOnline = () => globalThis.removeEventListener("online", onBrowserOnline);
+    }
     // Select the initial identity scope synchronously so subscriptions created
     // immediately after the client cannot capture an empty placeholder scope.
     // A same-tick setAuth supersedes this activation by generation before its
@@ -555,12 +615,37 @@ export class GonvexClient {
   }
 
   setAuth(auth: GonvexClientAuth) {
+    const nextAuth = { ...this.auth, ...auth };
+    const changesAuthFrame = this.auth.project !== nextAuth.project
+      || this.auth.tenant !== nextAuth.tenant
+      || this.auth.token !== nextAuth.token
+      || this.auth.identity?.sub !== nextAuth.identity?.sub
+      || this.auth.identity?.iss !== nextAuth.identity?.iss;
+    const needsFetcherAuth = !nextAuth.token
+      && nextAuth.fetchToken !== undefined
+      && nextAuth.fetchToken !== this.auth.fetchToken;
+    if (!changesAuthFrame && !needsFetcherAuth) {
+      // Local auth metadata (most commonly React installing a refresh
+      // callback for an already installed token) does not require another
+      // wire auth frame. Duplicating it can race the response to the current
+      // frame and has no authorization effect.
+      this.applyAuth(auth);
+      this.authFetchGeneration += 1;
+      return;
+    }
     this.cancelManagedAuthAttempt("Authentication was replaced by a newer session.");
     this.applyAuth(auth);
     // The caller owns auth now: a token fetch still in flight from the
     // previous installation must not clobber this one when it resolves.
     this.authFetchGeneration += 1;
     if (this.socket?.readyState === WebSocket.OPEN) {
+      if (this.authInFlight && this.latestAuthFrameId) {
+        // Keep server-side connection auth transitions serialized. Sending a
+        // second frame concurrently allows an older, slower project-only auth
+        // operation to overwrite a newer accepted tenant session.
+        this.authResendRequired = true;
+        return;
+      }
       // A token supplied in this very call was just minted by the caller —
       // send it as-is instead of paying another fetch round trip.
       this.sendAuth(true, { useFetcher: !hasOwn(auth, "token") });
@@ -581,7 +666,11 @@ export class GonvexClient {
       this.managedAuthAttempt = { ids: new Set(), resolve, reject };
     });
     if (this.socket?.readyState === WebSocket.OPEN) {
-      this.sendAuth(true, { useFetcher: !hasOwn(auth, "token") });
+      if (this.authInFlight && this.latestAuthFrameId) {
+        this.authResendRequired = true;
+      } else {
+        this.sendAuth(true, { useFetcher: !hasOwn(auth, "token") });
+      }
     } else {
       this.connect();
     }
@@ -615,25 +704,29 @@ export class GonvexClient {
       || (hasOwn(auth, "identity") && !sameAuthTokenIdentity(this.auth, nextAuth));
     if (scopeMayChange) {
       this.pendingMessages.length = 0;
+      this.pendingReplicaTransactions.length = 0;
       this.rejectPendingCalls((call) => new GonvexClientError(
         `Authentication scope changed while waiting for ${call.kind} ${call.path}`,
-        { code: "auth", path: call.path, operation: call.kind },
+        { code: "superseded", path: call.path, operation: call.kind },
       ));
       for (const query of this.oneShotQueries.values()) {
         if (query.timeoutTimer) clearTimeout(query.timeoutTimer);
         this.handlers.delete(query.id);
         query.reject(new GonvexClientError(
           `Authentication scope changed while waiting for Query ${query.path}`,
-          { code: "auth", path: query.path, operation: "query" },
+          { code: "superseded", path: query.path, operation: "query" },
         ));
       }
       this.oneShotQueries.clear();
-      this.resetReplicaScopeState();
+      // Authentication is changing the project, tenant, or actor. Immediately
+      // leave the previous authoritative Replica scope so hooks mounted by the
+      // next React render cannot send tenant reads against the old server
+      // session. The accepted auth result installs the next scope below.
+      this.quarantineReplicaScope();
     }
     this.auth = nextAuth;
     if (scopeMayChange) {
       void this.activateOutboxScope();
-      this.rotateSubscriptionScopes();
     }
     if (auth.tenant !== undefined) this.errorReporter?.setTenant(auth.tenant);
     if (auth.project !== undefined) this.errorReporter?.setProject(auth.project);
@@ -673,6 +766,9 @@ export class GonvexClient {
       this.replica.setFreshness("offline");
       this.markReplicaSubscriptionsOutOfDate();
       this.authInFlight = false;
+      this.authResendRequired = false;
+      this.latestAuthFrameId = undefined;
+      this.activeAuthFrameId = undefined;
       if (this.authWatchdogTimer) {
         clearTimeout(this.authWatchdogTimer);
         this.authWatchdogTimer = undefined;
@@ -682,6 +778,7 @@ export class GonvexClient {
       // drop them too — flushing them after reconnect would fire writes whose
       // callers already saw a rejection.
       this.pendingMessages.length = 0;
+      this.pendingReplicaTransactions.length = 0;
       // Reducers/actions must fail closed on transport loss: silently
       // replaying a non-idempotent write after reconnect is unsafe, and
       // leaving the promise pending hangs the caller forever.
@@ -727,17 +824,81 @@ export class GonvexClient {
         if (typeof message.artifactHash === "string") {
           this.activeArtifactHashValue = message.artifactHash;
         }
-        this.resumeQuerySubscriptions();
+        this.resumeQuerySubscriptions(true);
         this.resumeReplicaSubscriptions();
         return;
       }
       if (message.type === "auth.result" || message.type === "auth.error") {
-        this.authInFlight = false;
+        if (
+          message.type === "auth.error"
+          && (message.id === "membership-changed" || message.id === "session-expired")
+        ) {
+          // These are unsolicited connection-scope events, not replies to an
+          // auth frame. The runtime has already discarded every tenant
+          // subscription. Rotate their routing IDs immediately so delayed
+          // Replica errors from that discarded scope cannot reach current
+          // React listeners.
+          this.pendingReplicaTransactions.length = 0;
+          this.quarantineReplicaScope();
+          this.activeAuthFrameId = undefined;
+
+          // If credentials are already being revalidated, that queued auth
+          // frame will install the new authoritative scope. Starting another
+          // transition here would recreate the out-of-order auth race.
+          if (this.latestAuthFrameId) return;
+
+          if (this.authWatchdogTimer) {
+            clearTimeout(this.authWatchdogTimer);
+            this.authWatchdogTimer = undefined;
+          }
+          this.authInFlight = false;
+          if (message.id === "membership-changed") {
+            this.sendAuth(true, { useFetcher: false });
+            return;
+          }
+
+          const fetcher = this.auth.fetchToken;
+          if (fetcher) {
+            this.authInFlight = true;
+            this.authRetriedAfterError = true;
+            this.armAuthWatchdog();
+            void this.refreshRejectedAuth(fetcher, this.auth.token, message.error);
+          } else {
+            this.notifyAuthError(message.error);
+          }
+          return;
+        }
+        // Auth work may complete out of order inside the runtime. An obsolete
+        // response must never settle the current transition, reopen queries,
+        // or downgrade an accepted tenant session to an older control-only
+        // scope.
+        const settlesLatestFrame = message.id === this.latestAuthFrameId;
+        const rejectsActiveFrame = message.type === "auth.error"
+          && this.latestAuthFrameId === undefined
+          && message.id === this.activeAuthFrameId;
+        if (!settlesLatestFrame && !rejectsActiveFrame) return;
+        if (settlesLatestFrame) this.latestAuthFrameId = undefined;
+        if (settlesLatestFrame && this.authResendRequired) {
+          // The settled frame represented credentials that have already been
+          // superseded locally. Do not publish or flush anything from that
+          // intermediate server scope; authenticate the newest state now.
+          this.authResendRequired = false;
+          if (this.authWatchdogTimer) {
+            clearTimeout(this.authWatchdogTimer);
+            this.authWatchdogTimer = undefined;
+          }
+          this.sendAuth(true);
+          return;
+        }
+        if (message.type === "auth.result") this.activeAuthFrameId = message.id;
+        else this.activeAuthFrameId = undefined;
         if (this.authWatchdogTimer) {
           clearTimeout(this.authWatchdogTimer);
           this.authWatchdogTimer = undefined;
         }
         if (message.type === "auth.result") {
+          const reauthenticatedSameSocket = this.authenticatedSocketGeneration === this.socketGeneration;
+          this.authenticatedSocketGeneration = this.socketGeneration;
           this.activeArtifactHashValue = artifactHashFromAuthResult(message.result) ?? this.activeArtifactHashValue;
           const developerSessionToken = developerSessionTokenFromAuthResult(message.result);
           if (developerSessionToken) {
@@ -748,28 +909,52 @@ export class GonvexClient {
           this.authRetriedAfterError = false;
           const directive = replicaDirectiveFromAuthResult(message.result);
           if (!directive) {
+            this.authInFlight = false;
             if (!this.auth.tenant) {
-              this.resumeQuerySubscriptions();
+              this.resumeQuerySubscriptions(reauthenticatedSameSocket);
               this.settleManagedAuthAttempt(message.id);
             } else {
               this.settleManagedAuthAttempt(message.id, "Runtime did not provide an authoritative Local Replica visibility scope");
               this.rejectMissingReplicaDirective();
             }
+            // A reducer admitted while this auth frame was in flight may have
+            // been durably queued because the socket was not yet usable. Wake
+            // that queue once the successful auth result has made it usable.
+            void this.drainOutbox();
             this.flushPendingMessages();
             return;
           }
           void this.activateReplicaDirective(directive)
             .then(() => this.activateOutboxScope())
             .then(() => {
-              this.resumeQuerySubscriptions();
+              // The accepted server identity is not usable until its durable
+              // Replica partition has been activated locally. Only now may
+              // tenant calls and subscriptions leave the client.
+              this.authInFlight = false;
+              this.drainPendingReplicaTransactions();
+              // Authentication is replaced in-place on the same socket during
+              // normal token rotation. The runtime clears its subscription
+              // maps for every accepted auth frame, so same-generation Live
+              // Queries must be sent again just like Replica Collections.
+              this.resumeQuerySubscriptions(reauthenticatedSameSocket);
               this.resumeReplicaSubscriptions();
               this.settleManagedAuthAttempt(message.id);
+              // Same-scope reauthentication does not reload the outbox, so no
+              // restore callback will wake a reducer queued during auth.
+              void this.drainOutbox();
+              this.flushPendingMessages();
             })
             .catch((error) => {
+              this.authInFlight = false;
+              this.pendingReplicaTransactions.length = 0;
               this.settleManagedAuthAttempt(message.id, error instanceof Error ? error.message : "Runtime returned an invalid Local Replica scope");
               this.rejectReplicaDirective(error);
+              this.flushPendingMessages();
             });
+          return;
         } else {
+          this.authInFlight = false;
+          this.pendingReplicaTransactions.length = 0;
           const fetcher = this.auth.fetchToken;
           if (fetcher && !this.authRetriedAfterError) {
             // The installed token was rejected — typically expired while the
@@ -798,27 +983,20 @@ export class GonvexClient {
       if (message.type === "replica.transaction") {
         // Replica frames carry no tenant/scope field. During auth renewal we
         // cannot safely attribute a late frame to either side of the switch.
-        if (this.authInFlight) return;
-        const scope = this.replicaScope;
-        void this.replica.applyTransaction({
-          cursor: message.cursor,
-          originCommandId: message.originCommandId,
-          provenance: message.provenance,
-          changes: message.changes.map((change) => ({
-            ...change,
-            oldValue: asReplicaRow(change.oldValue),
-            newValue: asReplicaRow(change.newValue),
-          })),
-        }, scope).then(() => {
-          if (message.originCommandId && !this.replica.hasPendingCommand(message.originCommandId)) {
-            void this.ackOptimisticReducer(message.originCommandId);
-          }
-        }).catch(() => this.replica.setFreshness("verifying"));
+        if (this.authInFlight) {
+          this.pendingReplicaTransactions.push(message);
+          return;
+        }
+        this.enqueueReplicaTransaction(message);
         return;
       }
       if (message.type === "replica.watermark") {
         if (this.serverCapabilities.replicaWatermark === 1) {
-          this.handleReplicaWatermark(message.revision);
+          // The runtime emits transactions and watermarks in one ordered
+          // stream. Keep both on the same client queue so a watermark cannot
+          // advance the cursor past a transaction that was received first but
+          // has not finished applying to durable Local Replica storage yet.
+          this.enqueueReplicaFrame(() => this.handleReplicaWatermark(message.revision));
         }
         return;
       }
@@ -896,6 +1074,7 @@ export class GonvexClient {
       this.outboxDrainTimer = undefined;
     }
     this.unsubscribeOutbox();
+    this.unsubscribeBrowserOnline?.();
     this.handlers.clear();
     this.querySubscriptions.clear();
     this.replicaSubscriptions.clear();
@@ -1025,7 +1204,7 @@ export class GonvexClient {
         snapshot = { result, version };
         notify();
       } else if (message.type === "query.error") {
-        error = new GonvexClientError(message.error, { code: "server", path: ref.path, operation: "query" });
+        error = new GonvexClientError(`Query ${ref.path} failed: ${message.error}`, { code: "server", path: ref.path, operation: "query" });
         version += 1;
         snapshot = { result, version };
         notify();
@@ -1270,7 +1449,8 @@ export class GonvexClient {
       id: randomID(),
       key,
       path: ref.path,
-      entity: ref.live?.entity ?? ref.path,
+      entity: ref.replica?.table ?? ref.live?.entity ?? ref.path,
+      columns: ref.replica?.columns,
       args,
       listeners: new Set([onMessage]),
       scope: this.replicaScope,
@@ -1281,11 +1461,13 @@ export class GonvexClient {
       verificationGeneration: 0,
       retiredEpochs: new Set(),
     };
+    if (ref.replica) {
+      this.replica.registerReplicaCollection(key, ref.replica, asReplicaRow(args) ?? {});
+    }
     this.replicaSubscriptions.set(key, subscription);
     this.handlers.set(subscription.id, (message) => {
       const scope = subscription.scope ?? this.replicaScope;
-      void this.handleReplicaMessage(subscription, message as ReplicaMessage, scope)
-        .catch(() => this.replica.setFreshness("verifying"));
+      this.enqueueReplicaFrame(() => this.handleReplicaMessage(subscription, message as ReplicaMessage, scope));
     });
     this.startReplica(subscription);
     return () => this.unsubscribeReplicaListener(key, onMessage);
@@ -1304,7 +1486,9 @@ export class GonvexClient {
     let snapshotVersion = -1;
     let snapshotRows: T[] | undefined;
     let stateVersion = -1;
-    let snapshotState: ReplicaCollectionState | undefined;
+    let stateFreshness: ReplicaFreshness | undefined;
+    let stateIsUpToDate: boolean | undefined;
+    let snapshotState: ReplicaCollectionSubscriptionState | undefined;
     let releaseTimer: ReturnType<typeof setTimeout> | undefined;
     const notify = () => {
       for (const handler of updateHandlers) handler();
@@ -1318,20 +1502,29 @@ export class GonvexClient {
       } else if (message.type === "replica.syncing" || message.type === "replica.reset") {
         latestError = undefined;
         notify();
-      } else if (message.type === "replica.snapshot" || message.type === "replica.ready") {
+      } else if (message.type === "replica.ready") {
+        latestError = undefined;
+        notify();
+      } else if (message.type === "replica.snapshot") {
         latestError = undefined;
       }
     });
     const unsubscribeReplica = this.replica.subscribe(notify);
     const unsubscribeScope = this.onSessionScopeChange(() => {
       latestError = undefined;
+      snapshotVersion = -1;
+      snapshotRows = undefined;
+      stateVersion = -1;
+      stateFreshness = undefined;
+      stateIsUpToDate = undefined;
+      snapshotState = undefined;
       notify();
     });
     return {
       localReplicaResult: () => {
         if (latestError) throw latestError;
         if (!this.replica.hasLiveQuery(key)) return undefined;
-        const version = this.replica.version();
+        const version = this.replica.windowVersion(key);
         if (snapshotVersion === version) return snapshotRows;
         snapshotVersion = version;
         snapshotRows = this.replica.liveQuery(key).rows as unknown as T[];
@@ -1340,10 +1533,26 @@ export class GonvexClient {
       localReplicaState: () => {
         if (latestError) throw latestError;
         if (!this.replica.hasLiveQuery(key)) return undefined;
-        const version = this.replica.version();
-        if (stateVersion === version) return snapshotState;
+        const version = this.replica.windowVersion(key);
+        const freshness = this.replica.freshness();
+        const isUpToDate = this.replicaSubscriptions.get(key)?.isUpToDate === true;
+        if (
+          stateVersion === version
+          && stateFreshness === freshness
+          && stateIsUpToDate === isUpToDate
+        ) return snapshotState;
         stateVersion = version;
-        snapshotState = this.replica.collectionState(key);
+        stateFreshness = freshness;
+        stateIsUpToDate = isUpToDate;
+        const state = this.replica.collectionState(key);
+        snapshotState = {
+          ...state,
+          isUpToDate,
+          source: isUpToDate ? state.source : "cache",
+          freshness: isUpToDate
+            ? state.freshness
+            : state.freshness === "offline" ? "offline" : "verifying",
+        };
         return snapshotState;
       },
       status: () => ({
@@ -1406,7 +1615,7 @@ export class GonvexClient {
         // this callback is emitted, so this is the single initial UI wake-up.
         notify();
       } else if (message.type === "query.error") {
-        latestError = new GonvexClientError(message.error, {
+        latestError = new GonvexClientError(`Query ${ref.path} failed: ${message.error}`, {
           code: "server", path: ref.path, operation: "query",
         });
         notify();
@@ -1495,15 +1704,20 @@ export class GonvexClient {
       subscription.isUpToDate = false;
       raiseReplicaCursorFloor(subscription, message.cursor);
       const rows = boundReplicaRows(message.result, message.key, message.maxRows, message.maxBytes, message.orderBy, message.orderDirection);
+      let hashes: Record<string, string> | undefined;
+      if (message.hashes && message.digest) {
+        const digest = await replicaHashesDigest(message.hashes);
+        if (digest === message.digest) hashes = message.hashes;
+      }
       const window = {
         signature: subscription.key,
         kind: "replica" as const,
         entity: subscription.entity,
         key: message.key,
         rows: rows.filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map((row) => asReplicaRow(row)!),
-        // A snapshot is still verifying until replica.ready supplies the
-        // authoritative budget/truncation result.
-        completeness: "partial" as const,
+        // New runtimes include authoritative integrity and truncation metadata
+        // in bounded snapshots. Older runtimes remain verifying until ready.
+        completeness: hashes && message.truncated !== true ? "complete" as const : "partial" as const,
         source: "server" as const,
         cursor: message.cursor,
         mode: message.mode,
@@ -1511,7 +1725,8 @@ export class GonvexClient {
         orderDirection: message.orderDirection,
         maxRows: message.maxRows,
         maxBytes: message.maxBytes,
-        hashes: message.hashes,
+        truncated: message.truncated,
+        hashes,
         scope,
       };
       await this.replica.replaceWindow(window);
@@ -1524,7 +1739,6 @@ export class GonvexClient {
       const prior = current();
       if (replicaCursorIsStale(subscription, message.cursor) || (prior?.cursor && message.cursor.revision < prior.cursor.revision)) return;
       this.clearReplicaRetry(subscription, true);
-      subscription.isUpToDate = false;
       raiseReplicaCursorFloor(subscription, message.cursor);
       await this.replica.applyWindowDelta({
         signature: subscription.key,
@@ -1542,7 +1756,9 @@ export class GonvexClient {
         orderDirection: prior?.orderDirection,
         maxRows: prior?.maxRows,
         maxBytes: prior?.maxBytes,
-        hashes: message.hashes ?? prior?.hashes,
+        // A delta invalidates the prior full integrity map unless the server
+        // supplied a complete replacement map with this frame.
+        hashes: message.hashes,
       });
       const snapshot: ReplicaMessage = {
         type: "replica.snapshot", id: subscription.id, path: subscription.path,
@@ -1582,14 +1798,20 @@ export class GonvexClient {
     if (message.type === "replica.ready") {
       const window = current();
       if (!window?.cursor || replicaCursorIsStale(subscription, message.cursor) || message.cursor.revision < window.cursor.revision) return;
-      const rows = this.replica.windowRows(subscription.key);
-      const hashes = await replicaRowsHashes(rows, window.key);
+      const hashesWereStored = window.hashes !== undefined;
+      const hashes = window.hashes ?? await replicaRowsHashes(
+        projectReplicaIntegrityRows(
+          this.replica.committedWindowRows(subscription.key),
+          subscription.columns,
+        ),
+        window.key,
+      );
       const digest = await replicaHashesDigest(hashes);
       if (!message.digest || message.digest !== digest) {
         await this.handleReplicaMessage(subscription, { type: "replica.reset", id: subscription.id, path: subscription.path, reason: "integrity-mismatch" }, scope);
         return;
       }
-      await this.acceptReplicaReady(subscription, message, scope);
+      await this.acceptReplicaReady(subscription, message, hashes, hashesWereStored, scope);
       return;
     }
     if (message.type === "replica.error") {
@@ -1600,9 +1822,42 @@ export class GonvexClient {
     this.emitReplicaMessage(subscription, message, scope);
   }
 
+  private enqueueReplicaFrame(operation: () => Promise<void>) {
+    const processing = this.replicaFrames.then(operation);
+    this.replicaFrames = processing.catch(() => {
+      this.replica.setFreshness("verifying");
+    });
+  }
+
+  private enqueueReplicaTransaction(message: Extract<ServerMessage, { type: "replica.transaction" }>) {
+    const scope = this.replicaScope;
+    this.enqueueReplicaFrame(async () => {
+      await this.replica.applyTransaction({
+        cursor: message.cursor,
+        originCommandId: message.originCommandId,
+        provenance: message.provenance,
+        changes: message.changes.map((change) => ({
+          ...change,
+          oldValue: asReplicaRow(change.oldValue),
+          newValue: asReplicaRow(change.newValue),
+        })),
+      }, scope);
+      if (message.originCommandId && !this.replica.hasPendingCommand(message.originCommandId)) {
+        await this.ackOptimisticReducer(message.originCommandId);
+      }
+    });
+  }
+
+  private drainPendingReplicaTransactions() {
+    const pending = this.pendingReplicaTransactions.splice(0);
+    for (const message of pending) this.enqueueReplicaTransaction(message);
+  }
+
   private async acceptReplicaReady(
     subscription: ReplicaSubscription,
     message: ReplicaReadyMessage,
+    hashes: Record<string, string>,
+    hashesWereStored: boolean,
     scope = this.replicaScope,
   ) {
     this.clearReplicaRetry(subscription, true);
@@ -1611,18 +1866,41 @@ export class GonvexClient {
     raiseReplicaCursorFloor(subscription, message.cursor);
     const window = this.replica.getWindow(subscription.key);
     if (window) {
+      const completeness = message.truncated === true ? "partial" : "complete";
+      const mode = message.mode ?? window.mode;
+      const truncated = message.truncated ?? window.truncated;
+      const readyAlreadyPersisted = hashesWereStored
+        && window.source === "server"
+        && window.cursor?.epoch === message.cursor.epoch
+        && window.cursor.revision === message.cursor.revision
+        && window.completeness === completeness
+        && window.mode === mode
+        && window.truncated === truncated;
+      if (readyAlreadyPersisted) {
+        // Connection-wide freshness remains a separate summary. Collection
+        // state combines it with this subscription's isUpToDate bit, so one
+        // ready window cannot make another hydrated cache authoritative.
+        this.replica.setFreshness("current");
+        this.emitReplicaMessage(subscription, message, scope);
+        return;
+      }
       await this.replica.replaceWindow({
-        ...window, rows: this.replica.windowRows(subscription.key), source: "server", cursor: message.cursor,
-        completeness: message.truncated === true ? "partial" : "complete",
-        mode: message.mode ?? window.mode, truncated: message.truncated ?? window.truncated,
-        hashes: window.hashes,
+        ...window, rows: this.replica.committedWindowRows(subscription.key), source: "server", cursor: message.cursor,
+        completeness,
+        mode, truncated,
+        // Persist the exact integrity map verified above. Subsequent auth
+        // rotations can then prove unchanged rows instead of requesting a full
+        // upsert of every entity in every retained collection.
+        hashes,
       });
     }
+    this.replica.setFreshness("current");
     this.emitReplicaMessage(subscription, message, scope);
   }
 
-  private handleReplicaWatermark(revision: number) {
+  private async handleReplicaWatermark(revision: number) {
     if (!Number.isSafeInteger(revision) || revision < 0) return;
+    const eligibleSignatures: string[] = [];
     for (const subscription of this.replicaSubscriptions.values()) {
       const cursor = this.replica.getWindow(subscription.key)?.cursor;
       if (
@@ -1632,8 +1910,22 @@ export class GonvexClient {
         || subscription.opening
         || !this.replica.getWindow(subscription.key)?.hashes
       ) continue;
-      const window = this.replica.getWindow(subscription.key);
-      if (window) void this.replica.replaceWindow({ ...window, rows: this.replica.windowRows(subscription.key), cursor: { ...cursor, revision } });
+      eligibleSignatures.push(subscription.key);
+    }
+    await this.replica.advanceWatermark(revision, eligibleSignatures, this.replicaScope);
+    this.processedReplicaWatermarkRevision = Math.max(
+      this.processedReplicaWatermarkRevision,
+      revision,
+    );
+    for (const pending of this.pendingCalls.values()) {
+      if (
+        (pending.kind !== "reducer" && pending.kind !== "action")
+        || pending.committedRevision === undefined
+        || pending.committedRevision > this.processedReplicaWatermarkRevision
+      ) continue;
+      const complete = pending.completeAfterReplicaWatermark;
+      pending.completeAfterReplicaWatermark = undefined;
+      complete?.();
     }
   }
 
@@ -1701,7 +1993,13 @@ export class GonvexClient {
   }
 
   private sendReplicaOpen(subscription: ReplicaSubscription) {
-    if (subscription.listeners.size === 0 || subscription.opening) return;
+    // Replica rows are tenant-authorized state. A hook can mount while the
+    // socket is connected but before session.ready/auth.result supplies the
+    // authoritative visibility scope. Opening in that gap produces a correct
+    // server rejection that is nevertheless transient and must not become a
+    // fatal React snapshot error. The directive handlers resume every retained
+    // subscription once the scope is active.
+    if (this.authInFlight || !this.hasAuthoritativeReplicaScope || subscription.listeners.size === 0 || subscription.opening) return;
     const requestScope = this.replicaScope;
     subscription.scope = requestScope;
     subscription.opening = true;
@@ -1720,16 +2018,19 @@ export class GonvexClient {
   private replicaOpenRequest(subscription: ReplicaSubscription): ReplicaOpenRequest {
     const window = this.replica.getWindow(subscription.key);
     const cursor = window?.cursor;
-    const rows = this.replica.windowRows(subscription.key);
-    const fullIntegrity = cursor !== undefined;
-    const keys = fullIntegrity ? rows.map((row) => replicaRowKey(row, window?.key ?? "id")).filter(Boolean) : undefined;
+    const hashes = window?.hashes;
+    const fullIntegrity = cursor !== undefined && hashes !== undefined;
+    // Resume protocol state must describe only the committed server window.
+    // windowRows() includes optimistic overlays for rendering and would cause
+    // the server digest to disagree (and advertise uncommitted IDs as deletes).
+    const keys = cursor ? [...(window?.ids ?? [])] : undefined;
     return {
       id: subscription.id,
       path: subscription.path,
       args: subscription.args,
       cursor,
       keys,
-      hashes: undefined,
+      hashes,
       digest: undefined,
       fullIntegrity: fullIntegrity || undefined,
     };
@@ -1739,6 +2040,10 @@ export class GonvexClient {
     this.replicaOpenFlushTimer = undefined;
     const subscriptions = Array.from(this.pendingReplicaOpens);
     this.pendingReplicaOpens.clear();
+    if (this.authInFlight || !this.hasAuthoritativeReplicaScope) {
+      for (const subscription of subscriptions) subscription.opening = false;
+      return;
+    }
     const opens = subscriptions
       .filter((subscription) => (
         subscription.opening
@@ -1805,6 +2110,7 @@ export class GonvexClient {
     const scope = directive.visibilityScope.trim();
     if (this.hasAuthoritativeReplicaScope && this.replicaScope === scope) {
       await this.replicaReady;
+      await this.outboxReady;
       return;
     }
     for (const reducerId of this.optimisticReducerIds) this.replica.rejectCommand(reducerId);
@@ -1815,8 +2121,13 @@ export class GonvexClient {
     this.hasAuthoritativeReplicaScope = true;
     this.replicaReady = this.replica.activateScope(scope);
     this.rotateSubscriptionScopes();
-    await this.replicaReady;
     const generation = this.outboxScopeGeneration;
+    // Publish the recovery barrier before yielding to Replica storage. A
+    // reducer may be invoked as soon as the auth result arrives, while the
+    // session.ready scope activation is still hydrating. If outboxReady still
+    // points at the old resolved promise, that reducer can enqueue an inflight
+    // row which the concurrent recovery then mistakes for an abandoned call
+    // and sends a second time with the same command ID.
     this.outboxReady = this.restoreOutbox(this.outboxScope, generation);
     await this.outboxReady;
   }
@@ -1904,8 +2215,7 @@ export class GonvexClient {
     if (
       this.drainingOutbox
       || this.manuallyClosed
-      || !this.socket
-      || this.socket.readyState !== WebSocket.OPEN
+      || !this.canSendReducerNow()
     ) return;
     const drainScope = this.outboxScope;
     this.drainingOutbox = true;
@@ -1915,8 +2225,25 @@ export class GonvexClient {
         const entry = await this.reducerOutbox.nextReady(scope, Date.now());
         if (!entry) return;
         if (scope !== this.outboxScope) return;
+        if (this.directOutboxReducerIds.has(entry.idempotencyKey)) {
+          // Scope recovery may observe an inflight row created by this live
+          // process and reset it to pending under the assumption that a prior
+          // process crashed. The foreground call still owns that command ID.
+          // Restore the durable marker and wait for its real result instead of
+          // registering a second response handler for the same command.
+          await this.reducerOutbox.markInflight(entry.id);
+          return;
+        }
+        if (!this.canSendReducerNow()) {
+          await this.reducerOutbox.markPending(entry.id);
+          return;
+        }
         await this.reducerOutbox.markInflight(entry.id);
         if (scope !== this.outboxScope) return;
+        if (!this.canSendReducerNow()) {
+          await this.reducerOutbox.markPending(entry.id);
+          return;
+        }
         try {
           await this.call(
             "reducer",
@@ -2013,33 +2340,42 @@ export class GonvexClient {
         { code: "closed", path: ref.path, operation: "reducer" },
       );
     }
-    const scope = this.outboxScope;
-    const entry = await this.reducerOutbox.enqueue({
-      scope,
-      path: ref.path,
-      args,
-      idempotencyKey: reducerId,
-      entityKeys: patches.map((patch) => `${patch.entity ?? patch.collection ?? ""}:${patch.rowId}`),
-      patches,
-      state: "inflight",
-    });
-    if (this.manuallyClosed) {
-      await this.reducerOutbox.ack(entry.id);
-      throw new GonvexClientError(
-        `Gonvex client was closed before reducer ${ref.path} could be sent.`,
-        { code: "closed", path: ref.path, operation: "reducer" },
-      );
-    }
-    if (scope !== this.outboxScope) {
-      await this.reducerOutbox.ack(entry.id);
-      throw new GonvexClientError(
-        `Authentication changed before reducer ${ref.path} could be sent.`,
-        { code: "disconnected", path: ref.path, operation: "reducer" },
-      );
-    }
-    this.optimisticOutboxEntryIds.set(reducerId, entry.id);
-    this.addOptimisticReducer(reducerId, patches);
+    this.directOutboxReducerIds.add(reducerId);
+    let entryId: number | undefined;
+    let entryAttempts = 0;
     try {
+      const scope = this.outboxScope;
+      const entry = await this.reducerOutbox.enqueue({
+        scope,
+        path: ref.path,
+        args,
+        idempotencyKey: reducerId,
+        entityKeys: patches.map((patch) => `${patch.entity ?? patch.collection ?? ""}:${patch.rowId}`),
+        patches,
+        state: "inflight",
+      });
+      entryId = entry.id;
+      entryAttempts = entry.attempts;
+      if (this.manuallyClosed) {
+        await this.reducerOutbox.ack(entry.id);
+        throw new GonvexClientError(
+          `Gonvex client was closed before reducer ${ref.path} could be sent.`,
+          { code: "closed", path: ref.path, operation: "reducer" },
+        );
+      }
+      if (scope !== this.outboxScope) {
+        await this.reducerOutbox.ack(entry.id);
+        throw new GonvexClientError(
+          `Authentication changed before reducer ${ref.path} could be sent.`,
+          { code: "disconnected", path: ref.path, operation: "reducer" },
+        );
+      }
+      this.optimisticOutboxEntryIds.set(reducerId, entry.id);
+      this.addOptimisticReducer(reducerId, patches);
+      if (options.offline === "queue" && !this.canSendReducerNow()) {
+        await this.reducerOutbox.markPending(entry.id);
+        return { status: "queued", reducerId };
+      }
       // The direct send is outbox-managed: a crash here replays the entry
       // with the same idempotency key, so the server must dedupe it.
       const result = await this.call<T>(
@@ -2059,12 +2395,32 @@ export class GonvexClient {
       return result;
     } catch (error: unknown) {
       if (isQueueableReducerError(error) && options.offline === "queue") {
-        await this.reducerOutbox.fail(entry.id, reducerErrorMessage(error));
+        const queuedEntryId = this.optimisticOutboxEntryIds.get(reducerId) ?? entryId;
+        if (queuedEntryId !== undefined) {
+          await this.reducerOutbox.fail(queuedEntryId, reducerErrorMessage(error));
+          // `fail` deliberately records backoff, but it does not own the
+          // client's timer. The foreground queueable path must schedule the
+          // next deterministic drain just like the background drain path.
+          this.scheduleOutboxDrain(Math.min(30_000, 1_000 * (2 ** (entryAttempts + 1))));
+        }
         return { status: "queued", reducerId };
       }
-      await this.rejectOptimisticReducer(reducerId, entry.id);
+      await this.rejectOptimisticReducer(reducerId, entryId);
       throw error;
+    } finally {
+      this.directOutboxReducerIds.delete(reducerId);
+      void this.drainOutbox();
     }
+  }
+
+  private canSendReducerNow(): boolean {
+    if (globalThis.navigator?.onLine === false) return false;
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN || this.authInFlight) return false;
+    const hasConfiguredAuth = Boolean(
+      this.auth.project || this.auth.tenant || this.auth.token || this.auth.fetchToken,
+    );
+    return !hasConfiguredAuth || this.authenticatedSocketGeneration === this.socketGeneration;
   }
 
   action<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: CallOptions = {}): Promise<T> {
@@ -2120,7 +2476,7 @@ export class GonvexClient {
             error: message.error,
             clientReceivedAtMs: nowMs(),
           });
-          reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: "query" }));
+          reject(new GonvexClientError(`Query ${ref.path} failed: ${message.error}`, { code: "server", path: ref.path, operation: "query" }));
         }
       });
       this.sendOneShotQuery(query);
@@ -2262,11 +2618,36 @@ export class GonvexClient {
       }
       this.pendingCalls.set(id, pending);
       this.handlers.set(id, (message) => {
+        if (message.type === "control.watermark") {
+          const complete = pending.completeAfterControlWatermark;
+          pending.completeAfterControlWatermark = undefined;
+          complete?.();
+          return;
+        }
         if (kind === "reducer" && message.type === "reducer.result") {
-          settle();
           this.replica.acknowledgeCommand(message.originCommandId, message.committedRevision);
-          this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);
-          resolve(message.result as T);
+          const complete = () => {
+            settle();
+            this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);
+            resolve(message.result as T);
+          };
+          const committedRevision = message.committedRevision;
+          if (pending.scope === "control" && this.serverCapabilities.controlWatermark === 1) {
+            pending.completeAfterControlWatermark = complete;
+            return;
+          }
+          if (
+            pending.scope === "tenant"
+            && this.serverCapabilities.replicaWatermark === 1
+            && typeof committedRevision === "number"
+            && Number.isSafeInteger(committedRevision)
+            && committedRevision > this.processedReplicaWatermarkRevision
+          ) {
+            pending.committedRevision = committedRevision;
+            pending.completeAfterReplicaWatermark = complete;
+            return;
+          }
+          complete();
         }
         if (kind === "reducer" && message.type === "reducer.error") {
           settle();
@@ -2274,9 +2655,28 @@ export class GonvexClient {
           reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: kind }));
         }
         if (kind === "action" && message.type === "action.result") {
-          settle();
-          this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);
-          resolve(message.result as T);
+          const complete = () => {
+            settle();
+            this.emitTelemetryFromCall(kind, id, ref.path, "ok", clientSentAtMs, message.trace);
+            resolve(message.result as T);
+          };
+          const committedRevision = message.committedRevision;
+          if (pending.scope === "control" && this.serverCapabilities.controlWatermark === 1) {
+            pending.completeAfterControlWatermark = complete;
+            return;
+          }
+          if (
+            pending.scope === "tenant"
+            && this.serverCapabilities.replicaWatermark === 1
+            && typeof committedRevision === "number"
+            && Number.isSafeInteger(committedRevision)
+            && committedRevision > this.processedReplicaWatermarkRevision
+          ) {
+            pending.committedRevision = committedRevision;
+            pending.completeAfterReplicaWatermark = complete;
+            return;
+          }
+          complete();
         }
         if (kind === "action" && message.type === "action.error") {
           settle();
@@ -2309,6 +2709,10 @@ export class GonvexClient {
 
   private sendSubscription(subscription: QuerySubscription) {
     if (subscription.listeners.size === 0) return;
+    if (
+      subscription.executionScope !== "control"
+      && (this.authInFlight || (!!this.auth.tenant && !this.hasAuthoritativeReplicaScope))
+    ) return;
     if (subscription.socketGeneration === this.socketGeneration) return;
     subscription.scope = this.replicaScope;
     subscription.socketGeneration = this.socketGeneration;
@@ -2340,6 +2744,10 @@ export class GonvexClient {
         subscription.listeners.size > 0
         && subscription.socketGeneration === this.socketGeneration
         && this.querySubscriptions.get(subscription.key) === subscription
+        && !(
+          subscription.executionScope !== "control"
+          && (this.authInFlight || (!!this.auth.tenant && !this.hasAuthoritativeReplicaScope))
+        )
       ))
       .map((subscription) => ({
         id: subscription.id,
@@ -2353,9 +2761,10 @@ export class GonvexClient {
     }
   }
 
-  private resumeQuerySubscriptions() {
+  private resumeQuerySubscriptions(force = false) {
     for (const subscription of this.querySubscriptions.values()) {
       if (subscription.listeners.size === 0) continue;
+      if (force) subscription.socketGeneration = undefined;
       this.sendSubscription(subscription);
     }
   }
@@ -2491,6 +2900,7 @@ export class GonvexClient {
   }
 
   private resetReplicaScopeState() {
+    this.processedReplicaWatermarkRevision = 0;
     for (const subscription of this.querySubscriptions.values()) {
       subscription.lastMessage = undefined;
       subscription.serverSettled = false;
@@ -2533,8 +2943,17 @@ export class GonvexClient {
       subscription.scope = this.replicaScope;
       this.handlers.set(subscription.id, (message) => {
         const scope = subscription.scope ?? this.replicaScope;
-        void this.handleReplicaMessage(subscription, message as ReplicaMessage, scope)
-          .catch(() => this.replica.setFreshness("verifying"));
+        // Snapshot/delta/ready frames for every Replica Collection must be
+        // handled in wire order. In particular, `ready` verifies the entities
+        // written by the preceding snapshot or delta. Running these handlers
+        // concurrently after an auth-scope rotation lets `ready` inspect the
+        // old window, falsely reset it for an integrity mismatch, and leave a
+        // retained entity stale until another server change happens.
+        this.enqueueReplicaFrame(() => this.handleReplicaMessage(
+          subscription,
+          message as ReplicaMessage,
+          scope,
+        ));
       });
     }
   }
@@ -2648,6 +3067,7 @@ export class GonvexClient {
 
   private sendAuthFrame() {
     const id = randomID();
+    this.latestAuthFrameId = id;
     this.managedAuthAttempt?.ids.add(id);
     this.sendNow({
       type: "auth",

@@ -111,7 +111,7 @@ export type LiveQueryPlan = {
   resultPath?: string[];
   where?: LiveExpression;
   search?: { argument: string; columns: string[] };
-  filters?: { argument: string; allowedColumns: string[]; allowedOperators: FilterOperator[] };
+  filters?: { argument: string; allowedColumns: string[]; allowedOperators: FilterOperator[]; columnTypes?: Record<string, "text" | "number"> };
   sort?: { columnArgument: string; directionArgument: string; defaultColumn: string; defaultDirection: "asc" | "desc"; allowedColumns: string[] };
   window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number; count?: "exact" };
   serverOnly?: boolean;
@@ -187,6 +187,8 @@ export type ServerCapabilities = {
   reducerBatch?: 1;
   /** Server emits connection-level replica revision watermarks. */
   replicaWatermark?: 1;
+  /** Server closes each successful Control write after refreshing this connection's Control subscriptions. */
+  controlWatermark?: 1;
 };
 
 export type QuerySubscribeRequest = {
@@ -442,6 +444,8 @@ export type ServerMessage =
     maxRows?: number;
     maxBytes?: number;
     hashes?: Record<string, string>;
+    digest?: string;
+    truncated?: boolean;
   }
   | {
     type: "replica.delta";
@@ -474,8 +478,9 @@ export type ServerMessage =
   }
   | { type: "replica.error"; id: string; path?: string; error: string }
   | { type: "query.error"; id: string; path?: string; error: string }
+  | { type: "control.watermark"; id: string }
   | { type: "reducer.result"; id: string; path?: string; result: JsonValue; originCommandId: string; committedRevision?: number; trace?: MessageTrace }
   | { type: "reducer.error"; id: string; path?: string; error: string; trace?: MessageTrace }
-  | { type: "action.result"; id: string; path?: string; result: JsonValue; trace?: MessageTrace }
+  | { type: "action.result"; id: string; path?: string; result: JsonValue; committedRevision?: number; trace?: MessageTrace }
   | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "system.reload"; reason: string; artifactHash?: string };

@@ -500,6 +500,11 @@
         table: text("table", table),
         id: rowKey(id),
       });
+      db.deleteMany = (table, ids) => hostCall({
+        kind: "dbDeleteMany",
+        table: text("table", table),
+        ids: Array.from(ids ?? [], rowKey),
+      });
     }
     if (granted.dbRead || granted.dbWrite) context.db = Object.freeze(db);
 

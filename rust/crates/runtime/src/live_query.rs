@@ -14,9 +14,9 @@ use serde_json::{Map, Value};
 use sqlx::Row;
 use thiserror::Error;
 
-use crate::change_feed::FeedEvent;
+use crate::change_feed::{FeedEvent, LogChange};
 use crate::host_calls::bind_value;
-use crate::visibility::{self, ResolvedVisibility, VisibilityPlan};
+use crate::visibility::{self, ResolvedVisibility, VisibilityDependencies, VisibilityPlan};
 use crate::Runtime;
 
 #[derive(Clone, Debug)]
@@ -26,7 +26,7 @@ pub struct LiveQuerySubscription {
     pub args: Value,
     pub plan: LiveQueryPlan,
     pub visibility: VisibilityPlan,
-    pub affected_tables: BTreeSet<String>,
+    pub visibility_dependencies: VisibilityDependencies,
     pub required_revision: u64,
     pub computed_revision: u64,
     pub epoch: String,
@@ -36,6 +36,15 @@ pub struct LiveQuerySubscription {
 pub struct LiveQueryOpenResult {
     pub message: ServerMessage,
     pub subscription: LiveQuerySubscription,
+}
+
+fn change_affects_live_query(
+    source: &str,
+    dependencies: &VisibilityDependencies,
+    change: &LogChange,
+) -> bool {
+    change.table == source
+        || dependencies.change_affects(&change.table, &change.operation, &change.changed_columns)
 }
 
 #[derive(Clone)]
@@ -134,6 +143,8 @@ pub struct LiveFilters {
     pub argument: String,
     pub allowed_columns: Vec<String>,
     pub allowed_operators: Vec<String>,
+    #[serde(default)]
+    pub column_types: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -222,6 +233,18 @@ impl LiveQueryPlan {
                     )));
                 }
             }
+            for (column, column_type) in &filters.column_types {
+                if !filters.allowed_columns.contains(column) {
+                    return Err(LiveQueryError::Invalid(format!(
+                        "filter column type references unallowed column {column:?}"
+                    )));
+                }
+                if !matches!(column_type.as_str(), "text" | "number") {
+                    return Err(LiveQueryError::Invalid(format!(
+                        "filter column {column:?} has unsupported type {column_type:?}"
+                    )));
+                }
+            }
         }
         if let Some(sort) = &self.sort {
             quote(&sort.default_column)?;
@@ -257,12 +280,6 @@ impl LiveQueryPlan {
             require_name(part, "result path segment")?;
         }
         Ok(())
-    }
-
-    pub fn affected_tables(&self, visibility: &VisibilityPlan) -> BTreeSet<String> {
-        let mut tables = visibility.dependencies();
-        tables.insert(self.table.clone());
-        tables
     }
 }
 
@@ -342,7 +359,7 @@ impl Runtime {
                 id,
                 path,
                 args,
-                affected_tables: plan.affected_tables(&visibility_plan),
+                visibility_dependencies: visibility_plan.dependency_columns(),
                 plan,
                 visibility: visibility_plan,
                 required_revision: snapshot.revision,
@@ -359,26 +376,23 @@ impl Runtime {
         subscriptions: &mut BTreeMap<String, LiveQuerySubscription>,
         event: &FeedEvent,
     ) -> Vec<ServerMessage> {
-        let (event_revision, changed_tables, reset) = match event {
+        let (event_revision, changes, reset) = match event {
             FeedEvent::Transaction {
                 revision, changes, ..
-            } => (
-                *revision,
-                changes
-                    .iter()
-                    .map(|change| change.table.as_str())
-                    .collect::<BTreeSet<_>>(),
-                false,
-            ),
-            FeedEvent::Reset { .. } => (0, BTreeSet::new(), true),
+            } => (*revision, changes.as_slice(), false),
+            FeedEvent::Reset { .. } => (0, &[][..], true),
         };
         let mut messages = Vec::new();
         for subscription in subscriptions.values_mut() {
             if !reset
                 && (event_revision <= subscription.computed_revision
-                    || !changed_tables
-                        .iter()
-                        .any(|table| subscription.affected_tables.contains(*table)))
+                    || !changes.iter().any(|change| {
+                        change_affects_live_query(
+                            &subscription.plan.table,
+                            &subscription.visibility_dependencies,
+                            change,
+                        )
+                    }))
             {
                 continue;
             }
@@ -696,6 +710,8 @@ fn compile_expression(
         format!("${}", parameters.len())
     };
     Ok(match expression.operator.as_str() {
+        "eq" if value.is_null() => format!("{left} IS NULL"),
+        "neq" if value.is_null() => format!("{left} IS NOT NULL"),
         "eq" => format!("{left} = {}", add(parameters, value)),
         "neq" => format!("{left} <> {}", add(parameters, value)),
         "gt" => format!("{left} > {}", add(parameters, value)),
@@ -799,10 +815,29 @@ fn compile_filters(
         }
         let left = format!("{row_alias}.{}", quote(column)?);
         let text = format!("COALESCE({left}::text, '')");
+        let column_type = definition
+            .column_types
+            .get(column)
+            .map(String::as_str)
+            .unwrap_or("text");
+        let ordered_comparison = matches!(
+            operator,
+            "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange"
+        );
+        let parameter_value = if ordered_comparison && column_type == "number" {
+            parse_filter_number(value, index)?
+        } else {
+            Value::String(value.to_owned())
+        };
         let value_arg = if matches!(operator, "empty" | "notEmpty" | "oneOf") {
             String::new()
         } else {
-            push(parameters, Value::String(value.to_owned()))
+            push(parameters, parameter_value)
+        };
+        let comparison_left = if column_type == "number" {
+            &left
+        } else {
+            &text
         };
         let predicate = match operator {
             "contains" => format!("strpos(lower({text}), lower({value_arg}::text)) > 0"),
@@ -835,19 +870,24 @@ fn compile_filters(
                     format!("{text} IN ({})", values.join(", "))
                 }
             }
-            "lessThan" => format!("{left} < {value_arg}"),
-            "lessThanOrEqual" => format!("{left} <= {value_arg}"),
-            "greaterThan" => format!("{left} > {value_arg}"),
-            "greaterThanOrEqual" => format!("{left} >= {value_arg}"),
+            "lessThan" => format!("{comparison_left} < {value_arg}"),
+            "lessThanOrEqual" => format!("{comparison_left} <= {value_arg}"),
+            "greaterThan" => format!("{comparison_left} > {value_arg}"),
+            "greaterThanOrEqual" => format!("{comparison_left} >= {value_arg}"),
             "inRange" => {
                 let value_to = value_to.ok_or_else(|| {
                     LiveQueryError::Invalid(format!(
                         "live query filter {index} inRange requires valueTo"
                     ))
                 })?;
+                let value_to = if column_type == "number" {
+                    parse_filter_number(value_to, index)?
+                } else {
+                    Value::String(value_to.to_owned())
+                };
                 format!(
-                    "{left} BETWEEN {value_arg} AND {}",
-                    push(parameters, Value::String(value_to.to_owned()))
+                    "{comparison_left} BETWEEN {value_arg} AND {}",
+                    push(parameters, value_to)
                 )
             }
             _ => {
@@ -859,6 +899,21 @@ fn compile_filters(
         predicates.push(format!("({predicate})"));
     }
     Ok(predicates.join(" AND "))
+}
+
+fn parse_filter_number(value: &str, index: usize) -> Result<Value, LiveQueryError> {
+    if let Ok(value) = value.parse::<i64>() {
+        return Ok(Value::from(value));
+    }
+    let value = value
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64);
+    value.map(Value::Number).ok_or_else(|| {
+        LiveQueryError::Invalid(format!(
+            "live query filter {index} requires a finite numeric value"
+        ))
+    })
 }
 
 fn sort(definition: Option<&LiveSort>, args: &Map<String, Value>) -> (String, String) {
@@ -1067,6 +1122,61 @@ fn bind_scalar<'query>(
 mod tests {
     use super::*;
 
+    fn feed_change(table: &str, changed_columns: &[&str]) -> LogChange {
+        LogChange {
+            revision: 2,
+            ordinal: 0,
+            origin_command_id: String::new(),
+            table: table.to_owned(),
+            row_id: "1".to_owned(),
+            operation: "update".to_owned(),
+            changed_columns: changed_columns
+                .iter()
+                .map(|column| (*column).to_owned())
+                .collect(),
+            old_value: Value::Null,
+            new_value: Value::Null,
+            provenance: Default::default(),
+        }
+    }
+
+    #[test]
+    fn live_query_ignores_unreferenced_visibility_dependency_columns() {
+        let visibility: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "table": "taskComments",
+            "key": "id",
+            "sets": {
+                "createdTasks": {
+                    "table": "tasks",
+                    "select": "id",
+                    "joins": [],
+                    "where": [
+                        {"column": "createdBy", "context": "member.id"}
+                    ]
+                }
+            },
+            "where": {"operator": "inSet", "column": "taskId", "set": "createdTasks"}
+        }))
+        .unwrap();
+        let dependencies = visibility.dependency_columns();
+
+        assert!(!change_affects_live_query(
+            "taskComments",
+            &dependencies,
+            &feed_change("tasks", &["name"]),
+        ));
+        assert!(change_affects_live_query(
+            "taskComments",
+            &dependencies,
+            &feed_change("tasks", &["createdBy"]),
+        ));
+        assert!(change_affects_live_query(
+            "taskComments",
+            &dependencies,
+            &feed_change("taskComments", &["body"]),
+        ));
+    }
+
     #[test]
     fn explicit_null_literal_is_preserved() {
         let plan: LiveQueryPlan = serde_json::from_value(serde_json::json!({
@@ -1077,6 +1187,65 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(plan.predicate.unwrap().value.unwrap().literal, Value::Null);
+    }
+
+    #[test]
+    fn null_equality_compiles_to_is_null_without_a_parameter() {
+        let expression = LiveExpression {
+            operator: "eq".to_owned(),
+            column: "deletedAt".to_owned(),
+            value: Some(LiveValue {
+                argument: String::new(),
+                literal: Value::Null,
+            }),
+            value_to: None,
+            children: Vec::new(),
+        };
+        let mut parameters = Vec::new();
+        let sql = compile_expression(&expression, &Map::new(), &mut parameters, "r").unwrap();
+        assert_eq!(sql, "r.\"deletedAt\" IS NULL");
+        assert!(parameters.is_empty());
+    }
+
+    #[test]
+    fn ordered_filters_bind_declared_numeric_columns_as_numbers() {
+        let filters: LiveFilters = serde_json::from_value(serde_json::json!({
+            "argument": "filters",
+            "allowedColumns": ["id", "name"],
+            "allowedOperators": ["greaterThanOrEqual"],
+            "columnTypes": {"id": "number"}
+        }))
+        .unwrap();
+        let args = serde_json::json!({
+            "filters": [{"column": "id", "operator": "greaterThanOrEqual", "value": "42"}]
+        });
+        let mut parameters = Vec::new();
+
+        let sql =
+            compile_filters(&filters, args.as_object().unwrap(), &mut parameters, "r").unwrap();
+
+        assert_eq!(sql, "(r.\"id\" >= $1)");
+        assert_eq!(parameters, vec![Value::from(42)]);
+    }
+
+    #[test]
+    fn ordered_filters_default_to_explicit_text_comparisons() {
+        let filters: LiveFilters = serde_json::from_value(serde_json::json!({
+            "argument": "filters",
+            "allowedColumns": ["name"],
+            "allowedOperators": ["lessThan"]
+        }))
+        .unwrap();
+        let args = serde_json::json!({
+            "filters": [{"column": "name", "operator": "lessThan", "value": "M"}]
+        });
+        let mut parameters = Vec::new();
+
+        let sql =
+            compile_filters(&filters, args.as_object().unwrap(), &mut parameters, "r").unwrap();
+
+        assert_eq!(sql, "(COALESCE(r.\"name\"::text, '') < $1)");
+        assert_eq!(parameters, vec![Value::String("M".to_owned())]);
     }
 
     #[test]

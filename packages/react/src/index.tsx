@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState } from "@gonvex/client";
@@ -15,6 +15,8 @@ export function GonvexProvider(props: { client: GonvexClient; children: ReactNod
 export type AuthState = {
   isLoading: boolean;
   isAuthenticated: boolean;
+  /** Freshness of the canonical Gonvex session during provider rotation. */
+  sessionState?: "loading" | "current" | "reconnecting" | "degraded" | "signedOut";
   /** Terminal runtime rejection after one forced token refresh attempt. */
   authError?: Error | null;
   fetchAccessToken?: (args: { forceRefreshToken: boolean }) => Promise<string | null>;
@@ -93,6 +95,8 @@ export type GonvexAuthConfig = {
   runtimeUrl: string;
   projectId: string;
   callbackPath?: string;
+  /** Tenant routing hint used for the first authentication exchange. */
+  initialTenantId?: string;
   /** Trusted identity adapter such as createFirebaseAuthAdapter(). */
   externalAuth?: GonvexExternalAuthAdapter;
 };
@@ -178,33 +182,70 @@ const authBootstrapPromises = new Map<string, Promise<GonvexAuthSession | null>>
 
 export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient; children: ReactNode }) {
   const runtimeUrl = props.runtimeUrl.replace(/\/+$/, "");
+  const initialTenantId = props.initialTenantId?.trim() || undefined;
   const callbackPath = normalizeCallbackPath(props.callbackPath ?? "/");
   const storageKey = `gonvex-auth:${encodeURIComponent(runtimeUrl)}:${props.projectId}`;
   const pkceStorageKey = `${storageKey}:pkce`;
-  const [session, setSession] = useState<GonvexAuthSession | null>(() => readAuthSession(storageKey));
-  const [isLoading, setIsLoading] = useState(true);
+  const initialAuthRef = useRef<{
+    session: GonvexAuthSession | null;
+    warmSession: GonvexAuthSession | null;
+  } | null>(null);
+  if (!initialAuthRef.current) {
+    const persisted = readAuthSession(storageKey);
+    initialAuthRef.current = {
+      session: persisted,
+      warmSession: props.externalAuth
+        ? reusableExternalAuthSession(persisted, initialTenantId, props.externalAuth.provider)
+        : null,
+    };
+  }
+  const initialAuth = initialAuthRef.current;
+  const [session, setSession] = useState<GonvexAuthSession | null>(initialAuth.session);
+  const [isLoading, setIsLoading] = useState(!initialAuth.warmSession);
+  const [sessionState, setSessionState] = useState<AuthState["sessionState"]>(
+    initialAuth.warmSession ? "reconnecting" : "loading",
+  );
   const [error, setError] = useState<string | null>(null);
   const [refreshRetryAt, setRefreshRetryAt] = useState(0);
   const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>({ active: false });
   const sessionRef = useRef(session);
   const refreshRef = useRef<Promise<GonvexAuthSession | null> | null>(null);
   const developerModeRef = useRef<(GonvexDeveloperModeState & { active: true; originalTenantId?: string }) | null>(null);
+  // A persisted session is only a candidate until bootstrap/external auth has
+  // installed its complete project + tenant + account scope on the client.
+  // Never let the token-refresh effect authenticate an account-only socket in
+  // that gap: Replica Collections require an accepted tenant scope.
+  const installedClientScopeRef = useRef<string | null>(
+    initialAuth.warmSession
+      ? authSessionScope(props.projectId, initialAuth.warmSession)
+      : null,
+  );
+  const installedWarmSessionRef = useRef(false);
+  if (initialAuth.warmSession && !installedWarmSessionRef.current) {
+    installedWarmSessionRef.current = true;
+    installClientSession(props.client, props.projectId, initialAuth.warmSession);
+  }
 
-  const installSession = useCallback((next: GonvexAuthSession | null, persist = true) => {
+  const installSession = useCallback((
+    next: GonvexAuthSession | null,
+    persist = true,
+    installClientAuth = true,
+  ) => {
     sessionRef.current = next;
     if (next) {
       if (persist) safeLocalStorageSet(storageKey, JSON.stringify(next));
+      if (!developerModeRef.current && installClientAuth) {
+        installClientSession(props.client, props.projectId, next);
+      }
       if (!developerModeRef.current) {
-        props.client.setAuth({
-          project: props.projectId, tenant: next.activeTenantId, token: next.accessToken,
-          identity: { sub: next.account.id, iss: props.projectId },
-        });
+        installedClientScopeRef.current = authSessionScope(props.projectId, next);
       }
     } else {
       if (persist) safeLocalStorageRemove(storageKey);
-      if (!developerModeRef.current) {
+      if (!developerModeRef.current && installClientAuth) {
         props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined, identity: undefined });
       }
+      if (!developerModeRef.current) installedClientScopeRef.current = null;
     }
     setSession(next);
   }, [props.client, props.projectId, storageKey]);
@@ -252,10 +293,14 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       authBootstrapPromises.set(storageKey, bootstrap);
     }
     void bootstrap.then((next) => {
-      if (!cancelled) installSession(next);
+      if (!cancelled) {
+        installSession(next);
+        setSessionState(next ? "current" : "signedOut");
+      }
     }).catch((cause) => {
       if (!cancelled) {
         installSession(null);
+        setSessionState("signedOut");
         setError(cause instanceof Error ? cause.message : "Sign-in failed.");
       }
     }).finally(() => {
@@ -274,36 +319,115 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const unsubscribe = adapter.onIdTokenChanged((identity) => {
       const currentGeneration = ++generation;
       if (!identity) {
-        installSession(null);
+        // Gonvex owns the canonical application session after the external
+        // provider proves identity. Firebase can report null transiently while
+        // a new tab hydrates its IndexedDB state; that is not an application
+        // sign-out command and must not erase the shared Gonvex session.
+        // Explicit signOut() clears both systems, and its localStorage removal
+        // propagates to every tab through the storage listener below.
+        const canonical = readAuthSession(storageKey) ?? sessionRef.current;
+        const reusableCanonical = reusableExternalAuthSession(
+          canonical,
+          initialTenantId,
+          adapter.provider,
+        );
+        if (reusableCanonical) {
+          if (!sameInstalledAuthSession(sessionRef.current, reusableCanonical)) {
+            installSession(reusableCanonical, false);
+          }
+          setSessionState("current");
+          setIsLoading(false);
+        } else if (canonical) {
+          // Keep a refreshable but expired session private until the external
+          // provider supplies a current identity token. Its tenant Replica is
+          // not safe to expose under an expired access token.
+          sessionRef.current = canonical;
+          setSession(canonical);
+          setSessionState("loading");
+          setIsLoading(true);
+        } else {
+          installSession(null, false);
+          setSessionState("signedOut");
+          setIsLoading(false);
+        }
         setError(null);
-        setIsLoading(false);
         return;
       }
-      setIsLoading(true);
-      void withBrowserAuthLock(`${storageKey}:external-exchange`, async () => {
+      // A valid canonical Gonvex session remains usable while Firebase rotates
+      // its identity token. Keep the application mounted and perform that
+      // exchange in the background; unmounting the entire tree here destroys
+      // open dialogs and other local UI state in every existing tab.
+      const canonicalSession = readAuthSession(storageKey) ?? sessionRef.current;
+      const reusableCanonicalSession = reusableExternalAuthSession(
+        canonicalSession,
+        initialTenantId,
+        adapter.provider,
+      );
+      if (reusableCanonicalSession) {
+        // A reload already has a valid canonical Gonvex session. Install its
+        // complete tenant scope before releasing application children; the
+        // Firebase exchange below rotates it in the background. Otherwise the
+        // new document can issue private Control Queries on the constructor's
+        // unauthenticated socket while this exchange is still running.
+        installSession(reusableCanonicalSession, false);
+        setSessionState("reconnecting");
+      } else {
+        setSessionState("loading");
+      }
+      setIsLoading(!reusableCanonicalSession);
+      let attemptedRefreshToken = "";
+      void withBrowserAuthLock(`${storageKey}:external-session`, async () => {
         const token = await adapter.getIdToken(false);
         if (!token) throw new Error("The external identity provider did not return an ID token.");
-        if (!sessionRef.current) {
+        // Another tab can rotate the canonical Gonvex session while this tab
+        // is waiting for the cross-tab exchange lock. Read the shared winner
+        // inside the lock instead of replaying this tab's stale in-memory
+        // refresh token.
+        const current = readAuthSession(storageKey) ?? sessionRef.current;
+        attemptedRefreshToken = current?.refreshToken ?? "";
+        if (!current) {
           props.client.setAuth({
             project: props.projectId, tenant: undefined, token: undefined,
             identity: { sub: identity.uid, iss: identity.issuer ?? adapter.provider },
           });
         }
-        const tenantId = sessionRef.current?.activeTenantId;
+        const tenantId = initialTenantId ?? current?.activeTenantId;
         const grant = await props.client.action(control.auth.exchangeExternalToken, {
           provider: adapter.provider,
           token,
           ...(tenantId ? { tenantId } : {}),
-          ...(sessionRef.current?.refreshToken ? { previousRefreshToken: sessionRef.current.refreshToken } : {}),
+          ...(attemptedRefreshToken ? { previousRefreshToken: attemptedRefreshToken } : {}),
         });
-        return sessionFromNativeGrant(grant, sessionRef.current ?? undefined);
+        return sessionFromNativeGrant(grant, current ?? undefined);
       }).then((next) => {
         if (cancelled || currentGeneration !== generation) return;
         installSession(next);
+        setSessionState("current");
         setError(null);
       }).catch((cause) => {
         if (cancelled || currentGeneration !== generation) return;
+        const latest = readAuthSession(storageKey);
+        if (latest && attemptedRefreshToken && latest.refreshToken !== attemptedRefreshToken) {
+          // A competing tab completed the single-use rotation first. Its
+          // persisted session is authoritative; a replay rejection in this
+          // tab must not clear authentication for every open tab.
+          installSession(latest);
+          setSessionState("current");
+          setError(null);
+          return;
+        }
+        const canonical = latest ?? sessionRef.current ?? canonicalSession;
+        if (canonical && !isFatalExternalExchangeError(cause)) {
+          // The already-issued Gonvex session remains authoritative. A host,
+          // database, or transport failure while rotating the provider token
+          // must not turn a healthy signed-in application into a sign-in page.
+          installSession(canonical, false);
+          setSessionState("degraded");
+          setError(cause instanceof Error ? cause.message : "External session rotation failed.");
+          return;
+        }
         installSession(null);
+        setSessionState("signedOut");
         setError(cause instanceof Error ? cause.message : "External sign-in failed.");
       }).finally(() => {
         if (!cancelled && currentGeneration === generation) setIsLoading(false);
@@ -314,18 +438,30 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       generation += 1;
       unsubscribe();
     };
-  }, [installSession, props.client, props.externalAuth, props.projectId, storageKey]);
+  }, [initialTenantId, installSession, props.client, props.externalAuth, props.projectId, storageKey]);
 
   const refreshSession = useCallback(async (force = false) => {
     if (refreshRef.current) return refreshRef.current;
     let attemptedRefreshToken = "";
-    const request = withBrowserAuthLock(`${storageKey}:refresh`, async () => {
+    const lockName = props.externalAuth
+      ? `${storageKey}:external-session`
+      : `${storageKey}:refresh`;
+    const request = withBrowserAuthLock(lockName, async () => {
       const current = readAuthSession(storageKey) ?? sessionRef.current;
       if (!current) return null;
       if (!force && current.expiresAt > Date.now() + 60_000) return current;
       if (props.externalAuth) {
+        attemptedRefreshToken = current.refreshToken;
         const token = await props.externalAuth.getIdToken(force);
-        if (!token) return null;
+        if (!token) {
+          // External providers such as Firebase can briefly report no current
+          // user while a new tab hydrates IndexedDB. That is not an explicit
+          // sign-out and must not erase the still-valid canonical Gonvex
+          // session shared by every tab. The provider callback will retry the
+          // exchange once its identity is ready.
+          setRefreshRetryAt(Date.now() + 1_000);
+          return current;
+        }
         const grant = await props.client.action(control.auth.exchangeExternalToken, {
           provider: props.externalAuth.provider,
           token,
@@ -392,7 +528,14 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   // Keep the account tenant directory authoritative without a reducer+manual
   // refetch pair. The live Control Plane Query resumes on reconnect.
   useEffect(() => {
-    if (!sessionRef.current) return;
+    const currentSession = sessionRef.current;
+    if (!currentSession) return;
+    const sessionScope = `${props.projectId}\u0000${currentSession.activeTenantId ?? ""}\u0000${currentSession.account.id}`;
+    // A localStorage session has not been authenticated merely because it was
+    // parsed. Starting a private Control Query before the complete scope is
+    // installed can race the provider bootstrap and receive a legitimate
+    // "authentication is required" response from the control plane.
+    if (installedClientScopeRef.current !== sessionScope) return;
     const watch = props.client.watchControlQuery<ControlTenant[]>(control.tenants.mine, {});
     return watch.onUpdate(() => {
       const tenants = watch.getSnapshot().result as GonvexAuthTenant[] | undefined;
@@ -404,7 +547,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       if (JSON.stringify(current.tenants) === JSON.stringify(tenants) && current.activeTenantId === activeTenantId) return;
       installSession({ ...current, tenants, activeTenantId });
     });
-  }, [installSession, props.client, session?.account.id]);
+  }, [installSession, props.client, props.projectId, session]);
 
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
@@ -447,11 +590,16 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const signOut = useCallback(async (options?: { allDevices?: boolean }) => {
     const current = sessionRef.current;
     setError(null);
-    if (current) {
-      await props.client.reducer(control.auth.logout, { refreshToken: current.refreshToken, all: options?.allDevices === true }).catch(() => undefined);
-    }
+    // Start remote revocation while the authenticated socket is still
+    // available, but never leave the browser signed in while that request is
+    // queued behind other realtime work. Local and external-provider logout
+    // are the user-visible security boundary.
+    const revokeSession = current
+      ? props.client.reducer(control.auth.logout, { refreshToken: current.refreshToken, all: options?.allDevices === true }).catch(() => undefined)
+      : Promise.resolve();
     installSession(null);
-    await props.externalAuth?.signOut?.();
+    const signOutExternal = props.externalAuth?.signOut?.() ?? Promise.resolve();
+    await Promise.all([revokeSession, signOutExternal]);
   }, [installSession, props.client, props.externalAuth]);
 
   const fetchAccessToken = useCallback(async (args: { forceRefreshToken: boolean }) => {
@@ -463,14 +611,17 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
 
   useEffect(() => {
     if (!session || developerModeRef.current) return;
+    const sessionScope = `${props.projectId}\u0000${session.activeTenantId ?? ""}\u0000${session.account.id}`;
+    if (installedClientScopeRef.current !== sessionScope) return;
+    // installSession() and setActiveTenant() exclusively own the authenticated
+    // project/tenant scope. This effect only attaches the refresh callback.
+    // Re-sending the rendered session's tenant here can race an awaited tenant
+    // switch and replace it with the previous scope.
     props.client.setAuth({
-      project: props.projectId,
-      tenant: session.activeTenantId,
       token: session.accessToken,
       fetchToken: fetchAccessToken,
-      identity: { sub: session.account.id, iss: props.projectId },
     });
-  }, [developerMode.active, fetchAccessToken, props.client, session?.account.id]);
+  }, [developerMode.active, fetchAccessToken, props.client, props.projectId, session]);
 
   const setActiveTenant = useCallback(async (tenantId: string) => {
     if (developerModeRef.current) throw new Error("Exit developer mode before switching tenants.");
@@ -478,8 +629,19 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (!current || !current.tenants.some((tenant) => tenant.id === tenantId)) {
       throw new Error(`Your account does not have access to tenant ${tenantId}.`);
     }
-    installSession({ ...current, activeTenantId: tenantId });
-  }, [installSession]);
+    const next = { ...current, activeTenantId: tenantId };
+    await props.client.authenticate({
+      project: props.projectId,
+      tenant: tenantId,
+      token: current.accessToken,
+      fetchToken: fetchAccessToken,
+      identity: { sub: current.account.id, iss: props.projectId },
+    });
+    // Publish the new tenant only after the runtime accepted it and the client
+    // activated its authoritative Local Replica scope. This keeps React hooks
+    // from observing a tenant that is not usable yet.
+    installSession(next, true, false);
+  }, [fetchAccessToken, installSession, props.client, props.projectId]);
 
   const refreshMemberships = useCallback(async () => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
@@ -574,6 +736,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const authValue = useMemo<GonvexAuthValue>(() => ({
     isLoading,
     isAuthenticated: Boolean(session && session.refreshExpiresAt > Date.now()),
+    sessionState,
     fetchAccessToken,
     account: session?.account ?? null,
     tenants: session?.tenants ?? [],
@@ -592,7 +755,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     developerMode,
     enterDeveloperMode,
     exitDeveloperMode,
-  }), [acceptInvitation, activeTenant, createTenant, developerMode, enterDeveloperMode, error, exitDeveloperMode, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
+  }), [acceptInvitation, activeTenant, createTenant, developerMode, enterDeveloperMode, error, exitDeveloperMode, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, sessionState, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
 
   return (
     <ManagedAuthContext.Provider value={authValue}>
@@ -779,6 +942,16 @@ function isFatalRefreshError(cause: unknown) {
   return cause instanceof GonvexAuthRequestError && (cause.status === 400 || cause.status === 401 || cause.status === 403);
 }
 
+function isFatalExternalExchangeError(cause: unknown) {
+  if (cause instanceof GonvexAuthRequestError) {
+    return cause.status === 400 || cause.status === 401 || cause.status === 403;
+  }
+  if (!(cause instanceof GonvexClientError)) return false;
+  if (cause.code === "auth") return true;
+  if (cause.code !== "server") return false;
+  return /external identity provider is disabled|project auth mode .* does not allow provider|external identity token (?:is invalid|issuer is invalid|audience is invalid|is expired|subject is missing)|firebase tenant does not match this auth realm|firebase account is disabled or its sessions were revoked|account signup requires an active invitation|verified invited email is required|verified email matches more than one account|account is unavailable|user is disabled|user is revoked/i.test(cause.message);
+}
+
 function isGonvexAuthSession(value: Partial<GonvexAuthSession>): value is GonvexAuthSession {
   return Boolean(
     value.accessToken && value.expiresAt && value.refreshToken && value.refreshExpiresAt
@@ -844,11 +1017,74 @@ function normalizeCallbackPath(value: string) {
   return path;
 }
 
+const WARM_SESSION_ACCESS_SAFETY_MS = 30_000;
+
+function authSessionScope(projectId: string, session: GonvexAuthSession) {
+  return `${projectId}\u0000${session.activeTenantId ?? ""}\u0000${session.account.id}`;
+}
+
+function installClientSession(
+  client: GonvexClient,
+  projectId: string,
+  session: GonvexAuthSession,
+) {
+  client.setAuth({
+    project: projectId,
+    tenant: session.activeTenantId,
+    token: session.accessToken,
+    identity: { sub: session.account.id, iss: projectId },
+  });
+}
+
+function sameInstalledAuthSession(
+  current: GonvexAuthSession | null,
+  next: GonvexAuthSession,
+) {
+  return current?.accessToken === next.accessToken
+    && current.refreshToken === next.refreshToken
+    && current.activeTenantId === next.activeTenantId
+    && current.account.id === next.account.id;
+}
+
+/**
+ * A provider-backed session may reveal its cached Replica before the external
+ * provider hydrates only when the exact stored account and tenant scope still
+ * has a current access token. A refresh credential alone is not authorization
+ * to expose cached tenant data.
+ */
+function reusableExternalAuthSession(
+  session: GonvexAuthSession | null,
+  initialTenantId: string | undefined,
+  provider: string,
+  now = Date.now(),
+): GonvexAuthSession | null {
+  if (!session || session.account.provider !== provider) return null;
+  if (!Number.isFinite(session.expiresAt) || session.expiresAt <= now + WARM_SESSION_ACCESS_SAFETY_MS) {
+    return null;
+  }
+  if (initialTenantId !== undefined && session.activeTenantId !== initialTenantId) return null;
+  if (
+    session.activeTenantId !== undefined
+    && !session.tenants.some((tenant) => tenant.id === session.activeTenantId)
+  ) {
+    return null;
+  }
+  return session;
+}
+
 function readAuthSession(key: string): GonvexAuthSession | null {
   if (typeof window === "undefined") return null;
   try {
     const parsed = JSON.parse(localStorage.getItem(key) ?? "null") as GonvexAuthSession | null;
-    if (!parsed?.accessToken || !parsed.refreshToken || !parsed.account?.id || !Array.isArray(parsed.tenants) || parsed.refreshExpiresAt <= Date.now()) {
+    if (
+      !parsed?.accessToken
+      || !Number.isFinite(parsed.expiresAt)
+      || !parsed.refreshToken
+      || !Number.isFinite(parsed.refreshExpiresAt)
+      || !parsed.account?.id
+      || !Array.isArray(parsed.tenants)
+      || parsed.refreshExpiresAt <= Date.now()
+    ) {
       safeLocalStorageRemove(key);
       return null;
     }
@@ -928,6 +1164,21 @@ type QueryResultState<T> = {
   isStale: boolean;
 };
 
+function useSessionScopeGeneration(client: GonvexClient): number {
+  const [generation, setGeneration] = useState(0);
+  useEffect(() => {
+    const unsubscribe = client.onSessionScopeChange(() => {
+      setGeneration((current) => current + 1);
+    });
+    return () => { unsubscribe(); };
+  }, [client]);
+  return generation;
+}
+
+function isSupersededQuery(error: unknown): error is GonvexClientError {
+  return error instanceof GonvexClientError && error.code === "superseded";
+}
+
 /** One-shot Query hook with explicit loading/error/timeout status and retry. */
 export function useQueryResult<T extends JsonValue = JsonValue>(
   ref: FunctionReference,
@@ -935,6 +1186,7 @@ export function useQueryResult<T extends JsonValue = JsonValue>(
   options: UseQueryResultOptions = {},
 ): UseQueryResult<T> {
   const client = useGonvexClient();
+  const sessionScopeGeneration = useSessionScopeGeneration(client);
   const path = ref.path;
   const kind = ref.kind;
   const optimisticKey = JSON.stringify(ref.optimistic ?? null);
@@ -991,6 +1243,7 @@ export function useQueryResult<T extends JsonValue = JsonValue>(
       },
       (failure) => {
         if (!active) return;
+        if (isSupersededQuery(failure)) return;
         clearSlowTimer();
         const error = failure instanceof Error
           ? failure
@@ -1008,7 +1261,7 @@ export function useQueryResult<T extends JsonValue = JsonValue>(
       clearSlowTimer();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, kind, path, optimisticKey, argsKey, keepPreviousData, requestGeneration, startSlowTimer, clearSlowTimer]);
+  }, [client, kind, path, optimisticKey, argsKey, keepPreviousData, requestGeneration, sessionScopeGeneration, startSlowTimer, clearSlowTimer]);
 
   const retry = useCallback(() => {
     if (args === "skip") return;
@@ -1151,6 +1404,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
 export function useQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
+  const sessionScopeGeneration = useSessionScopeGeneration(client);
   const [result, setResult] = useState<T>();
   const [error, setError] = useState<Error | null>(null);
   const argsKey = JSON.stringify(args);
@@ -1166,11 +1420,15 @@ export function useQuery<T extends JsonValue = JsonValue>(ref: FunctionReference
     setError(null);
     void client.query<T>(ref, args).then(
       (value) => { if (active) setResult(value); },
-      (failure) => { if (active) setError(failure instanceof Error ? failure : new Error(String(failure))); },
+      (failure) => {
+        if (active && !isSupersededQuery(failure)) {
+          setError(failure instanceof Error ? failure : new Error(String(failure)));
+        }
+      },
     );
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, ref.kind, ref.path, argsKey]);
+  }, [client, ref.kind, ref.path, argsKey, sessionScopeGeneration]);
 
   if (error) throw error;
   return result;
@@ -1197,11 +1455,11 @@ export function useReplicaCollection<T extends JsonValue = JsonValue>(
   );
 }
 
-/** Replica rows plus authoritative completeness, truncation, and freshness metadata. */
+/** Replica rows plus exact per-collection authority, completeness, truncation, and freshness. */
 export function useReplicaCollectionState<T extends ReplicaRow = ReplicaRow>(
   ref: FunctionReference,
   args: JsonValue | "skip" = {},
-): ReplicaCollectionState<T> | undefined {
+): ReplicaCollectionSubscriptionState<T> | undefined {
   const client = useGonvexClient();
   const path = ref.path;
   const argsKey = JSON.stringify(args);
@@ -1212,7 +1470,7 @@ export function useReplicaCollectionState<T extends ReplicaRow = ReplicaRow>(
   );
   return useSyncExternalStore(
     useCallback((onStoreChange) => watch?.onUpdate(onStoreChange) ?? (() => undefined), [watch]),
-    useCallback(() => watch?.localReplicaState() as ReplicaCollectionState<T> | undefined, [watch]),
+    useCallback(() => watch?.localReplicaState() as ReplicaCollectionSubscriptionState<T> | undefined, [watch]),
     () => undefined,
   );
 }
@@ -1237,15 +1495,19 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, kind, path, optimisticKey, argsKey],
   );
-  const selectedRef = useRef<{ initialized: boolean; value: Selected | undefined }>({
+  const selectedRef = useRef<{ initialized: boolean; rows: T[] | undefined; value: Selected | undefined }>({
     initialized: false,
+    rows: undefined,
     value: undefined,
   });
   useEffect(() => {
-    selectedRef.current = { initialized: false, value: undefined };
+    selectedRef.current = { initialized: false, rows: undefined, value: undefined };
   }, [watch]);
   const getSnapshot = useCallback(() => {
     const rows = watch?.localReplicaResult();
+    if (selectedRef.current.initialized && selectedRef.current.rows === rows) {
+      return selectedRef.current.value;
+    }
     const next = rows === undefined ? undefined : selectorRef.current(rows);
     if (
       !selectedRef.current.initialized
@@ -1253,7 +1515,9 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
       || selectedRef.current.value === undefined
       || !equalityRef.current(selectedRef.current.value, next)
     ) {
-      selectedRef.current = { initialized: true, value: next };
+      selectedRef.current = { initialized: true, rows, value: next };
+    } else {
+      selectedRef.current = { ...selectedRef.current, rows };
     }
     return selectedRef.current.value;
   }, [watch]);
@@ -1262,14 +1526,18 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
     return watch.onUpdate(() => {
       const previous = selectedRef.current.value;
       const rows = watch.localReplicaResult();
+      if (selectedRef.current.initialized && selectedRef.current.rows === rows) return;
       const next = rows === undefined ? undefined : selectorRef.current(rows);
       if (
         selectedRef.current.initialized
         && previous !== undefined
         && next !== undefined
         && equalityRef.current(previous, next)
-      ) return;
-      selectedRef.current = { initialized: true, value: next };
+      ) {
+        selectedRef.current = { ...selectedRef.current, rows };
+        return;
+      }
+      selectedRef.current = { initialized: true, rows, value: next };
       onStoreChange();
     });
   }, [watch]);
@@ -1283,12 +1551,24 @@ export type UseReducerOptions = {
 
 export function useReducer(ref: FunctionReference, options: UseReducerOptions = {}) {
   const client = useGonvexClient();
-  return (args: JsonValue = {}) => client.reducer(ref, args, options);
+  const refRef = useRef(ref);
+  refRef.current = ref;
+  const timeoutMs = options.timeoutMs;
+  return useCallback(
+    (args: JsonValue = {}) => client.reducer(refRef.current, args, timeoutMs === undefined ? {} : { timeoutMs }),
+    [client, timeoutMs],
+  );
 }
 
 export function useAction(ref: FunctionReference, options: UseReducerOptions = {}) {
   const client = useGonvexClient();
-  return (args: JsonValue = {}) => client.action(ref, args, options);
+  const refRef = useRef(ref);
+  refRef.current = ref;
+  const timeoutMs = options.timeoutMs;
+  return useCallback(
+    (args: JsonValue = {}) => client.action(refRef.current, args, timeoutMs === undefined ? {} : { timeoutMs }),
+    [client, timeoutMs],
+  );
 }
 
 const FALLBACK_CONNECTION_STATE: ConnectionState = {

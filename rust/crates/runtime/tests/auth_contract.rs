@@ -50,6 +50,7 @@ fn test_config(database_url: String) -> Config {
             shutdown_timeout: Duration::from_secs(1),
             max_frame_bytes: 1 << 20,
             max_concurrent_calls: 4,
+            max_host_calls: 100,
             isolate_pool_size: 1,
             execution_timeout: Duration::from_secs(1),
         },
@@ -155,6 +156,46 @@ async fn refresh_token_reuse_commits_family_revocation() {
         )
         .await
         .unwrap();
+
+    // A browser can deliver the same provider token through session restore
+    // and the provider callback at nearly the same time. The shared
+    // idempotency key must serialize those calls and return the one committed
+    // grant, never observe the conflict without its row.
+    let concurrent_args = serde_json::json!({
+        "email":"person@example.test",
+        "password":"correct horse battery staple",
+    });
+    let concurrent_connection = ControlConnection {
+        project_id: "project".to_owned(),
+        ..ControlConnection::default()
+    };
+    let (first, second) = tokio::join!(
+        runtime.execute_control_action(
+            &concurrent_connection,
+            "control.auth.passwordLogin",
+            &concurrent_args,
+            "login-concurrent",
+        ),
+        runtime.execute_control_action(
+            &concurrent_connection,
+            "control.auth.passwordLogin",
+            &concurrent_args,
+            "login-concurrent",
+        ),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM gonvex_control_idempotency WHERE project_id='project' AND idempotency_key='login-concurrent' AND state='completed'",
+        )
+        .fetch_one(&fixture)
+        .await
+        .unwrap(),
+        1
+    );
+
     let access_token = login["accessToken"].as_str().unwrap();
     let response = runtime
         .router()
@@ -380,6 +421,49 @@ async fn internal_e2e_actor_creation_uses_native_auth_and_tenant_admission() {
         .await
         .unwrap(),
         1
+    );
+
+    sqlx::query("UPDATE gonvex_runtime_projects SET auth_mode='firebase' WHERE id='project'")
+        .execute(&fixture)
+        .await
+        .unwrap();
+    let firebase_response = runtime
+        .router()
+        .oneshot(
+            Request::post("/dev/internal/e2e/members")
+                .header("authorization", "Bearer test-admin-key")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "projectId":"project",
+                        "tenantId":"tenant",
+                        "email":"firebase-actor@example.test",
+                        "name":"Firebase Actor",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(firebase_response.status(), StatusCode::OK);
+    let firebase_actor: Value = serde_json::from_slice(
+        &to_bytes(firebase_response.into_body(), 64 << 10)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(firebase_actor["accountId"].as_str().is_some());
+    assert!(firebase_actor["memberId"].as_str().is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM account_identities WHERE account_id=$1 AND provider='password'",
+        )
+        .bind(firebase_actor["accountId"].as_str().unwrap())
+        .fetch_one(&fixture)
+        .await
+        .unwrap(),
+        0
     );
 
     runtime.shutdown().await;

@@ -243,6 +243,8 @@ pub struct InvocationContextWire {
     #[serde(default)]
     pub invocation: InvocationInfo,
     #[serde(default)]
+    pub nesting_depth: u8,
+    #[serde(default)]
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
     pub action_tools: Vec<String>,
@@ -274,6 +276,7 @@ impl InvocationContextWire {
                 permissions: self.permissions,
             },
             invocation: self.invocation,
+            nesting_depth: self.nesting_depth,
             environment: self.environment,
             action_tools: self.action_tools,
             generation,
@@ -469,6 +472,11 @@ pub enum HostCallFrame {
         key: String,
         id: serde_json::Value,
     },
+    DbDeleteMany {
+        table: String,
+        key: String,
+        ids: serde_json::Value,
+    },
     ActionEnqueue {
         function: String,
         args: serde_json::Value,
@@ -547,6 +555,11 @@ impl HostCallFrame {
                 table,
                 key,
                 id: decode(id, "id")?,
+            },
+            HostCall::DbDeleteMany { table, key, ids } => Self::DbDeleteMany {
+                table,
+                key,
+                ids: decode(ids, "ids")?,
             },
             HostCall::ActionEnqueue { function, args } => Self::ActionEnqueue {
                 function,

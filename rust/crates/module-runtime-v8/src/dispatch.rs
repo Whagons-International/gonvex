@@ -175,6 +175,13 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         id: serde_json::Value,
     },
+    DbDeleteMany {
+        table: String,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        ids: serde_json::Value,
+    },
     ActionEnqueue {
         function: String,
         #[serde(default)]
@@ -258,6 +265,11 @@ impl HostCallRequest {
                 table,
                 key: key_column(key),
                 id: encode(id)?,
+            },
+            Self::DbDeleteMany { table, key, ids } => HostCall::DbDeleteMany {
+                table,
+                key: key_column(key),
+                ids: encode(ids)?,
             },
             Self::ActionEnqueue { function, args } => HostCall::ActionEnqueue {
                 function,

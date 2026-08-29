@@ -64,6 +64,8 @@ export type ReducerOutbox = {
   loadAll(scope: string): Promise<ReducerOutboxEntry[]>;
   nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined>;
   markInflight(id: number): Promise<void>;
+  /** Return a just-admitted entry to pending without recording a failed attempt. */
+  markPending(id: number): Promise<void>;
   markCommitted(id: number): Promise<void>;
   ack(id: number): Promise<void>;
   fail(id: number, error: string): Promise<void>;
@@ -200,6 +202,34 @@ export class DexieReducerOutbox implements ReducerOutbox {
     }
   }
 
+  async markPending(id: number): Promise<void> {
+    if (this.memoryOnly) {
+      this.markPendingInMemory(id);
+      return;
+    }
+    try {
+      const database = await this.open();
+      let updated: ReducerOutboxEntry | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry || entry.state === "pending") return;
+        updated = {
+          ...entry,
+          state: "pending",
+          nextAttemptAt: Date.now(),
+          lastError: undefined,
+        };
+        await database.entries.put(updated);
+      });
+      if (!updated) return;
+      this.remember(updated);
+      this.notify();
+    } catch {
+      this.degradeToMemory();
+      this.markPendingInMemory(id);
+    }
+  }
+
   async markCommitted(id: number): Promise<void> {
     if (this.memoryOnly) {
       this.markCommittedInMemory(id);
@@ -319,6 +349,18 @@ export class DexieReducerOutbox implements ReducerOutbox {
     const entry = this.memoryEntries.get(id);
     if (!entry || entry.state === "inflight") return;
     this.memoryEntries.set(id, { ...entry, state: "inflight" });
+    this.notify();
+  }
+
+  private markPendingInMemory(id: number) {
+    const entry = this.memoryEntries.get(id);
+    if (!entry || entry.state === "pending") return;
+    this.memoryEntries.set(id, {
+      ...entry,
+      state: "pending",
+      nextAttemptAt: Date.now(),
+      lastError: undefined,
+    });
     this.notify();
   }
 
@@ -486,6 +528,21 @@ export class StoreReducerOutbox implements ReducerOutbox {
     const entry = this.entries.get(id);
     if (!entry || entry.state === "inflight") return;
     const updated = { ...entry, state: "inflight" as const };
+    this.entries.set(id, updated);
+    await this.persistPut(updated);
+    this.notify();
+  }
+
+  async markPending(id: number): Promise<void> {
+    await this.ready;
+    const entry = this.entries.get(id);
+    if (!entry || entry.state === "pending") return;
+    const updated: ReducerOutboxEntry = {
+      ...entry,
+      state: "pending",
+      nextAttemptAt: Date.now(),
+      lastError: undefined,
+    };
     this.entries.set(id, updated);
     await this.persistPut(updated);
     this.notify();

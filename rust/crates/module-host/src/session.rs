@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime};
 
 use gonvex_module_runtime::{
     BoxFuture, HostCall, HostError, HostResponse, Invocation, InvocationContext, ModuleError,
-    ModuleHost,
+    ModuleHost, MAX_INVOCATION_DEPTH,
 };
 use gonvex_module_runtime_v8::{V8Config, V8ModuleEngine};
 use gonvex_server_host::{ModuleRegistry, RegistryError};
@@ -549,10 +549,27 @@ async fn handle_invoke(
             format!("unknown function kind {}", request.kind),
         )
     })?;
-    let permit: OwnedSemaphorePermit = Arc::clone(&state.calls)
-        .acquire_owned()
-        .await
-        .map_err(|_| WireError::retryable(codes::SHUTTING_DOWN, "module host is shutting down"))?;
+    if request.context.nesting_depth > MAX_INVOCATION_DEPTH {
+        return Err(WireError::new(
+            codes::BAD_REQUEST,
+            "nested function invocation exceeded the maximum depth",
+        ));
+    }
+    // Root admission protects the process from unrelated callers. Nested
+    // calls already hold a root slot and use depth-specific isolate pools, so
+    // taking another root permit here can deadlock the parent and child.
+    let permit: Option<OwnedSemaphorePermit> = if request.context.nesting_depth == 0 {
+        Some(
+            Arc::clone(&state.calls)
+                .acquire_owned()
+                .await
+                .map_err(|_| {
+                    WireError::retryable(codes::SHUTTING_DOWN, "module host is shutting down")
+                })?,
+        )
+    } else {
+        None
+    };
 
     let lease = state
         .modules

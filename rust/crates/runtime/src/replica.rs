@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use thiserror::Error;
 
-use crate::change_feed::{FeedEvent, ReplicaClock};
+use crate::change_feed::{FeedEvent, LogChange, ReplicaClock};
 use crate::host_calls::bind_value;
 use crate::modules::ReplicaCollectionDefinition;
 use crate::visibility::{self, ResolvedVisibility, VisibilityPlan};
@@ -68,6 +68,12 @@ struct Snapshot {
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
 }
+
+// Small and normal application collections can carry their integrity map with
+// the initial rows. This lets clients persist the cold snapshot once instead of
+// hashing and rewriting it again when the immediately following ready arrives.
+// Large replicas keep the digest/need-hashes resume path to bound wire overhead.
+const INLINE_SNAPSHOT_HASH_LIMIT: usize = 2_048;
 
 impl Runtime {
     pub async fn open_replica(
@@ -251,18 +257,42 @@ impl Runtime {
             if revision <= subscription.cursor.revision {
                 continue;
             }
-            let dependency_changed = changes.iter().any(|change| {
-                change.table != subscription.definition.table
-                    && subscription
-                        .visibility
-                        .dependencies()
-                        .contains(&change.table)
-            });
+            let dependencies = subscription.visibility.dependency_columns();
+            let (source_changed, dependency_changed) = table_change_relevance(
+                &subscription.definition.table,
+                &dependencies,
+                changes.iter(),
+            );
+            // Budgets and progressive delivery only make a source-table or
+            // visibility-dependency change window-sensitive. Re-running every
+            // bounded collection for every unrelated transaction made one task
+            // update queue full snapshots for the entire application replica,
+            // leaving the changed task stale behind minutes of irrelevant SQL.
+            if !source_changed && !dependency_changed {
+                // Keep the server-side subscription cursor current for resume
+                // bookkeeping, but do not emit one `replica.ready` per open
+                // collection. The rows and visibility inputs did not change,
+                // so the collection remains authoritative at its existing
+                // client cursor. Per-collection ready fan-out made each client
+                // re-hash and persist every window for unrelated presence,
+                // preference, and notification transactions.
+                subscription.cursor.revision = revision;
+                continue;
+            }
+            let source_changes = changes
+                .iter()
+                .filter(|change| change.table == subscription.definition.table)
+                .collect::<Vec<_>>();
             if dependency_changed
-                || subscription.truncated
-                || subscription.definition.max_rows > 0
-                || subscription.definition.max_bytes > 0
-                || subscription.definition.mode == "progressive"
+                || source_update_requires_snapshot(
+                    &subscription.rows,
+                    subscription.truncated,
+                    &subscription.definition,
+                    &subscription.args,
+                    &subscription.visibility,
+                    &subscription.resolved,
+                    source_changes.iter().copied(),
+                )?
             {
                 let snapshot = self
                     .replica_snapshot(
@@ -325,10 +355,7 @@ impl Runtime {
             } else {
                 let mut upserts = BTreeMap::new();
                 let mut deleted = BTreeSet::new();
-                for change in changes
-                    .iter()
-                    .filter(|change| change.table == subscription.definition.table)
-                {
+                for change in source_changes {
                     let old_visible = row_in_collection(
                         &change.old_value,
                         &subscription.args,
@@ -352,14 +379,23 @@ impl Runtime {
                     let Some(operation) = operation else {
                         continue;
                     };
+                    let old_projection = old_visible
+                        .then(|| project_row(&change.old_value, &subscription.definition))
+                        .transpose()?;
+                    let new_projection = new_visible
+                        .then(|| project_row(&change.new_value, &subscription.definition))
+                        .transpose()?;
                     if new_visible {
+                        let new_projection = new_projection
+                            .as_ref()
+                            .expect("visible source rows have a projection");
                         subscription
                             .rows
-                            .insert(change.row_id.clone(), change.new_value.clone());
+                            .insert(change.row_id.clone(), new_projection.clone());
                         subscription
                             .hashes
-                            .insert(change.row_id.clone(), row_hash(&change.new_value));
-                        upserts.insert(change.row_id.clone(), change.new_value.clone());
+                            .insert(change.row_id.clone(), row_hash(new_projection));
+                        upserts.insert(change.row_id.clone(), new_projection.clone());
                     } else {
                         subscription.rows.remove(&change.row_id);
                         subscription.hashes.remove(&change.row_id);
@@ -371,8 +407,8 @@ impl Runtime {
                             entity: change.table.clone(),
                             id: change.row_id.clone(),
                             operation: operation.to_owned(),
-                            old_value: old_visible.then(|| change.old_value.clone()),
-                            new_value: new_visible.then(|| change.new_value.clone()),
+                            old_value: old_projection,
+                            new_value: new_projection,
                             changed_columns: change.changed_columns.clone(),
                         },
                     );
@@ -565,6 +601,77 @@ fn row_in_collection(
     visibility::row_matches(plan, resolved, &Value::Object(row.clone()))
 }
 
+/// Returns whether a source-table transaction can no longer be represented by
+/// incremental row changes. A complete collection remains complete when the
+/// projected post-transaction rows fit its budgets, including for progressive
+/// delivery. Once a collection is truncated, its missing rows are unknown and
+/// the next source change must rebuild the window from PostgreSQL.
+fn source_update_requires_snapshot<'a>(
+    rows: &BTreeMap<String, Value>,
+    truncated: bool,
+    definition: &ReplicaCollectionDefinition,
+    args: &Value,
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    changes: impl Iterator<Item = &'a LogChange>,
+) -> Result<bool, ReplicaError> {
+    if truncated {
+        return Ok(true);
+    }
+
+    // With no budgets, a complete collection can always apply source changes
+    // directly. The delivery mode controls initial loading, not correctness
+    // of subsequent source-table deltas.
+    if definition.max_rows == 0 && definition.max_bytes <= 0 {
+        return Ok(false);
+    }
+
+    let mut projected = rows.clone();
+    for change in changes {
+        let old_visible = row_in_collection(&change.old_value, args, definition, plan, resolved);
+        let new_visible = row_in_collection(&change.new_value, args, definition, plan, resolved);
+        if new_visible {
+            projected.insert(
+                change.row_id.clone(),
+                project_row(&change.new_value, definition)?,
+            );
+        } else if old_visible || projected.contains_key(&change.row_id) {
+            projected.remove(&change.row_id);
+        }
+    }
+
+    if definition.max_rows > 0 && projected.len() > definition.max_rows {
+        return Ok(true);
+    }
+    if definition.max_bytes > 0 {
+        let bytes = projected
+            .values()
+            .map(|row| serde_json::to_vec(row).unwrap_or_default().len() as i64)
+            .sum::<i64>();
+        if bytes > definition.max_bytes {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn project_row(
+    row: &Value,
+    definition: &ReplicaCollectionDefinition,
+) -> Result<Value, ReplicaError> {
+    let object = row.as_object().ok_or(ReplicaError::InvalidArguments)?;
+    let mut projected = serde_json::Map::new();
+    for column in &definition.columns {
+        if let Some(value) = object.get(column) {
+            projected.insert(column.clone(), value.clone());
+        }
+    }
+    if !projected.contains_key(&definition.key) {
+        return Err(ReplicaError::MissingKey(definition.key.clone()));
+    }
+    Ok(Value::Object(projected))
+}
+
 fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
     match row.get(key) {
         Some(Value::String(value)) => Ok(value.clone()),
@@ -575,34 +682,96 @@ fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
 }
 
 fn row_hash(row: &Value) -> String {
-    hex_digest(&serde_json::to_vec(row).unwrap_or_default())
+    hex_digest(stable_json(row).as_bytes())
 }
 
 fn hashes_digest(hashes: &BTreeMap<String, String>) -> String {
-    let pairs = hashes
-        .iter()
-        .map(|(key, hash)| [key, hash])
-        .collect::<Vec<_>>();
-    hex_digest(&serde_json::to_vec(&pairs).unwrap_or_default())
+    let pairs = Value::Array(
+        hashes
+            .iter()
+            .map(|(key, hash)| {
+                Value::Array(vec![
+                    Value::String(key.clone()),
+                    Value::String(hash.clone()),
+                ])
+            })
+            .collect(),
+    );
+    hex_digest(stable_json(&pairs).as_bytes())
+}
+
+fn stable_json(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                value.to_string()
+            } else if let Some(value) = value.as_u64() {
+                value.to_string()
+            } else if let Some(value) = value.as_f64() {
+                ryu_js::Buffer::new().format(value).to_owned()
+            } else {
+                "null".to_owned()
+            }
+        }
+        Value::String(value) => serde_json::to_string(value)
+            .unwrap_or_else(|_| "\"\"".to_owned())
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029"),
+        Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(stable_json).collect::<Vec<_>>().join(",")
+        ),
+        Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| format!(
+                        "{}:{}",
+                        stable_json(&Value::String(key.clone())),
+                        stable_json(&values[key])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+    }
+}
+
+fn table_change_relevance<'a>(
+    source: &str,
+    dependencies: &visibility::VisibilityDependencies,
+    changes: impl Iterator<Item = &'a LogChange>,
+) -> (bool, bool) {
+    let mut source_changed = false;
+    let mut dependency_changed = false;
+    for change in changes {
+        if change.table == source {
+            source_changed = true;
+        }
+        if dependencies.change_affects(&change.table, &change.operation, &change.changed_columns) {
+            dependency_changed = true;
+        }
+    }
+    (source_changed, dependency_changed)
 }
 
 fn cursor_for(
     clock: &ReplicaClock,
-    definition: &ReplicaCollectionDefinition,
-    visibility_scope: &str,
+    _definition: &ReplicaCollectionDefinition,
+    _visibility_scope: &str,
 ) -> ReplicaCursor {
-    let payload = serde_json::json!({
-        "semantics": 3,
-        "databaseEpoch": clock.epoch,
-        "definition": definition,
-        "scope": visibility_scope,
-    });
-    let digest = Sha256::digest(serde_json::to_vec(&payload).unwrap_or_default());
     ReplicaCursor {
-        epoch: digest[..16]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
+        // Transaction frames and every collection window share the durable
+        // database epoch. Collection identity and visibility are already
+        // isolated by the Local Replica scope/signature, while hashes prove
+        // the current row set on resume. Using a per-collection hash here made
+        // every normal transaction look like a database replacement to the
+        // client and cleared unrelated windows.
+        epoch: clock.epoch.clone(),
         revision: clock.revision,
     }
 }
@@ -632,29 +801,40 @@ fn replica_snapshot_message(
     snapshot: &Snapshot,
     cursor: ReplicaCursor,
 ) -> ServerMessage {
+    let mut metadata = BTreeMap::from([
+        ("path".to_owned(), Value::String(request.path.clone())),
+        (
+            "orderBy".to_owned(),
+            Value::String(definition.order_by.clone()),
+        ),
+        (
+            "orderDirection".to_owned(),
+            Value::String(definition.order_direction.clone()),
+        ),
+        ("mode".to_owned(), Value::String(definition.mode.clone())),
+        (
+            "maxRows".to_owned(),
+            Value::from(definition.max_rows as u64),
+        ),
+        ("maxBytes".to_owned(), Value::from(definition.max_bytes)),
+        ("truncated".to_owned(), Value::Bool(snapshot.truncated)),
+    ]);
+    if snapshot.hashes.len() <= INLINE_SNAPSHOT_HASH_LIMIT {
+        metadata.insert(
+            "hashes".to_owned(),
+            serde_json::to_value(&snapshot.hashes).unwrap_or_default(),
+        );
+        metadata.insert(
+            "digest".to_owned(),
+            Value::String(hashes_digest(&snapshot.hashes)),
+        );
+    }
     ServerMessage::ReplicaSnapshot {
         id: request.id.clone(),
         result: snapshot.rows.clone(),
         cursor,
         key: definition.key.clone(),
-        metadata: BTreeMap::from([
-            ("path".to_owned(), Value::String(request.path.clone())),
-            (
-                "orderBy".to_owned(),
-                Value::String(definition.order_by.clone()),
-            ),
-            (
-                "orderDirection".to_owned(),
-                Value::String(definition.order_direction.clone()),
-            ),
-            ("mode".to_owned(), Value::String(definition.mode.clone())),
-            (
-                "maxRows".to_owned(),
-                Value::from(definition.max_rows as u64),
-            ),
-            ("maxBytes".to_owned(), Value::from(definition.max_bytes)),
-            ("truncated".to_owned(), Value::Bool(snapshot.truncated)),
-        ]),
+        metadata,
     }
 }
 
@@ -730,6 +910,286 @@ fn hex_digest(value: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn visibility_with_task_dependency(source: &str) -> VisibilityPlan {
+        VisibilityPlan {
+            table: source.to_owned(),
+            key: "id".to_owned(),
+            sets: BTreeMap::from([(
+                "createdTasks".to_owned(),
+                crate::visibility::VisibilitySet {
+                    table: "tasks".to_owned(),
+                    alias: String::new(),
+                    select: "id".to_owned(),
+                    select_from: String::new(),
+                    joins: Vec::new(),
+                    constraints: vec![crate::visibility::VisibilityConstraint {
+                        table: String::new(),
+                        column: "createdBy".to_owned(),
+                        context: "member.id".to_owned(),
+                        value: None,
+                    }],
+                },
+            )]),
+            predicate: crate::visibility::VisibilityExpression {
+                operator: "inSet".to_owned(),
+                column: if source == "tasks" { "id" } else { "taskId" }.to_owned(),
+                context: String::new(),
+                set: "createdTasks".to_owned(),
+                value: None,
+                children: Vec::new(),
+            },
+        }
+    }
+
+    fn routing_change(table: &str, operation: &str, changed_columns: &[&str]) -> LogChange {
+        LogChange {
+            revision: 2,
+            ordinal: 0,
+            origin_command_id: String::new(),
+            table: table.to_owned(),
+            row_id: "1".to_owned(),
+            operation: operation.to_owned(),
+            changed_columns: changed_columns
+                .iter()
+                .map(|column| (*column).to_owned())
+                .collect(),
+            old_value: Value::Null,
+            new_value: Value::Null,
+            provenance: Default::default(),
+        }
+    }
+
+    #[test]
+    fn dependency_updates_only_recompute_visibility_for_referenced_columns() {
+        let dependencies = visibility_with_task_dependency("taskComments").dependency_columns();
+        let name = routing_change("tasks", "update", &["name"]);
+        let created_by = routing_change("tasks", "update", &["createdBy"]);
+        let inserted = routing_change("tasks", "insert", &["name"]);
+
+        assert_eq!(
+            table_change_relevance("taskComments", &dependencies, std::iter::once(&name)),
+            (false, false),
+        );
+        assert_eq!(
+            table_change_relevance("taskComments", &dependencies, std::iter::once(&created_by),),
+            (false, true),
+        );
+        assert_eq!(
+            table_change_relevance("taskComments", &dependencies, std::iter::once(&inserted),),
+            (false, true),
+        );
+    }
+
+    #[test]
+    fn source_table_can_also_be_a_visibility_dependency() {
+        let dependencies = visibility_with_task_dependency("tasks").dependency_columns();
+        let name = routing_change("tasks", "update", &["name"]);
+        let created_by = routing_change("tasks", "update", &["createdBy"]);
+
+        assert_eq!(
+            table_change_relevance("tasks", &dependencies, std::iter::once(&name)),
+            (true, false),
+        );
+        assert_eq!(
+            table_change_relevance("tasks", &dependencies, std::iter::once(&created_by)),
+            (true, true),
+        );
+    }
+
+    fn public_visibility() -> (VisibilityPlan, ResolvedVisibility) {
+        (
+            VisibilityPlan {
+                table: "tasks".to_owned(),
+                key: "id".to_owned(),
+                sets: BTreeMap::new(),
+                predicate: crate::visibility::VisibilityExpression {
+                    operator: "public".to_owned(),
+                    column: String::new(),
+                    context: String::new(),
+                    set: String::new(),
+                    value: None,
+                    children: Vec::new(),
+                },
+            },
+            ResolvedVisibility {
+                revision: 1,
+                direct: BTreeMap::new(),
+                role: String::new(),
+                permissions: Value::Null,
+                sets: BTreeMap::new(),
+                fingerprint: String::new(),
+            },
+        )
+    }
+
+    fn source_change(old_value: Value, new_value: Value) -> LogChange {
+        LogChange {
+            revision: 2,
+            ordinal: 0,
+            origin_command_id: String::new(),
+            table: "tasks".to_owned(),
+            row_id: "1".to_owned(),
+            operation: "UPDATE".to_owned(),
+            changed_columns: vec!["title".to_owned()],
+            old_value,
+            new_value,
+            provenance: Default::default(),
+        }
+    }
+
+    #[test]
+    fn complete_progressive_collection_stays_incremental_within_budgets() -> Result<(), ReplicaError>
+    {
+        let definition = ReplicaCollectionDefinition {
+            table: "tasks".to_owned(),
+            key: "id".to_owned(),
+            columns: vec!["id".to_owned(), "title".to_owned()],
+            equal_filters: BTreeMap::new(),
+            exclude_when_set: Vec::new(),
+            visibility_tables: Vec::new(),
+            visibility_plan_hash: String::new(),
+            order_by: String::new(),
+            order_direction: String::new(),
+            mode: "progressive".to_owned(),
+            max_rows: 2,
+            max_bytes: 1_000,
+            retention_ms: 0,
+        };
+        let (plan, resolved) = public_visibility();
+        let old = serde_json::json!({"id": "1", "title": "old"});
+        let new = serde_json::json!({"id": "1", "title": "new"});
+        let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
+        let change = source_change(old, new);
+
+        assert!(!source_update_requires_snapshot(
+            &rows,
+            false,
+            &definition,
+            &Value::Object(serde_json::Map::new()),
+            &plan,
+            &resolved,
+            std::iter::once(&change),
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_projection_ignores_unrequested_columns_for_delta_and_budget(
+    ) -> Result<(), ReplicaError> {
+        let definition = ReplicaCollectionDefinition {
+            table: "tasks".to_owned(),
+            key: "id".to_owned(),
+            columns: vec!["id".to_owned(), "title".to_owned()],
+            equal_filters: BTreeMap::new(),
+            exclude_when_set: Vec::new(),
+            visibility_tables: Vec::new(),
+            visibility_plan_hash: String::new(),
+            order_by: String::new(),
+            order_direction: String::new(),
+            mode: "progressive".to_owned(),
+            max_rows: 2,
+            max_bytes: 30,
+            retention_ms: 0,
+        };
+        let (plan, resolved) = public_visibility();
+        let old = serde_json::json!({"id": "1", "title": "old", "internalNotes": "old"});
+        let new = serde_json::json!({
+            "id": "1",
+            "title": "new",
+            "internalNotes": "a source column that is not replicated"
+        });
+        let rows = BTreeMap::from([("1".to_owned(), project_row(&old, &definition)?)]);
+        let change = source_change(old, new.clone());
+
+        assert!(!source_update_requires_snapshot(
+            &rows,
+            false,
+            &definition,
+            &Value::Object(serde_json::Map::new()),
+            &plan,
+            &resolved,
+            std::iter::once(&change),
+        )?);
+        assert_eq!(
+            project_row(&new, &definition)?,
+            serde_json::json!({"id": "1", "title": "new"}),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn complete_collection_snapshots_when_projected_rows_cross_row_budget(
+    ) -> Result<(), ReplicaError> {
+        let definition = ReplicaCollectionDefinition {
+            table: "tasks".to_owned(),
+            key: "id".to_owned(),
+            columns: vec!["id".to_owned(), "title".to_owned()],
+            equal_filters: BTreeMap::new(),
+            exclude_when_set: Vec::new(),
+            visibility_tables: Vec::new(),
+            visibility_plan_hash: String::new(),
+            order_by: String::new(),
+            order_direction: String::new(),
+            mode: "progressive".to_owned(),
+            max_rows: 1,
+            max_bytes: 1_000,
+            retention_ms: 0,
+        };
+        let (plan, resolved) = public_visibility();
+        let old = serde_json::json!({"id": "1", "title": "old"});
+        let new = serde_json::json!({"id": "2", "title": "new"});
+        let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
+        let mut change = source_change(old, new);
+        change.row_id = "2".to_owned();
+
+        assert!(source_update_requires_snapshot(
+            &rows,
+            false,
+            &definition,
+            &Value::Object(serde_json::Map::new()),
+            &plan,
+            &resolved,
+            std::iter::once(&change),
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn complete_collection_snapshots_when_projected_rows_cross_byte_budget(
+    ) -> Result<(), ReplicaError> {
+        let definition = ReplicaCollectionDefinition {
+            table: "tasks".to_owned(),
+            key: "id".to_owned(),
+            columns: vec!["id".to_owned(), "title".to_owned()],
+            equal_filters: BTreeMap::new(),
+            exclude_when_set: Vec::new(),
+            visibility_tables: Vec::new(),
+            visibility_plan_hash: String::new(),
+            order_by: String::new(),
+            order_direction: String::new(),
+            mode: "progressive".to_owned(),
+            max_rows: 2,
+            max_bytes: 30,
+            retention_ms: 0,
+        };
+        let (plan, resolved) = public_visibility();
+        let old = serde_json::json!({"id": "1", "title": "old"});
+        let new = serde_json::json!({"id": "1", "title": "a title too large"});
+        let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
+        let change = source_change(old, new);
+
+        assert!(source_update_requires_snapshot(
+            &rows,
+            false,
+            &definition,
+            &Value::Object(serde_json::Map::new()),
+            &plan,
+            &resolved,
+            std::iter::once(&change),
+        )?);
+        Ok(())
+    }
+
     #[test]
     fn transition_filter_is_old_and_new_aware() {
         let definition = ReplicaCollectionDefinition {
@@ -756,7 +1216,7 @@ mod tests {
                 column: String::new(),
                 context: String::new(),
                 set: String::new(),
-                value: String::new(),
+                value: None,
                 children: Vec::new(),
             },
         };
@@ -782,5 +1242,44 @@ mod tests {
             &plan,
             &resolved,
         ));
+
+        let cursor = cursor_for(
+            &ReplicaClock {
+                epoch: "database-epoch".to_owned(),
+                revision: 42,
+                retained_revision: 0,
+            },
+            &definition,
+            "visibility-scope",
+        );
+        assert_eq!(cursor.epoch, "database-epoch");
+        assert_eq!(cursor.revision, 42);
+    }
+
+    #[test]
+    fn integrity_hashes_match_the_client_canonical_json_contract() {
+        let row = serde_json::json!({
+            "z": 1,
+            "a": {"é": 2, "\u{2028}": "line", "nested": null},
+            "arr": [1.5, true, "x"],
+        });
+        assert_eq!(
+            stable_json(&row),
+            "{\"a\":{\"nested\":null,\"é\":2,\"\\u2028\":\"line\"},\"arr\":[1.5,true,\"x\"],\"z\":1}"
+        );
+        assert_eq!(
+            row_hash(&row),
+            "edd9d315212b227e52a73002b9c74b74a6199636e46ac150784918a41776b8eb"
+        );
+
+        let hashes = BTreeMap::from([
+            ("é".to_owned(), "b".to_owned()),
+            ("a".to_owned(), "c".to_owned()),
+            ("\u{2028}".to_owned(), "d".to_owned()),
+        ]);
+        assert_eq!(
+            hashes_digest(&hashes),
+            "6c26345fc47f53ca1caae1985bcb1547d3f6099dfe999b8b58e516086c42bf4f"
+        );
     }
 }

@@ -88,7 +88,7 @@ struct EngineInner {
     manifest: ModuleManifest,
     functions: HashMap<String, FunctionContract>,
     config: V8Config,
-    pool: IsolatePool,
+    pools: Vec<IsolatePool>,
 }
 
 impl V8ModuleEngine {
@@ -145,13 +145,18 @@ impl V8ModuleEngine {
         }
 
         let source = Arc::new(ModuleSource::new(&artifact.manifest.module_id, code)?);
-        let pool = IsolatePool::new(source, config.clone());
+        // A call awaiting a host-mediated nested function must keep its V8
+        // continuation alive. Separate depth pools prevent the nested call
+        // from waiting on the isolate held by its parent.
+        let pools = (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
+            .map(|_| IsolatePool::new(Arc::clone(&source), config.clone()))
+            .collect();
         Ok(Self {
             inner: Arc::new(EngineInner {
                 manifest: artifact.manifest,
                 functions,
                 config,
-                pool,
+                pools,
             }),
         })
     }
@@ -167,7 +172,7 @@ impl V8ModuleEngine {
     pub async fn prewarm(&self) -> Result<(), ModuleError> {
         let mut leases = Vec::with_capacity(self.inner.config.isolate_pool_size.max(1));
         for _ in 0..self.inner.config.isolate_pool_size.max(1) {
-            leases.push(self.inner.pool.acquire().await?);
+            leases.push(self.inner.pools[0].acquire().await?);
         }
         for lease in leases {
             lease.release_unused();
@@ -228,7 +233,15 @@ impl EngineInner {
             stamped => stamped,
         };
 
-        let lease = self.pool.acquire().await?;
+        let pool = self
+            .pools
+            .get(usize::from(invocation.context.nesting_depth))
+            .ok_or_else(|| {
+                ModuleError::Execution(
+                    "nested function invocation exceeded the maximum depth".to_owned(),
+                )
+            })?;
+        let lease = pool.acquire().await?;
         let (host_sender, mut host_calls) = mpsc::unbounded_channel::<HostRequest>();
         let (reply, mut replied) = oneshot::channel();
         lease.dispatch(WorkerCall {

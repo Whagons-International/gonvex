@@ -80,11 +80,26 @@ impl ChangeFeedHub {
         }
         let (sender, receiver) = broadcast::channel(1024);
         feeds.insert(key, sender.clone());
+        // Capture the durable clock before returning the first receiver. Any
+        // later Replica snapshot is necessarily at this revision or newer,
+        // while LISTEN plus deliver_committed below closes the gap for commits
+        // after it. Starting at retained_revision replayed the full 30-day log
+        // into a brand-new connection, delaying current changes and potentially
+        // overflowing the broadcast channel before subscriptions had opened.
+        let initial_revision = match read_clock(&self.pools, route).await {
+            Ok(clock) => clock.revision,
+            Err(error) => {
+                let _ = sender.send(FeedEvent::Reset {
+                    reason: format!("change feed clock unavailable: {error}"),
+                });
+                0
+            }
+        };
         let route = route.clone();
         let pools = self.pools.clone();
         let shutdown = self.shutdown.subscribe();
         tokio::spawn(async move {
-            run_feed(route, pools, sender, shutdown).await;
+            run_feed(route, pools, sender, shutdown, initial_revision).await;
         });
         receiver
     }
@@ -99,20 +114,9 @@ async fn run_feed(
     pools: PoolRegistry,
     sender: broadcast::Sender<FeedEvent>,
     mut shutdown: watch::Receiver<bool>,
+    mut last_revision: u64,
 ) {
     let mut last_prune = std::time::Instant::now() - Duration::from_secs(60 * 60);
-    let mut last_revision = match read_clock(&pools, &route).await {
-        // Start at the durable retention boundary rather than "now". A
-        // subscription snapshot can race listener startup; replay plus the
-        // subscription cursor is what proves no commit was skipped.
-        Ok(clock) => clock.retained_revision,
-        Err(error) => {
-            let _ = sender.send(FeedEvent::Reset {
-                reason: format!("change feed clock unavailable: {error}"),
-            });
-            0
-        }
-    };
     loop {
         if *shutdown.borrow() {
             return;
@@ -138,8 +142,21 @@ async fn run_feed(
             }
             continue;
         }
+        let recovery_started = std::time::Instant::now();
+        let recovery_after = last_revision;
         match deliver_committed(&pools, &route, last_revision, &sender).await {
-            Ok(revision) => last_revision = revision,
+            Ok(revision) => {
+                last_revision = revision;
+                tracing::debug!(
+                    project = %route.project_id,
+                    tenant = %route.tenant_id,
+                    wake_source = "reconnect",
+                    prior_revision = recovery_after,
+                    delivered_revision = revision,
+                    delivery_ms = recovery_started.elapsed().as_secs_f64() * 1_000.0,
+                    "change feed delivery"
+                );
+            }
             Err(error) => {
                 let _ = sender.send(FeedEvent::Reset {
                     reason: format!("change feed startup recovery failed: {error}"),
@@ -148,21 +165,50 @@ async fn run_feed(
             }
         }
         loop {
-            tokio::select! {
+            let (wake_source, notified_revision) = tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
                         return;
                     }
+                    continue;
                 }
                 notification = listener.recv() => {
-                    if notification.is_err() {
-                        break;
+                    match notification {
+                        Ok(notification) => {
+                            let revision = serde_json::from_str::<Value>(notification.payload())
+                                .ok()
+                                .and_then(|payload| payload.get("revision").and_then(Value::as_u64));
+                            ("notify", revision)
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                project = %route.project_id,
+                                tenant = %route.tenant_id,
+                                %error,
+                                "change feed listener disconnected"
+                            );
+                            break;
+                        }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-            }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => ("repair", None),
+            };
+            let delivery_started = std::time::Instant::now();
+            let delivery_after = last_revision;
             match deliver_committed(&pools, &route, last_revision, &sender).await {
-                Ok(revision) => last_revision = revision,
+                Ok(revision) => {
+                    last_revision = revision;
+                    tracing::debug!(
+                        project = %route.project_id,
+                        tenant = %route.tenant_id,
+                        wake_source,
+                        notified_revision,
+                        prior_revision = delivery_after,
+                        delivered_revision = revision,
+                        delivery_ms = delivery_started.elapsed().as_secs_f64() * 1_000.0,
+                        "change feed delivery"
+                    );
+                }
                 Err(error) => {
                     let _ = sender.send(FeedEvent::Reset {
                         reason: format!("change feed recovery failed: {error}"),

@@ -32,6 +32,7 @@ hmac = "0.12"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ryu-js = "1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json", "chrono", "uuid", "bigdecimal"] }
 bigdecimal = "0.4"
