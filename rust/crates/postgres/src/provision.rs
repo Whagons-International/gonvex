@@ -70,6 +70,80 @@ impl SqlMigration {
 }
 
 impl ControlPlane {
+    pub(crate) async fn prepare_identity_schema_upgrade(&self) -> Result<(), DatabaseError> {
+        let _admission = self.pools.admit().await?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gonvex:identity-schema-upgrade'))")
+            .execute(&mut *transaction)
+            .await?;
+
+        let mut legacy_tables = Vec::new();
+        for table in [
+            "gonvex_auth_codes",
+            "gonvex_auth_sessions",
+            "gonvex_auth_refresh_tokens",
+        ] {
+            let has_legacy_user_id: bool = sqlx::query_scalar(
+                r#"SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                   WHERE table_schema=current_schema() AND table_name=$1 AND column_name='user_id')"#,
+            )
+            .bind(table)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if has_legacy_user_id {
+                legacy_tables.push(table);
+            }
+        }
+        for table in ["gonvex_auth_memberships", "gonvex_auth_users"] {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT to_regclass(format('%I.%I',current_schema(),$1)) IS NOT NULL",
+            )
+            .bind(table)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if exists {
+                legacy_tables.push(table);
+            }
+        }
+        if legacy_tables.is_empty() {
+            transaction.commit().await?;
+            return Ok(());
+        }
+
+        for table in &legacy_tables {
+            let populated: bool =
+                sqlx::query_scalar(&format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)"))
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if populated {
+                return Err(sqlx::Error::Protocol(format!(
+                    "legacy identity table {table} contains data; run `gonvex-admin migrate identity-v2` before starting this runtime"
+                ))
+                .into());
+            }
+        }
+
+        // An empty pre-identity-v2 installation has no identity to preserve.
+        // Remove only tables with the legacy user_id shape and let the
+        // canonical schema below recreate them with account_id. Non-empty
+        // installations are rejected above and require the reviewed migration.
+        for table in [
+            "gonvex_auth_refresh_tokens",
+            "gonvex_auth_sessions",
+            "gonvex_auth_codes",
+            "gonvex_auth_memberships",
+            "gonvex_auth_users",
+        ] {
+            if legacy_tables.contains(&table) {
+                sqlx::query(&format!("DROP TABLE {table}"))
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub(crate) async fn ensure_control_schema(&self) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit().await?;
         execute_script_pool(&self.pool, include_str!("control_schema.sql")).await

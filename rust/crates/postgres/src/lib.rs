@@ -327,6 +327,7 @@ impl ControlPlane {
             configured_tenants: Arc::new(configured_tenants),
         };
         control.ping().await?;
+        control.prepare_identity_schema_upgrade().await?;
         control.ensure_control_schema().await?;
         Ok(control)
     }
