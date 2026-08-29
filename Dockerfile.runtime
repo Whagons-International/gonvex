@@ -14,7 +14,7 @@ RUN cargo build --locked --release \
 FROM debian:bookworm-slim
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/gonvex/data /var/lib/gonvex/tmp
 COPY --from=rust-build /src/rust/target/release/gonvex-runtime /usr/local/bin/gonvex-runtime
@@ -36,5 +36,5 @@ WORKDIR /var/lib/gonvex
 USER 0:0
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=30 \
-  CMD bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; grep -q "200 OK" <&3'
+  CMD curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8080/healthz >/dev/null
 CMD ["gonvex-runtime"]
