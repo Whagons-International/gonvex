@@ -629,6 +629,70 @@ describe("GonvexAuthProvider", () => {
     expect(client.action).not.toHaveBeenCalled();
   });
 
+  it("does not request a stale persisted tenant on an explicit landlord origin and renders a loading surface", async () => {
+    const client = new FakeGonvexClient();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-landlord.test:shop";
+    const persisted = {
+      accessToken: "tenant-access", expiresAt: Date.now() + 900_000,
+      refreshToken: "tenant-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    };
+    localStorage.setItem(storageKey, JSON.stringify(persisted));
+    client.action.mockResolvedValue({
+      ...persisted,
+      accessToken: "landlord-access",
+      refreshToken: "landlord-refresh",
+      activeTenantId: undefined,
+    });
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    const rendered = render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-landlord.test"
+        projectId="shop"
+        initialTenantId={null}
+        externalAuth={externalAuth}
+        loadingFallback={<div data-testid="auth-loading">Loading authentication</div>}
+      >
+        <div data-testid="application">Application</div>
+      </GonvexAuthProvider>,
+    );
+
+    expect(rendered.queryByTestId("auth-loading")).not.toBeNull();
+    expect(rendered.queryByTestId("application")).toBeNull();
+    expect(client.setAuth).not.toHaveBeenCalled();
+
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(client.action).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "control.auth.exchangeExternalToken" }),
+      {
+        provider: "firebase",
+        token: "firebase-id-token",
+        previousRefreshToken: "tenant-refresh",
+      },
+    );
+    expect(rendered.queryByTestId("auth-loading")).toBeNull();
+    expect(rendered.queryByTestId("application")).not.toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({
+      project: "shop",
+      tenant: "tenant-1",
+      token: "landlord-access",
+    }));
+  });
+
   it("keeps expired, provider-mismatched, and tenant-mismatched sessions private", () => {
     const session = {
       accessToken: "canonical-access", expiresAt: Date.now() + 10_000,

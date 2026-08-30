@@ -58,10 +58,25 @@ async fn drain_all(runtime: &Runtime) -> Result<(), gonvex_postgres::DatabaseErr
         let Some(project_id) = project.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
+        // A Control-Plane-only project has no tenant module and therefore no
+        // tenant identity infrastructure to project. Querying every historical
+        // route made one such database abort projection for all real app
+        // projects on every worker pass.
+        if runtime.inner.modules.project(project_id).await.is_none() {
+            continue;
+        }
         for route in control.tenant_routes(project_id).await? {
-            let changed = project_membership_outbox_once(&control, &route).await?;
-            if changed {
-                runtime.notify_control_changed(project_id);
+            match project_membership_outbox_once(&control, &route).await {
+                Ok(true) => runtime.notify_control_changed(project_id),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        project_id,
+                        tenant_id = route.tenant_id,
+                        "project tenant membership directory route"
+                    );
+                }
             }
         }
     }

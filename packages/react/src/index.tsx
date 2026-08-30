@@ -97,8 +97,14 @@ export type GonvexAuthConfig = {
   runtimeUrl: string;
   projectId: string;
   callbackPath?: string;
-  /** Tenant routing hint used for the first authentication exchange. */
-  initialTenantId?: string;
+  /**
+   * Tenant routing scope for the first authentication exchange. Pass `null`
+   * to explicitly select account/landlord scope; omit it to restore the
+   * persisted active tenant when possible.
+   */
+  initialTenantId?: string | null;
+  /** Visible content while the external identity provider initializes. */
+  loadingFallback?: ReactNode;
   /** Trusted identity adapter such as createFirebaseAuthAdapter(). */
   externalAuth?: GonvexExternalAuthAdapter;
   /** Secure browser-to-browser handoff for apps routed across sibling subdomains. */
@@ -213,6 +219,7 @@ const authBootstrapPromises = new Map<string, Promise<GonvexAuthSession | null>>
 
 export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient; children: ReactNode }) {
   const runtimeUrl = props.runtimeUrl.replace(/\/+$/, "");
+  const hasExplicitInitialTenant = props.initialTenantId !== undefined;
   const initialTenantId = props.initialTenantId?.trim() || undefined;
   const callbackPath = normalizeCallbackPath(props.callbackPath ?? "/");
   const storageKey = `gonvex-auth:${encodeURIComponent(runtimeUrl)}:${props.projectId}`;
@@ -226,7 +233,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     initialAuthRef.current = {
       session: persisted,
       warmSession: props.externalAuth
-        ? reusableExternalAuthSession(persisted, initialTenantId, props.externalAuth.provider)
+        ? reusableExternalAuthSession(
+            persisted,
+            initialTenantId,
+            props.externalAuth.provider,
+            hasExplicitInitialTenant,
+          )
         : null,
     };
   }
@@ -317,6 +329,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         candidate,
         initialTenantId,
         props.externalAuth?.provider ?? candidate?.account.provider ?? "",
+        hasExplicitInitialTenant,
       );
       if (!reusable) return;
       installSession(reusable);
@@ -327,7 +340,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     window.addEventListener("message", onMessage);
     window.parent.postMessage({ type: SESSION_HANDOFF_READY, nonce }, parentOrigin);
     return () => window.removeEventListener("message", onMessage);
-  }, [initialTenantId, installSession, props.crossOriginHandoff, props.externalAuth?.provider, props.projectId, runtimeUrl]);
+  }, [hasExplicitInitialTenant, initialTenantId, installSession, props.crossOriginHandoff, props.externalAuth?.provider, props.projectId, runtimeUrl]);
 
   const restoreAccountSession = useCallback(() => {
     const developer = developerModeRef.current;
@@ -409,6 +422,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
           canonical,
           initialTenantId,
           adapter.provider,
+          hasExplicitInitialTenant,
         );
         if (reusableCanonical) {
           if (!sameInstalledAuthSession(sessionRef.current, reusableCanonical)) {
@@ -441,6 +455,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         canonicalSession,
         initialTenantId,
         adapter.provider,
+        hasExplicitInitialTenant,
       );
       if (reusableCanonicalSession) {
         // A reload already has a valid canonical Gonvex session. Install its
@@ -470,7 +485,9 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
             identity: { sub: identity.uid, iss: identity.issuer ?? adapter.provider },
           });
         }
-        const tenantId = initialTenantId ?? current?.activeTenantId;
+        const tenantId = hasExplicitInitialTenant
+          ? initialTenantId
+          : current?.activeTenantId;
         const grant = await props.client.action(control.auth.exchangeExternalToken, {
           provider: adapter.provider,
           token,
@@ -517,7 +534,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       generation += 1;
       unsubscribe();
     };
-  }, [initialTenantId, installSession, props.client, props.externalAuth, props.projectId, storageKey]);
+  }, [hasExplicitInitialTenant, initialTenantId, installSession, props.client, props.externalAuth, props.projectId, storageKey]);
 
   const refreshSession = useCallback(async (force = false) => {
     if (refreshRef.current) return refreshRef.current;
@@ -907,7 +924,9 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   return (
     <ManagedAuthContext.Provider value={authValue}>
       <GonvexAuthContext.Provider value={authValue}>
-        <GonvexProvider client={props.client}>{isLoading ? null : props.children}</GonvexProvider>
+        <GonvexProvider client={props.client}>
+          {isLoading ? (props.loadingFallback ?? null) : props.children}
+        </GonvexProvider>
       </GonvexAuthContext.Provider>
     </ManagedAuthContext.Provider>
   );
@@ -1203,6 +1222,7 @@ function reusableExternalAuthSession(
   session: GonvexAuthSession | null,
   initialTenantId: string | undefined,
   provider: string,
+  hasExplicitInitialTenant = initialTenantId !== undefined,
   now = Date.now(),
 ): GonvexAuthSession | null {
   if (!session || session.account.provider !== provider) return null;
@@ -1210,7 +1230,13 @@ function reusableExternalAuthSession(
     return null;
   }
   if (
-    initialTenantId !== undefined
+    hasExplicitInitialTenant
+    && initialTenantId === undefined
+    && session.activeTenantId !== undefined
+  ) return null;
+  if (
+    hasExplicitInitialTenant
+    && initialTenantId !== undefined
     && !session.tenants.some((tenant) => (
       tenant.id === session.activeTenantId
       && (tenant.id === initialTenantId || tenant.domain.toLowerCase() === initialTenantId.toLowerCase())
