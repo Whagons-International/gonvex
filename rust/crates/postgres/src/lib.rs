@@ -819,23 +819,29 @@ impl ControlPlane {
         }
 
         let _admission = self.pools.admit().await?;
-        let database_url: Option<String> = sqlx::query_scalar(
-            r#"SELECT NULLIF(database_url, '')
+        let row = sqlx::query(
+            r#"SELECT tenant_id,NULLIF(database_url, '') AS database_url
                FROM gonvex_runtime_tenants
-               WHERE project_id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+               WHERE project_id = $1
+                 AND (tenant_id = $2 OR lower(domain) = lower($2))
+                 AND deleted_at IS NULL
                  AND status NOT IN ('deleted', 'disabled')"#,
         )
         .bind(project_id)
         .bind(tenant_id)
         .fetch_optional(&self.pool)
-        .await?
-        .flatten();
-        let database_url = database_url.ok_or_else(|| DatabaseError::TenantDatabaseMissing {
+        .await?;
+        let row = row.ok_or_else(|| DatabaseError::TenantDatabaseMissing {
             tenant: tenant_id.to_owned(),
+        })?;
+        let canonical_tenant_id: String = row.get("tenant_id");
+        let database_url: Option<String> = row.get("database_url");
+        let database_url = database_url.ok_or_else(|| DatabaseError::TenantDatabaseMissing {
+            tenant: canonical_tenant_id.clone(),
         })?;
         Ok(TenantRoute {
             project_id: project_id.to_owned(),
-            tenant_id: tenant_id.to_owned(),
+            tenant_id: canonical_tenant_id,
             database_url,
         })
     }

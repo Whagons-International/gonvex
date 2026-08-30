@@ -606,7 +606,7 @@ describe("GonvexAuthProvider", () => {
         client={client as unknown as GonvexClient}
         runtimeUrl="https://firebase-warm.test"
         projectId="shop"
-        initialTenantId="tenant-1"
+        initialTenantId="tenant"
         externalAuth={externalAuth}
       >
         <Consumer />
@@ -1109,9 +1109,14 @@ describe("GonvexAuthProvider", () => {
 
     let create: Promise<unknown> | undefined;
     await act(async () => {
-      create = auth!.createTenant("New Tenant");
+      create = auth!.createTenant("New Tenant", { domain: "new-tenant" });
       await Promise.resolve();
     });
+
+    expect(client.reducer).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "control.tenants.create" }),
+      { name: "New Tenant", domain: "new-tenant" },
+    );
 
     await act(async () => {
       client.emitQuery({
@@ -1138,6 +1143,72 @@ describe("GonvexAuthProvider", () => {
       tenant: createdTenant.id,
       token: "account-access",
     }));
+  });
+
+  it("hands the canonical session to an allowed sibling origin before navigation", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    localStorage.setItem("gonvex-auth:https%3A%2F%2Fhandoff-runtime.test:shop", JSON.stringify({
+      accessToken: "canonical-access",
+      expiresAt: now + 900_000,
+      refreshToken: "canonical-refresh",
+      refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-1", email: "owner@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "owner", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => null),
+      onIdTokenChanged() { return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://handoff-runtime.test"
+        projectId="shop"
+        externalAuth={externalAuth}
+        crossOriginHandoff={{ allowedOriginSuffix: "localhost" }}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    let handoff: Promise<void> | undefined;
+    await act(async () => {
+      handoff = auth!.handoffSessionTo("http://tenant.localhost/onboarding");
+      await Promise.resolve();
+    });
+    const frame = document.querySelector("iframe") as HTMLIFrameElement;
+    expect(frame).not.toBeNull();
+    const nonce = new URL(frame.src).hash.match(/gonvexSessionHandoff=([^&]+)/)?.[1];
+    expect(nonce).toBeTruthy();
+    const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+
+    act(() => window.dispatchEvent(new MessageEvent("message", {
+      data: { type: "gonvex.sessionHandoff.ready", nonce },
+      origin: "http://tenant.localhost",
+      source: frame.contentWindow,
+    })));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "gonvex.sessionHandoff.offer",
+      nonce,
+      projectId: "shop",
+      targetOrigin: "http://tenant.localhost",
+      session: expect.objectContaining({ activeTenantId: "tenant-1" }),
+    }), "http://tenant.localhost");
+
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent("message", {
+        data: { type: "gonvex.sessionHandoff.accepted", nonce },
+        origin: "http://tenant.localhost",
+        source: frame.contentWindow,
+      }));
+      await handoff;
+    });
+    expect(document.querySelector("iframe")).toBeNull();
   });
 
   it("keeps the canonical Firebase-backed session through a transient provider-null callback", async () => {

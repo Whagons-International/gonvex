@@ -1069,8 +1069,27 @@ impl Runtime {
         idempotency_key: &str,
     ) -> Result<Value, ControlError> {
         let identity = account(connection)?.clone();
-        let object = exact_object(args, &["name"])?;
+        let object = exact_object(args, &["name", "domain"])?;
         let requested_name = required_string(object, "name")?.to_owned();
+        let requested_domain = object
+            .get("domain")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_lowercase)
+            .unwrap_or_else(|| slug(&requested_name));
+        if requested_domain.is_empty()
+            || requested_domain.len() > 63
+            || !requested_domain.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || (byte == b'-' && index > 0 && index + 1 < requested_domain.len())
+            })
+        {
+            return Err(ControlError::InvalidArguments(
+                "tenant domain must be a lowercase DNS label".to_owned(),
+            ));
+        }
         let base_url = self
             .inner
             .config
@@ -1107,15 +1126,24 @@ impl Runtime {
             ))
             .execute(&mut **reserve_tx.transaction())
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!(
+                "tenant-domain:{}:{}",
+                connection.project_id, requested_domain
+            ))
+            .execute(&mut **reserve_tx.transaction())
+            .await?;
         let checkpoint = sqlx::query(
-            r#"SELECT tenant_id,database_name,database_alias,name,account_id
+            r#"SELECT tenant_id,database_name,database_alias,name,domain,account_id
                FROM gonvex_tenant_provisioning WHERE project_id=$1 AND idempotency_key=$2"#,
         )
         .bind(&connection.project_id)
         .bind(idempotency_key)
         .fetch_optional(&mut **reserve_tx.transaction())
         .await?;
-        let (tenant_id, database_name, database_alias, name, owner_account) = if let Some(row) =
+        let (tenant_id, database_name, database_alias, name, domain, owner_account) = if let Some(
+            row,
+        ) =
             checkpoint
         {
             (
@@ -1123,6 +1151,7 @@ impl Runtime {
                 row.get("database_name"),
                 row.get("database_alias"),
                 row.get("name"),
+                row.get("domain"),
                 row.get("account_id"),
             )
         } else {
@@ -1140,10 +1169,15 @@ impl Runtime {
                     .take(8)
                     .collect::<String>(),
             );
-            sqlx::query(
+            let inserted = sqlx::query(
                     r#"INSERT INTO gonvex_tenant_provisioning
-                       (project_id,idempotency_key,tenant_id,database_name,database_alias,name,account_id)
-                       VALUES($1,$2,$3,$4,$5,$6,$7)"#,
+                       (project_id,idempotency_key,tenant_id,database_name,database_alias,name,domain,account_id)
+                       SELECT $1,$2,$3,$4,$5,$6,$7,$8
+                       WHERE NOT EXISTS (
+                         SELECT 1 FROM gonvex_runtime_tenants
+                         WHERE project_id=$1 AND lower(domain)=lower($7)
+                           AND deleted_at IS NULL AND status NOT IN ('deleted','disabled')
+                       )"#,
                 )
                 .bind(&connection.project_id)
                 .bind(idempotency_key)
@@ -1151,14 +1185,22 @@ impl Runtime {
                 .bind(&database_name)
                 .bind(&database_alias)
                 .bind(&requested_name)
+                .bind(&requested_domain)
                 .bind(&identity.account.id)
                 .execute(&mut **reserve_tx.transaction())
-                .await?;
+                .await?
+                .rows_affected();
+            if inserted == 0 {
+                return Err(ControlError::InvalidArguments(
+                    "tenant domain is already in use".to_owned(),
+                ));
+            }
             (
                 tenant_id,
                 database_name,
                 database_alias,
                 requested_name.clone(),
+                requested_domain.clone(),
                 identity.account.id.clone(),
             )
         };
@@ -1175,9 +1217,9 @@ impl Runtime {
             r#"INSERT INTO gonvex_runtime_tenants
                (relationship_id,project_id,tenant_id,name,database_alias,database_name,
                 database_url,status,description,provisioned,runtime_created)
-               VALUES($1,$2,$1,$3,$4,$5,$6,'active','Account-created tenant database.',FALSE,TRUE)
+               VALUES($1,$2,$1,$3,$4,$5,$6,$7,'active','Account-created tenant database.',FALSE,TRUE)
                ON CONFLICT(project_id,tenant_id) DO UPDATE SET name=EXCLUDED.name,
-                 database_url=EXCLUDED.database_url,updated_at=now()"#,
+                 domain=EXCLUDED.domain,database_url=EXCLUDED.database_url,updated_at=now()"#,
         )
         .bind(&tenant_id)
         .bind(&connection.project_id)
@@ -1185,6 +1227,7 @@ impl Runtime {
         .bind(&database_alias)
         .bind(&database_name)
         .bind(&database_url)
+        .bind(&domain)
         .execute(&mut **directory_tx.transaction())
         .await?;
         directory_tx.commit().await?;
@@ -1269,6 +1312,8 @@ impl Runtime {
         .await?;
         let result = serde_json::json!({
             "id":tenant_id,"name":name,"role":"owner","permissions":{},
+            "domain":domain,"timezone":"UTC","description":"Account-created tenant database.",
+            "profile":{},
         });
         complete_control_idempotency(
             &mut finish_tx,
@@ -3860,11 +3905,18 @@ pub(crate) async fn session_result_from_directory(
             "domain":domain,"timezone":timezone,"description":description,"profile":profile,
         }));
     }
-    let active = if tenants
-        .iter()
-        .any(|tenant| tenant.get("id").and_then(Value::as_str) == Some(requested_tenant))
-    {
-        requested_tenant.to_owned()
+    let active = if let Some(tenant) = tenants.iter().find(|tenant| {
+        tenant.get("id").and_then(Value::as_str) == Some(requested_tenant)
+            || tenant
+                .get("domain")
+                .and_then(Value::as_str)
+                .is_some_and(|domain| domain.eq_ignore_ascii_case(requested_tenant))
+    }) {
+        tenant
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
     } else {
         tenants
             .first()

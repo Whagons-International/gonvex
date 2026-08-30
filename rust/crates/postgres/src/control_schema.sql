@@ -227,10 +227,12 @@ CREATE TABLE IF NOT EXISTS gonvex_member_login_provisioning (
 CREATE TABLE IF NOT EXISTS gonvex_tenant_provisioning (
   project_id text NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
   idempotency_key text NOT NULL, tenant_id text NOT NULL, database_name text NOT NULL,
-  database_alias text NOT NULL, name text NOT NULL, account_id text NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  database_alias text NOT NULL, name text NOT NULL, domain text NOT NULL DEFAULT '',
+  account_id text NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(project_id,idempotency_key),
   UNIQUE(project_id,tenant_id), UNIQUE(database_name)
 );
+ALTER TABLE gonvex_tenant_provisioning ADD COLUMN IF NOT EXISTS domain text NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS gonvex_control_idempotency (
   project_id text NOT NULL, subject_id text NOT NULL, idempotency_key text NOT NULL,
   kind text NOT NULL, path text NOT NULL, state text NOT NULL DEFAULT 'pending', result jsonb,

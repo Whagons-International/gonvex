@@ -82,7 +82,9 @@ export type GonvexAuthValue = AuthState & {
   signOut: (options?: { allDevices?: boolean }) => Promise<void>;
   setActiveTenant: (tenantId: string) => Promise<void>;
   refreshMemberships: () => Promise<GonvexAuthTenant[]>;
-  createTenant: (name: string) => Promise<GonvexAuthTenant>;
+  createTenant: (name: string, options?: { domain?: string }) => Promise<GonvexAuthTenant>;
+  /** Copies the canonical session into a trusted sibling origin before navigation. */
+  handoffSessionTo: (targetUrl: string) => Promise<void>;
   inviteMember: (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown>; teamIds?: string[]; allowedAuthProviders?: string[]; payload?: JsonValue }) => Promise<ControlToken>;
   acceptInvitation: (token: string) => Promise<ControlInvitationAcceptance>;
   revokeInvitation: (tenantId: string, email: string) => Promise<void>;
@@ -99,7 +101,36 @@ export type GonvexAuthConfig = {
   initialTenantId?: string;
   /** Trusted identity adapter such as createFirebaseAuthAdapter(). */
   externalAuth?: GonvexExternalAuthAdapter;
+  /** Secure browser-to-browser handoff for apps routed across sibling subdomains. */
+  crossOriginHandoff?: {
+    allowedOriginSuffix: string;
+    receiverPath?: string;
+    timeoutMs?: number;
+  };
 };
+
+const SESSION_HANDOFF_READY = "gonvex.sessionHandoff.ready";
+const SESSION_HANDOFF_OFFER = "gonvex.sessionHandoff.offer";
+const SESSION_HANDOFF_ACCEPTED = "gonvex.sessionHandoff.accepted";
+
+function normalizedOriginSuffix(value: string): string {
+  return value.trim().toLowerCase().replace(/^\.+/, "").replace(/\.+$/, "");
+}
+
+function originMatchesSuffix(origin: string, suffix: string): boolean {
+  try {
+    const hostname = new URL(origin).hostname.toLowerCase();
+    const normalized = normalizedOriginSuffix(suffix);
+    return Boolean(normalized) && (hostname === normalized || hostname.endsWith(`.${normalized}`));
+  } catch {
+    return false;
+  }
+}
+
+function handoffNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return bytesToBase64Url(bytes);
+}
 
 const ManagedAuthContext = createContext<GonvexAuthValue | null>(null);
 
@@ -249,6 +280,54 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     }
     setSession(next);
   }, [props.client, props.projectId, storageKey]);
+
+  useEffect(() => {
+    const handoff = props.crossOriginHandoff;
+    if (!handoff || window.parent === window) return;
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const nonce = hash.get("gonvexSessionHandoff");
+    if (!nonce) return;
+    let parentOrigin = "";
+    try {
+      parentOrigin = new URL(document.referrer).origin;
+    } catch {
+      return;
+    }
+    if (!originMatchesSuffix(parentOrigin, handoff.allowedOriginSuffix)) return;
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window.parent || event.origin !== parentOrigin) return;
+      const message = event.data as {
+        type?: string;
+        nonce?: string;
+        projectId?: string;
+        runtimeUrl?: string;
+        targetOrigin?: string;
+        session?: GonvexAuthSession;
+      };
+      if (
+        message.type !== SESSION_HANDOFF_OFFER
+        || message.nonce !== nonce
+        || message.projectId !== props.projectId
+        || message.runtimeUrl !== runtimeUrl
+        || message.targetOrigin !== window.location.origin
+      ) return;
+      const candidate = message.session ?? null;
+      const reusable = reusableExternalAuthSession(
+        candidate,
+        initialTenantId,
+        props.externalAuth?.provider ?? candidate?.account.provider ?? "",
+      );
+      if (!reusable) return;
+      installSession(reusable);
+      setSessionState("current");
+      setIsLoading(false);
+      window.parent.postMessage({ type: SESSION_HANDOFF_ACCEPTED, nonce }, parentOrigin);
+    };
+    window.addEventListener("message", onMessage);
+    window.parent.postMessage({ type: SESSION_HANDOFF_READY, nonce }, parentOrigin);
+    return () => window.removeEventListener("message", onMessage);
+  }, [initialTenantId, installSession, props.crossOriginHandoff, props.externalAuth?.provider, props.projectId, runtimeUrl]);
 
   const restoreAccountSession = useCallback(() => {
     const developer = developerModeRef.current;
@@ -667,14 +746,72 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     return mappedTenants;
   }, [fetchAccessToken, installSession, props.client]);
 
-  const createTenant = useCallback(async (name: string) => {
+  const createTenant = useCallback(async (name: string, options?: { domain?: string }) => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
     if (!token) throw new Error("Sign in before creating a tenant.");
-    const tenant = await props.client.reducer(control.tenants.create, { name }) as GonvexAuthTenant;
+    const tenant = await props.client.reducer(control.tenants.create, {
+      name,
+      ...(options?.domain ? { domain: options.domain } : {}),
+    }) as GonvexAuthTenant;
     const current = sessionRef.current!;
     installSession({ ...current, tenants: [...current.tenants.filter((item) => item.id !== tenant.id), tenant], activeTenantId: tenant.id });
     return tenant;
   }, [fetchAccessToken, installSession, props.client]);
+
+  const handoffSessionTo = useCallback(async (targetUrl: string) => {
+    const handoff = props.crossOriginHandoff;
+    const current = sessionRef.current;
+    if (!handoff || !current) {
+      throw new Error("Cross-origin session handoff is not configured for this authenticated session.");
+    }
+    const target = new URL(targetUrl, window.location.href);
+    if (
+      target.protocol !== window.location.protocol
+      || !originMatchesSuffix(window.location.origin, handoff.allowedOriginSuffix)
+      || !originMatchesSuffix(target.origin, handoff.allowedOriginSuffix)
+    ) {
+      throw new Error("Cross-origin session handoff target is outside the configured origin suffix.");
+    }
+    const nonce = handoffNonce();
+    const receiver = new URL(handoff.receiverPath ?? "/auth/session-handoff", target.origin);
+    receiver.hash = new URLSearchParams({ gonvexSessionHandoff: nonce }).toString();
+    const frame = document.createElement("iframe");
+    frame.hidden = true;
+    frame.setAttribute("aria-hidden", "true");
+    frame.src = receiver.toString();
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("Cross-origin session handoff timed out before the destination accepted it."));
+      }, Math.max(1_000, handoff.timeoutMs ?? 10_000));
+      const cleanup = () => {
+        window.clearTimeout(timeout);
+        window.removeEventListener("message", onMessage);
+        frame.remove();
+      };
+      const onMessage = (event: MessageEvent) => {
+        if (event.source !== frame.contentWindow || event.origin !== target.origin) return;
+        const message = event.data as { type?: string; nonce?: string };
+        if (message.nonce !== nonce) return;
+        if (message.type === SESSION_HANDOFF_READY) {
+          frame.contentWindow?.postMessage({
+            type: SESSION_HANDOFF_OFFER,
+            nonce,
+            projectId: props.projectId,
+            runtimeUrl,
+            targetOrigin: target.origin,
+            session: current,
+          }, target.origin);
+        } else if (message.type === SESSION_HANDOFF_ACCEPTED) {
+          cleanup();
+          resolve();
+        }
+      };
+      window.addEventListener("message", onMessage);
+      document.body.append(frame);
+    });
+  }, [props.crossOriginHandoff, props.projectId, runtimeUrl]);
 
   const inviteMember = useCallback(async (tenantId: string, email: string, options?: { role?: GonvexAuthTenant["role"]; permissions?: Record<string, unknown>; teamIds?: string[]; allowedAuthProviders?: string[]; payload?: JsonValue }) => {
     const token = await fetchAccessToken({ forceRefreshToken: false });
@@ -757,14 +894,15 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     signOut,
     setActiveTenant,
     refreshMemberships,
-    createTenant,
+        createTenant,
+        handoffSessionTo,
     inviteMember,
     acceptInvitation,
     revokeInvitation,
     developerMode,
     enterDeveloperMode,
     exitDeveloperMode,
-  }), [acceptInvitation, activeTenant, createTenant, developerMode, enterDeveloperMode, error, exitDeveloperMode, fetchAccessToken, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, sessionState, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
+    }), [acceptInvitation, activeTenant, createTenant, developerMode, enterDeveloperMode, error, exitDeveloperMode, fetchAccessToken, handoffSessionTo, inviteMember, isLoading, refreshMemberships, revokeInvitation, session, sessionState, setActiveTenant, signIn, signInWithPassword, signInWithProvider, signOut]);
 
   return (
     <ManagedAuthContext.Provider value={authValue}>
@@ -1071,7 +1209,13 @@ function reusableExternalAuthSession(
   if (!Number.isFinite(session.expiresAt) || session.expiresAt <= now + WARM_SESSION_ACCESS_SAFETY_MS) {
     return null;
   }
-  if (initialTenantId !== undefined && session.activeTenantId !== initialTenantId) return null;
+  if (
+    initialTenantId !== undefined
+    && !session.tenants.some((tenant) => (
+      tenant.id === session.activeTenantId
+      && (tenant.id === initialTenantId || tenant.domain.toLowerCase() === initialTenantId.toLowerCase())
+    ))
+  ) return null;
   if (
     session.activeTenantId !== undefined
     && !session.tenants.some((tenant) => tenant.id === session.activeTenantId)

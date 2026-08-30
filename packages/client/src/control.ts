@@ -15,7 +15,6 @@ const accountSchema = objectSchema({ id:stringSchema,email:stringSchema,name:str
 const authAccountSchema = objectSchema({
   id:stringSchema,email:stringSchema,emailVerified:booleanSchema,name:stringSchema,picture:stringSchema,provider:stringSchema,
 });
-const tenantSchema = objectSchema({ id:stringSchema,name:stringSchema,role:stringSchema,permissions:anySchema });
 const directoryTenantSchema = objectSchema({
   id:stringSchema,name:stringSchema,role:stringSchema,permissions:anySchema,
   domain:stringSchema,timezone:stringSchema,description:stringSchema,profile:anySchema,
@@ -67,7 +66,7 @@ export const controlFunctionSchemas: Readonly<Record<string, { args: JsonValue; 
   "control.auth.realms.configure": { args:objectSchema({provider:stringSchema,authMode:optionalStringSchema,enabled:booleanSchema,signupMode:stringSchema,azureTenantId:optionalStringSchema,clientId:optionalStringSchema,clientSecret:optionalStringSchema,issuer:optionalStringSchema,audience:optionalStringSchema,jwksUrl:optionalStringSchema,firebaseProjectId:optionalStringSchema,firebaseTenantId:optionalStringSchema,adminCredentials:optionalStringSchema}),result:updatedSchema },
   "control.auth.memberProviders": { args:objectSchema({memberIds:arraySchema(stringSchema)}),result:arraySchema(objectSchema({memberId:stringSchema,providers:arraySchema(stringSchema)})) },
   "control.tenants.mine": { args:emptySchema,result:arraySchema(directoryTenantSchema) },
-  "control.tenants.create": { args:objectSchema({name:stringSchema}),result:tenantSchema },
+  "control.tenants.create": { args:objectSchema({name:stringSchema,domain:optionalStringSchema}),result:directoryTenantSchema },
   "control.tenants.getByDomain": { args:objectSchema({domain:stringSchema}),result:objectSchema({id:stringSchema,name:stringSchema,domain:stringSchema}) },
   "control.tenants.updateProfile": { args:objectSchema({name:stringSchema,domain:stringSchema,description:stringSchema}),result:updatedSchema },
   "control.tenants.updateTimezone": { args:objectSchema({timezone:stringSchema}),result:updatedSchema },
@@ -131,7 +130,7 @@ export type ControlTenant = JSONObject & {
   id: string; name: string; role: string; permissions: JSONObject;
   domain: string; timezone: string; description: string; profile: JsonValue;
 };
-export type ControlTenantCreated = JSONObject & { id: string; name: string; role: string; permissions: JSONObject };
+export type ControlTenantCreated = ControlTenant;
 export type ControlSession = JSONObject & {
   accessToken: string; tokenType: string; expiresIn: number; expiresAt: number;
   refreshToken: string; refreshExpiresAt: number; account: JSONObject;
@@ -195,7 +194,7 @@ export const control = Object.freeze({
   }),
   tenants: Object.freeze({
     mine: liveRef<JSONObject, ControlTenant[]>("control.tenants.mine", "account"),
-    create: ref<JSONObject & { name: string }, ControlTenantCreated>("reducer", "control.tenants.create", "account"),
+    create: ref<JSONObject & { name: string; domain?: string }, ControlTenantCreated>("reducer", "control.tenants.create", "account"),
     getByDomain: ref<JSONObject & { domain: string }, JSONObject & { id: string; name: string; domain: string }>("query", "control.tenants.getByDomain", "public"),
     updateProfile: ref<JSONObject & { name: string; domain: string; description: string }, ControlUpdated>("reducer", "control.tenants.updateProfile", "tenantAdmin"),
     updateTimezone: ref<JSONObject & { timezone: string }, ControlUpdated>("reducer", "control.tenants.updateTimezone", "tenantAdmin"),
