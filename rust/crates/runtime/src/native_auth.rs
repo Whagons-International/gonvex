@@ -8,7 +8,8 @@
 use std::collections::BTreeMap;
 
 use axum::extract::{Form, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -43,8 +44,34 @@ pub fn router() -> Router<Runtime> {
             "/auth/{provider}/callback",
             get(callback_get).post(callback_post),
         )
-        .route("/auth/token", post(token))
-        .route("/auth/logout", post(logout))
+        .route("/auth/token", post(token).options(auth_options))
+        .route("/auth/logout", post(logout).options(auth_options))
+        .layer(middleware::map_response(auth_cors))
+}
+
+async fn auth_options() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn auth_cors(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Authorization, Content-Type"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+    response
 }
 
 #[derive(Deserialize)]
@@ -867,6 +894,22 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn browser_token_exchange_preflight_is_cors_enabled() {
+        let response = auth_cors(auth_options().await.into_response()).await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_METHODS],
+            "GET, POST, OPTIONS"
+        );
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
+            "Authorization, Content-Type"
+        );
+    }
 
     #[test]
     fn redirects_require_https_except_for_local_development() {
