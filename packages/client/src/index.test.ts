@@ -116,6 +116,28 @@ function accountToken(accountId: string, issuer = "shop") {
 }
 
 describe("GonvexClient", () => {
+	it("holds native error telemetry until authentication establishes an attributable scope", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws", {
+			project: "shop",
+			token: accountToken("account-a"),
+		});
+		const registration = client.reportError("register", { release: "1.0.0", environment: "staging" });
+		const socket = latestSocket();
+		socket.open();
+
+		expect(sentMessages(socket).filter((message) => message.type === "error.register")).toHaveLength(0);
+		const auth = sentMessages(socket).find((message) => message.type === "auth");
+		expect(auth).toBeDefined();
+
+		socket.receive({ type: "auth.result", id: auth.id, result: { account: { id: "account-a" } } });
+		const register = sentMessages(socket).find((message) => message.type === "error.register");
+		expect(register).toMatchObject({ release: "1.0.0", environment: "staging" });
+
+		socket.receive({ type: "error.ack", id: register.id });
+		await expect(registration).resolves.toBeUndefined();
+		client.close();
+	});
+
 	function installBrowserOnlineEvents() {
 		const listeners = new Set<() => void>();
 		vi.stubGlobal("addEventListener", (type: string, listener: () => void) => {

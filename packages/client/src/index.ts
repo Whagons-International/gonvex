@@ -472,6 +472,12 @@ export class GonvexClient {
   private readonly pendingCalls = new Map<string, PendingCall>();
   private readonly connectionStateHandlers = new Set<ConnectionStateHandler>();
   private readonly supportCommandHandlers = new Set<(command: SupportCommand) => void>();
+  private readonly pendingNativeErrors: Array<{
+    type: "register" | "envelope" | "heartbeat";
+    payload: unknown;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }> = [];
   private isWebSocketConnected = false;
   private hasEverConnected = false;
   private connectionCount = 0;
@@ -892,6 +898,7 @@ export class GonvexClient {
         }
         if (message.type === "auth.result") this.activeAuthFrameId = message.id;
         else this.activeAuthFrameId = undefined;
+        if (message.type === "auth.result") this.flushPendingNativeErrors();
         if (this.authWatchdogTimer) {
           clearTimeout(this.authWatchdogTimer);
           this.authWatchdogTimer = undefined;
@@ -1091,6 +1098,8 @@ export class GonvexClient {
     this.notifyConnectionState();
     this.connectionStateHandlers.clear();
     this.supportCommandHandlers.clear();
+    const closedError = new Error("Gonvex client is closed");
+    for (const pending of this.pendingNativeErrors.splice(0)) pending.reject(closedError);
     if (!socket) return;
     socket.close();
   }
@@ -3025,6 +3034,22 @@ export class GonvexClient {
   private sendNativeError(type: "register" | "envelope" | "heartbeat", payload: unknown): Promise<void> {
     if (this.manuallyClosed) return Promise.reject(new Error("Gonvex client is closed"));
     this.connect();
+    if (!this.activeAuthFrameId) {
+      return new Promise<void>((resolve, reject) => {
+        this.pendingNativeErrors.push({ type, payload, resolve, reject });
+      });
+    }
+    return this.sendNativeErrorFrame(type, payload);
+  }
+
+  private flushPendingNativeErrors() {
+    if (!this.activeAuthFrameId || this.pendingNativeErrors.length === 0) return;
+    for (const pending of this.pendingNativeErrors.splice(0)) {
+      void this.sendNativeErrorFrame(pending.type, pending.payload).then(pending.resolve, pending.reject);
+    }
+  }
+
+  private sendNativeErrorFrame(type: "register" | "envelope" | "heartbeat", payload: unknown): Promise<void> {
     const id = randomID();
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
