@@ -1859,6 +1859,8 @@ struct UpdateProjectRequest {
     database_mode: Option<String>,
     #[serde(default)]
     error_tracking_enabled: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 async fn update_project(
@@ -1880,6 +1882,7 @@ async fn update_project(
     if request.name.is_none()
         && request.database_mode.is_none()
         && request.error_tracking_enabled.is_none()
+        && request.status.is_none()
     {
         return error(StatusCode::BAD_REQUEST, "no project fields provided");
     }
@@ -1903,6 +1906,16 @@ async fn update_project(
             "databaseMode must be single or multiTenant",
         );
     }
+    if request
+        .status
+        .as_deref()
+        .is_some_and(|value| value != "active")
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "status may only promote a project to active",
+        );
+    }
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1918,11 +1931,12 @@ async fn update_project(
     let row=sqlx::query(
         r#"UPDATE gonvex_runtime_projects SET
              name=COALESCE($2,name),database_mode=COALESCE($3,database_mode),
-             error_tracking_enabled=COALESCE($4,error_tracking_enabled),updated_at=now()
+             error_tracking_enabled=COALESCE($4,error_tracking_enabled),
+             status=COALESCE($5,status),updated_at=now()
            WHERE id=$1 AND status NOT IN('deleted','disabled')
            RETURNING id,name,environment,database_name,database_mode,storage_bucket,status,
                      description,provisioned,runtime_created,test_tab,error_tracking_enabled,owner_email"#,
-    ).bind(&project).bind(request.name.as_deref().map(str::trim)).bind(request.database_mode).bind(request.error_tracking_enabled)
+    ).bind(&project).bind(request.name.as_deref().map(str::trim)).bind(request.database_mode).bind(request.error_tracking_enabled).bind(request.status)
       .fetch_optional(&mut **transaction.transaction()).await;
     let Ok(Some(row)) = row else {
         return error(StatusCode::NOT_FOUND, "project not found");
