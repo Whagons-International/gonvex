@@ -3492,7 +3492,6 @@ function normalizeQuerySubscriptionRetentionMs(value: number | undefined): numbe
 }
 
 function authIdentityKey(auth: GonvexClientAuth) {
-  if (!auth.tenant) return "";
   if (auth.token) {
     const tokenIdentity = authIdentityKeyFromToken(auth);
     if (tokenIdentity) return tokenIdentity;
@@ -3501,13 +3500,13 @@ function authIdentityKey(auth: GonvexClientAuth) {
   // token would supply, so both paths derive the same key for the same Account.
   const hint = auth.identity;
   if (hint && typeof hint.sub === "string" && hint.sub.trim()) {
-    return [auth.project ?? "", auth.tenant, hint.iss ?? "", hint.sub].join("\u0000");
+    return [auth.project ?? "", auth.tenant ?? "", hint.iss ?? "", hint.sub].join("\u0000");
   }
   return "";
 }
 
 function authIdentityKeyFromToken(auth: GonvexClientAuth) {
-  if (!auth.token || !auth.tenant) return "";
+  if (!auth.token) return "";
   const parts = auth.token.split(".");
   if (parts.length < 2) return "";
   try {
@@ -3517,7 +3516,7 @@ function authIdentityKeyFromToken(auth: GonvexClientAuth) {
     if (typeof payload.sub !== "string" || !payload.sub.trim()) return "";
     return [
       auth.project ?? "",
-      auth.tenant,
+      auth.tenant ?? "",
       typeof payload.iss === "string" ? payload.iss : "",
       payload.sub,
     ].join("\u0000");

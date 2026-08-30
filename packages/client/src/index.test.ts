@@ -110,6 +110,11 @@ function sentMessages(socket = latestSocket()) {
   return socket.sent.map((message) => JSON.parse(message));
 }
 
+function accountToken(accountId: string, issuer = "shop") {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode({ sub: accountId, iss: issuer })}.signature`;
+}
+
 describe("GonvexClient", () => {
 	function installBrowserOnlineEvents() {
 		const listeners = new Set<() => void>();
@@ -2973,6 +2978,33 @@ describe("GonvexClient", () => {
     expect(replay).toMatchObject({ id: original.id, idempotencyKey: original.idempotencyKey, scope: "control" });
     second.receive({ type: "reducer.result", id: replay.id, result: { updated: true } });
     await expect(pending).resolves.toEqual({ updated: true });
+  });
+
+  it("keeps an account-scoped Control Plane reducer pending when React reinstalls the same identity", async () => {
+    const token = accountToken("acct-1");
+    const identity = { sub: "acct-1", iss: "shop" };
+    const client = new GonvexClient("ws://runtime.test/ws", {
+      project: "shop", token, identity,
+    });
+    const pending = client.reducer(control.tenants.create, { name: "Acme", domain: "acme" });
+    const socket = latestSocket();
+    socket.open();
+    const auth = sentMessages(socket).find((message) => message.type === "auth");
+    socket.receive({
+      type: "auth.result",
+      id: auth.id,
+      result: { accountId: "acct-1", projectId: "shop", tenantId: "" },
+    });
+    const call = sentMessages(socket).find((message) => message.type === "reducer.call");
+
+    client.setAuth({ project: "shop", tenant: undefined, token, identity });
+    socket.receive({
+      type: "reducer.result",
+      id: call.id,
+      result: { id: "tenant-1", domain: "acme", name: "Acme" },
+    });
+
+    await expect(pending).resolves.toMatchObject({ id: "tenant-1", domain: "acme" });
   });
 
   it("replays an in-flight Control Plane query after reconnect", async () => {

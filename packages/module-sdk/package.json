@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/module-sdk",
-  "version": "0.5.2-staging.4",
+  "version": "0.5.2-staging.5",
   "type": "module",
   "publishConfig": {
     "access": "public"
