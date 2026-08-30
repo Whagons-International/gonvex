@@ -822,10 +822,18 @@ async fn provision_e2e_member(
         .get("password")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    if project_id.is_empty() || tenant_id.is_empty() || email.is_empty() || email.len() > 320 {
+    let account_only = payload
+        .get("accountOnly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if project_id.is_empty()
+        || (!account_only && tenant_id.is_empty())
+        || email.is_empty()
+        || email.len() > 320
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"projectId, tenantId, and email are required"})),
+            Json(serde_json::json!({"error":"projectId and email are required; tenantId is required unless accountOnly is true"})),
         )
             .into_response();
     }
@@ -920,6 +928,11 @@ async fn provision_e2e_member(
         let name: String = sqlx::Row::get(&row, "name");
         let avatar: String = sqlx::Row::get(&row, "avatar_url");
         control_tx.commit().await?;
+        if account_only {
+            return Ok(serde_json::json!({
+                "projectId":project_id,"accountId":account_id,
+            }));
+        }
         let route = control.resolve_tenant(project_id, tenant_id).await?;
         let mut tenant_tx = control.begin_tenant_transaction(&route, false).await?;
         tenant_tx.set_command_id(&format!("e2e-member:{account_id}")).await?;
