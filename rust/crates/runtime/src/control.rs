@@ -1213,23 +1213,16 @@ impl Runtime {
 
         let database_url = control.create_database(&base_url, &database_name).await?;
         let mut directory_tx = control.begin_control_transaction(false).await?;
-        sqlx::query(
-            r#"INSERT INTO gonvex_runtime_tenants
-               (relationship_id,project_id,tenant_id,name,database_alias,database_name,
-                database_url,status,description,provisioned,runtime_created)
-               VALUES($1,$2,$1,$3,$4,$5,$6,$7,'active','Account-created tenant database.',FALSE,TRUE)
-               ON CONFLICT(project_id,tenant_id) DO UPDATE SET name=EXCLUDED.name,
-                 domain=EXCLUDED.domain,database_url=EXCLUDED.database_url,updated_at=now()"#,
-        )
-        .bind(&tenant_id)
-        .bind(&connection.project_id)
-        .bind(&name)
-        .bind(&database_alias)
-        .bind(&database_name)
-        .bind(&database_url)
-        .bind(&domain)
-        .execute(&mut **directory_tx.transaction())
-        .await?;
+        sqlx::query(RUNTIME_TENANT_DIRECTORY_INSERT_SQL)
+            .bind(&tenant_id)
+            .bind(&connection.project_id)
+            .bind(&name)
+            .bind(&database_alias)
+            .bind(&database_name)
+            .bind(&database_url)
+            .bind(&domain)
+            .execute(&mut **directory_tx.transaction())
+            .await?;
         directory_tx.commit().await?;
         let route = gonvex_postgres::TenantRoute {
             project_id: connection.project_id.clone(),
@@ -4622,6 +4615,13 @@ fn append_lock_component(material: &mut Vec<u8>, component: &str) {
     material.extend_from_slice(component.as_bytes());
 }
 
+const RUNTIME_TENANT_DIRECTORY_INSERT_SQL: &str = r#"INSERT INTO gonvex_runtime_tenants
+       (relationship_id,project_id,tenant_id,name,database_alias,database_name,
+        database_url,domain,status,description,provisioned,runtime_created)
+       VALUES($1,$2,$1,$3,$4,$5,$6,$7,'active','Account-created tenant database.',FALSE,TRUE)
+       ON CONFLICT(project_id,tenant_id) DO UPDATE SET name=EXCLUDED.name,
+         domain=EXCLUDED.domain,database_url=EXCLUDED.database_url,updated_at=now()"#;
+
 fn sha256_hex(value: &[u8]) -> String {
     Sha256::digest(value)
         .iter()
@@ -4659,6 +4659,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("databaseUrl"));
+    }
+
+    #[test]
+    fn account_created_tenant_directory_insert_maps_domain_before_status() {
+        assert!(RUNTIME_TENANT_DIRECTORY_INSERT_SQL
+            .contains("database_url,domain,status,description,provisioned,runtime_created"));
+        assert!(RUNTIME_TENANT_DIRECTORY_INSERT_SQL
+            .contains("$6,$7,'active','Account-created tenant database.',FALSE,TRUE"));
     }
 
     #[test]
