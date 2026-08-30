@@ -629,7 +629,7 @@ describe("GonvexAuthProvider", () => {
     expect(client.action).not.toHaveBeenCalled();
   });
 
-  it("does not request a stale persisted tenant on an explicit landlord origin and renders a loading surface", async () => {
+  it("warms an explicit landlord origin from a current tenant session without installing its tenant scope", async () => {
     const client = new FakeGonvexClient();
     const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-landlord.test:shop";
     const persisted = {
@@ -665,9 +665,14 @@ describe("GonvexAuthProvider", () => {
       </GonvexAuthProvider>,
     );
 
-    expect(rendered.queryByTestId("auth-loading")).not.toBeNull();
-    expect(rendered.queryByTestId("application")).toBeNull();
-    expect(client.setAuth).not.toHaveBeenCalled();
+    expect(rendered.queryByTestId("auth-loading")).toBeNull();
+    expect(rendered.queryByTestId("application")).not.toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith({
+      project: "shop",
+      tenant: undefined,
+      token: "tenant-access",
+      identity: { sub: "acct-firebase", iss: "shop" },
+    });
 
     await act(async () => {
       tokenListener?.({ uid: "firebase-uid" });
@@ -688,7 +693,7 @@ describe("GonvexAuthProvider", () => {
     expect(rendered.queryByTestId("application")).not.toBeNull();
     expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({
       project: "shop",
-      tenant: "tenant-1",
+      tenant: undefined,
       token: "landlord-access",
     }));
   });

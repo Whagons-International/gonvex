@@ -477,7 +477,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         // is waiting for the cross-tab exchange lock. Read the shared winner
         // inside the lock instead of replaying this tab's stale in-memory
         // refresh token.
-        const current = readAuthSession(storageKey) ?? sessionRef.current;
+        const storedCurrent = readAuthSession(storageKey) ?? sessionRef.current;
+        const current = scopeSessionForInitialTenant(
+          storedCurrent,
+          initialTenantId,
+          hasExplicitInitialTenant,
+        ) ?? storedCurrent;
         attemptedRefreshToken = current?.refreshToken ?? "";
         if (!current) {
           props.client.setAuth({
@@ -543,7 +548,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       ? `${storageKey}:external-session`
       : `${storageKey}:refresh`;
     const request = withBrowserAuthLock(lockName, async () => {
-      const current = readAuthSession(storageKey) ?? sessionRef.current;
+      const storedCurrent = readAuthSession(storageKey) ?? sessionRef.current;
+      const current = scopeSessionForInitialTenant(
+        storedCurrent,
+        initialTenantId,
+        hasExplicitInitialTenant,
+      ) ?? storedCurrent;
       if (!current) return null;
       if (!force && current.expiresAt > Date.now() + 60_000) return current;
       if (props.externalAuth) {
@@ -611,7 +621,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     });
     refreshRef.current = request;
     return request;
-  }, [installSession, props.client, props.externalAuth, storageKey]);
+  }, [hasExplicitInitialTenant, initialTenantId, installSession, props.client, props.externalAuth, storageKey]);
 
   useEffect(() => {
     if (!session) return;
@@ -1229,26 +1239,47 @@ function reusableExternalAuthSession(
   if (!Number.isFinite(session.expiresAt) || session.expiresAt <= now + WARM_SESSION_ACCESS_SAFETY_MS) {
     return null;
   }
-  if (
-    hasExplicitInitialTenant
-    && initialTenantId === undefined
-    && session.activeTenantId !== undefined
-  ) return null;
+  const scoped = scopeSessionForInitialTenant(session, initialTenantId, hasExplicitInitialTenant);
+  if (!scoped) return null;
   if (
     hasExplicitInitialTenant
     && initialTenantId !== undefined
-    && !session.tenants.some((tenant) => (
-      tenant.id === session.activeTenantId
+    && !scoped.tenants.some((tenant) => (
+      tenant.id === scoped.activeTenantId
       && (tenant.id === initialTenantId || tenant.domain.toLowerCase() === initialTenantId.toLowerCase())
     ))
   ) return null;
   if (
-    session.activeTenantId !== undefined
-    && !session.tenants.some((tenant) => tenant.id === session.activeTenantId)
+    scoped.activeTenantId !== undefined
+    && !scoped.tenants.some((tenant) => tenant.id === scoped.activeTenantId)
   ) {
     return null;
   }
-  return session;
+  return scoped;
+}
+
+/** Restrict a persisted session to the tenant context selected by the host. */
+function scopeSessionForInitialTenant(
+  session: GonvexAuthSession | null,
+  initialTenantId: string | undefined,
+  hasExplicitInitialTenant: boolean,
+): GonvexAuthSession | null {
+  if (!session || !hasExplicitInitialTenant) return session;
+  // The landlord is account-scoped. Reuse the valid token and tenant directory,
+  // but never carry a tenant Replica scope onto that origin.
+  if (initialTenantId === undefined) {
+    return session.activeTenantId === undefined
+      ? session
+      : { ...session, activeTenantId: undefined };
+  }
+  const tenant = session.tenants.find((candidate) => (
+    candidate.id === initialTenantId
+    || candidate.domain.toLowerCase() === initialTenantId.toLowerCase()
+  ));
+  if (!tenant) return null;
+  return session.activeTenantId === tenant.id
+    ? session
+    : { ...session, activeTenantId: tenant.id };
 }
 
 function readAuthSession(key: string): GonvexAuthSession | null {
