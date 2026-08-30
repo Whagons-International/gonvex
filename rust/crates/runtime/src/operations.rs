@@ -57,7 +57,10 @@ pub fn router() -> Router<Runtime> {
             "/dev/projects/{project}/key/rotate",
             post(rotate_project_key),
         )
-        .route("/dev/projects/{project}/members", get(project_members))
+        .route(
+            "/dev/projects/{project}/members",
+            get(project_members).post(upsert_project_member),
+        )
         .route(
             "/dev/projects/{project}/invitations",
             post(create_project_invitation),
@@ -425,6 +428,82 @@ async fn project_members(
             "project member store is unavailable",
         ),
     }
+}
+
+#[derive(Deserialize)]
+struct ProjectMemberRequest {
+    email: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
+}
+
+async fn upsert_project_member(
+    State(runtime): State<Runtime>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ProjectMemberRequest>,
+) -> Response {
+    let actor = match authorize(&runtime, &headers, "projects:members:write").await {
+        Ok(actor) if can_manage_project(&runtime, &actor, &project).await => actor,
+        Ok(_) => {
+            return error(
+                StatusCode::FORBIDDEN,
+                "project owner or admin access is required",
+            )
+        }
+        Err(response) => return response,
+    };
+    let email = normalize_email(&request.email);
+    let role = match request.role.trim() {
+        "" | "dev" => "dev",
+        "owner" => "owner",
+        "admin" => "admin",
+        _ => return error(StatusCode::BAD_REQUEST, "role must be owner, admin, or dev"),
+    };
+    if email.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "email is required");
+    }
+    let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project member store is unavailable",
+        );
+    };
+    let Ok(mut transaction) = control.begin_control_transaction(false).await else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project member store is unavailable",
+        );
+    };
+    let stored = sqlx::query(
+        r#"INSERT INTO gonvex_project_members(project_id,email,name,role)
+           VALUES($1,$2,$3,$4)
+           ON CONFLICT(project_id,email) DO UPDATE SET
+             name=EXCLUDED.name,role=EXCLUDED.role"#,
+    )
+    .bind(&project)
+    .bind(&email)
+    .bind(request.name.trim())
+    .bind(role)
+    .execute(&mut **transaction.transaction())
+    .await;
+    if stored.is_err() || transaction.commit().await.is_err() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project member could not be stored",
+        );
+    }
+    runtime.notify_control_changed(&project);
+    (
+        StatusCode::OK,
+        Json(json!({"member":{
+            "email":email,"name":request.name.trim(),"role":role,
+            "updatedBy":actor.email,
+        }})),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
