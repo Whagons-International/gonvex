@@ -379,7 +379,7 @@ impl ControlPlane {
                 .bind(name)
                 .execute(&maintenance)
                 .await?;
-            let statement = format!("DROP DATABASE IF EXISTS \"{name}\"");
+            let statement = format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)");
             sqlx::query(&statement).execute(&maintenance).await?;
         }
         let mut finish = self.begin_control_transaction(false).await?;
@@ -608,9 +608,11 @@ impl ControlPlane {
         .bind(&database_name)
         .execute(&maintenance)
         .await?;
-        sqlx::query(&format!("DROP DATABASE IF EXISTS \"{database_name}\""))
-            .execute(&maintenance)
-            .await?;
+        sqlx::query(&format!(
+            "DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)"
+        ))
+        .execute(&maintenance)
+        .await?;
 
         let mut finish = self.begin_control_transaction(false).await?;
         sqlx::query(
