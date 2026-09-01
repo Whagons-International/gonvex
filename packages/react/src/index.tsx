@@ -243,7 +243,13 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     };
   }
   const initialAuth = initialAuthRef.current;
-  const [session, setSession] = useState<GonvexAuthSession | null>(initialAuth.session);
+  // The session exposed to React must be the same scoped session installed on
+  // the client. On an explicit landlord origin, warmSession intentionally
+  // clears a persisted tenant selection. Keeping the unscoped persisted value
+  // here makes the tenant-directory effect see a different auth scope and skip
+  // its authoritative Control Query, leaving deleted tenants in the UI.
+  const initialSession = initialAuth.warmSession ?? initialAuth.session;
+  const [session, setSession] = useState<GonvexAuthSession | null>(initialSession);
   const [isLoading, setIsLoading] = useState(!initialAuth.warmSession);
   const [sessionState, setSessionState] = useState<AuthState["sessionState"]>(
     initialAuth.warmSession ? "reconnecting" : "loading",

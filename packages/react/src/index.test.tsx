@@ -652,6 +652,11 @@ describe("GonvexAuthProvider", () => {
       getIdToken: vi.fn(async () => "firebase-id-token"),
       onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
     };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() {
+      auth = useGonvexAuth();
+      return <div data-testid="application">Application</div>;
+    }
     const rendered = render(
       <GonvexAuthProvider
         client={client as unknown as GonvexClient}
@@ -661,7 +666,7 @@ describe("GonvexAuthProvider", () => {
         externalAuth={externalAuth}
         loadingFallback={<div data-testid="auth-loading">Loading authentication</div>}
       >
-        <div data-testid="application">Application</div>
+        <Consumer />
       </GonvexAuthProvider>,
     );
 
@@ -673,6 +678,24 @@ describe("GonvexAuthProvider", () => {
       token: "tenant-access",
       identity: { sub: "acct-firebase", iss: "shop" },
     });
+    expect(auth?.activeTenant).toBeNull();
+    expect(client.subscribedRefs).toContainEqual(
+      expect.objectContaining({ path: "control.tenants.mine" }),
+    );
+
+    await act(async () => {
+      client.emitQuery({
+        type: "query.result",
+        id: "landlord-tenants",
+        result: [{
+          id: "tenant-2", name: "Current tenant", role: "owner", permissions: {},
+          domain: "current", timezone: "UTC", description: "", profile: {},
+        }],
+      });
+    });
+    expect(auth?.tenants).toEqual([
+      expect.objectContaining({ id: "tenant-2", domain: "current" }),
+    ]);
 
     await act(async () => {
       tokenListener?.({ uid: "firebase-uid" });
