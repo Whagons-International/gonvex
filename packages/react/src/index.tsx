@@ -514,7 +514,13 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         return sessionFromNativeGrant(grant, current ?? undefined);
       }).then((next) => {
         if (cancelled || currentGeneration !== generation) return;
-        installSession(next);
+        // A user can select a different tenant while the provider exchange is
+        // still in flight. The returned access token is account-wide, but its
+        // activeTenantId reflects the scope captured when the exchange began.
+        // Preserve the latest locally accepted tenant selection so a stale
+        // background exchange cannot bounce a cross-origin handoff back to the
+        // previously active tenant.
+        installSession(preserveActiveTenant(next, sessionRef.current ?? undefined));
         setSessionState("current");
         setError(null);
       }).catch((cause) => {
@@ -1125,10 +1131,21 @@ function sessionFromNativeGrant(value: JsonValue, previous?: GonvexAuthSession):
     throw new GonvexAuthRequestError("Gonvex returned an invalid native session.", 502);
   }
   const session = value as GonvexAuthSession;
-  const activeTenantId = previous && session.tenants.some((tenant) => tenant.id === previous.activeTenantId)
+  return preserveActiveTenant(session, previous);
+}
+
+function preserveActiveTenant(
+  session: GonvexAuthSession,
+  previous?: GonvexAuthSession,
+): GonvexAuthSession {
+  const activeTenantId = previous
+    && previous.account.id === session.account.id
+    && session.tenants.some((tenant) => tenant.id === previous.activeTenantId)
     ? previous.activeTenantId
     : session.activeTenantId;
-  return { ...session, activeTenantId };
+  return activeTenantId === session.activeTenantId
+    ? session
+    : { ...session, activeTenantId };
 }
 
 async function requestGonvexAuthToken(runtimeUrl: string, body: Record<string, unknown>): Promise<GonvexAuthSession> {

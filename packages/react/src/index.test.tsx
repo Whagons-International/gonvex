@@ -1005,6 +1005,72 @@ describe("GonvexAuthProvider", () => {
     expect(rendered.queryByTestId("application")).not.toBeNull();
   });
 
+  it("does not let a stale Firebase exchange undo a newer tenant selection", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-tenant-switch.test:shop";
+    const tenants = [
+      { id: "tenant-1", name: "First", role: "owner", permissions: {}, domain: "first", timezone: "UTC", description: "", profile: {} },
+      { id: "tenant-2", name: "Second", role: "owner", permissions: {}, domain: "second", timezone: "UTC", description: "", profile: {} },
+    ];
+    const persisted = {
+      accessToken: "access-before-switch", expiresAt: now + 900_000,
+      refreshToken: "refresh-before-switch", refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants,
+      activeTenantId: "tenant-1",
+    };
+    localStorage.setItem(storageKey, JSON.stringify(persisted));
+
+    let finishExchange: ((session: typeof persisted) => void) | undefined;
+    client.action.mockImplementation(() => new Promise((resolve) => { finishExchange = resolve; }));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => "firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-tenant-switch.test"
+        projectId="shop"
+        initialTenantId={null}
+        externalAuth={externalAuth}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    await act(async () => {
+      tokenListener?.({ uid: "firebase-uid" });
+      await Promise.resolve();
+    });
+    await act(async () => { await auth!.setActiveTenant("tenant-2"); });
+    expect(auth?.activeTenant?.id).toBe("tenant-2");
+
+    await act(async () => {
+      finishExchange?.({
+        ...persisted,
+        accessToken: "access-after-exchange",
+        refreshToken: "refresh-after-exchange",
+        // The response reflects the landlord exchange that started before the
+        // tenant switch and therefore still carries the old default tenant.
+        activeTenantId: "tenant-1",
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(auth?.activeTenant?.id).toBe("tenant-2");
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({
+      accessToken: "access-after-exchange",
+      activeTenantId: "tenant-2",
+    });
+  });
+
   it("preserves a canonical Firebase session when background exchange has a transient host failure", async () => {
     const client = new FakeGonvexClient();
     const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-degraded.test:shop";
