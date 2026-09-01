@@ -1369,6 +1369,76 @@ describe("GonvexAuthProvider", () => {
     expect(document.querySelector("iframe")).toBeNull();
   });
 
+  it("can load the handoff receiver with an empty POST outside navigation service workers", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    localStorage.setItem("gonvex-auth:https%3A%2F%2Fhandoff-post.test:shop", JSON.stringify({
+      accessToken: "canonical-access",
+      expiresAt: now + 900_000,
+      refreshToken: "canonical-refresh",
+      refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-1", email: "owner@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "owner", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => null),
+      onIdTokenChanged() { return vi.fn(); },
+    };
+    const submit = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => undefined);
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() { auth = useGonvexAuth(); return null; }
+    render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://handoff-post.test"
+        projectId="shop"
+        externalAuth={externalAuth}
+        crossOriginHandoff={{ allowedOriginSuffix: "localhost", receiverMethod: "post" }}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    let handoff: Promise<void> | undefined;
+    await act(async () => {
+      handoff = auth!.handoffSessionTo("http://tenant.localhost/");
+      await Promise.resolve();
+    });
+    const frame = document.querySelector("iframe") as HTMLIFrameElement;
+    const form = document.querySelector("form") as HTMLFormElement;
+    expect(frame.name).toMatch(/^gonvex-session-handoff-/);
+    expect(form.method).toBe("post");
+    expect(form.target).toBe(frame.name);
+    expect(form.querySelectorAll("input")).toHaveLength(0);
+    expect(new URL(form.action).pathname).toBe("/auth/session-handoff");
+    expect(submit).toHaveBeenCalledOnce();
+    const nonce = new URL(form.action).hash.match(/gonvexSessionHandoff=([^&]+)/)?.[1];
+    const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+
+    act(() => window.dispatchEvent(new MessageEvent("message", {
+      data: { type: "gonvex.sessionHandoff.ready", nonce },
+      origin: "http://tenant.localhost",
+      source: frame.contentWindow,
+    })));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: "gonvex.sessionHandoff.offer",
+      session: expect.objectContaining({ activeTenantId: "tenant-1" }),
+    }), "http://tenant.localhost");
+
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent("message", {
+        data: { type: "gonvex.sessionHandoff.accepted", nonce },
+        origin: "http://tenant.localhost",
+        source: frame.contentWindow,
+      }));
+      await handoff;
+    });
+    expect(document.querySelector("iframe")).toBeNull();
+    expect(document.querySelector("form")).toBeNull();
+  });
+
   it("keeps the canonical Firebase-backed session through a transient provider-null callback", async () => {
     const client = new FakeGonvexClient();
     const controlWatch = vi.spyOn(client, "watchControlQuery");

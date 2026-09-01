@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/react",
-  "version": "0.5.2-staging.9",
+  "version": "0.5.2-staging.10",
   "type": "module",
   "publishConfig": {
     "access": "public"

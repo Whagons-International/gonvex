@@ -111,6 +111,13 @@ export type GonvexAuthConfig = {
   crossOriginHandoff?: {
     allowedOriginSuffix: string;
     receiverPath?: string;
+    /**
+     * Load the receiver with POST when a service worker may serve a stale
+     * cached application shell for GET navigations. The POST body is empty;
+     * the canonical session still travels only through the origin-checked
+     * postMessage exchange.
+     */
+    receiverMethod?: "get" | "post";
     timeoutMs?: number;
   };
 };
@@ -844,7 +851,19 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const frame = document.createElement("iframe");
     frame.hidden = true;
     frame.setAttribute("aria-hidden", "true");
-    frame.src = receiver.toString();
+    const receiverMethod = handoff.receiverMethod ?? "get";
+    let receiverForm: HTMLFormElement | null = null;
+    if (receiverMethod === "get") {
+      frame.src = receiver.toString();
+    } else {
+      const frameName = `gonvex-session-handoff-${nonce}`;
+      frame.name = frameName;
+      receiverForm = document.createElement("form");
+      receiverForm.hidden = true;
+      receiverForm.method = "post";
+      receiverForm.action = receiver.toString();
+      receiverForm.target = frameName;
+    }
 
     await new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
@@ -854,6 +873,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       const cleanup = () => {
         window.clearTimeout(timeout);
         window.removeEventListener("message", onMessage);
+        receiverForm?.remove();
         frame.remove();
       };
       const onMessage = (event: MessageEvent) => {
@@ -876,6 +896,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       };
       window.addEventListener("message", onMessage);
       document.body.append(frame);
+      if (receiverForm) {
+        document.body.append(receiverForm);
+        receiverForm.submit();
+      }
     });
   }, [props.crossOriginHandoff, props.projectId, runtimeUrl]);
 
