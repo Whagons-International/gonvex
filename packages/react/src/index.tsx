@@ -250,6 +250,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   );
   const [error, setError] = useState<string | null>(null);
   const [refreshRetryAt, setRefreshRetryAt] = useState(0);
+  const [canonicalRefreshRequested, setCanonicalRefreshRequested] = useState(false);
   const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>({ active: false });
   const sessionRef = useRef(session);
   const refreshRef = useRef<Promise<GonvexAuthSession | null> | null>(null);
@@ -425,20 +426,24 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
           hasExplicitInitialTenant,
         );
         if (reusableCanonical) {
+          setCanonicalRefreshRequested(false);
           if (!sameInstalledAuthSession(sessionRef.current, reusableCanonical)) {
             installSession(reusableCanonical, false);
           }
           setSessionState("current");
           setIsLoading(false);
         } else if (canonical) {
-          // Keep a refreshable but expired session private until the external
-          // provider supplies a current identity token. Its tenant Replica is
-          // not safe to expose under an expired access token.
+          // Firebase persistence is origin-scoped, while the canonical Gonvex
+          // session is deliberately handed across tenant subdomains. Refresh
+          // that canonical session directly instead of waiting forever for a
+          // Firebase user that may never exist on this sibling origin.
           sessionRef.current = canonical;
           setSession(canonical);
           setSessionState("loading");
           setIsLoading(true);
+          setCanonicalRefreshRequested(true);
         } else {
+          setCanonicalRefreshRequested(false);
           installSession(null, false);
           setSessionState("signedOut");
           setIsLoading(false);
@@ -446,6 +451,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         setError(null);
         return;
       }
+      setCanonicalRefreshRequested(false);
       // A valid canonical Gonvex session remains usable while Firebase rotates
       // its identity token. Keep the application mounted and perform that
       // exchange in the background; unmounting the entire tree here destroys
@@ -556,29 +562,31 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       ) ?? storedCurrent;
       if (!current) return null;
       if (!force && current.expiresAt > Date.now() + 60_000) return current;
+      if (current.refreshExpiresAt <= Date.now()) return null;
       if (props.externalAuth) {
+        if (current.account.provider !== props.externalAuth.provider) return null;
         attemptedRefreshToken = current.refreshToken;
         const token = await props.externalAuth.getIdToken(force);
-        if (!token) {
-          // External providers such as Firebase can briefly report no current
-          // user while a new tab hydrates IndexedDB. That is not an explicit
-          // sign-out and must not erase the still-valid canonical Gonvex
-          // session shared by every tab. The provider callback will retry the
-          // exchange once its identity is ready.
-          setRefreshRetryAt(Date.now() + 1_000);
-          return current;
-        }
-        const grant = await props.client.action(control.auth.exchangeExternalToken, {
-          provider: props.externalAuth.provider,
-          token,
-          ...(current.activeTenantId ? { tenantId: current.activeTenantId } : {}),
-          previousRefreshToken: current.refreshToken,
-        });
-        const next = sessionFromNativeGrant(grant, current);
+        const grant = token
+          ? await props.client.action(control.auth.exchangeExternalToken, {
+              provider: props.externalAuth.provider,
+              token,
+              ...(current.activeTenantId ? { tenantId: current.activeTenantId } : {}),
+              previousRefreshToken: current.refreshToken,
+            })
+          : await props.client.action(control.auth.refreshSession, {
+              refreshToken: current.refreshToken,
+            });
+        const refreshed = sessionFromNativeGrant(grant, current);
+        const next = scopeSessionForInitialTenant(
+          refreshed,
+          initialTenantId,
+          hasExplicitInitialTenant,
+        );
+        if (!next) return null;
         safeLocalStorageSet(storageKey, JSON.stringify(next));
         return next;
       }
-      if (current.refreshExpiresAt <= Date.now()) return null;
       attemptedRefreshToken = current.refreshToken;
       const grant = await props.client.action(control.auth.refreshSession, { refreshToken: current.refreshToken });
       const next = sessionFromNativeGrant(grant, current);
@@ -592,8 +600,12 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       if (next) {
         setRefreshRetryAt(0);
         setError(null);
+        setSessionState("current");
+      } else {
+        setSessionState("signedOut");
       }
       installSession(next);
+      setIsLoading(false);
       return next;
     }).catch((cause) => {
       const latest = readAuthSession(storageKey);
@@ -608,12 +620,16 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
       if (isFatalRefreshError(cause)) {
         installSession(null);
         setRefreshRetryAt(0);
+        setSessionState("signedOut");
+        setIsLoading(false);
         setError(cause instanceof Error ? cause.message : "Your session expired. Please sign in again.");
         return null;
       }
       // Network failures, timeouts, rate limits, and server outages must not
       // destroy a valid refresh credential. Keep it and retry shortly.
       if (sessionRef.current) setRefreshRetryAt(Date.now() + 5_000);
+      setSessionState("degraded");
+      setIsLoading(false);
       setError("Gonvex could not refresh your session. Retrying shortly…");
       return null;
     }).finally(() => {
@@ -622,6 +638,17 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     refreshRef.current = request;
     return request;
   }, [hasExplicitInitialTenant, initialTenantId, installSession, props.client, props.externalAuth, storageKey]);
+
+  useEffect(() => {
+    if (!canonicalRefreshRequested) return;
+    let cancelled = false;
+    void refreshSession().finally(() => {
+      if (!cancelled) setCanonicalRefreshRequested(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [canonicalRefreshRequested, refreshSession]);
 
   useEffect(() => {
     if (!session) return;
@@ -908,7 +935,11 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
 
   const authValue = useMemo<GonvexAuthValue>(() => ({
     isLoading,
-    isAuthenticated: Boolean(session && session.refreshExpiresAt > Date.now()),
+    isAuthenticated: Boolean(
+      session
+      && session.expiresAt > Date.now()
+      && session.refreshExpiresAt > Date.now()
+    ),
     sessionState,
     fetchAccessToken,
     account: session?.account ?? null,
@@ -1115,7 +1146,13 @@ async function requestGonvexAuthToken(runtimeUrl: string, body: Record<string, u
 }
 
 function isFatalRefreshError(cause: unknown) {
-  return cause instanceof GonvexAuthRequestError && (cause.status === 400 || cause.status === 401 || cause.status === 403);
+  if (cause instanceof GonvexAuthRequestError) {
+    return cause.status === 400 || cause.status === 401 || cause.status === 403;
+  }
+  if (!(cause instanceof GonvexClientError)) return false;
+  if (cause.code === "auth") return true;
+  if (cause.code !== "server") return false;
+  return /invalid or expired refresh token|refresh token (?:reuse detected|was already rotated)|login was revoked/i.test(cause.message);
 }
 
 function isFatalExternalExchangeError(cause: unknown) {

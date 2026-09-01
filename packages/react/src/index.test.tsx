@@ -1324,16 +1324,202 @@ describe("GonvexAuthProvider", () => {
     expect(localStorage.getItem(storageKey)).not.toBeNull();
   });
 
-  it("does not sign out when a forced Firebase refresh runs before provider hydration", async () => {
+  it("refreshes an expired canonical session when Firebase is absent on this origin", async () => {
     const client = new FakeGonvexClient();
-    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-hydration.test:shop";
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-canonical-refresh.test:shop";
+    const expired = {
+      accessToken: "expired-access", expiresAt: now - 1_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    };
+    const rotated = {
+      ...expired,
+      accessToken: "rotated-access", expiresAt: now + 900_000,
+      refreshToken: "rotated-refresh", refreshExpiresAt: now + 172_800_000,
+    };
+    localStorage.setItem(storageKey, JSON.stringify(expired));
+    client.action.mockResolvedValue(rotated);
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => null),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() {
+      auth = useGonvexAuth();
+      return <div data-testid="application">Application</div>;
+    }
+    const rendered = render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-canonical-refresh.test"
+        projectId="shop"
+        externalAuth={externalAuth}
+        loadingFallback={<div data-testid="auth-loading">Loading authentication</div>}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    expect(rendered.queryByTestId("auth-loading")).not.toBeNull();
+    expect(rendered.queryByTestId("application")).toBeNull();
+    await act(async () => {
+      tokenListener?.(null);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(externalAuth.getIdToken).toHaveBeenCalledWith(false);
+    expect(client.action).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "control.auth.refreshSession" }),
+      { refreshToken: "canonical-refresh" },
+    );
+    expect(client.action).not.toHaveBeenCalledWith(
+      expect.objectContaining({ path: "control.auth.exchangeExternalToken" }),
+      expect.anything(),
+    );
+    expect(rendered.queryByTestId("auth-loading")).toBeNull();
+    expect(rendered.queryByTestId("application")).not.toBeNull();
+    expect(auth).toMatchObject({ isAuthenticated: true, isLoading: false, sessionState: "current" });
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({
+      project: "shop",
+      tenant: "tenant-1",
+      token: "rotated-access",
+    }));
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({
+      accessToken: "rotated-access",
+      refreshToken: "rotated-refresh",
+    });
+  });
+
+  it("signs out and releases loading when the canonical refresh credential has expired", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-expired-refresh.test:shop";
     localStorage.setItem(storageKey, JSON.stringify({
-      accessToken: "canonical-access", expiresAt: Date.now() + 900_000,
-      refreshToken: "canonical-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      accessToken: "expired-access", expiresAt: now - 2_000,
+      refreshToken: "expired-refresh", refreshExpiresAt: now - 1_000,
       account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
       tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
       activeTenantId: "tenant-1",
     }));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => null),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() {
+      auth = useGonvexAuth();
+      return <div data-testid="signed-out-application">Application</div>;
+    }
+    const rendered = render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-expired-refresh.test"
+        projectId="shop"
+        externalAuth={externalAuth}
+        loadingFallback={<div data-testid="auth-loading">Loading authentication</div>}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    await act(async () => {
+      tokenListener?.(null);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(client.action).not.toHaveBeenCalled();
+    expect(externalAuth.getIdToken).not.toHaveBeenCalled();
+    expect(rendered.queryByTestId("auth-loading")).toBeNull();
+    expect(rendered.queryByTestId("signed-out-application")).not.toBeNull();
+    expect(auth).toMatchObject({ isAuthenticated: false, isLoading: false, sessionState: "signedOut" });
+    expect(localStorage.getItem(storageKey)).toBeNull();
+    expect(client.setAuth).toHaveBeenLastCalledWith({
+      project: "shop",
+      tenant: undefined,
+      token: undefined,
+      identity: undefined,
+    });
+  });
+
+  it("releases loading without authenticating when canonical refresh fails transiently", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-refresh-failure.test:shop";
+    localStorage.setItem(storageKey, JSON.stringify({
+      accessToken: "expired-access", expiresAt: now - 1_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: now + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    }));
+    client.action.mockRejectedValue(new Error("network unavailable"));
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider: "firebase" as const,
+      getIdToken: vi.fn(async () => null),
+      onIdTokenChanged(listener: typeof tokenListener) { tokenListener = listener; return vi.fn(); },
+    };
+    let auth: ReturnType<typeof useGonvexAuth> | undefined;
+    function Consumer() {
+      auth = useGonvexAuth();
+      return <div data-testid="degraded-application">Application</div>;
+    }
+    const rendered = render(
+      <GonvexAuthProvider
+        client={client as unknown as GonvexClient}
+        runtimeUrl="https://firebase-refresh-failure.test"
+        projectId="shop"
+        externalAuth={externalAuth}
+        loadingFallback={<div data-testid="auth-loading">Loading authentication</div>}
+      >
+        <Consumer />
+      </GonvexAuthProvider>,
+    );
+
+    await act(async () => {
+      tokenListener?.(null);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(client.action).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "control.auth.refreshSession" }),
+      { refreshToken: "canonical-refresh" },
+    );
+    expect(rendered.queryByTestId("auth-loading")).toBeNull();
+    expect(rendered.queryByTestId("degraded-application")).not.toBeNull();
+    expect(auth).toMatchObject({ isAuthenticated: false, isLoading: false, sessionState: "degraded" });
+    expect(localStorage.getItem(storageKey)).toContain("canonical-refresh");
+  });
+
+  it("uses canonical refresh when a forced Firebase refresh runs before provider hydration", async () => {
+    const client = new FakeGonvexClient();
+    const now = Date.now();
+    const storageKey = "gonvex-auth:https%3A%2F%2Ffirebase-hydration.test:shop";
+    const current = {
+      accessToken: "canonical-access", expiresAt: now + 900_000,
+      refreshToken: "canonical-refresh", refreshExpiresAt: Date.now() + 86_400_000,
+      account: { id: "acct-firebase", email: "firebase@example.test", emailVerified: true, provider: "firebase" },
+      tenants: [{ id: "tenant-1", name: "Tenant", role: "admin", permissions: {}, domain: "tenant", timezone: "UTC", description: "", profile: {} }],
+      activeTenantId: "tenant-1",
+    };
+    localStorage.setItem(storageKey, JSON.stringify(current));
+    client.action.mockResolvedValue({
+      ...current,
+      accessToken: "rotated-access", expiresAt: now + 1_800_000,
+      refreshToken: "rotated-refresh", refreshExpiresAt: now + 172_800_000,
+    });
     let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
     const externalAuth = {
       provider: "firebase" as const,
@@ -1355,12 +1541,15 @@ describe("GonvexAuthProvider", () => {
 
     await act(async () => { tokenListener?.(null); await Promise.resolve(); });
     await act(async () => {
-      expect(await auth!.fetchAccessToken!({ forceRefreshToken: true })).toBe("canonical-access");
+      expect(await auth!.fetchAccessToken!({ forceRefreshToken: true })).toBe("rotated-access");
     });
 
     expect(auth?.isAuthenticated).toBe(true);
-    expect(localStorage.getItem(storageKey)).toContain("canonical-refresh");
-    expect(client.action).not.toHaveBeenCalled();
+    expect(localStorage.getItem(storageKey)).toContain("rotated-refresh");
+    expect(client.action).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "control.auth.refreshSession" }),
+      { refreshToken: "canonical-refresh" },
+    );
   });
 
   it("owns the developer-mode enter/exit lifecycle without exposing or persisting its token", async () => {

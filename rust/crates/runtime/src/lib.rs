@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body, body::Body, Json, Router};
@@ -333,6 +334,7 @@ impl Runtime {
             )
             .route("/dev/internal/e2e/members", post(provision_e2e_member))
             .layer(DefaultBodyLimit::max(64 << 20))
+            .layer(middleware::from_fn(dev_cors))
             .with_state(self.clone())
     }
 
@@ -344,6 +346,42 @@ impl Runtime {
         self.inner.module_host.shutdown().await;
         self.inner.pools.close().await;
     }
+}
+
+async fn dev_cors(request: axum::http::Request<Body>, next: middleware::Next) -> Response {
+    let is_dev_route = request.uri().path().starts_with("/dev/");
+    if is_dev_route && request.method() == Method::OPTIONS {
+        return dev_cors_headers(StatusCode::NO_CONTENT.into_response());
+    }
+    let response = next.run(request).await;
+    if is_dev_route {
+        dev_cors_headers(response)
+    } else {
+        response
+    }
+}
+
+fn dev_cors_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static(
+            "Authorization, Content-Type, X-Gonvex-Key, X-Gonvex-Project-Key, X-Gonvex-Project-Id, X-Gonvex-Tenant-Id",
+        ),
+    );
+    headers.insert(
+        axum::http::header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("600"),
+    );
+    response
 }
 
 #[derive(serde::Deserialize)]
@@ -3128,6 +3166,61 @@ mod tests {
             response.headers()["access-control-allow-headers"],
             "Content-Type"
         );
+    }
+
+    #[tokio::test]
+    async fn operator_preflights_are_cors_enabled() {
+        let runtime = Runtime::new(config(false));
+        for (uri, requested_method) in [("/dev/auth/me", "GET"), ("/dev/projects", "POST")] {
+            let response = runtime
+                .router()
+                .oneshot(
+                    Request::builder()
+                        .method("OPTIONS")
+                        .uri(uri)
+                        .header("origin", "https://dashboard.gonvex.test")
+                        .header("access-control-request-method", requested_method)
+                        .header(
+                            "access-control-request-headers",
+                            "authorization,content-type,x-gonvex-key,x-gonvex-project-key",
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{uri}");
+            assert_eq!(response.headers()["access-control-allow-origin"], "*");
+            assert_eq!(
+                response.headers()["access-control-allow-methods"],
+                "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            );
+            assert_eq!(
+                response.headers()["access-control-allow-headers"],
+                "Authorization, Content-Type, X-Gonvex-Key, X-Gonvex-Project-Key, X-Gonvex-Project-Id, X-Gonvex-Tenant-Id"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_cors_does_not_bypass_authorization() {
+        let runtime = Runtime::new(config(false));
+        for uri in ["/dev/auth/me", "/dev/projects"] {
+            let response = runtime
+                .router()
+                .oneshot(
+                    Request::get(uri)
+                        .header("origin", "https://dashboard.gonvex.test")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        }
     }
 
     #[tokio::test]
