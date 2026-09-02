@@ -19,9 +19,6 @@ func (s *Server) recordTransactionTelemetry(entry transactionTelemetryEntry) {
 }
 
 func (s *Server) recordTransactionTelemetryBatch(entries []transactionTelemetryEntry) {
-	if !s.config.TelemetryEnabled {
-		return
-	}
 	normalized := make([]transactionTelemetryEntry, 0, len(entries))
 	for _, entry := range entries {
 		entry.Project = strings.TrimSpace(entry.Project)
@@ -30,10 +27,13 @@ func (s *Server) recordTransactionTelemetryBatch(entries []transactionTelemetryE
 		}
 		normalized = append(normalized, entry)
 	}
-	s.metrics.recordTransactions(normalized)
 	for _, entry := range normalized {
 		s.telegramAlerts.observeTTLU(entry)
 	}
+	if !s.config.TelemetryEnabled {
+		return
+	}
+	s.metrics.recordTransactions(normalized)
 	dropped := 0
 	for index, entry := range normalized {
 		if !transactionTelemetryIsDurable(entry) {

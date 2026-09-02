@@ -103,7 +103,7 @@ func (a *telegramAlertManager) observeTTLU(entry transactionTelemetryEntry) {
 	if latencyMS <= 0 {
 		latencyMS = entry.ChangeToBrowserMS
 	}
-	if latencyMS < float64(a.ttluThreshold.Milliseconds()) {
+	if latencyMS < float64(a.ttluThreshold)/float64(time.Millisecond) {
 		return
 	}
 	now := a.now().UTC()

@@ -68,6 +68,34 @@ func TestTelegramTTLUAlertFiltersTelemetryAndAppliesCooldown(t *testing.T) {
 	assertNoTelegramAlert(t, alerts)
 }
 
+func TestTelegramTTLUAlertDoesNotDependOnTelemetryPersistence(t *testing.T) {
+	server := New(config.Config{TelemetryEnabled: false})
+	defer server.Close()
+	server.telegramAlerts = newTelegramAlertManager(config.Config{
+		TelegramBotToken: "token", TelegramChatID: "chat",
+		AlertTTLU: 5 * time.Second, AlertCooldown: time.Minute,
+	})
+
+	server.recordTransactionTelemetry(transactionTelemetryEntry{
+		Project: "project-a", Kind: "query", Phase: "browser", Reason: "invalidate",
+		Path: "tasks.list", ChangeToAckMS: 6000,
+	})
+	assertTelegramAlertContains(t, server.telegramAlerts, "Update propagation took 6.00s")
+}
+
+func TestTelegramTTLUSubMillisecondThresholdKeepsPrecision(t *testing.T) {
+	alerts := newTelegramAlertManager(config.Config{
+		TelegramBotToken: "token", TelegramChatID: "chat",
+		AlertTTLU: 500 * time.Microsecond, AlertCooldown: time.Minute,
+	})
+	entry := transactionTelemetryEntry{Kind: "query", Phase: "browser", Reason: "invalidate", ChangeToAckMS: 0.4}
+	alerts.observeTTLU(entry)
+	assertNoTelegramAlert(t, alerts)
+	entry.ChangeToAckMS = 0.5
+	alerts.observeTTLU(entry)
+	assertTelegramAlertContains(t, alerts, "TTLU alert")
+}
+
 func TestTelegramAlertSendUsesBotAPIWithoutLeakingTokenIntoBody(t *testing.T) {
 	requests := make(chan url.Values, 1)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

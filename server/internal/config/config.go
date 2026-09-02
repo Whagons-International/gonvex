@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"encoding/json"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -253,7 +254,7 @@ func envFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil || parsed < 0 {
+	if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return fallback
 	}
 	return parsed
