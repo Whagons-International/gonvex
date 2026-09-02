@@ -91,13 +91,13 @@ func TestCallerIDPredicateSelectsOnlyAffectedUser(t *testing.T) {
 	detail := tableChangeDetail{precise: true, userIDs: map[string]bool{"user-a": true}}
 	callerA := callerContext{user: &gonvex.User{ID: "user-a"}}
 	callerB := callerContext{user: &gonvex.User{ID: "user-b"}}
-	if !readPredicateMatches("callerIdColumn:userId", nil, callerA, detail) {
+	if !readPredicateMatches("callerIdColumn:userId", nil, callerA, detail, nil) {
 		t.Fatal("affected caller did not match committed userId")
 	}
-	if readPredicateMatches("callerIdColumn:userId", nil, callerB, detail) {
+	if readPredicateMatches("callerIdColumn:userId", nil, callerB, detail, nil) {
 		t.Fatal("unaffected caller matched committed userId")
 	}
-	if !readPredicateMatches("callerIdColumn:userId", nil, callerB, tableChangeDetail{precise: true}) {
+	if !readPredicateMatches("callerIdColumn:userId", nil, callerB, tableChangeDetail{precise: true}, nil) {
 		t.Fatal("missing userId metadata must fail open")
 	}
 }
@@ -106,15 +106,92 @@ func TestColumnArgumentPredicateSelectsOldAndNewWorkspace(t *testing.T) {
 	detail := tableChangeDetail{precise: true, workspaceIDs: map[string]bool{"ws-old": true, "ws-new": true}}
 	for _, workspace := range []string{"ws-old", "ws-new"} {
 		args := json.RawMessage(fmt.Sprintf(`{"workspaceId":%q}`, workspace))
-		if !readPredicateMatches("columnArg:workspaceId", args, callerContext{}, detail) {
+		if !readPredicateMatches("columnArg:workspaceId", args, callerContext{}, detail, nil) {
 			t.Fatalf("affected workspace %q did not match", workspace)
 		}
 	}
-	if readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"ws-other"}`), callerContext{}, detail) {
+	if readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"ws-other"}`), callerContext{}, detail, nil) {
 		t.Fatal("unaffected workspace matched committed workspace IDs")
 	}
-	if !readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"all"}`), callerContext{}, detail) {
+	if !readPredicateMatches("columnArg:workspaceId", json.RawMessage(`{"workspaceId":"all"}`), callerContext{}, detail, nil) {
 		t.Fatal("all-workspaces query must fail open")
+	}
+}
+
+func TestResultTaskPredicateDoesNotFanOutAcrossUnrelatedPages(t *testing.T) {
+	change := tableChange{
+		table: "taskAckReads", operation: "insert", taskIDs: map[string]bool{"task-a": true},
+		details: map[string]tableChangeDetail{"taskAckReads": {
+			operation: "insert", taskIDs: map[string]bool{"task-a": true}, precise: true,
+		}},
+	}
+	for _, test := range []struct {
+		name   string
+		rowIDs map[string]bool
+		want   bool
+	}{
+		{name: "affected page", rowIDs: map[string]bool{"task-a": true}, want: true},
+		{name: "unrelated page", rowIDs: map[string]bool{"task-b": true}, want: false},
+		{name: "empty page", rowIDs: map[string]bool{}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			group := &sharedSubscription{
+				reads:  []manifest.ReadDependency{{Table: "taskAckReads", Predicate: "resultTaskIds"}},
+				rowIDs: test.rowIDs,
+			}
+			if got := group.matches(change); got != test.want {
+				t.Fatalf("matches = %v, want %v", got, test.want)
+			}
+		})
+	}
+	group := &sharedSubscription{
+		reads:  []manifest.ReadDependency{{Table: "taskAckReads", Predicate: "resultTaskIds"}},
+		rowIDs: map[string]bool{"task-b": true},
+	}
+	missingMetadata := tableChange{
+		table: "taskAckReads", operation: "insert",
+		details: map[string]tableChangeDetail{"taskAckReads": {operation: "insert", precise: true}},
+	}
+	if !group.matches(missingMetadata) {
+		t.Fatal("missing taskId metadata must fail open")
+	}
+}
+
+func TestResultTaskOrWorkspacePredicatePreservesMembershipChanges(t *testing.T) {
+	group := &sharedSubscription{
+		args:   json.RawMessage(`{"workspaceId":"workspace-b"}`),
+		reads:  []manifest.ReadDependency{{Table: "taskWorkspaceContexts", Predicate: "resultTaskIdsOrColumnArg:workspaceId"}},
+		rowIDs: map[string]bool{"task-a": true},
+	}
+
+	contentChange := tableChange{
+		table: "taskWorkspaceContexts", operation: "update",
+		details: map[string]tableChangeDetail{"taskWorkspaceContexts": {
+			operation: "update", taskIDs: map[string]bool{"task-a": true}, workspaceIDs: map[string]bool{"workspace-c": true}, precise: true,
+		}},
+	}
+	if !group.matches(contentChange) {
+		t.Fatal("change for a task already in the page must match")
+	}
+
+	membershipChange := tableChange{
+		table: "taskWorkspaceContexts", operation: "insert",
+		details: map[string]tableChangeDetail{"taskWorkspaceContexts": {
+			operation: "insert", taskIDs: map[string]bool{"task-new": true}, workspaceIDs: map[string]bool{"workspace-b": true}, precise: true,
+		}},
+	}
+	if !group.matches(membershipChange) {
+		t.Fatal("change that can add a task to the subscribed workspace must match")
+	}
+
+	unrelatedChange := tableChange{
+		table: "taskWorkspaceContexts", operation: "insert",
+		details: map[string]tableChangeDetail{"taskWorkspaceContexts": {
+			operation: "insert", taskIDs: map[string]bool{"task-new": true}, workspaceIDs: map[string]bool{"workspace-c": true}, precise: true,
+		}},
+	}
+	if group.matches(unrelatedChange) {
+		t.Fatal("unrelated task and workspace must not match")
 	}
 }
 
