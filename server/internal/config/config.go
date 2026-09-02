@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"encoding/json"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -94,6 +95,14 @@ type Config struct {
 	// DropEmptyUndeclaredColumns enables conservative declarative cleanup. It is
 	// off by default so deploying an older bundle cannot erase newer columns.
 	DropEmptyUndeclaredColumns bool
+	// Telegram alerts are disabled unless both the bot token and chat ID are
+	// configured. Thresholds at or below zero disable that individual alert.
+	TelegramBotToken string
+	TelegramChatID   string
+	TelegramAPIURL   string
+	AlertCPUPercent  float64
+	AlertTTLU        time.Duration
+	AlertCooldown    time.Duration
 }
 
 func FromEnv() Config {
@@ -144,6 +153,12 @@ func FromEnv() Config {
 		FirebaseJWKSURL:              env("GONVEX_FIREBASE_JWKS_URL", "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"),
 		Environment:                  env("GONVEX_ENVIRONMENT", "local dev"),
 		DropEmptyUndeclaredColumns:   envBool("GONVEX_DROP_EMPTY_UNDECLARED_COLUMNS", false),
+		TelegramBotToken:             strings.TrimSpace(env("GONVEX_TELEGRAM_BOT_TOKEN", "")),
+		TelegramChatID:               strings.TrimSpace(env("GONVEX_TELEGRAM_CHAT_ID", "")),
+		TelegramAPIURL:               strings.TrimRight(env("GONVEX_TELEGRAM_API_URL", "https://api.telegram.org"), "/"),
+		AlertCPUPercent:              envFloat("GONVEX_ALERT_CPU_PERCENT", 200),
+		AlertTTLU:                    envDuration("GONVEX_ALERT_TTLU", 5*time.Second),
+		AlertCooldown:                envDuration("GONVEX_ALERT_COOLDOWN", 15*time.Minute),
 	}
 }
 
@@ -228,6 +243,18 @@ func envInt(key string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloat(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return fallback
 	}
 	return parsed

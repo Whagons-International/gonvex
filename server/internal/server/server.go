@@ -29,32 +29,32 @@ import (
 )
 
 type Server struct {
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	config                config.Config
-	runtime               *runtime.Runtime
-	app                   *gonvex.App
-	storage               *storage.Factory
-	dataFiles             *datafiles.Manager
-	tenantStores          *tenantStoreResolver
-	ephemeral             ephemeralBackend
-	cache                 *rowsCache
-	admission             *queryAdmission
-	metrics               *runtimeMetrics
-	scheduler             *scheduler
-	telemetryWrites       chan struct{}
-	telemetryDBMu         sync.Mutex
-	telemetryDBs          map[string]*sql.DB
+	ctx             context.Context
+	cancel          context.CancelFunc
+	config          config.Config
+	runtime         *runtime.Runtime
+	app             *gonvex.App
+	storage         *storage.Factory
+	dataFiles       *datafiles.Manager
+	tenantStores    *tenantStoreResolver
+	ephemeral       ephemeralBackend
+	cache           *rowsCache
+	admission       *queryAdmission
+	metrics         *runtimeMetrics
+	scheduler       *scheduler
+	telemetryWrites chan struct{}
+	telemetryDBMu   sync.Mutex
+	telemetryDBs    map[string]*sql.DB
 	// Lazily initialized under mutationIdempotencyMu; both maps key on the
 	// tenant database URL.
 	mutationIdempotencyMu       sync.Mutex
 	mutationIdempotencyReady    map[string]bool
 	mutationIdempotencySweptAt  map[string]time.Time
 	mutationIdempotencyInstalls singleflight.Group
-	subscriptionTelemetry chan []transactionTelemetryEntry
-	projectMu             sync.RWMutex
-	projects              map[string]projectTarget
-	tenants               map[string]tenantTarget
+	subscriptionTelemetry       chan []transactionTelemetryEntry
+	projectMu                   sync.RWMutex
+	projects                    map[string]projectTarget
+	tenants                     map[string]tenantTarget
 	// explicitTenantDatabases is the immutable deployment-level routing map.
 	// Registry hydration may enrich tenant metadata, but must not replace an
 	// operator-provided database endpoint for the same project/tenant key.
@@ -110,6 +110,7 @@ type Server struct {
 	runtimeHydrationMu    sync.RWMutex
 	runtimeHydrationFails map[string]struct{}
 	runtimeHydrationReady atomic.Bool
+	telegramAlerts        *telegramAlertManager
 }
 
 func New(cfg config.Config) *Server {
@@ -249,6 +250,8 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 	server.scheduler = newScheduler(server.runScheduledJob)
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	server.startRuntimeErrorCapture()
+	server.telegramAlerts = newTelegramAlertManager(cfg)
+	go server.telegramAlerts.run(server.ctx)
 	go server.runSubscriptionTelemetry()
 	server.metrics.onFunctionError = server.queueRuntimeFunctionError
 	if strings.TrimSpace(server.projectRegistryURL()) != "" {

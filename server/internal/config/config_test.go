@@ -30,3 +30,14 @@ func TestValkeyURLAcceptsRedisURLAlias(t *testing.T) {
 		t.Fatalf("VALKEY_URL did not take precedence: %q", got)
 	}
 }
+
+func TestEnvFloatRejectsNonFiniteValues(t *testing.T) {
+	for _, value := range []string{"NaN", "+Inf", "-Inf"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("GONVEX_TEST_FLOAT", value)
+			if got := envFloat("GONVEX_TEST_FLOAT", 200); got != 200 {
+				t.Fatalf("envFloat(%q) = %v, want fallback", value, got)
+			}
+		})
+	}
+}
