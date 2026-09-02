@@ -635,7 +635,7 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 		}
 		intersected = true
 		detail := tableDetail(change, read.Table)
-		if detail.precise && !readPredicateMatches(read.Predicate, group.args, group.caller, detail) {
+		if detail.precise && !readPredicateMatches(read.Predicate, group.args, group.caller, detail, rowIDs) {
 			continue
 		}
 		if !detail.precise || detail.broad || detail.operation == "insert" || detail.operation == "delete" {
@@ -666,14 +666,47 @@ func (group *sharedSubscription) matchResult(change tableChange) (bool, bool) {
 	return false, !intersected
 }
 
-// readPredicateMatches implements predicates whose safety can be proven
-// from the trigger's canonical row IDs and the subscription arguments. Unknown
-// predicates remain conservative. "idArg:<name>" means the query reads exactly
-// the row whose primary ID is supplied by that JSON argument.
-func readPredicateMatches(predicate string, args json.RawMessage, caller callerContext, detail tableChangeDetail) bool {
+// readPredicateMatches implements predicates whose safety can be proven from
+// the trigger metadata, subscription arguments, and the previous result rows.
+// resultTaskIds scopes a task-linked table to tasks already in the result;
+// resultTaskIdsOrColumnArg:workspaceId also admits changes that can move a task
+// into the subscribed workspace. Unknown predicates remain conservative.
+func readPredicateMatches(predicate string, args json.RawMessage, caller callerContext, detail tableChangeDetail, resultRowIDs map[string]bool) bool {
 	predicate = strings.TrimSpace(predicate)
 	if predicate == "" {
 		return true
+	}
+	resultTaskIDsMatch := func() (bool, bool) {
+		if len(detail.taskIDs) == 0 {
+			return false, false
+		}
+		for taskID := range detail.taskIDs {
+			if resultRowIDs[taskID] {
+				return true, true
+			}
+		}
+		return false, true
+	}
+	if predicate == "resultTaskIds" {
+		matches, known := resultTaskIDsMatch()
+		if !known {
+			return true
+		}
+		return matches
+	}
+	if strings.HasPrefix(predicate, "resultTaskIdsOrColumnArg:") {
+		column := strings.TrimSpace(strings.TrimPrefix(predicate, "resultTaskIdsOrColumnArg:"))
+		if column != "workspaceId" {
+			return true
+		}
+		matches, known := resultTaskIDsMatch()
+		if matches {
+			return true
+		}
+		if !known {
+			return true
+		}
+		return readPredicateMatches("columnArg:"+column, args, caller, detail, resultRowIDs)
 	}
 	if strings.HasPrefix(predicate, "callerIdColumn:") {
 		// The column suffix documents the manifest/trigger contract. userIds is

@@ -300,6 +300,10 @@ func (o *readOption) Windowed() *readOption {
 	return o
 }
 
+// Predicate narrows reactive invalidation using runtime-supported metadata.
+// resultTaskIds matches task-linked changes whose taskId is in the previous
+// result. resultTaskIdsOrColumnArg:workspaceId also matches changes addressed
+// to the workspaceId argument, preserving insert and routing membership.
 func (o *readOption) Predicate(name string) *readOption {
 	for index := range o.dependencies {
 		o.dependencies[index].Predicate = strings.TrimSpace(name)
