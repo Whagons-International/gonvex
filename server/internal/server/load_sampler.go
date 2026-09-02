@@ -30,12 +30,14 @@ func (s *Server) startLoadSampler(ctx context.Context) {
 
 func (s *Server) sampleLoad(now time.Time) {
 	connections, users, subscriptions := s.websocketCounts()
+	cpuPercent := s.sampleCPUPercent(now)
 	s.metrics.recordLoad(loadMetricPoint{
 		Time:          now.Format(time.RFC3339Nano),
 		Connections:   connections,
 		Users:         users,
 		Subscriptions: subscriptions,
-		CPUPercent:    s.sampleCPUPercent(now),
+		CPUPercent:    cpuPercent,
 		MemoryBytes:   processResidentBytes(),
 	})
+	s.telegramAlerts.observeCPU(cpuPercent)
 }

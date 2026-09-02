@@ -31,6 +31,9 @@ func (s *Server) recordTransactionTelemetryBatch(entries []transactionTelemetryE
 		normalized = append(normalized, entry)
 	}
 	s.metrics.recordTransactions(normalized)
+	for _, entry := range normalized {
+		s.telegramAlerts.observeTTLU(entry)
+	}
 	dropped := 0
 	for index, entry := range normalized {
 		if !transactionTelemetryIsDurable(entry) {
