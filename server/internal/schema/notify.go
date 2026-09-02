@@ -11,7 +11,7 @@ import (
 
 const NotifyChannel = "gonvex_table_change"
 const NotifySchemaVersion = manifest.NotifySchemaVersion
-const notifySchemaVersionFunction = "gonvex_notify_schema_v14"
+const notifySchemaVersionFunction = "gonvex_notify_schema_v" + NotifySchemaVersion
 
 func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]manifest.Table) ([]string, error) {
 	artifacts, err := loadNotifyArtifacts(ctx, db)
@@ -35,11 +35,19 @@ func InstallNotifyTriggers(ctx context.Context, db *sql.DB, tables map[string]ma
 		applied = append(applied, fmt.Sprintf("ensured notify triggers for %s", tableName))
 	}
 	if !artifacts.functions[notifySchemaVersionFunction] {
-		if _, err := db.ExecContext(ctx, `CREATE OR REPLACE FUNCTION gonvex_notify_schema_v14() RETURNS integer AS $$ BEGIN RETURN 14; END; $$ LANGUAGE plpgsql IMMUTABLE;`); err != nil {
+		if _, err := db.ExecContext(ctx, notifySchemaVersionSQL()); err != nil {
 			return applied, err
 		}
 	}
 	return applied, nil
+}
+
+func notifySchemaVersionSQL() string {
+	return fmt.Sprintf(
+		`CREATE OR REPLACE FUNCTION %s() RETURNS integer AS $$ BEGIN RETURN %s; END; $$ LANGUAGE plpgsql IMMUTABLE;`,
+		quoteIdent(notifySchemaVersionFunction),
+		NotifySchemaVersion,
+	)
 }
 
 type notifyArtifacts struct {

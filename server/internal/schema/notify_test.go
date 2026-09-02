@@ -7,6 +7,20 @@ import (
 	"github.com/gonvex/gonvex/pkg/manifest"
 )
 
+func TestNotifySchemaVersionReinstallsChangedTriggerDefinitions(t *testing.T) {
+	if NotifySchemaVersion != "15" {
+		t.Fatalf("notify schema version = %q, want 15 for task relationship update metadata", NotifySchemaVersion)
+	}
+	if notifySchemaVersionFunction != "gonvex_notify_schema_v"+NotifySchemaVersion {
+		t.Fatalf("version function %q does not track notify schema version %q", notifySchemaVersionFunction, NotifySchemaVersion)
+	}
+	for _, want := range []string{`"gonvex_notify_schema_v15"`, "RETURN 15"} {
+		if !strings.Contains(notifySchemaVersionSQL(), want) {
+			t.Fatalf("expected notify schema marker SQL to contain %q: %s", want, notifySchemaVersionSQL())
+		}
+	}
+}
+
 func TestNotifySQLForTableUsesTableNameAndChannel(t *testing.T) {
 	sql, err := NotifySQLForTable("messages", manifest.Table{Columns: map[string]manifest.Column{
 		"id":   {Type: "id"},
