@@ -88,6 +88,23 @@ func TestNotifySQLIncludesOldAndNewWorkspaceIDsForUpdates(t *testing.T) {
 	}
 }
 
+func TestNotifySQLIncludesOldAndNewTaskIDsForUpdates(t *testing.T) {
+	sql, err := NotifySQLForTable("taskAckReads", manifest.Table{Columns: map[string]manifest.Column{
+		"_id": {Type: "id"}, "taskId": {Type: "id"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`SELECT "taskId" FROM old_rows UNION SELECT "taskId" FROM new_rows`,
+		`'taskIds', CASE WHEN row_count < 500 THEN task_ids`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("expected notify SQL to contain %q:\n%s", want, sql)
+		}
+	}
+}
+
 func TestNotifySQLFallsBackToBroadInvalidationBeforePostgresPayloadLimit(t *testing.T) {
 	sql, err := NotifySQLForTable("taskWorkspaceContexts", manifest.Table{Columns: map[string]manifest.Column{
 		"_id": {Type: "id"}, "taskId": {Type: "id"}, "userId": {Type: "id"}, "workspaceId": {Type: "id"},

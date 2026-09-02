@@ -189,17 +189,17 @@ func notifyFunctionSQL(functionName string, tableName string, transitionTable st
   FROM %s;
   ids := ARRAY[]::text[];`, transitionTable)
 	}
-	taskIDRead := "task_ids := ARRAY[]::text[];"
-	if hasTaskID {
-		taskIDRead = fmt.Sprintf(`SELECT COALESCE(array_agg(DISTINCT "taskId"::text), ARRAY[]::text[])
-  INTO task_ids
-  FROM (SELECT "taskId" FROM %s WHERE "taskId" IS NOT NULL LIMIT 500) task_refs;`, transitionTable)
-	}
 	referenceSource := func(column string) string {
 		if operation == "update" {
 			return fmt.Sprintf(`(SELECT %s FROM old_rows UNION SELECT %s FROM new_rows) changed_refs`, quoteIdent(column), quoteIdent(column))
 		}
 		return transitionTable
+	}
+	taskIDRead := "task_ids := ARRAY[]::text[];"
+	if hasTaskID {
+		taskIDRead = fmt.Sprintf(`SELECT COALESCE(array_agg(DISTINCT "taskId"::text), ARRAY[]::text[])
+  INTO task_ids
+  FROM (SELECT "taskId" FROM %s WHERE "taskId" IS NOT NULL LIMIT 500) task_refs;`, referenceSource("taskId"))
 	}
 	userIDRead := "user_ids := ARRAY[]::text[];"
 	if hasUserID {
