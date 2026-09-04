@@ -1,7 +1,7 @@
 //! Capability-scoped Action host operations.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use gonvex_module_host::protocol::HostCallFrame;
@@ -12,13 +12,40 @@ use serde_json::Value;
 use url::Url;
 use uuid::Uuid;
 
+use crate::Runtime;
 use crate::execution::{CommittedRevisionTracker, ExecutionAccess, NestedExecutionAccess};
 use crate::module_host::HostCallHandler;
 use crate::modules::FunctionDefinition;
 use crate::modules::ModuleCallLease;
-use crate::Runtime;
 
 const MAX_FETCH_RESPONSE_BYTES: usize = 8 << 20;
+
+fn action_fetch_timeout(
+    deadline_unix_ms: Option<u64>,
+    now_unix_ms: u64,
+) -> Result<Duration, String> {
+    // Long-running Actions already have a host-enforced deadline. A second,
+    // shorter total-body timeout aborts valid slow responses before that deadline.
+    match deadline_unix_ms {
+        Some(deadline) if deadline > now_unix_ms => {
+            Ok(Duration::from_millis(deadline - now_unix_ms))
+        }
+        Some(_) => Err("fetch cannot start after the Action execution deadline".to_owned()),
+        None => Ok(Duration::from_secs(30)),
+    }
+}
+
+fn fetch_error(error: reqwest::Error, phase: &str, timeout: Duration) -> String {
+    if error.is_timeout() {
+        format!(
+            "fetch {phase} timed out within the {} ms Action request budget",
+            timeout.as_millis()
+        )
+    } else {
+        // Do not leak URL query parameters into application errors.
+        format!("fetch {phase} failed: {}", error.without_url())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,8 +249,14 @@ impl ActionHostCalls {
             ));
         }
         let redirect_allowed = allowed.clone();
+        let now_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let timeout = action_fetch_timeout(self.provenance.deadline_unix_ms, now_unix_ms)?;
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(timeout)
+            .connect_timeout(Duration::from_secs(30).min(timeout))
             .redirect(Policy::custom(move |attempt: Attempt<'_>| {
                 let permitted = origin(attempt.url())
                     .map(|origin| redirect_allowed.contains(&origin))
@@ -249,7 +282,10 @@ impl ActionHostCalls {
         if let Some(body) = request.body {
             outbound = outbound.body(body);
         }
-        let response = outbound.send().await.map_err(|error| error.to_string())?;
+        let response = outbound
+            .send()
+            .await
+            .map_err(|error| fetch_error(error, "request", timeout))?;
         if response.content_length().unwrap_or_default() > MAX_FETCH_RESPONSE_BYTES as u64 {
             return Err(format!(
                 "fetch response exceeds the {MAX_FETCH_RESPONSE_BYTES} byte limit"
@@ -267,7 +303,10 @@ impl ActionHostCalls {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
             })
             .collect::<BTreeMap<_, _>>();
-        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| fetch_error(error, "response body", timeout))?;
         if bytes.len() > MAX_FETCH_RESPONSE_BYTES {
             return Err(format!(
                 "fetch response exceeds the {MAX_FETCH_RESPONSE_BYTES} byte limit"
@@ -378,4 +417,90 @@ fn origin(url: &Url) -> Result<String, String> {
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
     Ok(format!("{}://{host}{port}", url.scheme()))
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_body_timeout_is_reported_as_a_timeout_not_a_decode_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = socket.write_all(b"ok").await;
+        });
+        let timeout = Duration::from_millis(200);
+        let response = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/?secret=hidden"))
+            .send()
+            .await
+            .unwrap();
+        let error = response.bytes().await.unwrap_err();
+        assert_eq!(error.to_string(), "error decoding response body");
+        assert!(error.is_timeout());
+        let diagnostic = fetch_error(error, "response body", timeout);
+        assert!(diagnostic.contains("response body timed out"));
+        assert!(!diagnostic.contains("secret"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn response_body_can_arrive_after_thirty_seconds_within_the_action_deadline() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(31)).await;
+            socket.write_all(b"ok").await.unwrap();
+        });
+        let timeout = action_fetch_timeout(Some(40_000), 0).unwrap();
+        let response = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"ok");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn slow_responses_can_use_the_remaining_action_budget() {
+        assert_eq!(
+            action_fetch_timeout(Some(121_000), 1_000).unwrap(),
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn requests_cannot_outlive_the_action_deadline() {
+        assert_eq!(
+            action_fetch_timeout(Some(1_025), 1_000).unwrap(),
+            Duration::from_millis(25)
+        );
+        assert!(action_fetch_timeout(Some(1_000), 1_000).is_err());
+        assert!(action_fetch_timeout(Some(999), 1_000).is_err());
+    }
 }
