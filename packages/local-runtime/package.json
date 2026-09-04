@@ -1,0 +1,20 @@
+{
+  "name": "@gonvex/local-runtime",
+  "version": "0.5.2-staging.10",
+  "private": true,
+  "type": "module",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --maxWorkers=1"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@gonvex/module-sdk": "workspace:*"
+  },
+  "devDependencies": { "typescript": "^6.0.3", "vitest": "^4.1.6" }
+}
