@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./sync-store.js", async (importOriginal) => {
@@ -160,7 +161,12 @@ afterEach(() => {
 });
 
 describe("sync revision watermarks", () => {
-  it("advances only verified settled cursors without hashing or listener emission", async () => {
+  it.each([0, 25])("advances only verified settled cursors without hashing or listener emission with %i ms hashing delay", async (hashDelayMs) => {
+    const actual = await vi.importActual<typeof import("./sync-store.js")>("./sync-store.js");
+    vi.mocked(syncRowsHashes).mockImplementation(async (...args) => {
+      if (hashDelayMs) await delay(hashDelayMs);
+      return actual.syncRowsHashes(...args);
+    });
     const store = new WatermarkSyncStore();
     const paths = ["sync.qualifying", "sync.opening", "sync.fullIntegrity", "sync.staleEpoch"];
     for (const path of paths) {
@@ -185,9 +191,12 @@ describe("sync revision watermarks", () => {
       queryCache: directive,
       capabilities: { syncIntegrity: 1, syncWatermark: 1 },
     });
-    await flushAsyncWork();
-    const opens = sentMessages().filter((message) => message.type === "sync.open");
-    expect(opens).toHaveLength(paths.length);
+    // Web Crypto completion is independent of microtask and digest barriers.
+    const opens = await vi.waitFor(() => {
+      const messages = sentMessages().filter((message) => message.type === "sync.open");
+      expect(messages).toHaveLength(paths.length);
+      return messages;
+    });
     for (const open of opens) {
       const rows = store.collections.get(open.path)!.rows;
       socket.receive({
