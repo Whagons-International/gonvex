@@ -83,7 +83,6 @@ pub(crate) struct CallSpec {
     pub(crate) now_unix_ms: u64,
     pub(crate) timeout: Duration,
     pub(crate) max_result_bytes: usize,
-    pub(crate) max_host_calls: usize,
     pub(crate) host: mpsc::UnboundedSender<HostRequest>,
 }
 
@@ -196,7 +195,6 @@ struct ActiveCall {
     capabilities: Capabilities,
     action_tools: BTreeSet<String>,
     host: mpsc::UnboundedSender<HostRequest>,
-    remaining_host_calls: usize,
     violation: Option<Violation>,
 }
 
@@ -205,7 +203,6 @@ struct ActiveCall {
 /// denial must not turn into a successful invocation.
 enum Violation {
     Denied(String),
-    Budget(String),
     Bridge(String),
 }
 
@@ -253,15 +250,6 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 return HostCallOutcome::denied(message);
             }
         }
-        if active.remaining_host_calls == 0 {
-            let message = "module exhausted its host call budget".to_owned();
-            active
-                .violation
-                .get_or_insert(Violation::Budget(message.clone()));
-            return HostCallOutcome::failed(message);
-        }
-        active.remaining_host_calls -= 1;
-
         let (reply, response) = oneshot::channel();
         if active.host.send(HostRequest { call, reply }).is_err() {
             let message = "module host bridge closed".to_owned();
@@ -538,7 +526,6 @@ impl ModuleIsolate {
                 .cloned()
                 .collect(),
             host: spec.host,
-            remaining_host_calls: spec.max_host_calls,
             violation: None,
         });
         self.watchdog.arm(Instant::now() + spec.timeout);
@@ -585,7 +572,6 @@ impl ModuleIsolate {
             // capabilities it was not granted.
             Err(match violation {
                 Violation::Denied(message) => ModuleError::Execution(message),
-                Violation::Budget(message) => ModuleError::BudgetExceeded(message),
                 Violation::Bridge(message) => {
                     healthy = false;
                     ModuleError::Execution(message)

@@ -2865,7 +2865,6 @@ mod tests {
                 shutdown_timeout: Duration::from_secs(1),
                 max_frame_bytes: 64 << 20,
                 max_concurrent_calls: 32,
-                max_host_calls: 100,
                 isolate_pool_size: 4,
                 execution_timeout: Duration::from_secs(10),
             },

@@ -12,7 +12,7 @@
 //!   isolate, so a JavaScript loop that never yields is still interruptible;
 //! * a V8 heap ceiling per isolate, enforced through a near-heap-limit callback
 //!   that terminates the call instead of aborting the process;
-//! * a host-call budget and a result byte budget, both checked in Rust;
+//! * a result byte budget checked in Rust;
 //! * isolate recycling after `recycle_after_calls` calls, and immediately after
 //!   any termination or unexplained failure.
 //!
@@ -58,8 +58,6 @@ pub struct V8Config {
     /// never lengthens it.
     pub execution_timeout: Duration,
     pub max_result_bytes: usize,
-    /// Budget for every host operation a call may make, not only database ones.
-    pub max_host_calls: usize,
     /// Calls one isolate serves before it is retired. 0 disables reuse.
     pub recycle_after_calls: usize,
     /// Live isolates, and therefore the ceiling on concurrent module calls.
@@ -72,7 +70,6 @@ impl Default for V8Config {
             max_heap_bytes: 64 * 1024 * 1024,
             execution_timeout: Duration::from_secs(10),
             max_result_bytes: 8 * 1024 * 1024,
-            max_host_calls: 100,
             recycle_after_calls: 10_000,
             isolate_pool_size: 1,
         }
@@ -252,7 +249,6 @@ impl EngineInner {
                 now_unix_ms,
                 timeout,
                 max_result_bytes: self.config.max_result_bytes,
-                max_host_calls: self.config.max_host_calls,
                 host: host_sender,
             },
             reply,
@@ -316,5 +312,86 @@ impl EngineInner {
         Ok(remaining_budget(context)
             .unwrap_or(self.config.execution_timeout)
             .min(self.config.execution_timeout))
+    }
+}
+
+#[cfg(test)]
+mod host_call_tests {
+    use super::*;
+    use gonvex_module_runtime::{
+        Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse,
+        InvocationContext, ModuleLanguage, ModuleManifest,
+    };
+    use serde_json::{Map, json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingHost(AtomicUsize);
+    impl ModuleHost for CountingHost {
+        fn call<'a>(
+            &'a self,
+            _: &'a InvocationContext,
+            _: HostCall,
+        ) -> BoxFuture<'a, Result<HostResponse, HostError>> {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(HostResponse {
+                    value: b"[]".to_vec(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn invocation_can_complete_more_than_one_hundred_host_calls() {
+        initialize_v8_platform();
+        let engine = V8ModuleEngine::from_artifact(
+            ModuleArtifact {
+                manifest: ModuleManifest {
+                    module_id: "bulk-host-calls".into(),
+                    generation: 1,
+                    language: ModuleLanguage::TypeScript,
+                    artifact_hash: "test".into(),
+                    functions: vec![FunctionContract {
+                        path: "run".into(),
+                        kind: FunctionKind::Query,
+                        internal: false,
+                        delivery: None,
+                        args_schema: Some(json!({"kind":"any"})),
+                        result_schema: Some(json!({"kind":"any"})),
+                        metadata: Map::from_iter([("export".into(), json!("run"))]),
+                    }],
+                    metadata: Map::new(),
+                },
+                payload: br#"export async function run(ctx) {
+                for (let i = 0; i < 150; i++) await ctx.db.query('SELECT 1', []);
+                return 150;
+            }"#
+                .to_vec(),
+            },
+            V8Config::default(),
+        )
+        .unwrap();
+        let host = CountingHost(AtomicUsize::new(0));
+        let result = engine
+            .invoke(
+                &host,
+                Invocation {
+                    function: "run".into(),
+                    kind: FunctionKind::Query,
+                    args: b"null".to_vec(),
+                    context: InvocationContext {
+                        generation: 1,
+                        capabilities: Capabilities {
+                            db_read: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("bulk work must not stop at a host-call count ceiling");
+        assert_eq!(result.value, b"150");
+        assert_eq!(host.0.load(Ordering::SeqCst), 150);
     }
 }

@@ -145,7 +145,6 @@ async fn run() -> Result<(JsonValue, Vec<LogLine>), String> {
             max_heap_bytes: usize::try_from(request.max_heap_bytes).unwrap_or(64 << 20),
             execution_timeout: Duration::from_millis(request.timeout_ms),
             max_result_bytes: request.max_output_bytes,
-            max_host_calls: 10_000,
             recycle_after_calls: 0,
             isolate_pool_size: 1,
         },

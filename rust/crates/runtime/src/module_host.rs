@@ -129,8 +129,6 @@ impl ModuleHost {
             .arg(self.config.max_frame_bytes.to_string())
             .arg("--max-concurrent")
             .arg(self.config.max_concurrent_calls.to_string())
-            .arg("--max-host-calls")
-            .arg(self.config.max_host_calls.to_string())
             .arg("--isolate-pool")
             .arg(self.config.isolate_pool_size.to_string())
             .arg("--execution-timeout-ms")

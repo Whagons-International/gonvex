@@ -16,7 +16,7 @@
 // values as parameters.
 //
 // Reaching `Deno.core.ops.op_gonvex_host_call` directly is not a privilege
-// escalation: the Rust op re-checks the capability and the host-call budget of
+// escalation: the Rust op re-checks the capabilities of
 // the active invocation before it forwards anything, so these context objects
 // are ergonomics, not the security boundary.
 ((core) => {
