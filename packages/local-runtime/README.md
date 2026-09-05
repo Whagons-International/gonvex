@@ -42,6 +42,25 @@ The default host targets browser workers. Other hosts can implement the exported
 `LocalExecutor` interface; this package does not claim a native PGlite host.
 The IndexedDB and Expo SQLite adapters both persist SDK session metadata.
 
+## Browser tabs and bundle boundaries
+
+Each generated browser client creates its own dedicated worker and in-memory
+PGlite instance. Workers do not open a shared PGlite data directory. Requests are
+serialized within each executor and carry the caller's replica snapshot and scope.
+Closing one tab terminates its executor without terminating another tab's work.
+The tradeoff is a separate WASM instance and execution memory per client.
+
+This does not provide cross-tab leader election for the durable outbox. Multiple
+clients may send the same stored intent; authoritative reducer receipts deduplicate
+that intent on the server. This does not imply instant synchronization of pending
+optimistic edits between tabs. A future shared executor must isolate project,
+account, tenant and artifact version and handle owner shutdown and recovery.
+
+The embedded mobile/WebView bundle excludes PGlite's Node filesystem adapter and
+throws explicitly if that unsupported path is selected. Its Emscripten loaders
+require direct lexical eval. Only their known eval diagnostics are filtered;
+application eval and all other bundler diagnostics remain visible.
+
 ## Verification
 
 ```sh

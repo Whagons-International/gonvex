@@ -1,4 +1,5 @@
 import { rolldown } from 'rolldown';
+import { pgliteBrowserBundleOptions } from './pglite-browser-bundle.js';
 import { createRequire } from 'node:module';
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -26,7 +27,7 @@ const bytes = encoded => Uint8Array.from(atob(encoded), c=>c.charCodeAt(0));
  const [pgliteWasmModule,initdbWasmModule] = await Promise.all([WebAssembly.compile(bytes(${JSON.stringify(assets[0]!.toString('base64'))})),WebAssembly.compile(bytes(${JSON.stringify(assets[1]!.toString('base64'))}))]);
  serveLocalReducerWorker({schema:${JSON.stringify(schema)},reducers:localReducers,artifactHash:${JSON.stringify(metadata.artifactHash)},engine:{pgliteWasmModule,initdbWasmModule,fsBundle:new Blob([bytes(${JSON.stringify(assets[2]!.toString('base64'))})])}});
 })().catch(error=>send({id:0,error:{name:error.name,message:error.message}}));`);
-  const bundle = await rolldown({input:entry,platform:'browser',tsconfig:false,transform:{define:{'import.meta.url':JSON.stringify('https://gonvex.local.invalid/runtime.js')}},resolve:{conditionNames:['browser','import','default']}});
+  const bundle = await rolldown({...pgliteBrowserBundleOptions(pglite),input:entry,platform:'browser',tsconfig:false,transform:{define:{'import.meta.url':JSON.stringify('https://gonvex.local.invalid/runtime.js')}},resolve:{conditionNames:['browser','import','default']}});
   let code: string;
   try {
     const output = await bundle.generate({format:'iife',codeSplitting:false});
