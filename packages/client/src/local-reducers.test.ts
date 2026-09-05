@@ -46,10 +46,11 @@ async function fixture() {
   await storage.replaceSnapshot({ entities: { tasks: { t1: { _id: "t1", count: 0, statusId: "todo" } } },
     liveQueries: { [collectionKey]: { signature: collectionKey, kind: "replica", entity: "tasks", key: "_id", ids: ["t1"], completeness: "complete", source: "server" } },
   }, "visible");
-  const create = (store = createKvOutboxStore(kv)) => {
+  const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number }) => {
     const host = new LocalReducerRuntime({ tables: { tasks: { _id: "text", count: "bigint", statusId: "text" } }, reducers: { increment }, artifactHash: "artifact" });
     hosts.push(host);
     const client = new GonvexClient(url, {
+      clientContract,
       project: "project", tenant: "tenant", identity: { sub: "account", iss: "issuer" },
       localReplica: { storage }, outbox: { store },
       localRuntime: { artifactHash: "artifact", tables: ["tasks"], collections: [collection], create: () => ({
@@ -73,6 +74,23 @@ async function connect(client: GonvexClient, watermark = false) {
 }
 
 describe("SDK-owned local reducer lifecycle", () => {
+  it("stops new offline edits after the admission window without deleting cached data", async () => {
+    const { create, kv, storage } = await fixture();
+    const saved = (await storage.loadSession(owner))!;
+    await storage.saveSession(owner, { ...saved, lastOnlineAtMs: Date.now() - 8 * 86400000 });
+    const client = create(createKvOutboxStore(kv), { version: 1, offlineMaxAgeMs: 7 * 86400000 });
+    await expect(client.reducer(ref, {})).rejects.toThrow("Offline editing window expired");
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(0);
+  });
+
+  it("continues local editing within the configured offline window", async () => {
+    const { create, kv, storage } = await fixture();
+    const saved = (await storage.loadSession(owner))!;
+    await storage.saveSession(owner, { ...saved, lastOnlineAtMs: Date.now() - 2 * 86400000 });
+    const client = create(createKvOutboxStore(kv), { version: 1, offlineMaxAgeMs: 7 * 86400000 });
+    expect(await client.reducer(ref, {})).toBe(1);
+    expect((await createKvOutboxStore(kv).load())).toHaveLength(1);
+  });
   it("waits for the durable server watermark before sending a dependent intent", async () => {
     const { create, kv } = await fixture();
     const client = create();

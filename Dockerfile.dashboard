@@ -26,7 +26,7 @@ COPY apps/dashboard ./apps/dashboard
 RUN pnpm install --frozen-lockfile || true
 RUN pnpm approve-builds --all
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @gonvex/protocol build && pnpm --filter @gonvex/client build && pnpm --filter @gonvex/react build
+RUN pnpm --filter '@gonvex/react...' -r build
 RUN pnpm --filter @gonvex/dashboard build
 
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
