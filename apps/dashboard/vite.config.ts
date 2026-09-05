@@ -26,7 +26,7 @@ export default defineConfig({
     port: 5174,
     strictPort: true,
     proxy: {
-      "/dev": "http://127.0.0.1:8080",
+      "/dev": { target: "http://127.0.0.1:8080", ws: true },
       "/ws": {
         target: "ws://127.0.0.1:8080",
         ws: true,

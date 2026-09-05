@@ -89,3 +89,36 @@ test("proxies runtime project discovery instead of serving the SPA shell", async
   assert.match(response.headers.get("content-type") ?? "", /^application\/json\b/);
   assert.deepEqual(await response.json(), { projects: [{ id: "maker", name: "Maker" }] });
 });
+
+test("proxies the private dashboard WebSocket without forwarding cookies", async (t) => {
+  const { WebSocket, WebSocketServer } = await import("ws");
+  const upstream = createServer();
+  const sockets = new WebSocketServer({ server: upstream });
+  sockets.on("connection", (socket, request) => {
+    assert.equal(request.url, "/dev/dashboard/ws");
+    assert.equal(request.headers.cookie, undefined);
+    socket.on("message", (message) => socket.send(message));
+  });
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const previous = { auth: process.env.DASHBOARD_AUTH_ENABLED, runtime: process.env.GONVEX_RUNTIME_URL };
+  process.env.DASHBOARD_AUTH_ENABLED = "false";
+  process.env.GONVEX_RUNTIME_URL = `http://127.0.0.1:${upstream.address().port}`;
+  const { createDashboardServer } = await import(`./server.mjs?websocket=${Date.now()}`);
+  const server = createDashboardServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    for (const socket of sockets.clients) socket.terminate();
+    await new Promise((resolve) => sockets.close(resolve));
+    await Promise.all([new Promise((resolve) => server.close(resolve)), new Promise((resolve) => upstream.close(resolve))]);
+    for (const [key, value] of [["DASHBOARD_AUTH_ENABLED", previous.auth], ["GONVEX_RUNTIME_URL", previous.runtime]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const client = new WebSocket(`ws://127.0.0.1:${server.address().port}/dev/dashboard/ws`, { headers: { cookie: "private-session=secret" }, handshakeTimeout: 1000 });
+  t.after(() => client.terminate());
+  await new Promise((resolve, reject) => { client.once("open", resolve); client.once("error", reject); });
+  const response = new Promise((resolve) => client.once("message", (data) => resolve(String(data))));
+  client.send(JSON.stringify({ type: "auth", token: "dashboard-test" }));
+  assert.equal(await response, JSON.stringify({ type: "auth", token: "dashboard-test" }));
+  client.terminate();
+});

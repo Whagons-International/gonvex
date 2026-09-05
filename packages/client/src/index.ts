@@ -2890,6 +2890,7 @@ export class GonvexClient {
   }
 
   private hasControlPlaneWork() {
+    for (const query of this.querySubscriptions.values()) if (query.executionScope === "control") return true;
     for (const query of this.oneShotQueries.values()) if (query.scope === "control") return true;
     for (const call of this.pendingCalls.values()) if (call.scope === "control") return true;
     return false;

@@ -42,6 +42,7 @@ import {
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import { GonvexClient } from "@gonvex/client";
+import { closeDashboardConnections as closeSystemConnections, DashboardLiveStore, watchDashboard } from "./dashboard-live";
 import type { GonvexAuthValue } from "@gonvex/react";
 import { Avatar, Button, Calendar, Card, Checkbox, Chip, DateField, DatePicker, ListBox, NumberField, SearchField, Select, Separator } from "@heroui/react";
 import { parseDate, type DateValue } from "@internationalized/date";
@@ -79,6 +80,7 @@ type DataTableInfo = {
   name: string;
   columns: string[];
   rowCount: number;
+  rowCountEstimated?: boolean;
 };
 
 type DataRowsResponse = {
@@ -1419,75 +1421,79 @@ export function dashboardMetricsWebSocketProtocols(token: string): string[] {
   return normalized ? [`gonvex-dashboard-auth.${normalized}`] : [];
 }
 
+const metricsStore = new DashboardLiveStore((key, next, fail) => {
+  const { url, baseURL, project, token } = JSON.parse(key) as { url: string; baseURL: string; project: string; token: string };
+  let closed = false;
+  let socket: WebSocket | undefined;
+  let reconnect: ReturnType<typeof setTimeout> | undefined;
+  let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+  let attempts = 0;
+  const controller = new AbortController();
+  let fallbackStarted = false;
+  const fallback = () => {
+    if (closed || fallbackStarted) return;
+    fallbackStarted = true;
+    const headers = new Headers({ "x-gonvex-project-id": project });
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    void fetch(`${baseURL}/dev/metrics`, { headers, signal: controller.signal })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(response.statusText)))
+      .then((value) => { if (!closed) next(value); })
+      .catch((error: Error) => { if (!closed) fail(error); });
+  };
+  const connect = () => {
+    if (closed) return;
+    const protocols = dashboardMetricsWebSocketProtocols(token);
+    socket = protocols.length ? new WebSocket(url, protocols) : new WebSocket(url);
+    socket.addEventListener("message", (event) => {
+      try {
+        const message = JSON.parse(String(event.data)) as { type?: string; metrics?: RuntimeMetricsResponse };
+        if (!closed && message.type === "metrics" && message.metrics) {
+          attempts = 0;
+          clearTimeout(fallbackTimer);
+          controller.abort();
+          next(message.metrics);
+        }
+      } catch { /* Ignore malformed stream frames. */ }
+    });
+    socket.addEventListener("error", fallback);
+    socket.addEventListener("close", () => {
+      if (closed) return;
+      fallback();
+      reconnect = setTimeout(connect, Math.min(250 * 2 ** attempts++, 5000));
+    });
+  };
+  connect();
+  fallbackTimer = setTimeout(fallback, 2000);
+  return () => {
+    closed = true;
+    clearTimeout(reconnect);
+    clearTimeout(fallbackTimer);
+    controller.abort();
+    socket?.close();
+  };
+});
+
+function closeDashboardConnections() {
+  metricsStore.close();
+  closeSystemConnections();
+}
+
 function useRuntimeMetrics(project: ProjectTarget, enabled = true) {
   const [metrics, setMetrics] = useState<RuntimeMetricsResponse | null>(null);
   const [reachable, setReachable] = useState(true);
-
   useEffect(() => {
-    if (!enabled) {
+    const url = runtimeWebSocketURL(project, "/dev/metrics/stream");
+    if (!enabled || !url || typeof WebSocket === "undefined") {
       setMetrics(null);
       setReachable(false);
       return;
     }
-    const wsURL = runtimeWebSocketURL(project, "/dev/metrics/stream");
-    const baseURL = runtimeURLForProject(project);
-    if (!wsURL || !baseURL || typeof WebSocket === "undefined") {
-      setMetrics(null);
-      setReachable(false);
-      return;
-    }
-
-    let cancelled = false;
-    let fallbackStarted = false;
-    let receivedMetrics = false;
-    const loadFallbackOnce = () => {
-      if (fallbackStarted || cancelled || receivedMetrics) return;
-      fallbackStarted = true;
-      fetch(`${baseURL}/dev/metrics`, { headers: runtimeHeaders(project) })
-        .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-        .then((payload: RuntimeMetricsResponse) => {
-          if (cancelled) return;
-          setMetrics(payload);
-          setReachable(true);
-        })
-        .catch(() => {
-          if (!cancelled) setReachable(false);
-        });
-    };
-
-    const url = new URL(wsURL);
-    url.searchParams.set("project", project.id);
-    const token = dashboardAccessToken();
-    const protocols = dashboardMetricsWebSocketProtocols(token);
-    const socket = protocols.length > 0
-      ? new WebSocket(url.toString(), protocols)
-      : new WebSocket(url.toString());
-    const fallbackTimer = window.setTimeout(loadFallbackOnce, 2000);
-    socket.addEventListener("open", () => {
-      window.clearTimeout(fallbackTimer);
-      if (!cancelled) setReachable(true);
-    });
-    socket.addEventListener("message", (event) => {
-      try {
-        const payload = JSON.parse(String(event.data)) as { type?: string; metrics?: RuntimeMetricsResponse };
-        if (!cancelled && payload.type === "metrics" && payload.metrics) {
-          receivedMetrics = true;
-          setMetrics(payload.metrics);
-          setReachable(true);
-        }
-      } catch {
-        // Ignore malformed stream frames.
-      }
-    });
-    socket.addEventListener("error", loadFallbackOnce);
-    socket.addEventListener("close", loadFallbackOnce);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(fallbackTimer);
-      socket.close();
-    };
+    const target = new URL(url);
+    target.searchParams.set("project", project.id);
+    return metricsStore.watch(JSON.stringify({ url: target.toString(), baseURL: runtimeURLForProject(project), project: project.id, token: dashboardAccessToken() }),
+      (value) => { setMetrics(value as RuntimeMetricsResponse); setReachable(true); },
+      () => { setMetrics(null); setReachable(false); });
   }, [enabled, project]);
-
   return { metrics, reachable, setMetrics };
 }
 
@@ -1606,12 +1612,6 @@ async function createDashboardAccount(email: string, name: string, password: str
   return payload.account;
 }
 
-async function fetchAccountAccessTokens(): Promise<AccountAccessToken[]> {
-  const response = await fetch(`${runtimeBaseURL}/dev/auth/tokens`, { headers: dashboardAuthHeaders() });
-  const payload = await response.json().catch(() => ({} as { error?: string; tokens?: AccountAccessToken[] }));
-  if (!response.ok) throw new Error(payload.error ?? response.statusText);
-  return payload.tokens ?? [];
-}
 
 async function createGlobalAdminAccessToken(name: string, expiresAt?: string): Promise<CreatedAccountAccessToken> {
   const response = await fetch(`${runtimeBaseURL}/dev/auth/tokens`, {
@@ -1691,9 +1691,11 @@ function NotificationBell() {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 30000);
-    return () => window.clearInterval(timer);
+    return watchDashboard(`${runtimeBaseURL}/dev/auth/notifications`, { headers: dashboardAuthHeaders() },
+      (payload: { notifications?: DashboardNotification[]; unread?: number }) => {
+        setNotifications(payload.notifications ?? []);
+        setUnread(payload.unread ?? 0);
+      }, () => { setNotifications([]); setUnread(0); });
   }, [refresh]);
 
   useEffect(() => {
@@ -3400,6 +3402,7 @@ function ManifestGrid(props: {
 }
 
 export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
+  useEffect(() => () => closeDashboardConnections(), []);
   const [activePage, setActivePage] = useState<PageID>(() => pageFromPath(window.location.pathname));
   const [theme, setTheme] = useState<ThemeMode>(() => storedTheme());
   const [signedOut, setSignedOut] = useState(() => window.location.pathname === "/login");
@@ -3429,7 +3432,6 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   const activeProject = projectByID(visibleProjects, activeProjectID);
   const activeProjectRef = useRef<ProjectTarget | null>(null);
   activeProjectRef.current = activeProject;
-  const didAutoDiscoverProjects = useRef(false);
   const activePages = activeProject ? pagesForProject(activeProject) : pages;
   const page = activePages.find((item) => item.id === activePage) ?? activePages[0] ?? getPage("overview");
   const activeDatabaseMode = activeProject ? activeProject.databaseMode ?? databaseModeForProject(databaseModes, activeProject.id) : "single";
@@ -3444,6 +3446,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
     || (Boolean(session.accessToken) && session.accessToken === validatedNativeAccessToken);
 
   const login = (nextSession: DashboardSession) => {
+    closeDashboardConnections();
     setSignedOut(false);
     setSession(nextSession);
     window.localStorage.setItem(dashboardSessionKey, JSON.stringify(nextSession));
@@ -3468,6 +3471,9 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   };
 
   const logout = () => {
+    closeDashboardConnections();
+    for (const client of gonvexClients.values()) client.close();
+    gonvexClients.clear();
     void destroyDashboardPasswordSession();
     if (nativeAuth?.isAuthenticated) void nativeAuth.signOut();
     setSignedOut(true);
@@ -3701,6 +3707,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
       .catch((error) => {
         if (cancelled) return;
         setNativeLoginError(error instanceof Error ? error.message : "Google sign-in failed.");
+        closeDashboardConnections();
         setSignedOut(true);
         setSession(null);
         setActiveProjectID(null);
@@ -3716,6 +3723,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
     // The dashboard's display session mirrors the native rotating session. Do
     // not leave a stale Google dashboard session usable in the UI after the
     // native refresh token expires or is revoked.
+    closeDashboardConnections();
     setSignedOut(true);
     setSession(null);
     setActiveProjectID(null);
@@ -3761,16 +3769,26 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   }, [theme]);
 
   useEffect(() => {
-    if (didAutoDiscoverProjects.current) return;
-    if (loginRequired && !session) return;
-    // A cached Google display session can contain an expired access token while
-    // GonvexAuthProvider restores and refreshes the real native session. Wait
-    // for /dev/auth/me to validate that fresh token before requesting projects,
-    // otherwise the first navigation gets a one-shot 401 and only reload works.
-    if (!nativeGoogleSessionReady) return;
-    didAutoDiscoverProjects.current = true;
-    void refreshRuntimeProjects();
-  }, [loginRequired, nativeGoogleSessionReady, refreshRuntimeProjects, session]);
+    if ((loginRequired && !session) || !nativeGoogleSessionReady) return;
+    setProjectDiscoveryLoading(true);
+    return watchDashboard(`${runtimeBaseURL}/dev/projects`, { headers: dashboardAuthHeaders() },
+      (payload: { projects?: Array<Partial<ProjectTarget> & { id: string; name: string }> }) => {
+        const nextProjects = (payload.projects ?? []).map(projectFromRuntime);
+        setProjects((current) => mergeRuntimeProjects(current, nextProjects));
+        setProjectDiscoveryError("");
+        setProjectDiscoveryLoading(false);
+        const requested = projectIDFromPath(window.location.pathname);
+        const preferred = nextProjects.find((project) => project.id === requested)
+          ?? preferredRuntimeProject(activeProjectRef.current, nextProjects);
+        if (!isProjectChooserPath(window.location.pathname) && preferred && !activeProjectRef.current) {
+          setActiveProjectID(preferred.id);
+          window.localStorage.setItem(dashboardProjectKey, preferred.id);
+        }
+      }, (error) => {
+        setProjectDiscoveryError(error.message);
+        setProjectDiscoveryLoading(false);
+      });
+  }, [loginRequired, nativeGoogleSessionReady, session?.accessToken]);
 
   useEffect(() => {
     if (!actionMessage) return;
@@ -3819,7 +3837,7 @@ export function App({ nativeAuth }: { nativeAuth?: GonvexAuthValue } = {}) {
   }
 
   return (
-    <main className="app-shell" data-theme={theme}>
+    <main className="app-shell" data-theme={theme} key={`${activeProject.id}:${session?.accessToken ?? session?.email ?? "local"}`}>
       <aside className="sidebar" aria-label="Dashboard navigation">
         <div className="brand-lockup" aria-label="Gonvex dashboard">
           <span className="brand-mark">G</span>
@@ -4440,17 +4458,15 @@ function AccountProfileDialog(props: { session: DashboardSession; onClose: () =>
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    void fetchAccountAccessTokens()
-      .then((nextTokens) => {
-        if (!cancelled) setTokens(nextTokens);
-      })
-      .catch((reason) => {
-        if (!cancelled) setError(reason instanceof Error ? reason.message : "Could not load API keys");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+    const stop = watchDashboard(`${runtimeBaseURL}/dev/auth/tokens`, { headers: dashboardAuthHeaders() },
+      (payload: { tokens?: AccountAccessToken[] }) => {
+        if (cancelled) return;
+        setTokens(payload.tokens ?? []); setLoading(false);
+      }, (error) => {
+        if (cancelled) return;
+        setTokens([]); setError(error.message); setLoading(false);
       });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; stop(); };
   }, []);
 
   const createToken = async (event: FormEvent<HTMLFormElement>) => {
@@ -5289,15 +5305,12 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
     }
     let cancelled = false;
 
-    fetch(`${runtimeBaseURL}/dev/manifest`, { headers: runtimeHeaders(props.project) })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-      .then((payload: ManifestResponse) => {
+    const stop = watchDashboard(`${runtimeURLForProject(props.project)}/dev/manifest`, { headers: runtimeHeaders(props.project) }, (payload: ManifestResponse) => {
         if (cancelled) return;
         const nextFunctions = manifestFunctionsToRows(payload);
         setRuntimeFunctions(nextFunctions);
         setSelectedName((current) => (nextFunctions.some((item) => item.name === current) ? current : nextFunctions[0]?.name ?? ""));
-      })
-      .catch(() => {
+      }, () => {
         if (!cancelled) {
           setRuntimeFunctions([]);
           setSelectedName("");
@@ -5306,6 +5319,7 @@ function FunctionsPage(props: { project: ProjectTarget; themeMode: ThemeMode; on
 
     return () => {
       cancelled = true;
+      stop();
     };
   }, [props.project]);
 
@@ -5558,9 +5572,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     }
 
     const params = new URLSearchParams({ project: props.project.id });
-    fetch(`${baseURL}/dev/tenants?${params.toString()}`, { headers: runtimeHeaders(props.project) })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-      .then((payload: { tenants?: TenantTarget[] }) => {
+    const stop = watchDashboard(`${baseURL}/dev/tenants?${params.toString()}`, { headers: runtimeHeaders(props.project) }, (payload: { tenants?: TenantTarget[] }) => {
         if (cancelled) return;
         const nextTenants = payload.tenants ?? [];
         const selectableTenants = props.hideTestTenants ? nextTenants.filter((tenant) => !tenantLooksInternalOrTest(tenant)) : nextTenants;
@@ -5575,13 +5587,13 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
           if (nextSource !== current) setDataSourceInURL(nextSource, true);
           return nextSource;
         });
-      })
-      .catch(() => {
+      }, () => {
         if (!cancelled) setTenants([]);
       });
 
     return () => {
       cancelled = true;
+      stop();
     };
   }, [props.hideTestTenants, props.project]);
 
@@ -5620,17 +5632,14 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
     if (currentTenantID) params.set("tenant", currentTenantID);
     const tablesQuery = params.toString();
     const tablesURL = `${baseURL}/dev/data/tables${tablesQuery ? `?${tablesQuery}` : ""}`;
-    fetch(tablesURL, { headers: runtimeHeaders(props.project, undefined, currentTenantID) })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-      .then((payload: { tables: DataTableInfo[] }) => {
+    const stop = watchDashboard(tablesURL, { headers: runtimeHeaders(props.project, undefined, currentTenantID) }, (payload: { tables: DataTableInfo[] }) => {
         if (cancelled) return;
         const nextTables = payload.tables ?? [];
         setTables(nextTables);
         setStatus(currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing Control Plane / project database");
         setRuntimeAvailable(true);
         setSelectedTable((current) => (nextTables.some((table) => table.name === current) ? current : nextTables[0]?.name ?? ""));
-      })
-      .catch(() => {
+      }, () => {
         if (!cancelled) {
           setTables([]);
           setSelectedTable("");
@@ -5641,6 +5650,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
 
     return () => {
       cancelled = true;
+      stop();
     };
   }, [activeTenantDisplay, currentTenantID, props.project, refreshKey]);
 
@@ -5689,31 +5699,31 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
 
     inFlightOffsetRef.current = requestedOffset;
 
-    fetch(`${baseURL}/dev/data/tables/${selectedTable}/rows?${params.toString()}`, {
+    let receivedRows = false;
+    const stop = watchDashboard(`${baseURL}/dev/data/tables/${selectedTable}/rows?${params.toString()}`, {
       headers: runtimeHeaders(props.project, undefined, currentTenantID),
       signal: controller.signal,
-    })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-      .then((payload: DataRowsResponse) => {
+    }, (payload: DataRowsResponse) => {
         if (cancelled) return;
         const offset = payload.offset ?? requestedOffset;
         if (offset !== requestedOffsetRef.current) return;
-        setRowCache((current) => mergeRowsIntoCache(current, payload.rows, offset));
+        const changed = receivedRows;
+        receivedRows = true;
+        setRowCache((current) => mergeRowsIntoCache(changed ? {} : current, payload.rows, offset));
         setMatchingRows(payload.total ?? (rowSearch.trim() || filtersKey !== "[]" ? payload.rows.length : activeTable.rowCount));
         setStatus(payload.total === undefined
           ? "Connected to Gonvex Runtime (restart needed for server sort)"
           : currentTenantID ? `Viewing tenant database: ${activeTenantDisplay}` : "Viewing Control Plane / project database");
         setRuntimeAvailable(true);
-      })
-      .catch(() => {
+        inFlightOffsetRef.current = null;
+      }, () => {
         if (controller.signal.aborted) return;
         if (!cancelled) {
           setRowCache({});
           setMatchingRows(0);
           setRuntimeAvailable(false);
         }
-      })
-      .finally(() => {
+
         if (!cancelled && inFlightOffsetRef.current === requestedOffset) {
           inFlightOffsetRef.current = null;
         }
@@ -5721,6 +5731,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
 
     return () => {
       cancelled = true;
+      stop();
       controller.abort();
       if (inFlightOffsetRef.current === requestedOffset) {
         inFlightOffsetRef.current = null;
@@ -6059,7 +6070,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
               variant={table.name === selectedTable ? "secondary" : "ghost"}
             >
               <span>{table.name}</span>
-              <small>{table.rowCount}</small>
+              <small title={table.rowCountEstimated ? "Estimated row count" : "Row count"}>{table.rowCountEstimated ? "≈" : ""}{table.rowCount}</small>
             </Button>
           ))}
           {visibleTables.length === 0 ? <span className="empty-list-note">No matching tables</span> : null}
@@ -6078,7 +6089,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
             <div className="data-table-nameline">
               <h2 id="data-table-title">{activeTable?.name ?? "No tables"}</h2>
               <span className="row-count">
-                {activeTable ? `${activeTable.rowCount} rows · ${activeTable.columns.length} columns` : "No schema pushed for this project"}
+                {activeTable ? `${activeTable.rowCountEstimated ? "≈" : ""}${activeTable.rowCount} rows · ${activeTable.columns.length} columns` : "No schema pushed for this project"}
               </span>
             </div>
           </div>
@@ -6295,7 +6306,7 @@ function DataPage(props: { databaseMode: DatabaseMode; hideTestTenants: boolean;
                       <Button size="sm" variant="ghost" onPress={() => setSelectedERDTable("")}>Close</Button>
                     </header>
                     <div className="erd-detail-stats">
-                      <span>{selectedERDTableInfo.rowCount.toLocaleString()} rows</span>
+                      <span>{selectedERDTableInfo.rowCountEstimated ? "≈" : ""}{selectedERDTableInfo.rowCount.toLocaleString()} rows</span>
                       <span>{selectedERDTableInfo.columns.length.toLocaleString()} columns</span>
                       <span>{selectedERDRelations.length.toLocaleString()} relations</span>
                     </div>
@@ -6485,7 +6496,7 @@ function createERDGraph(tables: DataTableInfo[]): { nodes: Node<ERDNodeData>[]; 
           <div className="erd-table-bubble">
             <strong>{table.name}</strong>
             <div>
-              <span>{table.rowCount.toLocaleString()} rows</span>
+              <span>{table.rowCountEstimated ? "≈" : ""}{table.rowCount.toLocaleString()} rows</span>
               <span>{relations.toLocaleString()} links</span>
             </div>
           </div>
@@ -7308,9 +7319,7 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
       return;
     }
     const params = new URLSearchParams({ project: props.project.id });
-    fetch(`${baseURL}/dev/tenants?${params.toString()}`, { headers: runtimeHeaders(props.project) })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-      .then((payload: { tenants?: TenantTarget[] }) => {
+    const stop = watchDashboard(`${baseURL}/dev/tenants?${params.toString()}`, { headers: runtimeHeaders(props.project) }, (payload: { tenants?: TenantTarget[] }) => {
         if (cancelled) return;
         const nextTenants = payload.tenants ?? [];
         setTenants(nextTenants);
@@ -7318,12 +7327,12 @@ function TestPage(props: { project: ProjectTarget; themeMode: ThemeMode; onActio
         // the typically empty Control Plane database.
         const firstReal = nextTenants.find((tenant) => !tenantLooksInternalOrTest(tenant));
         if (firstReal) setSelectedTenant(firstReal.id);
-      })
-      .catch(() => {
+      }, () => {
         if (!cancelled) setTenants([]);
       });
     return () => {
       cancelled = true;
+      stop();
     };
   }, [props.project.id]);
 
@@ -7686,9 +7695,7 @@ function FilesPage(props: {
       return;
     }
 
-    fetch(`${baseURL}/dev/storage/files`, { headers: runtimeHeaders(props.project) })
-      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(response.statusText))))
-      .then((payload: StorageFilesResponse) => {
+    const stop = watchDashboard(`${baseURL}/dev/storage/files`, { headers: runtimeHeaders(props.project) }, (payload: StorageFilesResponse) => {
         if (cancelled) return;
         const rows = (payload.files ?? []).map(fileFromStorageObject);
         setRuntimeFiles(rows);
@@ -7699,8 +7706,7 @@ function FilesPage(props: {
         } else {
           setStatus("Connected — no files in storage yet");
         }
-      })
-      .catch(() => {
+      }, () => {
         if (!cancelled) {
           setRuntimeFiles([]);
           setStatus("Could not load files — runtime unreachable.");
@@ -7709,6 +7715,7 @@ function FilesPage(props: {
 
     return () => {
       cancelled = true;
+      stop();
     };
   }, [props.project]);
 
@@ -9100,8 +9107,18 @@ function SettingsPage(props: {
   }, [props.project]);
 
   useEffect(() => {
-    if (activeSection === "members") void loadMembers();
-  }, [activeSection, loadMembers]);
+    if (activeSection !== "members") return;
+    setMembersLoading(true);
+    return watchDashboard(`${runtimeURLForProject(props.project)}/dev/projects/${encodeURIComponent(props.project.id)}/members`, { headers: runtimeHeaders(props.project) },
+      (payload: { members?: ProjectMember[]; invitations?: ProjectInvitation[] }) => {
+        setMembers(payload.members ?? []);
+        setInvitations(payload.invitations ?? []);
+        setMembersLoading(false);
+      }, (error) => {
+        setMembers([]); setInvitations([]);
+        setMemberStatus(error.message); setMembersLoading(false);
+      });
+  }, [activeSection, props.project]);
 
   const inviteMember = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

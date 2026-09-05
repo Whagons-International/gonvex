@@ -219,35 +219,37 @@ async fn list_tables(
         Ok(admission) => admission,
         Err(response) => return response,
     };
-    let names = match sqlx::query_scalar::<_, String>(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' ORDER BY table_name",
+    // Catalog statistics avoid one full-table COUNT and column query per table.
+    // Exact counts belong to the selected, filtered row page, not navigation.
+    let rows = match sqlx::query(
+        r#"SELECT c.relname AS name,
+                  GREATEST(c.reltuples, 0)::bigint AS row_count,
+                  array_agg(a.attname::text ORDER BY a.attnum) AS columns
+           FROM pg_class c
+           JOIN pg_namespace n ON n.oid=c.relnamespace
+           JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped
+           WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
+           GROUP BY c.oid,c.relname,c.reltuples ORDER BY c.relname"#,
     )
     .fetch_all(&pool)
     .await
     {
-        Ok(names) => names,
+        Ok(rows) => rows,
         Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
     };
-    let mut tables = Vec::new();
-    for name in names.into_iter().filter(|name| !internal_table(name)) {
-        let table_columns = match columns(&pool, &name).await {
-            Ok(columns) => columns,
-            Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
-        };
-        let quoted = match quote_ident(&name) {
-            Ok(quoted) => quoted,
-            Err(message) => return error(StatusCode::BAD_REQUEST, message),
-        };
-        let row_count =
-            match sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {quoted}"))
-                .fetch_one(&pool)
-                .await
-            {
-                Ok(count) => count,
-                Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
-            };
-        tables.push(json!({"name":name,"columns":table_columns,"rowCount":row_count}));
-    }
+    let tables: Vec<Value> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let name: String = row.get("name");
+            if internal_table(&name) {
+                return None;
+            }
+            Some(
+                json!({"name":name,"columns":row.get::<Vec<String>, _>("columns"),
+            "rowCount":row.get::<i64, _>("row_count"),"rowCountEstimated":true}),
+            )
+        })
+        .collect();
     Json(json!({"tables":tables})).into_response()
 }
 

@@ -284,17 +284,54 @@ async function handleRequest(request, response) {
   return serveFile(response, join(rootDir, "index.html"));
 }
 
+function proxyRuntimeUpgrade(request, socket, head) {
+  const url = new URL(request.url ?? "/", "http://dashboard.local");
+  if (!["/dev/dashboard/ws", "/dev/metrics/stream", "/ws"].includes(url.pathname)) {
+    socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+    return;
+  }
+  const target = new URL(`${url.pathname}${url.search}`, `${runtimeURL}/`);
+  const requestRuntime = target.protocol === "https:" ? requestHTTPS : requestHTTP;
+  const upstream = requestRuntime(target, {
+    headers: { ...proxyHeaders(request.headers, target.host), connection: "Upgrade", upgrade: "websocket" },
+  });
+  upstream.setTimeout(10_000, () => upstream.destroy());
+  upstream.on("upgrade", (response, peer, upstreamHead) => {
+    upstream.setTimeout(0);
+    const headers = Object.entries(response.headers).flatMap(([name, value]) =>
+      Array.isArray(value) ? value.map((item) => `${name}: ${item}`) : [`${name}: ${value}`]);
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\n${headers.join("\r\n")}\r\n\r\n`);
+    if (upstreamHead.length) socket.write(upstreamHead);
+    if (head.length) peer.write(head);
+    socket.on("error", () => peer.destroy());
+    peer.on("error", () => socket.destroy());
+    socket.on("close", () => peer.destroy());
+    peer.on("close", () => socket.destroy());
+    socket.pipe(peer).pipe(socket);
+  });
+  upstream.on("response", (response) => {
+    response.resume();
+    socket.end(`HTTP/1.1 ${response.statusCode ?? 502} Upstream rejected upgrade\r\nConnection: close\r\n\r\n`);
+  });
+  upstream.on("error", () => socket.destroy());
+  socket.on("error", () => upstream.destroy());
+  socket.on("close", () => upstream.destroy());
+  upstream.end();
+}
+
 export function createDashboardServer() {
   if (authEnabled && !sessionSecret) {
     throw new Error("DASHBOARD_SESSION_SECRET is required.");
   }
-  return createServer((request, response) => {
+  const server = createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
       console.error(error);
       if (response.headersSent) response.destroy(error);
       else writeJSON(response, 500, { error: "internal server error" });
     });
   });
+  server.on("upgrade", proxyRuntimeUpgrade);
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

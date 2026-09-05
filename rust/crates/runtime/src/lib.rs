@@ -3,6 +3,7 @@ pub mod change_feed;
 pub mod config;
 pub mod control;
 mod data_ingest;
+mod dashboard;
 pub mod execution;
 pub mod external_auth;
 pub mod host_calls;
@@ -62,6 +63,7 @@ struct RuntimeInner {
     telemetry: telemetry::TelemetryLimiter,
     scheduler: scheduler::Scheduler,
     runtime_events: broadcast::Sender<RuntimeEvent>,
+    dashboard_changes: broadcast::Sender<()>,
     sandboxes: sandbox::SandboxManager,
     storage: storage::StorageManager,
     live_query_cache: live_query::SharedLiveQueryCache,
@@ -206,6 +208,7 @@ impl Runtime {
                 telemetry: telemetry::TelemetryLimiter::default(),
                 scheduler: scheduler::Scheduler::new(),
                 runtime_events,
+                dashboard_changes: broadcast::channel(256).0,
                 sandboxes,
                 storage,
                 live_query_cache: live_query::SharedLiveQueryCache::default(),
@@ -314,6 +317,7 @@ impl Runtime {
         Router::new()
             .route("/healthz", get(health))
             .route("/ws", get(websocket_upgrade))
+            .route("/dev/dashboard/ws", get(dashboard::upgrade))
             .merge(native_auth::router())
             .merge(operations::router())
             .merge(operator_data::router())
@@ -335,6 +339,7 @@ impl Runtime {
             .route("/dev/internal/e2e/members", post(provision_e2e_member))
             .layer(DefaultBodyLimit::max(64 << 20))
             .layer(middleware::from_fn(dev_cors))
+            .layer(middleware::from_fn_with_state(self.clone(), dashboard::invalidate))
             .with_state(self.clone())
     }
 
