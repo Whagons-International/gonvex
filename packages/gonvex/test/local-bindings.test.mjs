@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { chromium } from '@playwright/test';
 import { buildModuleArtifact, moduleManifestFunctions } from '../dist/module-artifact.js';
 import { localBindings } from '../dist/local-bindings.js';
 
@@ -15,6 +16,7 @@ test('codegen owns local execution and never replicates unexposed columns', asyn
   await mkdir(join(root, 'node_modules', '@gonvex'), { recursive: true });
   await symlink(fileURLToPath(new URL('../../module-sdk', import.meta.url)), join(root, 'node_modules', '@gonvex', 'module-sdk'));
   await writeFile(join(root, 'migrations', '0000.sql'), 'CREATE TABLE tasks ("_id" text PRIMARY KEY, title text, secret text);');
+  await writeFile(join(root, 'gonvex', 'client-contract.json'), JSON.stringify({version: 1, offlineMaxAgeMs: null}));
   const entry = join(root, 'gonvex', 'index.ts');
   await writeFile(entry, `import { reducer, schema, replicaCollection, visibility, action } from '@gonvex/module-sdk';
 export const access = visibility({table:'tasks', key:'_id', sets:{}, where:{operator:'public'}});
@@ -24,6 +26,7 @@ export const rename = reducer({args:schema.object({id:schema.string(),title:sche
 export const external = action({args:schema.object({}),result:schema.any(),run:()=>{throw new Error('EXTERNAL_ACTION_MUST_NOT_SHIP')}});
 `);
   const module = await buildModuleArtifact({root,backendDir:join(root,'gonvex'),files:[entry],migrations:[]});
+  assert.deepEqual(JSON.parse(Buffer.from(module.files['client-contract.json'], 'base64').toString()), {version: 1, offlineMaxAgeMs: null});
   const functions = moduleManifestFunctions(module);
   assert.equal(functions.rename.localExecution, 1);
   assert.equal(functions.rename.offline.mode, 'allowed');
@@ -39,4 +42,28 @@ export const external = action({args:schema.object({}),result:schema.any(),run:(
   const writes = [];
   await bundled.localReducers.rename.handler({db:{update:(...args)=>writes.push(args)}},{id:'t',title:'changed'});
   assert.deepEqual(writes, [['tasks','t',{title:'changed'}]]);
+  // Exercise the fully bundled native execution sandbox with networking disabled.
+  const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+  t.after(()=>browser.close());
+  const context = await browser.newContext({offline:true});
+  const page = await context.newPage();
+  const messages = [];
+  const requests = [];
+  page.on('request', request=>requests.push(request.url()));
+  await page.exposeFunction('nativeResponse', message=>messages.push(JSON.parse(message)));
+  await page.evaluate(()=>{window.ReactNativeWebView={postMessage:message=>window.nativeResponse(message)};});
+  await page.setContent(JSON.parse(generated['local-native-host.json']).html);
+  await assert.doesNotReject(async()=>{
+    for(let attempt=0;attempt<300&&!messages.some(message=>message.id===0);attempt++)await new Promise(resolve=>setTimeout(resolve,100));
+    assert.ok(messages.some(message=>message.id===0), 'native host must become ready offline');
+    assert.equal(messages.find(message=>message.id===0).error,undefined);
+  });
+  await page.evaluate((hash)=>window.dispatchEvent(new MessageEvent('message',{data:{id:1,method:'execute',args:['rename',{id:'t',title:'changed'},{scope:'scope',tables:{tasks:{complete:true,rows:[{_id:'t',title:'old'}]}}},{scope:'scope',commandId:'intent',now:1,artifactHash:hash,identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}}}]}})), module.hash);
+  for(let attempt=0;attempt<100&&!messages.some(message=>message.id===1);attempt++)await new Promise(resolve=>setTimeout(resolve,100));
+  const response=messages.find(message=>message.id===1);
+  assert.ok(response,'native host must return its atomic transaction');
+  assert.equal(response.error,undefined);
+  assert.equal(response.result.patches[0].fields.title,'changed');
+  assert.deepEqual(requests,[], 'native initialization and reducers must never download an engine or contact a server');
+
 });

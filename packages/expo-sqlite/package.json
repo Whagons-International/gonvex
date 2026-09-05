@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/expo-sqlite",
-  "version": "0.5.2-staging.12",
+  "version": "0.5.2-staging.13",
   "type": "module",
   "publishConfig": {
     "access": "public"

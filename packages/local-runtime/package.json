@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/local-runtime",
-  "version": "0.5.2-staging.12",
+  "version": "0.5.2-staging.13",
   "type": "module",
   "exports": {
     ".": {
@@ -18,6 +18,10 @@
     "./worker-client": {
       "types": "./dist/worker-client.d.ts",
       "default": "./dist/worker-client.js"
+    },
+    "./native-bridge": {
+      "types": "./dist/native-bridge.d.ts",
+      "default": "./dist/native-bridge.js"
     }
   },
   "main": "./dist/index.js",
@@ -33,9 +37,11 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.8",
-    "@gonvex/module-sdk": "workspace:*"
+    "@gonvex/module-sdk": "workspace:*",
+    "@ungap/structured-clone": "1.4.0"
   },
   "devDependencies": {
+    "@types/ungap__structured-clone": "^1.2.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
   },

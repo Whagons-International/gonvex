@@ -946,6 +946,22 @@ fn client_contract_from_module(module: &Map<String, Value>) -> Result<Option<u64
     let bytes = STANDARD.decode(encoded.as_str().ok_or("invalid client contract encoding")?).map_err(|e| e.to_string())?;
     let contract: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let version = contract.get("version").and_then(Value::as_u64).filter(|v| *v > 0).ok_or("invalid client contract version")?;
-    if contract.get("offlineMaxAgeMs").and_then(Value::as_u64).filter(|v| *v > 0).is_none() { return Err("invalid offline window".into()); }
+    if contract.get("offlineMaxAgeMs") != Some(&Value::Null) && contract.get("offlineMaxAgeMs").and_then(Value::as_u64).filter(|v| *v > 0).is_none() { return Err("invalid offline window".into()); }
     Ok(Some(version))
+}
+
+#[cfg(test)]
+mod offline_contract_tests {
+    use super::*;
+    #[test]
+    fn unlimited_offline_policy_is_valid_but_missing_or_invalid_window_is_not() {
+        for (window, valid) in [(Value::Null, true), (serde_json::json!(604800000), true), (serde_json::json!(0), false), (serde_json::json!(-1), false), (serde_json::json!("forever"), false)] {
+            let policy = serde_json::json!({"version": 1, "offlineMaxAgeMs": window});
+            let module = serde_json::json!({"files": {"client-contract.json": STANDARD.encode(serde_json::to_vec(&policy).unwrap())}});
+            assert_eq!(client_contract_from_module(module.as_object().unwrap()).is_ok(), valid);
+        }
+        let policy = serde_json::json!({"version": 1});
+        let module = serde_json::json!({"files": {"client-contract.json": STANDARD.encode(serde_json::to_vec(&policy).unwrap())}});
+        assert!(client_contract_from_module(module.as_object().unwrap()).is_err());
+    }
 }

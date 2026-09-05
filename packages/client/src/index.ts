@@ -682,7 +682,7 @@ export class GonvexClient {
       if (!this.localIdentity || !this.hasAuthoritativeReplicaScope) throw new Error("Restore an authenticated local session before editing offline");
       if (this.manuallyClosed) throw new Error("Gonvex client is closed");
       if (this.updateRequired) throw new Error("Application update required before editing");
-      if (this.clientContract && !this.canSendReducerNow() && (Date.now() - this.lastOnlineAtMs > this.clientContract.offlineMaxAgeMs || Date.now() < this.lastOnlineAtMs)) throw new Error("Offline editing window expired. Reconnect before making more changes.");
+      if (this.clientContract && this.clientContract.offlineMaxAgeMs !== null && !this.canSendReducerNow() && (Date.now() - this.lastOnlineAtMs > this.clientContract.offlineMaxAgeMs || Date.now() < this.lastOnlineAtMs)) throw new Error("Offline editing window expired. Reconnect before making more changes.");
       const scope = this.outboxScope;
       const reducerId = randomID();
       const execution: LocalExecution = {

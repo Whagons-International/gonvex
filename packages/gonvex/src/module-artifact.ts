@@ -207,7 +207,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   if (existsSync(clientContractPath)) {
     const bytes = await readFile(clientContractPath);
     const contract = JSON.parse(bytes.toString());
-    if (!Number.isSafeInteger(contract.version) || contract.version < 1 || !Number.isSafeInteger(contract.offlineMaxAgeMs) || contract.offlineMaxAgeMs <= 0) throw new Error("Invalid client-contract.json");
+    if (!Number.isSafeInteger(contract.version) || contract.version < 1 || (contract.offlineMaxAgeMs !== null && (!Number.isSafeInteger(contract.offlineMaxAgeMs) || contract.offlineMaxAgeMs <= 0))) throw new Error("Invalid client-contract.json");
     files["client-contract.json"] = bytes.toString("base64");
   }
   const sortedFiles = sortedRecord(files);

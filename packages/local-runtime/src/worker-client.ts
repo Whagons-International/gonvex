@@ -9,8 +9,14 @@ export type LocalExecutor = {
 };
 export type LocalRuntimeBinding = { artifactHash: string; tables: readonly string[]; create(): LocalExecutor };
 
+export type LocalWorkerEndpoint = {
+  postMessage(message: unknown): void;
+  terminate(): void;
+  addEventListener(type: "message" | "error" | "messageerror", listener: (event: any) => void): void;
+};
+
 /** Worker lifetime and RPC are SDK-owned; applications only import generated bindings. */
-export function createLocalReducerWorker(worker: Worker): LocalExecutor {
+export function createLocalReducerWorker(worker: LocalWorkerEndpoint): LocalExecutor {
   let sequence = 0;
   let closed = false;
   let failure: Error | undefined;

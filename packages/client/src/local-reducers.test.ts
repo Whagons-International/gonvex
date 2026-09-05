@@ -46,7 +46,7 @@ async function fixture() {
   await storage.replaceSnapshot({ entities: { tasks: { t1: { _id: "t1", count: 0, statusId: "todo" } } },
     liveQueries: { [collectionKey]: { signature: collectionKey, kind: "replica", entity: "tasks", key: "_id", ids: ["t1"], completeness: "complete", source: "server" } },
   }, "visible");
-  const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number }) => {
+  const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }) => {
     const host = new LocalReducerRuntime({ tables: { tasks: { _id: "text", count: "bigint", statusId: "text" } }, reducers: { increment }, artifactHash: "artifact" });
     hosts.push(host);
     const client = new GonvexClient(url, {
@@ -74,6 +74,24 @@ async function connect(client: GonvexClient, watermark = false) {
 }
 
 describe("SDK-owned local reducer lifecycle", () => {
+  it.each([8, 3650, -1])("persists offline edits with unlimited admission after %i days, including clock rollback", async (days) => {
+    const { create, kv, storage } = await fixture();
+    const saved = (await storage.loadSession(owner))!;
+    await storage.saveSession(owner, { ...saved, lastOnlineAtMs: Date.now() - days * 86400000 });
+    const client = create(createKvOutboxStore(kv), { version: 1, offlineMaxAgeMs: null });
+    expect(await client.reducer(ref, {})).toBe(1);
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1);
+    const [queued] = await createKvOutboxStore(kv).load();
+    expect(queued).toBeDefined();
+    client.close();
+    const restored = create(createKvOutboxStore(kv), { version: 1, offlineMaxAgeMs: null });
+    const socket = await connect(restored);
+    await vi.waitFor(() => expect(socket.sent.some(message => message.type === "reducer.call")).toBe(true));
+    const sent = socket.sent.find(message => message.type === "reducer.call");
+    expect(sent.id).toBe(queued!.idempotencyKey);
+    expect(sent.args).toEqual({});
+  });
+
   it("stops new offline edits after the admission window without deleting cached data", async () => {
     const { create, kv, storage } = await fixture();
     const saved = (await storage.loadSession(owner))!;

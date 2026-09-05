@@ -33,6 +33,8 @@ export type LocalTransactionResult = {
   readTables: string[];
 };
 export type LocalRuntimeOptions = {
+  /** Prebundled engines let native hosts start without any network access. */
+  engine?: { pgliteWasmModule: WebAssembly.Module; initdbWasmModule: WebAssembly.Module; fsBundle: Blob };
   tables?: LocalTables;
   schema?: LocalSchema;
   reducers: Readonly<Record<string, ReducerDefinition<any, any>>>;
@@ -70,12 +72,13 @@ const queryOptions = { parsers: { 20: parseInteger } };
  */
 export class LocalReducerRuntime {
   private readonly schema: LocalSchema;
-  private readonly database = new PGlite();
+  private readonly database: PGlite;
   private readonly ready: Promise<void>;
   private tail: Promise<unknown> = Promise.resolve();
   private closed = false;
 
   constructor(private readonly options: LocalRuntimeOptions) {
+    this.database = new PGlite(options.engine);
     this.schema = clone(options.schema ?? Object.fromEntries(Object.entries(options.tables ?? {}).map(([table, columns]) => [table, {
       key: "_id", columns: Object.fromEntries(Object.entries(columns).map(([name, type]) => [name, { type, nullable: name !== "_id" }])),
     }])));

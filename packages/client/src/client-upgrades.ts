@@ -2,7 +2,7 @@ import type { JsonValue } from "@gonvex/protocol";
 import type { ReplicaSnapshot } from "./local-replica.js";
 import type { ReducerOutboxEntry } from "./outbox.js";
 
-export type ClientContract = { version: number; offlineMaxAgeMs: number };
+export type ClientContract = { version: number; /** null permits indefinite offline edits and requires retaining migration paths. */ offlineMaxAgeMs: number | null };
 export type ClientMigration = {
   from: number;
   to: number;
