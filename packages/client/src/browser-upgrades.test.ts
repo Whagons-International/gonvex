@@ -26,6 +26,18 @@ const migrations = [{ from: 1, to: 2, replica: (s: any) => {
   const row = s.entities.tasks.a; row.name = row.title; delete row.title; return s;
 }, intent: (i: any) => ({ path: "setName", args: { name: i.args.title } }) }];
 
+it("boots a fresh installation after obsolete migration paths are retired", async () => {
+  const fresh = open(5); await fresh.ready;
+  expect(await fresh.store.load()).toEqual([]);
+});
+
+it("allocates distinct durable sequence numbers for concurrent tabs", async () => {
+  const first = open(1); await first.ready;
+  const second = open(1); await second.ready;
+  const ids = await Promise.all([first.store.allocateId!(), second.store.allocateId!()]);
+  expect(new Set(ids).size).toBe(2);
+});
+
 it("migrates confirmed rows and durable intents, fencing already-open old tabs", async () => {
   const old = await seed();
   const current = open(2, migrations); await current.ready;

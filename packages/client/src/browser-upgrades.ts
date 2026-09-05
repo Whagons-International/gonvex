@@ -39,7 +39,9 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
     if (!locks) throw new Error("Safe offline upgrades require browser Web Locks support");
     await locks.request(lockName, { mode: "exclusive" }, async () => {
       await Promise.all([meta.open(), queue.open()]);
-      let record = await meta.state.get("contract") ?? { key: "contract", version: options.initialVersion };
+      const saved = await meta.state.get("contract");
+      const hasOldData = saved ? true : (await replica.listScopes()).length > 0 || await queue.entries.count() > 0;
+      let record = saved ?? { key: "contract", version: hasOldData ? options.initialVersion : options.contract.version };
       // A interrupted upgrade must finish its exact staged payload before another upgrade starts.
       const finish = async () => {
         if (!record.journal) return;

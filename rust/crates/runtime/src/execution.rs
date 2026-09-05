@@ -1083,6 +1083,18 @@ mod tests {
     }
 
     #[test]
+    fn compatible_client_contract_survives_artifact_rebuilds() {
+        let mut module = module(BTreeMap::new());
+        module.client_contract = Some(3);
+        assert!(module.accepts_client_artifact("older-build", Some(3)));
+        assert!(!module.accepts_client_artifact("older-build", Some(2)));
+        assert!(!module.accepts_client_artifact("older-build", None));
+        module.client_contract = None;
+        assert!(!module.accepts_client_artifact("older-build", Some(3)));
+        assert!(module.accepts_client_artifact("active-hash", None));
+    }
+
+    #[test]
     fn action_revision_tracker_keeps_the_highest_nested_reducer_revision() {
         let tracker = CommittedRevisionTracker::default();
         assert_eq!(tracker.maximum(), None);

@@ -144,6 +144,8 @@ describe("SDK-owned local reducer lifecycle", () => {
       expect(queue[0]).toMatchObject({ idempotencyKey: call.id, state: "pending" });
     });
     expect(socket.readyState).toBe(Socket.CLOSED);
+    client.connect();
+    expect(Socket.all.at(-1)).toBe(socket);
   });
 
   it("does not expose edits when durable persistence fails", async () => {

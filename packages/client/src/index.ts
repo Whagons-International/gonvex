@@ -929,6 +929,7 @@ export class GonvexClient {
   }
 
   connect() {
+    if (this.updateRequired) return;
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return;
 
     const isReconnect = this.socket !== undefined;
