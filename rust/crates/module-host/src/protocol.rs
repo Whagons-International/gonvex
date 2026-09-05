@@ -227,6 +227,8 @@ impl From<CapabilitiesWire> for Capabilities {
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContextWire {
     #[serde(default)]
+    pub intent_entropy: Option<String>,
+    #[serde(default)]
     pub project_id: String,
     #[serde(default)]
     pub tenant_id: String,
@@ -266,6 +268,7 @@ impl InvocationContextWire {
             (None, None) => None,
         };
         InvocationContext {
+            intent_entropy: self.intent_entropy,
             project_id: self.project_id,
             tenant_id: self.tenant_id,
             operation_id: self.operation_id,
@@ -460,6 +463,8 @@ pub enum HostCallFrame {
     DbInsert {
         table: String,
         row: serde_json::Value,
+        #[serde(default, rename = "generatedId")]
+        generated_id: Option<String>,
     },
     DbUpdate {
         table: String,
@@ -536,8 +541,9 @@ impl HostCallFrame {
                 statement,
                 parameters: decode(parameters, "parameters")?,
             },
-            HostCall::DbInsert { table, row } => Self::DbInsert {
+            HostCall::DbInsert { table, row, generated_id } => Self::DbInsert {
                 table,
+                generated_id,
                 row: decode(row, "row")?,
             },
             HostCall::DbUpdate {
@@ -614,6 +620,18 @@ impl HostCallFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_allocation_survives_the_module_host_wire() {
+        let frame = HostCallFrame::from_host_call(HostCall::DbInsert {
+            table: "messages".to_owned(), row: br#"{"id":"explicit"}"#.to_vec(),
+            generated_id: Some("intent-id".to_owned()),
+        }).expect("insert encodes");
+        let encoded = serde_json::to_value(frame).unwrap();
+        assert_eq!(encoded["generatedId"], "intent-id");
+        assert_eq!(encoded["row"]["id"], "explicit");
+        assert!(encoded["row"].get("_id").is_none());
+    }
 
     #[test]
     fn action_enqueue_host_call_is_encoded_for_the_wire() {

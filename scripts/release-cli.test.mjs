@@ -28,6 +28,7 @@ test("release includes every public Gonvex SDK needed by TypeScript modules and 
   const source = readFileSync(resolve(ROOT, "scripts/release-cli.mjs"), "utf8");
   assert.match(source, /"module-sdk"/);
   assert.match(source, /"expo-sqlite"/);
+  assert.match(source, /"local-runtime"/);
 });
 
 test("selects a version above every package when the release tag is stale", () => {
@@ -73,11 +74,18 @@ test("version info reports a next version greater than the checked-in packages a
 
   assert.equal(result.status, 0, result.stderr);
   const latestTag = result.stdout.match(/latest tag:\s+v?(\d+\.\d+\.\d+)|latest tag:\s+(none)/)?.[1];
-  const highestPackage = result.stdout.match(/highest package:\s+(\d+\.\d+\.\d+)/)?.[1];
-  const nextVersion = result.stdout.match(/next version:\s+(\d+\.\d+\.\d+)/)?.[1];
+  const highestPackage = result.stdout.match(/highest package:\s+(\S+)/)?.[1];
+  const nextVersion = result.stdout.match(/next version:\s+(\S+)/)?.[1];
 
   assert.ok(highestPackage, result.stdout);
   assert.ok(nextVersion, result.stdout);
   assert.ok(compareVersions(nextVersion, highestPackage) > 0, result.stdout);
   if (latestTag) assert.ok(compareVersions(nextVersion, latestTag) > 0, result.stdout);
+});
+
+test("staging versions compare numerically and promote to their stable version", () => {
+  assert.ok(compareVersions("0.5.2-staging.10", "0.5.2-staging.9") > 0);
+  assert.ok(compareVersions("0.5.2", "0.5.2-staging.10") > 0);
+  assert.equal(selectReleaseVersion({ packageVersions: ["0.5.2-staging.10"] }).version, "0.5.2");
+  assert.throws(() => compareVersions("0.5.2-staging.01", "0.5.2"), /Invalid semver/);
 });

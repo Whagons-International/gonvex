@@ -22,8 +22,7 @@ const execution = (): LocalExecution => ({
   },
 });
 const define = (run: (ctx: ReducerContext, args: any) => Promise<any>) => reducer({
-  args: schema.any(), result: schema.any(), offline: { mode: "allowed" },
-  nonOptimisticReason: "Test the same handler in the new local host without handwritten patches.", run,
+  args: schema.any(), result: schema.any(), run,
 });
 const runtimes: LocalReducerRuntime[] = [];
 const runtime = (handlers: Record<string, ReturnType<typeof define>>) => {
@@ -34,6 +33,18 @@ const runtime = (handlers: Record<string, ReturnType<typeof define>>) => {
 afterEach(async () => { await Promise.all(runtimes.splice(0).map((runtime) => runtime.close())); });
 
 describe("local reducer execution", () => {
+  it("returns the same Action and scheduler IDs as the authoritative host", async () => {
+    const host = runtime({ schedule: define(async ctx => ({
+      action: await ctx.actions.enqueue("notify", {}),
+      job: await ctx.scheduler.runAfter(100, "notify", {}),
+    })) });
+    const result = await host.execute("schedule", {}, snapshot(), execution());
+    expect(result.result).toEqual({
+      action: "aa14126b-2f16-814a-8623-07601307140c",
+      job: "job_c9983b7c-273c-8f8e-91df-ef1b9ba899f6",
+    });
+    expect(result.deferred[1]).toMatchObject({ at: 1334 });
+  });
   it("executes the same handler and derives the complete transaction from database writes", async () => {
     const transition = define(async (ctx, args) => {
       const [task] = await ctx.db.query<any>('SELECT * FROM "tasks" WHERE "_id" = $1', [args.taskId]);
@@ -83,9 +94,24 @@ describe("local reducer execution", () => {
     await expect(host.execute("read", {}, partial, execution())).rejects.toThrow(/logs.*incomplete/i);
   });
 
-  it("rejects raw SQL writes instead of letting them escape transaction capture", async () => {
-    const host = runtime({ write: define((ctx) => ctx.db.query('DELETE FROM "tasks" RETURNING *')) });
-    await expect(host.execute("write", {}, snapshot(), execution())).rejects.toThrow(/read.only/i);
+  it("allows known primary-key rows from a partial large collection, but not absent rows", async () => {
+    const host = runtime({ read: define((ctx, args) => ctx.db.query('SELECT * FROM "tasks" WHERE "_id" = $1 LIMIT 1', [args.id])) });
+    const partial = snapshot(); partial.tables.tasks!.complete = false;
+    expect((await host.execute("read", { id: "t1" }, partial, execution())).result).toMatchObject([{ _id: "t1" }]);
+    await expect(host.execute("read", { id: "missing" }, partial, execution())).rejects.toThrow(/incomplete/i);
+  });
+
+  it("does not substitute NULL for columns omitted from a replica projection", async () => {
+    const host = runtime({ read: define((ctx) => ctx.db.query('SELECT * FROM "tasks"')) });
+    const partial = snapshot(); partial.tables.tasks!.columns = ["_id", "count"];
+    await expect(host.execute("read", {}, partial, execution())).rejects.toThrow(/incomplete/i);
+  });
+
+  it("captures SQL writes and data-modifying CTEs in the reducer transaction", async () => {
+    const host = runtime({ write: define((ctx) => ctx.db.query(`WITH deleted AS (DELETE FROM "tasks" WHERE "_id" = 't1' RETURNING *) INSERT INTO "logs" ("_id", "taskId", "message") SELECT 'log1', "_id", 'removed' FROM deleted RETURNING *`)) });
+    const result = await host.execute("write", {}, snapshot(), execution());
+    expect(result.patches).toContainEqual({ entity: "tasks", rowId: "t1", op: "delete" });
+    expect(result.patches).toContainEqual(expect.objectContaining({ entity: "logs", rowId: "log1", op: "insert" }));
   });
 
   it("re-executes dependent intent against a new base rather than reusing stale patches", async () => {
@@ -144,11 +170,11 @@ describe("local reducer execution", () => {
     await expect(host.execute("read", {}, input, execution())).rejects.toThrow(/logs.*incomplete/i);
   });
 
-  it("rejects writes hidden inside a read CTE", async () => {
+  it("captures writes hidden inside a read CTE", async () => {
     const host = runtime({ write: define((ctx) => ctx.db.query(
       'WITH removed AS (DELETE FROM "tasks" RETURNING *) SELECT * FROM removed',
     )) });
-    await expect(host.execute("write", {}, snapshot(), execution())).rejects.toThrow(/read.only/i);
+    expect((await host.execute("write", {}, snapshot(), execution())).patches).toEqual([{ entity: "tasks", rowId: "t1", op: "delete" }]);
   });
 
   it("keeps incomplete-data replay pending instead of discarding intents", async () => {

@@ -205,6 +205,8 @@ impl InvocationProvenance {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContext {
+    #[serde(default)]
+    pub intent_entropy: Option<String>,
     pub project_id: String,
     pub tenant_id: String,
     pub operation_id: Option<String>,
@@ -279,6 +281,7 @@ pub enum HostCall {
         table: String,
         /// JSON object of column name to value.
         row: Vec<u8>,
+        generated_id: Option<String>,
     },
     DbUpdate {
         table: String,

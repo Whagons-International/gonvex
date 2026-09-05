@@ -18,6 +18,7 @@ export type FunctionEntry = {
   replica?: ReplicaCollectionDefinition;
   /** Reducer delivery policy declared by a TypeScript module. */
   offline?: JsonValue;
+  localExecution?: 1;
   /** Ordered atomic optimistic transaction declared by a TypeScript module. */
   optimistic?: JsonValue;
   actionProfile?: "standard" | "agent";
@@ -210,6 +211,7 @@ export type ModuleFunction = {
   // Declarative metadata is emitted into the signed artifact contract and
   // validated again by the runtime before module activation.
   offline?: JsonValue;
+  localExecution?: 1;
   optimistic?: JsonValue;
   actionProfile?: "standard" | "agent";
   actionCapabilities?: ActionCapabilities;

@@ -1175,6 +1175,18 @@ impl TenantTransaction {
         provenance: &Value,
     ) -> Result<String, DatabaseError> {
         let id = uuid::Uuid::new_v4().to_string();
+        self.enqueue_action_with_id(&id, action_path, args, actor_account_id, actor_email, provenance).await
+    }
+
+    pub async fn enqueue_action_with_id(
+        &mut self,
+        id: &str,
+        action_path: &str,
+        args: &Value,
+        actor_account_id: &str,
+        actor_email: &str,
+        provenance: &Value,
+    ) -> Result<String, DatabaseError> {
         sqlx::query(
             r#"INSERT INTO _gonvex_action_outbox
                (id, action_path, args, actor_user_id, actor_email, provenance)
@@ -1188,7 +1200,7 @@ impl TenantTransaction {
         .bind(Json(provenance.clone()))
         .execute(&mut *self.transaction)
         .await?;
-        Ok(id)
+        Ok(id.to_owned())
     }
 
     pub async fn commit(self) -> Result<(), DatabaseError> {

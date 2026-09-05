@@ -187,6 +187,10 @@ impl ActionHostCalls {
                     args,
                     ExecutionAccess {
                         allow_internal: true,
+                        expected_artifact_hash: None,
+                        client_contract: None,
+                        receipt_path: None,
+                        intent_entropy: None,
                         provenance: Some(provenance),
                         module: Some(self.module.clone()),
                         committed_revisions: Some(self.committed_revisions.clone()),
@@ -204,6 +208,10 @@ impl ActionHostCalls {
                     args,
                     ExecutionAccess {
                         allow_internal: binding.kind == "internalReducer",
+                        expected_artifact_hash: None,
+                        client_contract: None,
+                        receipt_path: None,
+                        intent_entropy: None,
                         provenance: Some(provenance),
                         module: Some(self.module.clone()),
                         committed_revisions: Some(self.committed_revisions.clone()),

@@ -15,6 +15,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use gonvex_module_host::protocol::HostCallFrame;
 use gonvex_postgres::TenantTransaction;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::query::Query;
 use sqlx::types::Json;
@@ -25,6 +26,19 @@ use crate::module_host::HostCallHandler;
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
+
+// Same seed and UUID layout as module-sdk reducerRowId.
+fn intent_deferred_id(tenant: &str, account: &str, command: &str, kind: &str, ordinal: u64) -> String {
+    let seed = serde_json::to_vec(&serde_json::json!([
+        "gonvex.reducer.ids.v1", tenant, account, command, format!("deferred:{kind}"), ordinal
+    ])).expect("intent seed serializes");
+    let digest = Sha256::digest(seed);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 15) | 128;
+    bytes[8] = (bytes[8] & 63) | 128;
+    Uuid::from_bytes(bytes).to_string()
+}
 
 #[derive(Clone, Debug)]
 struct TableKey {
@@ -48,6 +62,9 @@ pub struct DatabaseHostCalls {
     actor_account_id: String,
     actor_email: String,
     provenance: Value,
+    intent_tenant: String,
+    intent_command: String,
+    deferred_ordinals: BTreeMap<String, u64>,
 }
 
 impl DatabaseHostCalls {
@@ -61,6 +78,9 @@ impl DatabaseHostCalls {
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
+            intent_tenant: String::new(),
+            intent_command: String::new(),
+            deferred_ordinals: BTreeMap::new(),
         }
     }
 
@@ -76,6 +96,20 @@ impl DatabaseHostCalls {
         self.actor_account_id = account_id.to_owned();
         self.actor_email = email.to_owned();
         self
+    }
+
+    pub fn with_intent(mut self, tenant: &str, command: &str) -> Self {
+        self.intent_tenant = tenant.to_owned();
+        self.intent_command = command.to_owned();
+        self
+    }
+
+    fn deferred_id(&mut self, kind: &str) -> String {
+        if self.intent_command.is_empty() { return Uuid::new_v4().to_string(); }
+        let ordinal = self.deferred_ordinals.entry(kind.to_owned()).or_default();
+        let id = intent_deferred_id(&self.intent_tenant, &self.actor_account_id, &self.intent_command, kind, *ordinal);
+        *ordinal += 1;
+        id
     }
 
     pub fn with_schema(mut self, schema: &Value) -> Self {
@@ -138,9 +172,9 @@ impl HostCallHandler for DatabaseHostCalls {
                 statement,
                 parameters,
             } => self.query(&statement, parameters).await,
-            HostCallFrame::DbInsert { table, row } => {
+            HostCallFrame::DbInsert { table, row, generated_id } => {
                 self.require_write()?;
-                self.insert(&table, row).await
+                self.insert(&table, row, generated_id).await
             }
             HostCallFrame::DbUpdate {
                 table,
@@ -173,9 +207,10 @@ impl HostCallHandler for DatabaseHostCalls {
                 let account_id = self.actor_account_id.clone();
                 let email = self.actor_email.clone();
                 let provenance = self.provenance.clone();
+                let allocated_id = self.deferred_id("action");
                 let id = self
                     .transaction()?
-                    .enqueue_action(function, &args, &account_id, &email, &provenance)
+                    .enqueue_action_with_id(&allocated_id, function, &args, &account_id, &email, &provenance)
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(Value::String(id))
@@ -233,7 +268,7 @@ impl DatabaseHostCalls {
                 "scheduled function {function:?} is not a registered Reducer or Action"
             ));
         }
-        let job_id = format!("job_{}", Uuid::new_v4());
+        let job_id = format!("job_{}", self.deferred_id("schedule"));
         let payload = serde_json::json!({
             "jobId": job_id,
             "function": function,
@@ -296,13 +331,18 @@ impl DatabaseHostCalls {
         rows_to_json(rows)
     }
 
-    async fn insert(&mut self, table: &str, row: Value) -> Result<Value, String> {
+    async fn insert(&mut self, table: &str, row: Value, generated_id: Option<String>) -> Result<Value, String> {
         let row = object(row, "row")?;
         if row.is_empty() {
             return Err("an insert requires at least one column".to_owned());
         }
         let mut values: BTreeMap<String, Value> = row.into_iter().collect();
         let key = self.catalog_table_key(table).await?;
+        if !values.contains_key(&key.column) {
+            if let Some(id) = generated_id.filter(|_| matches!(key.data_type.as_deref(), Some("text" | "character varying" | "character" | "uuid"))) {
+                values.insert(key.column.clone(), Value::String(id));
+            }
+        }
         if !values.contains_key(&key.column) && !key.database_generated {
             match key.data_type.as_deref() {
                 Some("text" | "character varying" | "character") => {
@@ -920,6 +960,12 @@ fn require_single_statement(statement: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deferred_ids_match_the_browser_sdk_vectors() {
+        assert_eq!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0), "aa14126b-2f16-814a-8623-07601307140c");
+        assert_eq!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "schedule", 0), "c9983b7c-273c-8f8e-91df-ef1b9ba899f6");
+        assert_ne!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0), super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 1));
+    }
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -973,6 +1019,9 @@ mod tests {
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
+            intent_tenant: String::new(),
+            intent_command: String::new(),
+            deferred_ordinals: BTreeMap::new(),
         };
         let mut calls = calls;
         assert_eq!(
@@ -1001,6 +1050,9 @@ mod tests {
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
+            intent_tenant: String::new(),
+            intent_command: String::new(),
+            deferred_ordinals: BTreeMap::new(),
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());
@@ -1088,12 +1140,20 @@ mod tests {
                     "tags": ["one", "two"],
                     "score": 1
                 }),
+                None,
             )
             .await
             .unwrap();
         assert_eq!(inserted["metadata"], serde_json::json!("created"));
         assert_eq!(inserted["tags"], serde_json::json!(["one", "two"]));
         assert_eq!(inserted["score"], serde_json::json!(1));
+
+        let allocated = calls.insert("tasks", serde_json::json!({"title": "allocated"}), Some("intent-owned".to_owned())).await.unwrap();
+        assert_eq!(allocated["_id"], "intent-owned");
+        calls.delete("tasks", "", serde_json::json!("intent-owned")).await.unwrap();
+        let explicit = calls.insert("tasks", serde_json::json!({"_id": "explicit", "title": "explicit"}), Some("unused-allocation".to_owned())).await.unwrap();
+        assert_eq!(explicit["_id"], "explicit");
+        calls.delete("tasks", "", serde_json::json!("explicit")).await.unwrap();
 
         let updated = calls
             .update(
@@ -1114,7 +1174,7 @@ mod tests {
 
         for id in ["second", "third"] {
             calls
-                .insert("tasks", serde_json::json!({"_id": id, "title": id}))
+                .insert("tasks", serde_json::json!({"_id": id, "title": id}), None)
                 .await
                 .unwrap();
         }

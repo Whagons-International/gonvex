@@ -179,6 +179,9 @@ importers:
 
   packages/client:
     dependencies:
+      '@gonvex/local-runtime':
+        specifier: workspace:*
+        version: link:../local-runtime
       '@gonvex/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -186,6 +189,9 @@ importers:
         specifier: ^4.4.4
         version: 4.4.4
     devDependencies:
+      '@gonvex/module-sdk':
+        specifier: workspace:*
+        version: link:../module-sdk
       fake-indexeddb:
         specifier: ^6.2.4
         version: 6.2.5
@@ -224,6 +230,9 @@ importers:
 
   packages/gonvex:
     dependencies:
+      '@gonvex/local-runtime':
+        specifier: workspace:*
+        version: link:../local-runtime
       '@gonvex/client':
         specifier: workspace:*
         version: link:../client

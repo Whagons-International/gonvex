@@ -123,6 +123,22 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     return { cursor: cursor ? JSON.parse(cursor.value) : undefined, entities, liveQueries };
   }
 
+  async loadSession(scope: string): Promise<import("@gonvex/client").LocalReplicaSession | undefined> {
+    await this.initialize();
+    const row = await this.database.getFirstAsync<MetaRecord>(
+      `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'session'`, scope,
+    );
+    return row ? JSON.parse(row.value) : undefined;
+  }
+
+  async saveSession(scope: string, session: import("@gonvex/client").LocalReplicaSession | undefined): Promise<void> {
+    await this.initialize();
+    if (session) await this.database.runAsync(
+      `INSERT OR REPLACE INTO _gonvex_replica_meta (scope,key,value) VALUES (?, 'session', ?)`, scope, JSON.stringify(session),
+    );
+    else await this.database.runAsync(`DELETE FROM _gonvex_replica_meta WHERE scope = ? AND key = 'session'`, scope);
+  }
+
   async applyTransaction(transaction: ReplicaTransaction, _snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
     await this.initialize();
     await this.database.withTransactionAsync(async () => {

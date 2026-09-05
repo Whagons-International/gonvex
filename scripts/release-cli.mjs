@@ -10,15 +10,17 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const DEFAULT_MODEL = "moonshotai/kimi-k2.5";
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const NOTE_CONTEXT_LIMIT = 75_000;
-const RELEASE_PACKAGES = ["protocol", "client", "expo-sqlite", "react", "module-sdk", "gonvex", "create-gonvex"];
+const RELEASE_PACKAGES = ["protocol", "client", "expo-sqlite", "react", "module-sdk", "local-runtime", "gonvex", "create-gonvex"];
 
 const args = new Set(process.argv.slice(2));
 const dryRun = args.has("--dry-run") || process.env.DRY_RUN === "1";
 const notesPreview = args.has("--notes-preview") || process.env.NOTES_PREVIEW === "1";
 const versionInfo = args.has("--version-info");
 
-loadDotEnv(join(ROOT, ".env"));
-loadDotEnv(join(ROOT, ".env.local"));
+if (!versionInfo) {
+  loadDotEnv(join(ROOT, ".env"));
+  loadDotEnv(join(ROOT, ".env.local"));
+}
 
 if (versionInfo) {
   printVersionInfo();

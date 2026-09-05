@@ -4671,7 +4671,7 @@ const HEALTH_TOOLTIP_STYLE = {
 };
 
 const HEALTH_AXIS_TICK = { fontSize: 10, fill: "var(--muted)" };
-const HEALTH_CHART_MARGIN = { top: 10, right: 12, left: -14, bottom: 0 };
+const HEALTH_CHART_MARGIN = { top: 10, right: 12, left: 0, bottom: 0 };
 const healthCompactNumber = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
 
 function formatCount(value: number): string {

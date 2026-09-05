@@ -75,6 +75,28 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return this.initialized ??= this.database.open().then(() => undefined);
   }
 
+  async listScopes(): Promise<string[]> {
+    await this.initialize();
+    const [entities, windows, meta] = await Promise.all([
+      this.database.entities.orderBy("scope").uniqueKeys(),
+      this.database.windows.orderBy("scope").uniqueKeys(),
+      this.database.meta.orderBy("scope").uniqueKeys(),
+    ]);
+    return [...new Set([...entities, ...windows, ...meta].map(String))];
+  }
+
+  async loadSession(scope: string): Promise<import("./local-replica.js").LocalReplicaSession | undefined> {
+    await this.initialize();
+    const record = await this.database.meta.get([scope, "session"]);
+    return record ? JSON.parse(record.value) : undefined;
+  }
+
+  async saveSession(scope: string, session: import("./local-replica.js").LocalReplicaSession | undefined): Promise<void> {
+    await this.initialize();
+    if (session) await this.database.meta.put({ scope, key: "session", value: JSON.stringify(session) });
+    else await this.database.meta.delete([scope, "session"]);
+  }
+
   async load(scope: ReplicaScope = defaultReplicaScope): Promise<ReplicaSnapshot | undefined> {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);

@@ -12,6 +12,7 @@ import { builtinModules } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { rolldown, type OutputChunk, type RolldownPlugin } from "rolldown";
+import { projectLocalSchema } from "./local-bindings.js";
 
 import type {
   ActionCapabilities,
@@ -152,6 +153,37 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   for (const file of [...options.migrations].sort()) {
     files[projectPath(options.root, file)] = (await readFile(file)).toString("base64");
   }
+  if (Object.values(functions).some((entry) => entry.localExecution === 1)) {
+    const schema = await projectLocalSchema(options.root);
+    // Reuse only explicitly exposed columns. Offline hydration must never turn
+    // a metadata-only API into a route for credential/private table columns.
+    for (const [table, plan] of Object.entries(visibilityPlans)) {
+      const columns = new Set<string>();
+      let maxRows = 50000;
+      let maxBytes = 67108864;
+      for (const entry of Object.values(functions)) {
+        if (entry.internal) continue;
+        if (entry.replica?.table === table) {
+          entry.replica.columns.forEach((column) => columns.add(column));
+          if (!Object.keys(entry.replica.equalFilters ?? {}).length) {
+            maxRows = Math.min(maxRows, entry.replica.maxRows ?? maxRows);
+            maxBytes = Math.min(maxBytes, entry.replica.maxBytes ?? maxBytes);
+          }
+        }
+        if (entry.dependencies?.liveQueryPlan?.table === table) entry.dependencies.liveQueryPlan.columns?.forEach((column) => columns.add(column));
+      }
+      if (!schema[table] || !columns.has(plan.key)) continue;
+      const path = `__local.${table}`;
+      if (functions[path]) throw new Error(`${path} uses the SDK-reserved local replica namespace`);
+      functions[path] = {
+        kind: "query", handler: "__local", file: projectPath(options.root, entrypoint.absolute),
+        args: { kind: "object", fields: {} }, result: { kind: "array", items: { kind: "any" } },
+        delivery: "replica", interactive: false, classification: "system",
+        replica: { table, key: plan.key, columns: [...columns].filter((column) => !!schema[table]!.columns[column]),
+          mode: "progressive", maxRows, maxBytes },
+      };
+    }
+  }
   const cronNames = new Set<string>();
   for (const cron of crons) {
     if (cronNames.has(cron.name)) throw new Error(`duplicate cron: ${cron.name}`);
@@ -170,6 +202,13 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       if (binding.kind === "reducer" && target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target a public business-intent Reducer`);
       if (binding.kind === "internalReducer" && !target.internal) throw new Error(`action ${JSON.stringify(path)} tool ${JSON.stringify(name)} must target an internal Reducer`);
     }
+  }
+  const clientContractPath = join(options.backendDir, "client-contract.json");
+  if (existsSync(clientContractPath)) {
+    const bytes = await readFile(clientContractPath);
+    const contract = JSON.parse(bytes.toString());
+    if (!Number.isSafeInteger(contract.version) || contract.version < 1 || !Number.isSafeInteger(contract.offlineMaxAgeMs) || contract.offlineMaxAgeMs <= 0) throw new Error("Invalid client-contract.json");
+    files["client-contract.json"] = bytes.toString("base64");
   }
   const sortedFiles = sortedRecord(files);
   const sortedFunctions = sortedRecord(functions);
@@ -394,6 +433,7 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
       ...(entry.dependencies ? { dependencies: entry.dependencies } : {}),
       ...(entry.replica ? { replica: entry.replica } : {}),
       ...(entry.offline === undefined ? {} : { offline: entry.offline }),
+      ...(entry.localExecution === undefined ? {} : { localExecution: entry.localExecution }),
       ...(entry.optimistic === undefined ? {} : { optimistic: entry.optimistic }),
       ...(entry.actionProfile === undefined ? {} : { actionProfile: entry.actionProfile }),
       ...(entry.actionCapabilities === undefined ? {} : { actionCapabilities: entry.actionCapabilities }),
@@ -635,7 +675,7 @@ function moduleFunction(input: {
       throw new Error(`one-shot query ${input.path} requires a structured live query plan with a table, key, and columns including the key`);
     }
   }
-  const offline = input.options?.get("offline")?.value;
+  const declaredOffline = input.options?.get("offline")?.value;
   const optimistic = input.options?.get("optimistic")?.value;
   const internalEntry = input.options?.get("internal");
   if (internalEntry && typeof internalEntry.value !== "boolean") {
@@ -648,6 +688,9 @@ function moduleFunction(input: {
     throw new Error(`${input.kind} ${input.path} interactive must be a boolean literal`);
   }
   const interactive = !internal && (interactiveValue === true || (interactiveValue === undefined && input.kind !== "action"));
+  const offline = declaredOffline ?? (input.kind === "reducer" ? { mode: interactive ? "allowed" : "forbidden" } : undefined);
+  const localExecution = input.kind === "reducer" && interactive && (offline as { mode?: string } | undefined)?.mode === "allowed"
+    && optimistic === undefined && !input.options?.get("nonOptimisticReason");
   const classification = internal ? "internal" : interactive ? "interactive" : "system";
   const descriptionEntry = input.options?.get("description");
   let description: string | undefined;
@@ -688,6 +731,7 @@ function moduleFunction(input: {
     ...(delivery === undefined ? {} : { delivery }),
     ...(replica ? { replica } : {}),
     ...(offline === undefined ? {} : { offline }),
+    ...(localExecution ? { localExecution: 1 as const } : {}),
     ...(optimistic === undefined ? {} : { optimistic }),
     ...(interactiveEntry ? { interactive } : interactive ? { interactive: true } : {}),
     classification,

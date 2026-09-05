@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/cli",
-  "version": "0.5.2-staging.10",
+  "version": "0.5.2-staging.11",
   "type": "module",
   "bin": {
     "gonvex": "./dist/index.js"
@@ -34,7 +34,8 @@
   "dependencies": {
     "@gonvex/client": "workspace:*",
     "@gonvex/react": "workspace:*",
-    "rolldown": "^1.2.3"
+    "rolldown": "^1.2.3",
+    "@gonvex/local-runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.12.4",

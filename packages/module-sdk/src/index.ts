@@ -1,3 +1,6 @@
+import { reducerExecutionContext } from "./reducer-execution.js";
+export { reducerExecutionContext, reducerRowId, reducerIdGenerator, reducerToken } from "./reducer-execution.js";
+
 /** JSON values accepted by the module ABI. */
 export type JsonValue =
   | null
@@ -178,7 +181,7 @@ export type ReadDB = {
 };
 
 export type WriteDB = ReadDB & {
-  readonly insert: <T = JsonValue>(table: string, row: JsonObject) => Promise<T>;
+  readonly insert: <T = JsonValue>(table: string, row: JsonObject, allocation?: { generatedId: string }) => Promise<T>;
   readonly update: <T = JsonValue>(table: string, id: string, patch: JsonObject) => Promise<T>;
   readonly delete: (table: string, id: string) => Promise<void>;
   readonly deleteMany: (table: string, ids: readonly JsonValue[]) => Promise<{ deleted: number }>;
@@ -198,6 +201,8 @@ export type Scheduler = {
 export type QueryContext = AuthContext & TenantContext & InvocationAware & { readonly db: ReadDB; readonly now: number };
 
 export type ReducerContext = AuthContext & TenantContext & InvocationAware & {
+  /** SDK-owned replay entropy. Never include it in rows, logs, or Action provenance. */
+  readonly intentEntropy?: string;
   readonly db: WriteDB;
   readonly actions: ReducerActions;
   readonly scheduler: Scheduler;
@@ -382,7 +387,8 @@ export type ReplicaCollectionOptions<Args, Result> = Omit<QueryOptions<Args, Res
 export type ReducerOptions<Args, Result> = FunctionMetadata & {
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
-  readonly offline: OfflinePolicy;
+  /** Public interactive reducers execute locally and queue by default. */
+  readonly offline?: OfflinePolicy;
   /** Set false for reducers that are not invoked directly by an interactive client. */
   readonly interactive?: boolean;
   readonly optimistic?: OptimisticTransaction;
@@ -510,6 +516,7 @@ export type ModuleFunctionManifest = {
   readonly liveQueryPlan?: LiveQueryPlan;
   readonly replica?: ReplicaCollectionDefinition;
   readonly offline?: OfflinePolicy;
+  readonly localExecution?: 1;
   readonly interactive?: boolean;
   readonly classification?: "interactive" | "system" | "internal";
   readonly description?: string;
@@ -949,6 +956,7 @@ const freezeVisibilityPlan = (plan: VisibilityPlan): VisibilityPlan => {
 };
 
 /** Declare and validate one source table's language-neutral visibility plan. */
+/* @__NO_SIDE_EFFECTS__ */
 export function visibility(options: VisibilityPlan): VisibilityPlan {
   validateVisibilityPlan(options, "visibility");
   return freezeVisibilityPlan(options);
@@ -1171,6 +1179,7 @@ const queryDefinition = <Args, Result>(
 };
 
 /** Declare an executable one-shot, live, or replica query export. */
+/* @__NO_SIDE_EFFECTS__ */
 export function query<Args = JsonValue, Result = JsonValue>(options: QueryOptions<Args, Result> = {}): QueryDefinition<Args, Result> {
   return queryDefinition(options);
 }
@@ -1181,11 +1190,13 @@ export function internalQuery<Args = JsonValue, Result = JsonValue>(options: Omi
 }
 
 /** Declare an executable live query export with a structured live plan. */
+/* @__NO_SIDE_EFFECTS__ */
 export function liveQuery<Args = JsonValue, Result = JsonValue>(options: Omit<QueryOptions<Args, Result>, "delivery"> = {}): QueryDefinition<Args, Result> {
   return queryDefinition({ ...options, delivery: "live" }, "live");
 }
 
 /** Declare an executable bounded replica collection export. */
+/* @__NO_SIDE_EFFECTS__ */
 export function replicaCollection<Args = JsonValue, Result = JsonValue>(options: ReplicaCollectionOptions<Args, Result>): QueryDefinition<Args, Result> {
   return queryDefinition({ ...options, delivery: "replica", replica: options.replica }, "replica");
 }
@@ -1194,28 +1205,31 @@ const reducerDefinition = <Args, Result>(
   options: ReducerOptions<Args, Result>,
   internal = false,
 ): ReducerDefinition<Args, Result> => {
+  options = { ...options, offline: options.offline ?? { mode: internal || options.interactive === false ? "forbidden" : "allowed" } };
   validateOfflinePolicy(options.offline, "<export>");
   if (options.optimistic !== undefined) validateOptimisticTransaction(options.optimistic, "<export>");
   if (options.interactive === false && options.optimistic !== undefined) {
     throw new Error("non-interactive reducer <export> cannot declare optimistic metadata");
   }
-  if (options.interactive !== false && options.optimistic === undefined && !options.nonOptimisticReason?.trim()) {
-    throw new Error("interactive reducer <export> requires an optimistic transaction or nonOptimisticReason");
-  }
+  const local = !internal && !options.internal && options.interactive !== false && options.offline?.mode === "allowed"
+    && options.optimistic === undefined && !options.nonOptimisticReason;
+  const handler = options.run;
   return freeze({
     kind: "reducer",
     internal: internal || options.internal,
     options: executableOptions(options),
-    handler: options.run,
+    handler: local && handler ? (context: ReducerContext, args: Args) => handler(reducerExecutionContext(context), args) : handler,
   });
 };
 
 /** Declare an executable public reducer export. */
+/* @__NO_SIDE_EFFECTS__ */
 export function reducer<Args = JsonValue, Result = JsonValue>(options: ReducerOptions<Args, Result>): ReducerDefinition<Args, Result> {
   return reducerDefinition(options);
 }
 
 /** Declare an executable non-interactive internal reducer export. */
+/* @__NO_SIDE_EFFECTS__ */
 export function internalReducer<Args = JsonValue, Result = JsonValue>(options: InternalReducerOptions<Args, Result>): ReducerDefinition<Args, Result> {
   return reducerDefinition({
     ...options,
@@ -1226,6 +1240,7 @@ export function internalReducer<Args = JsonValue, Result = JsonValue>(options: I
 }
 
 /** Declare an executable action export. */
+/* @__NO_SIDE_EFFECTS__ */
 export function action<Args = JsonValue, Result = JsonValue, const Capabilities extends ActionCapabilities = ActionCapabilities>(options: ActionOptions<Args, Result, Capabilities> = {}): ActionDefinition<Args, Result, Capabilities> {
   validateActionCapabilities(options.profile ?? "standard", options.capabilities, options.name?.trim() || "<export>");
   return freeze({ kind: "action", options: executableOptions(options), handler: options.run });
@@ -1303,25 +1318,29 @@ export class ModuleBuilder {
 
   reducer<Args = JsonValue, Result = JsonValue>(path: string, options: ReducerOptions<Args, Result>): RegisteredFunction<Args, Result> {
     const normalized = normalizePath(path);
+    options = { ...options, offline: options.offline ?? { mode: options.internal || options.interactive === false ? "forbidden" : "allowed" } };
     validateOfflinePolicy(options.offline, normalized);
     if (options.optimistic !== undefined) validateOptimisticTransaction(options.optimistic, normalized);
     if (options.interactive === false && options.optimistic !== undefined) {
       throw new Error(`non-interactive reducer ${normalized} cannot declare optimistic metadata`);
     }
-    if (options.interactive !== false && options.optimistic === undefined && !options.nonOptimisticReason?.trim()) {
-      throw new Error(`interactive reducer ${normalized} requires an optimistic transaction or nonOptimisticReason`);
-    }
+    const local = !options.internal && options.interactive !== false && options.offline?.mode === "allowed"
+      && options.optimistic === undefined && !options.nonOptimisticReason;
     const definition = this.manifestCollector.register(path, {
       kind: "reducer",
       args: options.args,
       result: options.result,
       offline: options.offline,
+      ...(local ? { localExecution: 1 as const } : {}),
       internal: options.internal,
       ...functionManifestMetadata("reducer", options, options.internal === true),
       optimistic: options.optimistic,
       nonOptimisticReason: options.nonOptimisticReason?.trim() || undefined,
     });
-    const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: options.run as RegisteredFunction<Args, Result>["handler"] });
+    const handler = options.run;
+    const registration = freeze({ path: definition.path, kind: definition.kind, definition, handler: (local && handler
+      ? (context: ReducerContext, args: Args) => handler(reducerExecutionContext(context), args)
+      : handler) as RegisteredFunction<Args, Result>["handler"] });
     this.runtimeEntries.set(definition.path, registration as RuntimeFunctionRegistration);
     return registration;
   }
@@ -1409,9 +1428,6 @@ export class ModuleRuntimeRegistry {
       validateOfflinePolicy(registration.definition.offline, path);
       if (registration.definition.optimistic !== undefined) {
         validateOptimisticTransaction(registration.definition.optimistic, path);
-      }
-      if (registration.definition.interactive !== false && registration.definition.optimistic === undefined && !registration.definition.nonOptimisticReason?.trim()) {
-        throw new Error(`interactive reducer ${path} requires an optimistic transaction or nonOptimisticReason`);
       }
     }
     if (registration.kind === "query" && (registration.definition.delivery ?? "oneShot") === "oneShot") {

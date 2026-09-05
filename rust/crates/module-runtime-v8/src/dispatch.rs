@@ -130,6 +130,7 @@ impl<'a> From<&'a InvocationContext> for IdentityView<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DispatchRequest<'a> {
+    pub(crate) intent_entropy: Option<&'a str>,
     pub(crate) function: &'a str,
     pub(crate) kind: &'static str,
     pub(crate) capabilities: CapabilityFlags,
@@ -158,6 +159,8 @@ pub(crate) enum HostCallRequest {
         table: String,
         #[serde(default)]
         row: serde_json::Value,
+        #[serde(default, rename = "generatedId")]
+        generated_id: Option<String>,
     },
     DbUpdate {
         table: String,
@@ -246,8 +249,9 @@ impl HostCallRequest {
                 statement,
                 parameters: encode(parameters)?,
             },
-            Self::DbInsert { table, row } => HostCall::DbInsert {
+            Self::DbInsert { table, row, generated_id } => HostCall::DbInsert {
                 table,
+                generated_id,
                 row: encode(row)?,
             },
             Self::DbUpdate {
@@ -408,6 +412,23 @@ pub(crate) fn decode_result(envelope: &str) -> Result<Vec<u8>, ModuleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_preserves_sdk_allocation_without_changing_the_application_row() {
+        let request: HostCallRequest = serde_json::from_value(serde_json::json!({
+            "kind": "dbInsert", "table": "messages",
+            "row": {"id": "explicit", "body": "hello"}, "generatedId": "intent-id"
+        })).expect("insert request decodes");
+        match request.into_host_call().expect("insert lowers") {
+            HostCall::DbInsert { row, generated_id, .. } => {
+                assert_eq!(generated_id.as_deref(), Some("intent-id"));
+                let row: serde_json::Value = serde_json::from_slice(&row).unwrap();
+                assert_eq!(row["id"], "explicit");
+                assert!(row.get("_id").is_none());
+            }
+            _ => panic!("expected insert"),
+        }
+    }
 
     #[test]
     fn scheduler_is_structurally_denied_to_queries() {

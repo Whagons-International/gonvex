@@ -207,6 +207,10 @@ export type ReducerCallRequest = {
   trace?: MessageTrace;
   /** Stable key for a replayable command; see the `reducer.call` message. */
   idempotencyKey?: string;
+  artifactHash?: string;
+  clientContract?: number;
+  receiptPath?: string;
+  intentEntropy?: string;
 };
 
 export type ReplicaOpenRequest = {
@@ -263,7 +267,7 @@ export type GonvexManifest = {
 };
 
 export type ClientMessage =
-  | { type: "auth"; id: string; token?: string; project?: string; tenant?: string; controlOnly?: boolean; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
+  | { type: "auth"; clientContract?: number; id: string; token?: string; project?: string; tenant?: string; controlOnly?: boolean; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
   | { type: "query.call"; id: string; path: string; args: JsonValue; scope?: ExecutionScope }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue; scope?: ExecutionScope; windowRevision?: string }
   | { type: "query.unsubscribe"; id: string }
@@ -294,6 +298,10 @@ export type ClientMessage =
      * every duplicate delivery.
      */
     idempotencyKey?: string;
+    artifactHash?: string;
+  clientContract?: number;
+  receiptPath?: string;
+    intentEntropy?: string;
   }
   | { type: "reducer.callMany"; calls: ReducerCallRequest[] }
   | { type: "action.call"; id: string; path: string; args: JsonValue; scope?: ExecutionScope; idempotencyKey?: string; trace?: MessageTrace }
@@ -483,4 +491,5 @@ export type ServerMessage =
   | { type: "reducer.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "action.result"; id: string; path?: string; result: JsonValue; committedRevision?: number; trace?: MessageTrace }
   | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
+  | { type: "client.updateRequired"; reason: string; contract: number }
   | { type: "system.reload"; reason: string; artifactHash?: string };

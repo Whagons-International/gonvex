@@ -464,6 +464,7 @@ impl ModuleIsolate {
             }
         };
         let request = DispatchRequest {
+            intent_entropy: spec.invocation.context.intent_entropy.as_deref(),
             function: &spec.invocation.function,
             kind: kind_name(&spec.contract.kind),
             capabilities: CapabilityFlags::from(&spec.capabilities),

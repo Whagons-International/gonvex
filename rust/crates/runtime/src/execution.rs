@@ -50,6 +50,10 @@ pub enum ExecutionError {
     CapabilityUnavailable { path: String, capability: String },
     #[error("STALE_AGENT_CATALOG: expected artifact {expected:?}, active artifact is {active:?}")]
     StaleCatalog { expected: String, active: String },
+    #[error("STALE_REDUCER_ARTIFACT: expected {expected:?}, active artifact is {active:?}")]
+    StaleReducerArtifact { expected: String, active: String },
+    #[error("CLIENT_UPDATE_REQUIRED: expected contract {expected}, active contract is {active}")]
+    ClientUpdateRequired { expected: u64, active: u64 },
     #[error("function {0:?} is not classified as interactive")]
     NotInteractive(String),
     #[error("function {path:?} arguments do not match its schema: {message}")]
@@ -92,6 +96,10 @@ impl CommittedRevisionTracker {
 
 #[derive(Default)]
 pub(crate) struct ExecutionAccess {
+    pub client_contract: Option<u64>,
+    pub receipt_path: Option<String>,
+    pub intent_entropy: Option<String>,
+    pub expected_artifact_hash: Option<String>,
     pub allow_internal: bool,
     pub provenance: Option<InvocationProvenance>,
     pub module: Option<ModuleCallLease>,
@@ -202,13 +210,6 @@ impl Runtime {
                     ExecutionError::ModuleMissing(session.identity.project_id.clone())
                 })?,
         };
-        let definition = require_function(&module, path, "reducer", access.allow_internal)?;
-        validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
-            ExecutionError::InvalidArguments {
-                path: path.to_owned(),
-                message,
-            }
-        })?;
         let control = self
             .inner
             .control_plane
@@ -224,21 +225,40 @@ impl Runtime {
             .begin_tenant_transaction(&session.route, false)
             .await?;
         transaction.set_command_id(command_id).await?;
+        let receipt_path = access.receipt_path.as_deref().unwrap_or(path);
         if let Some(key) = idempotency_key {
             let claimed = transaction
-                .claim_reducer(&session.identity.account.id, key, path)
+                .claim_reducer(&session.identity.account.id, key, receipt_path)
                 .await?;
             if !claimed {
                 transaction.rollback().await?;
                 let value = control
-                    .replay_reducer_result(&session.route, &session.identity.account.id, key, path)
+                    .replay_reducer_result(&session.route, &session.identity.account.id, key, receipt_path)
                     .await?;
-                return Ok(ReducerExecution {
-                    value,
-                    committed_revision: None,
+                // Offline retries reuse the command ID. Preserve the commit
+                // barrier even when a response was lost after the first commit.
+                let committed_revision = control.command_revision(&session.route, command_id).await?;
+                return Ok(ReducerExecution { value, committed_revision });
+            }
+        }
+        if let (Some(expected), Some(active)) = (access.client_contract, module.client_contract) {
+            if expected != active {
+                transaction.rollback().await?;
+                return Err(ExecutionError::ClientUpdateRequired { expected, active });
+            }
+        }
+        if let Some(expected) = access.expected_artifact_hash.as_ref() {
+            if !module.accepts_client_artifact(expected, access.client_contract) {
+                transaction.rollback().await?;
+                return Err(ExecutionError::StaleReducerArtifact {
+                    expected: expected.clone(), active: module.artifact_hash.clone(),
                 });
             }
         }
+        let definition = require_function(&module, path, "reducer", access.allow_internal)?;
+        validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
+            ExecutionError::InvalidArguments { path: path.to_owned(), message }
+        })?;
         let mut provenance = access.provenance.unwrap_or_else(|| {
             direct_provenance(
                 session,
@@ -260,6 +280,7 @@ impl Runtime {
             })
             .await?;
         let mut handler = DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
+            .with_intent(&session.route.tenant_id, command_id)
             .with_schema(&module.schema)
             .with_schedulable_functions(
                 module
@@ -286,6 +307,11 @@ impl Runtime {
         );
         invocation.context.capabilities.action_outbox = true;
         invocation.context.capabilities.scheduler = true;
+        if access.intent_entropy.as_ref().is_some_and(|seed| seed.len() != 64 || !seed.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))) {
+            let _ = handler.finish(false).await;
+            return Err(ExecutionError::InvalidArguments { path: path.to_owned(), message: "Invalid reducer entropy".to_owned() });
+        }
+        invocation.context.intent_entropy = access.intent_entropy;
         let result = self
             .inner
             .module_host
@@ -792,6 +818,7 @@ pub(crate) fn invocation(
         kind: kind.to_owned(),
         args: serde_json::to_string(&args).unwrap_or_else(|_| "null".to_owned()),
         context: InvocationContextWire {
+            intent_entropy: None,
             project_id: session.identity.project_id.clone(),
             tenant_id: session.route.tenant_id.clone(),
             operation_id: None,
@@ -1002,6 +1029,7 @@ mod tests {
 
     fn module(functions: BTreeMap<String, FunctionDefinition>) -> ProjectModule {
         ProjectModule {
+            client_contract: None,
             project_id: "project".to_owned(),
             generation: 1,
             artifact_hash: "active-hash".to_owned(),

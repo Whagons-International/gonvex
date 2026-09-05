@@ -1,12 +1,31 @@
 {
   "name": "@gonvex/local-runtime",
-  "version": "0.5.2-staging.10",
-  "private": true,
+  "version": "0.5.2-staging.11",
   "type": "module",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "default": "./dist/schema.js"
+    },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "default": "./dist/worker.js"
+    },
+    "./worker-client": {
+      "types": "./dist/worker-client.d.ts",
+      "default": "./dist/worker-client.js"
+    }
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -16,5 +35,11 @@
     "@electric-sql/pglite": "0.5.8",
     "@gonvex/module-sdk": "workspace:*"
   },
-  "devDependencies": { "typescript": "^6.0.3", "vitest": "^4.1.6" }
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

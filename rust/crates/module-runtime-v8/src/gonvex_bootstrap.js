@@ -473,6 +473,7 @@
       tenant: identity.tenant ?? null,
       member: identity.member ?? null,
       invocation: Object.freeze({ ...(request.invocation ?? {}) }),
+      ...(request.kind === "reducer" && request.intentEntropy ? { intentEntropy: request.intentEntropy } : {}),
     };
 
     const db = {};
@@ -484,10 +485,11 @@
       });
     }
     if (granted.dbWrite) {
-      db.insert = (table, row) => hostCall({
+      db.insert = (table, row, allocation) => hostCall({
         kind: "dbInsert",
         table: text("table", table),
         row: plainObject("row", row),
+        generatedId: allocation?.generatedId ?? null,
       });
       db.update = (table, id, patch) => hostCall({
         kind: "dbUpdate",

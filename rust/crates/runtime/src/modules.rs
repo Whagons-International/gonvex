@@ -78,6 +78,7 @@ pub struct ProjectModule {
     pub project_id: String,
     pub generation: u64,
     pub artifact_hash: String,
+    pub client_contract: Option<u64>,
     pub functions: BTreeMap<String, FunctionDefinition>,
     pub manifest_functions: Value,
     pub schema: Value,
@@ -161,6 +162,7 @@ impl ModuleRegistry {
                 message,
             }
         })?;
+        let client_contract = client_contract_from_module(module).map_err(|message| ModuleRegistryError::InvalidArtifact { project: project.clone(), message })?;
         let crons = crons_from_module(module, &project)?;
         let (artifact, functions, visibility) = artifact_from_manifest(&record)?;
         for cron in &crons {
@@ -212,6 +214,7 @@ impl ModuleRegistry {
             project_id: project.clone(),
             generation,
             artifact_hash: record.module_hash,
+            client_contract,
             functions,
             manifest_functions: record
                 .manifest
@@ -429,6 +432,11 @@ fn migrations_from_module(
 }
 
 impl ProjectModule {
+    /// Application contract compatibility is independent of the compiled artifact bytes.
+    pub fn accepts_client_artifact(&self, expected: &str, contract: Option<u64>) -> bool {
+        expected == self.artifact_hash
+            || (self.client_contract.is_some() && contract == self.client_contract)
+    }
     pub fn replica_directive(
         &self,
         tenant_id: &str,
@@ -931,4 +939,13 @@ mod tests {
             "system"
         );
     }
+}
+
+fn client_contract_from_module(module: &Map<String, Value>) -> Result<Option<u64>, String> {
+    let Some(encoded) = module.get("files").and_then(|f| f.get("client-contract.json")) else { return Ok(None); };
+    let bytes = STANDARD.decode(encoded.as_str().ok_or("invalid client contract encoding")?).map_err(|e| e.to_string())?;
+    let contract: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let version = contract.get("version").and_then(Value::as_u64).filter(|v| *v > 0).ok_or("invalid client contract version")?;
+    if contract.get("offlineMaxAgeMs").and_then(Value::as_u64).filter(|v| *v > 0).is_none() { return Err("invalid offline window".into()); }
+    Ok(Some(version))
 }

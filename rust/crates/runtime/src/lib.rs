@@ -1239,6 +1239,7 @@ async fn websocket_upgrade(
 
 async fn websocket(mut socket: WebSocket, runtime: Runtime) {
     let mut tenant_session: Option<TenantSession> = None;
+    let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
     let _connection_presence = runtime.inner.metrics.register(&connection_id);
     let mut control_connection = control::ControlConnection {
@@ -1446,6 +1447,14 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     {
                         replicas.clear();
                         live_queries.clear();
+                        if let Some(module) = runtime.inner.modules.project(&project_id).await {
+                            if let Some(required) = module.client_contract {
+                                if tenant_session.is_some() && connected_client_contract != Some(required) {
+                                    let _ = send_json(&mut socket, &ServerMessage::ClientUpdateRequired { reason: "CLIENT_UPDATE_REQUIRED".into(), contract: required }).await;
+                                    break;
+                                }
+                            }
+                        }
                         let artifact_hash = runtime
                             .inner
                             .modules
@@ -1474,10 +1483,21 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
         let Ok(message) = message else {
             break;
         };
+        if tenant_session.is_some() {
+            if let Some(module) = runtime.inner.modules.project(&control_connection.project_id).await {
+                if let Some(required) = module.client_contract {
+                    if connected_client_contract != Some(required) {
+                        let _ = send_json(&mut socket, &ServerMessage::ClientUpdateRequired { reason: "CLIENT_UPDATE_REQUIRED".into(), contract: required }).await;
+                        break;
+                    }
+                }
+            }
+        }
         match message {
             Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                 Ok(ClientMessage::Auth {
                     id,
+                    client_contract,
                     token,
                     project,
                     tenant,
@@ -1495,6 +1515,15 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         &connection_id,
                     )
                     .await;
+                    connected_client_contract = client_contract;
+                    if let Some(module) = runtime.inner.modules.project(&authenticated_control.project_id).await {
+                        if let Some(required) = module.client_contract {
+                            if authenticated_control.tenant.is_some() && client_contract != Some(required) {
+                                let _ = send_json(&mut socket, &ServerMessage::ClientUpdateRequired { reason: "CLIENT_UPDATE_REQUIRED".into(), contract: required }).await;
+                                break;
+                            }
+                        }
+                    }
                     replicas.clear();
                     live_queries.clear();
                     control_queries.clear();
@@ -2607,6 +2636,23 @@ async fn authenticate(
                         "tenantId": session.route.tenant_id,
                         "artifactHash": artifact_hash,
                         "replica": replica,
+                        "localIdentity": {
+                            "auth": { "account": {
+                                "id": session.identity.account.id,
+                                "email": session.identity.account.email,
+                                "name": session.identity.account.name,
+                                "avatarUrl": session.identity.account.avatar_url,
+                            } },
+                            "tenant": { "id": session.route.tenant_id },
+                            "member": {
+                                "id": session.member.id,
+                                "accountId": session.member.account_id,
+                                "status": session.member.status,
+                                "role": session.member.role,
+                                "displayName": session.member.display_name,
+                                "permissions": session.member.permissions,
+                            },
+                        },
                     }),
                 },
                 connection,
@@ -2649,6 +2695,10 @@ async fn call_reducer(
         scope,
         trace,
         idempotency_key,
+        artifact_hash,
+        client_contract,
+        receipt_path,
+        intent_entropy,
     } = call;
     if scope == Some(ExecutionScope::Control) {
         return match runtime
@@ -2685,7 +2735,8 @@ async fn call_reducer(
         };
     };
     match runtime
-        .execute_tenant_reducer(session, &id, idempotency_key.as_deref(), &path, args)
+        .execute_tenant_reducer_with_access(session, &id, idempotency_key.as_deref(), &path, args,
+            execution::ExecutionAccess { expected_artifact_hash: artifact_hash, client_contract, receipt_path, intent_entropy, ..Default::default() })
         .await
     {
         Ok(result) => ServerMessage::ReducerResult {

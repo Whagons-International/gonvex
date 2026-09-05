@@ -1,5 +1,6 @@
 import type { Dexie as DexieDatabase, Table } from "dexie";
 import type { OptimisticPatch } from "./optimistic.js";
+import type { LocalExecution } from "@gonvex/local-runtime";
 
 export type ReducerOutboxOptions = {
   databaseName?: string;
@@ -20,6 +21,10 @@ export type ReducerOutboxOptions = {
  * order, causal barriers, and inflight recovery all stay in the SDK.
  */
 export type OutboxStore = {
+  /** Version-fenced stores must never fall back to unpersisted sends. */
+  strictPersistence?: boolean;
+  /** Reserve globally unique sequence numbers when several tabs share a store. */
+  allocateId?(): Promise<number>;
   /** Every persisted entry across all scopes; called once to hydrate. */
   load(): Promise<ReducerOutboxEntry[]>;
   /** Insert or replace the entry with this id. */
@@ -30,6 +35,8 @@ export type OutboxStore = {
 };
 
 export type ReducerOutboxEntry = {
+  /** Original receipt namespace survives operation renames across client upgrades. */
+  receiptPath?: string;
   /** Auto-incremented sequence number. Lower ids always happened first. */
   id: number;
   /** Authenticated project/tenant/user identity that owns this reducer. */
@@ -41,6 +48,7 @@ export type ReducerOutboxEntry = {
   entityKeys: string[];
   /** Optimistic UI state restored while this entry awaits a server result. */
   patches?: OptimisticPatch[];
+  localExecution?: LocalExecution;
   createdAt: number;
   attempts: number;
   nextAttemptAt: number;
@@ -55,6 +63,7 @@ export type EnqueueReducer = {
   idempotencyKey?: string;
   entityKeys?: string[];
   patches?: OptimisticPatch[];
+  localExecution?: LocalExecution;
   /** Direct online sends start inflight so the background drain cannot race them. */
   state?: "pending" | "inflight";
 };
@@ -62,6 +71,9 @@ export type EnqueueReducer = {
 export type ReducerOutbox = {
   enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry>;
   loadAll(scope: string): Promise<ReducerOutboxEntry[]>;
+  /** Observe current records without performing startup inflight recovery. */
+  list(scope: string): Promise<ReducerOutboxEntry[]>;
+  updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void>;
   nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined>;
   markInflight(id: number): Promise<void>;
   /** Return a just-admitted entry to pending without recording a failed attempt. */
@@ -122,13 +134,17 @@ export class DexieReducerOutbox implements ReducerOutbox {
       idempotencyKey: reducer.idempotencyKey ?? createIdempotencyKey(),
       entityKeys: [...(reducer.entityKeys ?? [])],
       patches: reducer.patches?.map(clonePatch),
+      ...(reducer.localExecution ? { localExecution: cloneValue(reducer.localExecution) } : {}),
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
       state: reducer.state ?? "pending",
     };
 
-    if (this.memoryOnly) return this.enqueueInMemory(entry);
+    if (this.memoryOnly) {
+      if (reducer.localExecution) throw new Error("Durable storage is required for local reducer execution");
+      return this.enqueueInMemory(entry);
+    }
     try {
       const database = await this.open();
       const id = await database.entries.add(entry);
@@ -136,7 +152,8 @@ export class DexieReducerOutbox implements ReducerOutbox {
       this.remember(stored);
       this.notify();
       return cloneEntry(stored);
-    } catch {
+    } catch (error) {
+      if (reducer.localExecution) throw new Error("Could not persist local reducer; no changes were staged", { cause: error });
       this.degradeToMemory();
       return this.enqueueInMemory(entry);
     }
@@ -164,6 +181,25 @@ export class DexieReducerOutbox implements ReducerOutbox {
       this.degradeToMemory();
       return this.loadAllFromMemory(scope);
     }
+  }
+
+  async list(scope: string): Promise<ReducerOutboxEntry[]> {
+    if (this.memoryOnly) return this.sortedMemoryEntries(scope).map(cloneEntry);
+    const entries = await (await this.open()).entries.where("scope").equals(scope).sortBy("id");
+    this.replaceMemoryEntriesForScope(scope, entries);
+    return entries.map(cloneEntry);
+  }
+
+  async updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void> {
+    if (this.memoryOnly) throw new Error("Durable storage is required for local reducer replay");
+    const database = await this.open();
+    await database.transaction("rw", database.entries, async () => {
+      const entry = await database.entries.get(id);
+      if (!entry) return;
+      const updated = { ...entry, patches: patches.map(clonePatch), localExecution: cloneValue(execution) };
+      await database.entries.put(updated);
+      this.remember(updated);
+    });
   }
 
   async nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined> {
@@ -486,20 +522,24 @@ export class StoreReducerOutbox implements ReducerOutbox {
     await this.ready;
     const createdAt = Date.now();
     const entry: ReducerOutboxEntry = {
-      id: this.nextId++,
+      id: this.store.allocateId ? await this.store.allocateId() : this.nextId++,
       scope: reducer.scope,
       path: reducer.path,
       args: cloneValue(reducer.args),
       idempotencyKey: reducer.idempotencyKey ?? createIdempotencyKey(),
       entityKeys: [...(reducer.entityKeys ?? [])],
       patches: reducer.patches?.map(clonePatch),
+      ...(reducer.localExecution ? { localExecution: cloneValue(reducer.localExecution) } : {}),
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
       state: reducer.state ?? "pending",
     };
+    if (reducer.localExecution) {
+      if (this.memoryOnly) throw new Error("Durable storage is required for local reducer execution");
+      await this.store.put(cloneEntry(entry));
+    } else await this.persistPut(entry);
     this.entries.set(entry.id, entry);
-    await this.persistPut(entry);
     this.notify();
     return cloneEntry(entry);
   }
@@ -516,6 +556,21 @@ export class StoreReducerOutbox implements ReducerOutbox {
     await Promise.all(recovered.map((entry) => this.persistPut(entry)));
     if (recovered.length > 0) this.notify();
     return this.sortedEntries(scope).map(cloneEntry);
+  }
+
+  async list(scope: string): Promise<ReducerOutboxEntry[]> {
+    await this.ready;
+    return this.sortedEntries(scope).map(cloneEntry);
+  }
+
+  async updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void> {
+    await this.ready;
+    if (this.memoryOnly) throw new Error("Durable storage is required for local reducer replay");
+    const entry = this.entries.get(id);
+    if (!entry) return;
+    const updated = { ...entry, patches: patches.map(clonePatch), localExecution: cloneValue(execution) };
+    await this.store.put(cloneEntry(updated));
+    this.entries.set(id, updated);
   }
 
   async nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined> {
@@ -605,7 +660,8 @@ export class StoreReducerOutbox implements ReducerOutbox {
         this.entries.set(entry.id, cloneEntry(entry));
         this.nextId = Math.max(this.nextId, entry.id + 1);
       }
-    } catch {
+    } catch (error) {
+      if (this.store.strictPersistence) throw error;
       this.degradeToMemory();
     }
   }
@@ -614,7 +670,8 @@ export class StoreReducerOutbox implements ReducerOutbox {
     if (this.memoryOnly) return;
     try {
       await this.store.put(cloneEntry(entry));
-    } catch {
+    } catch (error) {
+      if (this.store.strictPersistence) throw error;
       this.degradeToMemory();
     }
   }
@@ -623,7 +680,8 @@ export class StoreReducerOutbox implements ReducerOutbox {
     if (this.memoryOnly) return;
     try {
       await this.store.delete(id);
-    } catch {
+    } catch (error) {
+      if (this.store.strictPersistence) throw error;
       this.degradeToMemory();
     }
   }
@@ -700,6 +758,7 @@ function cloneEntry(entry: ReducerOutboxEntry): ReducerOutboxEntry {
     args: cloneValue(entry.args),
     entityKeys: [...entry.entityKeys],
     patches: entry.patches?.map(clonePatch),
+    ...(entry.localExecution ? { localExecution: cloneValue(entry.localExecution) } : {}),
   };
 }
 

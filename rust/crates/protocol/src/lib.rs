@@ -154,6 +154,14 @@ pub struct ReducerCallRequest {
     pub trace: Option<MessageTrace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_contract: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_entropy: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,6 +201,8 @@ pub enum ClientMessage {
     #[serde(rename = "auth")]
     Auth {
         id: String,
+        #[serde(default, rename = "clientContract", skip_serializing_if = "Option::is_none")]
+        client_contract: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -549,6 +559,8 @@ pub enum ServerMessage {
     },
     #[serde(rename = "support.command")]
     SupportCommand { id: String, result: Value },
+    #[serde(rename = "client.updateRequired")]
+    ClientUpdateRequired { reason: String, contract: u64 },
     #[serde(rename = "system.reload")]
     SystemReload {
         reason: String,

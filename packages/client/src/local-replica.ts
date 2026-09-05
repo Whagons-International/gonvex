@@ -1,5 +1,13 @@
 import type { JsonValue, PublicInvocationProvenance, ReplicaCursor, SubscriptionRevision } from "@gonvex/protocol";
 import type { OptimisticPatch } from "./optimistic.js";
+import type { LocalExecution } from "@gonvex/local-runtime";
+
+export type LocalReplicaSession = {
+  lastOnlineAtMs?: number;
+  directive: { protocolVersion: 1; scope: string; visibilityScope: string; epoch: string };
+  identity: LocalExecution["identity"];
+  artifactHash: string;
+};
 
 export type ReplicaRow = Record<string, JsonValue>;
 
@@ -70,6 +78,9 @@ const defaultReplicaScope: ReplicaScope = "default";
  * implementations use one readwrite transaction over the same stores.
  */
 export interface LocalReplicaStorage {
+  /** Last server-authorized identity/visibility metadata, partitioned by login. */
+  loadSession?(identityScope: string): Promise<LocalReplicaSession | undefined>;
+  saveSession?(identityScope: string, session: LocalReplicaSession | undefined): Promise<void>;
   load(scope?: ReplicaScope): Promise<ReplicaSnapshot | undefined>;
   applyTransaction(transaction: ReplicaTransaction, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
   /** Advance ready Replica Collection cursors without rewriting normalized rows. */
@@ -255,6 +266,18 @@ export class LocalReplica implements LocalReplicaView {
     const clonedPatches = patches.map(cloneOptimisticPatch);
     this.pendingCommands.set(commandId, { commandId, patches: clonedPatches });
     this.markWindowsForPatches(clonedPatches);
+    this.notify();
+  }
+
+  /** SDK-only atomic replacement after ordered local reducer replay. */
+  replaceOptimistic(commands: readonly { commandId: string; patches: OptimisticPatch[] }[]) {
+    for (const command of this.pendingCommands.values()) this.markWindowsForPatches(command.patches);
+    this.pendingCommands.clear();
+    for (const command of commands) {
+      const patches = command.patches.map(cloneOptimisticPatch);
+      this.pendingCommands.set(command.commandId, { commandId: command.commandId, patches });
+      this.markWindowsForPatches(patches);
+    }
     this.notify();
   }
 
@@ -954,6 +977,11 @@ function replicaOrderValue(value: JsonValue | undefined): string | number | null
 }
 
 export class MemoryLocalReplicaStorage implements LocalReplicaStorage {
+  private readonly sessions = new Map<string, LocalReplicaSession>();
+  async loadSession(scope: string) { const value = this.sessions.get(scope); return value ? structuredClone(value) : undefined; }
+  async saveSession(scope: string, value: LocalReplicaSession | undefined) {
+    if (value) this.sessions.set(scope, structuredClone(value)); else this.sessions.delete(scope);
+  }
   private readonly values = new Map<ReplicaScope, ReplicaSnapshot>();
   async load(scope: ReplicaScope = defaultReplicaScope) {
     const value = this.values.get(normalizeReplicaScope(scope));

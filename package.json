@@ -5,7 +5,7 @@
   "packageManager": "pnpm@11.1.2",
   "scripts": {
     "build": "pnpm -r build",
-    "build:packages": "pnpm --filter @gonvex/protocol build && pnpm --filter @gonvex/client build && pnpm --filter @gonvex/expo-sqlite build && pnpm --filter @gonvex/react build && pnpm --filter @gonvex/module-sdk build && pnpm --filter @gonvex/cli build && pnpm --filter create-gonvex build",
+    "build:packages": "pnpm --filter @gonvex/protocol build && pnpm --filter @gonvex/module-sdk build && pnpm --filter @gonvex/local-runtime build && pnpm --filter @gonvex/client build && pnpm --filter @gonvex/expo-sqlite build && pnpm --filter @gonvex/react build && pnpm --filter @gonvex/cli build && pnpm --filter create-gonvex build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "test:production-compose": "node --test scripts/production-compose.test.mjs",

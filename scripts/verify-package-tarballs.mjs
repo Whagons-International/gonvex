@@ -13,7 +13,7 @@ const packageDirectories = [
   "client",
   "expo-sqlite",
   "react",
-  "module-sdk",
+  "module-sdk", "local-runtime",
   "gonvex",
   "create-gonvex",
 ];
