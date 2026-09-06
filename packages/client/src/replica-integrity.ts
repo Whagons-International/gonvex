@@ -60,3 +60,10 @@ function utf8KeyCompare(left: string, right: string) {
   }
   return leftBytes.length - rightBytes.length;
 }
+
+/** Carry verified unchanged hashes forward; only changed rows need serialization. */
+export async function applyReplicaHashDelta(previous: Readonly<Record<string, string>>, upserts: readonly JsonValue[], deleted: readonly string[], key: string): Promise<Record<string, string>> {
+  const next = { ...previous };
+  for (const id of deleted) delete next[id];
+  return Object.assign(next, await replicaRowsHashes(upserts, key));
+}

@@ -376,3 +376,21 @@ it('sends only observed reducer tables and retries changed branches against the 
   expect(seen.at(-1)).toEqual(['tasks', 'other']);
   expect(snapshot.tables.other.rows).toEqual([{ _id: 'o1', count: 9 }]);
 });
+
+
+it('opens execution collections only for observed reads and missing tables', async () => {
+  const history: FunctionReference = { ...collection, path: '__local.history', replica: { ...collection.replica!, table: 'history' } };
+  const execute = vi.fn(async () => ({ result: null, patches: [], readTables: ['tasks'] }));
+  const client = new GonvexClient(url, { localRuntime: { artifactHash: 'artifact', tables: ['tasks', 'history'], collections: [collection, history], create: () => ({ ready: Promise.resolve(), execute, replay: vi.fn(), close: vi.fn() }) } });
+  clients.push(client);
+  const subscribe = vi.spyOn(client as any, 'subscribeReplicaTransport').mockReturnValue(() => {});
+  expect(subscribe).not.toHaveBeenCalled();
+  const snapshot = { scope: 'scope', tables: { tasks: { complete: true, rows: [] } } };
+  const execution = { scope: 'scope', commandId: 'command', now: 1, artifactHash: 'artifact', identity };
+  await (client as any).executeLocal('read', {}, snapshot, execution);
+  expect(subscribe.mock.calls.map(call => (call[0] as FunctionReference).path)).toEqual(['__local.tasks']);
+  const missing = Object.assign(new Error('Local replica for history is incomplete; this reducer cannot decide from missing rows.'), { name: 'IncompleteReplicaError' });
+  execute.mockRejectedValueOnce(missing);
+  await expect((client as any).executeLocal('history', {}, snapshot, execution)).rejects.toThrow('incomplete');
+  expect(subscribe.mock.calls.map(call => (call[0] as FunctionReference).path)).toEqual(['__local.tasks', '__local.history']);
+});

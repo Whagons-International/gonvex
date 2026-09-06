@@ -12,7 +12,7 @@ import type {
   ReplicaDirective,
   ReplicaOpenRequest,
 } from "@gonvex/protocol";
-import { replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
+import { applyReplicaHashDelta, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
 import type { LocalExecutor, LocalRuntimeBinding } from "@gonvex/local-runtime/worker-client";
 import { GonvexErrorReporter, type ErrorReporterOptions } from "./error-reporter.js";
@@ -431,6 +431,7 @@ export class GonvexClient {
   private replacingLocal = false;
   private readonly unsubscribeLocal?: () => void;
   private readonly localCollectionClosers: Array<() => void> = [];
+  private readonly localCollectionKeys = new Set<string>();
   private readonly localExecutionTables = new Map<string, Set<string>>();
   private readonly reducerRejectionHandlers = new Set<(event: { reducerId: string; path: string; error: string }) => void>();
   private socket: WebSocket | undefined;
@@ -605,11 +606,23 @@ export class GonvexClient {
     this.replica.setFreshness("offline");
   }
 
-  private ensureLocalCollections() {
-    if (!this.localBinding || this.localCollectionClosers.length) return;
+  private ensureLocalCollections(tables: Iterable<string>) {
+    if (!this.localBinding) return;
+    const needed = new Set(tables);
     for (const reference of this.localBinding.collections ?? []) {
+      if (!reference.replica || !needed.has(reference.replica.table)) continue;
+      const key = querySubscriptionKey(reference, {});
+      if (this.localCollectionKeys.has(key)) continue;
+      this.localCollectionKeys.add(key);
       this.localCollectionClosers.push(this.subscribeReplicaTransport(reference, {}, () => undefined));
     }
+  }
+
+  private hydrateMissingLocalTable(error: unknown): void {
+    if (!(error instanceof Error) || error.name !== "IncompleteReplicaError") return;
+    // Worker errors preserve the public runtime name/message contract.
+    const table = /^Local replica for (.+?) is incomplete;/.exec(error.message)?.[1];
+    if (table) this.ensureLocalCollections([table]);
   }
 
   private localSnapshot(includePending: boolean): LocalSnapshot {
@@ -628,11 +641,14 @@ export class GonvexClient {
     let transaction: LocalTransactionResult;
     try { transaction = await this.localExecutor!.execute(path, args, input, execution); }
     catch (error) {
+      this.hydrateMissingLocalTable(error);
       if (!known || !(error instanceof Error) || error.name !== "IncompleteReplicaError") throw error;
       // A different argument, tenant or workflow can read different tables.
       // Retry against the SAME captured snapshot, never newer mixed-version rows.
-      transaction = await this.localExecutor!.execute(path, args, snapshot, execution);
+      try { transaction = await this.localExecutor!.execute(path, args, snapshot, execution); }
+      catch (retryError) { this.hydrateMissingLocalTable(retryError); throw retryError; }
     }
+    this.ensureLocalCollections(transaction.readTables);
     this.localExecutionTables.set(path, new Set([
       ...(known ?? []), ...transaction.readTables, ...transaction.patches.map(patch => patch.entity),
     ]));
@@ -1313,6 +1329,7 @@ export class GonvexClient {
     this.manuallyClosed = true;
     this.unsubscribeLocal?.();
     for (const close of this.localCollectionClosers.splice(0)) close();
+    this.localCollectionKeys.clear();
     this.localExecutor?.close();
     this.cancelManagedAuthAttempt("Gonvex client was closed during authentication.");
     if (isEphemeralOutboxScope(this.outboxScope)) {
@@ -2038,12 +2055,20 @@ export class GonvexClient {
       if (replicaCursorIsStale(subscription, message.cursor) || (prior?.cursor && message.cursor.revision < prior.cursor.revision)) return;
       this.clearReplicaRetry(subscription, true);
       raiseReplicaCursorFloor(subscription, message.cursor);
+      const upserts = (message.upserts ?? []).filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map(row => asReplicaRow(row)!);
+      // Incremental integrity is safe only for full projected row images. Older
+      // partial-row protocols keep the full normalized rehash on replica.ready.
+      const canCarryHashes = prior?.hashes && subscription.columns?.length
+        && upserts.every(row => subscription.columns!.every(column => hasOwn(row, column)));
+      const hashes = message.hashes ?? (canCarryHashes
+        ? await applyReplicaHashDelta(prior!.hashes!, projectReplicaIntegrityRows(upserts, subscription.columns), message.deleted ?? [], prior?.key ?? "id")
+        : undefined);
       await this.replica.applyWindowDelta({
         signature: subscription.key,
         kind: "replica",
         entity: subscription.entity,
         key: prior?.key ?? "id",
-        upserts: (message.upserts ?? []).filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map((row) => asReplicaRow(row)! ),
+        upserts,
         deleted: message.deleted ?? [],
         completeness: prior?.completeness ?? "partial",
         source: "server",
@@ -2054,9 +2079,7 @@ export class GonvexClient {
         orderDirection: prior?.orderDirection,
         maxRows: prior?.maxRows,
         maxBytes: prior?.maxBytes,
-        // A delta invalidates the prior full integrity map unless the server
-        // supplied a complete replacement map with this frame.
-        hashes: message.hashes,
+        hashes,
       });
       const snapshot: ReplicaMessage = {
         type: "replica.snapshot", id: subscription.id, path: subscription.path,
@@ -2428,7 +2451,6 @@ export class GonvexClient {
     // and sends a second time with the same command ID.
     this.outboxReady = this.restoreOutbox(this.outboxScope, generation);
     await this.outboxReady;
-    this.ensureLocalCollections();
   }
 
   private quarantineReplicaScope() {
