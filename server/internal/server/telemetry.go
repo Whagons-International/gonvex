@@ -98,10 +98,7 @@ func (s *Server) persistTransactionTelemetry(entry transactionTelemetryEntry) {
 		}
 		return
 	}
-	deviceJSON := strings.TrimSpace(entry.DeviceJSON)
-	if deviceJSON == "" {
-		deviceJSON = "{}"
-	}
+	deviceJSON := telemetryDeviceJSON(entry)
 	eventTime := entry.Time
 	if eventTime == "" {
 		eventTime = time.Now().UTC().Format(time.RFC3339Nano)

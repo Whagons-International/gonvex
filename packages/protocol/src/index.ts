@@ -61,11 +61,25 @@ export type MessageTrace = {
   serverSubscriptionStartedAtMs?: number;
   serverSubscriptionSentAtMs?: number;
   serverDurationMs?: number;
+  /** Actual socket-write start, after result batching and lock acquisition. */
+  serverSocketWriteStartedAtMs?: number;
   /** Non-semantic top-level query performance metadata from result.perf. */
   queryPerf?: JsonValue;
 };
 
 export type BrowserTelemetryInfo = {
+  deliveryDiagnostics?: {
+    messageHandlerDelayMs?: number;
+    messageDecodeMs: number;
+    messageProcessingMs: number;
+    longTaskSupported: boolean;
+    longTaskCount: number;
+    longTaskMaxMs: number;
+    longTaskTotalMs: number;
+    visibilityState?: string;
+    online?: boolean;
+    bufferedAmount: number;
+  };
   userAgent?: string;
   browserName?: string;
   browserVersion?: string;

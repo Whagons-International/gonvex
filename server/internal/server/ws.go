@@ -179,6 +179,7 @@ func explicitNull(result any) any {
 }
 
 type messageTrace struct {
+	ServerSocketWriteStartedAtMS  float64         `json:"serverSocketWriteStartedAtMs,omitempty"`
 	ClientSentAtMS                float64         `json:"clientSentAtMs,omitempty"`
 	ServerReceivedAtMS            float64         `json:"serverReceivedAtMs,omitempty"`
 	ServerMutationStartedAtMS     float64         `json:"serverMutationStartedAtMs,omitempty"`
@@ -759,6 +760,10 @@ func transactionEntryFromTrace(project string, tenant string, operationID string
 	entry.ServerCompletedAtMS = trace.ServerCompletedAtMS
 	entry.ServerSentAtMS = trace.ServerSubscriptionSentAtMS
 	entry.ChangeCommittedAtMS = trace.ServerChangeCommittedAtMS
+	entry.ServerSocketWriteStartedAtMS = trace.ServerSocketWriteStartedAtMS
+	if trace.ServerSocketWriteStartedAtMS > 0 && trace.ServerSubscriptionSentAtMS > 0 {
+		entry.ServerSocketQueueMS = max(0, trace.ServerSocketWriteStartedAtMS-trace.ServerSubscriptionSentAtMS)
+	}
 	entry.ServerDurationMS = trace.ServerDurationMS
 	if trace.ServerMutationStartedAtMS > 0 && trace.ServerMutationCommittedAtMS > 0 {
 		entry.ServerCommitMS = float64(trace.ServerMutationCommittedAtMS - trace.ServerMutationStartedAtMS)
@@ -1208,12 +1213,22 @@ func (c *wsConn) writeLocked(message serverMessage) {
 	if c.conn == nil {
 		return
 	}
-	_ = c.conn.SetWriteDeadline(time.Now().Add(websocketWriteTimeout))
+	writeStarted := time.Now()
+	message, queueMS := stampSocketWrite(message, writeStarted)
+	_ = c.conn.SetWriteDeadline(writeStarted.Add(websocketWriteTimeout))
 	payload, err := json.Marshal(message)
 	if err != nil {
 		return
 	}
-	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+	writeErr := c.conn.WriteMessage(websocket.TextMessage, payload)
+	writeMS := float64(time.Since(writeStarted).Microseconds()) / 1000
+	if queueMS >= 200 || writeMS >= 200 {
+		slog.Warn("slow websocket delivery", "connection", c.id, "project", c.project, "tenant", c.tenant,
+			"type", message.Type, "path", message.Path, "operation", message.ID,
+			"queueMs", queueMS, "writeMs", writeMS, "bytes", len(payload),
+			"queries", deliveryQueryIDs(message), "failed", writeErr != nil)
+	}
+	if err := writeErr; err != nil {
 		slog.Warn("websocket write failed", "connection", c.id, "project", c.project, "tenant", c.tenant, "type", message.Type, "path", message.Path, "error", err)
 		_ = c.conn.Close()
 		c.conn = nil
