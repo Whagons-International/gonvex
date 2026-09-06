@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { Dexie } from "dexie";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica";
+import { LocalReplica } from "./local-replica";
 
 describe("IndexedDBLocalReplicaStorage", () => {
   it("stores normalized entities and window metadata in one scope", async () => {
@@ -162,4 +163,32 @@ describe("IndexedDBLocalReplicaStorage", () => {
       Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
     }
   });
+});
+
+
+it("persists only changed delta rows while retaining normalized projected fields", async () => {
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalKeyRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const storage = new IndexedDBLocalReplicaStorage(`delta-${Math.random()}`);
+  try {
+    const replica = new LocalReplica(storage);
+    await replica.replaceWindow({ signature: "tasks", kind: "replica", entity: "tasks", key: "id", rows: [{ id: "a", name: "A", status: "new" }, { id: "b", name: "B" }], completeness: "complete", source: "server" });
+    const replace = vi.spyOn(storage, "replaceWindow");
+    const apply = storage.applyWindowDelta.bind(storage);
+    const delta = vi.spyOn(storage, "applyWindowDelta").mockImplementation(async (window, change, snapshot, scope) => {
+      // Unchanged rows must not be materialized or serialized for this write.
+      Object.defineProperty(snapshot.entities.tasks, "b", { get() { throw new Error("copied unchanged row"); } });
+      return apply(window, change, snapshot, scope);
+    });
+    await replica.applyWindowDelta({ signature: "tasks", kind: "replica", entity: "tasks", key: "id", upserts: [{ id: "a", status: "working" }], deleted: [] });
+    expect(delta).toHaveBeenCalledOnce();
+    expect(replace).not.toHaveBeenCalled();
+    expect((await storage.load())?.entities.tasks).toEqual({ a: { id: "a", name: "A", status: "working" }, b: { id: "b", name: "B" } });
+  } finally {
+    storage.close();
+    Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
+  }
 });

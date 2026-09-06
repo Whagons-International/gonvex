@@ -212,11 +212,23 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     });
   }
 
-  async applyWindowDelta(window: ReplicaWindow, _delta: { upserts: ReplicaRow[]; deleted: string[] }, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
-    // The in-memory replica has already computed the normalized result. The
-    // storage transaction receives that result and persists it atomically;
-    // retaining unrelated entities is deliberate and conservative.
-    await this.replaceWindow(window, snapshot, scope);
+  async applyWindowDelta(window: ReplicaWindow, delta: { upserts: ReplicaRow[]; deleted: string[] }, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+    await this.initialize();
+    const normalizedScope = normalizeScope(scope);
+    await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
+      const rows = snapshot.entities[window.entity] ?? {};
+      for (const id of delta.deleted) {
+        // A removed membership may still be owned by another projection.
+        if (rows[id] === undefined) await this.database.entities.delete([normalizedScope, window.entity, id]);
+      }
+      const ids = new Set(delta.upserts.map(row => String(row[window.key])));
+      await this.database.entities.bulkPut([...ids].flatMap(id => {
+        const value = rows[id];
+        return value === undefined ? [] : [{ scope: normalizedScope, entity: window.entity, id, value: JSON.stringify(value) }];
+      }));
+      await this.database.windows.put({ scope: normalizedScope, signature: window.signature, value: JSON.stringify(normalizeWindow(window)) });
+      if (snapshot.cursor) await this.database.meta.put({ scope: normalizedScope, key: "cursor", value: JSON.stringify(snapshot.cursor) });
+    });
   }
 
   async removeWindow(signature: string, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {

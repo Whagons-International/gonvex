@@ -1,3 +1,4 @@
+import { shareReplicaRows } from "./replica-row-sharing.js";
 import type {
   BrowserTelemetryInfo,
   ClientMessage,
@@ -1812,7 +1813,7 @@ export class GonvexClient {
         const version = this.replica.windowRowsVersion(key);
         if (snapshotVersion === version) return snapshotRows;
         snapshotVersion = version;
-        snapshotRows = this.replica.liveQuery(key).rows as unknown as T[];
+        snapshotRows = shareReplicaRows(snapshotRows as unknown as ReplicaRow[] | undefined, this.replica.liveQuery(key).rows, ref.replica?.key ?? "id") as unknown as T[];
         return snapshotRows;
       },
       localReplicaState: () => {
@@ -1829,11 +1830,11 @@ export class GonvexClient {
         stateVersion = version;
         stateFreshness = freshness;
         stateIsUpToDate = isUpToDate;
-        const state = this.replica.collectionState(key);
         const rowsVersion = this.replica.windowRowsVersion(key);
+        const state = this.replica.collectionState(key, snapshotVersion === rowsVersion ? snapshotRows as unknown as ReplicaRow[] : undefined);
         if (snapshotVersion !== rowsVersion) {
           snapshotVersion = rowsVersion;
-          snapshotRows = state.rows as unknown as T[];
+          snapshotRows = shareReplicaRows(snapshotRows as unknown as ReplicaRow[] | undefined, state.rows, ref.replica?.key ?? "id") as unknown as T[];
         }
         state.rows = snapshotRows as unknown as ReplicaRow[];
         snapshotState = {

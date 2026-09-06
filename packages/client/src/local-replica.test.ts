@@ -733,3 +733,19 @@ it('captures execution rows atomically without cloning unused tables', async () 
   expect(replica.entity('tasks', 't')?.nested).toEqual({ count: 3 });
   expect(base('tasks')[0]!.nested).toEqual({ count: 1 });
 });
+
+
+describe("optimistic membership allocation", () => {
+  it("copies each row at most once for ordering rather than on every comparison", async () => {
+    const replica = new LocalReplica();
+    const rows = Array.from({ length: 100 }, (_, i) => ({ id: String(i), order: (i * 37) % 100 }));
+    await replica.replaceWindow({ signature: "ordered", kind: "replica", entity: "tasks", key: "id", rows, completeness: "complete", source: "server" });
+    replica.registerReplicaCollection("ordered", { table: "tasks", key: "id", orderBy: "order", orderDirection: "asc" });
+    replica.applyOptimistic("edit", [{ entity: "tasks", rowId: "0", op: "patch", fields: { order: -1 } }]);
+    const read = vi.spyOn(replica, "entity");
+    const result = replica.windowRows("ordered");
+    expect(result[0]).toMatchObject({ id: "0", order: -1 });
+    expect(result.map(row => row.order)).toEqual([...result.map(row => row.order)].sort((a, b) => Number(a) - Number(b)));
+    expect(read.mock.calls.length).toBeLessThanOrEqual(201);
+  });
+});

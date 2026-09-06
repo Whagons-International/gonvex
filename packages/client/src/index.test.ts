@@ -1731,10 +1731,12 @@ describe("GonvexClient", () => {
     const before = watch.localReplicaResult();
     const stateRowsBefore = watch.localReplicaState()!.rows;
     const replica = (client as any).replica;
+    const readEntity = vi.spyOn(replica, "entity");
     await replica.advanceWatermark(19, replica.listWindows().map((w: any) => w.signature));
     expect(watch.localReplicaState()).toMatchObject({ computedRevision: 19 });
     expect(watch.localReplicaResult()).toBe(before);
     expect(watch.localReplicaState()!.rows).toBe(stateRowsBefore);
+    expect(readEntity).not.toHaveBeenCalled();
     client.close();
   });
 
