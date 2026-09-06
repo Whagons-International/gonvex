@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { internalReducer, reducer, schema, type ReducerContext } from "@gonvex/module-sdk";
 import { LocalReducerRuntime, type LocalExecution, type LocalSnapshot } from "./index.js";
@@ -215,3 +216,49 @@ describe("local reducer execution", () => {
     expect(inserts).toBeLessThan(10);
     expect((await host.execute("count", {}, snapshot(), { ...execution(), commandId: "next" })).result).toBe(1);
  });
+
+it("executes isolated reducer transactions from the prebuilt empty cluster", async () => {
+  const encoded = await readFile(new URL("../assets/empty-database.b64", import.meta.url), "utf8");
+  const template = new Blob([Buffer.from(encoded.trim(), "base64")]);
+  const host = new LocalReducerRuntime({ tables, databaseTemplate: template, artifactHash: "artifact-1", reducers: {
+    increment: define(async ctx => {
+      const [task] = await ctx.db.query<any>('SELECT * FROM "tasks" WHERE "_id" = $1', ["t1"]);
+      await ctx.db.update("tasks", "t1", { count: task.count + 1 });
+      return task.count + 1;
+    }),
+  }});
+  runtimes.push(host);
+  const first = await host.execute("increment", {}, snapshot(), execution());
+  const second = await host.execute("increment", {}, snapshot(), { ...execution(), commandId: "second" });
+  expect(first.result).toBe(1);
+  expect(second.result).toBe(1);
+  expect(first.patches).toEqual([{ entity: "tasks", rowId: "t1", op: "patch", fields: { count: 1 } }]);
+});
+
+it("preserves point writes when a later query expands to a full table scan", async () => {
+  const input = snapshot();
+  input.tables.tasks.rows.push({ _id: "t2", statusId: "todo", count: 2 }, { _id: "t3", statusId: "todo", count: 3 });
+  const host = runtime({ edit: define(async ctx => {
+    await ctx.db.update("tasks", "t1", { count: 10 });
+    await ctx.db.delete("tasks", "t2");
+    await ctx.db.insert("tasks", { _id: "t4", statusId: "todo", count: 4 });
+    return ctx.db.query('SELECT "_id", "count" FROM "tasks" ORDER BY "_id"');
+  }) });
+  const result = await host.execute("edit", {}, input, execution());
+  expect(result.result).toEqual([{ _id: "t1", count: 10 }, { _id: "t3", count: 3 }, { _id: "t4", count: 4 }]);
+});
+
+it("still detects an existing primary key when inserting with point seeding", async () => {
+  const host = runtime({ duplicate: define(ctx => ctx.db.insert("tasks", { _id: "t1", statusId: "todo", count: 1 })) });
+  await expect(host.execute("duplicate", {}, snapshot(), execution())).rejects.toThrow();
+});
+
+it("seeds only the requested primary key for a large collection update", async () => {
+  const input = snapshot();
+  input.tables.tasks.rows = Array.from({ length: 1000 }, (_, i) => ({ _id: `t${i}`, statusId: "todo", count: i }));
+  const host = runtime({ edit: define(ctx => ctx.db.update("tasks", "t500", { count: 9 })) });
+  const seed = vi.spyOn(host as any, "seedRows");
+  const result = await host.execute("edit", {}, input, execution());
+  expect(result.patches).toEqual([{ entity: "tasks", rowId: "t500", op: "patch", fields: { count: 9 } }]);
+  expect(seed.mock.calls.flatMap(call => call[2] as unknown[])).toHaveLength(1);
+});

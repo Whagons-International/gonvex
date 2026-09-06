@@ -661,3 +661,75 @@ describe("LocalReplica", () => {
     replica.replaceOptimistic([]);
     expect(listener).toHaveBeenCalledOnce();
   });
+
+it("keeps task entity versions stable for metadata and unrelated rows", async () => {
+  const replica = new LocalReplica();
+  await replica.applyTransaction({cursor:{epoch:"e",revision:1},changes:[{entity:"tasks",id:"a",operation:"insert",newValue:{id:"a",title:"A"}}]});
+  const before = replica.entityVersion("tasks");
+  replica.setFreshness("offline");
+  await replica.applyTransaction({cursor:{epoch:"e",revision:2},changes:[{entity:"members",id:"m",operation:"insert",newValue:{id:"m"}}]});
+  expect(replica.entityVersion("tasks")).toBe(before);
+  replica.applyOptimistic("edit",[{entity:"tasks",rowId:"a",op:"patch",fields:{title:"B"}}]);
+  expect(replica.entityVersion("tasks")).toBeGreaterThan(before);
+  const edited = replica.entityVersion("tasks");
+  replica.rejectCommand("edit");
+  expect(replica.entityVersion("tasks")).toBeGreaterThan(edited);
+  const previousScope = replica.entityVersion("tasks");
+  await replica.activateScope("another");
+  expect(replica.entityVersion("tasks")).toBeGreaterThan(previousScope);
+  expect(replica.entity("tasks","a")).toBeUndefined();
+});
+
+for (const kind of ["transaction", "window"] as const) {
+  it(`keeps entity versions atomic when an epoch-changing ${kind} fails persistence`, async () => {
+    let fail = false;
+    const persist = async () => { if (fail) throw new Error("disk unavailable"); };
+    const replica = new LocalReplica({ load: async () => undefined, replaceSnapshot: persist, applyTransaction: persist });
+    await replica.replaceWindow({ signature: "tasks:grid", entity: "tasks", key: "id", rows: [{ id: "a" }], completeness: "complete", source: "server", cursor: { epoch: "old", revision: 1 } });
+    const version = replica.entityVersion("tasks");
+    fail = true;
+    const attempt = kind === "transaction"
+      ? replica.applyTransaction({ cursor: { epoch: "new", revision: 1 }, changes: [] })
+      : replica.replaceWindow({ signature: "tasks:grid", entity: "tasks", key: "id", rows: [], completeness: "complete", source: "server", cursor: { epoch: "new", revision: 1 } });
+    await expect(attempt).rejects.toThrow("disk unavailable");
+    expect(replica.entityVersion("tasks")).toBe(version);
+    expect(replica.entity("tasks", "a")).toEqual({ id: "a" });
+    expect(replica.liveQuery("tasks:grid").ids).toEqual(["a"]);
+  });
+}
+
+it("does not copy unrelated rows for incremental persistence, but isolates adapter snapshots", async () => {
+  let stored: any;
+  const replica = new LocalReplica({ load: async () => undefined,
+    applyTransaction: async () => {},
+    replaceWindow: async (window, snapshot) => { stored = snapshot; void snapshot.entities[window.entity]; },
+  });
+  await replica.replaceWindow({ signature: "notes", entity: "notes", key: "id", rows: [{ id: "n", nested: { text: "original" } }], completeness: "complete", source: "server" });
+  const clone = vi.spyOn(globalThis, "structuredClone");
+  await replica.replaceWindow({ signature: "tasks", entity: "tasks", key: "id", rows: [{ id: "t" }], completeness: "complete", source: "server" });
+  expect(clone.mock.calls.some(([row]: any[]) => row?.id === "n")).toBe(false);
+  clone.mockRestore();
+  stored.entities.notes.n.nested.text = "adapter change";
+  expect(replica.entity("notes", "n")?.nested).toEqual({ text: "original" });
+  await replica.applyTransaction({ cursor: { epoch: "e", revision: 1 }, changes: [{ entity: "notes", id: "n", operation: "delete" }] });
+  expect(stored.entities.notes.n.nested.text).toBe("adapter change");
+});
+
+it('captures execution rows atomically without cloning unused tables', async () => {
+  const replica = new LocalReplica();
+  await replica.replaceWindow({ signature: 'tasks', entity: 'tasks', key: 'id', rows: [{ id: 't', nested: { count: 1 } }], completeness: 'complete', source: 'server' });
+  await replica.replaceWindow({ signature: 'history', entity: 'history', key: 'id', rows: [{ id: 'h', body: 'unrelated' }], completeness: 'complete', source: 'server' });
+  replica.applyOptimistic('first', [{ entity: 'tasks', rowId: 't', op: 'patch', fields: { nested: { count: 2 } } }]);
+  const clone = vi.spyOn(globalThis, 'structuredClone');
+  const read = replica.captureExecutionRows(true);
+  expect(clone).not.toHaveBeenCalled();
+  const base = replica.captureExecutionRows(false);
+  clone.mockRestore();
+  replica.rejectCommand('first');
+  await replica.applyTransaction({ cursor: { epoch: 'e', revision: 1 }, changes: [{ entity: 'tasks', id: 't', operation: 'update', newValue: { id: 't', nested: { count: 3 } } }] });
+  expect(read('tasks')).toEqual([{ id: 't', nested: { count: 2 } }]);
+  expect(base('tasks')).toEqual([{ id: 't', nested: { count: 1 } }]);
+  (read('tasks')[0]!.nested as any).count = 99;
+  expect(replica.entity('tasks', 't')?.nested).toEqual({ count: 3 });
+  expect(base('tasks')[0]!.nested).toEqual({ count: 1 });
+});

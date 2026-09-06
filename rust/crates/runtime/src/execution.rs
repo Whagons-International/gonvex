@@ -1035,6 +1035,7 @@ mod tests {
             artifact_hash: "active-hash".to_owned(),
             functions,
             manifest_functions: json!({}),
+            replica_epochs: Default::default(),
             schema: json!({}),
             visibility: BTreeMap::new(),
             invitation_acceptance_reducer: String::new(),

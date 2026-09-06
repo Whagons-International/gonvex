@@ -1,0 +1,5 @@
+{
+  "pgliteVersion": "0.5.8",
+  "sha256": "73162a65865fbf5710183a8061d8e611b39b99461196f7c58182102af47e05db",
+  "description": "Empty PGlite cluster, no application schemas or tenant data."
+}

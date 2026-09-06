@@ -167,13 +167,11 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     // window metadata and the shared cursor so large normalized replicas are
     // never rewritten once per retained collection.
     await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
-      for (const window of windows) {
-        await this.database.windows.put({
-          scope: normalizedScope,
-          signature: window.signature,
-          value: JSON.stringify(normalizeWindow(window)),
-        });
-      }
+      await this.database.windows.bulkPut(windows.map((window) => ({
+        scope: normalizedScope,
+        signature: window.signature,
+        value: JSON.stringify(normalizeWindow(window)),
+      })));
       if (cursor) {
         await this.database.meta.put({ scope: normalizedScope, key: "cursor", value: JSON.stringify(cursor) });
       }
@@ -203,17 +201,12 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
           }
         }
       }
-      for (const id of window.ids) {
+      await this.database.entities.bulkPut(window.ids.flatMap((id) => {
         const value = rows[id];
-        if (value !== undefined) {
-          await this.database.entities.put({
-            scope: normalizedScope,
-            entity: window.entity,
-            id,
-            value: JSON.stringify(value),
-          });
-        }
-      }
+        return value === undefined ? [] : [{
+          scope: normalizedScope, entity: window.entity, id, value: JSON.stringify(value),
+        }];
+      }));
       await this.database.windows.put({ scope: normalizedScope, signature: window.signature, value: JSON.stringify(normalizeWindow(window)) });
       if (snapshot.cursor) await this.database.meta.put({ scope: normalizedScope, key: "cursor", value: JSON.stringify(snapshot.cursor) });
     });

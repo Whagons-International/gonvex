@@ -108,6 +108,7 @@ function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
     cursor: () => replica.cursor(),
     freshness: () => replica.freshness(),
     version: () => replica.version(),
+    entityVersion: (entity) => replica.entityVersion(entity),
     subscribe: (listener) => replica.subscribe(listener),
     hasPendingCommand: (commandId) => replica.hasPendingCommand(commandId),
     getWindow: (signature) => replica.getWindow(signature),
@@ -418,15 +419,18 @@ const maxReplicaBatchOpens = 256;
 // normally settle in a few milliseconds.
 
 export class GonvexClient {
+  private readonly localTableBindings = new Map<string, { signatures: string[]; columns: string[] }>();
   private readonly localBinding?: GonvexClientOptions["localRuntime"];
   private readonly localExecutor?: LocalExecutor;
   private readonly localStorage?: LocalReplicaStorage;
   private localIdentity?: LocalExecution["identity"];
   private localLane: Promise<unknown> = Promise.resolve();
   private localReplayScheduled = false;
+  private waitingLocalEdits = 0;
   private replacingLocal = false;
   private readonly unsubscribeLocal?: () => void;
   private readonly localCollectionClosers: Array<() => void> = [];
+  private readonly localExecutionTables = new Map<string, Set<string>>();
   private readonly reducerRejectionHandlers = new Set<(event: { reducerId: string; path: string; error: string }) => void>();
   private socket: WebSocket | undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
@@ -517,7 +521,13 @@ export class GonvexClient {
     this.clientContract = options.clientContract ?? options.localRuntime?.clientContract;
     this.updateRequiredHandler = options.onUpdateRequired;
     this.localBinding = options.localRuntime;
-    this.localExecutor = options.localRuntime?.create();
+    for (const table of this.localBinding?.tables ?? []) {
+      const references = (this.localBinding?.collections ?? []).filter(ref => ref.replica?.table === table
+        && !Object.keys(ref.replica.equalFilters ?? {}).length && !(ref.replica.excludeWhenSet?.length));
+      this.localTableBindings.set(table, { signatures: references.map(ref => querySubscriptionKey(ref, {})),
+        columns: [...new Set(references.flatMap(ref => ref.replica?.columns ?? []))] });
+    }
+    this.localExecutor = options.localRuntime ? deferredLocalExecutor(() => options.localRuntime!.create()) : undefined;
     this.localStorage = options.localReplica?.storage;
     this.auth = authFromOptions(options);
     this.telemetryEnabled = options.telemetry === true;
@@ -530,7 +540,15 @@ export class GonvexClient {
     this.reducerOutbox = createReducerOutbox(options.outbox);
     this.replica = new LocalReplica(options.localReplica?.storage);
     this.replicaView = createLocalReplicaView(this.replica);
-    if (this.localExecutor) this.unsubscribeLocal = this.replica.subscribe(() => this.scheduleLocalReplay());
+    if (this.localExecutor) {
+      let executionVersion = this.replica.executionVersion();
+      this.unsubscribeLocal = this.replica.subscribe(() => {
+        const next = this.replica.executionVersion();
+        if (next === executionVersion) return;
+        executionVersion = next;
+        this.scheduleLocalReplay();
+      });
+    }
     this.unsubscribeOutbox = this.reducerOutbox.subscribe(() => {
       void this.drainOutbox();
     });
@@ -581,6 +599,7 @@ export class GonvexClient {
     if (!saved || generation !== this.outboxScopeGeneration || scope !== this.outboxScope || this.hasAuthoritativeReplicaScope) return;
     this.lastOnlineAtMs = saved.lastOnlineAtMs ?? 0;
     this.localIdentity = saved.identity;
+    void this.localExecutor?.ready.catch(() => undefined);
     await this.activateReplicaDirective(saved.directive);
     this.replica.setFreshness("offline");
   }
@@ -593,18 +612,30 @@ export class GonvexClient {
   }
 
   private localSnapshot(includePending: boolean): LocalSnapshot {
-    const snapshot = this.replica.snapshot();
+    const rows = this.replica.captureExecutionRows(includePending);
     const tables: LocalSnapshot["tables"] = {};
-    for (const table of this.localBinding?.tables ?? []) {
-      const references = (this.localBinding?.collections ?? []).filter((ref) => ref.replica?.table === table
-        && !Object.keys(ref.replica.equalFilters ?? {}).length && !(ref.replica.excludeWhenSet?.length));
-      const complete = references.some((ref) => {
-        const window = snapshot.liveQueries[querySubscriptionKey(ref, {})];
-        return window?.completeness === "complete" && window.truncated !== true;
-      });
-      tables[table] = { complete, columns: [...new Set(references.flatMap(ref => ref.replica?.columns ?? []))], rows: includePending ? this.replica.entityRows(table) : Object.values(snapshot.entities[table] ?? {}) };
+    for (const [table, binding] of this.localTableBindings) {
+      const complete = binding.signatures.some(signature => this.replica.windowIsComplete(signature));
+      tables[table] = { complete, columns: binding.columns, get rows() { return rows(table); } };
     }
     return { scope: this.replicaScope, tables };
+  }
+
+  private async executeLocal(path: string, args: JsonValue, snapshot: LocalSnapshot, execution: LocalExecution): Promise<LocalTransactionResult> {
+    const known = this.localExecutionTables.get(path);
+    const input = known ? { ...snapshot, tables: Object.fromEntries(Object.entries(snapshot.tables).filter(([table]) => known.has(table))) } : snapshot;
+    let transaction: LocalTransactionResult;
+    try { transaction = await this.localExecutor!.execute(path, args, input, execution); }
+    catch (error) {
+      if (!known || !(error instanceof Error) || error.name !== "IncompleteReplicaError") throw error;
+      // A different argument, tenant or workflow can read different tables.
+      // Retry against the SAME captured snapshot, never newer mixed-version rows.
+      transaction = await this.localExecutor!.execute(path, args, snapshot, execution);
+    }
+    this.localExecutionTables.set(path, new Set([
+      ...(known ?? []), ...transaction.readTables, ...transaction.patches.map(patch => patch.entity),
+    ]));
+    return transaction;
   }
 
   private inLocalLane<T>(run: () => Promise<T>): Promise<T> {
@@ -629,8 +660,12 @@ export class GonvexClient {
     for (const listener of this.reducerRejectionHandlers) listener({ reducerId, path, error: message });
   }
 
-  private async rebaseLocalEntries(): Promise<void> {
+  private async rebaseLocalEntries(afterRejection = false): Promise<void> {
     if (!this.localExecutor || !this.localBinding || !this.localIdentity || !this.hasAuthoritativeReplicaScope) return;
+    // The authoritative drain validates the pending chain in order. Keep its
+    // predictions while it progresses, then rebase once it settles or loses
+    // connectivity instead of replaying N + (N-1) + ... local transactions.
+    if (!afterRejection && this.drainingOutbox && this.canSendReducerNow()) return;
     const scope = this.outboxScope;
     const replicaScope = this.replicaScope;
     const entries = await this.reducerOutbox.list(scope);
@@ -643,16 +678,22 @@ export class GonvexClient {
       this.optimisticOutboxEntryIds.clear();
       return;
     }
-    const baseVersion = this.replica.version();
+    const baseVersion = this.replica.executionVersion();
     const needsExecution = entries.some(entry => entry.localExecution && entry.state !== "inflight" && entry.state !== "committed");
     const snapshot = needsExecution ? this.localSnapshot(false) : undefined;
     const commands: Array<{ commandId: string; patches: OptimisticPatch[] }> = [];
     for (const entry of entries) {
+      // Predictions can wait; a fresh user intent must not sit behind the
+      // entire durable backlog. Publish only a complete, coherent rebase.
+      if (this.waitingLocalEdits > 0) {
+        setTimeout(() => this.scheduleLocalReplay(), 0);
+        return;
+      }
       let patches = entry.patches ?? [];
       if (entry.localExecution && entry.state !== "inflight" && entry.state !== "committed") {
         const execution: LocalExecution = { ...entry.localExecution, scope: replicaScope, identity: this.localIdentity, artifactHash: this.localBinding.artifactHash };
         try {
-          const transaction = await this.localExecutor.execute(entry.path, entry.args as JsonValue, snapshot!, execution);
+          const transaction = await this.executeLocal(entry.path, entry.args as JsonValue, snapshot!, execution);
           patches = transaction.patches;
           if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
         } catch (error) {
@@ -669,7 +710,7 @@ export class GonvexClient {
       commands.push({ commandId: entry.idempotencyKey, patches });
     }
     if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
-    if (baseVersion !== this.replica.version()) {
+    if (baseVersion !== this.replica.executionVersion()) {
       // A changing server base must not recursively occupy the local lane.
       // Release it so user intents already queued can run before the retry.
       setTimeout(() => this.scheduleLocalReplay(), 0);
@@ -692,7 +733,9 @@ export class GonvexClient {
     await this.outboxReady;
     await this.replicaReady;
     if (!this.localExecutor || !this.localBinding) throw new Error("This reducer requires the generated Gonvex client with local execution enabled");
+    this.waitingLocalEdits += 1;
     return this.inLocalLane(async () => {
+      this.waitingLocalEdits -= 1;
       if (admittedGeneration !== this.outboxScopeGeneration) throw new GonvexClientError("Session changed before local reducer execution", { code: "superseded" });
       if (!this.localIdentity || !this.hasAuthoritativeReplicaScope) throw new Error("Restore an authenticated local session before editing offline");
       if (this.manuallyClosed) throw new Error("Gonvex client is closed");
@@ -705,8 +748,9 @@ export class GonvexClient {
         intentEntropy: Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, "0")).join(""),
         artifactHash: this.localBinding!.artifactHash, identity: structuredClone(this.localIdentity),
       };
+      const executionBaseVersion = this.replica.executionVersion();
       let transaction: LocalTransactionResult | undefined;
-      try { transaction = await this.localExecutor!.execute(ref.path, args, this.localSnapshot(true), execution); }
+      try { transaction = await this.executeLocal(ref.path, args, this.localSnapshot(true), execution); }
       catch (error) { if (!(error instanceof Error) || error.name !== "IncompleteReplicaError") throw error; }
       if (scope !== this.outboxScope || execution.scope !== this.replicaScope) throw new GonvexClientError("Session changed during local reducer execution", { code: "superseded" });
       const patches = transaction?.patches ?? [];
@@ -728,7 +772,10 @@ export class GonvexClient {
         return transaction ? transaction.result as T : { status: "queued", reducerId };
       } finally {
         this.directOutboxReducerIds.delete(reducerId);
-        this.scheduleLocalReplay();
+        // This transaction already executed against all earlier predictions.
+        // Appending it does not invalidate those predictions. Rebase only if
+        // the authoritative execution snapshot changed during execution.
+        if (!transaction || this.replica.executionVersion() !== executionBaseVersion) this.scheduleLocalReplay();
         void this.drainOutbox();
       }
     });
@@ -1124,7 +1171,10 @@ export class GonvexClient {
           this.authRetriedAfterError = false;
           const directive = replicaDirectiveFromAuthResult(message.result);
           const localIdentity = localIdentityFromAuthResult(message.result);
-          if (localIdentity) this.localIdentity = localIdentity;
+          if (localIdentity) {
+            this.localIdentity = localIdentity;
+            void this.localExecutor?.ready.catch(() => undefined);
+          }
           if (!directive) {
             this.authInFlight = false;
             if (!this.auth.tenant) {
@@ -1706,7 +1756,7 @@ export class GonvexClient {
   }
 
   /** Watch a bounded Replica Collection through the normalized Local Replica. */
-  watchReplica<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args) {
+  watchReplica<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: { deferStart?: boolean } = {}) {
     const key = querySubscriptionKey(ref, args);
     const updateHandlers = new Set<WatchUpdateHandler>();
     let latestError: Error | undefined;
@@ -1722,31 +1772,39 @@ export class GonvexClient {
     };
     // Keep the ReplicaSubscription as transport/reconciliation state only. The
     // value returned by this watch always comes from normalized LocalReplica.
-    const unsubscribeTransport = this.subscribeReplicaTransport(ref, args, (message) => {
-      if (message.type === "replica.error") {
-        latestError = new Error(message.error);
-        notify();
-      } else if (message.type === "replica.syncing" || message.type === "replica.reset") {
+    let stop: (() => void) | undefined;
+    const start = () => {
+      if (stop) return;
+      snapshotVersion = -1; stateVersion = -1;
+      const unsubscribeTransport = this.subscribeReplicaTransport(ref, args, (message) => {
+        if (message.type === "replica.error") {
+          latestError = new Error(message.error);
+          notify();
+        } else if (message.type === "replica.syncing" || message.type === "replica.reset") {
+          latestError = undefined;
+          notify();
+        } else if (message.type === "replica.ready") {
+          latestError = undefined;
+          notify();
+        } else if (message.type === "replica.snapshot") {
+          latestError = undefined;
+        }
+      });
+      const unsubscribeReplica = this.replica.subscribe(notify);
+      const unsubscribeScope = this.onSessionScopeChange(() => {
         latestError = undefined;
+        snapshotVersion = -1;
+        snapshotRows = undefined;
+        stateVersion = -1;
+        stateFreshness = undefined;
+        stateIsUpToDate = undefined;
+        snapshotState = undefined;
         notify();
-      } else if (message.type === "replica.ready") {
-        latestError = undefined;
-        notify();
-      } else if (message.type === "replica.snapshot") {
-        latestError = undefined;
-      }
-    });
-    const unsubscribeReplica = this.replica.subscribe(notify);
-    const unsubscribeScope = this.onSessionScopeChange(() => {
-      latestError = undefined;
-      snapshotVersion = -1;
-      snapshotRows = undefined;
-      stateVersion = -1;
-      stateFreshness = undefined;
-      stateIsUpToDate = undefined;
-      snapshotState = undefined;
-      notify();
-    });
+      });
+      stop = () => { unsubscribeTransport(); unsubscribeReplica(); unsubscribeScope(); stop = undefined; };
+    };
+    // React can discard a render before subscribing. Such watches must own no resources.
+    if (!options.deferStart) start();
     return {
       localReplicaResult: () => {
         if (latestError) throw latestError;
@@ -1772,6 +1830,12 @@ export class GonvexClient {
         stateFreshness = freshness;
         stateIsUpToDate = isUpToDate;
         const state = this.replica.collectionState(key);
+        const rowsVersion = this.replica.windowRowsVersion(key);
+        if (snapshotVersion !== rowsVersion) {
+          snapshotVersion = rowsVersion;
+          snapshotRows = state.rows as unknown as T[];
+        }
+        state.rows = snapshotRows as unknown as ReplicaRow[];
         snapshotState = {
           ...state,
           isUpToDate,
@@ -1787,6 +1851,7 @@ export class GonvexClient {
         isUpToDate: this.replicaSubscriptions.get(key)?.isUpToDate === true,
       }),
       onUpdate(handler: WatchUpdateHandler) {
+        start();
         if (releaseTimer) {
           clearTimeout(releaseTimer);
           releaseTimer = undefined;
@@ -1801,9 +1866,7 @@ export class GonvexClient {
           releaseTimer = setTimeout(() => {
             releaseTimer = undefined;
             if (updateHandlers.size > 0) return;
-            unsubscribeTransport();
-            unsubscribeReplica();
-            unsubscribeScope();
+            stop?.();
           }, 0);
         };
       },
@@ -1815,7 +1878,7 @@ export class GonvexClient {
    * latest query result is retained only as the transport-shaped skeleton;
    * its row window is always rebuilt from LocalReplica membership/entities.
    */
-  watchLiveQuery<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args) {
+  watchLiveQuery<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args, options: { deferStart?: boolean } = {}) {
     const key = querySubscriptionKey(ref, args);
     const updateHandlers = new Set<WatchUpdateHandler>();
     let transportResult: JsonValue | undefined;
@@ -1833,37 +1896,45 @@ export class GonvexClient {
         for (const handler of updateHandlers) handler();
       });
     };
-    const unsubscribeQuery = this.subscribeLiveQuery(ref, args, (message) => {
-      if (message.type === "query.result") {
-        transportResult = message.result;
+    let stop: (() => void) | undefined;
+    const start = () => {
+      if (stop) return;
+      transportResult = undefined; snapshotToken = "";
+      const unsubscribeQuery = this.subscribeLiveQuery(ref, args, (message) => {
+        if (message.type === "query.result") {
+          transportResult = message.result;
+          transportGeneration += 1;
+          latestError = undefined;
+          // LocalReplica has already published its atomic window swap before
+          // this callback is emitted, so this is the single initial UI wake-up.
+          notify();
+        } else if (message.type === "query.error") {
+          latestError = new GonvexClientError(`Query ${ref.path} failed: ${message.error}`, {
+            code: "server", path: ref.path, operation: "query",
+          });
+          notify();
+        }
+      });
+      // During the initial query result, LocalReplica notifies before the
+      // transport-shaped skeleton is installed above. Suppress that empty
+      // intermediate wake-up; later transactions notify directly from the
+      // normalized store.
+      const unsubscribeReplica = this.replica.subscribe(() => {
+        if (transportResult !== undefined || this.replica.hasLiveQuery(key)) notify();
+      });
+      void this.replicaReady.then(() => notify());
+      const unsubscribeScope = this.onSessionScopeChange(() => {
+        transportResult = undefined;
         transportGeneration += 1;
+        snapshotToken = "";
+        snapshotResult = undefined;
         latestError = undefined;
-        // LocalReplica has already published its atomic window swap before
-        // this callback is emitted, so this is the single initial UI wake-up.
         notify();
-      } else if (message.type === "query.error") {
-        latestError = new GonvexClientError(`Query ${ref.path} failed: ${message.error}`, {
-          code: "server", path: ref.path, operation: "query",
-        });
-        notify();
-      }
-    });
-    // During the initial query result, LocalReplica notifies before the
-    // transport-shaped skeleton is installed above. Suppress that empty
-    // intermediate wake-up; later transactions notify directly from the
-    // normalized store.
-    const unsubscribeReplica = this.replica.subscribe(() => {
-      if (transportResult !== undefined || this.replica.hasLiveQuery(key)) notify();
-    });
-    void this.replicaReady.then(() => notify());
-    const unsubscribeScope = this.onSessionScopeChange(() => {
-      transportResult = undefined;
-      transportGeneration += 1;
-      snapshotToken = "";
-      snapshotResult = undefined;
-      latestError = undefined;
-      notify();
-    });
+      });
+      stop = () => { unsubscribeQuery(); unsubscribeReplica(); unsubscribeScope(); stop = undefined; };
+    };
+    // React can discard a render before subscribing. Such watches must own no resources.
+    if (!options.deferStart) start();
     return {
       localLiveQueryResult: () => {
         if (latestError) throw latestError;
@@ -1898,6 +1969,7 @@ export class GonvexClient {
         return snapshotResult;
       },
       onUpdate(handler: WatchUpdateHandler) {
+        start();
         if (releaseTimer) {
           clearTimeout(releaseTimer);
           releaseTimer = undefined;
@@ -1912,9 +1984,7 @@ export class GonvexClient {
           releaseTimer = setTimeout(() => {
             releaseTimer = undefined;
             if (updateHandlers.size > 0) return;
-            unsubscribeQuery();
-            unsubscribeReplica();
-            unsubscribeScope();
+            stop?.();
           }, 0);
         };
       },
@@ -2517,7 +2587,7 @@ export class GonvexClient {
               await this.inLocalLane(async () => {
                 await this.reducerOutbox.ack(entry.id);
                 if (scope === this.outboxScope) {
-                  await this.rebaseLocalEntries();
+                  await this.rebaseLocalEntries(true);
                   this.reportLocalRejection(entry.idempotencyKey, entry.path, error);
                 }
               });
@@ -2531,6 +2601,7 @@ export class GonvexClient {
       }
     } finally {
       this.drainingOutbox = false;
+      this.scheduleLocalReplay();
       if (!this.manuallyClosed && drainScope !== this.outboxScope) {
         void this.drainOutbox();
       }
@@ -3611,6 +3682,8 @@ function stableStringify(value: JsonValue): string {
 }
 
 function utf8KeyCompare(left: string, right: string) {
+  // ASCII keys have identical UTF-8 and JavaScript lexical ordering.
+  if (!/[^\x00-\x7f]/.test(left) && !/[^\x00-\x7f]/.test(right)) return left < right ? -1 : left > right ? 1 : 0;
   const leftBytes = new TextEncoder().encode(left);
   const rightBytes = new TextEncoder().encode(right);
   const length = Math.min(leftBytes.length, rightBytes.length);
@@ -3959,4 +4032,22 @@ function detectDeviceType(userAgent: string) {
   if (/ipad|tablet/i.test(userAgent)) return "tablet";
   if (/mobi|iphone|android/i.test(userAgent)) return "mobile";
   return "desktop";
+}
+
+/** Sign-in and account-only pages do not need a PostgreSQL worker. */
+function deferredLocalExecutor(create: () => LocalExecutor): LocalExecutor {
+  let executor: LocalExecutor | undefined;
+  let closed = false;
+  const start = () => {
+    if (closed) throw new Error("Local reducer executor is closed");
+    return executor ??= create();
+  };
+  return {
+    get ready() {
+      try { return start().ready; } catch (error) { return Promise.reject(error); }
+    },
+    execute: async (...args) => start().execute(...args),
+    replay: async (...args) => start().replay(...args),
+    close: () => { closed = true; executor?.close(); },
+  };
 }

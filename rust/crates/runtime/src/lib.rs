@@ -1248,6 +1248,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
     };
     let mut feed = None;
     let mut feed_scheduler = FeedFirstScheduler::default();
+    let mut sent_replica_revision = 0u64;
     let mut replicas = BTreeMap::new();
     let mut live_queries = BTreeMap::new();
     let mut control_queries = BTreeMap::new();
@@ -1285,6 +1286,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     tenant_session = None;
                     feed = None;
                     feed_scheduler.reset();
+                    sent_replica_revision = 0;
                     control_connection = control::ControlConnection {
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
@@ -1336,6 +1338,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                 tenant_session = None;
                                 feed = None;
                                 feed_scheduler.reset();
+                                sent_replica_revision = 0;
                                 runtime.inner.metrics.authenticated(
                                     &connection_id,
                                     &control::ControlConnection {
@@ -1377,6 +1380,9 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                     // subscription changes.
                                     if let Some(watermark) = transaction_watermark {
                                         if send_json(&mut socket, &watermark).await.is_err() { return; }
+                                        if let ServerMessage::ReplicaWatermark { revision } = watermark {
+                                            sent_replica_revision = sent_replica_revision.max(revision);
+                                        }
                                     }
                                     if reset {
                                         replicas.clear();
@@ -1421,6 +1427,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     Err(broadcast::error::RecvError::Closed) => {
                         feed = None;
                         feed_scheduler.reset();
+                        sent_replica_revision = 0;
                         continue;
                     }
                     },
@@ -1533,6 +1540,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         feed = None;
                     }
                     feed_scheduler.reset();
+                    sent_replica_revision = 0;
                     tenant_session = authenticated_control.tenant.clone();
                     control_connection = authenticated_control;
                     runtime.inner.metrics.authenticated(
@@ -1773,10 +1781,15 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     let response =
                         call_reducer(&runtime, tenant_session.as_ref(), &control_connection, call)
                             .await;
-                    let terminal_watermark = call_watermark_without_replica_work(
+                    let terminal_watermark = call_watermark_after_sent_replica_work(
                         &response,
                         !control_write && tenant_session.is_some(),
-                        !replicas.is_empty() || !live_queries.is_empty(),
+                        replicas
+                            .values()
+                            .map(|s| s.cursor.revision)
+                            .chain(live_queries.values().map(|s| s.computed_revision))
+                            .min()
+                            .map(|revision| revision.max(sent_replica_revision)),
                     );
                     let control_succeeded =
                         control_write && matches!(response, ServerMessage::ReducerResult { .. });
@@ -1841,10 +1854,15 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             call,
                         )
                         .await;
-                        let terminal_watermark = call_watermark_without_replica_work(
+                        let terminal_watermark = call_watermark_after_sent_replica_work(
                             &response,
                             !control_write && tenant_session.is_some(),
-                            !replicas.is_empty() || !live_queries.is_empty(),
+                            replicas
+                                .values()
+                                .map(|s| s.cursor.revision)
+                                .chain(live_queries.values().map(|s| s.computed_revision))
+                                .min()
+                                .map(|revision| revision.max(sent_replica_revision)),
                         );
                         let control_succeeded = control_write
                             && matches!(response, ServerMessage::ReducerResult { .. });
@@ -1937,10 +1955,15 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             trace,
                         }
                     };
-                    let terminal_watermark = call_watermark_without_replica_work(
+                    let terminal_watermark = call_watermark_after_sent_replica_work(
                         &response,
                         scope != Some(ExecutionScope::Control) && tenant_session.is_some(),
-                        !replicas.is_empty() || !live_queries.is_empty(),
+                        replicas
+                            .values()
+                            .map(|s| s.cursor.revision)
+                            .chain(live_queries.values().map(|s| s.computed_revision))
+                            .min()
+                            .map(|revision| revision.max(sent_replica_revision)),
                     );
                     let control_succeeded = scope == Some(ExecutionScope::Control)
                         && matches!(response, ServerMessage::ActionResult { .. });
@@ -2361,17 +2384,17 @@ fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
     }
 }
 
-/// A connection with no Replica or Live Query work has no local server state
-/// to reconcile. Complete a successful durable call with an explicit terminal
-/// watermark instead of depending on a later change-feed broadcast. Connections
-/// that do have synchronized state continue to receive their watermark only
-/// after the feed has written every entity and membership frame for the commit.
-fn call_watermark_without_replica_work(
+/// Complete a durable call when every subscribed snapshot has already been sent
+/// through its revision. An idempotent retry can return an old commit without a
+/// new feed event, particularly after reconnect. Waiting for that event would
+/// deadlock the outbox. New commits still wait for all feed frames to be sent.
+/// With no subscriptions there is no replica work to reconcile.
+fn call_watermark_after_sent_replica_work(
     response: &ServerMessage,
     is_authenticated_tenant_call: bool,
-    has_replica_work: bool,
+    lowest_sent_revision: Option<u64>,
 ) -> Option<ServerMessage> {
-    if !is_authenticated_tenant_call || has_replica_work {
+    if !is_authenticated_tenant_call {
         return None;
     }
     let committed_revision = match response {
@@ -2383,6 +2406,9 @@ fn call_watermark_without_replica_work(
         } => *committed_revision,
         _ => None,
     }?;
+    if lowest_sent_revision.is_some_and(|sent| sent < committed_revision) {
+        return None;
+    }
     Some(ServerMessage::ReplicaWatermark {
         revision: committed_revision,
     })
@@ -3360,11 +3386,11 @@ mod tests {
             trace: None,
         };
         assert!(matches!(
-            call_watermark_without_replica_work(&action, true, false),
+            call_watermark_after_sent_replica_work(&action, true, None),
             Some(ServerMessage::ReplicaWatermark { revision: 541 })
         ));
         assert!(matches!(
-            call_watermark_without_replica_work(&reducer, true, false),
+            call_watermark_after_sent_replica_work(&reducer, true, None),
             Some(ServerMessage::ReplicaWatermark { revision: 542 })
         ));
     }
@@ -3386,9 +3412,17 @@ mod tests {
             committed_revision: Some(543),
             trace: None,
         };
-        assert!(call_watermark_without_replica_work(&reducer, true, true).is_none());
-        assert!(call_watermark_without_replica_work(&action, true, true).is_none());
-        assert!(call_watermark_without_replica_work(&action, false, false).is_none());
+        assert!(call_watermark_after_sent_replica_work(&reducer, true, Some(541)).is_none());
+        assert!(call_watermark_after_sent_replica_work(&action, true, Some(541)).is_none());
+        assert!(call_watermark_after_sent_replica_work(&action, false, None).is_none());
+        // A retry after reconnect has no new feed event. Snapshots already
+        // include its commit, so it must complete without blocking later edits.
+        for sent in [542, 600] {
+            assert!(matches!(
+                call_watermark_after_sent_replica_work(&reducer, true, Some(sent)),
+                Some(ServerMessage::ReplicaWatermark { revision: 542 })
+            ));
+        }
     }
 
     #[test]
@@ -3406,8 +3440,8 @@ mod tests {
             error: "failed".to_owned(),
             trace: None,
         };
-        assert!(call_watermark_without_replica_work(&no_commit, true, false).is_none());
-        assert!(call_watermark_without_replica_work(&failed, true, false).is_none());
+        assert!(call_watermark_after_sent_replica_work(&no_commit, true, None).is_none());
+        assert!(call_watermark_after_sent_replica_work(&failed, true, None).is_none());
     }
 
     #[test]

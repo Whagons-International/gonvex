@@ -81,6 +81,7 @@ pub struct ProjectModule {
     pub client_contract: Option<u64>,
     pub functions: BTreeMap<String, FunctionDefinition>,
     pub manifest_functions: Value,
+    pub(crate) replica_epochs: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
     pub schema: Value,
     pub visibility: BTreeMap<String, crate::visibility::VisibilityPlan>,
     pub invitation_acceptance_reducer: String,
@@ -216,6 +217,7 @@ impl ModuleRegistry {
             artifact_hash: record.module_hash,
             client_contract,
             functions,
+            replica_epochs: Default::default(),
             manifest_functions: record
                 .manifest
                 .get("functions")
@@ -444,14 +446,32 @@ impl ProjectModule {
         account_id: &str,
         permissions: &Value,
     ) -> gonvex_protocol::ReplicaDirective {
-        let epoch = hash_json(&serde_json::json!({
-            "protocolVersion": 1,
-            "project": self.project_id,
-            "database": database_url,
-            "functions": self.manifest_functions,
-            "schema": self.schema,
-            "moduleHash": self.artifact_hash,
-        }));
+        // A deployed module is immutable. Hash its full schema and function
+        // manifest once per database, not once per subscription on every open.
+        // Keep the exact existing epoch bytes so persisted replicas can resume.
+        let epoch = {
+            let mut epochs = self
+                .replica_epochs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(epoch) = epochs.get(database_url) {
+                epoch.clone()
+            } else {
+                let epoch = hash_json(&serde_json::json!({
+                    "protocolVersion": 1,
+                    "project": self.project_id,
+                    "database": database_url,
+                    "functions": self.manifest_functions,
+                    "schema": self.schema,
+                    "moduleHash": self.artifact_hash,
+                }));
+                if epochs.len() >= 1024 {
+                    epochs.clear();
+                }
+                epochs.insert(database_url.to_owned(), epoch.clone());
+                epoch
+            }
+        };
         let permissions_hash = hash_json(permissions);
         let account_id = if account_id.trim().is_empty() {
             "anonymous"
@@ -837,6 +857,47 @@ fn nonempty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_replica_epochs_preserve_hashes_and_tenant_identity() {
+        let module = ProjectModule {
+            project_id: "project".into(),
+            generation: 1,
+            artifact_hash: "artifact".into(),
+            client_contract: None,
+            functions: BTreeMap::new(),
+            manifest_functions: serde_json::json!({"tasks": {"kind": "reducer"}}),
+            schema: serde_json::json!({"tasks": {"id": "text"}}),
+            replica_epochs: Default::default(),
+            visibility: BTreeMap::new(),
+            invitation_acceptance_reducer: String::new(),
+            migrations: Vec::new(),
+            crons: Vec::new(),
+        };
+        let expected = hash_json(&serde_json::json!({
+            "protocolVersion": 1, "project": module.project_id, "database": "database-a",
+            "functions": module.manifest_functions, "schema": module.schema, "moduleHash": module.artifact_hash,
+        }));
+        let first = module.replica_directive("tenant-a", "database-a", "account-a", &Value::Null);
+        assert_eq!(first.epoch, expected);
+        for _ in 0..300 {
+            assert_eq!(
+                module
+                    .replica_directive("tenant-a", "database-a", "account-a", &Value::Null)
+                    .epoch,
+                expected
+            );
+        }
+        assert_eq!(module.replica_epochs.lock().unwrap().len(), 1);
+        let other_account =
+            module.replica_directive("tenant-a", "database-a", "account-b", &Value::Null);
+        assert_eq!(first.epoch, other_account.epoch);
+        assert_ne!(first.scope, other_account.scope);
+        let other_database =
+            module.replica_directive("tenant-b", "database-b", "account-a", &Value::Null);
+        assert_ne!(first.epoch, other_database.epoch);
+        assert_eq!(module.replica_epochs.lock().unwrap().len(), 2);
+    }
 
     #[test]
     fn extracts_stored_typescript_artifact_without_rewriting_nulls() {

@@ -1586,7 +1586,7 @@ export function useLiveQuery<T extends JsonValue = JsonValue>(ref: FunctionRefer
   const argsKey = JSON.stringify(args);
   const liveKey = JSON.stringify(ref.live ?? null);
   const liveWatch = useMemo(
-    () => args === "skip" ? undefined : client.watchLiveQuery<T>(ref, args),
+    () => args === "skip" ? undefined : client.watchLiveQuery<T>(ref, args, { deferStart: true }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, kind, path, optimisticKey, argsKey, liveKey],
   );
@@ -1621,7 +1621,7 @@ export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id:
   const client = useGonvexClient();
   useSyncExternalStore(
     useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    useCallback(() => client.localReplica.version(), [client]),
+    useCallback(() => client.localReplica.entityVersion(entity), [client, entity]),
     () => 0,
   );
   return client.localReplica.entity<T>(entity, id);
@@ -1633,7 +1633,7 @@ export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: st
   const idsKey = JSON.stringify(ids);
   const version = useSyncExternalStore(
     useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    useCallback(() => client.localReplica.version(), [client]),
+    useCallback(() => client.localReplica.entityVersion(entity), [client, entity]),
     () => 0,
   );
   return useMemo(() => client.replicaEntities<T>(entity, ids), [client, entity, idsKey, version]);
@@ -1738,7 +1738,7 @@ export function useReplicaCollection<T extends JsonValue = JsonValue>(
   const optimisticKey = JSON.stringify(ref.optimistic ?? null);
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
-    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args),
+    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args, { deferStart: true }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, kind, path, optimisticKey, argsKey],
   );
@@ -1758,7 +1758,7 @@ export function useReplicaCollectionState<T extends ReplicaRow = ReplicaRow>(
   const path = ref.path;
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
-    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args),
+    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args, { deferStart: true }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, ref.kind, path, argsKey],
   );
@@ -1785,7 +1785,7 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
   selectorRef.current = selector;
   equalityRef.current = isEqual;
   const watch = useMemo(
-    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args),
+    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args, { deferStart: true }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client, kind, path, optimisticKey, argsKey],
   );

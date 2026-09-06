@@ -255,7 +255,7 @@ it("captures arguments at admission before initialization or persistence awaits"
     await new Promise(resolve => setTimeout(resolve, 30));
     const replica = (client as any).replica;
     let versions = 0;
-    const version = vi.spyOn(replica, "version").mockImplementation(() => Math.min(++versions, 8));
+    const version = vi.spyOn(replica, "executionVersion").mockImplementation(() => Math.min(++versions, 8));
     const snapshot = vi.spyOn(client as any, "localSnapshot");
     const run = (client as any).rebaseLocalEntries();
     const result = await Promise.race([run.then(() => "yielded"), new Promise(resolve => setTimeout(() => resolve("starved"), 300))]);
@@ -264,3 +264,115 @@ it("captures arguments at admission before initialization or persistence awaits"
     expect(result).toBe("yielded");
     expect(snapshot).toHaveBeenCalledTimes(1);
   });
+
+it("runs a newly admitted edit before replaying the rest of a pending backlog", async () => {
+  const { create } = await fixture();
+  const client = create();
+  for (let i = 0; i < 3; i++) await client.reducer(ref, {});
+  await (client as any).localLane;
+  const executor = (client as any).localExecutor;
+  const original = executor.execute.bind(executor);
+  const order: number[] = [];
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const spy = vi.spyOn(executor, "execute").mockImplementation(async (...args: any[]) => {
+    order.push(args[1].amount ?? 1);
+    if (order.length === 1) { entered(); await gate; }
+    return original(...args);
+  });
+  const replay = (client as any).inLocalLane(() => (client as any).rebaseLocalEntries());
+  await started;
+  const edit = client.reducer(ref, { amount: 10 });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  release();
+  await Promise.all([edit, replay]);
+  expect(order.slice(0, 2)).toEqual([1, 10]);
+  expect(client.localReplica.entity("tasks", "t1")?.count).toBe(13);
+  spy.mockRestore();
+});
+
+it("does not replay the pending chain just because another edit was appended", async () => {
+  const { create } = await fixture();
+  const client = create();
+  await client.reducer(ref, {});
+  await (client as any).localLane;
+  const spy = vi.spyOn((client as any).localExecutor, "execute");
+  await client.reducer(ref, { amount: 2 });
+  await (client as any).localLane;
+  expect(spy).toHaveBeenCalledTimes(1);
+  expect(client.localReplica.entity("tasks", "t1")?.count).toBe(3);
+});
+
+it("does not replay pending writes for freshness-only notifications", async () => {
+  const { create } = await fixture();
+  const client = create();
+  await client.reducer(ref, {});
+  await (client as any).localLane;
+  const spy = vi.spyOn((client as any).localExecutor, "execute");
+  (client as any).replica.setFreshness("verifying");
+  (client as any).replica.setFreshness("current");
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await (client as any).localLane;
+  expect(spy).not.toHaveBeenCalled();
+});
+
+it("drains acknowledged intents without replaying the remaining queue per acknowledgement", async () => {
+  const { create, kv } = await fixture();
+  const client = create();
+  for (let i = 0; i < 4; i++) await client.reducer(ref, {});
+  const socket = await connect(client);
+  await vi.waitFor(() => expect(socket.sent.filter(m => m.type === "reducer.call")).toHaveLength(1));
+  const execute = vi.spyOn((client as any).localExecutor, "execute");
+  for (let i = 0; i < 4; i++) {
+    const call = socket.sent.filter(m => m.type === "reducer.call")[i];
+    socket.receive({ type: "reducer.result", id: call.id, result: i + 1, originCommandId: call.id });
+    if (i < 3) await vi.waitFor(() => expect(socket.sent.filter(m => m.type === "reducer.call")).toHaveLength(i + 2));
+  }
+  await vi.waitFor(async () => expect(await createKvOutboxStore(kv).load()).toHaveLength(0));
+  expect(execute).not.toHaveBeenCalled();
+});
+
+it("does not allocate a local SQL worker before an authenticated tenant session exists", () => {
+  const create = vi.fn(() => ({ ready: Promise.resolve(), execute: vi.fn(), replay: vi.fn(), close: vi.fn() }));
+  const client = new GonvexClient(url, { localRuntime: { artifactHash: "artifact", tables: [], create } });
+  clients.push(client);
+  expect(create).not.toHaveBeenCalled();
+  client.close();
+  expect(create).not.toHaveBeenCalled();
+});
+
+it('sends only observed reducer tables and retries changed branches against the same snapshot', async () => {
+  const host = new LocalReducerRuntime({
+    tables: { tasks: { _id: 'text', count: 'integer' }, other: { _id: 'text', count: 'integer' }, history: { _id: 'text' } },
+    reducers: { choose: reducer({ args: schema.any(), result: schema.any(), run: async (ctx, args: any) => {
+      if (args.insert) return ctx.db.insert('other', { _id: 'o1', count: 2 });
+      return (await ctx.db.query(`SELECT * FROM "${args.table}"`))[0];
+    } }) }, artifactHash: 'artifact',
+  });
+  hosts.push(host);
+  const seen: string[][] = [];
+  const client = new GonvexClient(url, { localRuntime: { artifactHash: 'artifact', tables: ['tasks', 'other', 'history'], create: () => ({
+    ready: host.initializeReady(), close: () => {}, replay: (...args) => host.replay(...args),
+    execute: (...args) => { seen.push(Object.keys(args[2].tables)); return host.execute(...args); },
+  }) } });
+  clients.push(client);
+  const snapshot = { scope: 'scope', tables: {
+    tasks: { complete: true, rows: [{ _id: 't1', count: 1 }] },
+    other: { complete: true, rows: [{ _id: 'o1', count: 9 }] },
+    history: { complete: true, rows: [{ _id: 'large-unrelated-history' }] },
+  } };
+  const execute = (args: any) => (client as any).executeLocal('choose', args, snapshot, { scope: 'scope', commandId: 'test', now: 1, artifactHash: 'artifact', identity });
+  expect(await execute({ table: 'tasks' })).toMatchObject({ result: { count: 1 } });
+  expect(await execute({ table: 'tasks' })).toMatchObject({ result: { count: 1 } });
+  expect(seen).toEqual([['tasks', 'other', 'history'], ['tasks']]);
+  // Omission cannot turn an existing ID into an apparently safe insert.
+  await expect(execute({ insert: true })).rejects.toThrow(/duplicate|unique/i);
+  expect(seen.slice(-2)).toEqual([['tasks'], ['tasks', 'other', 'history']]);
+  expect(await execute({ table: 'other' })).toMatchObject({ result: { count: 9 } });
+  expect(seen.slice(-2)).toEqual([['tasks'], ['tasks', 'other', 'history']]);
+  await execute({ table: 'tasks' });
+  expect(seen.at(-1)).toEqual(['tasks', 'other']);
+  expect(snapshot.tables.other.rows).toEqual([{ _id: 'o1', count: 9 }]);
+});

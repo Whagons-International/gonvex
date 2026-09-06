@@ -1,5 +1,5 @@
 import { validateValue } from "./validation.js";
-import { PGlite, type Transaction } from "@electric-sql/pglite";
+import { PGlite, type Transaction, type PGliteOptions } from "@electric-sql/pglite";
 import { reducerRowId } from "@gonvex/module-sdk";
 import type { JsonObject, JsonValue, ReducerContext, ReducerDefinition } from "@gonvex/module-sdk";
 import type { LocalSchema } from "./schema.js";
@@ -33,6 +33,12 @@ export type LocalTransactionResult = {
   readTables: string[];
 };
 export type LocalRuntimeOptions = {
+  /** Empty engine cluster, produced with the pinned PGlite version. */
+  databaseTemplate?: Blob;
+  /** Optional disposable engine filesystem; never the application replica. */
+  filesystem?: PGliteOptions["fs"];
+  /** Worker RPC already owns its structured-cloned messages. Native/direct callers keep the default copy. */
+  ownsSnapshots?: boolean;
   /** Prebundled engines let native hosts start without any network access. */
   engine?: { pgliteWasmModule: WebAssembly.Module; initdbWasmModule: WebAssembly.Module; fsBundle: Blob };
   tables?: LocalTables;
@@ -78,7 +84,10 @@ export class LocalReducerRuntime {
   private closed = false;
 
   constructor(private readonly options: LocalRuntimeOptions) {
-    this.database = new PGlite(options.engine);
+    // One connection, disposable transactions, and lazily seeded tables do
+    // not need PostgreSQL's server-sized 128 MB shared buffer pool. Let the
+    // engine grow execution memory on demand without reserving that pool.
+    this.database = new PGlite({ ...options.engine, fs: options.filesystem, loadDataDir: options.databaseTemplate, initDbStartParams: ["--wal-segsize=1"], postgresqlconf: ["shared_buffers=1MB", "max_connections=1", "superuser_reserved_connections=0", "max_wal_senders=0", "max_worker_processes=0", "max_parallel_workers=0"] });
     this.schema = clone(options.schema ?? Object.fromEntries(Object.entries(options.tables ?? {}).map(([table, columns]) => [table, {
       key: "_id", columns: Object.fromEntries(Object.entries(columns).map(([name, type]) => [name, { type, nullable: name !== "_id" }])),
     }])));
@@ -90,7 +99,9 @@ export class LocalReducerRuntime {
   execute(path: string, args: JsonValue, snapshot: LocalSnapshot, execution: LocalExecution): Promise<LocalTransactionResult> {
     // Capture at admission: the caller may receive a new server transaction or
     // switch tenants while another reducer awaits its database turn.
-    const input = clone({ args, snapshot, execution });
+    const input = this.options.ownsSnapshots
+      ? { args: clone(args), snapshot, execution: clone(execution) }
+      : clone({ args, snapshot, execution });
     const job = this.tail.then(async () => {
       if (this.closed) throw new Error("Local reducer runtime is closed");
       await this.ready;
@@ -205,18 +216,40 @@ export class LocalReducerRuntime {
     return this.database.transaction(async (tx) => {
       // Both the input rows and reducer writes are rolled back on success. The
       // only published output is the returned transaction, applied by the SDK.
-      const seeded = new Set<string>();
+      const seeded = new Map<string, Promise<void>>();
+      const rowSeeds = new Map<string, Map<string, Promise<void>>>();
+      const seedRow = async (table: string, id: string) => {
+        requireTable(table);
+        if (!snapshot.tables[table]) throw new IncompleteReplicaError(table);
+        if (seeded.has(table)) return seeded.get(table);
+        const loads = rowSeeds.get(table) ?? new Map<string, Promise<void>>();
+        rowSeeds.set(table, loads);
+        if (!loads.has(id)) {
+          const row = snapshot.tables[table]?.rows.find(row => String(row[this.schema[table]!.key]) === id);
+          loads.set(id, row ? this.seedRows(tx, table, [row]) : Promise.resolve());
+        }
+        await loads.get(id);
+      };
       const seed = async (table: string) => {
         requireTable(table);
-        if (seeded.has(table)) return;
-        seeded.add(table);
-        await this.seedRows(tx, table, snapshot.tables[table]?.rows ?? []);
+        if (!seeded.has(table)) {
+          const loads = rowSeeds.get(table);
+          const load = (async () => {
+            await Promise.all(loads?.values() ?? []);
+            // Previously loaded rows may already have been updated or deleted
+            // by this reducer. A later scan must not restore their input values.
+            const remaining = (snapshot.tables[table]?.rows ?? []).filter(row => !loads?.has(String(row[this.schema[table]!.key])));
+            await this.seedRows(tx, table, remaining);
+          })();
+          seeded.set(table, load);
+        }
+        await seeded.get(table);
       };
       const readRow = async (table: string, id: string) => {
         requireTable(table);
         reads.add(table);
         requireColumns(table);
-        await seed(table);
+        await seedRow(table, id);
         const result = await tx.query<JsonObject>(`SELECT * FROM ${quote(table)} WHERE ${quote(this.schema[table]!.key)} = $1`, [id], queryOptions);
         if (!result.rows.length && !snapshot.tables[table]?.complete) throw new IncompleteReplicaError(table);
         return result.rows[0];
@@ -247,7 +280,8 @@ export class LocalReducerRuntime {
           if (tables.size === 1 && exact?.[1] === table && exact[2] === key && snapshot.tables[table]?.rows.some(row => row[key!] === id)) {
             requireColumns(table); reads.add(table);
           } else requireComplete(table);
-          await seed(table);
+          if (tables.size === 1 && exact?.[1] === table && exact[2] === key && (typeof id === "string" || typeof id === "number")) await seedRow(table, String(id));
+          else await seed(table);
         }
         const before = new Map<string, Map<string, JsonObject>>();
         for (const table of written) {
@@ -286,12 +320,12 @@ export class LocalReducerRuntime {
           query,
           insert: async <T>(table: string, row: JsonObject, allocation?: { generatedId: string }) => {
             const columns = requireTable(table);
-            await seed(table);
             const value = clone(row);
             const key = this.schema[table]!.key;
             if (value[key] == null) value[key] = allocation?.generatedId ?? await nextId(`insert:${table}`);
             if (typeof value[key] !== "string" || !value[key]) throw new Error("Insert requires a non-empty string id");
             if (columns._creationTime && value._creationTime == null) value._creationTime = execution.now;
+            await seedRow(table, value[key] as string);
             const inserted = await this.insertRow(tx, table, value);
             patches.push({ entity: table, rowId: value[key] as string, op: "insert", fields: clone(inserted) });
             return clone(inserted) as T;

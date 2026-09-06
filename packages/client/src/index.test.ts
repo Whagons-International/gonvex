@@ -1729,10 +1729,12 @@ describe("GonvexClient", () => {
       expect(replaceWindow).toHaveBeenCalledTimes(1);
     });
     const before = watch.localReplicaResult();
+    const stateRowsBefore = watch.localReplicaState()!.rows;
     const replica = (client as any).replica;
     await replica.advanceWatermark(19, replica.listWindows().map((w: any) => w.signature));
     expect(watch.localReplicaState()).toMatchObject({ computedRevision: 19 });
     expect(watch.localReplicaResult()).toBe(before);
+    expect(watch.localReplicaState()!.rows).toBe(stateRowsBefore);
     client.close();
   });
 
@@ -3133,4 +3135,30 @@ describe("GonvexClient", () => {
 
     await rejected;
   });
+});
+
+it('does not retain abandoned React watches and can subscribe again after cleanup', async () => {
+  const client = new GonvexClient('ws://runtime.test/ws', { replicaSubscriptionRetentionMs: 0, querySubscriptionRetentionMs: 0 });
+  const replicaRef: FunctionReference = { kind: 'query', path: 'tasks.rows', delivery: 'replica', replica: { table: 'tasks', key: '_id', columns: ['_id'] } };
+  const liveRef: FunctionReference = { kind: 'query', path: 'tasks.page', live: { entity: 'tasks', key: '_id', resultPath: [], plan: { table: 'tasks', key: '_id', columns: ['_id'] } } };
+  const replica = vi.spyOn(client as any, 'subscribeReplicaTransport');
+  const live = vi.spyOn(client, 'subscribeLiveQuery');
+  const before = (client as any).replica.listeners.size;
+  for (let i = 0; i < 20; i++) {
+    client.watchReplica(replicaRef, {}, { deferStart: true });
+    client.watchLiveQuery(liveRef, {}, { deferStart: true });
+  }
+  expect(replica).not.toHaveBeenCalled();
+  expect(live).not.toHaveBeenCalled();
+  expect((client as any).replica.listeners.size).toBe(before);
+  const watch = client.watchReplica(replicaRef, {}, { deferStart: true });
+  const off = watch.onUpdate(() => {});
+  expect(replica).toHaveBeenCalledTimes(1);
+  off();
+  await vi.waitFor(() => expect((client as any).replica.listeners.size).toBe(before));
+  const offAgain = watch.onUpdate(() => {});
+  expect(replica).toHaveBeenCalledTimes(2);
+  offAgain();
+  await vi.waitFor(() => expect((client as any).replica.listeners.size).toBe(before));
+  client.close();
 });

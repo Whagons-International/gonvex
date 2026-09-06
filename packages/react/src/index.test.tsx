@@ -45,6 +45,7 @@ class FakeGonvexClient {
   readonly localReplica = {
     subscribe: (listener: () => void) => { this.replicaListeners.add(listener); return () => this.replicaListeners.delete(listener); },
     version: () => this.replicaVersion,
+    entityVersion: () => this.replicaVersion,
   };
   state: ConnectionState = {
     isWebSocketConnected: true,

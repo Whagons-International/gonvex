@@ -49,6 +49,8 @@ function stableStringify(value: JsonValue): string {
 }
 
 function utf8KeyCompare(left: string, right: string) {
+  // ASCII keys have identical UTF-8 and JavaScript lexical ordering.
+  if (!/[^\x00-\x7f]/.test(left) && !/[^\x00-\x7f]/.test(right)) return left < right ? -1 : left > right ? 1 : 0;
   const leftBytes = new TextEncoder().encode(left);
   const rightBytes = new TextEncoder().encode(right);
   const length = Math.min(leftBytes.length, rightBytes.length);
