@@ -1619,24 +1619,39 @@ export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionRe
 /** Read one normalized entity from the single Gonvex Local Replica. */
 export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined {
   const client = useGonvexClient();
-  useSyncExternalStore(
+  const version = useSyncExternalStore(
     useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    useCallback(() => client.localReplica.entityVersion(entity), [client, entity]),
+    useCallback(() => client.localReplica.entityVersion(entity, id), [client, entity, id]),
     () => 0,
   );
-  return client.localReplica.entity<T>(entity, id);
+  return useMemo(() => client.localReplica.entity<T>(entity, id), [client, entity, id, version]);
 }
 
 /** Resolve an ordered entity batch with one Local Replica subscription. */
 export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
   const client = useGonvexClient();
   const idsKey = JSON.stringify(ids);
+  const cache = useMemo(() => new Map<string, { version: number; row: T | undefined }>(), [client, entity]);
   const version = useSyncExternalStore(
     useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    useCallback(() => client.localReplica.entityVersion(entity), [client, entity]),
-    () => 0,
+    // Only changes to the requested rows should invalidate the grid batch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useCallback(() => ids.map(id => client.localReplica.entityVersion(entity, id)).join(","), [client, entity, idsKey]),
+    () => "",
   );
-  return useMemo(() => client.replicaEntities<T>(entity, ids), [client, entity, idsKey, version]);
+  return useMemo(() => {
+    const retained = new Set(ids);
+    for (const id of cache.keys()) if (!retained.has(id)) cache.delete(id);
+    return ids.map(id => {
+      const rowVersion = client.localReplica.entityVersion(entity, id);
+      const prior = cache.get(id);
+      if (prior?.version === rowVersion) return prior.row;
+      const row = client.localReplica.entity<T>(entity, id);
+      cache.set(id, { version: rowVersion, row });
+      return row;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, entity, idsKey, version, cache]);
 }
 
 /** Read a persisted Live Query window without opening another server subscription. */
@@ -1654,7 +1669,7 @@ export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
     useCallback(() => client.localReplica.version(), [client]),
     () => 0,
   );
-  return useMemo(() => client.retainedLiveQuery<T>(signature), [client, signature, argsKey, version]);
+  return useMemo(() => client.localReplica.liveQuerySnapshot<T>(signature), [client, signature, argsKey, version]);
 }
 
 /** Structured Live Query state backed by normalized Local Replica entities. */
@@ -1691,7 +1706,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     };
   }
   return signature
-    ? client.localReplica.liveQuery<T>(signature)
+    ? client.localReplica.liveQuerySnapshot<T>(signature)
     : { rows: [], ids: [], source: "cache", completeness: "partial", freshness: client.localReplica.freshness() };
 }
 

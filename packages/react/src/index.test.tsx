@@ -40,12 +40,15 @@ class FakeGonvexClient {
   replicaState = { rows: [] as unknown[], ids: [] as string[], source: "cache", completeness: "partial", freshness: "verifying", truncated: false, computedRevision: 0 };
   replicaVersion = 0;
   readonly replicaListeners = new Set<() => void>();
+  readonly rowVersions = new Map<string, number>();
   readonly entityValues = new Map<string, Record<string, unknown>>();
   retained = { rows: [] as Record<string, unknown>[], ids: [] as string[], source: "cache", completeness: "partial", freshness: "verifying" };
   readonly localReplica = {
     subscribe: (listener: () => void) => { this.replicaListeners.add(listener); return () => this.replicaListeners.delete(listener); },
     version: () => this.replicaVersion,
-    entityVersion: () => this.replicaVersion,
+    liveQuerySnapshot: () => this.retained,
+    entityVersion: (_entity: string, id?: string) => id === undefined ? this.replicaVersion : this.rowVersions.get(id) ?? this.replicaVersion,
+    entity: vi.fn((_entity: string, id: string) => { const row = this.entityValues.get(id); return row ? structuredClone(row) : undefined; }),
   };
   state: ConnectionState = {
     isWebSocketConnected: true,
@@ -376,6 +379,40 @@ describe("normalized Replica selectors", () => {
     act(() => { client.entityValues.set("b", { id: "b", title: "B" }); client.updateReplica(); });
     expect(result.current).toEqual([{ id: "a", title: "A" }, { id: "b", title: "B" }]);
     expect(client.replicaListeners.size).toBe(1);
+  });
+
+  it("only clones changed entities and preserves requested order", () => {
+    const client = new FakeGonvexClient();
+    for (const id of ["a", "b", "c"]) {
+      client.entityValues.set(id, { id, title: id });
+      client.rowVersions.set(id, 1);
+    }
+    const { result, rerender } = renderHook(({ ids }) => useReplicaEntities("tasks", ids), {
+      initialProps: { ids: ["a", "b"] }, wrapper: wrapperFor(client),
+    });
+    const initial = result.current;
+    client.localReplica.entity.mockClear();
+    act(() => { client.rowVersions.set("c", 2); client.updateReplica(); });
+    expect(result.current).toBe(initial);
+    expect(client.localReplica.entity).not.toHaveBeenCalled();
+    act(() => {
+      client.entityValues.set("b", { id: "b", title: "updated" });
+      client.rowVersions.set("b", 2); client.updateReplica();
+    });
+    expect(result.current[0]).toBe(initial[0]);
+    expect(result.current[1]).toEqual({ id: "b", title: "updated" });
+    expect(client.localReplica.entity).toHaveBeenCalledTimes(1);
+    const changed = result.current;
+    rerender({ ids: ["b", "a"] });
+    expect(result.current).toEqual([changed[1], changed[0]]);
+    expect(result.current[0]).toBe(changed[1]);
+    rerender({ ids: ["a"] });
+    rerender({ ids: ["a", "b"] });
+    expect(client.localReplica.entity).toHaveBeenCalledTimes(2);
+    act(() => {
+      client.entityValues.clear(); client.rowVersions.clear(); client.updateReplica();
+    });
+    expect(result.current).toEqual([undefined, undefined]);
   });
 
   it("subscribes to retained membership without opening another query", () => {

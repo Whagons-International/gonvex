@@ -749,3 +749,47 @@ describe("optimistic membership allocation", () => {
     expect(read.mock.calls.length).toBeLessThanOrEqual(201);
   });
 });
+
+it('watch snapshots clone only the changed row through prediction, rejection, and server delta', async () => {
+  const replica = new LocalReplica();
+  await replica.replaceWindow({ signature: 'rows', kind: 'replica', entity: 'tasks', key: 'id', rows: Array.from({ length: 100 }, (_, i) => ({ id: String(i), order: i })), completeness: 'complete', source: 'server' });
+  replica.registerReplicaCollection('rows', { table: 'tasks', key: 'id', orderBy: 'order', orderDirection: 'asc' });
+  const cache = new Map();
+  const initial = replica.watchRows('rows', cache);
+  const read = vi.spyOn(replica, 'entity');
+  replica.applyOptimistic('edit', [{ entity: 'tasks', rowId: '50', op: 'patch', fields: { order: -1 } }]);
+  const predicted = replica.watchRows('rows', cache);
+  expect(predicted[0]).toMatchObject({ id: '50', order: -1 });
+  expect(predicted[1]).toBe(initial[0]);
+  expect(read).toHaveBeenCalledTimes(1);
+  read.mockClear();
+  replica.rejectCommand('edit');
+  expect(replica.watchRows('rows', cache)[50]).toMatchObject({ id: '50', order: 50 });
+  expect(read).toHaveBeenCalledTimes(1);
+  read.mockClear();
+  await replica.applyWindowDelta({ signature: 'rows', entity: 'tasks', key: 'id', upserts: [{ id: '50', order: 50, name: 'changed' }], deleted: [] });
+  const committed = replica.watchRows('rows', cache);
+  expect(committed[0]).toBe(initial[0]);
+  expect(committed[50]).toMatchObject({ name: 'changed' });
+  expect(read).toHaveBeenCalledTimes(1);
+  await replica.applyWindowDelta({ signature: 'rows', entity: 'tasks', key: 'id', upserts: [], deleted: ['50'] });
+  expect(replica.watchRows('rows', cache)).toHaveLength(99);
+  expect(cache.has('50')).toBe(false);
+});
+
+it("retained reactive snapshots reuse rows across metadata and isolated edits", async () => {
+  const replica = new LocalReplica();
+  await replica.replaceWindow({ signature: "retained", entity: "tasks", key: "id", rows: [{ id: "a", value: 1 }, { id: "b", value: 2 }], completeness: "complete", source: "server" });
+  const initial = replica.liveQuerySnapshot("retained");
+  expect(replica.liveQuerySnapshot("retained")).toBe(initial);
+  replica.setFreshness("offline");
+  const offline = replica.liveQuerySnapshot("retained");
+  expect(offline.freshness).toBe("offline");
+  expect(offline.rows).toBe(initial.rows);
+  replica.applyOptimistic("edit", [{ entity: "tasks", rowId: "b", op: "patch", fields: { value: 3 } }]);
+  const changed = replica.liveQuerySnapshot("retained");
+  expect(changed.rows[0]).toBe(initial.rows[0]);
+  expect(changed.rows[1]).toMatchObject({ value: 3 });
+  replica.rejectCommand("edit");
+  expect(replica.liveQuerySnapshot("retained").rows[1]).toMatchObject({ value: 2 });
+});

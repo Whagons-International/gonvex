@@ -1,4 +1,3 @@
-import { shareReplicaRows } from "./replica-row-sharing.js";
 import type {
   BrowserTelemetryInfo,
   ClientMessage,
@@ -109,7 +108,7 @@ function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
     cursor: () => replica.cursor(),
     freshness: () => replica.freshness(),
     version: () => replica.version(),
-    entityVersion: (entity) => replica.entityVersion(entity),
+    entityVersion: (entity, id) => replica.entityVersion(entity, id),
     subscribe: (listener) => replica.subscribe(listener),
     hasPendingCommand: (commandId) => replica.hasPendingCommand(commandId),
     getWindow: (signature) => replica.getWindow(signature),
@@ -120,6 +119,7 @@ function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
     entityRows: <T extends ReplicaRow = ReplicaRow>(entity: string) => replica.entityRows<T>(entity),
     entityCompleteness: (entity) => replica.entityCompleteness(entity),
     liveQuery: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.liveQuery<T>(signature),
+    liveQuerySnapshot: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.liveQuerySnapshot<T>(signature),
     collectionState: <T extends ReplicaRow = ReplicaRow>(signature: string) => replica.collectionState<T>(signature),
     hasLiveQuery: (signature) => replica.hasLiveQuery(signature),
     snapshot: () => replica.snapshot(),
@@ -1780,6 +1780,11 @@ export class GonvexClient {
     let latestError: Error | undefined;
     let snapshotVersion = -1;
     let snapshotRows: T[] | undefined;
+    const rowCache = new Map<string, { version: number; row: ReplicaRow | undefined }>();
+    const readRows = () => {
+      const next = this.replica.watchRows(key, rowCache) as unknown as T[];
+      return snapshotRows?.length === next.length && next.every((row, index) => row === snapshotRows![index]) ? snapshotRows : next;
+    };
     let stateVersion = -1;
     let stateFreshness: ReplicaFreshness | undefined;
     let stateIsUpToDate: boolean | undefined;
@@ -1793,7 +1798,7 @@ export class GonvexClient {
     let stop: (() => void) | undefined;
     const start = () => {
       if (stop) return;
-      snapshotVersion = -1; stateVersion = -1;
+      snapshotVersion = -1; stateVersion = -1; rowCache.clear();
       const unsubscribeTransport = this.subscribeReplicaTransport(ref, args, (message) => {
         if (message.type === "replica.error") {
           latestError = new Error(message.error);
@@ -1813,6 +1818,7 @@ export class GonvexClient {
         latestError = undefined;
         snapshotVersion = -1;
         snapshotRows = undefined;
+        rowCache.clear();
         stateVersion = -1;
         stateFreshness = undefined;
         stateIsUpToDate = undefined;
@@ -1830,7 +1836,7 @@ export class GonvexClient {
         const version = this.replica.windowRowsVersion(key);
         if (snapshotVersion === version) return snapshotRows;
         snapshotVersion = version;
-        snapshotRows = shareReplicaRows(snapshotRows as unknown as ReplicaRow[] | undefined, this.replica.liveQuery(key).rows, ref.replica?.key ?? "id") as unknown as T[];
+        snapshotRows = readRows();
         return snapshotRows;
       },
       localReplicaState: () => {
@@ -1848,12 +1854,11 @@ export class GonvexClient {
         stateFreshness = freshness;
         stateIsUpToDate = isUpToDate;
         const rowsVersion = this.replica.windowRowsVersion(key);
-        const state = this.replica.collectionState(key, snapshotVersion === rowsVersion ? snapshotRows as unknown as ReplicaRow[] : undefined);
         if (snapshotVersion !== rowsVersion) {
           snapshotVersion = rowsVersion;
-          snapshotRows = shareReplicaRows(snapshotRows as unknown as ReplicaRow[] | undefined, state.rows, ref.replica?.key ?? "id") as unknown as T[];
+          snapshotRows = readRows();
         }
-        state.rows = snapshotRows as unknown as ReplicaRow[];
+        const state = this.replica.collectionState(key, snapshotRows as unknown as ReplicaRow[]);
         snapshotState = {
           ...state,
           isUpToDate,
