@@ -177,6 +177,7 @@ export class LocalReplica implements LocalReplicaView {
   private versionValue = 0;
   private windowVersionClock = 0;
   private readonly windowVersions = new Map<string, number>();
+  private readonly windowRowsVersions = new Map<string, number>();
   private scopeValue: ReplicaScope = defaultReplicaScope;
   // The default scope starts as an immediately usable empty in-memory store.
   // Persistence is restored only by hydrate()/activateScope(), so direct
@@ -248,6 +249,7 @@ export class LocalReplica implements LocalReplicaView {
 
   /** Monotonic version for one materialized window and its referenced rows. */
   windowVersion(signature: string) { return this.windowVersions.get(signature) ?? 0; }
+  windowRowsVersion(signature: string) { return this.windowRowsVersions.get(signature) ?? 0; }
 
   setFreshness(freshness: ReplicaFreshness) {
     if (freshness === this.freshnessValue) return;
@@ -271,6 +273,12 @@ export class LocalReplica implements LocalReplicaView {
 
   /** SDK-only atomic replacement after ordered local reducer replay. */
   replaceOptimistic(commands: readonly { commandId: string; patches: OptimisticPatch[] }[]) {
+    // Rebase is also triggered by unrelated authoritative updates. An identical
+    // overlay must not dirty every selector or schedule another application render.
+    const previous = [...this.pendingCommands.values()];
+    if (previous.length === commands.length && commands.every((command, index) =>
+      command.commandId === previous[index]!.commandId &&
+      JSON.stringify(command.patches) === JSON.stringify(previous[index]!.patches))) return;
     for (const command of this.pendingCommands.values()) this.markWindowsForPatches(command.patches);
     this.pendingCommands.clear();
     for (const command of commands) {
@@ -461,7 +469,7 @@ export class LocalReplica implements LocalReplicaView {
       }
 
       this.liveQueries = nextQueries;
-      for (const window of changedWindows) this.markWindowChanged(window.signature);
+      for (const window of changedWindows) this.markWindowChanged(window.signature, false);
       this.cursorValue = nextCursor;
       this.notify();
     });
@@ -813,9 +821,10 @@ export class LocalReplica implements LocalReplicaView {
     for (const listener of [...this.listeners]) listener();
   }
 
-  private markWindowChanged(signature: string) {
+  private markWindowChanged(signature: string, rowsChanged = true) {
     this.windowVersionClock += 1;
     this.windowVersions.set(signature, this.windowVersionClock);
+    if (rowsChanged) this.windowRowsVersions.set(signature, this.windowVersionClock);
   }
 
   private markWindowsForPatches(patches: readonly OptimisticPatch[]) {

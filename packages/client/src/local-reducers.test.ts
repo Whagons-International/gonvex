@@ -237,3 +237,30 @@ it("captures arguments at admission before initialization or persistence awaits"
   expect(await pending).toBe(4);
   expect(client.localReplica.entity("tasks", "t1")?.count).toBe(4);
 });
+
+ it("does not clone the replica during an empty outbox rebase", async () => {
+    const { create } = await fixture();
+    const client = create();
+    await connect(client);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const snapshot = vi.spyOn(client as any, "localSnapshot");
+    await (client as any).rebaseLocalEntries();
+    expect(snapshot).not.toHaveBeenCalled();
+  });
+
+ it("yields a stale rebase instead of recursively monopolizing the local lane", async () => {
+    const { create } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const replica = (client as any).replica;
+    let versions = 0;
+    const version = vi.spyOn(replica, "version").mockImplementation(() => Math.min(++versions, 8));
+    const snapshot = vi.spyOn(client as any, "localSnapshot");
+    const run = (client as any).rebaseLocalEntries();
+    const result = await Promise.race([run.then(() => "yielded"), new Promise(resolve => setTimeout(() => resolve("starved"), 300))]);
+    version.mockRestore();
+    await run;
+    expect(result).toBe("yielded");
+    expect(snapshot).toHaveBeenCalledTimes(1);
+  });

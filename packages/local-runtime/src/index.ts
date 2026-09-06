@@ -210,7 +210,7 @@ export class LocalReducerRuntime {
         requireTable(table);
         if (seeded.has(table)) return;
         seeded.add(table);
-        for (const row of snapshot.tables[table]?.rows ?? []) await this.insertRow(tx, table, row, true);
+        await this.seedRows(tx, table, snapshot.tables[table]?.rows ?? []);
       };
       const readRow = async (table: string, id: string) => {
         requireTable(table);
@@ -355,6 +355,29 @@ export class LocalReducerRuntime {
       await tx.rollback();
       return { result, patches, deferred, readTables: [...reads].sort() };
     });
+  }
+
+  private async seedRows(tx: Transaction, table: string, rows: readonly JsonObject[]): Promise<void> {
+    const columns = this.schema[table]!.columns;
+    // Bound both parameter count and transient SQL size. Missing columns keep
+    // PostgreSQL DEFAULT semantics; JSON values remain bound parameters.
+    for (let offset = 0; offset < rows.length;) {
+      const first = rows[offset]!;
+      const keys = Object.keys(first).filter(key => !!columns[key]);
+      if (!keys.length) throw new Error("Cannot insert an empty local row");
+      const maxRows = Math.max(1, Math.min(128, Math.floor(16000 / keys.length)));
+      const params: JsonValue[] = [];
+      const values: string[] = [];
+      while (offset < rows.length && values.length < maxRows) {
+        const row = rows[offset]!;
+        const rowKeys = Object.keys(row).filter(key => !!columns[key]);
+        if (rowKeys.length !== keys.length || rowKeys.some(key => !keys.includes(key))) break;
+        values.push(`(${keys.map(key => { params.push(row[key]!); return `$${params.length}`; }).join(", ")})`);
+        offset++;
+      }
+      // Seeding is rolled back after prediction and needs no RETURNING rows.
+      await tx.query(`INSERT INTO ${quote(table)} (${keys.map(quote).join(", ")}) VALUES ${values.join(", ")}`, params);
+    }
   }
 
   private async insertRow(tx: Transaction, table: string, row: JsonObject, seed = false): Promise<JsonObject> {

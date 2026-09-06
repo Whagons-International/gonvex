@@ -646,3 +646,18 @@ describe("LocalReplica", () => {
     expect(replica.entityCompleteness("tasks")).toBe("complete");
   });
 });
+
+ it("does not republish an unchanged optimistic overlay", () => {
+    const replica = new LocalReplica();
+    const listener = vi.fn();
+    replica.subscribe(listener);
+    replica.replaceOptimistic([]);
+    expect(listener).not.toHaveBeenCalled();
+    const commands = [{ commandId: "a", patches: [{ entity: "tasks", rowId: "a", op: "patch" as const, fields: { statusId: "working" } }] }];
+    replica.replaceOptimistic(commands);
+    listener.mockClear();
+    replica.replaceOptimistic(structuredClone(commands));
+    expect(listener).not.toHaveBeenCalled();
+    replica.replaceOptimistic([]);
+    expect(listener).toHaveBeenCalledOnce();
+  });

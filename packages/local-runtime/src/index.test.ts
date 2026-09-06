@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { internalReducer, reducer, schema, type ReducerContext } from "@gonvex/module-sdk";
 import { LocalReducerRuntime, type LocalExecution, type LocalSnapshot } from "./index.js";
 
@@ -197,3 +197,21 @@ describe("local reducer execution", () => {
     expect((await pending).result).toBe(3);
   });
 });
+
+ it("seeds a large replica without one database round trip per row", async () => {
+    const host = runtime({ count: define(async ctx => (await ctx.db.query<any>('SELECT count(*) AS n FROM "tasks"'))[0].n) });
+    await host.initializeReady();
+    const database = (host as any).database;
+    const original = database.transaction.bind(database);
+    let inserts = 0;
+    vi.spyOn(database, "transaction").mockImplementation((run: any) => original((tx: any) => {
+      const query = tx.query.bind(tx);
+      tx.query = (sql: string, ...args: any[]) => { if (sql.startsWith('INSERT INTO "tasks"')) inserts++; return query(sql, ...args); };
+      return run(tx);
+    }));
+    const input = snapshot();
+    input.tables.tasks.rows = Array.from({ length: 300 }, (_, i) => ({ _id: `task-${i}`, statusId: "todo", count: i }));
+    expect((await host.execute("count", {}, input, execution())).result).toBe(300);
+    expect(inserts).toBeLessThan(10);
+    expect((await host.execute("count", {}, snapshot(), { ...execution(), commandId: "next" })).result).toBe(1);
+ });

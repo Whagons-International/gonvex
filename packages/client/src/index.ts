@@ -634,15 +634,25 @@ export class GonvexClient {
     const scope = this.outboxScope;
     const replicaScope = this.replicaScope;
     const entries = await this.reducerOutbox.list(scope);
+    if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
+    if (entries.length === 0) {
+      this.replacingLocal = true;
+      try { this.replica.replaceOptimistic([]); }
+      finally { this.replacingLocal = false; }
+      this.optimisticReducerIds.clear();
+      this.optimisticOutboxEntryIds.clear();
+      return;
+    }
     const baseVersion = this.replica.version();
-    const snapshot = this.localSnapshot(false);
+    const needsExecution = entries.some(entry => entry.localExecution && entry.state !== "inflight" && entry.state !== "committed");
+    const snapshot = needsExecution ? this.localSnapshot(false) : undefined;
     const commands: Array<{ commandId: string; patches: OptimisticPatch[] }> = [];
     for (const entry of entries) {
       let patches = entry.patches ?? [];
       if (entry.localExecution && entry.state !== "inflight" && entry.state !== "committed") {
         const execution: LocalExecution = { ...entry.localExecution, scope: replicaScope, identity: this.localIdentity, artifactHash: this.localBinding.artifactHash };
         try {
-          const transaction = await this.localExecutor.execute(entry.path, entry.args as JsonValue, snapshot, execution);
+          const transaction = await this.localExecutor.execute(entry.path, entry.args as JsonValue, snapshot!, execution);
           patches = transaction.patches;
           if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
         } catch (error) {
@@ -655,11 +665,16 @@ export class GonvexClient {
         // Storage failures must abort rebasing, never masquerade as rejection.
         await this.reducerOutbox.updateLocal(entry.id, patches, execution);
       }
-      applyLocalPatches(snapshot, patches);
+      if (snapshot) applyLocalPatches(snapshot, patches);
       commands.push({ commandId: entry.idempotencyKey, patches });
     }
     if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
-    if (baseVersion !== this.replica.version()) return this.rebaseLocalEntries();
+    if (baseVersion !== this.replica.version()) {
+      // A changing server base must not recursively occupy the local lane.
+      // Release it so user intents already queued can run before the retry.
+      setTimeout(() => this.scheduleLocalReplay(), 0);
+      return;
+    }
     this.replacingLocal = true;
     try { this.replica.replaceOptimistic(commands); }
     finally { this.replacingLocal = false; }
@@ -1736,7 +1751,7 @@ export class GonvexClient {
       localReplicaResult: () => {
         if (latestError) throw latestError;
         if (!this.replica.hasLiveQuery(key)) return undefined;
-        const version = this.replica.windowVersion(key);
+        const version = this.replica.windowRowsVersion(key);
         if (snapshotVersion === version) return snapshotRows;
         snapshotVersion = version;
         snapshotRows = this.replica.liveQuery(key).rows as unknown as T[];

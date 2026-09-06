@@ -1692,6 +1692,50 @@ describe("GonvexClient", () => {
     client.close();
   });
 
+  it("keeps row identity when only the replication watermark advances", async () => {
+    const collectionRef: FunctionReference = {
+      kind: "query",
+      path: "statuses.all",
+      delivery: "replica",
+      replica: { table: "statuses", key: "id", columns: ["id", "name"], maxRows: 100 },
+    };
+    const storage = new MemoryLocalReplicaStorage();
+    const replaceWindow = vi.spyOn(storage, "replaceWindow");
+    const client = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const watch = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => {
+      expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(1);
+    });
+    const open = sentMessages(socket).filter((message) => message.type === "replica.open").at(-1)!;
+    const rows = [{ id: "status-1", name: "Working" }];
+    const hashes = await replicaRowsHashes(rows, "id");
+    const digest = await replicaHashesDigest(hashes);
+
+    socket.receive({
+      type: "replica.snapshot", id: open.id, path: collectionRef.path,
+      result: rows, cursor: { epoch: "epoch:test", revision: 18 }, key: "id",
+      maxRows: 100, hashes, digest, truncated: false,
+    });
+    socket.receive({
+      type: "replica.ready", id: open.id, path: collectionRef.path,
+      cursor: { epoch: "epoch:test", revision: 18 }, digest, truncated: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(watch.localReplicaState()).toMatchObject({ completeness: "complete", computedRevision: 18 });
+      expect(replaceWindow).toHaveBeenCalledTimes(1);
+    });
+    const before = watch.localReplicaResult();
+    const replica = (client as any).replica;
+    await replica.advanceWatermark(19, replica.listWindows().map((w: any) => w.signature));
+    expect(watch.localReplicaState()).toMatchObject({ computedRevision: 19 });
+    expect(watch.localReplicaResult()).toBe(before);
+    client.close();
+  });
+
   it("applies a received transaction before a following Replica watermark", async () => {
     const collectionRef: FunctionReference = {
       kind: "query",
