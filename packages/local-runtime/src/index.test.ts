@@ -34,6 +34,27 @@ const runtime = (handlers: Record<string, ReturnType<typeof define>>) => {
 afterEach(async () => { await Promise.all(runtimes.splice(0).map((runtime) => runtime.close())); });
 
 describe("local reducer execution", () => {
+  it("creates only relations used by an intent and keeps retry side effects atomic", async () => {
+    const host = runtime({ edit: define(async ctx => {
+      await ctx.db.update("tasks", "t1", { count: 7 });
+      const log = await ctx.db.insert<any>("logs", { taskId: "t1", message: "once" });
+      await ctx.actions.enqueue("notify", { taskId: "t1" });
+      return log._id;
+    }), read: define(async ctx => ctx.db.query('SELECT * FROM "tasks"')) });
+    await host.initializeReady();
+    const db = (host as any).database;
+    const names = async () => (await db.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")).rows.map((row: any) => row.tablename);
+    expect(await names()).toEqual([]);
+    await host.execute("read", {}, snapshot(), execution());
+    expect(await names()).toEqual(["tasks"]);
+    const result = await host.execute("edit", {}, snapshot(), execution());
+    expect(await names()).toEqual(["logs", "tasks"]);
+    expect(result.patches).toHaveLength(2);
+    expect(result.deferred).toHaveLength(1);
+    expect((await db.query('SELECT * FROM "tasks"')).rows).toEqual([]);
+    expect((await db.query('SELECT * FROM "logs"')).rows).toEqual([]);
+  });
+
   it("returns the same Action and scheduler IDs as the authoritative host", async () => {
     const host = runtime({ schedule: define(async ctx => ({
       action: await ctx.actions.enqueue("notify", {}),

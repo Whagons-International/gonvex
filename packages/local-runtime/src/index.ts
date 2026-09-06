@@ -70,6 +70,10 @@ const parseInteger = (value: string) => {
 };
 const queryOptions = { parsers: { 20: parseInteger } };
 
+class LocalSchemaRequired extends Error {
+  constructor(readonly table: string) { super(`Local schema required: ${table}`); }
+}
+
 /**
  * Executes an existing module reducer against an isolated PostgreSQL workspace.
  * This database is disposable execution memory, never a second durable cache.
@@ -82,6 +86,7 @@ export class LocalReducerRuntime {
   private readonly ready: Promise<void>;
   private tail: Promise<unknown> = Promise.resolve();
   private closed = false;
+  private readonly createdTables = new Set<string>();
 
   constructor(private readonly options: LocalRuntimeOptions) {
     // One connection, disposable transactions, and lazily seeded tables do
@@ -105,7 +110,19 @@ export class LocalReducerRuntime {
     const job = this.tail.then(async () => {
       if (this.closed) throw new Error("Local reducer runtime is closed");
       await this.ready;
-      return this.run(path, input.args, input.snapshot, input.execution);
+      // PostgreSQL discovers dependencies, including nested SQL relations. A
+      // missing declared relation rolls back the attempt before its schema is
+      // created and the same deterministic intent is retried.
+      for (;;) {
+        try { return await this.run(path, input.args, input.snapshot, input.execution); }
+        catch (error) {
+          const failure = error as { code?: string; message?: string };
+          const relation = failure.code === "42P01" ? /^relation "([^"]+)" does not exist$/.exec(failure.message ?? "")?.[1] : undefined;
+          const table = error instanceof LocalSchemaRequired ? error.table : relation?.startsWith("public.") ? relation.slice(7) : relation;
+          if (!table || !this.schema[table] || this.createdTables.has(table)) throw error;
+          await this.createTable(table);
+        }
+      }
     });
     this.tail = job.catch(() => undefined);
     return job;
@@ -172,14 +189,18 @@ export class LocalReducerRuntime {
 
   private async initialize(): Promise<void> {
     for (const [table, definition] of Object.entries(this.schema)) {
-      const { columns, key } = definition;
-      if (!table || !columns[key]) throw new Error(`Local table ${table} requires its primary key column`);
-      const definitions = Object.entries(columns).map(([column, spec]) => {
-        // Types/defaults come only from the generated, build-time schema.
-        return `${quote(column)} ${spec.type}${column === key ? " PRIMARY KEY" : ""}${spec.default ? ` DEFAULT ${spec.default}` : ""}`;
-      });
-      await this.database.exec(`CREATE TABLE ${quote(table)} (${definitions.join(", ")})`);
+      if (!table || !definition.columns[definition.key]) throw new Error(`Local table ${table} requires its primary key column`);
     }
+    await this.database.waitReady;
+  }
+
+  private async createTable(table: string): Promise<void> {
+    const { columns, key } = this.schema[table]!;
+    const definitions = Object.entries(columns).map(([column, spec]) =>
+      `${quote(column)} ${spec.type}${column === key ? " PRIMARY KEY" : ""}${spec.default ? ` DEFAULT ${spec.default}` : ""}`,
+    );
+    await this.database.exec(`CREATE TABLE ${quote(table)} (${definitions.join(", ")})`);
+    this.createdTables.add(table);
   }
 
   private async run(path: string, args: JsonValue, snapshot: LocalSnapshot, execution: LocalExecution): Promise<LocalTransactionResult> {
@@ -220,6 +241,7 @@ export class LocalReducerRuntime {
       const rowSeeds = new Map<string, Map<string, Promise<void>>>();
       const seedRow = async (table: string, id: string) => {
         requireTable(table);
+        if (!this.createdTables.has(table)) throw new LocalSchemaRequired(table);
         if (!snapshot.tables[table]) throw new IncompleteReplicaError(table);
         if (seeded.has(table)) return seeded.get(table);
         const loads = rowSeeds.get(table) ?? new Map<string, Promise<void>>();
@@ -232,6 +254,7 @@ export class LocalReducerRuntime {
       };
       const seed = async (table: string) => {
         requireTable(table);
+        if (!this.createdTables.has(table)) throw new LocalSchemaRequired(table);
         if (!seeded.has(table)) {
           const loads = rowSeeds.get(table);
           const load = (async () => {
