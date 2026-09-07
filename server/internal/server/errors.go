@@ -209,8 +209,10 @@ func newErrorGroup(event capturedError, fp string, when time.Time) *errorGroup {
 }
 
 func applyErrorToGroup(group *errorGroup, event capturedError, when time.Time) {
-	previousRelease := group.Latest.Release
-	if group.Status == "resolved" && event.Release != "" && previousRelease != "" && event.Release != previousRelease {
+	// Ingestion deduplicates event IDs before reaching this function. A new
+	// occurrence must reopen a resolved group, including unversioned server
+	// failures and failed fixes within the same deployment.
+	if group.Status == "resolved" {
 		group.Status = "unresolved"
 		group.Regression = true
 	}
@@ -584,15 +586,43 @@ func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleErrorGroups(w http.ResponseWriter, r *http.Request) {
 	project, status, release := projectID(r), r.URL.Query().Get("status"), r.URL.Query().Get("release")
 	level := requestedErrorLevel(r.URL.Query().Get("level"))
-	if groups, releases, available, err := s.persistentErrorGroups(r.Context(), project, status, release, level); err != nil {
+	var after []string
+	if r.URL.Query().Get("export") == "1" {
+		cursor := r.URL.Query().Get("cursor")
+		if len(cursor) > 64 || strings.ContainsAny(cursor, " \t\r\n") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid export cursor"})
+			return
+		}
+		after = []string{cursor}
+	}
+	groups, releases, available, err := s.persistentErrorGroups(r.Context(), project, status, release, level, after...)
+	if err != nil {
 		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
 		return
-	} else if available {
-		writeJSON(w, 200, map[string]any{"groups": groups, "releases": releases})
-		return
 	}
-	groups, releases := s.errorTracker.listGroups(project, status, release, level)
-	writeJSON(w, http.StatusOK, map[string]any{"groups": groups, "releases": releases})
+	if !available {
+		groups, releases = s.errorTracker.listGroups(project, status, release, level)
+	}
+	response := map[string]any{"groups": groups, "releases": releases}
+	if len(after) > 0 {
+		// Fingerprints are immutable; last-seen ordering moves while new events
+		// arrive and can skip older groups during a multi-page export.
+		sort.Slice(groups, func(i, j int) bool { return groups[i].Fingerprint < groups[j].Fingerprint })
+		filtered := make([]*errorGroup, 0, len(groups))
+		for _, group := range groups {
+			if group.Fingerprint > after[0] {
+				filtered = append(filtered, group)
+			}
+		}
+		next := ""
+		if len(filtered) > 500 {
+			filtered = filtered[:500]
+			next = filtered[len(filtered)-1].Fingerprint
+		}
+		response["groups"] = filtered
+		response["nextCursor"] = next
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleErrorGroup(w http.ResponseWriter, r *http.Request) {

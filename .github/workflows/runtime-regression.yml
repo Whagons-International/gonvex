@@ -52,6 +52,7 @@ jobs:
         run: go test -count=1 -p 1 ./...
         env:
           GOMAXPROCS: "2"
+          GONVEX_ERROR_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       - name: Test PostgreSQL scheduler durability and rolling migration
         run: go test -count=1 ./server/internal/server -run '^(TestPostgresScheduled|TestMigratingScheduler)'
         env:

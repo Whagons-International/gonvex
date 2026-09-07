@@ -29,13 +29,13 @@ const trackedErrorProject = {
   errorTrackingEnabled: true,
 };
 
-async function renderTrackedErrorProject(groupsResponse: (input: RequestInfo | URL) => Promise<Response>) {
+async function renderTrackedErrorProject(groupsResponse: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   vi.stubGlobal("WebSocket", undefined);
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input).includes("/dev/projects") && init?.method === "POST") {
       return { ok: true, status: 200, statusText: "OK", json: async () => ({ project: trackedErrorProject, projectKey: "test-project-key" }) } as Response;
     }
-    if (String(input).includes("/dev/errors/groups")) return groupsResponse(input);
+    if (String(input).includes("/dev/errors/groups")) return groupsResponse(input, init);
     return { ok: true, status: 200, statusText: "OK", json: async () => ({}) } as Response;
   }));
   const user = userEvent.setup();
@@ -826,6 +826,43 @@ describe("App", () => {
     expect(screen.getByText(/exec-123/i)).toBeInTheDocument();
     expect(screen.getByText(/order-7/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /copy agent brief/i })).toBeInTheDocument();
+  });
+
+  it("resolves only visible selected groups and retains failed selections for retry", async () => {
+    const makeGroup = (fingerprint: string, title: string) => ({
+      fingerprint, title, status: "unresolved", priority: "high", count: 2,
+      firstSeen: "2026-09-01T10:00:00Z", lastSeen: "2026-09-02T10:00:00Z",
+      tenants: {}, users: {}, devices: {}, releases: {}, latest: {},
+    });
+    let groups = [makeGroup("a", "Fixed icon"), makeGroup("b", "Fixed input"), makeGroup("c", "Active timeout")];
+    const patches: string[] = [];
+    let fail = true;
+    const user = await renderTrackedErrorProject(async (input, init) => {
+      const fingerprint = String(input).split("/").pop()!;
+      if (init?.method === "PATCH") {
+        expect(JSON.parse(String(init.body))).toEqual({ status: "resolved" });
+        patches.push(fingerprint);
+        if (fingerprint === "b" && fail) return { ok: false, status: 503, json: async () => ({ error: "Try again" }) } as Response;
+        groups = groups.filter((group) => group.fingerprint !== fingerprint);
+        return { ok: true, json: async () => ({}) } as Response;
+      }
+      return { ok: true, json: async () => ({ groups }) } as Response;
+    });
+    await screen.findByText("Fixed icon");
+    await user.click(screen.getByRole("checkbox", { name: "Select Active timeout" }));
+    await user.type(screen.getByRole("textbox", { name: "Search error groups" }), "Fixed");
+    await user.click(screen.getByRole("checkbox", { name: "Select all visible unresolved groups" }));
+    await user.click(screen.getByRole("button", { name: "Resolve selected (2)" }));
+    expect(await screen.findByText(/1 group resolved.*1 could not be resolved/i)).toBeInTheDocument();
+    expect(patches).toEqual(["a", "b"]);
+    expect(screen.getByRole("checkbox", { name: "Select Fixed input" })).toBeChecked();
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Resolve selected (1)" }));
+    expect(await screen.findByText(/1 group resolved\. History is preserved/i)).toBeInTheDocument();
+    await user.clear(screen.getByRole("textbox", { name: "Search error groups" }));
+    expect(await screen.findByText("Active timeout")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Select Active timeout" })).not.toBeChecked();
+    expect(patches).toEqual(["a", "b", "b"]);
   });
 
   it("filters error groups to the latest release", async () => {
