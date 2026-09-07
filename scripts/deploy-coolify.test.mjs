@@ -164,6 +164,7 @@ test("pins and finishes runtime before deploying dashboard", async () => {
       return Response.json(states[uuid]);
     }
     if (target.pathname.endsWith("/deploy")) {
+      if (method !== "POST") return Response.json({ message: "This endpoint has changed to a POST request." }, { status: 405 });
       const uuid = target.searchParams.get("uuid");
       events.push(`deploy:${uuid}`);
       return Response.json({ deployments: [{ deployment_uuid: `${uuid}-deployment` }] });

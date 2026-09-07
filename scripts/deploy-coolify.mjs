@@ -281,6 +281,7 @@ export async function deployRollingApplications({
       base,
       token,
       `/deploy?uuid=${encodeURIComponent(uuid)}&force=true`,
+      { method: "POST" },
     );
     const deploymentUUID = queued?.deployments?.[0]?.deployment_uuid;
     if (!deploymentUUID) throw new Error(`Coolify did not return a ${role} deployment UUID`);
