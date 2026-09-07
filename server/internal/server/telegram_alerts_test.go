@@ -50,9 +50,10 @@ func TestTelegramTTLUAlertFiltersTelemetryAndAppliesCooldown(t *testing.T) {
 	entry := transactionTelemetryEntry{
 		Project: "whagons", Kind: "query", Phase: "browser", Reason: "invalidate",
 		Path: "tasks.list", ChangeToAckMS: 6200,
+		ServerSocketWriteStartedAtMS: 12345, ServerSocketQueueMS: 250, BrowserName: "Chrome", BrowserVersion: "152.0.0.0",
 	}
 	alerts.observeTTLU(entry)
-	assertTelegramAlertContains(t, alerts, "Update propagation took 6.20s", "Project: whagons", "Query: tasks.list")
+	assertTelegramAlertContains(t, alerts, "Update propagation took 6.20s", "Project: whagons", "Query: tasks.list", "Socket queue: 250ms", "Browser: Chrome 152.0.0.0")
 
 	now = now.Add(time.Minute)
 	entry.ChangeToAckMS = 9000

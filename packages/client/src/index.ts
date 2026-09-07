@@ -1,3 +1,4 @@
+import { DeliveryDiagnostics } from "./delivery-diagnostics.js";
 import type {
   BrowserTelemetryInfo,
   ClientMessage,
@@ -367,6 +368,7 @@ export class GonvexClient {
   private authRetriedAfterError = false;
   private readonly authErrorHandlers = new Set<(error: string) => void>();
   private telemetryEnabled = false;
+  private readonly deliveryDiagnostics = new DeliveryDiagnostics();
   private readonly queryCache: QueryCacheStore | undefined;
   private readonly queryCacheWaitForScope: boolean;
   private readonly queryCacheReadTimeoutMs: number;
@@ -539,6 +541,7 @@ export class GonvexClient {
     if (auth.project !== undefined) this.errorReporter?.setProject(auth.project);
     if (auth.telemetry !== undefined) {
       this.telemetryEnabled = auth.telemetry === true;
+      if (!this.telemetryEnabled) this.deliveryDiagnostics.close();
     }
   }
 
@@ -591,9 +594,11 @@ export class GonvexClient {
     });
     socket.addEventListener("message", (event) => {
       if (this.socket !== socket) return;
+      if (this.telemetryEnabled) this.deliveryDiagnostics.begin(event.timeStamp);
       let message: ServerMessage;
       try {
         message = JSON.parse(String(event.data)) as ServerMessage;
+        if (this.telemetryEnabled) this.deliveryDiagnostics.decodedMessage();
       } catch {
         return;
       }
@@ -683,6 +688,7 @@ export class GonvexClient {
   }
 
   close() {
+    this.deliveryDiagnostics.close();
     this.manuallyClosed = true;
     if (isEphemeralOutboxScope(this.outboxScope)) {
       void this.mutationOutbox.clear(this.outboxScope);
@@ -2631,7 +2637,10 @@ export class GonvexClient {
       clientReceivedAtMs: event.clientReceivedAtMs,
       clientDurationMs: event.clientDurationMs,
       trace: event.serverTrace,
-      device: event.device ?? browserTelemetryInfo(),
+      device: {
+        ...(event.device ?? browserTelemetryInfo()),
+        deliveryDiagnostics: this.deliveryDiagnostics.snapshot(this.socket?.bufferedAmount ?? 0),
+      },
     });
   }
 

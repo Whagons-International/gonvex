@@ -121,7 +121,14 @@ func (a *telegramAlertManager) observeTTLU(entry transactionTelemetryEntry) {
 	if path == "" {
 		path = "unknown query"
 	}
-	a.enqueue(fmt.Sprintf("Gonvex TTLU alert [%s]\nUpdate propagation took %.2fs, threshold %.2fs. Project: %s. Query: %s.", a.label(), latencyMS/1000, a.ttluThreshold.Seconds(), project, path))
+	detail := ""
+	if entry.ServerSocketWriteStartedAtMS > 0 {
+		detail += fmt.Sprintf(" Socket queue: %.0fms.", entry.ServerSocketQueueMS)
+	}
+	if entry.BrowserName != "" {
+		detail += fmt.Sprintf(" Browser: %.40s %.40s.", entry.BrowserName, entry.BrowserVersion)
+	}
+	a.enqueue(fmt.Sprintf("Gonvex TTLU alert [%s]\nUpdate propagation took %.2fs, threshold %.2fs. Project: %s. Query: %s.%s", a.label(), latencyMS/1000, a.ttluThreshold.Seconds(), project, path, detail))
 }
 
 func (a *telegramAlertManager) label() string {

@@ -1052,6 +1052,12 @@ describe("GonvexClient", () => {
       outcome: "ok",
       clientReceivedAtMs: 1_025.5,
       device: {
+        deliveryDiagnostics: {
+          messageDecodeMs: expect.any(Number),
+          messageProcessingMs: expect.any(Number),
+          longTaskSupported: expect.any(Boolean),
+          bufferedAmount: 0,
+        },
         browserName: "Chrome",
         browserVersion: "126.0.0.0",
         deviceType: "desktop",
