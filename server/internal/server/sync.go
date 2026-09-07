@@ -257,16 +257,13 @@ func (c *wsConn) openSyncWithClock(
 	resultCount := 0
 	var protocolErr error
 	defer func() {
-		c.server.metrics.recordOperationalLog(
+		// One attributed entry feeds both call metrics and the error inbox. A
+		// second recordFunction entry would duplicate the failure and replace
+		// the latest occurrence with one lacking tenant and client context.
+		c.server.metrics.recordRuntimeLog(
 			c.syncProtocolLog(message, phase, resultCount, time.Since(started), protocolErr),
 			time.Now().UTC(),
 		)
-		// Opens are the sync equivalent of a call: without this, sync.*
-		// functions show zero traffic in the dashboard's metrics view even
-		// while serving every reload.
-		if path := strings.TrimSpace(message.Path); path != "" {
-			c.server.metrics.recordFunction(c.project, path, "sync", time.Since(started), protocolErr)
-		}
 	}()
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(message.Path) == "" {
 		protocolErr = errors.New("sync id and path are required")

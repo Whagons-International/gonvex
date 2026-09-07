@@ -996,7 +996,7 @@ func (m *runtimeMetrics) recordRuntimeOperation(project string, path string, kin
 	}, now)
 }
 
-func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
+func stampRuntimeLogDeployment(log runtimeLogEntry) runtimeLogEntry {
 	// Record deployment identity before persistence. Restored historical logs
 	// bypass this path and must never inherit the current deployment's release.
 	if log.Release == "" {
@@ -1005,6 +1005,11 @@ func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 	if log.RuntimeInstance == "" {
 		log.RuntimeInstance, _ = os.Hostname()
 	}
+	return log
+}
+
+func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
+	log = stampRuntimeLogDeployment(log)
 	m.mu.Lock()
 
 	logKind := log.Kind
@@ -1053,6 +1058,7 @@ func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 // inflating function-call metrics. Failed entries still flow into durable logs
 // and the grouped Errors inbox through the normal error callback.
 func (m *runtimeMetrics) recordOperationalLog(log runtimeLogEntry, now time.Time) {
+	log = stampRuntimeLogDeployment(log)
 	m.mu.Lock()
 	m.appendLog(log)
 	onFunctionError := m.onFunctionError
