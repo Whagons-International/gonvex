@@ -41,3 +41,14 @@ func TestEnvFloatRejectsNonFiniteValues(t *testing.T) {
 		})
 	}
 }
+
+func TestOperationAlertDurationConfiguration(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": 5 * time.Second, "2s": 2 * time.Second, "0": 0, "-1s": -time.Second} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("GONVEX_ALERT_OPERATION_DURATION", value)
+			if got := FromEnv().AlertOperationDuration; got != want {
+				t.Fatalf("got %s, want %s", got, want)
+			}
+		})
+	}
+}

@@ -57,6 +57,9 @@ type runtimeMetrics struct {
 	// onFunctionError forwards failed log entries to the error store (see
 	// runtime_errors.go). Set once at server construction; nil in tests.
 	onFunctionError func(runtimeLogEntry)
+	// onFunctionCompleted observes successes and failures without depending on
+	// transaction telemetry persistence. Called outside the metrics lock.
+	onFunctionCompleted func(runtimeLogEntry)
 	// admissionSource reads the query admission controller's counters for the
 	// metrics API. Set once at server construction; nil in isolated tests.
 	admissionSource func() queryAdmissionSnapshot
@@ -1038,6 +1041,9 @@ func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
 	m.mu.Unlock()
 
 	m.persistMutationLog(log)
+	if m.onFunctionCompleted != nil {
+		m.onFunctionCompleted(log)
+	}
 	if log.Outcome == "error" && onFunctionError != nil {
 		onFunctionError(log)
 	}

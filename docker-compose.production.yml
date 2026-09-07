@@ -142,6 +142,13 @@ services:
       GONVEX_DB_MAX_OPEN_CONNS: "2"
       GONVEX_DB_MAX_IDLE_CONNS: "1"
       GONVEX_ENVIRONMENT: production
+      # Optional. Coolify notification credentials are not inherited by containers.
+      GONVEX_TELEGRAM_BOT_TOKEN: ${GONVEX_TELEGRAM_BOT_TOKEN:-}
+      GONVEX_TELEGRAM_CHAT_ID: ${GONVEX_TELEGRAM_CHAT_ID:-}
+      GONVEX_ALERT_CPU_PERCENT: ${GONVEX_ALERT_CPU_PERCENT:-200}
+      GONVEX_ALERT_TTLU: ${GONVEX_ALERT_TTLU:-5s}
+      GONVEX_ALERT_OPERATION_DURATION: ${GONVEX_ALERT_OPERATION_DURATION:-5s}
+      GONVEX_ALERT_COOLDOWN: ${GONVEX_ALERT_COOLDOWN:-15m}
       GONVEX_REQUIRE_AUTH: "true"
       GONVEX_PUBLIC_URL: https://gonvex-maker.whagons.com
       GONVEX_AUTH_URL: https://gonvex-maker.whagons.com

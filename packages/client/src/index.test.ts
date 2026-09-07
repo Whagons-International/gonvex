@@ -1113,6 +1113,19 @@ describe("GonvexClient", () => {
     });
   });
 
+  it.each(["query", "mutation", "action"] as const)("reports %s timeouts for slow-operation alerts", async (kind) => {
+    const client = new GonvexClient("ws://runtime.test/ws", { telemetry: true });
+    const promise = client[kind]({ kind, path: "tasks.count" }, {}, { timeoutMs: 20_000 });
+    const socket = latestSocket();
+    socket.open();
+    vi.advanceTimersByTime(20_000);
+    await expect(promise).rejects.toMatchObject({ code: "timeout" });
+    expect(sentMessages(socket).filter(message => message.type === "telemetry.event")).toEqual([
+      expect.objectContaining({ kind, path: "tasks.count", reason: "timeout", outcome: "error", clientDurationMs: 20_000 }),
+    ]);
+    client.close();
+  });
+
   it("honors per-call timeout overrides for one-shot queries", async () => {
     const client = new GonvexClient("ws://runtime.test/ws");
     const promise = client.query(ref, {}, { timeoutMs: 1_000 });

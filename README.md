@@ -230,6 +230,17 @@ MinIO UI:  http://localhost:9001
 
 For production self-hosting, put the runtime behind TLS, provide managed Postgres and Valkey/Redis, configure backups, set allowed origins, and use S3-compatible storage only if your app needs files. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
 
+### Telegram performance alerts
+
+Set `GONVEX_TELEGRAM_BOT_TOKEN` and `GONVEX_TELEGRAM_CHAT_ID` on the runtime service. Both are required. Coolify's own notification settings and settings on a retired runtime application are not inherited by the active runtime container. The production Compose template forwards these optional settings only to the runtime.
+
+- `GONVEX_ALERT_OPERATION_DURATION` defaults to `5s`. Completed server queries, mutations, actions and sync operations at or above this duration alert, whether successful or failed. These alerts work with telemetry persistence disabled.
+- Client round trips and timeouts use the same threshold when the client has `telemetry: true`. Timeout reports require the updated client SDK and a working connection to deliver them. Offline clients and requests that never finish cannot be detected by a completion-based alert alone.
+- `GONVEX_ALERT_TTLU` continues to cover live query invalidation propagation separately, defaulting to `5s`. A subscription's age is not treated as a slow request.
+- `GONVEX_ALERT_COOLDOWN` defaults to `15m`. Slow-operation alerts are deduplicated per project, tenant, function and operation kind, including duplicate server/client reports. CPU and TTLU cooldowns remain separate. The cooldown map holds at most 1024 active keys; additional keys are suppressed until entries expire. Delivery uses the existing bounded background queue.
+
+An 18-second workspace query and a reported 20-second timeout qualify at the default threshold. A successful 1.73-second acknowledgment does not. Set an individual threshold to `0` to disable it. Alerts identify the environment, tenant, function, duration and outcome, without request arguments, raw error messages or user identities. After merging, deploy the runtime and configure its destination before expecting notifications; client timeout coverage additionally requires shipping the updated SDK in the consuming app.
+
 `VALKEY_URL` (or the legacy alias `REDIS_URL`) is mandatory. The runtime pings
 it during startup and exits with an actionable error if it is unset, invalid,
 or unreachable; there is no in-memory fallback.

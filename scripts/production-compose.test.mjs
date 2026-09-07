@@ -14,15 +14,31 @@ const secretEnvironment = {
   SERVICE_REALBASE64_64_GONVEX_DASHBOARD_SESSION: "compose-contract-session",
 };
 
-function resolvedCompose() {
+function resolvedCompose(overrides = {}) {
   const result = spawnSync(
     "docker",
     ["compose", "-f", composePath, "config", "--format", "json"],
-    { cwd: root, env: secretEnvironment, encoding: "utf8" },
+    { cwd: root, env: { ...secretEnvironment, ...overrides }, encoding: "utf8" },
   );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
 }
+
+test("production runtime receives the configured Telegram destination and thresholds", () => {
+  const configured = {
+    GONVEX_TELEGRAM_BOT_TOKEN: "test-bot",
+    GONVEX_TELEGRAM_CHAT_ID: "test-chat",
+    GONVEX_ALERT_CPU_PERCENT: "250",
+    GONVEX_ALERT_TTLU: "6s",
+    GONVEX_ALERT_OPERATION_DURATION: "4s",
+    GONVEX_ALERT_COOLDOWN: "10m",
+  };
+  const { services } = resolvedCompose(configured);
+  for (const [key, value] of Object.entries(configured)) {
+    assert.equal(services["gonvex-maker-runtime"].environment[key], value);
+    assert.equal(services["gonvex-maker-dashboard"].environment[key], undefined);
+  }
+});
 
 test("production compose keeps stateful dependencies private and pinned", () => {
   const compose = resolvedCompose();

@@ -97,12 +97,13 @@ type Config struct {
 	DropEmptyUndeclaredColumns bool
 	// Telegram alerts are disabled unless both the bot token and chat ID are
 	// configured. Thresholds at or below zero disable that individual alert.
-	TelegramBotToken string
-	TelegramChatID   string
-	TelegramAPIURL   string
-	AlertCPUPercent  float64
-	AlertTTLU        time.Duration
-	AlertCooldown    time.Duration
+	TelegramBotToken       string
+	TelegramChatID         string
+	TelegramAPIURL         string
+	AlertCPUPercent        float64
+	AlertTTLU              time.Duration
+	AlertOperationDuration time.Duration
+	AlertCooldown          time.Duration
 }
 
 func FromEnv() Config {
@@ -158,6 +159,7 @@ func FromEnv() Config {
 		TelegramAPIURL:               strings.TrimRight(env("GONVEX_TELEGRAM_API_URL", "https://api.telegram.org"), "/"),
 		AlertCPUPercent:              envFloat("GONVEX_ALERT_CPU_PERCENT", 200),
 		AlertTTLU:                    envDuration("GONVEX_ALERT_TTLU", 5*time.Second),
+		AlertOperationDuration:       envDuration("GONVEX_ALERT_OPERATION_DURATION", 5*time.Second),
 		AlertCooldown:                envDuration("GONVEX_ALERT_COOLDOWN", 15*time.Minute),
 	}
 }

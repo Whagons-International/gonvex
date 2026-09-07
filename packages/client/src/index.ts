@@ -313,7 +313,7 @@ export type GonvexTelemetryEvent = {
   type: "mutation" | "action" | "query";
   id: string;
   path: string;
-  reason?: "initial" | "invalidate" | "recover";
+  reason?: "initial" | "invalidate" | "recover" | "timeout";
   outcome: "ok" | "error";
   error?: string;
   clientSentAtMs?: number;
@@ -2014,6 +2014,7 @@ export class GonvexClient {
   query<T = JsonValue>(ref: FunctionReference, args: JsonValue = {}, options: CallOptions = {}): Promise<T> {
     this.connect();
     const id = randomID();
+    const clientSentAtMs = nowMs();
     const timeoutMs = options.timeoutMs ?? this.timeouts.queryTimeoutMs;
     return new Promise<T>((resolve, reject) => {
       const query: OneShotQuery = { id, path: ref.path, args, reject };
@@ -2031,6 +2032,7 @@ export class GonvexClient {
             `Query ${ref.path} timed out after ${timeoutMs}ms`,
             { code: "timeout", path: ref.path, operation: "query" },
           ));
+          this.emitTelemetryFromCall("query", id, ref.path, "error", clientSentAtMs, undefined, "Query timed out", "timeout");
         }, timeoutMs);
       }
       this.oneShotQueries.set(id, query);
@@ -2043,6 +2045,8 @@ export class GonvexClient {
             path: ref.path,
             reason: message.reason,
             outcome: "ok",
+            clientSentAtMs,
+            clientDurationMs: nowMs() - clientSentAtMs,
             clientReceivedAtMs: nowMs(),
             serverTrace: message.trace,
           });
@@ -2057,6 +2061,8 @@ export class GonvexClient {
             path: ref.path,
             outcome: "error",
             error: message.error,
+            clientSentAtMs,
+            clientDurationMs: nowMs() - clientSentAtMs,
             clientReceivedAtMs: nowMs(),
           });
           this.send({ type: "query.unsubscribe", id });
@@ -2179,6 +2185,7 @@ export class GonvexClient {
             `${kind === "mutation" ? "Mutation" : "Action"} ${ref.path} timed out after ${timeoutMs}ms. The operation may or may not have been applied.`,
             { code: "timeout", path: ref.path, operation: kind },
           ));
+          this.emitTelemetryFromCall(kind, id, ref.path, "error", clientSentAtMs, undefined, "Operation timed out; outcome unknown", "timeout");
         }, timeoutMs);
       }
       this.pendingCalls.set(id, pending);
@@ -2583,13 +2590,14 @@ export class GonvexClient {
   }
 
   private emitTelemetryFromCall(
-    kind: "mutation" | "action",
+    kind: "query" | "mutation" | "action",
     id: string,
     path: string,
     outcome: "ok" | "error",
     clientSentAtMs: number,
     serverTrace: MessageTrace | undefined,
     error?: string,
+    reason?: GonvexTelemetryEvent["reason"],
   ) {
     const clientReceivedAtMs = nowMs();
     this.recordTelemetry({
@@ -2598,6 +2606,7 @@ export class GonvexClient {
       path,
       outcome,
       error,
+      reason,
       clientSentAtMs,
       clientReceivedAtMs,
       clientDurationMs: clientReceivedAtMs - clientSentAtMs,

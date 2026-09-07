@@ -235,7 +235,7 @@ export type ClientMessage =
     id: string;
     kind: "query" | "mutation" | "action";
     path: string;
-    reason?: "initial" | "invalidate" | "recover";
+    reason?: "initial" | "invalidate" | "recover" | "timeout";
     outcome: "ok" | "error";
     error?: string;
     clientSentAtMs?: number;

@@ -251,6 +251,9 @@ func newServer(cfg config.Config, app *gonvex.App, ephemeral ephemeralBackend, c
 	server.tenantStores = newTenantStoreResolver(&server.config)
 	server.startRuntimeErrorCapture()
 	server.telegramAlerts = newTelegramAlertManager(cfg)
+	server.metrics.onFunctionCompleted = func(entry runtimeLogEntry) {
+		server.telegramAlerts.observeOperation(entry)
+	}
 	go server.telegramAlerts.run(server.ctx)
 	go server.runSubscriptionTelemetry()
 	server.metrics.onFunctionError = server.queueRuntimeFunctionError
