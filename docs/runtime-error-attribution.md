@@ -8,6 +8,8 @@ Release identity is recorded before log persistence. Replaying historical logs d
 
 Mark a confirmed fix resolved to remove it from the unresolved inbox while retaining history. A new accepted occurrence reopens the group and marks it as a regression, including occurrences on the same release or without a release. Duplicate event IDs do not reopen groups. Ignored groups remain ignored.
 
+In the dashboard, select individual unresolved groups or use **Select visible**, then **Resolve selected**. Selection applies only to the currently displayed, filtered groups, not the entire project. Changing filters clears the selection. Successful updates leave the unresolved inbox; failed updates remain selected for retry. The Resolved filter retains access to history and the Reopen action.
+
 Do not bulk resolve active failures just to empty the inbox. Verify the fix is deployed and inspect last-seen times. Error group listings return at most 500 groups, so counts from a single response are not necessarily totals for the project.
 
 ## Exporting the complete inbox

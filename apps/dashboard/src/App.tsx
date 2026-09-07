@@ -8331,7 +8331,7 @@ async function readErrorTrackingResponse<T>(
   return payload as T;
 }
 
-function ErrorsPage(props: { project: ProjectTarget }) {
+export function ErrorsPage(props: { project: ProjectTarget }) {
   const [groups, setGroups] = useState<DashboardErrorGroup[]>([]);
   const [releases, setReleases] = useState<string[]>([]);
   const [release, setRelease] = useState("all");
@@ -8341,6 +8341,9 @@ function ErrorsPage(props: { project: ProjectTarget }) {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [resolving, setResolving] = useState(false);
+  const [resolutionNotice, setResolutionNotice] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
   const [runtimeState, setRuntimeState] = useState<ErrorTrackingRuntimeState>("checking");
 
@@ -8374,6 +8377,8 @@ function ErrorsPage(props: { project: ProjectTarget }) {
 
   useEffect(() => { void load(); }, [load]);
 
+  useEffect(() => { setChecked(new Set()); }, [props.project, release, status, level, search]);
+
   const updateGroup = async (group: DashboardErrorGroup, update: Record<string, string>) => {
     const runtimeURL = runtimeURLForProject(props.project);
     try {
@@ -8401,6 +8406,34 @@ function ErrorsPage(props: { project: ProjectTarget }) {
 
   const normalizedSearch = search.trim().toLowerCase();
   const visibleGroups = groups.filter((group) => !normalizedSearch || [group.title, group.culprit, group.fingerprint, ...Object.keys(group.tenants), ...Object.keys(group.releases)].some((value) => value?.toLowerCase().includes(normalizedSearch)));
+  const selectableGroups = visibleGroups.filter((group) => group.status === "unresolved");
+  const checkedGroups = selectableGroups.filter((group) => checked.has(group.fingerprint));
+  const allChecked = selectableGroups.length > 0 && checkedGroups.length === selectableGroups.length;
+
+  const resolveSelected = async () => {
+    if (resolving || checkedGroups.length === 0) return;
+    setResolving(true);
+    setResolutionNotice("");
+    const failed = new Set<string>();
+    const runtimeURL = runtimeURLForProject(props.project);
+    // Resolve only the visible selection captured at click time. Keep failures
+    // selected for retry, and reload once rather than after every PATCH.
+    for (const group of checkedGroups) {
+      try {
+        const response = await fetch(`${runtimeURL}/dev/errors/groups/${group.fingerprint}`, {
+          method: "PATCH", headers: runtimeHeaders(props.project, { "content-type": "application/json" }),
+          body: JSON.stringify({ status: "resolved" }),
+        });
+        await readErrorTrackingResponse(response, { action: "Resolving error group", runtimeURL });
+      } catch { failed.add(group.fingerprint); }
+    }
+    const resolved = checkedGroups.length - failed.size;
+    setChecked(failed);
+    await load();
+    setResolutionNotice(`${resolved} ${resolved === 1 ? "group" : "groups"} resolved. ${failed.size ? `${failed.size} could not be resolved. Retry the selected groups.` : "History is preserved."}`);
+    setResolving(false);
+  };
+
   const impactedTenants = new Set(groups.flatMap((group) => Object.keys(group.tenants))).size;
   const occurrences = groups.reduce((total, group) => total + group.count, 0);
   const regressions = groups.filter((group) => group.regression).length;
@@ -8455,9 +8488,15 @@ function ErrorsPage(props: { project: ProjectTarget }) {
           <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
           <Select.Popover><ListBox><ListBox.Item id="unresolved">Unresolved</ListBox.Item><ListBox.Item id="resolved">Resolved</ListBox.Item><ListBox.Item id="ignored">Ignored</ListBox.Item><ListBox.Item id="all">All groups</ListBox.Item></ListBox></Select.Popover>
         </Select>
-        <Button size="sm" variant="secondary" onPress={() => void load()}>Refresh</Button>
+        <Button size="sm" variant="secondary" isDisabled={resolving || loading} onPress={() => void load()}>Refresh</Button>
       </div>
     </div>
+    <div className="errors-bulk-toolbar">
+      <label className="errors-select-label"><input type="checkbox" aria-label="Select all visible unresolved groups" checked={allChecked} ref={(node) => { if (node) node.indeterminate = checkedGroups.length > 0 && !allChecked; }} disabled={loading || resolving || selectableGroups.length === 0} onChange={() => setChecked(allChecked ? new Set() : new Set(selectableGroups.map((group) => group.fingerprint)))} />Select visible ({selectableGroups.length})</label>
+      <Button size="sm" variant="secondary" isDisabled={loading || resolving || checkedGroups.length === 0} onPress={() => void resolveSelected()}>{resolving ? "Resolving…" : `Resolve selected (${checkedGroups.length})`}</Button>
+      <span>History is kept. New occurrences reopen resolved groups.</span>
+    </div>
+    {resolutionNotice ? <p role="status">{resolutionNotice}</p> : null}
     {error ? <p className="form-error" role="alert">{error}</p> : null}
     {loading ? <p>Loading error groups…</p> : null}
     {!loading && !error && visibleGroups.length === 0 ? <div className="errors-empty"><span className="errors-empty-mark">✓</span><strong>{groups.length ? "No matching groups" : release === "all" ? `No ${status === "all" ? "captured" : status} errors` : `No errors in ${release}`}</strong><span>{groups.length ? "Try a tenant, release, or part of the error message." : release === "all" ? "Captured browser and Gonvex operation failures will appear here automatically." : "Choose another release or refresh after new errors are captured."}</span></div> : null}
@@ -8469,11 +8508,14 @@ function ErrorsPage(props: { project: ProjectTarget }) {
           : "";
         const errorContextLabel = group.latest.tags?.source === "runtime" ? "Execution context" : "Captured context";
         return <article className="error-group-card" data-expanded={expanded ? "true" : undefined} data-level={group.level ?? "error"} data-priority={group.priority} key={group.fingerprint}>
+          <div className="error-group-heading">
+          {group.status === "unresolved" ? <label className="error-group-select"><input type="checkbox" aria-label={`Select ${group.title}`} checked={checked.has(group.fingerprint)} disabled={resolving || loading} onChange={(event) => setChecked((previous) => { const next = new Set(previous); if (event.target.checked) next.add(group.fingerprint); else next.delete(group.fingerprint); return next; })} /></label> : null}
           <button className="error-group-summary" type="button" aria-expanded={expanded} onClick={() => setSelected(expanded ? null : group.fingerprint)}>
             <div className="error-group-main"><div className="error-group-title"><span className="error-priority">{group.priority}</span>{group.level === "warning" ? <span className="error-level">warning</span> : null}{group.regression ? <span className="error-regression">regression</span> : null}<strong>{group.title}</strong></div><code>{group.culprit || group.fingerprint}</code><span>Last seen {new Date(group.lastSeen).toLocaleString()} · first seen {new Date(group.firstSeen).toLocaleDateString()}</span></div>
             <div className="error-impact"><div><strong>{group.count}</strong><span>events</span></div><div><strong>{Object.keys(group.tenants).length}</strong><span>tenants</span></div><div><strong>{Object.keys(group.users).length}</strong><span>users</span></div><div><strong>{Object.keys(group.devices).length}</strong><span>machines</span></div></div>
             <span className="error-expand-mark" aria-hidden="true">{expanded ? "−" : "+"}</span>
           </button>
+          </div>
           {expanded ? <div className="error-group-detail">
             <div className="error-detail-primary">
               <div className="error-detail-heading"><div><span>Latest exception</span><strong>{group.latest.release || "Unknown release"}</strong></div><code>{group.fingerprint}</code></div>
@@ -8489,7 +8531,7 @@ function ErrorsPage(props: { project: ProjectTarget }) {
               <ErrorBreakdown title="Tenants" values={group.tenants} />
               <ErrorBreakdown title="Releases" values={group.releases} />
               <ErrorBreakdown title="Machines" values={group.devices} maskKeys />
-              <div className="error-triage-actions"><span>Triage</span><div><Button size="sm" variant="secondary" onPress={() => void copyBrief(group)}>{copied === group.fingerprint ? "Brief copied" : "Copy agent brief"}</Button>{group.status === "resolved" ? <Button size="sm" variant="ghost" onPress={() => void updateGroup(group, { status: "unresolved" })}>Reopen</Button> : <Button size="sm" variant="ghost" onPress={() => void updateGroup(group, { status: "resolved" })}>Resolve</Button>}<Button size="sm" variant="ghost" onPress={() => void updateGroup(group, { status: "ignored" })}>Ignore</Button></div></div>
+              <div className="error-triage-actions"><span>Triage</span><div><Button size="sm" variant="secondary" onPress={() => void copyBrief(group)}>{copied === group.fingerprint ? "Brief copied" : "Copy agent brief"}</Button>{group.status === "resolved" ? <Button size="sm" variant="ghost" isDisabled={resolving} onPress={() => void updateGroup(group, { status: "unresolved" })}>Reopen</Button> : <Button size="sm" variant="ghost" isDisabled={resolving} onPress={() => void updateGroup(group, { status: "resolved" })}>Resolve</Button>}<Button size="sm" variant="ghost" isDisabled={resolving} onPress={() => void updateGroup(group, { status: "ignored" })}>Ignore</Button></div></div>
             </aside>
           </div> : null}
         </article>;
