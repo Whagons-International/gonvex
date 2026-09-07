@@ -29,6 +29,7 @@ func (s *Server) recordTransactionTelemetryBatch(entries []transactionTelemetryE
 	}
 	for _, entry := range normalized {
 		s.telegramAlerts.observeTTLU(entry)
+		s.telegramAlerts.observeClientOperation(entry)
 	}
 	if !s.config.TelemetryEnabled {
 		return

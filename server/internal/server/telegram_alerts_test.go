@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -141,6 +143,19 @@ func TestTelegramAlertsRequireTokenAndChat(t *testing.T) {
 	}
 }
 
+func TestTelegramSlowOperationWithoutTelemetryPersistence(t *testing.T) {
+	server := New(config.Config{TelemetryEnabled: false})
+	defer server.Close()
+	server.telegramAlerts = newTelegramAlertManager(config.Config{
+		TelegramBotToken: "token", TelegramChatID: "chat", AlertOperationDuration: 5 * time.Second,
+	})
+	server.metrics.recordRuntimeLog(runtimeLogEntry{
+		Project: "whagons", Tenant: "el-rey", Kind: "query", Path: "bulk.tasksByWorkspace",
+		Outcome: "ok", DurationMS: 18000,
+	}, time.Now())
+	assertTelegramAlertContains(t, server.telegramAlerts, "18.00s", "el-rey", "bulk.tasksByWorkspace")
+}
+
 func assertTelegramAlertContains(t *testing.T, alerts *telegramAlertManager, fragments ...string) {
 	t.Helper()
 	select {
@@ -161,5 +176,104 @@ func assertNoTelegramAlert(t *testing.T, alerts *telegramAlertManager) {
 	case alert := <-alerts.queue:
 		t.Fatalf("unexpected Telegram alert: %s", alert.text)
 	default:
+	}
+}
+
+func TestTelegramSlowOperationThresholdKindsAndSafeMessage(t *testing.T) {
+	for _, kind := range []string{"query", "mutation", "action", "sync"} {
+		t.Run(kind, func(t *testing.T) {
+			alerts := newTelegramAlertManager(config.Config{TelegramBotToken: "token", TelegramChatID: "chat", AlertOperationDuration: 5 * time.Second})
+			entry := runtimeLogEntry{Project: "whagons", Tenant: "el-rey", Kind: kind, Path: "tasks.acknowledge", Outcome: "error", Error: "secret-error", UserEmail: "private@example.test", Request: []byte(`{"password":"private"}`)}
+			for _, duration := range []float64{1730, 4999.9, math.NaN(), math.Inf(1), -1} {
+				entry.DurationMS = duration
+				alerts.observeOperation(entry)
+				assertNoTelegramAlert(t, alerts)
+			}
+			entry.DurationMS = 5000
+			alerts.observeOperation(entry)
+			select {
+			case alert := <-alerts.queue:
+				for _, secret := range []string{"secret-error", "private", "password"} {
+					if strings.Contains(alert.text, secret) {
+						t.Fatalf("private data in alert: %s", alert.text)
+					}
+				}
+				if !strings.Contains(alert.text, "5.00s") || !strings.Contains(alert.text, "Outcome: error") {
+					t.Fatal(alert.text)
+				}
+			default:
+				t.Fatal("expected threshold alert")
+			}
+		})
+	}
+}
+
+func TestTelegramSlowOperationCooldownScopeAndQueueBackpressure(t *testing.T) {
+	now := time.Now()
+	alerts := newTelegramAlertManager(config.Config{TelegramBotToken: "token", TelegramChatID: "chat", AlertOperationDuration: 5 * time.Second, AlertCooldown: time.Minute})
+	alerts.now = func() time.Time { return now }
+	entry := runtimeLogEntry{Project: "p", Tenant: "el-rey", Kind: "query", Path: "tasks.list", DurationMS: 18000}
+	alerts.observeOperation(entry)
+	assertTelegramAlertContains(t, alerts, "18.00s")
+	alerts.observeOperation(entry)
+	assertNoTelegramAlert(t, alerts)
+	alerts.observeClientOperation(transactionTelemetryEntry{Project: "p", Tenant: "el-rey", Kind: "query", Path: "tasks.list", Phase: "browser", ClientDurationMS: 20000})
+	assertNoTelegramAlert(t, alerts)
+	for _, other := range []runtimeLogEntry{
+		{Project: "p", Tenant: "other", Kind: "query", Path: "tasks.list", DurationMS: 6000},
+		{Project: "other", Tenant: "el-rey", Kind: "query", Path: "tasks.list", DurationMS: 6000},
+		{Project: "p", Tenant: "el-rey", Kind: "query", Path: "tasks.count", DurationMS: 6000},
+		{Project: "p", Tenant: "el-rey", Kind: "mutation", Path: "tasks.list", DurationMS: 6000},
+	} {
+		alerts.observeOperation(other)
+		assertTelegramAlertContains(t, alerts, "6.00s")
+	}
+	now = now.Add(time.Minute)
+	for i := 0; i < cap(alerts.queue); i++ {
+		alerts.queue <- telegramAlert{text: "occupied"}
+	}
+	alerts.observeOperation(entry)
+	for len(alerts.queue) > 0 {
+		<-alerts.queue
+	}
+	alerts.observeOperation(entry)
+	assertTelegramAlertContains(t, alerts, "18.00s")
+}
+
+func TestTelegramClientTimeoutAlertsWithoutPersistence(t *testing.T) {
+	server := New(config.Config{TelemetryEnabled: false})
+	defer server.Close()
+	server.telegramAlerts = newTelegramAlertManager(config.Config{TelegramBotToken: "token", TelegramChatID: "chat", AlertOperationDuration: 5 * time.Second})
+	entry := transactionEntryFromClientTelemetry("whagons", "el-rey", clientMessage{Kind: "query", Path: "tasks.count", Reason: "timeout", Outcome: "error", ClientDurationMS: 20000})
+	server.recordTransactionTelemetry(entry)
+	assertTelegramAlertContains(t, server.telegramAlerts, "client timeout query took 20.00s", "el-rey", "tasks.count")
+	entry.Path = "tasks.live"
+	entry.Reason = "invalidate"
+	server.recordTransactionTelemetry(entry)
+	assertNoTelegramAlert(t, server.telegramAlerts)
+	entry.Reason = "initial"
+	entry.Phase = "server"
+	server.recordTransactionTelemetry(entry)
+	assertNoTelegramAlert(t, server.telegramAlerts)
+}
+
+func TestTelegramSlowOperationCooldownMemoryIsBounded(t *testing.T) {
+	alerts := newTelegramAlertManager(config.Config{TelegramBotToken: "token", TelegramChatID: "chat", AlertOperationDuration: time.Second})
+	now := time.Now()
+	alerts.now = func() time.Time { return now }
+	for i := 0; i < telegramSlowOperationKeyLimit; i++ {
+		alerts.operationLastSentAt[slowOperationKey{path: fmt.Sprint(i)}] = now
+	}
+	entry := runtimeLogEntry{Kind: "query", Path: "new", DurationMS: 18000}
+	alerts.observeOperation(entry)
+	assertNoTelegramAlert(t, alerts)
+	if len(alerts.operationLastSentAt) != telegramSlowOperationKeyLimit {
+		t.Fatal("cooldown map grew")
+	}
+	now = now.Add(alerts.cooldown)
+	alerts.observeOperation(entry)
+	assertTelegramAlertContains(t, alerts, "18.00s")
+	if len(alerts.operationLastSentAt) != 1 {
+		t.Fatal("expired cooldowns were not reclaimed")
 	}
 }

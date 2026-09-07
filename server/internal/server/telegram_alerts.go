@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,21 +15,28 @@ import (
 )
 
 const telegramAlertQueueSize = 64
+const telegramSlowOperationKeyLimit = 1024
+
+type slowOperationKey struct {
+	project, tenant, kind, path string
+}
 
 type telegramAlert struct {
 	text string
 }
 
 type telegramAlertManager struct {
-	botToken      string
-	chatID        string
-	apiURL        string
-	environment   string
-	cpuThreshold  float64
-	ttluThreshold time.Duration
-	cooldown      time.Duration
-	client        *http.Client
-	queue         chan telegramAlert
+	botToken            string
+	chatID              string
+	apiURL              string
+	environment         string
+	cpuThreshold        float64
+	ttluThreshold       time.Duration
+	operationThreshold  time.Duration
+	operationLastSentAt map[slowOperationKey]time.Time
+	cooldown            time.Duration
+	client              *http.Client
+	queue               chan telegramAlert
 
 	mu             sync.Mutex
 	cpuActive      bool
@@ -53,7 +61,9 @@ func newTelegramAlertManager(cfg config.Config) *telegramAlertManager {
 		botToken: cfg.TelegramBotToken, chatID: cfg.TelegramChatID, apiURL: apiURL,
 		environment: strings.TrimSpace(cfg.Environment), cpuThreshold: cfg.AlertCPUPercent,
 		ttluThreshold: cfg.AlertTTLU, cooldown: cooldown,
-		client: &http.Client{Timeout: 5 * time.Second}, queue: make(chan telegramAlert, telegramAlertQueueSize),
+		operationThreshold:  cfg.AlertOperationDuration,
+		operationLastSentAt: make(map[slowOperationKey]time.Time),
+		client:              &http.Client{Timeout: 5 * time.Second}, queue: make(chan telegramAlert, telegramAlertQueueSize),
 		now: time.Now,
 	}
 }
@@ -138,11 +148,82 @@ func (a *telegramAlertManager) label() string {
 	return a.environment
 }
 
-func (a *telegramAlertManager) enqueue(text string) {
+func (a *telegramAlertManager) observeOperation(entry runtimeLogEntry) {
+	if a == nil {
+		return
+	}
+	a.observeSlowOperation(entry.Project, entry.Tenant, entry.Kind, entry.Path, entry.Outcome, "server", entry.DurationMS)
+}
+
+func (a *telegramAlertManager) observeClientOperation(entry transactionTelemetryEntry) {
+	if a == nil || entry.Phase != "browser" {
+		return
+	}
+	// Live update propagation has its own TTLU alert. A subscription's lifetime
+	// is not the duration of an individual request.
+	if entry.Kind == "query" && entry.Reason == "invalidate" {
+		return
+	}
+	duration := entry.ClientDurationMS
+	if duration <= 0 {
+		duration = entry.ClientRoundTripMS
+	}
+	source := "client"
+	if entry.Reason == "timeout" {
+		source = "client timeout"
+	}
+	a.observeSlowOperation(entry.Project, entry.Tenant, entry.Kind, entry.Path, entry.Outcome, source, duration)
+}
+
+func (a *telegramAlertManager) observeSlowOperation(project, tenant, kind, path, outcome, source string, durationMS float64) {
+	if a.operationThreshold <= 0 || math.IsNaN(durationMS) || math.IsInf(durationMS, 0) || durationMS < float64(a.operationThreshold)/float64(time.Millisecond) {
+		return
+	}
+	switch kind {
+	case "query", "mutation", "action", "sync":
+	default:
+		return
+	}
+	// Avoid request bodies, user identities and raw error strings in Telegram.
+	// Bound client-supplied labels as well as the cooldown map.
+	label := func(value, fallback string) string {
+		value = strings.Join(strings.Fields(value), " ")
+		if value == "" {
+			return fallback
+		}
+		runes := []rune(value)
+		if len(runes) > 160 {
+			value = string(runes[:160])
+		}
+		return value
+	}
+	key := slowOperationKey{label(project, "default"), label(tenant, "unknown"), kind, label(path, "unknown function")}
+	now := a.now().UTC()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if last, ok := a.operationLastSentAt[key]; ok && now.Sub(last) < a.cooldown {
+		return
+	}
+	for key, last := range a.operationLastSentAt {
+		if now.Sub(last) >= a.cooldown {
+			delete(a.operationLastSentAt, key)
+		}
+	}
+	if len(a.operationLastSentAt) >= telegramSlowOperationKeyLimit {
+		return
+	}
+	if a.enqueue(fmt.Sprintf("Gonvex slow operation alert [%s]\n%s %s took %.2fs, threshold %.2fs. Project: %s. Tenant: %s. Function: %s. Outcome: %s.", label(a.label(), "runtime"), source, kind, durationMS/1000, a.operationThreshold.Seconds(), key.project, key.tenant, key.path, label(outcome, "unknown"))) {
+		a.operationLastSentAt[key] = now
+	}
+}
+
+func (a *telegramAlertManager) enqueue(text string) bool {
 	select {
 	case a.queue <- telegramAlert{text: text}:
+		return true
 	default:
 		slog.Warn("Telegram runtime alert dropped because queue is full")
+		return false
 	}
 }
 
