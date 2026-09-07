@@ -209,8 +209,10 @@ func newErrorGroup(event capturedError, fp string, when time.Time) *errorGroup {
 }
 
 func applyErrorToGroup(group *errorGroup, event capturedError, when time.Time) {
-	previousRelease := group.Latest.Release
-	if group.Status == "resolved" && event.Release != "" && previousRelease != "" && event.Release != previousRelease {
+	// Ingestion deduplicates event IDs before reaching this function. A new
+	// occurrence must reopen a resolved group, including unversioned server
+	// failures and failed fixes within the same deployment.
+	if group.Status == "resolved" {
 		group.Status = "unresolved"
 		group.Regression = true
 	}

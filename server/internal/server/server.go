@@ -307,10 +307,12 @@ func (s *Server) runScheduledJob(ctx context.Context, job scheduledJob) error {
 func (s *Server) executeScheduledInternalMutation(ctx context.Context, job scheduledJob) (err error) {
 	const kind = "internalMutation"
 	s.metrics.recordFunctionStart(kind)
-	started := time.Now()
+	execution := newRuntimeFunctionLog(job.ProjectID, job.TenantID, job.FunctionPath, kind, callerContext{}, job.Args)
+	execution.entry.OperationID = job.ID
+	execution.entry.Reason = "scheduler"
 	defer func() {
 		s.metrics.recordFunctionEnd(kind)
-		s.metrics.recordFunction(job.ProjectID, job.FunctionPath, kind, time.Since(started), err)
+		s.metrics.recordFunctionExecution(execution, err)
 	}()
 
 	app := s.appForProject(ctx, job.ProjectID)

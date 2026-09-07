@@ -107,6 +107,8 @@ type databaseMetricState struct {
 }
 
 type runtimeLogEntry struct {
+	Release          string          `json:"release,omitempty"`
+	RuntimeInstance  string          `json:"runtimeInstance,omitempty"`
 	Time             string          `json:"time"`
 	ExecutionID      string          `json:"executionId,omitempty"`
 	OperationID      string          `json:"operationId,omitempty"`
@@ -992,6 +994,14 @@ func (m *runtimeMetrics) recordRuntimeOperation(project string, path string, kin
 }
 
 func (m *runtimeMetrics) recordRuntimeLog(log runtimeLogEntry, now time.Time) {
+	// Record deployment identity before persistence. Restored historical logs
+	// bypass this path and must never inherit the current deployment's release.
+	if log.Release == "" {
+		log.Release = "runtime@" + runtimeBuildVersion()
+	}
+	if log.RuntimeInstance == "" {
+		log.RuntimeInstance, _ = os.Hostname()
+	}
 	m.mu.Lock()
 
 	logKind := log.Kind

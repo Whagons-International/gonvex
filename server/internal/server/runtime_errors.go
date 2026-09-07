@@ -94,6 +94,7 @@ func runtimeErrorEvent(entry runtimeLogEntry) (capturedError, bool) {
 		Project:     project,
 		Tenant:      strings.TrimSpace(entry.Tenant),
 		Environment: "server",
+		Release:     strings.TrimSpace(entry.Release),
 		Tags: map[string]string{
 			"source": "runtime",
 			"kind":   kind,
@@ -116,17 +117,18 @@ func runtimeErrorEvent(entry runtimeLogEntry) (capturedError, bool) {
 func runtimeErrorContext(entry runtimeLogEntry) map[string]any {
 	context := map[string]any{"durationMs": entry.DurationMS}
 	for key, value := range map[string]string{
-		"executionId":  entry.ExecutionID,
-		"operationId":  entry.OperationID,
-		"connectionId": entry.ConnectionID,
-		"browser":      entry.Browser,
-		"deviceType":   entry.DeviceType,
-		"platform":     entry.Platform,
-		"startedAt":    entry.StartedAt,
-		"completedAt":  entry.CompletedAt,
-		"cache":        entry.Cache,
-		"source":       entry.Source,
-		"trigger":      entry.Reason,
+		"executionId":     entry.ExecutionID,
+		"runtimeInstance": entry.RuntimeInstance,
+		"operationId":     entry.OperationID,
+		"connectionId":    entry.ConnectionID,
+		"browser":         entry.Browser,
+		"deviceType":      entry.DeviceType,
+		"platform":        entry.Platform,
+		"startedAt":       entry.StartedAt,
+		"completedAt":     entry.CompletedAt,
+		"cache":           entry.Cache,
+		"source":          entry.Source,
+		"trigger":         entry.Reason,
 	} {
 		if value = strings.TrimSpace(value); value != "" {
 			context[key] = value
