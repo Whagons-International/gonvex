@@ -807,3 +807,42 @@ func TestSyncAuthRevocationCannotDeadlockDelivery(t *testing.T) {
 		t.Fatalf("revoked authentication left %d sync subscriptions attached", remaining)
 	}
 }
+
+func TestFailedSyncOpenCapturesOneAttributedOccurrence(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	var captured []runtimeLogEntry
+	metrics.onFunctionError = func(entry runtimeLogEntry) { captured = append(captured, entry) }
+	connection := &wsConn{server: &Server{metrics: metrics}, project: "project-a", tenant: "tenant-a", id: "connection-a", user: &gonvex.User{ID: "user-a"}}
+	// A malformed open fails before storage access but still exercises the same
+	// deferred reporting used for membership and snapshot failures.
+	connection.openSyncWithClock(context.Background(), clientMessage{Path: "sync.tasks", Args: json.RawMessage(`{"password":"secret","workspaceId":"workspace-a"}`)}, "", syncClock{})
+	if len(captured) != 1 {
+		t.Fatalf("one failed open produced %d captured errors, want 1", len(captured))
+	}
+	entry := captured[0]
+	if entry.Tenant != "tenant-a" || entry.UserID != "user-a" || entry.ConnectionID != "connection-a" || entry.Release == "" || entry.RuntimeInstance == "" {
+		t.Fatalf("lost sync error attribution: %+v", entry)
+	}
+	if strings.Contains(string(entry.Request), "secret") {
+		t.Fatal("sync error leaked request secret")
+	}
+	if calls := metrics.functions["sync.tasks"].Calls; calls != 1 {
+		t.Fatalf("function calls = %d, want 1", calls)
+	}
+	if errors := metrics.functions["sync.tasks"].Errors; errors != 1 {
+		t.Fatalf("function errors = %d, want 1", errors)
+	}
+}
+
+func TestOperationalErrorIncludesRuntimeDeployment(t *testing.T) {
+	metrics := newRuntimeMetrics()
+	var captured runtimeLogEntry
+	metrics.onFunctionError = func(entry runtimeLogEntry) { captured = entry }
+	metrics.recordOperationalLog(runtimeLogEntry{Project: "project-a", Kind: "sync", Path: "sync.tasks", Outcome: "error", Error: "clock unavailable"}, time.Now())
+	if captured.Release == "" || captured.RuntimeInstance == "" {
+		t.Fatalf("operational failure has no deployment context: %+v", captured)
+	}
+	if len(metrics.functions) != 0 {
+		t.Fatal("operational logging must not increment function calls")
+	}
+}
