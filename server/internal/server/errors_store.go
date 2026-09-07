@@ -158,7 +158,7 @@ func scanErrorGroup(row rowScanner) (*errorGroup, error) {
 	return group, nil
 }
 
-func (s *Server) persistentErrorGroups(ctx context.Context, project, status, release, level string) ([]*errorGroup, []string, bool, error) {
+func (s *Server) persistentErrorGroups(ctx context.Context, project, status, release, level string, after ...string) ([]*errorGroup, []string, bool, error) {
 	db, err := s.openErrorDB(ctx, project)
 	if err != nil || db == nil {
 		return nil, nil, db != nil, err
@@ -201,7 +201,12 @@ func (s *Server) persistentErrorGroups(ctx context.Context, project, status, rel
 		query += fmt.Sprintf(` AND releases ? $%d`, len(args)+1)
 		args = append(args, release)
 	}
-	query += ` ORDER BY last_seen DESC LIMIT 500`
+	if len(after) > 0 {
+		query += fmt.Sprintf(` AND fingerprint > $%d ORDER BY fingerprint ASC LIMIT 501`, len(args)+1)
+		args = append(args, after[0])
+	} else {
+		query += ` ORDER BY last_seen DESC LIMIT 500`
+	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, nil, true, err
