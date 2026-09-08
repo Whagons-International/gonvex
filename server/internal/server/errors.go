@@ -116,11 +116,15 @@ func (t *errorTracker) capture(event capturedError) (string, bool) {
 }
 
 func (t *errorTracker) listGroups(project, status, release, level string) ([]*errorGroup, []string) {
+	return t.listGroupsSince(project, status, release, level, time.Time{})
+}
+
+func (t *errorTracker) listGroupsSince(project, status, release, level string, since time.Time) ([]*errorGroup, []string) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	releases := orderedErrorReleases(t.eventLog, project)
-	if release == "" {
+	if release == "" && since.IsZero() {
 		groups := make([]*errorGroup, 0, len(t.groups))
 		for _, group := range t.groups {
 			if project != "" && group.Project != project {
@@ -141,7 +145,7 @@ func (t *errorTracker) listGroups(project, status, release, level string) ([]*er
 
 	eventsByFingerprint := map[string][]capturedError{}
 	for _, event := range t.eventLog {
-		if event.Project == project && event.Release == release {
+		if event.Project == project && (release == "" || event.Release == release) && (since.IsZero() || !eventTime(event.Timestamp).Before(since)) {
 			fp := fingerprint(event)
 			base := t.groups[fp]
 			matches := base != nil &&
@@ -586,6 +590,15 @@ func (s *Server) handleErrorEnvelope(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleErrorGroups(w http.ResponseWriter, r *http.Request) {
 	project, status, release := projectID(r), r.URL.Query().Get("status"), r.URL.Query().Get("release")
 	level := requestedErrorLevel(r.URL.Query().Get("level"))
+	var since time.Time
+	if value := r.URL.Query().Get("since"); value != "" {
+		var err error
+		since, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil || since.IsZero() || since.After(time.Now()) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "since must be a past RFC3339 timestamp"})
+			return
+		}
+	}
 	var after []string
 	if r.URL.Query().Get("export") == "1" {
 		cursor := r.URL.Query().Get("cursor")
@@ -595,15 +608,18 @@ func (s *Server) handleErrorGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		after = []string{cursor}
 	}
-	groups, releases, available, err := s.persistentErrorGroups(r.Context(), project, status, release, level, after...)
+	groups, releases, available, err := s.persistentErrorGroupsSince(r.Context(), project, status, release, level, since, after...)
 	if err != nil {
 		writeJSON(w, 503, map[string]any{"error": "error store unavailable"})
 		return
 	}
 	if !available {
-		groups, releases = s.errorTracker.listGroups(project, status, release, level)
+		groups, releases = s.errorTracker.listGroupsSince(project, status, release, level, since)
 	}
 	response := map[string]any{"groups": groups, "releases": releases}
+	if !since.IsZero() {
+		response["since"] = since.UTC().Format(time.RFC3339Nano)
+	}
 	if len(after) > 0 {
 		// Fingerprints are immutable; last-seen ordering moves while new events
 		// arrive and can skip older groups during a multi-page export.

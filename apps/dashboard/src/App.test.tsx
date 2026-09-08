@@ -35,7 +35,14 @@ async function renderTrackedErrorProject(groupsResponse: (input: RequestInfo | U
     if (String(input).includes("/dev/projects") && init?.method === "POST") {
       return { ok: true, status: 200, statusText: "OK", json: async () => ({ project: trackedErrorProject, projectKey: "test-project-key" }) } as Response;
     }
-    if (String(input).includes("/dev/errors/groups")) return groupsResponse(input, init);
+    if (String(input).includes("/dev/errors/groups")) {
+      const response = await groupsResponse(input, init);
+      if (response.ok && !init?.method && response.json && !response.text) {
+        const payload = await response.json();
+        return { ...response, json: async () => ({ since: new URL(String(input)).searchParams.get("since"), ...payload }) } as Response;
+      }
+      return response;
+    }
     return { ok: true, status: 200, statusText: "OK", json: async () => ({}) } as Response;
   }));
   const user = userEvent.setup();
@@ -791,6 +798,27 @@ describe("App", () => {
     expect(screen.getByText(/no files yet/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /column settings/i })).not.toBeDisabled();
     expect(screen.queryByText(/kg27zrhezshg/i)).not.toBeInTheDocument();
+  });
+
+  it("defaults to recent events, follows export pages, and counts affected users", async () => {
+    const requested: URL[] = [];
+    await renderTrackedErrorProject(async (input) => {
+      const url = new URL(String(input)); requested.push(url);
+      const second = url.searchParams.has("cursor");
+      return { ok: true, status: 200, json: async () => ({
+        since: url.searchParams.get("since"), nextCursor: second ? "" : "first",
+        groups: [{ fingerprint: second ? "second" : "first", title: second ? "Second failure" : "First failure", status: "unresolved", priority: "medium", count: second ? 3 : 2,
+          firstSeen: "2026-09-08T10:00:00Z", lastSeen: "2026-09-08T10:00:00Z", tenants: { acme: 1 }, users: { sameUser: 1 }, devices: {}, releases: {}, latest: {} }],
+      }) } as Response;
+    });
+    expect(await screen.findByText("Second failure")).toBeInTheDocument();
+    expect(requested).toHaveLength(2);
+    expect(requested[0].searchParams.get("export")).toBe("1");
+    expect(Date.now()-Date.parse(requested[0].searchParams.get("since")!)).toBeLessThan(24*60*60*1000+10000);
+    expect(requested[1].searchParams.get("since")).toBe(requested[0].searchParams.get("since"));
+    const summary=screen.getByLabelText("Error impact summary");
+    expect(within(summary).getByText("5")).toBeInTheDocument();
+    expect(within(summary).getByText("Users hit").parentElement).toHaveTextContent("1");
   });
 
   it("expands a grouped error with tenant, release, and machine context", async () => {

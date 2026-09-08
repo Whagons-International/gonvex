@@ -159,6 +159,10 @@ func scanErrorGroup(row rowScanner) (*errorGroup, error) {
 }
 
 func (s *Server) persistentErrorGroups(ctx context.Context, project, status, release, level string, after ...string) ([]*errorGroup, []string, bool, error) {
+	return s.persistentErrorGroupsSince(ctx, project, status, release, level, time.Time{}, after...)
+}
+
+func (s *Server) persistentErrorGroupsSince(ctx context.Context, project, status, release, level string, since time.Time, after ...string) ([]*errorGroup, []string, bool, error) {
 	db, err := s.openErrorDB(ctx, project)
 	if err != nil || db == nil {
 		return nil, nil, db != nil, err
@@ -201,6 +205,17 @@ func (s *Server) persistentErrorGroups(ctx context.Context, project, status, rel
 		query += fmt.Sprintf(` AND releases ? $%d`, len(args)+1)
 		args = append(args, release)
 	}
+	if !since.IsZero() {
+		// Filter by matching events before pagination. A group's latest event may
+		// belong to a different release, and lifetime counts are not recent impact.
+		query += fmt.Sprintf(` AND EXISTS (SELECT 1 FROM gonvex_error_events e WHERE e.project_id=gonvex_error_groups.project_id AND e.fingerprint=gonvex_error_groups.fingerprint AND e.occurred_at >= $%d`, len(args)+1)
+		args = append(args, since)
+		if release != "" {
+			query += fmt.Sprintf(` AND e.release=$%d`, len(args)+1)
+			args = append(args, release)
+		}
+		query += `)`
+	}
 	if len(after) > 0 {
 		query += fmt.Sprintf(` AND fingerprint > $%d ORDER BY fingerprint ASC LIMIT 501`, len(args)+1)
 		args = append(args, after[0])
@@ -225,14 +240,20 @@ func (s *Server) persistentErrorGroups(ctx context.Context, project, status, rel
 		return nil, nil, true, err
 	}
 	rows.Close()
-	if release == "" || len(groups) == 0 {
+	if (release == "" && since.IsZero()) || len(groups) == 0 {
 		return groups, releases, true, nil
 	}
 
-	eventQuery := `SELECT payload
-		FROM gonvex_error_events
-		WHERE project_id=$1 AND release=$2`
-	eventArgs := []any{project, release}
+	eventQuery := `SELECT fingerprint, payload FROM gonvex_error_events WHERE project_id=$1`
+	eventArgs := []any{project}
+	if release != "" {
+		eventQuery += fmt.Sprintf(` AND release=$%d`, len(eventArgs)+1)
+		eventArgs = append(eventArgs, release)
+	}
+	if !since.IsZero() {
+		eventQuery += fmt.Sprintf(` AND occurred_at >= $%d`, len(eventArgs)+1)
+		eventArgs = append(eventArgs, since)
+	}
 	fingerprintPlaceholders := make([]string, 0, len(groups))
 	for _, group := range groups {
 		fingerprintPlaceholders = append(fingerprintPlaceholders, fmt.Sprintf("$%d", len(eventArgs)+1))
@@ -246,7 +267,8 @@ func (s *Server) persistentErrorGroups(ctx context.Context, project, status, rel
 	eventsByFingerprint := map[string][]capturedError{}
 	for eventRows.Next() {
 		var raw []byte
-		if err := eventRows.Scan(&raw); err != nil {
+		var fp string
+		if err := eventRows.Scan(&fp, &raw); err != nil {
 			eventRows.Close()
 			return nil, nil, true, err
 		}
@@ -255,7 +277,6 @@ func (s *Server) persistentErrorGroups(ctx context.Context, project, status, rel
 			eventRows.Close()
 			return nil, nil, true, err
 		}
-		fp := fingerprint(event)
 		eventsByFingerprint[fp] = append(eventsByFingerprint[fp], event)
 	}
 	if err := eventRows.Err(); err != nil {
