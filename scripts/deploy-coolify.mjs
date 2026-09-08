@@ -186,6 +186,20 @@ async function waitForDeployment(base, token, deploymentUUID, options = {}) {
   throw new Error(`Coolify deployment ${deploymentUUID} did not finish before timeout`);
 }
 
+export async function waitForHealthyApplication(base, token, uuid, role, sha, options = {}) {
+  const deadline = Date.now() + (options.healthTimeoutMS ?? 120_000);
+  let status;
+  do {
+    const application = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
+    // A concurrent pin/config change is not health propagation. Fail at once.
+    verifyRollingApplication(application, role, sha);
+    status = application.status;
+    if (status === "running:healthy") return application;
+    await new Promise((resolve) => setTimeout(resolve, options.intervalMS ?? 5_000));
+  } while (Date.now() < deadline);
+  throw new Error(`${role} did not become healthy before timeout (last status: ${status ?? "unknown"})`);
+}
+
 export async function deployRollingApplications({
   base,
   token,
@@ -287,8 +301,7 @@ export async function deployRollingApplications({
     if (!deploymentUUID) throw new Error(`Coolify did not return a ${role} deployment UUID`);
     await waitForDeployment(base, token, deploymentUUID, waitOptions);
 
-    const deployed = await coolifyRequest(base, token, `/applications/${encodeURIComponent(uuid)}`);
-    verifyRollingApplication(deployed, role, sha);
+    await waitForHealthyApplication(base, token, uuid, role, sha, waitOptions);
     const deployedEnvironment = await coolifyRequest(
       base,
       token,
@@ -296,9 +309,6 @@ export async function deployRollingApplications({
     );
     if (role === "runtime") verifyRuntimeEnvironment(deployedEnvironment, sha, expectedRequireAuth);
     else verifyDashboardEnvironment(deployedEnvironment);
-    if (deployed.status !== "running:healthy") {
-      throw new Error(`${role} ended deployment as ${deployed.status ?? "unknown"}`);
-    }
     console.log(`Deployed rolling Gonvex ${role} ${uuid} at ${sha}`);
   }
 }

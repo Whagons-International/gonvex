@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deployRollingApplications,
+  waitForHealthyApplication,
   verifyApplicationUpdateAcknowledgement,
   verifyDashboardEnvironment,
   verifyRollingApplication,
@@ -111,8 +112,9 @@ test("requires the selected runtime auth policy, loopback proxy, and exact adver
   );
 });
 
-test("pins and finishes runtime before deploying dashboard", async () => {
+test("waits for propagated application health before deploying dashboard", async () => {
   const events = [];
+  const healthReads = {};
   const states = {
     "runtime-uuid": application("runtime", { git_commit_sha: "HEAD" }),
     "dashboard-uuid": application("dashboard", { git_commit_sha: "HEAD" }),
@@ -161,6 +163,10 @@ test("pins and finishes runtime before deploying dashboard", async () => {
         Object.assign(states[uuid], JSON.parse(init.body));
         return Response.json({ uuid });
       }
+      if (healthReads[uuid] !== undefined) {
+        healthReads[uuid]++;
+        if (healthReads[uuid] >= 3) states[uuid].status = "running:healthy";
+      }
       return Response.json(states[uuid]);
     }
     if (target.pathname.endsWith("/deploy")) {
@@ -173,7 +179,8 @@ test("pins and finishes runtime before deploying dashboard", async () => {
     if (deploymentMatch) {
       const uuid = decodeURIComponent(deploymentMatch[1]).replace(/-deployment$/, "");
       events.push(`finished:${uuid}`);
-      states[uuid].status = "running:healthy";
+      states[uuid].status = "running:unhealthy";
+      healthReads[uuid] = 0;
       return Response.json({ status: "finished" });
     }
     return new Response("not found", { status: 404 });
@@ -223,4 +230,14 @@ test("pins and finishes runtime before deploying dashboard", async () => {
     ).real_value,
     "preview",
   );
+});
+
+test("health propagation wait stays bounded and rejects concurrent pins", async () => {
+ const originalFetch=globalThis.fetch;
+ try {
+  globalThis.fetch=async()=>Response.json(application("runtime",{status:"running:unhealthy"}));
+  await assert.rejects(waitForHealthyApplication("https://coolify.test","test","runtime-uuid","runtime",sha,{healthTimeoutMS:5,intervalMS:1}),/before timeout/);
+  globalThis.fetch=async()=>Response.json(application("runtime",{git_commit_sha:"c".repeat(40)}));
+  await assert.rejects(waitForHealthyApplication("https://coolify.test","test","runtime-uuid","runtime",sha,{healthTimeoutMS:5,intervalMS:1}),/not pinned/);
+ } finally { globalThis.fetch=originalFetch; }
 });
