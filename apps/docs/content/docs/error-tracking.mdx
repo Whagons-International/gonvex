@@ -107,3 +107,19 @@ sends envelopes to `POST /errors/envelope`. Authenticated dashboard clients use:
 
 The bug-report response contains Markdown plus structured `agentContext` with
 the fingerprint, stack, release, breadcrumbs, context, and impact breakdowns.
+
+## Recent impact
+
+The Errors page opens on the last 24 hours. Choose Last 7 days or All history
+for a wider review. Occurrences, affected users, tenants, release breakdowns
+and the latest event are calculated from events in the selected period, not
+from each group's lifetime totals. Search also narrows the impact summary.
+The page follows every export page so the latest-500 list cap cannot hide
+older groups. Triage status and regression flags remain group-wide.
+
+API consumers can combine `since=<RFC3339 timestamp>` with `status`, `level`,
+`release`, `export=1` and `cursor`. The inclusive lower bound applies to event
+occurrence time before pagination. The response echoes `since`; dashboards
+must not label unfiltered responses from older runtimes as recent impact.
+Omit `since` to retain the existing historical API behavior. Resolution keeps
+the stored events, and a new accepted occurrence reopens a resolved group.

@@ -8337,6 +8337,8 @@ export function ErrorsPage(props: { project: ProjectTarget }) {
   const [release, setRelease] = useState("all");
   const [status, setStatus] = useState("unresolved");
   const [level, setLevel] = useState("all");
+  const [period, setPeriod] = useState("24h");
+  const requestSequence = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -8348,6 +8350,7 @@ export function ErrorsPage(props: { project: ProjectTarget }) {
   const [runtimeState, setRuntimeState] = useState<ErrorTrackingRuntimeState>("checking");
 
   const load = useCallback(async () => {
+    const sequence = ++requestSequence.current;
     setLoading(true);
     setRuntimeState("checking");
     const runtimeURL = runtimeURLForProject(props.project);
@@ -8356,28 +8359,42 @@ export function ErrorsPage(props: { project: ProjectTarget }) {
       if (status !== "all") params.set("status", status);
       if (release !== "all") params.set("release", release);
       if (level !== "all") params.set("level", level);
-      const response = await fetch(`${runtimeURL}/dev/errors/groups${params.size ? `?${params.toString()}` : ""}`, { headers: runtimeHeaders(props.project) });
-      const payload = await readErrorTrackingResponse<{ groups?: DashboardErrorGroup[]; releases?: string[] }>(response, {
-        action: "Loading error groups",
-        routeRequired: true,
-        runtimeURL,
-      });
-      const nextReleases = payload.releases ?? [];
-      setGroups(payload.groups ?? []);
+      params.set("export", "1");
+      if (period !== "all") params.set("since", new Date(Date.now() - (period === "24h" ? 1 : 7) * 86400000).toISOString());
+      const collected = new Map<string, DashboardErrorGroup>();
+      const cursors = new Set<string>();
+      let nextReleases: string[] = [];
+      do {
+        const response = await fetch(`${runtimeURL}/dev/errors/groups?${params.toString()}`, { headers: runtimeHeaders(props.project) });
+        const payload = await readErrorTrackingResponse<{ groups?: DashboardErrorGroup[]; releases?: string[]; since?: string; nextCursor?: string }>(response, {
+          action: "Loading error groups", routeRequired: true, runtimeURL,
+        });
+        if (sequence !== requestSequence.current) return;
+        if (period !== "all" && !payload.since) throw new Error("This runtime cannot calculate recent impact yet. Choose All history or update the runtime.");
+        for (const group of payload.groups ?? []) collected.set(group.fingerprint, group);
+        nextReleases = payload.releases ?? [];
+        if (!payload.nextCursor) break;
+        if (cursors.has(payload.nextCursor)) throw new Error("Error export repeated a page. Refresh to retry.");
+        cursors.add(payload.nextCursor);
+        params.set("cursor", payload.nextCursor);
+      } while (true);
+      setGroups([...collected.values()].sort((a, b) => b.lastSeen.localeCompare(a.lastSeen)));
       setReleases(nextReleases);
       if (release !== "all" && !nextReleases.includes(release)) setRelease("all");
       setError("");
       setRuntimeState("capturing");
     } catch (reason) {
+      if (sequence !== requestSequence.current) return;
+      setGroups([]);
       setError(reason instanceof Error ? reason.message : "Could not load error groups");
       setRuntimeState("unavailable");
     }
-    finally { setLoading(false); }
-  }, [props.project, release, status, level]);
+    finally { if (sequence === requestSequence.current) setLoading(false); }
+  }, [props.project, release, status, level, period]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { requestSequence.current++; }; }, [load]);
 
-  useEffect(() => { setChecked(new Set()); }, [props.project, release, status, level, search]);
+  useEffect(() => { setChecked(new Set()); }, [props.project, release, status, level, search, period]);
 
   const updateGroup = async (group: DashboardErrorGroup, update: Record<string, string>) => {
     const runtimeURL = runtimeURLForProject(props.project);
@@ -8434,9 +8451,11 @@ export function ErrorsPage(props: { project: ProjectTarget }) {
     setResolving(false);
   };
 
-  const impactedTenants = new Set(groups.flatMap((group) => Object.keys(group.tenants))).size;
-  const occurrences = groups.reduce((total, group) => total + group.count, 0);
-  const regressions = groups.filter((group) => group.regression).length;
+  const impactedTenants = new Set(visibleGroups.flatMap((group) => Object.keys(group.tenants))).size;
+  const impactedUsers = new Set(visibleGroups.flatMap((group) => Object.keys(group.users))).size;
+  const periodLabel = period === "all" ? "All recorded history" : period === "24h" ? "Last 24 hours" : "Last 7 days";
+  const occurrences = visibleGroups.reduce((total, group) => total + group.count, 0);
+  const regressions = visibleGroups.filter((group) => group.regression).length;
   const releaseOptions: SelectOption[] = [
     { value: "all", label: "All releases", description: "Errors from every release" },
     ...releases.map((value, index) => ({
@@ -8458,18 +8477,23 @@ export function ErrorsPage(props: { project: ProjectTarget }) {
 
   return <section className="errors-inbox" aria-label="Error groups">
     <div className="errors-command-header">
-      <div><p className="eyebrow">Incident intelligence</p><h2>Errors affecting real users</h2><p>Grouped by root cause, enriched with tenant, release, user, and machine context.</p></div>
+      <div><p className="eyebrow">Incident intelligence</p><h2>Errors affecting real users</h2><p>Grouped by error signature, with tenant, release, user, and machine context.</p></div>
       <div className="errors-live-indicator" data-state={runtimeState} aria-live="polite"><span aria-hidden="true" /><strong>{runtimeStatus.label}</strong><small>{runtimeStatus.detail}</small></div>
     </div>
+    <p className="errors-period-caption">{periodLabel}. Counts and affected users reflect events in this period and the current filters. History is retained.</p>
     <div className="errors-stat-strip" aria-label="Error impact summary">
-      <div><span>Groups</span><strong>{groups.length}</strong></div>
+      <div><span>Groups</span><strong>{visibleGroups.length}</strong></div>
       <div><span>Occurrences</span><strong>{occurrences}</strong></div>
       <div><span>Tenants hit</span><strong>{impactedTenants}</strong></div>
+      <div><span>Users hit</span><strong>{impactedUsers}</strong></div>
       <div data-alert={regressions > 0 ? "true" : undefined}><span>Regressions</span><strong>{regressions}</strong></div>
     </div>
     <div className="errors-toolbar">
       <input className="errors-search" aria-label="Search error groups" placeholder="Search message, tenant, release, fingerprint…" value={search} onChange={(event) => setSearch(event.target.value)} />
       <div className="errors-toolbar-actions">
+        <AppSelect ariaLabel="Error time period" selectedKey={period} onChange={setPeriod} options={[
+          { value: "24h", label: "Last 24 hours" }, { value: "7d", label: "Last 7 days" }, { value: "all", label: "All history" },
+        ]} />
         <AppSelect
           ariaLabel="Error release"
           className="errors-release-filter"

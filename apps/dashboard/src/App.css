@@ -4756,7 +4756,7 @@ h1 {
 .errors-live-indicator[data-state="unavailable"] { border-color: color-mix(in oklab, var(--danger) 32%, var(--border)); background: color-mix(in oklab, var(--danger) 8%, var(--surface)); }
 .errors-live-indicator[data-state="unavailable"] > span { background: var(--danger); box-shadow: 0 0 0 4px color-mix(in oklab, var(--danger) 15%, transparent); animation: none; }
 @keyframes capture-pulse { 50% { box-shadow: 0 0 0 7px transparent; } }
-.errors-stat-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: calc(var(--field-radius) + 3px); overflow: hidden; background: var(--surface); }
+.errors-stat-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: calc(var(--field-radius) + 3px); overflow: hidden; background: var(--surface); }
 .errors-stat-strip > div { position: relative; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 14px 16px; border-right: 1px solid var(--border); }
 .errors-stat-strip > div:last-child { border-right: 0; }
 .errors-stat-strip span { color: var(--muted); font-size: .7rem; font-weight: 650; letter-spacing: .065em; text-transform: uppercase; }
@@ -4764,7 +4764,9 @@ h1 {
 .errors-stat-strip [data-alert="true"] { background: color-mix(in oklab, var(--danger) 8%, transparent); }
 .errors-stat-strip [data-alert="true"] strong { color: var(--danger); }
 .errors-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.errors-toolbar-actions { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+.errors-toolbar-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
+.errors-period-caption { color: var(--muted); font-size: .85rem; }
+.errors-search { min-width: 180px; }
 .errors-release-filter { width: 190px; }
 .errors-search { width: min(520px, 100%); min-height: 38px; padding: 0 13px; border: 1px solid var(--border); border-radius: var(--field-radius); outline: 0; background: var(--field-background); color: var(--field-foreground); font: inherit; font-size: .8rem; transition: border-color 140ms ease, box-shadow 140ms ease; }
 .errors-search:focus { border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in oklab, var(--focus) 15%, transparent); }
@@ -4942,3 +4944,4 @@ h1 {
 @media (prefers-reduced-motion: reduce) {
   .realtime-shell .health-pulse { animation: none; }
 }
+@media (max-width: 720px) { .errors-stat-strip > div:last-child { grid-column: 1 / -1; border-top: 1px solid var(--border); } }
