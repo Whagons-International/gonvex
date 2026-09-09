@@ -155,17 +155,7 @@ impl ModuleHost {
             source,
         })?;
         let stdout = child.stdout.take().ok_or(ModuleHostError::Closed)?;
-        let mut lines = BufReader::new(stdout).lines();
-        let line = timeout(self.config.start_timeout, lines.next_line())
-            .await
-            .map_err(|_| ModuleHostError::Timeout)?
-            .map_err(|error| ModuleHostError::InvalidReady(error.to_string()))?
-            .ok_or(ModuleHostError::Closed)?;
-        let ready: ReadyMessage = serde_json::from_str(&line)
-            .map_err(|error| ModuleHostError::InvalidReady(error.to_string()))?;
-        if !ready.ready || ready.protocol != 2 || ready.endpoint.trim().is_empty() {
-            return Err(ModuleHostError::InvalidReady(line));
-        }
+        let ready = read_module_ready(stdout, self.config.start_timeout).await?;
         *self.endpoint.write().await = Some(ready.endpoint);
         *self.child.lock().await = Some(child);
         let mut status = self.status.write().await;
@@ -358,6 +348,31 @@ fn temporary_endpoint(pid: u32) -> String {
     }
 }
 
+async fn read_module_ready<R: AsyncRead + Unpin + Send + 'static>(
+    stdout: R,
+    start_timeout: std::time::Duration,
+) -> Result<ReadyMessage, ModuleHostError> {
+    let mut lines = BufReader::new(stdout).lines();
+    let line = timeout(start_timeout, lines.next_line())
+        .await
+        .map_err(|_| ModuleHostError::Timeout)?
+        .map_err(|error| ModuleHostError::InvalidReady(error.to_string()))?
+        .ok_or(ModuleHostError::Closed)?;
+    let ready: ReadyMessage = serde_json::from_str(&line)
+        .map_err(|error| ModuleHostError::InvalidReady(error.to_string()))?;
+    if !ready.ready || ready.protocol != 2 || ready.endpoint.trim().is_empty() {
+        return Err(ModuleHostError::InvalidReady(line));
+    }
+    // The readiness line is only the startup handshake. Keep draining the
+    // pipe for the child's lifetime: dropping it makes later SDK/application
+    // logging throw EPIPE; keeping it open without reading can block V8.
+    // Copy preserves buffered bytes and uses bounded memory even for long logs.
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut lines.into_inner(), &mut tokio::io::stderr()).await;
+    });
+    Ok(ready)
+}
+
 fn host_response(id: u64, result: Result<Value, String>) -> ClientFrame {
     match result {
         Ok(value) => ClientFrame::HostResponse { id, value },
@@ -429,6 +444,38 @@ mod dispatch_tests {
     use super::*;
     use serde_json::json;
     use tokio::sync::Notify;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn module_stdout_remains_writable_after_ready() {
+        use tokio::io::AsyncWriteExt;
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"printf '{"ready":true,"protocol":2,"endpoint":"test"}\n'; read trigger; printf 'module diagnostic after readiness\n'"#)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true)
+            .spawn().unwrap();
+        read_module_ready(
+            child.stdout.take().unwrap(),
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"continue\n")
+            .await
+            .unwrap();
+        let status = timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            status.success(),
+            "closing module stdout must not break application logging: {status}"
+        );
+    }
 
     struct DelayedNetwork {
         release: Arc<Notify>,
