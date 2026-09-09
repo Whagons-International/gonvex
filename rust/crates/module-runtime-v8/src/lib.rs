@@ -26,6 +26,7 @@ mod dispatch;
 mod isolate;
 mod pool;
 
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -257,15 +258,34 @@ impl EngineInner {
         // The isolate runs on its own thread; this task holds the host reference
         // and answers the isolate's host calls until it reports a result. The
         // isolate never sees `host`, so the host never has to be `'static`.
+        // Only network calls may overlap. Database and tool calls retain their
+        // original ordering, while timers can forward heartbeats during a fetch.
+        // These futures borrow this invocation and are cancelled when it ends.
+        let mut network: FuturesUnordered<BoxFuture<'_, ()>> = FuturesUnordered::new();
         let mut bridging = true;
         let reply = loop {
             tokio::select! {
                 biased;
                 reply = &mut replied => break reply,
+                Some(()) = network.next(), if !network.is_empty() => {},
                 request = host_calls.recv(), if bridging => match request {
                     Some(request) => {
-                        let response = host.call(&context, request.call).await;
-                        let _ = request.reply.send(response);
+                        if matches!(request.call, gonvex_module_runtime::HostCall::Fetch { .. }) {
+                            if network.len() >= 16 {
+                                let _ = request.reply.send(Err(gonvex_module_runtime::HostError::Failed(
+                                    "Action concurrent network request limit exceeded".into(),
+                                )));
+                                continue;
+                            }
+                            let context = &context;
+                            network.push(Box::pin(async move {
+                                let response = host.call(context, request.call).await;
+                                let _ = request.reply.send(response);
+                            }));
+                        } else {
+                            let response = host.call(&context, request.call).await;
+                            let _ = request.reply.send(response);
+                        }
                     }
                     // The isolate dropped its end of the bridge: the call is
                     // finishing and only the result is still outstanding.
@@ -322,7 +342,7 @@ mod host_call_tests {
         Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse,
         InvocationContext, ModuleLanguage, ModuleManifest,
     };
-    use serde_json::{Map, json};
+    use serde_json::{json, Map};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingHost(AtomicUsize);
@@ -393,5 +413,87 @@ mod host_call_tests {
             .expect("bulk work must not stop at a host-call count ceiling");
         assert_eq!(result.value, b"150");
         assert_eq!(host.0.load(Ordering::SeqCst), 150);
+    }
+    struct HeartbeatHost(tokio::sync::Notify);
+    impl ModuleHost for HeartbeatHost {
+        fn call<'a>(
+            &'a self,
+            _: &'a InvocationContext,
+            call: HostCall,
+        ) -> BoxFuture<'a, Result<HostResponse, HostError>> {
+            Box::pin(async move {
+                if matches!(call, HostCall::Fetch { .. }) {
+                    tokio::time::timeout(Duration::from_secs(2), self.0.notified())
+                        .await
+                        .map_err(|_| HostError::Failed("heartbeat blocked behind fetch".into()))?;
+                    Ok(HostResponse {
+                        value: br#"{"status":200,"headers":{},"body":"ok"}"#.to_vec(),
+                    })
+                } else {
+                    self.0.notify_one();
+                    Ok(HostResponse {
+                        value: b"true".to_vec(),
+                    })
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn timer_heartbeat_reaches_host_while_fetch_is_pending() {
+        initialize_v8_platform();
+        let engine = V8ModuleEngine::from_artifact(
+            ModuleArtifact {
+                manifest: ModuleManifest {
+                    module_id: "heartbeat-fetch".into(),
+                    generation: 1,
+                    language: ModuleLanguage::TypeScript,
+                    artifact_hash: "test".into(),
+                    functions: vec![FunctionContract {
+                        path: "run".into(),
+                        kind: FunctionKind::Action,
+                        internal: false,
+                        delivery: None,
+                        args_schema: Some(json!({"kind":"any"})),
+                        result_schema: Some(json!({"kind":"any"})),
+                        metadata: Map::from_iter([("export".into(), json!("run"))]),
+                    }],
+                    metadata: Map::new(),
+                },
+                payload: br#"export async function run(ctx) {
+                const heartbeat = new Promise((resolve, reject) => {
+                    setTimeout(() => ctx.tools.heartbeat({}).then(resolve, reject), 20);
+                });
+                await ctx.fetch('https://example.com');
+                await heartbeat;
+                return 'completed';
+            }"#
+                .to_vec(),
+            },
+            V8Config::default(),
+        )
+        .unwrap();
+        let result = engine
+            .invoke(
+                &HeartbeatHost(tokio::sync::Notify::new()),
+                Invocation {
+                    function: "run".into(),
+                    kind: FunctionKind::Action,
+                    args: b"null".to_vec(),
+                    context: InvocationContext {
+                        generation: 1,
+                        action_tools: vec!["heartbeat".into()],
+                        capabilities: Capabilities {
+                            network: true,
+                            action_tools: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("timer heartbeat must not wait for a network response");
+        assert_eq!(result.value, br#""completed""#);
     }
 }

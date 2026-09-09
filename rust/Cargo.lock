@@ -1503,6 +1503,7 @@ name = "gonvex-module-runtime-v8"
 version = "0.1.0"
 dependencies = [
  "deno_core",
+ "futures-util",
  "gonvex-module-runtime",
  "rand 0.8.7",
  "serde",
