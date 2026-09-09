@@ -1,16 +1,15 @@
 # Whagons release compatibility gate
 
-`.github/workflows/whagons-compatibility.yml` invokes the Whagons-owned reusable workflow for every PR to main/staging and every push to those branches. It passes the candidate Gonvex commit and the pinned `WHAGONS_COMPAT_REF` client commit. Tests run on isolated GitHub runners, not the Coolify staging database.
+Compatibility runs in the private `Whagons-International/whagons5-client` repository. It checks out an explicit Gonvex commit and runs against isolated runner services. Public Gonvex workflows cannot call private reusable workflows, so there is no cross-repository `uses` call here.
 
-The canonical setup and coverage guide is in the client repository at `apps/docs/content/docs/internal/release-compatibility-ci.md`. The client owns `compatibility/app-support-policy.json`, mobile inventories, bridge adapters, and live scenarios.
+The client workflow runs on client staging pushes and PRs. For a Gonvex-only candidate, dispatch it in the private repository:
 
-Before activation:
+```sh
+gh workflow run release-compatibility.yml --repo Whagons-International/whagons5-client --ref staging -f gonvex_ref=<full-framework-sha> -f client_ref=<full-client-sha>
+```
 
-- Land the client reusable workflow on staging. Pin the caller's `uses` reference to that reviewed commit after landing.
-- Set `WHAGONS_COMPAT_REF` to the full client commit SHA.
-- Share the documented test/checkout secrets with this repository and permit private reusable-workflow access.
-- Require the `Whagons compatibility` check in branch protection.
+The private repository variable `GONVEX_COMPAT_REF` pins the framework for ordinary client runs. Test and mobile-checkout credentials remain private. Each run creates and cleans up a unique Firebase test actor. Reports record both source revisions, mobile commits, SDK versions, and live scenario outcomes.
 
-Production promotion now requires this check on the exact candidate commit. Missing configuration, a skipped run, or a failing app version blocks promotion. CI configuration alone does not prove that the current bridge supports the candidate runtime.
+The canonical coverage and setup guide is `apps/docs/content/docs/internal/release-compatibility-ci.md` in the client repository. The client owns the support policy, inventories, bridge, and tests. Full mobile UI and Coolify rollout tests remain separate.
 
-The suite tests released SDKs through the bridge. Full mobile UI testing and Coolify deployment smoke/rollback testing remain separate.
+Production promotion remains fail-closed: `scripts/release-gates.mjs` still requires successful `Whagons compatibility` evidence on the exact Gonvex candidate. Private CI execution alone does not publish that public check. A dedicated, narrowly scoped cross-repository result publisher must be configured before that production gate can pass. Do not remove the gate or substitute a workflow dispatch acknowledgment for a passing test result.
