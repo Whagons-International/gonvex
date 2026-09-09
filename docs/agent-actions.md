@@ -6,17 +6,24 @@ still belong to Reducers.
 
 ## Runtime policy
 
-The deployment must explicitly enable the profile:
+Agent Actions declare `profile: "agent"` in the deployed manifest. They have
+no automatic wall-clock deadline: time spent waiting for a model response must
+not terminate the conversation. An explicitly supplied invocation deadline is
+still honored. Queued Actions start with a fresh execution budget rather than
+inheriting the expired deadline of their queuing transaction. The runtime
+renews the queue claim every 30 seconds while a delivery is running. Heap, result-size, capability and concurrency limits still apply.
 
-```env
-GONVEX_AGENT_ACTIONS_ENABLED=true
-GONVEX_AGENT_ACTION_CONCURRENCY=4
-GONVEX_AGENT_ACTION_TIMEOUT=2m
-```
+Ordinary Actions default to 15 minutes, configurable with
+`GONVEX_MODULE_HOST_ACTION_EXECUTION_TIMEOUT_MS`. Queries and Reducers default
+to 10 seconds, configurable separately with
+`GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS`. Nested tools keep these independent
+limits; a timed-out tool rejects its promise so the agent can inspect the error
+and continue. A sandbox execution keeps its own requested timeout.
 
-The manifest declaration cannot turn the profile on or raise these limits.
-Agent Actions share the bounded module host, but enter through their own
-admission lane. Standard Actions remain on the normal short execution budget.
+Agent network responses have no total-body timeout when the invocation has no
+explicit deadline. Connection establishment is limited to 30 seconds. Pass an
+`AbortSignal` to `ctx.fetch` for explicit cancellation; do not use a timer to
+cancel the agent merely because the model is still responding.
 
 ## Declaration
 
@@ -107,7 +114,7 @@ compatibility fixture: browser-conditional package exports, `URL`,
 `ReadableStream`, `WritableStream`, `TransformStream`, `Headers`, `Response`,
 `crypto.getRandomValues`, `crypto.randomUUID`, and SHA-256 digest support.
 
-`ctx.fetch` remains host-owned, origin-allowlisted, deadline-bound, and capped at
+`ctx.fetch` remains host-owned, origin-allowlisted, and capped at
 8 MiB per response. The current response stream is backed by that bounded host
 buffer; use non-streaming agent completion when the result must be returned by
 an ordinary Action.

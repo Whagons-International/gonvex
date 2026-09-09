@@ -2962,6 +2962,7 @@ mod tests {
                 max_concurrent_calls: 32,
                 isolate_pool_size: 4,
                 execution_timeout: Duration::from_secs(10),
+                action_execution_timeout: Duration::from_secs(900),
             },
             runtime_version: "0.4.1-test".to_owned(),
             sandbox: Default::default(),

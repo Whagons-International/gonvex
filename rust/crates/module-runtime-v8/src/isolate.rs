@@ -81,7 +81,7 @@ pub(crate) struct CallSpec {
     pub(crate) capabilities: Capabilities,
     /// The host's wall clock for this call, surfaced to the module as `ctx.now`.
     pub(crate) now_unix_ms: u64,
-    pub(crate) timeout: Duration,
+    pub(crate) timeout: Option<Duration>,
     pub(crate) max_result_bytes: usize,
     pub(crate) host: mpsc::UnboundedSender<HostRequest>,
 }
@@ -529,7 +529,9 @@ impl ModuleIsolate {
             host: spec.host,
             violation: None,
         });
-        self.watchdog.arm(Instant::now() + spec.timeout);
+        if let Some(timeout) = spec.timeout {
+            self.watchdog.arm(Instant::now() + timeout);
+        }
 
         let call = self.runtime.call_with_args(&self.dispatch, &arguments);
         let outcome = self
@@ -565,7 +567,7 @@ impl ModuleIsolate {
         } else if terminated {
             Err(ModuleError::BudgetExceeded(format!(
                 "module exceeded its {} ms execution deadline",
-                spec.timeout.as_millis()
+                spec.timeout.unwrap_or_default().as_millis()
             )))
         } else if let Some(violation) = violation {
             // A denial or an exhausted budget fails the invocation even when the

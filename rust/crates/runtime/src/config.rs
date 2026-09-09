@@ -118,6 +118,7 @@ pub struct ModuleHostConfig {
     pub max_concurrent_calls: usize,
     pub isolate_pool_size: usize,
     pub execution_timeout: Duration,
+    pub action_execution_timeout: Duration,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -224,6 +225,11 @@ impl Config {
                     "GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS",
                     lookup("GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS"),
                     10_000,
+                )?,
+                action_execution_timeout: duration_ms(
+                    "GONVEX_MODULE_HOST_ACTION_EXECUTION_TIMEOUT_MS",
+                    lookup("GONVEX_MODULE_HOST_ACTION_EXECUTION_TIMEOUT_MS"),
+                    900_000,
                 )?,
             },
             runtime_version,

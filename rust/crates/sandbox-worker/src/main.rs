@@ -144,6 +144,7 @@ async fn run() -> Result<(JsonValue, Vec<LogLine>), String> {
         V8Config {
             max_heap_bytes: usize::try_from(request.max_heap_bytes).unwrap_or(64 << 20),
             execution_timeout: Duration::from_millis(request.timeout_ms),
+            action_execution_timeout: Duration::from_millis(request.timeout_ms),
             max_result_bytes: request.max_output_bytes,
             recycle_after_calls: 0,
             isolate_pool_size: 1,

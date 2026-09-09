@@ -590,7 +590,13 @@ async fn handle_invoke(
     }
 
     let context = request.context.into_context(active, deadline_unix_ms);
-    let budget = remaining_budget(&context, state.config.v8.execution_timeout);
+    // The engine enforces the contract's kind/profile ceiling. Do not add a
+    // transport ceiling to agent Actions without an invocation deadline.
+    let budget = context.deadline.map(|deadline| {
+        deadline
+            .duration_since(SystemTime::now())
+            .unwrap_or_default()
+    });
     let host = ConnectionHost {
         connection: Arc::clone(connection),
         invocation: request_id,
@@ -603,16 +609,17 @@ async fn handle_invoke(
     };
 
     let call = lease.engine().invoke(&host, invocation);
-    let result = match tokio::time::timeout(budget + INVOKE_SLACK, call).await {
-        Ok(result) => result,
-        // The engine's watchdog normally wins this race; reaching here means
-        // the engine itself stopped answering, so the lease is dropped and the
-        // isolate retired instead of being pooled.
-        Err(_) => Err(ModuleError::BudgetExceeded(format!(
-            "module {module_id} function {} did not answer within {} ms",
-            request.function,
-            (budget + INVOKE_SLACK).as_millis()
-        ))),
+    let result = if let Some(budget) = budget {
+        match tokio::time::timeout(budget + INVOKE_SLACK, call).await {
+            Ok(result) => result,
+            Err(_) => Err(ModuleError::BudgetExceeded(format!(
+                "module {module_id} function {} did not answer within {} ms",
+                request.function,
+                (budget + INVOKE_SLACK).as_millis()
+            ))),
+        }
+    } else {
+        call.await
     };
     drop(permit);
 
@@ -627,18 +634,6 @@ async fn handle_invoke(
             Ok(ResponsePayload::Invoked { value })
         }
         Err(err) => Err(module_error(&module_id, &request.function, err)),
-    }
-}
-
-/// The engine shortens its own deadline from the invocation context; this is
-/// the same computation, used only to bound the transport's wait.
-fn remaining_budget(context: &InvocationContext, ceiling: Duration) -> Duration {
-    match context.deadline {
-        Some(deadline) => deadline
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO)
-            .min(ceiling),
-        None => ceiling,
     }
 }
 

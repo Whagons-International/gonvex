@@ -142,6 +142,8 @@ impl ModuleHost {
             .arg(self.config.isolate_pool_size.to_string())
             .arg("--execution-timeout-ms")
             .arg(self.config.execution_timeout.as_millis().to_string())
+            .arg("--action-execution-timeout-ms")
+            .arg(self.config.action_execution_timeout.as_millis().to_string())
             .arg("--shutdown-ms")
             .arg(self.config.shutdown_timeout.as_millis().to_string())
             .arg("--exit-on-stdin-eof")
@@ -222,14 +224,15 @@ impl ModuleHost {
         mut handler: Option<&mut dyn HostCallHandler>,
     ) -> Result<ResponsePayload, ModuleHostError> {
         let mut stream = self.connect().await?;
-        let request_timeout = if matches!(&operation, RequestOp::Invoke(_)) {
-            self.config.execution_timeout
-        } else {
-            self.config.start_timeout
+        // Invocation provenance carries the per-kind deadline. In particular,
+        // an agent Action deliberately has none while awaiting model I/O.
+        let deadline_unix_ms = match &operation {
+            RequestOp::Invoke(request) => request.context.deadline_unix_ms,
+            _ => Some(unix_millis() + self.config.start_timeout.as_millis() as u64),
         };
         let request = ClientFrame::Request {
             id: 1,
-            deadline_unix_ms: Some(unix_millis() + request_timeout.as_millis() as u64),
+            deadline_unix_ms,
             payload: operation,
         };
         self.write_client_frame(&mut stream, &request).await?;

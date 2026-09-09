@@ -553,7 +553,23 @@
       });
     }
     if (granted.network) {
-      context.fetch = async (input, init) => createResponse(await hostCall({ kind: "fetch", request: requestInit(input, init) }));
+      context.fetch = async (input, init) => {
+        const request = requestInit(input, init);
+        const signal = init?.signal;
+        if (!signal) return createResponse(await hostCall({ kind: "fetch", request }));
+        // Abort the JS wait promptly. Once the Action returns, the invocation
+        // bridge drops its pending network futures and releases the connection.
+        let onAbort;
+        const aborted = new Promise((_, reject) => {
+          onAbort = () => reject(signal.reason ?? new Error("This operation was aborted"));
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        try {
+          return createResponse(await Promise.race([hostCall({ kind: "fetch", request }), aborted]));
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+      };
     }
     if (granted.secrets) {
       context.secrets = Object.freeze({ ...(request.environment ?? {}) });

@@ -34,7 +34,8 @@ gonvex-module-host — executes Gonvex TypeScript modules for the Rust runtime
   --max-concurrent <n>         concurrent module invocations
   --isolate-pool <n>           live isolates per module generation
   --max-heap-mb <n>            V8 heap ceiling per isolate
-  --execution-timeout-ms <n>   ceiling on one invocation
+  --execution-timeout-ms <n>   ceiling on one Query/Reducer invocation
+  --action-execution-timeout-ms <n> ceiling on one Action invocation
   --max-result-bytes <n>       largest result one invocation may return
   --recycle-after <n>          calls an isolate serves before retirement
   --drain-ms <n>               how long a retired generation may finish calls
@@ -124,6 +125,9 @@ fn parse_options() -> Result<Option<Options>, String> {
             "--max-heap-mb" => config.v8.max_heap_bytes = number::<usize>(&value()?)? * 1024 * 1024,
             "--execution-timeout-ms" => {
                 config.v8.execution_timeout = Duration::from_millis(number(&value()?)?)
+            }
+            "--action-execution-timeout-ms" => {
+                config.v8.action_execution_timeout = Duration::from_millis(number(&value()?)?)
             }
             "--max-result-bytes" => config.v8.max_result_bytes = number(&value()?)?,
             "--recycle-after" => config.v8.recycle_after_calls = number(&value()?)?,

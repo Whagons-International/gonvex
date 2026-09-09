@@ -205,7 +205,7 @@ impl Runtime {
         let mut provenance = access
             .provenance
             .expect("delegated agent read has provenance");
-        install_execution_deadline(self, &mut provenance);
+        install_execution_deadline(self, &mut provenance, false);
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
@@ -353,7 +353,7 @@ impl Runtime {
                 &module.artifact_hash,
             )
         });
-        install_execution_deadline(self, &mut provenance);
+        install_execution_deadline(self, &mut provenance, false);
         transaction
             .set_invocation_provenance(TransactionAttribution {
                 root_command_id: &provenance.root_command_id,
@@ -486,7 +486,9 @@ impl Runtime {
             &module.artifact_hash,
             definition.action_profile == "agent",
         );
-        install_execution_deadline(self, &mut provenance);
+        if definition.action_profile != "agent" {
+            install_execution_deadline(self, &mut provenance, true);
+        }
         if !provenance.action_stack.iter().any(|item| item == path) {
             provenance.action_stack.push(path.to_owned());
         }
@@ -723,7 +725,7 @@ impl Runtime {
                     )
                     .await
             };
-            let result =
+            let delivery = async {
                 match session {
                     Ok(session) => {
                         let mut provenance = serde_json::from_value::<InvocationProvenance>(
@@ -732,6 +734,9 @@ impl Runtime {
                         .unwrap_or_else(|_| {
                             direct_provenance(&session, InvocationChannel::System, &claimed.id, "")
                         });
+                        // Durable work starts after the queuing transaction,
+                        // possibly after a restart. Its old deadline is not valid.
+                        provenance.deadline_unix_ms = None;
                         provenance.parent_command_id = Some(provenance.command_id.clone());
                         provenance.command_id = format!("outbox-{}", claimed.id);
                         provenance.channel = InvocationChannel::System;
@@ -750,7 +755,24 @@ impl Runtime {
                         .map_err(|error| error.to_string())
                     }
                     Err(error) => Err(error.to_string()),
-                };
+                }
+            };
+            tokio::pin!(delivery);
+            let mut renewal = tokio::time::interval(std::time::Duration::from_secs(30));
+            renewal.tick().await;
+            let result = loop {
+                tokio::select! {
+                    result = &mut delivery => break result,
+                    _ = renewal.tick() => {
+                        if !matches!(control.renew_action(&fallback_session.route, &claimed.id, claimed.attempts).await, Ok(true)) {
+                            // Drop this delivery without modifying a newer owner's
+                            // claim. A failed renewal leaves durable work recoverable.
+                            eprintln!("Action delivery lost its queue lease; leaving it for recovery");
+                            return;
+                        }
+                    }
+                }
+            };
             match result {
                 Ok(()) => {
                     if control
@@ -1029,18 +1051,20 @@ fn delegated_provenance(
     }
 }
 
-fn install_execution_deadline(runtime: &Runtime, provenance: &mut InvocationProvenance) {
+fn install_execution_deadline(
+    runtime: &Runtime,
+    provenance: &mut InvocationProvenance,
+    action: bool,
+) {
     if provenance.deadline_unix_ms.is_none() {
-        provenance.deadline_unix_ms = Some(
-            unix_millis(SystemTime::now()).saturating_add(
-                runtime
-                    .inner
-                    .config
-                    .module_host
-                    .execution_timeout
-                    .as_millis() as u64,
-            ),
-        );
+        let config = &runtime.inner.config.module_host;
+        let budget = if action {
+            config.action_execution_timeout
+        } else {
+            config.execution_timeout
+        };
+        provenance.deadline_unix_ms =
+            Some(unix_millis(SystemTime::now()).saturating_add(budget.as_millis() as u64));
     }
 }
 

@@ -32,9 +32,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use gonvex_module_runtime::{
-    remaining_budget, validate_portable_schema, validate_portable_schema_definition, BoxFuture,
-    FunctionContract, Invocation, InvocationContext, InvocationResult, ModuleArtifact,
-    ModuleEngine, ModuleError, ModuleHost, ModuleLanguage, ModuleManifest,
+    validate_portable_schema, validate_portable_schema_definition, BoxFuture, FunctionContract,
+    Invocation, InvocationContext, InvocationResult, ModuleArtifact, ModuleEngine, ModuleError,
+    ModuleHost, ModuleLanguage, ModuleManifest,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -58,6 +58,8 @@ pub struct V8Config {
     /// Upper bound on a single call. An invocation deadline shortens it; it
     /// never lengthens it.
     pub execution_timeout: Duration,
+    /// Wall-clock ceiling for Actions, including external I/O and tool loops.
+    pub action_execution_timeout: Duration,
     pub max_result_bytes: usize,
     /// Calls one isolate serves before it is retired. 0 disables reuse.
     pub recycle_after_calls: usize,
@@ -70,9 +72,20 @@ impl Default for V8Config {
         Self {
             max_heap_bytes: 64 * 1024 * 1024,
             execution_timeout: Duration::from_secs(10),
+            action_execution_timeout: Duration::from_secs(15 * 60),
             max_result_bytes: 8 * 1024 * 1024,
             recycle_after_calls: 10_000,
             isolate_pool_size: 1,
+        }
+    }
+}
+
+impl V8Config {
+    pub fn timeout_for(&self, kind: &gonvex_module_runtime::FunctionKind) -> Duration {
+        if matches!(kind, gonvex_module_runtime::FunctionKind::Action) {
+            self.action_execution_timeout
+        } else {
+            self.execution_timeout
         }
     }
 }
@@ -217,7 +230,7 @@ impl EngineInner {
             &arguments,
         )
         .map_err(ModuleError::InvalidArguments)?;
-        let timeout = self.call_timeout(&invocation.context)?;
+        let timeout = self.call_timeout(&invocation.context, &contract)?;
         let capabilities = effective_capabilities(&contract.kind, &invocation.context.capabilities);
         let context = invocation.context.clone();
         // A host-stamped `now` keeps every engine reporting the same clock for
@@ -320,18 +333,29 @@ impl EngineInner {
 
     /// The call deadline is the configured ceiling, shortened by whatever the
     /// invocation's own deadline leaves.
-    fn call_timeout(&self, context: &InvocationContext) -> Result<Duration, ModuleError> {
+    fn call_timeout(
+        &self,
+        context: &InvocationContext,
+        contract: &FunctionContract,
+    ) -> Result<Option<Duration>, ModuleError> {
+        let agent = matches!(contract.kind, gonvex_module_runtime::FunctionKind::Action)
+            && contract
+                .metadata
+                .get("actionProfile")
+                .and_then(serde_json::Value::as_str)
+                == Some("agent");
+        let ceiling = (!agent).then(|| self.config.timeout_for(&contract.kind));
         let Some(deadline) = context.deadline else {
-            return Ok(self.config.execution_timeout);
+            return Ok(ceiling);
         };
-        if deadline <= SystemTime::now() {
-            return Err(ModuleError::BudgetExceeded(
+        let remaining = deadline.duration_since(SystemTime::now()).map_err(|_| {
+            ModuleError::BudgetExceeded(
                 "invocation deadline elapsed before the module started".to_owned(),
-            ));
-        }
-        Ok(remaining_budget(context)
-            .unwrap_or(self.config.execution_timeout)
-            .min(self.config.execution_timeout))
+            )
+        })?;
+        Ok(Some(
+            ceiling.map_or(remaining, |limit| remaining.min(limit)),
+        ))
     }
 }
 
@@ -344,6 +368,29 @@ mod host_call_tests {
     };
     use serde_json::{json, Map};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn run_v8_test(test: impl std::future::Future<Output = ()> + Send + 'static) {
+        // Match module-host: initialize V8 and start all isolate generations
+        // from one persistent parent thread, rather than libtest's short-lived threads.
+        type Job = Box<dyn FnOnce() + Send>;
+        static RUNNER: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+        let runner = RUNNER.get_or_init(|| {
+            let (sender, jobs) = std::sync::mpsc::channel::<Job>();
+            std::thread::spawn(move || {
+                initialize_v8_platform();
+                for job in jobs { job(); }
+            });
+            sender
+        });
+        let (done, result) = std::sync::mpsc::channel();
+        runner.send(Box::new(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(test);
+            }));
+            done.send(outcome).unwrap();
+        })).unwrap();
+        if let Err(panic) = result.recv().unwrap() { std::panic::resume_unwind(panic); }
+    }
 
     struct CountingHost(AtomicUsize);
     impl ModuleHost for CountingHost {
@@ -361,9 +408,9 @@ mod host_call_tests {
         }
     }
 
-    #[tokio::test]
-    async fn invocation_can_complete_more_than_one_hundred_host_calls() {
-        initialize_v8_platform();
+    #[test]
+    fn invocation_can_complete_more_than_one_hundred_host_calls() {
+        run_v8_test(async {
         let engine = V8ModuleEngine::from_artifact(
             ModuleArtifact {
                 manifest: ModuleManifest {
@@ -413,6 +460,7 @@ mod host_call_tests {
             .expect("bulk work must not stop at a host-call count ceiling");
         assert_eq!(result.value, b"150");
         assert_eq!(host.0.load(Ordering::SeqCst), 150);
+        });
     }
     struct HeartbeatHost(tokio::sync::Notify);
     impl ModuleHost for HeartbeatHost {
@@ -439,9 +487,9 @@ mod host_call_tests {
         }
     }
 
-    #[tokio::test]
-    async fn timer_heartbeat_reaches_host_while_fetch_is_pending() {
-        initialize_v8_platform();
+    #[test]
+    fn timer_heartbeat_reaches_host_while_fetch_is_pending() {
+        run_v8_test(async {
         let engine = V8ModuleEngine::from_artifact(
             ModuleArtifact {
                 manifest: ModuleManifest {
@@ -462,12 +510,16 @@ mod host_call_tests {
                 },
                 payload: br#"export async function run(ctx, args) {
                 if (args?.warmup) {
-                    const timer = setInterval(() => {}, 30);
+                    const timer = setInterval(() => {}, 5);
                     clearInterval(timer);
+                    await new Promise(resolve => setTimeout(resolve, 1));
                     return 'completed';
                 }
                 const heartbeat = new Promise((resolve, reject) => {
-                    setTimeout(() => ctx.tools.heartbeat({}).then(resolve, reject), 20);
+                    const timer = setInterval(() => {
+                        clearInterval(timer);
+                        ctx.tools.heartbeat({}).then(resolve, reject);
+                    }, 20);
                 });
                 await ctx.fetch('https://example.com');
                 await heartbeat;
@@ -493,6 +545,7 @@ mod host_call_tests {
             )
             .await
             .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
         let result = engine
             .invoke(
                 &HeartbeatHost(tokio::sync::Notify::new()),
@@ -515,5 +568,160 @@ mod host_call_tests {
             .await
             .expect("timer heartbeat must not wait for a network response");
         assert_eq!(result.value, br#""completed""#);
+        });
+    }
+    #[test]
+    fn actions_can_wait_beyond_query_budget_without_extending_queries() {
+        run_v8_test(async {
+        for kind in [
+            FunctionKind::Action,
+            FunctionKind::Query,
+            FunctionKind::Reducer,
+        ] {
+            let engine = V8ModuleEngine::from_artifact(
+                ModuleArtifact {
+                    manifest: ModuleManifest {
+                        module_id: "kind-budget".into(),
+                        generation: 1,
+                        language: ModuleLanguage::TypeScript,
+                        artifact_hash: "test".into(),
+                        functions: vec![FunctionContract {
+                            path: "run".into(),
+                            kind: kind.clone(),
+                            internal: false,
+                            delivery: None,
+                            args_schema: Some(json!({"kind":"any"})),
+                            result_schema: Some(json!({"kind":"any"})),
+                            metadata: Map::from_iter([("export".into(), json!("run"))]),
+                        }],
+                        metadata: Map::new(),
+                    },
+                    payload: br#"export async function run() {
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    return 'completed';
+                }"#
+                    .to_vec(),
+                },
+                V8Config {
+                    execution_timeout: Duration::from_millis(10),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let result = engine
+                .invoke(
+                    &CountingHost(AtomicUsize::new(0)),
+                    Invocation {
+                        function: "run".into(),
+                        kind: kind.clone(),
+                        args: b"null".to_vec(),
+                        context: InvocationContext {
+                            generation: 1,
+                            deadline: Some(SystemTime::now() + Duration::from_millis(200)),
+                            ..Default::default()
+                        },
+                    },
+                )
+                .await;
+            if matches!(kind, FunctionKind::Action) {
+                assert_eq!(
+                    result
+                        .expect("Action must use its own deadline, not the short query budget")
+                        .value,
+                    br#""completed""#
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(ModuleError::BudgetExceeded(_))),
+                    "Query budget must remain short: {result:?}"
+                );
+            }
+        }
+        });
+    }
+
+    #[test]
+    fn agent_waits_without_wall_clock_cutoff_and_recovers_from_tool_timeout() {
+        run_v8_test(async {
+        struct TimeoutHost;
+        impl ModuleHost for TimeoutHost {
+            fn call<'a>(
+                &'a self,
+                _: &'a InvocationContext,
+                call: HostCall,
+            ) -> BoxFuture<'a, Result<HostResponse, HostError>> {
+                Box::pin(async move {
+                    if matches!(call, HostCall::Fetch { .. }) {
+                        std::future::pending::<()>().await;
+                    }
+                    Err(HostError::Failed("tool execution timed out".into()))
+                })
+            }
+        }
+        let engine = V8ModuleEngine::from_artifact(ModuleArtifact {
+            manifest: ModuleManifest {
+                module_id: "agent-budget".into(), generation: 1,
+                language: ModuleLanguage::TypeScript, artifact_hash: "test".into(),
+                functions: vec![FunctionContract {
+                    path: "run".into(), kind: FunctionKind::Action, internal: false,
+                    delivery: None, args_schema: Some(json!({"kind":"any"})),
+                    result_schema: Some(json!({"kind":"any"})),
+                    metadata: Map::from_iter([("export".into(), json!("run")), ("actionProfile".into(), json!("agent"))]),
+                }], metadata: Map::new(),
+            },
+            payload: br#"export async function run(ctx, args) {
+                if (args === 'cancel') {
+                    const controller = new AbortController();
+                    setTimeout(() => controller.abort(new Error('User stopped')), 20);
+                    try { await ctx.fetch('https://example.com', { signal: controller.signal }); }
+                    catch (error) { return String(error).includes('User stopped') ? 'recovered' : 'wrong error'; }
+                }
+                await new Promise(resolve => setTimeout(resolve, 50));
+                try { await ctx.tools.slow({}); } catch (error) {
+                    if (!String(error).includes('timed out')) throw error;
+                    return 'recovered';
+                }
+                throw new Error('expected tool timeout');
+            }"#.to_vec(),
+        }, V8Config { execution_timeout: Duration::from_millis(10), action_execution_timeout: Duration::from_millis(10), ..Default::default() }).unwrap();
+        for (explicit_deadline, args) in [
+            (false, b"null".to_vec()),
+            (true, b"null".to_vec()),
+            (false, br#""cancel""#.to_vec()),
+        ] {
+            let result = engine
+                .invoke(
+                    &TimeoutHost,
+                    Invocation {
+                        function: "run".into(),
+                        kind: FunctionKind::Action,
+                        args,
+                        context: InvocationContext {
+                            generation: 1,
+                            deadline: explicit_deadline
+                                .then(|| SystemTime::now() + Duration::from_millis(10)),
+                            action_tools: vec!["slow".into()],
+                            capabilities: Capabilities {
+                                action_tools: true,
+                                network: true,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    },
+                )
+                .await;
+            if explicit_deadline {
+                assert!(matches!(result, Err(ModuleError::BudgetExceeded(_))));
+            } else {
+                assert_eq!(
+                    result
+                        .expect("tool timeout must be catchable by the agent after a long wait")
+                        .value,
+                    br#""recovered""#
+                );
+            }
+        }
+        });
     }
 }

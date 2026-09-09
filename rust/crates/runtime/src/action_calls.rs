@@ -23,23 +23,23 @@ const MAX_FETCH_RESPONSE_BYTES: usize = 8 << 20;
 fn action_fetch_timeout(
     deadline_unix_ms: Option<u64>,
     now_unix_ms: u64,
-) -> Result<Duration, String> {
+) -> Result<Option<Duration>, String> {
     // Long-running Actions already have a host-enforced deadline. A second,
     // shorter total-body timeout aborts valid slow responses before that deadline.
     match deadline_unix_ms {
         Some(deadline) if deadline > now_unix_ms => {
-            Ok(Duration::from_millis(deadline - now_unix_ms))
+            Ok(Some(Duration::from_millis(deadline - now_unix_ms)))
         }
         Some(_) => Err("fetch cannot start after the Action execution deadline".to_owned()),
-        None => Ok(Duration::from_secs(30)),
+        None => Ok(None),
     }
 }
 
-fn fetch_error(error: reqwest::Error, phase: &str, timeout: Duration) -> String {
+fn fetch_error(error: reqwest::Error, phase: &str, timeout: Option<Duration>) -> String {
     if error.is_timeout() {
         format!(
             "fetch {phase} timed out within the {} ms Action request budget",
-            timeout.as_millis()
+            timeout.unwrap_or(Duration::from_secs(30)).as_millis()
         )
     } else {
         // Do not leak URL query parameters into application errors.
@@ -264,9 +264,11 @@ impl ActionHostCalls {
             .unwrap_or_default()
             .as_millis() as u64;
         let timeout = action_fetch_timeout(deadline_unix_ms, now_unix_ms)?;
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
-            .connect_timeout(Duration::from_secs(30).min(timeout))
+        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(30));
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
+        let client = builder
             .redirect(Policy::custom(move |attempt: Attempt<'_>| {
                 let permitted = origin(attempt.url())
                     .map(|origin| redirect_allowed.contains(&origin))
@@ -482,7 +484,7 @@ mod fetch_tests {
         let error = response.bytes().await.unwrap_err();
         assert_eq!(error.to_string(), "error decoding response body");
         assert!(error.is_timeout());
-        let diagnostic = fetch_error(error, "response body", timeout);
+        let diagnostic = fetch_error(error, "response body", Some(timeout));
         assert!(diagnostic.contains("response body timed out"));
         assert!(!diagnostic.contains("secret"));
         server.abort();
@@ -504,7 +506,7 @@ mod fetch_tests {
             tokio::time::sleep(Duration::from_secs(31)).await;
             socket.write_all(b"ok").await.unwrap();
         });
-        let timeout = action_fetch_timeout(Some(40_000), 0).unwrap();
+        let timeout = action_fetch_timeout(Some(40_000), 0).unwrap().unwrap();
         let response = reqwest::Client::builder()
             .timeout(timeout)
             .build()
@@ -519,9 +521,10 @@ mod fetch_tests {
 
     #[test]
     fn slow_responses_can_use_the_remaining_action_budget() {
+        assert_eq!(action_fetch_timeout(None, 1_000).unwrap(), None);
         assert_eq!(
             action_fetch_timeout(Some(121_000), 1_000).unwrap(),
-            Duration::from_secs(120)
+            Some(Duration::from_secs(120))
         );
     }
 
@@ -529,7 +532,7 @@ mod fetch_tests {
     fn requests_cannot_outlive_the_action_deadline() {
         assert_eq!(
             action_fetch_timeout(Some(1_025), 1_000).unwrap(),
-            Duration::from_millis(25)
+            Some(Duration::from_millis(25))
         );
         assert!(action_fetch_timeout(Some(1_000), 1_000).is_err());
         assert!(action_fetch_timeout(Some(999), 1_000).is_err());

@@ -52,6 +52,7 @@ fn test_config(database_url: String) -> Config {
             max_concurrent_calls: 4,
             isolate_pool_size: 1,
             execution_timeout: Duration::from_secs(1),
+            action_execution_timeout: Duration::from_secs(900),
         },
         runtime_version: "test".to_owned(),
         sandbox: SandboxConfig::default(),

@@ -641,6 +641,7 @@ fn artifact_from_manifest(
             .to_owned();
         let mut metadata = Map::new();
         for name in [
+            "actionProfile",
             "offline",
             "optimistic",
             "interactive",
@@ -957,7 +958,7 @@ mod tests {
                     "result":{"kind":"object","fields":{"ok":{"kind":"boolean"}}}
                 },
                 "callbacks.receive":{
-                    "kind":"action","handler":"receive","file":"gonvex/callbacks.ts",
+                    "kind":"action","handler":"receive","file":"gonvex/callbacks.ts","actionProfile":"agent",
                     "classification":"system",
                     "args":{"kind":"object","fields":{}},"result":{"kind":"any"}
                 },
@@ -980,7 +981,9 @@ mod tests {
             module_hash: canonical,
             manifest: serde_json::json!({"module":module}),
         };
-        let (_, functions, _) = artifact_from_manifest(&record).unwrap();
+        let (artifact, functions, _) = artifact_from_manifest(&record).unwrap();
+        assert_eq!(functions["callbacks.receive"].action_profile, "agent");
+        assert_eq!(artifact.functions.iter().find(|f| f.path == "callbacks.receive").unwrap().metadata["actionProfile"], "agent");
         let start = &functions["tasks.start"];
         assert!(start.interactive);
         assert_eq!(start.classification, "interactive");

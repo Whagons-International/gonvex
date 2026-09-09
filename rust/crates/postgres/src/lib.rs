@@ -1027,6 +1027,18 @@ impl ControlPlane {
         Ok(Some(claimed))
     }
 
+    /// Only the current delivery attempt may extend its claim.
+    pub async fn renew_action(
+        &self, route: &TenantRoute, action_id: &str, attempt: i32,
+    ) -> Result<bool, DatabaseError> {
+        let pool = self.pools.pool(&route.database_url).await?;
+        let _admission = self.pools.admit().await?;
+        let result = sqlx::query(
+            "UPDATE _gonvex_action_outbox SET locked_at = now() WHERE id = $1 AND status = 'processing' AND attempts = $2",
+        ).bind(action_id).bind(attempt).execute(&pool).await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn complete_action(
         &self,
         route: &TenantRoute,
