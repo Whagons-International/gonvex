@@ -576,6 +576,7 @@
       const sandbox = (operation, payload) => hostCall({ kind: "sandbox", operation, payload: optional(payload) });
       context.sandbox = Object.freeze({
         create: (options = {}) => sandbox("create", options),
+        destroy: (sandboxId) => sandbox("destroy", { sandboxId: text("sandbox id", sandboxId) }),
         run: (sandboxId, options) => sandbox("run", { sandboxId: text("sandbox id", sandboxId), ...(options ?? {}) }),
         cancel: (sandboxId, executionId) => sandbox("cancel", { sandboxId: text("sandbox id", sandboxId), executionId: text("execution id", executionId) }),
         status: (sandboxId, executionId) => sandbox("status", { sandboxId: text("sandbox id", sandboxId), executionId: text("execution id", executionId) }),

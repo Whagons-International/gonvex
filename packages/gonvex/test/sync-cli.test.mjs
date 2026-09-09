@@ -55,3 +55,44 @@ export const tasks = replicaCollection({
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test("codegen refreshes existing agent catalogs to the built artifact", () => {
+  const project = mkdtempSync(join(tmpdir(), "gonvex-cli-agent-catalog-"));
+  try {
+    mkdirSync(join(project, "gonvex"));
+    writeFileSync(join(project, "gonvex.json"), JSON.stringify({ project: "catalog-test", module: { entrypoint: "gonvex/index.ts" } }));
+    writeFileSync(join(project, "gonvex", "index.ts"), `
+const schema = {
+  object: (fields) => ({ kind: "object", fields }),
+  string: () => ({ kind: "string" }),
+};
+const action = (options) => options;
+export const greet = action({
+  args: schema.object({ name: schema.string() }),
+  result: schema.string(),
+  interactive: true,
+  run: async (_ctx, args) => "Hello " + args.name,
+});
+`);
+    writeFileSync(join(project, "agent-api.ndjson"), "stale\n");
+    writeFileSync(join(project, "agent-api.d.ts"), "stale\n");
+    const environment = Object.fromEntries(
+      Object.entries(process.env).filter(([, value]) => !value?.trimStart().startsWith("()")),
+    );
+    const generated = spawnSync(process.execPath, [cli, "codegen", "--project", project], { env: environment, encoding: "utf8" });
+    assert.equal(generated.status, 0, generated.stderr);
+
+    const manifest = JSON.parse(readFileSync(join(project, "gonvex", "_generated", "manifest.json"), "utf8"));
+    const ndjson = readFileSync(join(project, "agent-api.ndjson"), "utf8");
+    const typescript = readFileSync(join(project, "agent-api.d.ts"), "utf8");
+    assert.match(ndjson, /"path":"greet"/);
+    assert.match(ndjson, new RegExp(`"artifactHash":"${manifest.module.hash}"`));
+    assert.match(typescript, /"greet": \{/);
+    assert.match(typescript, new RegExp(`artifactHash: "${manifest.module.hash}"`));
+
+    const checked = spawnSync(process.execPath, [cli, "functions", "check", "--project", project], { env: environment, encoding: "utf8" });
+    assert.equal(checked.status, 0, checked.stderr);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

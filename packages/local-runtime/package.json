@@ -1,8 +1,12 @@
 {
   "name": "@gonvex/local-runtime",
-  "version": "0.5.2-staging.13",
+  "version": "0.5.2-staging.14",
   "type": "module",
   "exports": {
+    "./portable": {
+      "types": "./dist/portable.d.ts",
+      "default": "./dist/portable.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -22,6 +26,14 @@
     "./native-bridge": {
       "types": "./dist/native-bridge.d.ts",
       "default": "./dist/native-bridge.js"
+    },
+    "./read-view": {
+      "types": "./dist/read-view.d.ts",
+      "default": "./dist/read-view.js"
+    },
+    "./portable-client": {
+      "types": "./dist/portable-client.d.ts",
+      "default": "./dist/portable-client.js"
     }
   },
   "main": "./dist/index.js",
@@ -31,19 +43,19 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --maxWorkers=1"
   },
   "dependencies": {
-    "@electric-sql/pglite": "0.5.8",
     "@gonvex/module-sdk": "workspace:*",
     "@ungap/structured-clone": "1.4.0"
   },
   "devDependencies": {
     "@types/ungap__structured-clone": "^1.2.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.6",
+    "@electric-sql/pglite": "0.5.8"
   },
   "publishConfig": {
     "access": "public"

@@ -3,11 +3,21 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery } from "./index";
+import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState } from "./index";
+
+// Replica UI notifications coalesce at a browser paint. Keep every existing
+// identity, authority, and rendering assertion after that observable boundary.
+function actAtPaint(update: () => void) {
+  act(() => { update(); vi.advanceTimersToNextFrame(); });
+}
 
 const ref: FunctionReference = { kind: "query", path: "tasks.list" };
 
 class FakeGonvexClient {
+  readonly releaseEntities = vi.fn();
+  readonly releaseWindow = vi.fn();
+  readonly retainReplicaEntities = vi.fn((_entity:string,_ids:readonly string[])=>this.releaseEntities);
+  readonly retainReplicaWindow = vi.fn((_signature:string)=>this.releaseWindow);
   readonly queryListeners = new Set<(message: ServerMessage) => void>();
   readonly scopeHandlers = new Set<() => void>();
   readonly connectionHandlers = new Set<(state: ConnectionState) => void>();
@@ -29,6 +39,7 @@ class FakeGonvexClient {
       this.queryListeners.add(handler);
     });
   });
+  readonly prepareReducer = vi.fn(() => Promise.resolve());
   readonly reducer = vi.fn(() => Promise.resolve(null));
   readonly action = vi.fn(() => Promise.resolve(null));
   readonly setAuth = vi.fn();
@@ -44,6 +55,7 @@ class FakeGonvexClient {
   readonly entityValues = new Map<string, Record<string, unknown>>();
   retained = { rows: [] as Record<string, unknown>[], ids: [] as string[], source: "cache", completeness: "partial", freshness: "verifying" };
   readonly localReplica = {
+    freshness: () => 'current',
     subscribe: (listener: () => void) => { this.replicaListeners.add(listener); return () => this.replicaListeners.delete(listener); },
     version: () => this.replicaVersion,
     liveQuerySnapshot: () => this.retained,
@@ -335,6 +347,21 @@ describe("useReplicaCollection", () => {
     expect(client.watchedReplicaRefs.at(-1)).toBe(projectedRef);
   });
 
+  it("reuses an unchanged replica contract and applies a replacement projection", () => {
+    const client = new FakeGonvexClient();
+    const projectedRef = { ...ref, optimistic: { projection: { entity: "tasks", key: "_id", resultPath: [] } } };
+    const { rerender } = renderHook(({ reference }) => useReplicaCollection(reference, {}), {
+      initialProps: { reference: projectedRef }, wrapper: wrapperFor(client),
+    });
+    const initialWatches = client.watchedReplicaRefs.length;
+    rerender({ reference: { ...projectedRef } });
+    expect(client.watchedReplicaRefs).toHaveLength(initialWatches);
+    const replacement = { ...projectedRef, optimistic: { projection: { entity: "tasks", key: "id", resultPath: [] } } };
+    rerender({ reference: replacement });
+    expect(client.watchedReplicaRefs).toHaveLength(initialWatches + 1);
+    expect(client.watchedReplicaRefs.at(-1)).toBe(replacement);
+  });
+
   it("exposes protocol-owned completeness instead of inferring from row count", () => {
     const client = new FakeGonvexClient();
     client.replicaState = { rows:[{id:"a"}],ids:["a"],source:"cache",completeness:"partial",freshness:"offline",isUpToDate:false,truncated:true,computedRevision:17 };
@@ -348,7 +375,7 @@ describe("useReplicaCollection", () => {
     const { result } = renderHook(() => useReplicaCollectionState(ref, {}), { wrapper: wrapperFor(client) });
 
     expect(result.current).toMatchObject({ source:"cache",freshness:"verifying",isUpToDate:false });
-    act(() => {
+    actAtPaint(() => {
       client.replicaState = { ...client.replicaState, source:"server", freshness:"current", isUpToDate:true };
       client.updateReplica();
     });
@@ -356,7 +383,66 @@ describe("useReplicaCollection", () => {
   });
 });
 
+describe("dynamic Replica slices", () => {
+  it("retains stable snapshots, publishes updates, and releases slices that leave the view", () => {
+    const client = new FakeGonvexClient();
+    const states = new Map<string, any>([['a', { rows: [{ id: 'a', value: 1 }] }], ['b', { rows: [{ id: 'b', value: 2 }] }]]);
+    const listeners = new Map<string, Set<() => void>>();
+    const watch = vi.spyOn(client, 'watchReplica').mockImplementation(((_ref: FunctionReference, args: any, options: any) => {
+      expect(options).toEqual({ deferStart: true });
+      const key = args.id;
+      return {
+        localReplicaResult: () => states.get(key)?.rows,
+        localReplicaState: () => states.get(key),
+        onUpdate: (notify: () => void) => {
+          const set = listeners.get(key) ?? new Set();
+          listeners.set(key, set); set.add(notify);
+          return () => set.delete(notify);
+        },
+      };
+    }) as any);
+    const { result, rerender, unmount } = renderHook(({ ids }) => useReplicaCollectionStates(ref, ids.map(id => ({ id }))), {
+      initialProps: { ids: ['a', 'b'] }, wrapper: wrapperFor(client),
+    });
+    const first = result.current;
+    actAtPaint(() => listeners.get('a')!.forEach(notify => notify()));
+    expect(result.current).toBe(first);
+    actAtPaint(() => {
+      states.set('a', { rows: [{ id: 'a', value: 3 }] });
+      listeners.get('a')!.forEach(notify => notify());
+    });
+    expect(result.current[0]?.rows).toEqual([{ id: 'a', value: 3 }]);
+    expect(result.current[1]).toBe(first[1]);
+    rerender({ ids: ['b'] });
+    expect(listeners.get('a')!.size).toBe(0);
+    expect(result.current).toEqual([states.get('b')]);
+    rerender({ ids: [] });
+    expect(result.current).toEqual([]);
+    expect(listeners.get('b')!.size).toBe(0);
+    unmount();
+    watch.mockRestore();
+  });
+});
+
 describe("normalized Replica selectors", () => {
+  it("skips unused watermark revisions while publishing changed rows and authority", () => {
+    const client = new FakeGonvexClient();
+    client.replicaState = { rows:[{id:'a'}],ids:['a'],source:'cache',completeness:'complete',freshness:'verifying',isUpToDate:false,truncated:false,computedRevision:1 };
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders++;
+      return useReplicaCollectionStateSelector(ref, {}, state => ({ rows:state.rows, freshness:state.freshness }), (a,b) => a.rows===b.rows && a.freshness===b.freshness);
+    }, { wrapper:wrapperFor(client) });
+    const initial = result.current;
+    const before = renders;
+    actAtPaint(() => { client.replicaState={...client.replicaState,computedRevision:2};client.updateReplica(); });
+    expect(result.current).toBe(initial);
+    expect(renders).toBe(before);
+    actAtPaint(() => { client.replicaState={...client.replicaState,freshness:'current',isUpToDate:true};client.updateReplica(); });
+    expect(result.current?.freshness).toBe('current');
+    actAtPaint(() => { client.replicaState={...client.replicaState,rows:[{id:'b'}]};client.updateReplica(); });
+    expect(result.current?.rows).toEqual([{id:'b'}]);
+  });
   it("keeps a derived snapshot stable while the source rows are unchanged", () => {
     const client = new FakeGonvexClient();
     client.replicaRows.push({ id: "a", title: "A" });
@@ -374,11 +460,27 @@ describe("normalized Replica selectors", () => {
   it("updates a batched entity selector with one Replica subscription", () => {
     const client = new FakeGonvexClient();
     client.entityValues.set("a", { id: "a", title: "A" });
-    const { result } = renderHook(() => useReplicaEntities<{ id: string; title: string }>("tasks", ["a", "b"]), { wrapper: wrapperFor(client) });
+    const { result, unmount } = renderHook(() => useReplicaEntities<{ id: string; title: string }>("tasks", ["a", "b"]), { wrapper: wrapperFor(client) });
     expect(result.current).toEqual([{ id: "a", title: "A" }, undefined]);
-    act(() => { client.entityValues.set("b", { id: "b", title: "B" }); client.updateReplica(); });
+    actAtPaint(() => { client.entityValues.set("b", { id: "b", title: "B" }); client.updateReplica(); });
     expect(result.current).toEqual([{ id: "a", title: "A" }, { id: "b", title: "B" }]);
     expect(client.replicaListeners.size).toBe(1);
+    expect(client.retainReplicaEntities).toHaveBeenCalledExactlyOnceWith('tasks',['a','b']);
+    unmount();expect(client.releaseEntities).toHaveBeenCalledOnce();
+  });
+
+  it("does not rescan entity IDs for repeated metadata publications", () => {
+    const client = new FakeGonvexClient();
+    client.entityValues.set("a", { id: "a", title: "A" });
+    const version = vi.spyOn(client.localReplica, "entityVersion");
+    const { result } = renderHook(() => useReplicaEntities("tasks", ["a"]), { wrapper: wrapperFor(client) });
+    const initial = result.current;
+    version.mockClear();
+    actAtPaint(() => { for (let index = 0; index < 50; index++) for (const listener of client.replicaListeners) listener(); });
+    expect(result.current).toBe(initial);
+    expect(version.mock.calls.filter(([, id]) => id !== undefined)).toHaveLength(0);
+    actAtPaint(() => { client.entityValues.set("a", { id: "a", title: "Changed" }); client.updateReplica(); });
+    expect(result.current).toEqual([{ id: "a", title: "Changed" }]);
   });
 
   it("only clones changed entities and preserves requested order", () => {
@@ -392,10 +494,10 @@ describe("normalized Replica selectors", () => {
     });
     const initial = result.current;
     client.localReplica.entity.mockClear();
-    act(() => { client.rowVersions.set("c", 2); client.updateReplica(); });
+    actAtPaint(() => { client.rowVersions.set("c", 2); client.updateReplica(); });
     expect(result.current).toBe(initial);
     expect(client.localReplica.entity).not.toHaveBeenCalled();
-    act(() => {
+    actAtPaint(() => {
       client.entityValues.set("b", { id: "b", title: "updated" });
       client.rowVersions.set("b", 2); client.updateReplica();
     });
@@ -409,7 +511,7 @@ describe("normalized Replica selectors", () => {
     rerender({ ids: ["a"] });
     rerender({ ids: ["a", "b"] });
     expect(client.localReplica.entity).toHaveBeenCalledTimes(2);
-    act(() => {
+    actAtPaint(() => {
       client.entityValues.clear(); client.rowVersions.clear(); client.updateReplica();
     });
     expect(result.current).toEqual([undefined, undefined]);
@@ -418,11 +520,35 @@ describe("normalized Replica selectors", () => {
   it("subscribes to retained membership without opening another query", () => {
     const client = new FakeGonvexClient();
     client.retained = { rows:[{id:"a"}],ids:["a"],source:"cache",completeness:"partial",freshness:"verifying" };
-    const { result } = renderHook(() => useRetainedLiveQuery("tasks:grid"), { wrapper: wrapperFor(client) });
+    const { result, unmount } = renderHook(() => useRetainedLiveQuery("tasks:grid"), { wrapper: wrapperFor(client) });
     expect(result.current.ids).toEqual(["a"]);
-    act(() => { client.retained = {...client.retained,rows:[{id:"b"}],ids:["b"]}; client.updateReplica(); });
+    actAtPaint(() => { client.retained = {...client.retained,rows:[{id:"b"}],ids:["b"]}; client.updateReplica(); });
     expect(result.current.ids).toEqual(["b"]);
     expect(client.subscribedRefs).toHaveLength(0);
+    expect(client.retainReplicaWindow).toHaveBeenCalledExactlyOnceWith('tasks:grid');
+    unmount();expect(client.releaseWindow).toHaveBeenCalledOnce();
+  });
+
+  it('does not subscribe or rerender skipped Live Queries on unrelated replica publications', () => {
+    const client = new FakeGonvexClient();
+    const renders = vi.fn();
+    const {result,rerender} = renderHook(({skip}) => {
+      renders();
+      return useLiveQueryState({kind:'query',path:'tasks:grid'},skip ? 'skip' : {});
+    }, {initialProps:{skip:true},wrapper:wrapperFor(client)});
+    const initial = result.current;
+    const count = renders.mock.calls.length;
+    actAtPaint(() => { for(let i=0;i<20;i++) client.updateReplica(); });
+    expect(result.current).toBe(initial);
+    expect(renders).toHaveBeenCalledTimes(count);
+    expect(client.subscribedRefs).toHaveLength(0);
+    rerender({skip:false});
+    expect(client.subscribedRefs).toHaveLength(1);
+    const enabledCount = renders.mock.calls.length;
+    actAtPaint(() => client.updateReplica());
+    expect(renders).toHaveBeenCalledTimes(enabledCount);
+    actAtPaint(() => {client.retained = {...client.retained,rows:[{id:'a'}],ids:['a']};client.updateReplica();});
+    expect(result.current.ids).toEqual(['a']);
   });
 });
 
@@ -433,15 +559,29 @@ describe("useGonvexConnectionState", () => {
 
     expect(result.current).toMatchObject({ isWebSocketConnected: true, hasEverConnected: true });
 
-    act(() => client.setConnected(false));
+    actAtPaint(() => client.setConnected(false));
     expect(result.current.isWebSocketConnected).toBe(false);
 
-    act(() => client.setConnected(true));
+    actAtPaint(() => client.setConnected(true));
     expect(result.current.isWebSocketConnected).toBe(true);
   });
 });
 
 describe("useReducer", () => {
+  it("prepares mounted reducer code without executing an intent", async () => {
+    const client = new FakeGonvexClient();
+    const reducerRef: FunctionReference = { kind: "reducer", path: "tasks.create", localExecution: 1 };
+    const { rerender } = renderHook(() => ({
+      reducer: useReducer(reducerRef),
+      action: useAction({ kind: "action", path: "tasks.export" }),
+    }), { wrapper: wrapperFor(client) });
+    await act(async () => {});
+    rerender();
+    expect(client.prepareReducer).toHaveBeenCalledExactlyOnceWith(reducerRef);
+    expect(client.reducer).not.toHaveBeenCalled();
+    expect(client.action).not.toHaveBeenCalled();
+  });
+
   it("forwards per-call timeout options to the client", async () => {
     const client = new FakeGonvexClient();
     const { result } = renderHook(
@@ -492,7 +632,7 @@ describe("useReducer", () => {
       expiresAt: "2026-09-01T00:00:00Z", revoked: false, accepted: false,
       state: "pending", createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z",
     }];
-    act(() => client.emitQuery({
+    actAtPaint(() => client.emitQuery({
       type: "query.result", id: "invitations", path: "control.invitations.list",
       result: before, reason: "initial",
     }));

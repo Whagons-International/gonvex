@@ -61,6 +61,8 @@ export const grid = liveQuery<GridArgs, GridRow[]>({
     table: "tasks",
     key: "id",
     columns: ["id", "title", "workspaceId"],
+    index: { table: "taskIndex", key: "taskId", columns: ["workspaceId"], sortColumns: { statusId: ["statusOrder", "statusName"] }, referenceFields: {statusOrder:{table:"statuses",foreignKey:"statusId",column:"order"}}, dependencies: ["statuses"] },
+    search: { argument: "search", columns: [], booleanTerms: true, offlineColumns: ["title"], sources: [{ table: "taskIndex", key: "taskId", column: "searchText", dependencies: ["tags"] }] },
     where: { operator: "eq", column: "workspaceId", value: { argument: "workspaceId" } },
     window: { offsetArgument: "offset", limitArgument: "limit", defaultLimit: 100, maxLimit: 200 },
   },
@@ -142,6 +144,8 @@ export const rename = reducer<RenameArgs, RenameResult>({
   assert.equal(functions.grid.kind, "query");
   assert.equal(functions.grid.delivery, "live");
   assert.equal(functions.grid.dependencies.liveQueryPlan.table, "tasks");
+  assert.deepEqual(functions.grid.dependencies.liveQueryPlan.index, { table: "taskIndex", key: "taskId", columns: ["workspaceId"], sortColumns: {statusId:["statusOrder","statusName"]}, referenceFields:{statusOrder:{table:"statuses",foreignKey:"statusId",column:"order"}}, dependencies:["statuses"] });
+  assert.deepEqual(functions.grid.dependencies.liveQueryPlan.search, { argument: "search", columns: [], booleanTerms: true, offlineColumns: ["title"], sources: [{ table: "taskIndex", key: "taskId", column: "searchText", dependencies: ["tags"] }] });
   assert.equal(functions.oneShot.delivery, "oneShot");
   assert.equal(artifact.functions.oneShot.interactive, false);
   assert.equal(functions.oneShot.interactive, false);
@@ -478,4 +482,21 @@ export const run = action({
   assert.deepEqual(artifact.functions.run.actionCapabilities.tools.searchTasks, { kind: "query", function: "searchTasks" });
   assert.deepEqual(moduleManifestFunctions(artifact).run.actionCapabilities.networkOrigins, ["https://api.openai.com"]);
   assert.deepEqual(moduleManifestFunctions(artifact).run.actionCapabilities.sandbox, { duckdb: true });
+});
+
+
+test("related Live Query scopes preserve nested predicates and trusted identity references", async (t) => {
+  const project = await moduleProject(t, `
+    const liveQuery = definition => definition;
+    const schema = { object: fields => ({ kind: 'object', fields }), string: () => ({ kind: 'string' }), any: () => ({ kind: 'any' }) };
+    export const inbox = liveQuery({ args: schema.object({ space: schema.string() }), result: schema.any(), liveQueryPlan: {
+      table: 'items', key: 'id', columns: ['id'], where: { operator: 'inRelation', column: 'id', relation: {
+        table: 'routing', column: 'itemId', where: { operator: 'eq', column: 'memberId', value: { context: 'member.id' } }
+      } }
+    } });
+  `);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  const where = moduleManifestFunctions(artifact).inbox.dependencies.liveQueryPlan.where;
+  assert.equal(where.operator, 'inRelation');
+  assert.deepEqual(where.relation.where.value, { context: 'member.id' });
 });

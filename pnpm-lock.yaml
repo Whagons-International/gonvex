@@ -182,6 +182,9 @@ importers:
       '@gonvex/local-runtime':
         specifier: workspace:*
         version: link:../local-runtime
+      '@gonvex/module-sdk':
+        specifier: workspace:*
+        version: link:../module-sdk
       '@gonvex/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -189,9 +192,6 @@ importers:
         specifier: ^4.4.4
         version: 4.4.4
     devDependencies:
-      '@gonvex/module-sdk':
-        specifier: workspace:*
-        version: link:../module-sdk
       fake-indexeddb:
         specifier: ^6.2.4
         version: 6.2.5
@@ -230,12 +230,15 @@ importers:
 
   packages/gonvex:
     dependencies:
-      '@gonvex/local-runtime':
-        specifier: workspace:*
-        version: link:../local-runtime
+      '@electric-sql/pglite':
+        specifier: 0.5.8
+        version: 0.5.8
       '@gonvex/client':
         specifier: workspace:*
         version: link:../client
+      '@gonvex/local-runtime':
+        specifier: workspace:*
+        version: link:../local-runtime
       '@gonvex/react':
         specifier: workspace:*
         version: link:../react
@@ -252,9 +255,6 @@ importers:
 
   packages/local-runtime:
     dependencies:
-      '@electric-sql/pglite':
-        specifier: 0.5.8
-        version: 0.5.8
       '@gonvex/module-sdk':
         specifier: workspace:*
         version: link:../module-sdk
@@ -262,6 +262,9 @@ importers:
         specifier: 1.4.0
         version: 1.4.0
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: 0.5.8
+        version: 0.5.8
       '@types/ungap__structured-clone':
         specifier: ^1.2.0
         version: 1.2.0

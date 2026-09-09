@@ -9,5 +9,6 @@ export const heartbeat = internalReducer({
 export const heartbeatSchedule = cron({
   name: "heartbeat",
   function: "system.heartbeat",
+  args: {},
   intervalMs: 15_000,
 });

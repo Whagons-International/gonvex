@@ -73,6 +73,16 @@ export const sync = replicaCollection({
     assert.doesNotMatch(generated, /optimisticReducers|optimisticProjection|projection:/);
 
     const bindings = await import(`${pathToFileURL(apiPath).href}?test=${Date.now()}`);
+    // Browser references need types and execution metadata, not another copy
+    // of the validation schemas already owned by the deployed manifest.
+    for (const reference of Object.values(bindings.api.tasks)) {
+      assert.equal(Object.hasOwn(reference, "args"), false);
+      assert.equal(Object.hasOwn(reference, "result"), false);
+    }
+    assert.match(generated, /taskId: string/);
+    const manifest = JSON.parse(readFileSync(join(project, "gonvex", "_generated", "manifest.json"), "utf8"));
+    assert.equal(manifest.functions["tasks.update"].args.fields.taskId.kind, "id");
+    assert.equal(manifest.functions["tasks.update"].result.fields.ok.kind, "boolean");
     assert.ok(bindings.api.tasks.update.optimistic);
     assert.equal(bindings.api.tasks.preview.optimistic, undefined);
     assert.equal(bindings.api.tasks.sync.optimistic, undefined);

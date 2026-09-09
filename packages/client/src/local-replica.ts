@@ -1,6 +1,10 @@
+import type { DataPredicate } from '@gonvex/module-sdk';
 import type { JsonValue, PublicInvocationProvenance, ReplicaCursor, SubscriptionRevision } from "@gonvex/protocol";
 import type { OptimisticPatch } from "./optimistic.js";
 import type { LocalExecution } from "@gonvex/local-runtime";
+import type { LocalPatch } from '@gonvex/local-runtime';
+import type { ReducerReadView } from '@gonvex/local-runtime/portable';
+import { memoryReadView, overlayReadView, type ReadCoverage } from '@gonvex/local-runtime/read-view';
 
 export type LocalReplicaSession = {
   lastOnlineAtMs?: number;
@@ -62,9 +66,19 @@ export type ReplicaTransaction = {
 };
 
 export type ReplicaSnapshot = {
+  /** Tables with disk rows deliberately omitted from the resident working set. */
+  residentPartialTables?: string[];
+  storageSequence?:number;
   cursor?: ReplicaCursor;
   entities: Record<string, Record<string, ReplicaRow>>;
   liveQueries: Record<string, ReplicaWindow>;
+};
+
+export type ReplicaStorageChanges = {
+  sequence:number;
+  reset?:boolean;
+  entities:Record<string,Record<string,ReplicaRow | null>>;
+  windows:Record<string,ReplicaWindow | null>;
 };
 
 /** Opaque persistence namespace for one deployment/project/tenant identity. */
@@ -78,6 +92,12 @@ const defaultReplicaScope: ReplicaScope = "default";
  * implementations use one readwrite transaction over the same stores.
  */
 export interface LocalReplicaStorage {
+  loadWorkingSet?(scope:string,budget:{maxRows:number;maxBytes:number}):Promise<ReplicaSnapshot | undefined>;
+  loadWindowRows?(scope:string,signature:string):Promise<{window:ReplicaWindow;rows:ReplicaRow[]} | undefined>;
+  loadEntityRows?(scope:string,entity:string,ids:readonly string[]):Promise<Array<{id:string;row:ReplicaRow}>>;
+  readChanges?(scope:string, afterSequence:number,interest?:{rows:Record<string,string[]>;windows:string[];availableRows:number;availableBytes:number;maxRows:number;maxBytes:number}):Promise<ReplicaStorageChanges>;
+  subscribePeer?(listener:(scope:string)=>void):()=>void;
+  withReadView?<T>(scope: string, coverage: ReadCoverage, run: (view: ReducerReadView) => Promise<T>): Promise<T>;
   /** Last server-authorized identity/visibility metadata, partitioned by login. */
   loadSession?(identityScope: string): Promise<LocalReplicaSession | undefined>;
   saveSession?(identityScope: string, session: LocalReplicaSession | undefined): Promise<void>;
@@ -87,7 +107,7 @@ export interface LocalReplicaStorage {
   advanceWatermark?(windows: readonly ReplicaWindow[], cursor: ReplicaCursor | undefined, scope?: ReplicaScope): Promise<void>;
   /** Persist a normalized Query/Collection materialization atomically. */
   replaceSnapshot?(snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
-  replaceWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
+  replaceWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope?: ReplicaScope, projection?:readonly ReplicaRow[]): Promise<void>;
   applyWindowDelta?(
     window: ReplicaWindow,
     delta: { upserts: ReplicaRow[]; deleted: string[] },
@@ -165,6 +185,12 @@ export interface LocalReplicaView {
 }
 
 export class LocalReplica implements LocalReplicaView {
+  private readonly retainedWindows = new Map<string, number>();
+  private readonly retainedRows = new Map<string,Map<string,number>>();
+  private readonly residentPartialTables = new Set<string>();
+  private readonly rowSizes = new WeakMap<ReplicaRow, number>();
+  private readonly visibleRowCopies = new WeakMap<ReplicaRow, ReplicaRow>();
+  private readonly residencyBudget = {maxRows:20_000,maxBytes:16*1024*1024};
   private cursorValue?: ReplicaCursor;
   private entities = new Map<string, Map<string, ReplicaRow>>();
   private liveQueries = new Map<string, ReplicaWindow>();
@@ -174,7 +200,36 @@ export class LocalReplica implements LocalReplicaView {
   private pendingCommands = new Map<string, PendingCommand>();
   private listeners = new Set<() => void>();
   private persistence = Promise.resolve();
+  private storageSequence = 0;
   private application = Promise.resolve();
+  private applicationRunning = false;
+  private disposed = false;
+  private readonly applicationJobs: Array<{ urgent: boolean; run: () => Promise<void>; cancel: () => void }> = [];
+
+  private enqueueApplication<T>(run: () => Promise<T>, urgent = false): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error("Local replica is closed"));
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const result = new Promise<T>((done, failed) => { resolve = done; reject = failed; });
+    this.applicationJobs.push({ urgent, cancel: () => reject(new Error("Local replica is closed")), run: async () => { try { resolve(await run()); } catch (error) { reject(error); } finally { if (this.disposed) this.releaseMemory(); } } });
+    this.application = Promise.all([this.application, result]).then(() => undefined, () => undefined);
+    if (!this.applicationRunning) {
+      this.applicationRunning = true;
+      queueMicrotask(() => { void this.drainApplicationJobs(); });
+    }
+    return result;
+  }
+
+  private async drainApplicationJobs() {
+    while (this.applicationJobs.length) {
+      // Finish the active transaction atomically. Between transactions, a user
+      // read can precede queued hydration without reordering server writes.
+      const urgent = this.applicationJobs.findIndex(job => job.urgent);
+      const [job] = this.applicationJobs.splice(urgent < 0 ? 0 : urgent, 1);
+      await job!.run();
+    }
+    this.applicationRunning = false;
+  }
   private hydration?: Promise<void>;
   private freshnessValue: ReplicaFreshness = "verifying";
   private versionValue = 0;
@@ -195,7 +250,37 @@ export class LocalReplica implements LocalReplicaView {
   private scopeActivationName?: ReplicaScope;
   private scopeActivationGeneration = 0;
 
-  constructor(private readonly storage?: LocalReplicaStorage) {}
+  constructor(private readonly storage?: LocalReplicaStorage, options:{maxResidentRows?:number;maxResidentBytes?:number}={}) {
+    for(const [name,value] of Object.entries(options))if(value!==undefined && (!Number.isSafeInteger(value) || value<=0))throw new Error(`Invalid replica residency budget: ${name}`);
+    this.residencyBudget.maxRows=options.maxResidentRows ?? this.residencyBudget.maxRows;
+    this.residencyBudget.maxBytes=options.maxResidentBytes ?? this.residencyBudget.maxBytes;
+  }
+
+  /** Release a discarded client's in-memory state without deleting durable data. */
+  dispose(): void {
+    this.disposed = true;
+    this.scopeLoaded = false;
+    this.scopeActivationGeneration++;
+    for (const job of this.applicationJobs.splice(0)) job.cancel();
+    this.releaseMemory();
+  }
+
+  private releaseMemory(): void {
+    this.entities.clear();
+    this.liveQueries.clear();
+    this.pendingCommands.clear();
+    this.listeners.clear();
+    this.retainedWindows.clear();
+    this.retainedRows.clear();
+    this.residentPartialTables.clear();
+    this.windowOwned.clear();
+    this.replicaPlans.clear();
+    this.readSnapshots.clear();
+    this.entityVersions.clear();
+    this.rowVersions.clear();
+    this.windowVersions.clear();
+    this.windowRowsVersions.clear();
+  }
 
   hydrate(): Promise<void> {
     if (this.hydration) return this.hydration;
@@ -218,15 +303,20 @@ export class LocalReplica implements LocalReplicaView {
     this.scopeLoaded = false;
     if (wasLoaded) { this.invalidateEntityVersions(); this.notify(true); }
     const generation = ++this.scopeActivationGeneration;
-    const activation = this.application.then(async () => {
+    const activation = this.enqueueApplication(async () => {
       // A prior transaction may still be in the storage queue. Wait for it so
       // a same-scope activation cannot load a snapshot from before its commit.
       await this.persistence;
-      const snapshot = await this.storage?.load(nextScope);
+      const snapshot = this.storage?.loadWorkingSet
+        ? await this.storage.loadWorkingSet(nextScope,this.residencyBudget)
+        : await this.storage?.load(nextScope);
       if (generation !== this.scopeActivationGeneration) return;
       this.scopeValue = nextScope;
+      this.storageSequence = snapshot?.storageSequence ?? 0;
       this.scopeLoaded = true;
       this.entities = snapshot ? entitiesFromSnapshot(snapshot.entities) : new Map();
+      this.residentPartialTables.clear();
+      for(const entity of snapshot?.residentPartialTables ?? []) this.residentPartialTables.add(entity);
       this.invalidateEntityVersions();
       this.liveQueries = snapshot
         ? new Map(Object.entries(snapshot.liveQueries).map(([key, value]) => [key, normalizeWindow(value)]))
@@ -239,15 +329,194 @@ export class LocalReplica implements LocalReplicaView {
       this.pendingCommands.clear();
       this.freshnessValue = "verifying";
       this.notify(true);
+      queueMicrotask(()=>{
+        if(generation!==this.scopeActivationGeneration)return;
+        for(const signature of this.retainedWindows.keys())this.retainWindow(signature)();
+        for(const [entity,ids] of this.retainedRows)this.retainRows(entity,[...ids.keys()])();
+      });
     });
-    this.application = activation.catch(() => undefined);
+
     this.scopeActivation = activation;
     this.scopeActivationName = nextScope;
     return activation;
   }
 
+  /** Active views retain their rows. Cold collections stay durable on disk and
+   * reducer reads can use the indexed adapter without hydrating the table. */
+  retainWindow(signature:string):()=>void {
+    this.retainedWindows.set(signature,(this.retainedWindows.get(signature) ?? 0)+1);
+    const scopeGeneration=this.scopeActivationGeneration;
+    const operation=this.enqueueApplication(async()=>{
+      if(!this.scopeLoaded || !this.retainedWindows.has(signature) || scopeGeneration!==this.scopeActivationGeneration || !this.storage?.loadWindowRows)return;
+      const existing=this.liveQueries.get(signature);
+      if(existing?.ids.every(id=>this.entities.get(existing.entity)?.has(id)))return;
+      const loaded=await this.storage.loadWindowRows(this.scopeValue,signature);
+      if(!loaded || !this.retainedWindows.has(signature) || scopeGeneration!==this.scopeActivationGeneration)return;
+      const table=new Map(this.entities.get(loaded.window.entity));
+      for(const row of loaded.rows)table.set(String(row[loaded.window.key]),row);
+      this.entities=new Map(this.entities).set(loaded.window.entity,table);
+      this.liveQueries.set(signature,normalizeWindow(loaded.window));
+      if(loaded.window.kind==='replica' && loaded.window.completeness==='complete' && !loaded.window.truncated && loaded.rows.length===loaded.window.ids.length)this.residentPartialTables.delete(loaded.window.entity);
+      this.markEntityChanged(loaded.window.entity,loaded.window.ids);
+      this.markWindowChanged(signature);
+      this.notify(true);
+    }, true);
+
+    let released=false;
+    return ()=>{
+      if(released)return;released=true;
+      const count=this.retainedWindows.get(signature) ?? 0;
+      if(count>1)this.retainedWindows.set(signature,count-1);
+      else {this.retainedWindows.delete(signature);this.readSnapshots.delete(signature);this.trimResidentRows();}
+    };
+  }
+
+  private residentCoverage(coverage:ReadCoverage):ReadCoverage {
+    if(!this.residentPartialTables.size)return coverage;
+    return Object.fromEntries(Object.entries(coverage).map(([table,value])=>[table,this.residentPartialTables.has(table)?{...value,complete:false,completeWhere:undefined}:value]));
+  }
+
+  retainRows(entity:string,ids:readonly string[]):()=>void {
+    const scopeGeneration=this.scopeActivationGeneration;
+    let retained=this.retainedRows.get(entity);
+    if(!retained){retained=new Map();this.retainedRows.set(entity,retained);}
+    for(const id of ids)retained.set(id,(retained.get(id)??0)+1);
+    const operation=this.enqueueApplication(async()=>{
+      if(!this.scopeLoaded || !this.storage?.loadEntityRows || scopeGeneration!==this.scopeActivationGeneration)return;
+      const missing=ids.filter(id=>!this.entities.get(entity)?.has(id) && this.retainedRows.get(entity)?.has(id));
+      if(!missing.length)return;
+      const rows=await this.storage.loadEntityRows(this.scopeValue,entity,missing);
+      if(scopeGeneration!==this.scopeActivationGeneration)return;
+      const next=new Map(this.entities.get(entity));
+      for(const {id,row} of rows)if(this.retainedRows.get(entity)?.has(id))next.set(id,row);
+      this.entities=new Map(this.entities).set(entity,next);
+      this.markEntityChanged(entity,missing);this.notify(true);
+    }, true);
+
+    let released=false;
+    return ()=>{
+      if(released)return;released=true;
+      const current=this.retainedRows.get(entity);
+      for(const id of ids){const count=current?.get(id)??0;if(count>1)current!.set(id,count-1);else current?.delete(id);}
+      if(!current?.size)this.retainedRows.delete(entity);
+      this.trimResidentRows();
+    };
+  }
+
+  private trimResidentRows() {
+    // Without indexed persistence, eviction would lose the only readable copy.
+    if(!this.storage?.withReadView || !this.storage?.loadWindowRows)return;
+    let bytes=0,count=0;
+    for(const rows of this.entities.values())for(const row of rows.values()){
+      let size=this.rowSizes.get(row);
+      if(size===undefined){size=JSON.stringify(row).length*2+256;this.rowSizes.set(row,size);}
+      bytes+=size;count++;
+    }
+    if(bytes<=this.residencyBudget.maxBytes && count<=this.residencyBudget.maxRows)return;
+    const pinned=new Map<string,Set<string>>();
+    const pin=(entity:string,id:string)=>{let ids=pinned.get(entity);if(!ids){ids=new Set();pinned.set(entity,ids);}ids.add(id);};
+    for(const signature of this.retainedWindows.keys()){
+      const window=this.liveQueries.get(signature);
+      if(window)for(const id of window.ids)pin(window.entity,id);
+    }
+    for(const [entity,ids] of this.retainedRows)for(const id of ids.keys())pin(entity,id);
+    for(const command of this.pendingCommands.values())for(const patch of command.patches)pin(patch.entity ?? patch.collection!,patch.rowId);
+    const next=new Map(this.entities);
+    let evicted=false;
+    for(const [entity,rows] of this.entities){
+      let copied:Map<string,ReplicaRow>|undefined;
+      for(const [id,row] of rows){
+        if(bytes<=this.residencyBudget.maxBytes && count<=this.residencyBudget.maxRows)break;
+        if(pinned.get(entity)?.has(id))continue;
+        copied ??=new Map(rows);copied.delete(id);count--;bytes-=this.rowSizes.get(row)!;
+        this.rowVersions.delete(`${entity}\0${id}`);this.residentPartialTables.add(entity);evicted=true;
+      }
+      if(copied)next.set(entity,copied);
+    }
+    if(evicted){this.entities=next;this.readSnapshots.clear();}
+  }
+
   cursor() {
     return this.scopeLoaded && this.cursorValue ? { ...this.cursorValue } : undefined;
+  }
+
+  /** Consume the durable replica, including commits delivered by another tab.
+   * Predictions remain a separate overlay; peers never advance our socket's
+   * acknowledged cursor or publish a half-applied transaction. */
+  synchronizeStorage(): Promise<void> {
+    if (!this.storage?.readChanges) return Promise.resolve();
+    const scope = this.scopeValue;
+    const application = this.enqueueApplication(async () => {
+      if (!this.scopeLoaded || scope !== this.scopeValue || !this.storage?.readChanges) return;
+      await this.persistence;
+      const entities = new Map(this.entities);
+      const windows = new Map(this.liveQueries);
+      if (!await this.mergeStoredChanges(entities, windows)) return;
+      this.entities = entities;
+      this.liveQueries = windows;
+      this.notify(true);
+    }, true);
+
+    return application;
+  }
+
+  private async mergeStoredChanges(entities: Map<string, Map<string, ReplicaRow>>, windows: Map<string, ReplicaWindow>): Promise<boolean> {
+    if (!this.storage?.readChanges) return false;
+    const residentIds=Object.fromEntries([...entities].map(([table,rows])=>[table,[...rows.keys()]]));
+    let residentBytes=0,residentCount=0;
+    for(const rows of entities.values())for(const row of rows.values()){
+      let size=this.rowSizes.get(row);if(size===undefined){size=JSON.stringify(row).length*2+256;this.rowSizes.set(row,size);}
+      residentBytes+=size;residentCount++;
+    }
+    for(const command of this.pendingCommands.values())for(const patch of command.patches){const entity=patch.entity ?? patch.collection!;(residentIds[entity]??=[]).push(patch.rowId);}
+    const changes = await this.storage.readChanges(this.scopeValue, this.storageSequence,this.storage.loadWorkingSet ? {
+      rows:residentIds,
+      windows:[...this.retainedWindows.keys()],
+      availableRows:Math.max(0,this.residencyBudget.maxRows-residentCount),
+      availableBytes:Math.max(0,this.residencyBudget.maxBytes-residentBytes),
+      ...this.residencyBudget,
+    } : undefined);
+    if (changes.sequence === this.storageSequence) return false;
+    if (changes.reset) {
+      entities.clear();
+      windows.clear();
+      this.windowOwned.clear();
+      this.invalidateEntityVersions();
+    }
+    for (const [entity, values] of Object.entries(changes.entities)) {
+      const rows = new Map(entities.get(entity));
+      const changedIDs = new Set<string>();
+      for (const [id, row] of Object.entries(values)) {
+        if (row === null) {
+          if (rows.delete(id)) changedIDs.add(id);
+        } else if (!sameReplicaValue(rows.get(id), row)) {
+          rows.set(id, row);
+          changedIDs.add(id);
+        }
+      }
+      if (!changedIDs.size) continue;
+      entities.set(entity, rows);
+      this.markEntityChanged(entity, changedIDs);
+      for (const window of windows.values()) {
+        if (window.entity === entity && window.ids.some(id => changedIDs.has(id))) this.markWindowChanged(window.signature);
+      }
+    }
+    for (const [signature, window] of Object.entries(changes.windows)) {
+      const previous = windows.get(signature);
+      if (window === null) {
+        if (windows.delete(signature)) this.markWindowChanged(signature);
+        continue;
+      }
+      if (sameReplicaValue(previous, window)) continue;
+      const membershipChanged = !sameWindowRowDefinition(previous, window);
+      windows.set(signature, normalizeWindow(window));
+      if(window.ids.some(id=>!entities.get(window.entity)?.has(id)))this.residentPartialTables.add(window.entity);
+      // Row changes have already invalidated their windows above. A storage
+      // watermark changes metadata, not membership or the visible row array.
+      this.markWindowChanged(signature, membershipChanged);
+    }
+    this.storageSequence = changes.sequence;
+    return true;
   }
 
   freshness() {
@@ -280,6 +549,9 @@ export class LocalReplica implements LocalReplicaView {
     commandId = commandId.trim();
     if (!commandId) throw new Error("optimistic commandId is required");
     const clonedPatches = patches.map(cloneOptimisticPatch);
+    const previous = this.pendingCommands.get(commandId);
+    if (previous && sameReplicaValue(previous.patches,clonedPatches)) return;
+    if (previous) this.markWindowsForPatches(previous.patches);
     this.pendingCommands.set(commandId, { commandId, patches: clonedPatches });
     this.markWindowsForPatches(clonedPatches);
     this.notify();
@@ -294,10 +566,11 @@ export class LocalReplica implements LocalReplicaView {
       command.commandId === previous[index]!.commandId &&
       JSON.stringify(command.patches) === JSON.stringify(previous[index]!.patches))) return;
     for (const command of this.pendingCommands.values()) this.markWindowsForPatches(command.patches);
+    const previousCommands = new Map(this.pendingCommands);
     this.pendingCommands.clear();
     for (const command of commands) {
       const patches = command.patches.map(cloneOptimisticPatch);
-      this.pendingCommands.set(command.commandId, { commandId: command.commandId, patches });
+      this.pendingCommands.set(command.commandId, { commandId: command.commandId, patches, committedRevision: previousCommands.get(command.commandId)?.committedRevision });
       this.markWindowsForPatches(patches);
     }
     this.notify();
@@ -341,8 +614,8 @@ export class LocalReplica implements LocalReplicaView {
 
   applyTransaction(transaction: ReplicaTransaction, scope?: ReplicaScope): Promise<void> {
     const requestedScope = scope === undefined ? undefined : normalizeReplicaScope(scope);
-    const application = this.application.then(() => this.applyTransactionNow(transaction, requestedScope));
-    this.application = application.catch(() => undefined);
+    const application = this.enqueueApplication(() => this.applyTransactionNow(transaction, requestedScope));
+
     return application;
   }
 
@@ -370,8 +643,8 @@ export class LocalReplica implements LocalReplicaView {
     removedIDs?: string[];
     scope?: ReplicaScope;
   }): Promise<void> {
-    const application = this.application.then(() => this.materializeWindowNow(input));
-    this.application = application.catch(() => undefined);
+    const application = this.enqueueApplication(() => this.materializeWindowNow(input));
+
     return application;
   }
 
@@ -406,7 +679,7 @@ export class LocalReplica implements LocalReplicaView {
     removedIDs?: string[];
     scope?: ReplicaScope;
   }): Promise<void> {
-    const application = this.application.then(async () => {
+    const application = this.enqueueApplication(async () => {
       const existing = this.liveQueries.get(input.signature);
       const deleted = new Set(input.deleted.map(String));
       const ids = (existing?.ids ?? []).filter((id) => !deleted.has(id));
@@ -417,8 +690,14 @@ export class LocalReplica implements LocalReplicaView {
       }
       const upserts = new Map(input.upserts.map(row => [String(row[input.key]), row]));
       const rows = ids
-        .map((id) => upserts.get(id) ?? this.entities.get(input.entity)?.get(id))
+        .map((id) => upserts.has(id) ? {...this.entities.get(input.entity)?.get(id),...upserts.get(id)} : this.entities.get(input.entity)?.get(id))
         .filter((row): row is ReplicaRow => row !== undefined);
+      const plan = this.replicaPlans.get(input.signature)?.definition;
+      const orderBy = input.orderBy ?? existing?.orderBy ?? plan?.orderBy;
+      const orderDirection = input.orderDirection ?? existing?.orderDirection ?? plan?.orderDirection;
+      if ((input.kind ?? existing?.kind) === 'replica' && orderBy) {
+        rows.sort((a,b) => compareReplicaMembershipRows(a,b,input.key,orderBy,orderDirection));
+      }
       await this.materializeWindowNow({
         ...input,
         rows,
@@ -427,7 +706,7 @@ export class LocalReplica implements LocalReplicaView {
         removedIDs: [...deleted],
       }, { upserts: input.upserts, deleted: [...deleted] });
     });
-    this.application = application.catch(() => undefined);
+
     return application;
   }
 
@@ -443,7 +722,7 @@ export class LocalReplica implements LocalReplicaView {
     scope?: ReplicaScope,
   ): Promise<void> {
     const requestedScope = scope === undefined ? undefined : normalizeReplicaScope(scope);
-    const application = this.application.then(async () => {
+    const application = this.enqueueApplication(async () => {
       if (requestedScope !== undefined && requestedScope !== this.scopeValue) return;
       if (!Number.isSafeInteger(revision) || revision < 0 || signatures.length === 0) return;
 
@@ -486,7 +765,7 @@ export class LocalReplica implements LocalReplicaView {
       this.cursorValue = nextCursor;
       this.notify();
     });
-    this.application = application.catch(() => undefined);
+
     return application;
   }
 
@@ -519,7 +798,7 @@ export class LocalReplica implements LocalReplicaView {
   }
 
   removeWindow(signature: string, scope?: ReplicaScope): Promise<void> {
-    const application = this.application.then(async () => {
+    const application = this.enqueueApplication(async () => {
       if (scope !== undefined && normalizeReplicaScope(scope) !== this.scopeValue) return;
       if (!this.liveQueries.has(signature)) return;
       const nextQueries = new Map(this.liveQueries);
@@ -537,12 +816,12 @@ export class LocalReplica implements LocalReplicaView {
       this.markEntityChanged(removed.entity);
       this.notify(true);
     });
-    this.application = application.catch(() => undefined);
+
     return application;
   }
 
   clear(scope?: ReplicaScope): Promise<void> {
-    const application = this.application.then(async () => {
+    const application = this.enqueueApplication(async () => {
       if (scope !== undefined && normalizeReplicaScope(scope) !== this.scopeValue) return;
       if (this.storage?.clear) await this.persist(() => this.storage!.clear!(this.scopeValue));
       this.cursorValue = undefined;
@@ -555,7 +834,7 @@ export class LocalReplica implements LocalReplicaView {
       this.freshnessValue = "verifying";
       this.notify(true);
     });
-    this.application = application.catch(() => undefined);
+
     return application;
   }
 
@@ -652,20 +931,22 @@ export class LocalReplica implements LocalReplicaView {
     // cursor shared by every materialized Replica window in the epoch.
     const nextCursor = replicaTransactionFloor(this.cursorValue, nextQueries);
     const snapshot = storageSnapshotFrom(nextCursor, nextEntities, nextQueries);
-    const membershipChanged = !previous || ids.length !== previous.ids.length || ids.some((id, index) => id !== previous.ids[index]);
+    const membershipChanged = !sameWindowRowDefinition(previous, window);
     const rowsChanged = membershipChanged || changedRowIDs.size > 0;
     const writeScope = this.scopeValue;
     if (!epochChanged && this.storage?.applyWindowDelta && (delta || !rowsChanged)) {
       const writeDelta = delta ? { upserts: delta.upserts.filter(row => changedRowIDs.has(String(row[input.key]))), deleted: delta.deleted } : { upserts: [], deleted: [] };
       await this.persist(() => this.storage!.applyWindowDelta!(window, writeDelta, snapshot, writeScope));
     } else if (this.storage?.replaceWindow) {
-      await this.persist(() => this.storage!.replaceWindow!(window, snapshot, writeScope));
+      await this.persist(() => this.storage!.replaceWindow!(window, snapshot, writeScope,input.rows));
     } else if (this.storage?.replaceSnapshot) {
       await this.persist(() => this.storage!.replaceSnapshot!(snapshot, writeScope));
     }
     if (epochChanged) this.invalidateEntityVersions();
+    if (this.storage?.readChanges) await this.mergeStoredChanges(nextEntities, nextQueries);
     this.entities = nextEntities;
     this.liveQueries = nextQueries;
+    if(window.kind==='replica' && window.completeness==='complete' && !window.truncated && window.ids.every(id=>nextEntities.get(window.entity)?.has(id)))this.residentPartialTables.delete(window.entity);
     if (changedRowIDs.size) {
       this.markEntityChanged(input.entity, changedRowIDs);
       for (const candidate of this.liveQueries.values()) {
@@ -714,7 +995,9 @@ export class LocalReplica implements LocalReplicaView {
           }
         }
       }
-      else if (change.newValue) rows.set(change.id, cloneRow(change.newValue));
+      // Change-feed rows are projections, just like collection snapshots.
+      // A narrow subscription must not erase fields supplied by another one.
+      else if (change.newValue) rows.set(change.id, {...rows.get(change.id),...cloneRow(change.newValue)});
     }
     for (const membership of transaction.memberships ?? []) {
       nextQueries.set(membership.signature, normalizeWindow(membership));
@@ -724,6 +1007,7 @@ export class LocalReplica implements LocalReplicaView {
     const snapshot = storageSnapshotFrom(transaction.cursor, nextEntities, nextQueries);
     const writeScope = this.scopeValue;
     await this.persist(() => this.storage?.applyTransaction(transaction, snapshot, writeScope));
+    if (this.storage?.readChanges) await this.mergeStoredChanges(nextEntities, nextQueries);
 
     if (epochChanged) {
       this.invalidateEntityVersions();
@@ -764,21 +1048,98 @@ export class LocalReplica implements LocalReplicaView {
 
   /** Resolve several IDs from one atomic Local Replica version. */
   entityBatch<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
-    return ids.map((id) => this.entity<T>(entity, id));
+    if (!this.scopeLoaded) return ids.map(() => undefined);
+    const base = this.entities.get(entity);
+    if (this.pendingCommands.size === 0) return ids.map(id => {
+      const row = base?.get(id);
+      return row === undefined ? undefined : cloneRow(row) as T;
+    });
+    const rows = new Map<string, ReplicaRow | undefined>();
+    for (const id of ids) rows.set(id, base?.get(id));
+    if (rows.size) for (const command of this.pendingCommands.values()) {
+      for (const patch of command.patches) {
+        if ((patch.entity ?? patch.collection) !== entity || !rows.has(patch.rowId)) continue;
+        if (patch.op === 'delete') rows.set(patch.rowId, undefined);
+        else if (patch.op === 'insert' || patch.op === 'upsert') rows.set(patch.rowId, patch.fields as ReplicaRow);
+        else if (patch.op === 'patch') rows.set(patch.rowId, { ...(rows.get(patch.rowId) ?? {}), ...(patch.fields as ReplicaRow) });
+      }
+    }
+    // Preserve caller order and return independent values for duplicate IDs.
+    return ids.map(id => {
+      const row = rows.get(id);
+      return row === undefined ? undefined : cloneRow(row) as T;
+    });
   }
 
   /** All cached rows for one normalized entity, including optimistic overlays. */
   entityRows<T extends ReplicaRow = ReplicaRow>(entity: string): T[] {
     if (!this.scopeLoaded) return [];
-    const ids = new Set(this.entities.get(entity)?.keys() ?? []);
+    if (this.pendingCommands.size === 0) {
+      return Array.from(this.entities.get(entity)?.values() ?? [], row => cloneRow(row) as T);
+    }
+    // Apply the journal once for the table, not once per row. Keep deleted
+    // entries as tombstones until projection so delete/reinsert retains the
+    // established ID order. Base rows and journal fields stay untouched.
+    const rows = new Map<string, ReplicaRow | undefined>(this.entities.get(entity));
     for (const command of this.pendingCommands.values()) {
       for (const patch of command.patches) {
-        if ((patch.entity ?? patch.collection) === entity) ids.add(patch.rowId);
+        if ((patch.entity ?? patch.collection) !== entity) continue;
+        if (patch.op === "delete") rows.set(patch.rowId, undefined);
+        else if (patch.op === "insert" || patch.op === "upsert") rows.set(patch.rowId, patch.fields as ReplicaRow);
+        else if (patch.op === "patch") rows.set(patch.rowId, { ...(rows.get(patch.rowId) ?? {}), ...(patch.fields as ReplicaRow) });
       }
     }
-    return [...ids]
-      .map((id) => this.entity<T>(entity, id))
-      .filter((row): row is T => row !== undefined);
+    const result: T[] = [];
+    // Clone only the final values, including nested patch fields. Callers must
+    // not be able to mutate either authoritative rows or the pending journal.
+    for (const row of rows.values()) if (row !== undefined) result.push(cloneRow(row) as T);
+    return result;
+  }
+
+  /** Serialize against confirmed publications, then capture just the pending journal.
+   * IndexedDB keeps the base transaction consistent without copying any tables.
+   */
+  pendingReducerPatches(): LocalPatch[] {
+    return [...this.pendingCommands.values()].flatMap(command => command.patches.map(patch => patch.op === 'delete'
+      ? {entity:patch.entity ?? patch.collection!,rowId:patch.rowId,op:'delete' as const}
+      : {entity:patch.entity ?? patch.collection!,rowId:patch.rowId,op:patch.op === 'upsert' ? 'insert' as const : patch.op,fields:structuredClone(patch.fields) as ReplicaRow}
+    ));
+  }
+
+  withReadView<T>(coverage: () => ReadCoverage, pending: boolean | readonly LocalPatch[], run: (view: ReducerReadView) => Promise<T>, residentOnly = false): Promise<T> {
+    if (residentOnly) {
+      if (!this.scopeLoaded) return Promise.reject(new Error('Local replica scope is not ready'));
+      const known = coverage();
+      const patches: LocalPatch[] = typeof pending !== 'boolean' ? [...pending] : pending ? [...this.pendingCommands.values()].flatMap(command => command.patches.map(patch => patch.op === 'delete'
+        ? {entity:patch.entity ?? patch.collection!,rowId:patch.rowId,op:'delete' as const}
+        : {entity:patch.entity ?? patch.collection!,rowId:patch.rowId,op:patch.op === 'upsert' ? 'insert' as const : patch.op,fields:patch.fields as ReplicaRow}
+      )) : [];
+      // A short speculative read never waits for disk. Its publication is
+      // checked against the captured execution version, and durable admission
+      // re-executes against the coordinated journal before sending anything.
+      return run(overlayReadView(memoryReadView(this.entities,this.residentCoverage(known)),known,patches));
+    }
+    const operation = this.enqueueApplication(async () => {
+      if (!this.scopeLoaded) throw new Error('Local replica scope is not ready');
+      await this.persistence;
+      const known = coverage();
+      const patches: LocalPatch[] = typeof pending !== 'boolean' ? [...pending] : pending ? [...this.pendingCommands.values()].flatMap(command => command.patches.map(patch => {
+        const entity = patch.entity ?? patch.collection!;
+        return patch.op === 'delete' ? {entity,rowId:patch.rowId,op:'delete' as const} : {entity,rowId:patch.rowId,op:patch.op === 'upsert' ? 'insert' as const : patch.op,fields:patch.fields as ReplicaRow};
+      })) : [];
+      const apply = (base: ReducerReadView) => run(overlayReadView(base,known,patches));
+      // The visible working set is already resident. Execute against that
+      // consistent view first instead of sending hot row reads back to disk.
+      // A missing row/field retries the whole prediction in one disk read
+      // transaction, never mixes rows from two different snapshots.
+      try { return await apply(memoryReadView(this.entities,this.residentCoverage(known))); }
+      catch (error) {
+        if (!(error instanceof Error) || error.name !== 'IncompleteReplicaError' || !this.storage?.withReadView) throw error;
+        return this.storage.withReadView(this.scopeValue,known,apply);
+      }
+    }, true);
+
+    return operation;
   }
 
   /** SDK execution snapshot: capture immutable row references now, copy a table only when used. */
@@ -805,6 +1166,30 @@ export class LocalReplica implements LocalReplicaView {
     };
   }
 
+  /** Complete registered slices prove narrower reads without another subscription. */
+  captureReadCoverage(base: ReadCoverage): ReadCoverage {
+    const coverage = { ...base };
+    for (const [signature, {definition, args}] of this.replicaPlans) {
+      const known = coverage[definition.table];
+      if (!known || !this.windowIsComplete(signature)) continue;
+      const terms: DataPredicate[] = [];
+      let valid = true;
+      for (const [argument, column] of Object.entries(definition.equalFilters ?? {})) {
+        const value = args[argument];
+        if (value === undefined || value !== null && !['string','number','boolean'].includes(typeof value)) { valid = false; break; }
+        terms.push({column, op:'eq', value: value as string | number | boolean | null});
+      }
+      if (!valid) continue;
+      for (const column of definition.excludeWhenSet ?? []) terms.push({column, op:'isNull'});
+      coverage[definition.table] = {
+        ...known,
+        complete: known.complete || terms.length === 0,
+        completeWhere: terms.length ? [...(known.completeWhere ?? []), {and:terms}] : known.completeWhere,
+      };
+    }
+    return coverage;
+  }
+
   /** Read execution eligibility without copying a window's ordered IDs and hashes. */
   windowIsComplete(signature: string): boolean {
     const window = this.liveQueries.get(signature);
@@ -815,11 +1200,28 @@ export class LocalReplica implements LocalReplicaView {
   watchRows<T extends ReplicaRow>(signature: string, cache: Map<string, { version: number; row: T | undefined }>): T[] {
     const window = this.scopeLoaded ? this.liveQueries.get(signature) : undefined;
     if (!window) { cache.clear(); return []; }
+    // A pending write to a different row must not disable shared immutable
+    // snapshots for every newly mounted view in the application.
+    let pendingRows: Set<string> | undefined;
+    for (const command of this.pendingCommands.values()) {
+      for (const patch of command.patches) {
+        if ((patch.entity ?? patch.collection) === window.entity) (pendingRows ??= new Set()).add(patch.rowId);
+      }
+    }
     const read = (id: string): T | undefined => {
       const version = this.rowVersion(window.entity, id);
       const prior = cache.get(id);
       if (prior?.version === version) return prior.row;
-      const row = this.entity<T>(window.entity, id);
+      const base = !pendingRows?.has(id) ? this.entities.get(window.entity)?.get(id) : undefined;
+      let next: T | undefined;
+      if (base) {
+        let copy = this.visibleRowCopies.get(base);
+        if (!copy) { copy = cloneRow(base); this.visibleRowCopies.set(base, copy); }
+        next = copy as T;
+      } else next = this.entity<T>(window.entity, id);
+      // A matching server echo or removal of its prediction changes protocol
+      // versions without changing the row the component sees.
+      const row = prior && sameReplicaValue(prior.row, next) ? prior.row as T | undefined : next;
       cache.set(id, { version, row });
       return row;
     };
@@ -831,7 +1233,7 @@ export class LocalReplica implements LocalReplicaView {
 
   /** Exact only when an authoritative, non-truncated Replica Collection covers the entity. */
   entityCompleteness(entity: string): "complete" | "partial" {
-    if (!this.scopeLoaded) return "partial";
+    if (!this.scopeLoaded || this.residentPartialTables.has(entity)) return "partial";
     return [...this.liveQueries.values()].some((window) => (
       window.kind === "replica"
       && window.entity === entity
@@ -841,20 +1243,32 @@ export class LocalReplica implements LocalReplicaView {
   }
 
   // Bounded derived snapshots, containing only rows in recently read windows.
-  private readonly readSnapshots = new Map<string, { version: number; rows: ReplicaRow[]; cache: Map<string, { version: number; row: ReplicaRow | undefined }>; result?: LiveQueryResult }>();
+  private readonly readSnapshots = new Map<string, { version: number; rowsVersion: number; freshness?: ReplicaFreshness; rows: ReplicaRow[]; cache: Map<string, { version: number; row: ReplicaRow | undefined }>; result?: LiveQueryResult }>();
   liveQuerySnapshot<T extends ReplicaRow = ReplicaRow>(signature: string): LiveQueryResult<T> {
     let snapshot = this.readSnapshots.get(signature);
     if (!snapshot) {
-      if (this.readSnapshots.size >= 64) this.readSnapshots.delete(this.readSnapshots.keys().next().value!);
-      snapshot = { version: -1, rows: [], cache: new Map() };
+      if (this.readSnapshots.size >= 64) {
+        const cold = [...this.readSnapshots.keys()].find(key => !this.retainedWindows.has(key));
+        if (cold !== undefined) this.readSnapshots.delete(cold);
+      }
+      snapshot = { version: -1, rowsVersion: -1, rows: [], cache: new Map() };
     }
-    this.readSnapshots.delete(signature);
+    // Mounted windows cannot be evicted. Reordering them on every store read
+    // only allocates Map tombstones; LRU order matters for cold windows alone.
+    if (!this.retainedWindows.has(signature)) this.readSnapshots.delete(signature);
     this.readSnapshots.set(signature, snapshot);
-    if (snapshot.version !== this.version()) {
-      const rows = this.watchRows(signature, snapshot.cache);
-      if (rows.length !== snapshot.rows.length || rows.some((row, index) => row !== snapshot.rows[index])) snapshot.rows = rows;
-      snapshot.result = this.liveQuery(signature, snapshot.rows);
-      snapshot.version = this.version();
+    if (snapshot.version !== this.windowVersion(signature) || snapshot.freshness !== this.freshnessValue) {
+      const rowsVersion = this.windowRowsVersion(signature);
+      if (snapshot.rowsVersion !== rowsVersion) {
+        const rows = this.watchRows(signature, snapshot.cache);
+        if (rows.length !== snapshot.rows.length || rows.some((row, index) => row !== snapshot.rows[index])) snapshot.rows = rows;
+        snapshot.rowsVersion = rowsVersion;
+      }
+      const next = this.liveQuery(signature, snapshot.rows);
+      const previous = snapshot.result;
+      if (!previous || previous.rows !== next.rows || !sameReplicaValue({...previous,rows:undefined}, {...next,rows:undefined})) snapshot.result = next;
+      snapshot.version = this.windowVersion(signature);
+      snapshot.freshness = this.freshnessValue;
     }
     return snapshot.result as LiveQueryResult<T>;
   }
@@ -881,7 +1295,7 @@ export class LocalReplica implements LocalReplicaView {
       ids,
       ...metadata,
       source: this.freshnessValue === "current" ? membership.source : "cache",
-      completeness: membership.completeness,
+      completeness: membership.ids.every(id=>this.entities.get(membership.entity)?.has(id)) ? membership.completeness : 'partial',
       freshness: this.freshnessValue,
     };
   }
@@ -926,6 +1340,8 @@ export class LocalReplica implements LocalReplicaView {
   }
 
   private notify(executionChanged = false) {
+    if (this.disposed) return;
+    if(executionChanged)this.trimResidentRows();
     if (executionChanged) this.executionVersionValue += 1;
     this.versionValue += 1;
     for (const listener of [...this.listeners]) listener();
@@ -1065,6 +1481,14 @@ export class LocalReplica implements LocalReplicaView {
     }
     this.windowOwned.delete(signature);
   }
+}
+
+function sameWindowRowDefinition(previous: ReplicaWindow | undefined, next: ReplicaWindow): boolean {
+  return previous !== undefined && previous.entity === next.entity && previous.key === next.key
+    && previous.kind === next.kind && previous.completeness === next.completeness
+    && previous.truncated === next.truncated && previous.orderBy === next.orderBy
+    && previous.orderDirection === next.orderDirection && previous.ids.length === next.ids.length
+    && previous.ids.every((id, index) => id === next.ids[index]);
 }
 
 function replicaRowMatchesPlan(
@@ -1262,29 +1686,43 @@ function normalizeReplicaScope(scope: ReplicaScope): ReplicaScope {
   return scope;
 }
 
-/** Adapters that persist a delta need not clone unrelated entity values. */
+/** Build snapshot accessors only if an adapter needs them. Metadata-only writes
+ * never enumerate tables/windows; delta adapters clone values on first access. */
 function storageSnapshotFrom(cursor: ReplicaCursor | undefined, source: Map<string, Map<string, ReplicaRow>>, windows: Map<string, ReplicaWindow>): ReplicaSnapshot {
-  const entities: ReplicaSnapshot["entities"] = {};
-  for (const [entity, rows] of source) {
-    // Committed maps and rows are immutable. Retain that version without
-    // allocating entries for unrelated tables; clone values on first access.
-    const captured = rows;
-    Object.defineProperty(entities, entity, { enumerable: true, configurable: true, get() {
-      const value: Record<string, ReplicaRow> = {};
-      for (const [id, row] of captured) Object.defineProperty(value, id, { enumerable: true, configurable: true, get() {
-        const copy = cloneRow(row);
-        Object.defineProperty(value, id, { enumerable: true, configurable: true, writable: true, value: copy });
-        return copy;
+  // Capture membership now even if an adapter reads its snapshot after the
+  // persistence promise resolves and reconciliation replaces map entries.
+  const capturedSource = new Map(source);
+  const capturedWindows = new Map(windows);
+  const snapshot = { cursor: cursor ? { ...cursor } : undefined } as ReplicaSnapshot;
+  Object.defineProperty(snapshot, "entities", { enumerable: true, configurable: true, get() {
+    const entities: ReplicaSnapshot["entities"] = {};
+    for (const [entity, rows] of capturedSource) {
+      // Committed maps and rows are immutable. Retain that version without
+      // allocating entries for unrelated tables; clone values on first access.
+      const captured = rows;
+      Object.defineProperty(entities, entity, { enumerable: true, configurable: true, get() {
+        const value: Record<string, ReplicaRow> = {};
+        for (const [id, row] of captured) Object.defineProperty(value, id, { enumerable: true, configurable: true, get() {
+          const copy = cloneRow(row);
+          Object.defineProperty(value, id, { enumerable: true, configurable: true, writable: true, value: copy });
+          return copy;
+        }});
+        Object.defineProperty(entities, entity, { enumerable: true, configurable: true, writable: true, value });
+        return value;
       }});
-      Object.defineProperty(entities, entity, { enumerable: true, configurable: true, writable: true, value });
-      return value;
-    }});
-  }
-  const liveQueries: ReplicaSnapshot["liveQueries"] = {};
-  for (const [key, window] of windows) Object.defineProperty(liveQueries, key, { enumerable: true, configurable: true, get() {
-    const copy = cloneWindow(window);
-    Object.defineProperty(liveQueries, key, { enumerable: true, configurable: true, writable: true, value: copy });
-    return copy;
+    }
+    Object.defineProperty(snapshot, "entities", { enumerable: true, configurable: true, writable: true, value: entities });
+    return entities;
   }});
-  return { cursor: cursor ? { ...cursor } : undefined, entities, liveQueries };
+  Object.defineProperty(snapshot, "liveQueries", { enumerable: true, configurable: true, get() {
+    const liveQueries: ReplicaSnapshot["liveQueries"] = {};
+    for (const [key, window] of capturedWindows) Object.defineProperty(liveQueries, key, { enumerable: true, configurable: true, get() {
+      const copy = cloneWindow(window);
+      Object.defineProperty(liveQueries, key, { enumerable: true, configurable: true, writable: true, value: copy });
+      return copy;
+  }});
+  Object.defineProperty(snapshot, "liveQueries", { enumerable: true, configurable: true, writable: true, value: liveQueries });
+  return liveQueries;
+  }});
+  return snapshot;
 }

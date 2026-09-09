@@ -38,6 +38,10 @@ export function assertPromotionCandidate({
   if (ci?.status !== "completed" || ci?.conclusion !== "success") {
     throw new Error(`${sha} does not have a successful CI check`);
   }
+  const compatibility = checkRuns?.find((run) => run?.name === "Whagons compatibility");
+  if (compatibility?.status !== "completed" || compatibility?.conclusion !== "success") {
+    throw new Error(`${sha} does not have a successful Whagons compatibility check`);
+  }
   assertRuntimeHealth(devRuntimeHealth, sha);
   for (const role of ["runtime", "dashboard"]) {
     const application = devApplications?.[role];

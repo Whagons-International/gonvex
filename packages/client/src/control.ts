@@ -39,6 +39,7 @@ const supportSessionSchema = objectSchema({
 const supportTenantSchema = objectSchema({
   id: stringSchema, name: stringSchema, domain: stringSchema, status: stringSchema,
   timezone: stringSchema, seatLimit: anySchema, createdAt: stringSchema,
+  userCount: { ...anySchema, optional: true }, activeSessions: { ...anySchema, optional: true },
 });
 const supportErrorGroupSchema = objectSchema({
   fingerprint: stringSchema, project: stringSchema, title: stringSchema, level: stringSchema,
@@ -160,6 +161,7 @@ export type ControlSupportSession = JSONObject & {
 export type ControlSupportTenant = JSONObject & {
   id: string; name: string; domain: string; status: string; timezone: string;
   seatLimit: number | null; createdAt: string;
+  userCount?: number | null; activeSessions?: number;
 };
 export type ControlSupportErrorGroup = JSONObject & {
   fingerprint: string; project: string; title: string; level: string; culprit?: string;

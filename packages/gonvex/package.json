@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/cli",
-  "version": "0.5.2-staging.13",
+  "version": "0.5.2-staging.14",
   "type": "module",
   "bin": {
     "gonvex": "./dist/index.js"
@@ -35,7 +35,8 @@
     "@gonvex/client": "workspace:*",
     "@gonvex/react": "workspace:*",
     "rolldown": "^1.2.3",
-    "@gonvex/local-runtime": "workspace:*"
+    "@gonvex/local-runtime": "workspace:*",
+    "@electric-sql/pglite": "0.5.8"
   },
   "devDependencies": {
     "@types/node": "^24.12.4",

@@ -1,95 +1,57 @@
 # Local Reducer execution
 
-The generated Gonvex client executes an interactive Reducer's existing TypeScript
-body in a browser worker. Applications define argument/result schemas and `run`;
-they do not maintain a separate optimistic handler or effects list.
+The generated client executes the same TypeScript Reducer body used by the Rust
+server. Structured reads and writes use the normalized Local Replica in browsers
+and native JavaScript, and compile to parameterized PostgreSQL operations on the
+server. Production execution has no PGlite, WASM startup, scratch database, or
+WebView. The CLI uses PGlite only during schema compilation, and the test suite uses it
+as a PostgreSQL reference. Neither use is part of application execution.
 
-The CLI compiles a local SQL schema from tenant migrations and bundles the public
-Reducer exports. Unused Action declarations are removed from that bundle. The
-worker uses PGlite as a disposable execution database, seeded from the SDK Local
-Replica. Its scratch files are not a durable application cache or a second source
-of server state. It captures typed database writes and SQL write CTEs as one transaction.
-Both seed rows and writes are rolled back after execution.
+Use the module SDK structured data operations inside an interactive Reducer.
+Arbitrary SQL belongs in server Queries or explicitly server-only work. One
+Reducer captures one atomic transaction, including relationship rows, logs,
+notifications, and deferred Action requests. The server checks permissions and
+constraints and executes deferred work only after its authoritative commit.
 
-The client persists the intent, arguments, command ID, artifact hash and local
-transaction in its existing durable outbox before publishing the predicted rows.
-A successful local call returns the Reducer's result without waiting for a server.
-On reconnect the SDK sends the same intent and idempotency key. The Rust runtime
-executes the Reducer in an authoritative PostgreSQL transaction, checking the
-artifact and current permissions. A retry of an already committed command returns
-its stored result and commit barrier. It does not execute the write twice.
+The client first predicts against resident rows. It publishes a successful
+prediction immediately, then durably stores the intent before network delivery.
+A coordinated admission checks the shared journal and base version and re-executes
+when necessary. Storage failure removes the prediction. A successful call resolves
+after durable admission, without waiting for the server. Never treat a visible
+prediction as confirmation of durable admission or server acceptance.
 
-A server rejection removes the command's entire prediction and recomputes later
-pending intents against the remaining base. The SDK publishes that replacement
-atomically and emits `onReducerRejection`. Transport failures retain the intent.
-The queue and cached session are partitioned by project, tenant and account.
+A missing row or projected field retries the body through a transaction-consistent
+storage read view. IndexedDB and Expo SQLite use primary/secondary indexes and
+bounded pages. Missing coverage is never interpreted as an empty collection.
+An intent needing unavailable data waits for the server without a guessed result.
+The SDK supplies stable intent-owned IDs and captures Action/scheduler requests.
 
-Generated replica subscriptions reuse the declared visibility plans and only
-columns already exposed by application reads. The runtime refuses to interpret
-an incomplete collection or an omitted column as an empty/NULL value. A known
-primary-key row can be read from a partial large collection. If required input is
-unavailable, the intent remains queued without a guessed result or transaction.
-First-time authentication and data never downloaded cannot be fabricated offline.
+The confirmed replica and ordered pending intents produce one frontend entity
+view. Rejection removes the rejected prediction and rebases later intents. Server
+commits and local predictions notify the same entity subscriptions. The durable
+journal is scoped by project, tenant, and account; replay also checks the artifact.
 
-Database inserts use the same intent-owned ID allocator in the server module and
-the local module. Explicit IDs remain supported. Action and scheduler calls are
-recorded locally but only the authoritative server commits and executes their
-outbox work. The worker denies ambient network access after loading its WASM.
-Server timestamps, constraints, hidden data and concurrent writes remain
-server-authoritative and reconcile through the change feed.
+## Storage and multiple tabs
 
-The default host targets browser workers. Other hosts can implement the exported
-`LocalExecutor` interface; this package does not claim a native PGlite host.
-The IndexedDB and Expo SQLite adapters both persist SDK session metadata.
+IndexedDB owns persistent rows; the Local Replica keeps a bounded resident working
+set. Active rows and windows are retained while observed. Cold rows stay on disk
+and can be read by Reducers without loading the entire collection into RAM.
 
-## Browser tabs and bundle boundaries
+Browser tabs share the journal and confirmed storage. Web Locks serialize intent
+admission and outbox delivery. BroadcastChannel signals changes without copying
+whole databases. Field revisions, tombstones, and epochs reject stale projections.
+An online tab can deliver an intent created in another offline tab. Server receipts
+remain the final protection against duplicate effects after a lost response.
 
-Each authenticated generated browser client warms its own dedicated worker and
-PGlite instance. Where supported, OPFS stores the disposable PostgreSQL files so
-they do not all occupy JavaScript buffers. Each worker uses a fresh directory
-under `gonvex-reducer-scratch-v1`, protected by a Web Lock for its lifetime. A new
-worker removes abandoned directories only after acquiring their locks; live tabs
-remain untouched. Unsupported storage falls back to memory. Neither mode stores
-the authoritative replica or pending intents in PGlite. Workers do not open a
-shared PGlite data directory. Requests are
-serialized within each executor and carry the caller's replica snapshot and scope.
-Closing one tab terminates its executor without terminating another tab's work.
-The tradeoff is a separate WASM instance and execution memory per client.
-
-This does not provide cross-tab leader election for the durable outbox. Multiple
-clients may send the same stored intent; authoritative reducer receipts deduplicate
-that intent on the server. This does not imply instant synchronization of pending
-optimistic edits between tabs. A future shared executor must isolate project,
-account, tenant and artifact version and handle owner shutdown and recovery.
-
-The embedded mobile/WebView bundle excludes PGlite's Node filesystem adapter and
-throws explicitly if that unsupported path is selected. Its Emscripten loaders
-require direct lexical eval. Only their known eval diagnostics are filtered;
-application eval and all other bundler diagnostics remain visible.
+Expo SQLite implements the same read-view contract with indexed scalar lookups,
+bounded pages, projected writes, and transactional row authority. The generated
+native runtime executes JavaScript directly. Native database files remain scoped
+and shared only through the SDK adapter.
 
 ## Verification
 
-```sh
-pnpm --filter @gonvex/local-runtime test
-pnpm --filter @gonvex/client test
-pnpm --filter @gonvex/module-sdk test
-pnpm --filter @gonvex/cli test
-```
-
-Host tests cover atomic writes, SQL CTE capture, incomplete reads, ordered replay,
-stable IDs, validation and scope isolation. Client tests cover durable admission,
-restart, server rejection, dependent edits, concurrent admission, lost responses,
-account switching and argument capture. CLI tests cover generated execution and
-ensure unexposed columns and unused external Actions do not enter local delivery.
-
-The browser worker loads a version-pinned empty database template before executing
-application reducers. This skips initdb's temporary PostgreSQL instance. The
-cluster contains no application tables or tenant rows. Its source and checksum
-are under `assets/`; regenerate it with `node scripts/generate-empty-database.mjs`
-when upgrading PGlite, then build the package. An unavailable template falls back
-to initdb, preserving editing with older offline caches. Hosts should cache the
-emitted `.b64` asset alongside the worker and WASM assets.
-
-Execution uses one PostgreSQL connection and a small shared buffer pool. Primary-key
-reads and typed writes seed the requested row. A subsequent table scan seeds the
-remaining input rows without overwriting earlier writes in the same transaction.
+The tests cover PostgreSQL/portable conformance, deterministic IDs, atomic rollback,
+read-own-writes, incomplete data, ordered replay, persistence failures, rejection,
+concurrent tabs, scope changes, residency budgets, and real SQLite transactions.
+CLI tests bundle and execute generated Reducers in an offline browser and verify
+that execution does not start a worker or load a SQL engine.

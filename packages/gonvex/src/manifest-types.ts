@@ -74,7 +74,8 @@ export type LiveQueryPlan = {
   columns?: string[];
   resultPath?: string[];
   where?: LiveExpression;
-  search?: { argument: string; columns: string[] };
+  search?: { argument: string; columns: string[]; booleanTerms?: boolean; offlineColumns?: string[]; sources?: {table:string;key:string;column:string;dependencies?:string[]}[] };
+  index?: {table:string;key:string;columns:string[];sortColumns?:Record<string,string[]>;dependencies?:string[];referenceFields?:Record<string,{table:string;foreignKey:string;column:string;fallback?:JsonValue}>};
   filters?: { argument: string; allowedColumns: string[]; allowedOperators: FilterOperator[]; columnTypes?: Record<string, "text" | "number"> };
   sort?: { columnArgument?: string; directionArgument?: string; defaultColumn: string; defaultDirection: "asc" | "desc"; allowedColumns: string[] };
   window?: { offsetArgument: string; limitArgument: string; defaultLimit: number; maxLimit: number; count?: "exact" };
@@ -84,14 +85,15 @@ export type LiveQueryPlan = {
 export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
 
 export type LiveExpression = {
-  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server";
+  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server" | "inRelation" | "arrayContains";
   column?: string;
   value?: LiveValue;
   valueTo?: LiveValue;
   children?: LiveExpression[];
+  relation?: { table: string; column: string; where?: LiveExpression };
 };
 
-export type LiveValue = { argument?: string; literal?: unknown };
+export type LiveValue = { context?: "account.id" | "member.id" | "tenant.id"; argument?: string; literal?: unknown };
 
 export type Column = {
   type: string;

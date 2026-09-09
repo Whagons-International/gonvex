@@ -21,12 +21,18 @@ export type ReducerOutboxOptions = {
  * order, causal barriers, and inflight recovery all stay in the SDK.
  */
 export type OutboxStore = {
+  shared?: boolean;
+  coordinate?<T>(scope: string, lane: 'intent' | 'delivery', run: () => Promise<T>): Promise<T>;
+  subscribePeer?(listener: () => void): () => void;
+  update?(id: number, change: (entry: ReducerOutboxEntry) => ReducerOutboxEntry): Promise<ReducerOutboxEntry | undefined>;
   /** Version-fenced stores must never fall back to unpersisted sends. */
   strictPersistence?: boolean;
   /** Reserve globally unique sequence numbers when several tabs share a store. */
   allocateId?(): Promise<number>;
+  /** Reserve the sequence and persist one complete local intent under one storage fence. */
+  append?(entry: Omit<ReducerOutboxEntry, "id">): Promise<ReducerOutboxEntry>;
   /** Every persisted entry across all scopes; called once to hydrate. */
-  load(): Promise<ReducerOutboxEntry[]>;
+  load(scope?: string): Promise<ReducerOutboxEntry[]>;
   /** Insert or replace the entry with this id. */
   put(entry: ReducerOutboxEntry): Promise<void>;
   delete(id: number): Promise<void>;
@@ -69,6 +75,7 @@ export type EnqueueReducer = {
 };
 
 export type ReducerOutbox = {
+  recoverInflight?(scope: string): Promise<void>;
   enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry>;
   loadAll(scope: string): Promise<ReducerOutboxEntry[]>;
   /** Observe current records without performing startup inflight recovery. */
@@ -515,14 +522,13 @@ export class StoreReducerOutbox implements ReducerOutbox {
   constructor(store: OutboxStore, options: { enabled?: boolean } = {}) {
     this.store = store;
     this.memoryOnly = options.enabled === false;
-    this.ready = this.memoryOnly ? Promise.resolve() : this.hydrate();
+    this.ready = this.memoryOnly || store.shared ? Promise.resolve() : this.hydrate();
   }
 
   async enqueue(reducer: EnqueueReducer): Promise<ReducerOutboxEntry> {
     await this.ready;
     const createdAt = Date.now();
-    const entry: ReducerOutboxEntry = {
-      id: this.store.allocateId ? await this.store.allocateId() : this.nextId++,
+    const draft: Omit<ReducerOutboxEntry, "id"> = {
       scope: reducer.scope,
       path: reducer.path,
       args: cloneValue(reducer.args),
@@ -535,10 +541,15 @@ export class StoreReducerOutbox implements ReducerOutbox {
       nextAttemptAt: createdAt,
       state: reducer.state ?? "pending",
     };
-    if (reducer.localExecution) {
-      if (this.memoryOnly) throw new Error("Durable storage is required for local reducer execution");
-      await this.store.put(cloneEntry(entry));
-    } else await this.persistPut(entry);
+    let entry: ReducerOutboxEntry;
+    if (reducer.localExecution && this.memoryOnly) throw new Error("Durable storage is required for local reducer execution");
+    if (reducer.localExecution && this.store.append) {
+      entry = await this.store.append(draft);
+    } else {
+      entry = { ...draft, id: this.store.allocateId ? await this.store.allocateId() : this.nextId++ };
+      if (reducer.localExecution) await this.store.put(cloneEntry(entry));
+      else await this.persistPut(entry);
+    }
     this.entries.set(entry.id, entry);
     this.notify();
     return cloneEntry(entry);
@@ -546,6 +557,9 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async loadAll(scope: string): Promise<ReducerOutboxEntry[]> {
     await this.ready;
+    await this.refreshShared(scope);
+    // Only the holder of the cross-tab delivery lock may recover inflight work.
+    if (this.store.shared) return this.sortedEntries(scope).map(cloneEntry);
     const recovered: ReducerOutboxEntry[] = [];
     for (const [id, entry] of this.entries) {
       if (entry.scope !== scope || entry.state !== "inflight") continue;
@@ -560,12 +574,14 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async list(scope: string): Promise<ReducerOutboxEntry[]> {
     await this.ready;
+    await this.refreshShared(scope);
     return this.sortedEntries(scope).map(cloneEntry);
   }
 
   async updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void> {
     await this.ready;
     if (this.memoryOnly) throw new Error("Durable storage is required for local reducer replay");
+    if(this.store.update) { await this.updateShared(id,entry=>({...entry,patches:patches.map(clonePatch),localExecution:cloneValue(execution)}));return; }
     const entry = this.entries.get(id);
     if (!entry) return;
     const updated = { ...entry, patches: patches.map(clonePatch), localExecution: cloneValue(execution) };
@@ -575,11 +591,13 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined> {
     await this.ready;
+    await this.refreshShared(scope);
     return cloneOptionalEntry(firstReady(this.sortedEntries(scope), now));
   }
 
   async markInflight(id: number): Promise<void> {
     await this.ready;
+    if(this.store.update) { await this.updateShared(id,entry=>({...entry,state:'inflight'}));this.notify();return; }
     const entry = this.entries.get(id);
     if (!entry || entry.state === "inflight") return;
     const updated = { ...entry, state: "inflight" as const };
@@ -590,6 +608,7 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async markPending(id: number): Promise<void> {
     await this.ready;
+    if(this.store.update) { await this.updateShared(id,entry=>({...entry,state:'pending',nextAttemptAt:Date.now(),lastError:undefined}));this.notify();return; }
     const entry = this.entries.get(id);
     if (!entry || entry.state === "pending") return;
     const updated: ReducerOutboxEntry = {
@@ -605,6 +624,7 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async markCommitted(id: number): Promise<void> {
     await this.ready;
+    if(this.store.update) { await this.updateShared(id,entry=>({...entry,state:'committed'}));this.notify();return; }
     const entry = this.entries.get(id);
     if (!entry || entry.state === "committed") return;
     const updated = { ...entry, state: "committed" as const };
@@ -615,13 +635,14 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async ack(id: number): Promise<void> {
     await this.ready;
-    if (!this.entries.delete(id)) return;
+    if (!this.entries.delete(id) && !this.store.shared) return;
     await this.persistDelete(id);
     this.notify();
   }
 
   async fail(id: number, error: string): Promise<void> {
     await this.ready;
+    if(this.store.update) { await this.updateShared(id,entry=>failedEntry(entry,error,Date.now()));this.notify();return; }
     const entry = this.entries.get(id);
     if (!entry) return;
     const updated = failedEntry(entry, error, Date.now());
@@ -632,11 +653,13 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async count(scope: string): Promise<number> {
     await this.ready;
+    await this.refreshShared(scope);
     return this.sortedEntries(scope).length;
   }
 
   async clear(scope: string): Promise<void> {
     await this.ready;
+    await this.refreshShared(scope);
     // Delete by snapshotted id, never scope-wide, so an enqueue racing this
     // clear is not swallowed by a later store delete.
     const ids: number[] = [];
@@ -652,6 +675,23 @@ export class StoreReducerOutbox implements ReducerOutbox {
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  async recoverInflight(scope:string):Promise<void> {
+    await this.ready;await this.refreshShared(scope);
+    for(const entry of this.sortedEntries(scope)) if(entry.state==='inflight') await this.markPending(entry.id);
+  }
+
+  private async refreshShared(scope:string) {
+    if(!this.store.shared || this.memoryOnly) return;
+    const entries=await this.store.load(scope);
+    this.entries.clear();
+    for(const entry of entries) this.entries.set(entry.id,cloneEntry(entry));
+  }
+
+  private async updateShared(id:number,change:(entry:ReducerOutboxEntry)=>ReducerOutboxEntry) {
+    const entry=await this.store.update!(id,change);
+    if(entry) this.entries.set(id,cloneEntry(entry));else this.entries.delete(id);
   }
 
   private async hydrate() {

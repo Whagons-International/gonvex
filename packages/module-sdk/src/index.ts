@@ -1,4 +1,8 @@
 import { reducerExecutionContext } from "./reducer-execution.js";
+export { selectRows, selectFirst, getRow, dataValue, dataValues, existingDataTables, existsDataRows, selectDataBatch, summarizeRows, compileDataRead, orderedDataRead, matchesDataPredicate, lockData } from './data.js';
+export { insertDataRows, updateDataRows, deleteDataRows, deleteDataWhere, updateDataWhere, applyDataWrites } from './data-write.js';
+export type { DataRowUpdate, DataWrite } from './data-write.js';
+export type { DataMetric, DataRead, DataPredicate, DataScalar, DataReader } from './data.js';
 export { reducerExecutionContext, reducerRowId, reducerIdGenerator, reducerToken } from "./reducer-execution.js";
 
 /** JSON values accepted by the module ABI. */
@@ -177,11 +181,18 @@ export type InvocationInfo = {
 type InvocationAware = { readonly invocation: InvocationInfo };
 
 export type ReadDB = {
+  readonly tables?: readonly string[];
+  readonly select?: import('./data.js').DataReader['select'];
   readonly query: <T = JsonValue>(statement: string, parameters?: readonly JsonValue[]) => Promise<readonly T[]>;
 };
 
 export type WriteDB = ReadDB & {
-  readonly insert: <T = JsonValue>(table: string, row: JsonObject, allocation?: { generatedId: string }) => Promise<T>;
+  /** Adapter hook for short deterministic non-database work, such as ID hashing. Never wrap database reads in this hook. */
+  readonly keepAliveFor?: <T>(promise: Promise<T>) => Promise<T>;
+  readonly lock?: (key: string) => Promise<void>;
+  /** Local adapter savepoint for a single structured multi-row operation. */
+  readonly atomic?: <T>(run: () => Promise<T>) => Promise<T>;
+  readonly insert: <T = JsonValue>(table: string, row: JsonObject, allocation?: { generatedId?: string }) => Promise<T>;
   readonly update: <T = JsonValue>(table: string, id: string, patch: JsonObject) => Promise<T>;
   readonly delete: (table: string, id: string) => Promise<void>;
   readonly deleteMany: (table: string, ids: readonly JsonValue[]) => Promise<{ deleted: number }>;
@@ -251,6 +262,8 @@ export type SandboxExecutionStatus = SandboxExecution & {
 export type ActionSandbox = {
   /** Create one caller-owned, tenant-scoped ephemeral TypeScript workspace. */
   readonly create: (options?: { readonly ttlMs?: number }) => Promise<SandboxHandle>;
+  /** Release a completed workspace immediately instead of waiting for TTL cleanup. */
+  readonly destroy: (sandboxId: string) => Promise<{ readonly sandboxId: string; readonly destroyed: boolean }>;
   /** Start TypeScript code asynchronously. The code returns its JSON result with a top-level return statement. */
   readonly run: (sandboxId: string, options: { readonly code: string; readonly timeoutMs?: number }) => Promise<SandboxExecution>;
   readonly cancel: (sandboxId: string, executionId: string) => Promise<SandboxExecutionStatus>;
@@ -413,15 +426,16 @@ export type ActionOptions<Args, Result, Capabilities extends ActionCapabilities 
   readonly run?: Handler<ActionContext<Capabilities>, Args, Result>;
 };
 
-export type LiveQueryValue = { readonly argument?: string; readonly literal?: JsonValue };
+export type LiveQueryValue = { context?: "account.id" | "member.id" | "tenant.id"; readonly argument?: string; readonly literal?: JsonValue };
 export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
 export type FilterColumnType = "text" | "number";
 export type LiveQueryExpression = {
-  readonly operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "range" | "in" | "contains" | "containsInsensitive" | "and" | "or" | "not" | "server";
+  readonly operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "range" | "in" | "contains" | "containsInsensitive" | "and" | "or" | "not" | "server" | "inRelation" | "arrayContains";
   readonly column?: string;
   readonly value?: LiveQueryValue;
   readonly valueTo?: LiveQueryValue;
   readonly children?: readonly LiveQueryExpression[];
+  readonly relation?: { readonly table: string; readonly column: string; readonly where?: LiveQueryExpression };
 };
 
 export type LiveQueryPlan = {
@@ -430,7 +444,23 @@ export type LiveQueryPlan = {
   readonly columns?: readonly string[];
   readonly resultPath?: readonly string[];
   readonly where?: LiveQueryExpression;
-  readonly search?: { readonly argument: string; readonly columns: readonly string[] };
+  readonly search?: {
+    readonly argument: string;
+    readonly columns: readonly string[];
+    readonly booleanTerms?: boolean;
+    readonly sources?: readonly { readonly table: string; readonly key: string; readonly column: string; readonly dependencies?: readonly string[] }[];
+    /** Searchable base fields when only an offline working set is available. */
+    readonly offlineColumns?: readonly string[];
+  };
+  readonly index?: {
+    readonly table: string;
+    readonly key: string;
+    readonly columns: readonly string[];
+    readonly sortColumns?: Readonly<Record<string, readonly string[]>>;
+    /** Resolve projected sort fields from normalized replica rows offline. */
+    readonly referenceFields?: Readonly<Record<string, { readonly table: string; readonly foreignKey: string; readonly column: string; readonly fallback?: JsonValue }>>;
+    readonly dependencies?: readonly string[];
+  };
   readonly filters?: { readonly argument: string; readonly allowedColumns: readonly string[]; readonly allowedOperators: readonly FilterOperator[]; readonly columnTypes?: Readonly<Record<string, FilterColumnType>> };
   readonly sort?: { readonly columnArgument?: string; readonly directionArgument?: string; readonly defaultColumn: string; readonly defaultDirection: "asc" | "desc"; readonly allowedColumns: readonly string[] };
   readonly window?: {

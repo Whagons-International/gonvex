@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
 import { GonvexClient, GonvexClientError, control, type ConnectionState, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
@@ -1483,7 +1484,7 @@ export function useQueryResult<T extends JsonValue = JsonValue>(
   const sessionScopeGeneration = useSessionScopeGeneration(client);
   const path = ref.path;
   const kind = ref.kind;
-  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
+  const optimisticKey = useMemo(() => JSON.stringify(ref.optimistic ?? null), [ref.optimistic]);
   const argsKey = JSON.stringify(args);
   const keepPreviousData = options.keepPreviousData !== false;
   const timeoutMs = options.timeoutMs ?? DEFAULT_LIVE_QUERY_SLOW_MS;
@@ -1582,9 +1583,9 @@ export function useLiveQuery<T extends JsonValue = JsonValue>(ref: FunctionRefer
   }
   const path = ref.path;
   const kind = ref.kind;
-  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
+  const optimisticKey = useMemo(() => JSON.stringify(ref.optimistic ?? null), [ref.optimistic]);
   const argsKey = JSON.stringify(args);
-  const liveKey = JSON.stringify(ref.live ?? null);
+  const liveKey = useMemo(() => JSON.stringify(ref.live ?? null), [ref.live]);
   const liveWatch = useMemo(
     () => args === "skip" ? undefined : client.watchLiveQuery<T>(ref, args, { deferStart: true }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1612,6 +1613,9 @@ export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionRe
     useCallback((notify) => watch?.onUpdate(notify) ?? (() => undefined), [watch]),
     useCallback(() => watch?.getSnapshot(), [watch]),
     () => undefined,
+    // Batch cold control-query delivery, but publish later control changes
+    // before their Reducer promise settles and follow-up UI handlers run.
+    true,
   );
   return snapshot?.result;
 }
@@ -1619,6 +1623,7 @@ export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionRe
 /** Read one normalized entity from the single Gonvex Local Replica. */
 export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined {
   const client = useGonvexClient();
+  useEffect(()=>client.retainReplicaEntities(entity,[id]),[client,entity,id]);
   const version = useSyncExternalStore(
     useCallback((notify) => client.localReplica.subscribe(notify), [client]),
     useCallback(() => client.localReplica.entityVersion(entity, id), [client, entity, id]),
@@ -1631,12 +1636,27 @@ export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id:
 export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
   const client = useGonvexClient();
   const idsKey = JSON.stringify(ids);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(()=>client.retainReplicaEntities(entity,ids),[client,entity,idsKey]);
   const cache = useMemo(() => new Map<string, { version: number; row: T | undefined }>(), [client, entity]);
+  const getVersion = useMemo(() => {
+    let tableVersion: number | undefined;
+    let snapshot = "";
+    return () => {
+      const next = client.localReplica.entityVersion(entity);
+      // Metadata, presence and other tables publish through this subscription
+      // too. They cannot change this batch, so avoid scanning its IDs again.
+      if (next !== tableVersion) {
+        tableVersion = next;
+        snapshot = ids.map(id => client.localReplica.entityVersion(entity, id)).join(",");
+      }
+      return snapshot;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, entity, idsKey]);
   const version = useSyncExternalStore(
     useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    // Only changes to the requested rows should invalidate the grid batch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    useCallback(() => ids.map(id => client.localReplica.entityVersion(entity, id)).join(","), [client, entity, idsKey]),
+    getVersion,
     () => "",
   );
   return useMemo(() => {
@@ -1664,13 +1684,15 @@ export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
   const signature = typeof signatureOrReference === "string"
     ? signatureOrReference
     : client.replicaSignature(signatureOrReference, args);
-  const version = useSyncExternalStore(
+  useEffect(()=>client.retainReplicaWindow(signature),[client,signature]);
+  return useSyncExternalStore(
     useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    useCallback(() => client.localReplica.version(), [client]),
-    () => 0,
+    useCallback(() => client.localReplica.liveQuerySnapshot<T>(signature), [client, signature, argsKey]),
+    () => emptyLiveQuery as LiveQueryResult<T>,
   );
-  return useMemo(() => client.localReplica.liveQuerySnapshot<T>(signature), [client, signature, argsKey, version]);
 }
+
+const emptyLiveQuery: LiveQueryResult = {rows:[],ids:[],source:'cache',completeness:'partial',freshness:'verifying'};
 
 /** Structured Live Query state backed by normalized Local Replica entities. */
 export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
@@ -1682,17 +1704,21 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   const signature = args === "skip" ? "" : client.replicaSignature(ref, args);
   useEffect(() => {
     if (args === "skip") return;
-    return client.subscribeLiveQuery(ref, args, () => undefined);
+    const release=client.retainReplicaWindow(signature);
+    const unsubscribe=client.subscribeLiveQuery(ref, args, () => undefined);
+    return ()=>{unsubscribe();release();};
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, ref.kind, ref.path, argsKey]);
-  useSyncExternalStore(
-    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    useCallback(() => client.localReplica.version(), [client]),
-    () => 0,
-  );
-  if (args !== "skip" && client.localReplica.freshness() === "offline") {
+  const getSnapshot = useMemo(() => {
+    let offlineVersion = -1;
+    let offlineResult: LiveQueryResult<T> | undefined;
+    return () => {
+      if (args === 'skip') return emptyLiveQuery as LiveQueryResult<T>;
+      if (client.localReplica.freshness() !== 'offline') return client.localReplica.liveQuerySnapshot<T>(signature);
+      const version = client.localReplica.version();
+      if (offlineVersion === version && offlineResult) return offlineResult;
     const offline = client.offlineLiveQuery<T>(ref, args);
-    return {
+    offlineResult = {
       rows: offline.rows,
       ids: offline.rows.map((row) => String(row.id ?? row._id ?? "")).filter(Boolean),
       ...(offline.total === undefined ? {} : { total: offline.total }),
@@ -1704,10 +1730,16 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
       supported: offline.supported,
       ...(offline.unsupportedOperator ? { unsupportedOperator: offline.unsupportedOperator } : {}),
     };
-  }
-  return signature
-    ? client.localReplica.liveQuerySnapshot<T>(signature)
-    : { rows: [], ids: [], source: "cache", completeness: "partial", freshness: client.localReplica.freshness() };
+      offlineVersion = version;
+      return offlineResult;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, ref.kind, ref.path, signature, argsKey]);
+  return useSyncExternalStore(
+    useCallback(notify => signature ? client.localReplica.subscribe(notify) : () => undefined, [client, signature]),
+    getSnapshot,
+    () => emptyLiveQuery as LiveQueryResult<T>,
+  );
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
@@ -1750,7 +1782,7 @@ export function useReplicaCollection<T extends JsonValue = JsonValue>(
   const client = useGonvexClient();
   const path = ref.path;
   const kind = ref.kind;
-  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
+  const optimisticKey = useMemo(() => JSON.stringify(ref.optimistic ?? null), [ref.optimistic]);
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
     () => args === "skip" ? undefined : client.watchReplica<T>(ref, args, { deferStart: true }),
@@ -1784,6 +1816,79 @@ export function useReplicaCollectionState<T extends ReplicaRow = ReplicaRow>(
   );
 }
 
+/** Subscribe to a bounded, dynamic set of slices of the same Replica Collection.
+ * Results borrow normalized SDK snapshots; there is no second entity cache.
+ * Deferred watches only start when React commits the subscription.
+ */
+export function useReplicaCollectionStates<T extends ReplicaRow = ReplicaRow>(
+  ref: FunctionReference,
+  args: readonly JsonValue[],
+): ReadonlyArray<ReplicaCollectionSubscriptionState<T> | undefined> {
+  const client = useGonvexClient();
+  const argsKey = JSON.stringify(args);
+  const watches = useMemo(
+    () => args.map(value => client.watchReplica<T>(ref, value, { deferStart: true })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, ref.kind, ref.path, argsKey],
+  );
+  const getSnapshot = useMemo(() => {
+    let snapshot: ReadonlyArray<ReplicaCollectionSubscriptionState<T> | undefined> = [];
+    return () => {
+      const next = watches.map(watch => watch.localReplicaState() as ReplicaCollectionSubscriptionState<T> | undefined);
+      if (next.length !== snapshot.length || next.some((state, index) => state !== snapshot[index])) snapshot = next;
+      return snapshot;
+    };
+  }, [watches]);
+  return useSyncExternalStore(
+    useCallback(notify => {
+      const releases = watches.map(watch => watch.onUpdate(notify));
+      return () => releases.forEach(release => release());
+    }, [watches]),
+    getSnapshot,
+    () => emptyCollectionStates as ReadonlyArray<ReplicaCollectionSubscriptionState<T> | undefined>,
+  );
+}
+const emptyCollectionStates: readonly undefined[] = [];
+
+/** Select rows and authority metadata without rerendering for unused watermarks. */
+export function useReplicaCollectionStateSelector<T extends ReplicaRow, Selected>(
+  ref: FunctionReference,
+  args: JsonValue | "skip",
+  selector: (state: ReplicaCollectionSubscriptionState<T>) => Selected,
+  isEqual: (left: Selected, right: Selected) => boolean = Object.is,
+): Selected | undefined {
+  const client = useGonvexClient();
+  const argsKey = JSON.stringify(args);
+  const watch = useMemo(
+    () => args === "skip" ? undefined : client.watchReplica<T>(ref, args, { deferStart: true }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, ref.kind, ref.path, argsKey],
+  );
+  const committed = useRef<{ watch: typeof watch; value: Selected | undefined } | undefined>(undefined);
+  const getSnapshot = useMemo(() => {
+    let initialized = false;
+    let previous: ReplicaCollectionSubscriptionState<T> | undefined;
+    let selected: Selected | undefined;
+    return () => {
+      const state = watch?.localReplicaState() as ReplicaCollectionSubscriptionState<T> | undefined;
+      if (initialized && state === previous) return selected;
+      const next = state === undefined ? undefined : selector(state);
+      const prior = initialized ? selected : committed.current && committed.current.watch === watch ? committed.current.value : undefined;
+      selected = prior !== undefined && next !== undefined && isEqual(prior, next) ? prior : next;
+      previous = state;
+      initialized = true;
+      return selected;
+    };
+  }, [watch, selector, isEqual]);
+  const selected = useSyncExternalStore(
+    useCallback((notify) => watch?.onUpdate(notify) ?? (() => undefined), [watch]),
+    getSnapshot,
+    () => undefined,
+  );
+  useEffect(() => { committed.current = { watch, value: selected }; }, [watch, selected]);
+  return selected;
+}
+
 export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = unknown>(
   ref: FunctionReference,
   args: JsonValue | "skip",
@@ -1793,7 +1898,7 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
   const client = useGonvexClient();
   const path = ref.path;
   const kind = ref.kind;
-  const optimisticKey = JSON.stringify(ref.optimistic ?? null);
+  const optimisticKey = useMemo(() => JSON.stringify(ref.optimistic ?? null), [ref.optimistic]);
   const argsKey = JSON.stringify(args);
   const selectorRef = useRef(selector);
   const equalityRef = useRef(isEqual);
@@ -1860,6 +1965,7 @@ export type UseReducerOptions = {
 
 export function useReducer(ref: FunctionReference, options: UseReducerOptions = {}) {
   const client = useGonvexClient();
+  useEffect(() => { void client.prepareReducer?.(ref)?.catch(() => undefined); }, [client, ref]);
   const refRef = useRef(ref);
   refRef.current = ref;
   const timeoutMs = options.timeoutMs;

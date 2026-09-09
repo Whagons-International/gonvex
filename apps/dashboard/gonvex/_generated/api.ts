@@ -15,7 +15,9 @@ export type FunctionReference<Kind extends FunctionKind = FunctionKind, Args = J
   readonly kind: Kind;
   readonly path: string;
   readonly delivery?: "oneShot" | "live" | "replica";
+  readonly replica?: { readonly table: string; readonly key: string; readonly columns?: readonly string[] };
   readonly offline?: { readonly mode: "forbidden" | "allowed" | "onlineOnly"; readonly conflict?: "reject" | "expectedVersion" | "merge"; readonly reason?: string };
+  readonly localExecution?: 1;
   readonly args?: Args;
   readonly result?: Result;
   readonly live?: { readonly entity: string; readonly key: string; readonly resultPath?: readonly string[]; readonly plan: LiveQueryPlan };
@@ -95,205 +97,49 @@ export type TasksRandomizeStatusPriorityResult = {
   durationMs: number;
 };
 
-export const api = {
-  files: {
-    createUploadUrl: {
-      args: {
-        fields: {
-          contentType: {
-            kind: "string",
-          },
-          size: {
-            kind: "optional",
-            value: {
-              integer: true,
-              kind: "number",
-            },
-          },
-        },
-        kind: "object",
-      },
+function lazyReferences<T extends Record<string, () => unknown>>(factories: T): { readonly [Key in keyof T]: ReturnType<T[Key]> } {
+  const references = {} as { readonly [Key in keyof T]: ReturnType<T[Key]> };
+  for (const key of Object.keys(factories)) {
+    const factory = factories[key]!;
+    let initialized = false;
+    let value: unknown;
+    Object.defineProperty(references, key, { enumerable: true, get() {
+      if (!initialized) { value = factory(); initialized = true; }
+      return value;
+    } });
+  }
+  return references;
+}
+
+export const api = /* @__PURE__ */ lazyReferences({
+  "files": () => (/* @__PURE__ */ lazyReferences({
+    "createUploadUrl": () => ({
       kind: "action",
       path: "files.createUploadUrl",
-      result: {
-        fields: {
-          fileId: {
-            kind: "string",
-          },
-          headers: {
-            kind: "optional",
-            value: {
-              kind: "record",
-              values: {
-                kind: "string",
-              },
-            },
-          },
-          method: {
-            kind: "string",
-          },
-          url: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"action", FilesCreateUploadUrlArgs, FilesCreateUploadUrlResult>,
-    delete: {
-      args: {
-        fields: {
-          fileId: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"action", FilesCreateUploadUrlArgs, FilesCreateUploadUrlResult>),
+    "delete": () => ({
       kind: "action",
       path: "files.delete",
-      result: {
-        fields: {
-          deleted: {
-            kind: "boolean",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"action", FilesDeleteArgs, FilesDeleteResult>,
-    getMetadata: {
-      args: {
-        fields: {
-          fileId: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"action", FilesDeleteArgs, FilesDeleteResult>),
+    "getMetadata": () => ({
       kind: "action",
       path: "files.getMetadata",
-      result: {
-        kind: "record",
-        values: {
-          kind: "any",
-        },
-      },
-    } as unknown as FunctionReference<"action", FilesGetMetadataArgs, FilesGetMetadataResult>,
-    getUrl: {
-      args: {
-        fields: {
-          fileId: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"action", FilesGetMetadataArgs, FilesGetMetadataResult>),
+    "getUrl": () => ({
       kind: "action",
       path: "files.getUrl",
-      result: {
-        fields: {
-          url: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"action", FilesGetUrlArgs, FilesGetUrlResult>,
-  },
-  tasks: {
-    create: {
-      args: {
-        fields: {
-          title: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"action", FilesGetUrlArgs, FilesGetUrlResult>),
+  })),
+  "tasks": () => (/* @__PURE__ */ lazyReferences({
+    "create": () => ({
       kind: "reducer",
       offline: {
         mode: "onlineOnly",
         reason: "dashboard data-generator operation",
       },
       path: "tasks.create",
-      result: {
-        fields: {
-          id: {
-            entity: "dashboard_demo_tasks",
-            kind: "id",
-          },
-          status: {
-            kind: "string",
-          },
-          title: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"reducer", TasksCreateArgs, TasksCreateResult>,
-    grid: {
-      args: {
-        fields: {
-          direction: {
-            kind: "optional",
-            value: {
-              kind: "string",
-            },
-          },
-          filters: {
-            kind: "optional",
-            value: {
-              items: {
-                fields: {
-                  column: {
-                    kind: "string",
-                  },
-                  id: {
-                    kind: "optional",
-                    value: {
-                      kind: "string",
-                    },
-                  },
-                  operator: {
-                    kind: "string",
-                  },
-                  value: {
-                    kind: "string",
-                  },
-                  valueTo: {
-                    kind: "optional",
-                    value: {
-                      kind: "string",
-                    },
-                  },
-                },
-                kind: "object",
-              },
-              kind: "array",
-            },
-          },
-          limit: {
-            integer: true,
-            kind: "number",
-          },
-          offset: {
-            integer: true,
-            kind: "number",
-          },
-          search: {
-            kind: "optional",
-            value: {
-              kind: "string",
-            },
-          },
-          sort: {
-            kind: "optional",
-            value: {
-              kind: "string",
-            },
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"reducer", TasksCreateArgs, TasksCreateResult>),
+    "grid": () => ({
       delivery: "live",
       kind: "query",
       live: {
@@ -331,121 +177,44 @@ export const api = {
         resultPath: ["rows"],
       },
       path: "tasks.grid",
-      result: {
-        fields: {
-          limit: {
-            integer: true,
-            kind: "number",
-          },
-          offset: {
-            integer: true,
-            kind: "number",
-          },
-          rows: {
-            items: {
-              kind: "record",
-              values: {
-                kind: "any",
-              },
-            },
-            kind: "array",
-          },
-          total: {
-            integer: true,
-            kind: "number",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"query", TasksGridArgs, TasksGridResult>,
-    list: {
-      args: {
-        fields: {
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"query", TasksGridArgs, TasksGridResult>),
+    "list": () => ({
       delivery: "replica",
       kind: "query",
       path: "tasks.list",
-      result: {
-        items: {
-          fields: {
-            id: {
-              entity: "dashboard_demo_tasks",
-              kind: "id",
-            },
-            status: {
-              kind: "string",
-            },
-            title: {
-              kind: "string",
-            },
-          },
-          kind: "object",
-        },
-        kind: "array",
+      replica: {
+        columns: ["id","title","status"],
+        key: "id",
+        maxBytes: 50000000,
+        maxRows: 10000,
+        mode: "progressive",
+        table: "dashboard_demo_tasks",
       },
-    } as unknown as FunctionReference<"query", TasksListArgs, TasksListResult>,
-    randomizeStatusPriority: {
-      args: {
-        fields: {
-          count: {
-            integer: true,
-            kind: "number",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"query", TasksListArgs, TasksListResult>),
+    "randomizeStatusPriority": () => ({
       kind: "reducer",
       offline: {
         mode: "onlineOnly",
         reason: "dashboard bulk benchmark operation",
       },
       path: "tasks.randomizeStatusPriority",
-      result: {
-        fields: {
-          durationMs: {
-            integer: true,
-            kind: "number",
-          },
-          requested: {
-            integer: true,
-            kind: "number",
-          },
-          updated: {
-            integer: true,
-            kind: "number",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"reducer", TasksRandomizeStatusPriorityArgs, TasksRandomizeStatusPriorityResult>,
-  },
-} as const;
+    } as unknown as FunctionReference<"reducer", TasksRandomizeStatusPriorityArgs, TasksRandomizeStatusPriorityResult>),
+  })),
+});
 
 export const control = gonvexControl;
 
-export const internal = {
-  system: {
-    heartbeat: {
-      args: {
-        fields: {
-        },
-        kind: "object",
-      },
+export const internal = /* @__PURE__ */ lazyReferences({
+  "system": () => (/* @__PURE__ */ lazyReferences({
+    "heartbeat": () => ({
       kind: "reducer",
-      path: "system.heartbeat",
-      result: {
-        fields: {
-          ok: {
-            kind: "boolean",
-          },
-        },
-        kind: "object",
+      offline: {
+        mode: "forbidden",
       },
-    } as unknown as FunctionReference<"reducer", SystemHeartbeatArgs, SystemHeartbeatResult>,
-  },
-} as const;
+      path: "system.heartbeat",
+    } as unknown as FunctionReference<"reducer", SystemHeartbeatArgs, SystemHeartbeatResult>),
+  })),
+});
 export type Api = typeof api;
 
 export const optimisticTransactions: Record<string, OptimisticTransactionDefinition> = {

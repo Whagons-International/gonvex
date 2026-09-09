@@ -1,8 +1,97 @@
 import { describe, expect, it, vi } from "vitest";
 import { LocalReplica, MemoryLocalReplicaStorage, type LocalReplicaStorage, type ReplicaSnapshot, type ReplicaTransaction } from "./local-replica";
 import { replicaRowsHashes } from "./replica-integrity";
+import { MissingReducerDataError } from "@gonvex/local-runtime/portable";
 
 describe("LocalReplica", () => {
+  it('admits a user read after the current atomic write without waiting for the hydration backlog', async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const replica = new LocalReplica({ load: async () => undefined, applyTransaction: async () => {},
+      replaceWindow: async window => { if (window.signature === 'background-0') await blocked; order.push(window.signature); },
+    });
+    await replica.replaceWindow({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id', rows: [{ id: 'a' }], completeness: 'complete', source: 'server' });
+    const background = Array.from({ length: 20 }, (_, i) => replica.replaceWindow({ signature: `background-${i}`, entity: 'other', key: 'id', rows: [{ id: String(i) }], completeness: 'complete', source: 'server' }));
+    await Promise.resolve();
+    const read = replica.withReadView(() => ({ tasks: { key: 'id', complete: true, columns: ['id'] } }), true, async view => {
+      order.push('user-read');
+      return view.select({ table: 'tasks', key: 'id' });
+    });
+    release();
+    expect((await read).rows).toEqual([{ id: 'a' }]);
+    await Promise.all(background);
+    expect(order.slice(0, 4)).toEqual(['tasks', 'background-0', 'user-read', 'background-1']);
+    expect(order.filter(x => x.startsWith('background-'))).toEqual(Array.from({length: 20}, (_, i) => `background-${i}`));
+  });
+
+  it('retains other projected fields when the change feed updates a narrow subscription', async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const replica = new LocalReplica(storage);
+    await replica.replaceWindow({signature:'tasks',kind:'replica',entity:'tasks',key:'id',rows:[{id:'a',name:'Task',priority:'normal',note:'before'}],completeness:'complete',source:'server'});
+    await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',priority:'high',note:null}}]});
+    expect(replica.entity('tasks','a')).toEqual({id:'a',name:'Task',priority:'high',note:null});
+    expect((await storage.load())?.entities.tasks?.a).toEqual(replica.entity('tasks','a'));
+  });
+
+  it('keeps collection ordering after a resumed delta and an optimistic edit', async () => {
+    const replica = new LocalReplica();
+    replica.registerReplicaCollection('tasks',{table:'tasks',key:'id',orderBy:'number',orderDirection:'desc'});
+    await replica.applyWindowDelta({signature:'tasks',kind:'replica',entity:'tasks',key:'id',upserts:[{id:'a',number:1},{id:'b',number:3},{id:'c',number:2}],deleted:[],completeness:'complete'});
+    expect(replica.liveQuerySnapshot('tasks').ids).toEqual(['b','c','a']);
+    replica.applyOptimistic('edit',[{entity:'tasks',rowId:'c',op:'patch',fields:{priority:'high'}}]);
+    expect(replica.liveQuerySnapshot('tasks').ids).toEqual(['b','c','a']);
+    replica.rejectCommand('edit');
+    await replica.applyWindowDelta({signature:'tasks',entity:'tasks',key:'id',upserts:[{id:'a',number:4}],deleted:[]});
+    expect(replica.liveQuerySnapshot('tasks').ids).toEqual(['a','b','c']);
+  });
+  it('keeps a retained query snapshot stable when an unrelated table changes', async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({signature:'tasks',kind:'live',entity:'tasks',key:'id',rows:[{id:'a'}],completeness:'partial',source:'server'});
+    const before = replica.liveQuerySnapshot('tasks');
+    await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'members',id:'m',operation:'insert',newValue:{id:'m'}}]});
+    expect(replica.liveQuerySnapshot('tasks')).toBe(before);
+    replica.applyOptimistic('edit',[{entity:'tasks',rowId:'a',op:'patch',fields:{name:'changed'}}]);
+    expect(replica.liveQuerySnapshot('tasks').rows[0]).toMatchObject({name:'changed'});
+  });
+  it('reads resident reducer data without opening a disk transaction', async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const disk = vi.fn();
+    const replica = new LocalReplica(Object.assign(storage, {withReadView: disk}));
+    await replica.hydrate();
+    await replica.replaceWindow({signature:'tasks',kind:'replica',entity:'tasks',key:'id',rows:[{id:'a',count:1}],completeness:'complete',source:'server'});
+    const result = await replica.withReadView(() => ({tasks:{key:'id',complete:true,columns:['id','count']}}),true,view => view.select({table:'tasks',key:'id',where:{column:'id',op:'eq',value:'a'}}));
+    expect(result).toEqual({rows:[{id:'a',count:1}],complete:true});
+    expect(disk).not.toHaveBeenCalled();
+  });
+
+  it('retries the entire reducer read when a resident row lacks required fields', async () => {
+    const storage = new MemoryLocalReplicaStorage();
+    const disk = vi.fn(async (_scope, _coverage, run) => run({select:async () => ({rows:[{id:'a',count:2}],complete:true})}));
+    const replica = new LocalReplica(Object.assign(storage, {withReadView: disk}));
+    await replica.hydrate();
+    await replica.replaceWindow({signature:'tasks',kind:'replica',entity:'tasks',key:'id',rows:[{id:'a'}],completeness:'complete',source:'server'});
+    const run = vi.fn(async view => {
+      const read = {table:'tasks',key:'id',columns:['id','count'],where:{column:'id',op:'eq' as const,value:'a'}};
+      const result = await view.select(read);
+      if (!result.complete) throw new MissingReducerDataError(read);
+      return result.rows[0].count;
+    });
+    expect(await replica.withReadView(() => ({tasks:{key:'id',complete:true,columns:['id','count']}}),true,run)).toBe(2);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(disk).toHaveBeenCalledTimes(1);
+    expect(replica.entity('tasks','a')).toEqual({id:'a'});
+  });
+  it('keeps the same watched row when a matching authoritative echo replaces a prediction', async () => {
+    const replica = new LocalReplica();
+    await replica.replaceWindow({signature:'tasks',kind:'replica',entity:'tasks',key:'id',rows:[{id:'a',priority:'normal'}],completeness:'complete',source:'server',cursor:{epoch:'e',revision:1}});
+    const cache = new Map();
+    replica.applyOptimistic('edit',[{entity:'tasks',rowId:'a',op:'patch',fields:{priority:'high'}}]);
+    const predicted = replica.watchRows('tasks',cache)[0];
+    await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'a',operation:'update',newValue:{id:'a',priority:'high'}}]});
+    replica.acknowledgeCommand('edit',2);
+    expect(replica.watchRows('tasks',cache)[0]).toBe(predicted);
+  });
   it("publishes a multi-entity server transaction once", async () => {
     const replica = new LocalReplica();
     const listener = vi.fn();
@@ -756,8 +845,9 @@ it('watch snapshots clone only the changed row through prediction, rejection, an
   replica.registerReplicaCollection('rows', { table: 'tasks', key: 'id', orderBy: 'order', orderDirection: 'asc' });
   const cache = new Map();
   const initial = replica.watchRows('rows', cache);
-  const read = vi.spyOn(replica, 'entity');
+  const read = vi.spyOn(globalThis, 'structuredClone');
   replica.applyOptimistic('edit', [{ entity: 'tasks', rowId: '50', op: 'patch', fields: { order: -1 } }]);
+  read.mockClear();
   const predicted = replica.watchRows('rows', cache);
   expect(predicted[0]).toMatchObject({ id: '50', order: -1 });
   expect(predicted[1]).toBe(initial[0]);
@@ -765,9 +855,10 @@ it('watch snapshots clone only the changed row through prediction, rejection, an
   read.mockClear();
   replica.rejectCommand('edit');
   expect(replica.watchRows('rows', cache)[50]).toMatchObject({ id: '50', order: 50 });
-  expect(read).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(0);
   read.mockClear();
   await replica.applyWindowDelta({ signature: 'rows', entity: 'tasks', key: 'id', upserts: [{ id: '50', order: 50, name: 'changed' }], deleted: [] });
+  read.mockClear();
   const committed = replica.watchRows('rows', cache);
   expect(committed[0]).toBe(initial[0]);
   expect(committed[50]).toMatchObject({ name: 'changed' });
@@ -775,6 +866,7 @@ it('watch snapshots clone only the changed row through prediction, rejection, an
   await replica.applyWindowDelta({ signature: 'rows', entity: 'tasks', key: 'id', upserts: [], deleted: ['50'] });
   expect(replica.watchRows('rows', cache)).toHaveLength(99);
   expect(cache.has('50')).toBe(false);
+  read.mockRestore();
 });
 
 it("retained reactive snapshots reuse rows across metadata and isolated edits", async () => {
@@ -792,4 +884,156 @@ it("retained reactive snapshots reuse rows across metadata and isolated edits", 
   expect(changed.rows[1]).toMatchObject({ value: 3 });
   replica.rejectCommand("edit");
   expect(replica.liveQuerySnapshot("retained").rows[1]).toMatchObject({ value: 2 });
+});
+
+it('derives conservative execution coverage from completed registered collection windows', async () => {
+  const replica = new LocalReplica();
+  const definition = {table:'assignments',key:'_id',columns:['_id','taskId','deletedAt'],equalFilters:{task:'taskId'},excludeWhenSet:['deletedAt']};
+  replica.registerReplicaCollection('one',definition,{task:'one'});
+  const base = {assignments:{key:'_id',complete:false,columns:definition.columns}};
+  expect(replica.captureReadCoverage(base).assignments.completeWhere).toBeUndefined();
+  await replica.replaceWindow({signature:'one',kind:'replica',entity:'assignments',key:'_id',rows:[],completeness:'complete',source:'server'});
+  const coverage=replica.captureReadCoverage(base).assignments;
+  expect(coverage.complete).toBe(false);
+  expect(coverage.completeWhere).toEqual([{and:[{column:'taskId',op:'eq',value:'one'},{column:'deletedAt',op:'isNull'}]}]);
+  await replica.replaceWindow({signature:'one',kind:'replica',entity:'assignments',key:'_id',rows:[],completeness:'partial',source:'server'});
+  expect(replica.captureReadCoverage(base).assignments.completeWhere).toBeUndefined();
+});
+
+it('disposing releases resident rows and cancels queued writes without deleting durable data', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const storage = new MemoryLocalReplicaStorage();
+  const replica = new LocalReplica(storage);
+  await replica.materializeWindow({signature:'all',kind:'replica',entity:'tasks',key:'_id',rows:[{_id:'t',name:'kept'}],completeness:'complete',source:'server'});
+  let began!: () => void;
+  const started = new Promise<void>(resolve => { began = resolve; });
+  const read = replica.withReadView(() => ({}), false, async () => { began(); await blocked; });
+  await started;
+  const queued = replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'late',operation:'insert',newValue:{_id:'late'}}]});
+  const rejected = expect(queued).rejects.toThrow('closed');
+  replica.dispose();
+  await rejected;
+  release(); await read;
+  expect(replica.entityRows('tasks')).toEqual([]);
+  expect((await storage.load())!.entities.tasks).toEqual({t:{_id:'t',name:'kept'}});
+});
+
+it('keeps mounted window snapshots stable beyond the cold-cache budget', async () => {
+  const replica = new LocalReplica();
+  const releases: Array<() => void> = [];
+  for (let index = 0; index < 80; index++) {
+    const signature = `view-${index}`;
+    await replica.materializeWindow({signature,kind:'replica',entity:`table-${index}`,key:'_id',rows:[{_id:'row',name:'unchanged'}],completeness:'complete',source:'server'});
+    releases.push(replica.retainWindow(signature));
+  }
+  const before = Array.from({length:80}, (_, index) => replica.liveQuerySnapshot(`view-${index}`));
+  await replica.materializeWindow({signature:'other',kind:'replica',entity:'other',key:'_id',rows:[],completeness:'complete',source:'server'});
+  for (let index = 0; index < 80; index++) expect(replica.liveQuerySnapshot(`view-${index}`)).toBe(before[index]);
+  releases.forEach(release => release());
+});
+
+it('shares immutable visible rows across windows without exposing the stored row', async () => {
+  const replica = new LocalReplica();
+  for (const signature of ['grid', 'calendar']) {
+    await replica.materializeWindow({signature,kind:'replica',entity:'tasks',key:'_id',rows:[{_id:'t',name:'original'}],completeness:'complete',source:'server'});
+  }
+  const first = replica.liveQuerySnapshot('grid').rows[0]!;
+  expect(replica.liveQuerySnapshot('calendar').rows[0]).toBe(first);
+  replica.applyOptimistic('edit', [{entity:'tasks',rowId:'t',op:'patch',fields:{name:'changed'}}]);
+  expect(replica.liveQuerySnapshot('calendar').rows[0]!.name).toBe('changed');
+  expect(first.name).toBe('original');
+  replica.rejectCommand('edit');
+  expect(replica.liveQuerySnapshot('calendar').rows[0]!.name).toBe('original');
+  first.name = 'outside mutation';
+  expect(replica.entity('tasks', 't')!.name).toBe('original');
+});
+
+it('preserves visible row identity when a storage checkpoint repeats the published values', async () => {
+  let sequence = 0;
+  let row = { id: 'a', count: 1 };
+  const replica = new LocalReplica({ load: async () => undefined, applyTransaction: async () => {},
+    readChanges: async () => ({ sequence, reset: false, entities: { tasks: { a: structuredClone(row) } }, windows: {} }),
+  });
+  await replica.replaceWindow({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id', rows: [row], completeness: 'complete', source: 'server' });
+  const before = replica.watchRows('tasks', new Map());
+  const version = replica.entityVersion('tasks', 'a');
+  sequence++;
+  await replica.synchronizeStorage();
+  expect(replica.entityVersion('tasks', 'a')).toBe(version);
+  expect(replica.watchRows('tasks', new Map())[0]).toBe(before[0]);
+  row = { id: 'a', count: 2 }; sequence++;
+  await replica.synchronizeStorage();
+  expect(replica.watchRows('tasks', new Map())[0]).toEqual(row);
+  expect(replica.watchRows('tasks', new Map())[0]).not.toBe(before[0]);
+});
+
+it('shares unchanged rows across newly mounted windows while other intents are pending', async () => {
+  const replica = new LocalReplica();
+  for (const signature of ['grid', 'calendar']) {
+    await replica.materializeWindow({signature,kind:'replica',entity:'tasks',key:'_id',rows:[{_id:'t',name:'original'},{_id:'other',name:'second'}],completeness:'complete',source:'server'});
+  }
+  replica.applyOptimistic('unrelated', [{entity:'views',rowId:'v',op:'insert',fields:{_id:'v'}}]);
+  replica.applyOptimistic('other-task', [{entity:'tasks',rowId:'other',op:'patch',fields:{name:'edited'}}]);
+  const grid = replica.liveQuerySnapshot('grid').rows;
+  const calendar = replica.liveQuerySnapshot('calendar').rows;
+  expect(calendar[0]).toBe(grid[0]);
+  expect(calendar[1]).toMatchObject({_id:'other',name:'edited'});
+  replica.applyOptimistic('target', [{entity:'tasks',rowId:'t',op:'delete'}]);
+  expect(replica.liveQuerySnapshot('grid').rows.map(row => row._id)).toEqual(['other']);
+  expect(grid[0]).toEqual({_id:'t',name:'original'});
+});
+
+
+it('storage metadata checkpoints retain row revisions and skip repeated window decoding', async () => {
+  let sequence = 0;
+  let window: any;
+  const replica = new LocalReplica({ load: async () => undefined, applyTransaction: async () => {},
+    readChanges: async () => ({ sequence, reset: false, entities: {}, windows: window ? { tasks: structuredClone(window) } : {} }),
+  });
+  await replica.materializeWindow({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id', rows: [{ id: 'a', value: 1 }], completeness: 'complete', source: 'server', cursor: { epoch: 'e', revision: 1 } });
+  window = replica.getWindow('tasks');
+  const rowsVersion = replica.windowRowsVersion('tasks');
+  const windowVersion = replica.windowVersion('tasks');
+  sequence++;
+  await replica.synchronizeStorage();
+  expect(replica.windowRowsVersion('tasks')).toBe(rowsVersion);
+  expect(replica.windowVersion('tasks')).toBe(windowVersion);
+  window = { ...window, cursor: { epoch: 'e', revision: 2 } };
+  sequence++;
+  await replica.synchronizeStorage();
+  expect(replica.windowRowsVersion('tasks')).toBe(rowsVersion);
+  expect(replica.windowVersion('tasks')).toBeGreaterThan(windowVersion);
+  expect(replica.collectionState('tasks').computedRevision).toBe(2);
+  window = { ...window, ids: [] };
+  sequence++;
+  await replica.synchronizeStorage();
+  expect(replica.windowRowsVersion('tasks')).toBeGreaterThan(rowsVersion);
+  expect(replica.liveQuerySnapshot('tasks').rows).toEqual([]);
+});
+
+
+it('recomputes predicted membership when a window becomes complete or truncated', async () => {
+  const replica = new LocalReplica();
+  replica.registerReplicaCollection('tasks', { table: 'tasks', key: 'id' });
+  const input = { signature: 'tasks', kind: 'replica' as const, entity: 'tasks', key: 'id', rows: [{ id: 'a' }], source: 'server' as const };
+  await replica.materializeWindow({ ...input, completeness: 'partial' });
+  replica.applyOptimistic('add', [{ entity: 'tasks', rowId: 'b', op: 'upsert', fields: { id: 'b' } }]);
+  expect(replica.liveQuerySnapshot('tasks').ids).toEqual(['a']);
+  await replica.materializeWindow({ ...input, completeness: 'complete' });
+  expect(replica.liveQuerySnapshot('tasks').ids).toEqual(['a', 'b']);
+  await replica.materializeWindow({ ...input, completeness: 'complete', truncated: true });
+  expect(replica.liveQuerySnapshot('tasks').ids).toEqual(['a']);
+});
+
+it('keeps a lazily read persistence snapshot stable after peer reconciliation replaces its map entries', async () => {
+  let captured: ReplicaSnapshot | undefined;
+  let sequence = 0;
+  const replica = new LocalReplica({load:async()=>undefined,applyTransaction:async()=>{},
+    replaceWindow:async(_window,snapshot)=>{ captured=snapshot;sequence++; },
+    readChanges:async()=>({sequence,reset:false,entities:{tasks:{a:{id:'a',count:2}}},windows:{}}),
+  });
+  await replica.replaceWindow({signature:'tasks',kind:'replica',entity:'tasks',key:'id',rows:[{id:'a',count:1}],completeness:'complete',source:'server'});
+  expect(replica.entity('tasks','a')).toEqual({id:'a',count:2});
+  expect(captured?.entities.tasks.a).toEqual({id:'a',count:1});
 });

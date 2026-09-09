@@ -4,17 +4,20 @@ OPENROUTER_MODEL ?= moonshotai/kimi-k2.5
 
 dev:
 	@bash -lc 'set -euo pipefail; \
+		if [ -f .env ]; then set -a; source .env; set +a; fi; \
+		export GONVEX_SANDBOX_ENABLED="$${GONVEX_SANDBOX_ENABLED:-true}"; \
+		export GONVEX_SANDBOX_ALLOW_UNCONFINED="$${GONVEX_SANDBOX_ALLOW_UNCONFINED:-true}"; \
 		runtime_pid=""; dashboard_pid=""; packages_pid=""; \
 		cleanup() { \
-			[ -n "$$runtime_pid" ] && kill "$$runtime_pid" 2>/dev/null || true; \
-			[ -n "$$dashboard_pid" ] && kill "$$dashboard_pid" 2>/dev/null || true; \
-			[ -n "$$packages_pid" ] && kill "$$packages_pid" 2>/dev/null || true; \
+			[ -n "$$runtime_pid" ] && kill -- "-$$runtime_pid" 2>/dev/null || true; \
+			[ -n "$$dashboard_pid" ] && kill -- "-$$dashboard_pid" 2>/dev/null || true; \
+			[ -n "$$packages_pid" ] && kill -- "-$$packages_pid" 2>/dev/null || true; \
 		}; \
 		trap cleanup EXIT INT TERM; \
 		pnpm build:packages; \
-		pnpm dev:packages & packages_pid=$$!; \
-		pnpm dev:runtime & runtime_pid=$$!; \
-		pnpm dev:dashboard & dashboard_pid=$$!; \
+		setsid pnpm dev:packages & packages_pid=$$!; \
+		setsid pnpm dev:runtime & runtime_pid=$$!; \
+		setsid pnpm dev:dashboard & dashboard_pid=$$!; \
 		while kill -0 "$$packages_pid" 2>/dev/null \
 			&& kill -0 "$$runtime_pid" 2>/dev/null \
 			&& kill -0 "$$dashboard_pid" 2>/dev/null; do \

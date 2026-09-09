@@ -16,6 +16,7 @@ use crate::control::ControlConnection;
 #[derive(Clone, Default)]
 pub struct RuntimeMetrics {
     inner: Arc<Mutex<BTreeMap<String, ConnectionPresence>>>,
+    changes: Option<tokio::sync::broadcast::Sender<crate::RuntimeEvent>>,
 }
 
 #[derive(Clone)]
@@ -49,6 +50,28 @@ impl Drop for ConnectionGuard {
 }
 
 impl RuntimeMetrics {
+    pub(crate) fn with_changes(changes: tokio::sync::broadcast::Sender<crate::RuntimeEvent>) -> Self {
+        Self { changes: Some(changes), ..Self::default() }
+    }
+
+    fn notify_project(&self, project: &str) {
+        if !project.is_empty() {
+            if let Some(changes) = &self.changes {
+                let _ = changes.send(crate::RuntimeEvent::PresenceChanged { project_id: project.to_owned() });
+            }
+        }
+    }
+
+    /// Live authenticated sockets on this runtime, scoped to the requested project.
+    pub(crate) fn tenant_connection_counts(&self, project: &str) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for presence in self.lock().values() {
+            if presence.project == project && presence.authenticated && !presence.tenant.is_empty() {
+                *counts.entry(presence.tenant.clone()).or_default() += 1;
+            }
+        }
+        counts
+    }
     pub fn register(&self, id: &str) -> ConnectionGuard {
         let now = timestamp();
         self.lock().insert(
@@ -87,6 +110,7 @@ impl RuntimeMetrics {
         let Some(presence) = connections.get_mut(id) else {
             return;
         };
+        let before = (presence.project.clone(), presence.tenant.clone(), presence.authenticated);
         presence.project.clone_from(&connection.project_id);
         presence.tenant = connection
             .tenant
@@ -120,6 +144,13 @@ impl RuntimeMetrics {
                 .clone()
                 .or_else(|| device.connection_type.clone())
                 .unwrap_or_default();
+        }
+        let changed = before != (presence.project.clone(), presence.tenant.clone(), presence.authenticated);
+        let project = presence.project.clone();
+        drop(connections);
+        if changed {
+            self.notify_project(&project);
+            if before.0 != project { self.notify_project(&before.0); }
         }
     }
 
@@ -191,7 +222,10 @@ impl RuntimeMetrics {
     }
 
     fn remove(&self, id: &str) {
-        self.lock().remove(id);
+        let removed = self.lock().remove(id);
+        if let Some(presence) = removed {
+            if presence.authenticated { self.notify_project(&presence.project); }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, ConnectionPresence>> {
@@ -246,4 +280,31 @@ mod tests {
         drop(guard);
         assert_eq!(metrics.snapshot("project")["connections"], 0);
     }
+    #[test]
+    fn tenant_counts_include_only_authenticated_sockets_and_notify_on_close() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(16);
+        let metrics = RuntimeMetrics::with_changes(sender);
+        let first = metrics.register("first");
+        let second = metrics.register("second");
+        let other = metrics.register("other");
+        {
+            let mut rows = metrics.lock();
+            for id in ["first", "second", "other"] {
+                let row = rows.get_mut(id).unwrap();
+                row.project = if id == "other" { "other-project" } else { "project" }.into();
+                row.tenant = "tenant".into();
+                row.authenticated = true;
+            }
+            rows.get_mut("second").unwrap().authenticated = false;
+        }
+        assert_eq!(metrics.tenant_connection_counts("project").get("tenant"), Some(&1));
+        drop(first);
+        assert!(metrics.tenant_connection_counts("project").is_empty());
+        assert!(matches!(receiver.try_recv(), Ok(crate::RuntimeEvent::PresenceChanged { project_id }) if project_id == "project"));
+        drop(second);
+        assert!(receiver.try_recv().is_err());
+        drop(other);
+        assert!(matches!(receiver.try_recv(), Ok(crate::RuntimeEvent::PresenceChanged { project_id }) if project_id == "other-project"));
+    }
+
 }

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { internalReducer, reducer, schema, type ReducerContext } from "@gonvex/module-sdk";
-import { LocalReducerRuntime, type LocalExecution, type LocalSnapshot } from "./index.js";
+import { LocalReducerRuntime, type LocalExecution, type LocalSnapshot } from "../test/postgres-reference.js";
 
 const tables = {
   tasks: { _id: "text", statusId: "text", count: "bigint" },

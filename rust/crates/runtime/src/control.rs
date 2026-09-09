@@ -11,6 +11,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use gonvex_postgres::{
     Member, SessionIdentity, TenantSession, TenantTransaction, TransactionAttribution,
 };
@@ -1926,6 +1927,7 @@ impl Runtime {
     ) -> Vec<ServerMessage> {
         let mut messages = Vec::new();
         for subscription in subscriptions.values_mut() {
+            if reason == "presence-change" && subscription.path != "control.support.listTenants" { continue; }
             match self
                 .execute_control_query(connection, &subscription.path, &subscription.args)
                 .await
@@ -2021,7 +2023,7 @@ impl Runtime {
 
     async fn control_query(
         &self,
-        _control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_postgres::ControlPlane,
         transaction: &mut TenantTransaction,
         connection: &ControlConnection,
         path: &str,
@@ -2291,13 +2293,35 @@ impl Runtime {
                 .bind(&connection.project_id)
                 .fetch_all(&mut **transaction.transaction())
                 .await?;
-                Ok(Value::Array(rows.into_iter().map(|row| serde_json::json!({
-                    "id":row.get::<String,_>("tenant_id"),"name":row.get::<String,_>("name"),
-                    "domain":row.get::<String,_>("domain"),"status":row.get::<String,_>("status"),
-                    "timezone":row.get::<String,_>("timezone"),
-                    "seatLimit":row.get::<Option<i32>,_>("seat_limit"),
-                    "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
-                })).collect()))
+                let connections = self.inner.metrics.tenant_connection_counts(&connection.project_id);
+                let tenants = futures_util::stream::iter(rows).map(|row| {
+                    let tenant_id: String = row.get("tenant_id");
+                    let live = connections.get(&tenant_id).copied().unwrap_or_default();
+                    async move {
+                        // Members are authoritative in the physical tenant database. Do not
+                        // recreate membership copies in the Control Plane for this overview.
+                        let count = async {
+                            let route = control.resolve_tenant(&connection.project_id, &tenant_id).await?;
+                            let mut tenant_tx = control.begin_tenant_transaction(&route, true).await?;
+                            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM members WHERE status='active'")
+                                .fetch_one(&mut **tenant_tx.transaction()).await?;
+                            tenant_tx.commit().await?;
+                            Ok::<_, gonvex_postgres::DatabaseError>(count)
+                        }.await;
+                        if let Err(error) = &count {
+                            tracing::warn!(project = %connection.project_id, tenant = %tenant_id, %error, "could not read tenant member count");
+                        }
+                        serde_json::json!({
+                            "id":tenant_id,"name":row.get::<String,_>("name"),
+                            "domain":row.get::<String,_>("domain"),"status":row.get::<String,_>("status"),
+                            "timezone":row.get::<String,_>("timezone"),
+                            "seatLimit":row.get::<Option<i32>,_>("seat_limit"),
+                            "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
+                            "userCount":count.ok(),"activeSessions":live,
+                        })
+                    }
+                }).buffered(4).collect::<Vec<_>>().await;
+                Ok(Value::Array(tenants))
             }
             "control.support.getSession" => {
                 let object = exact_object(args, &["id"])?;
@@ -3257,7 +3281,7 @@ async fn member_auth_providers(
     let account_ids = account_by_member.values().cloned().collect::<Vec<_>>();
     let mut control_tx = control.begin_control_transaction(true).await?;
     let identities = sqlx::query(
-        r#"SELECT account_id,provider FROM account_identities
+        r#"SELECT account_id,provider,sign_in_provider FROM account_identities
            WHERE project_id=$1 AND account_id = ANY($2)
            ORDER BY account_id,provider"#,
     )
@@ -3268,10 +3292,16 @@ async fn member_auth_providers(
     control_tx.commit().await?;
     let mut providers = BTreeMap::<String, Vec<String>>::new();
     for row in identities {
+        let provider = row.get::<String, _>("provider");
+        let sign_in_provider = row.get::<String, _>("sign_in_provider");
         providers
             .entry(row.get("account_id"))
             .or_default()
-            .push(row.get("provider"));
+            .push(reported_auth_provider(&provider, &sign_in_provider).to_owned());
+    }
+    for account_providers in providers.values_mut() {
+        account_providers.sort();
+        account_providers.dedup();
     }
     Ok(Value::Array(
         member_ids
@@ -3285,6 +3315,15 @@ async fn member_auth_providers(
             })
             .collect(),
     ))
+}
+
+fn reported_auth_provider<'a>(provider: &'a str, sign_in_provider: &'a str) -> &'a str {
+    let sign_in_provider = sign_in_provider.trim();
+    if sign_in_provider.is_empty() {
+        provider
+    } else {
+        sign_in_provider
+    }
 }
 
 async fn claim_control_idempotency(
@@ -3551,7 +3590,8 @@ pub(crate) async fn resolve_external_account(
     .await?
     {
         sqlx::query(
-            r#"UPDATE account_identities SET email=$5,verified_email=$6,updated_at=now()
+            r#"UPDATE account_identities
+               SET email=$5,verified_email=$6,sign_in_provider=$7,updated_at=now()
                WHERE project_id=$1 AND provider=$2 AND issuer=$3 AND subject=$4"#,
         )
         .bind(project)
@@ -3560,6 +3600,7 @@ pub(crate) async fn resolve_external_account(
         .bind(&identity.subject)
         .bind(&identity.email)
         .bind(identity.email_verified)
+        .bind(&identity.sign_in_provider)
         .execute(&mut **transaction.transaction())
         .await?;
         sqlx::query(
@@ -3633,8 +3674,8 @@ pub(crate) async fn resolve_external_account(
     }
     let inserted = sqlx::query(
         r#"INSERT INTO account_identities
-           (project_id,account_id,provider,issuer,subject,email,verified_email,updated_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,now())
+           (project_id,account_id,provider,issuer,subject,email,verified_email,sign_in_provider,updated_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,now())
            ON CONFLICT(project_id,provider,issuer,subject) DO NOTHING"#,
     )
     .bind(project)
@@ -3644,6 +3685,7 @@ pub(crate) async fn resolve_external_account(
     .bind(&identity.subject)
     .bind(&identity.email)
     .bind(identity.email_verified)
+    .bind(&identity.sign_in_provider)
     .execute(&mut **transaction.transaction())
     .await?
     .rows_affected();
@@ -4706,5 +4748,16 @@ mod tests {
             .all(|character| character.is_ascii_alphanumeric()
                 || character == '-'
                 || character == ':'));
+    }
+
+    #[test]
+    fn member_provider_prefers_the_concrete_external_sign_in_provider() {
+        assert_eq!(reported_auth_provider("firebase", "password"), "password");
+        assert_eq!(
+            reported_auth_provider("firebase", "google.com"),
+            "google.com"
+        );
+        assert_eq!(reported_auth_provider("firebase", ""), "firebase");
+        assert_eq!(reported_auth_provider("password", ""), "password");
     }
 }

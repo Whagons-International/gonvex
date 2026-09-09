@@ -30,10 +30,12 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   const lockName = `gonvex-upgrade:${options.replicaName}:${options.outboxName}`;
   const locks = globalThis.navigator?.locks;
   const channel = typeof BroadcastChannel === "function" ? new BroadcastChannel(lockName) : undefined;
+  const peers=new Set<()=>void>();
   let closed = false;
   const requireUpgrade = (error: Error) => { options.onRequired?.(error); return error; };
   if (channel) channel.onmessage = event => {
-    if (event.data?.version !== options.contract.version) requireUpgrade(new Error("Another tab upgraded the application. Reload to continue."));
+    if(event.data?.type==='outbox') { for(const listener of peers) listener(); }
+    else if (event.data?.version !== options.contract.version) requireUpgrade(new Error("Another tab upgraded the application. Reload to continue."));
   };
   const ready = (async () => {
     if (!locks) throw new Error("Safe offline upgrades require browser Web Locks support");
@@ -88,9 +90,19 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
       return run();
     });
   };
+  const reserveId = async () => {
+    const last = await queue.entries.orderBy('id').last();
+    return meta.transaction('rw', meta.state, async () => {
+      const counter = await meta.state.get('sequence');
+      const version = Math.max(counter?.version ?? 0, last?.id ?? 0) + 1;
+      await meta.state.put({ key: 'sequence', version });
+      return version;
+    });
+  };
   const storage = new Proxy(replica, {
     get(target, property) {
       const value = Reflect.get(target, property);
+      if (property === 'subscribePeer') return value.bind(target);
       return typeof value === "function" ? (...args: unknown[]) => guarded(() => value.apply(target, args)) : value;
     },
   });
@@ -98,19 +110,39 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
     storage, ready,
     store: {
       strictPersistence: true,
-      allocateId: () => guarded(async () => {
-        const last = await queue.entries.orderBy('id').last();
-        return meta.transaction('rw', meta.state, async () => {
-          const counter = await meta.state.get('sequence');
-          const version = Math.max(counter?.version ?? 0, last?.id ?? 0) + 1;
-          await meta.state.put({ key: 'sequence', version });
-          return version;
-        });
+      shared:true,
+      coordinate:async (scope,lane,run)=>{
+        await ready;
+        return locks!.request(`${lockName}:${lane}:${scope}`,{mode:'exclusive'},run);
+      },
+      subscribePeer:listener=>{peers.add(listener);return()=>{peers.delete(listener);};},
+      append: draft => guarded(async () => {
+        // Keep the established shared counter so already-open SDK versions
+        // cannot reuse a deleted entry's ID. One upgrade fence covers both
+        // reservation and insertion; only the complete durable entry is exposed.
+        const id = await reserveId();
+        const entry = { ...draft, id };
+        await queue.entries.add(entry);
+        channel?.postMessage({type:'outbox'});
+        return entry;
       }),
-      load: () => guarded(() => queue.entries.toArray()),
-      put: entry => guarded(async () => { await queue.entries.put(entry); }),
-      delete: id => guarded(() => queue.entries.delete(id)),
-      clear: scope => guarded(() => scope ? queue.entries.where("scope").equals(scope).delete().then(() => undefined) : queue.entries.clear()),
+      allocateId: () => guarded(reserveId),
+      load: scope => guarded(() => scope ? queue.entries.where('scope').equals(scope).toArray() : queue.entries.toArray()),
+      put: entry => guarded(async () => { await queue.entries.put(entry);channel?.postMessage({type:'outbox'}); }),
+      update: (id,change) => guarded(async () => {
+        let changed = false;
+        const updated=await queue.transaction('rw',queue.entries,async()=>{
+          const prior=await queue.entries.get(id);if(!prior)return undefined;
+          const next=change(prior);
+          if(next.id!==id||next.scope!==prior.scope||next.idempotencyKey!==prior.idempotencyKey)throw new Error('Outbox identity cannot change');
+          if (JSON.stringify(prior) !== JSON.stringify(next)) { await queue.entries.put(next); changed = true; }
+          return next;
+        });
+        if(changed)channel?.postMessage({type:'outbox'});
+        return updated;
+      }),
+      delete: id => guarded(async()=>{await queue.entries.delete(id);channel?.postMessage({type:'outbox'});}),
+      clear: scope => guarded(async()=>{if(scope)await queue.entries.where('scope').equals(scope).delete();else await queue.entries.clear();channel?.postMessage({type:'outbox'});}),
     },
     close() { closed = true; channel?.close(); replica.close(); queue.close(); meta.close(); },
   };

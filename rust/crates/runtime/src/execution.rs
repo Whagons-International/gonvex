@@ -160,14 +160,100 @@ impl Runtime {
                 definition.delivery
             )));
         }
-        let plan = definition.live_query_plan.as_ref().ok_or_else(|| {
-            ExecutionError::HostCall(format!(
+        if let Some(plan) = definition.live_query_plan.as_ref() {
+            return self
+                .execute_structured_live_query(session, plan, &args)
+                .await
+                .map_err(|error| ExecutionError::HostCall(error.to_string()));
+        }
+
+        // Replica collections deliberately have no TypeScript handler. Execute
+        // their signed collection definition with the same visibility and
+        // budget enforcement used for a browser replica snapshot.
+        if let Some(replica) = definition.replica.as_ref() {
+            let visibility = module.visibility.get(&replica.table).ok_or_else(|| {
+                ExecutionError::HostCall(format!(
+                    "visibility plan required for replica table {:?}",
+                    replica.table
+                ))
+            })?;
+            return self
+                .execute_replica_collection_query(session, replica, visibility, &args)
+                .await
+                .map_err(|error| ExecutionError::HostCall(error.to_string()));
+        }
+
+        // Browser one-shot Queries are constrained to analyzer-produced plans so
+        // clients cannot smuggle arbitrary SQL through a query handler. An agent
+        // child call is different: require_interactive_target already validates
+        // the catalog entry and provenance, and the host gives the handler a
+        // read-only transaction. This is the only safe path for legacy/richer
+        // application Queries whose result cannot be represented by one plan.
+        if !delegated_agent_read {
+            return Err(ExecutionError::HostCall(format!(
                 "one-shot query {path:?} requires a structured live query plan"
-            ))
-        })?;
-        self.execute_structured_live_query(session, plan, &args)
+            )));
+        }
+
+        let control = self
+            .inner
+            .control_plane
+            .read()
             .await
-            .map_err(|error| ExecutionError::HostCall(error.to_string()))
+            .clone()
+            .ok_or_else(|| ExecutionError::ModuleMissing(session.identity.project_id.clone()))?;
+        let mut provenance = access
+            .provenance
+            .expect("delegated agent read has provenance");
+        install_execution_deadline(self, &mut provenance);
+        let mut transaction = control
+            .begin_tenant_transaction(&session.route, true)
+            .await?;
+        transaction
+            .set_invocation_provenance(TransactionAttribution {
+                root_command_id: &provenance.root_command_id,
+                root_channel: invocation_channel_name(provenance.root_channel),
+                channel: invocation_channel_name(provenance.channel),
+                actor_account_id: provenance.actor_account_id.as_deref(),
+                actor_member_id: provenance.actor_member_id.as_deref(),
+                on_behalf_of_member_id: provenance.on_behalf_of_member_id.as_deref(),
+                agent_execution_id: provenance.agent_execution_id.as_deref(),
+            })
+            .await?;
+        let mut handler = DatabaseHostCalls::new(transaction, DatabaseCapability::Query)
+            .with_schema(&module.schema)
+            .with_actor(
+                &session.identity.account.id,
+                &session.identity.account.email,
+            )
+            .with_provenance(&provenance);
+        let invocation = invocation(
+            session,
+            module.generation,
+            path,
+            "query",
+            args,
+            Some(DatabaseCapability::Query),
+            provenance,
+        );
+        let result = self
+            .inner
+            .module_host
+            .invoke(invocation, &mut handler)
+            .await;
+        match result {
+            Ok(value) => {
+                handler
+                    .finish(false)
+                    .await
+                    .map_err(ExecutionError::HostCall)?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = handler.finish(false).await;
+                Err(error.into())
+            }
+        }
     }
 
     pub async fn execute_tenant_reducer(

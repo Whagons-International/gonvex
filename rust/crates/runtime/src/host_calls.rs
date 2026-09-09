@@ -598,7 +598,7 @@ fn bind_query_value<'query>(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Some("_INT2" | "SMALLINT[]") => query.bind(
+        Some("_INT2" | "INT2[]" | "SMALLINT[]") => query.bind(
             values
                 .iter()
                 .map(|value| {
@@ -609,7 +609,7 @@ fn bind_query_value<'query>(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Some("_INT4" | "INTEGER[]") => query.bind(
+        Some("_INT4" | "INT4[]" | "INTEGER[]") => query.bind(
             values
                 .iter()
                 .map(|value| {
@@ -620,13 +620,13 @@ fn bind_query_value<'query>(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Some("_INT8" | "BIGINT[]") => query.bind(
+        Some("_INT8" | "INT8[]" | "BIGINT[]") => query.bind(
             values
                 .iter()
                 .map(|value| value.as_i64().ok_or_else(|| invalid("a bigint array")))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Some("_FLOAT4" | "REAL[]") => query.bind(
+        Some("_FLOAT4" | "FLOAT4[]" | "REAL[]") => query.bind(
             values
                 .iter()
                 .map(|value| {
@@ -637,7 +637,7 @@ fn bind_query_value<'query>(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Some("_FLOAT8" | "DOUBLE PRECISION[]") => query.bind(
+        Some("_FLOAT8" | "FLOAT8[]" | "DOUBLE PRECISION[]") => query.bind(
             values
                 .iter()
                 .map(|value| {
@@ -647,7 +647,7 @@ fn bind_query_value<'query>(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Some("_BOOL" | "BOOLEAN[]") => query.bind(
+        Some("_BOOL" | "BOOL[]" | "BOOLEAN[]") => query.bind(
             values
                 .iter()
                 .map(|value| value.as_bool().ok_or_else(|| invalid("a boolean array")))
@@ -750,27 +750,27 @@ fn cell_to_json(row: &PgRow, index: usize, type_name: &str) -> Result<Value, Str
             serde_json::to_value(row.try_get::<Vec<String>, _>(index).map_err(db_decode)?)
                 .map_err(|error| error.to_string())?
         }
-        "_BOOL" | "BOOLEAN[]" => {
+        "_BOOL" | "BOOL[]" | "BOOLEAN[]" => {
             serde_json::to_value(row.try_get::<Vec<bool>, _>(index).map_err(db_decode)?)
                 .map_err(|error| error.to_string())?
         }
-        "_INT2" | "SMALLINT[]" => {
+        "_INT2" | "INT2[]" | "SMALLINT[]" => {
             serde_json::to_value(row.try_get::<Vec<i16>, _>(index).map_err(db_decode)?)
                 .map_err(|error| error.to_string())?
         }
-        "_INT4" | "INTEGER[]" => {
+        "_INT4" | "INT4[]" | "INTEGER[]" => {
             serde_json::to_value(row.try_get::<Vec<i32>, _>(index).map_err(db_decode)?)
                 .map_err(|error| error.to_string())?
         }
-        "_INT8" | "BIGINT[]" => {
+        "_INT8" | "INT8[]" | "BIGINT[]" => {
             serde_json::to_value(row.try_get::<Vec<i64>, _>(index).map_err(db_decode)?)
                 .map_err(|error| error.to_string())?
         }
-        "_FLOAT4" | "REAL[]" => {
+        "_FLOAT4" | "FLOAT4[]" | "REAL[]" => {
             serde_json::to_value(row.try_get::<Vec<f32>, _>(index).map_err(db_decode)?)
                 .map_err(|error| error.to_string())?
         }
-        "_FLOAT8" | "DOUBLE PRECISION[]" => {
+        "_FLOAT8" | "FLOAT8[]" | "DOUBLE PRECISION[]" => {
             serde_json::to_value(row.try_get::<Vec<f64>, _>(index).map_err(db_decode)?)
                 .map_err(|error| error.to_string())?
         }
@@ -978,6 +978,15 @@ mod tests {
     }
 
     #[test]
+    fn query_arrays_accept_postgres_driver_type_names() {
+        for name in ["INT2[]", "INT4[]", "INT8[]", "FLOAT4[]", "FLOAT8[]"] {
+            assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([1, 2]), Some(name)).is_ok(), "{name}");
+        }
+        assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([true, false]), Some("BOOL[]")).is_ok());
+        assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([2147483648_i64]), Some("INT4[]")).is_err());
+    }
+
+    #[test]
     fn identifiers_are_plain_and_bounded() {
         assert_eq!(
             quote_identifier("public.tasks").unwrap(),
@@ -1147,6 +1156,11 @@ mod tests {
         assert_eq!(inserted["metadata"], serde_json::json!("created"));
         assert_eq!(inserted["tags"], serde_json::json!(["one", "two"]));
         assert_eq!(inserted["score"], serde_json::json!(1));
+        assert_eq!(calls.query(
+            "SELECT \"_id\" FROM \"tasks\" WHERE \"score\" = ANY($1)",
+            serde_json::json!([[1, 2, 3]]),
+        ).await.unwrap(), serde_json::json!([{"_id":"first"}]));
+
 
         let allocated = calls.insert("tasks", serde_json::json!({"title": "allocated"}), Some("intent-owned".to_owned())).await.unwrap();
         assert_eq!(allocated["_id"], "intent-owned");

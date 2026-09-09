@@ -17,7 +17,10 @@ function candidate(overrides = {}) {
     productionSha,
     mainComparison: { status: "ahead", behind_by: 0 },
     productionComparison: { status: "ahead", behind_by: 0 },
-    checkRuns: [{ name: "CI", status: "completed", conclusion: "success" }],
+    checkRuns: [
+      { name: "CI", status: "completed", conclusion: "success" },
+      { name: "Whagons compatibility", status: "completed", conclusion: "success" },
+    ],
     devApplications: {
       runtime: { status: "running:healthy" },
       dashboard: { status: "running:healthy" },
@@ -82,4 +85,13 @@ test("production promotion waits for approval and records the release only after
   assert.match(workflow, /git push --atomic origin/);
   assert.match(workflow, /GONVEX_DEPLOY_SHA: \$\{\{ needs\.validate\.outputs\.production_sha \}\}/);
   assert.match(workflow, /failure\(\) && steps\.finalize\.outcome != 'success'/);
+});
+
+
+test("promotion rejects missing, skipped, or failed app compatibility", () => {
+  for (const conclusion of [undefined, "skipped", "failure", "cancelled"]) {
+    const checkRuns = [{ name: "CI", status: "completed", conclusion: "success" }];
+    if (conclusion) checkRuns.push({ name: "Whagons compatibility", status: "completed", conclusion });
+    assert.throws(() => assertPromotionCandidate(candidate({ checkRuns })), /successful Whagons compatibility/);
+  }
 });

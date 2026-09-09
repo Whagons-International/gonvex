@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { reducer, schema } from "@gonvex/module-sdk";
+import { reducer, schema, selectRows } from "@gonvex/module-sdk";
+import { createPortableReducer } from "@gonvex/local-runtime/portable-client";
+import { MissingReducerDataError } from "@gonvex/local-runtime/portable";
 import { LocalReducerRuntime } from "@gonvex/local-runtime";
-import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, type FunctionReference } from "./index.js";
+import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, type FunctionReference, type OutboxStore } from "./index.js";
 
 class Socket {
   static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -26,7 +28,7 @@ const collectionKey = `${collection.path}\u0000{}\u0000{"delivery":"replica","li
 const increment = reducer({
   args: schema.object({ amount: schema.optional(schema.number()) }), result: schema.number(),
   run: async (ctx, args: { amount?: number }) => {
-    const [row] = await ctx.db.query<any>('SELECT * FROM "tasks" WHERE "_id" = $1', ["t1"]);
+    const [row] = await selectRows<any>(ctx.db, {table: "tasks", where: {column: "_id", op: "eq", value: "t1"}});
     if (!row) throw new Error("Task not found");
     await ctx.db.update("tasks", "t1", { count: row.count + (args.amount ?? 1) });
     return row.count + (args.amount ?? 1);
@@ -47,15 +49,12 @@ async function fixture() {
     liveQueries: { [collectionKey]: { signature: collectionKey, kind: "replica", entity: "tasks", key: "_id", ids: ["t1"], completeness: "complete", source: "server" } },
   }, "visible");
   const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }) => {
-    const host = new LocalReducerRuntime({ tables: { tasks: { _id: "text", count: "bigint", statusId: "text" } }, reducers: { increment }, artifactHash: "artifact" });
-    hosts.push(host);
+    const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment},artifactHash: "artifact"});
     const client = new GonvexClient(url, {
       clientContract,
       project: "project", tenant: "tenant", identity: { sub: "account", iss: "issuer" },
       localReplica: { storage }, outbox: { store },
-      localRuntime: { artifactHash: "artifact", tables: ["tasks"], collections: [collection], create: () => ({
-        ready: host.initializeReady(), execute: (...args) => host.execute(...args), replay: (...args) => host.replay(...args), close: () => undefined,
-      }) },
+      localRuntime: { mode: "portable", artifactHash: "artifact", tables: ["tasks"], collections: [collection], create: () => host },
     });
     clients.push(client);
     return client;
@@ -73,7 +72,113 @@ async function connect(client: GonvexClient, watermark = false) {
   return socket;
 }
 
+
+function sharedStores(kv: ReturnType<typeof createMemoryGonvexKv>) {
+  const lanes = new Map<string, Promise<unknown>>();
+  const peers = new Set<() => void>();
+  let sequence = 0;
+  const base = createKvOutboxStore(kv);
+  return (): OutboxStore => ({
+    ...base, shared: true, strictPersistence: true,
+    allocateId: async () => {sequence=Math.max(sequence,...(await base.load()).map(entry=>entry.id),0)+1;return sequence;},
+    coordinate: (scope, lane, run) => {
+      const key = scope + lane;
+      const next = (lanes.get(key) ?? Promise.resolve()).then(run);
+      lanes.set(key, next.catch(() => undefined));
+      return next;
+    },
+    load: async scope => (await base.load()).filter(entry => !scope || entry.scope === scope),
+    update: async (id, change) => {
+      const entry = (await base.load()).find(entry => entry.id === id);
+      if (!entry) return undefined;
+      const next = change(entry); await base.put(next); return next;
+    },
+    subscribePeer: listener => { peers.add(listener); return () => { peers.delete(listener); }; },
+    put: async entry => { await base.put(entry); for (const peer of peers) queueMicrotask(peer); },
+    delete: async id => { await base.delete(id); for (const peer of peers) queueMicrotask(peer); },
+  });
+}
 describe("SDK-owned local reducer lifecycle", () => {
+  it.each([false, true])('does not expand a successful cached edit into another full collection subscription (disk read: %s)', async (needsDisk) => {
+    const { create } = await fixture();
+    const client = create();
+    const subscribe = vi.spyOn(client as any, 'subscribeReplicaTransport');
+    if (needsDisk) {
+      const replica = (client as any).replica;
+      const withReadView = replica.withReadView.bind(replica);
+      vi.spyOn(replica, 'withReadView').mockImplementation((...args: any[]) => {
+        if (args[3]) throw Object.assign(new Error('Local replica for tasks is incomplete; read its persisted rows.'), { name: 'IncompleteReplicaError' });
+        return withReadView(...args);
+      });
+    }
+    expect(await client.reducer(ref, { amount: 2 })).toBe(2);
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(2);
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+  it('waits for durable admission before exposing consecutive edits, preserving their causal results', async () => {
+    const {create,kv} = await fixture();
+    const client = create();
+    await client.reducer(ref,{});
+    client.close();
+    const factory = sharedStores(kv);
+    const store = factory();
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => {release=resolve;});
+    const coordinate = store.coordinate!;
+    let hold = false;
+    store.coordinate = (scope,lane,run) => coordinate(scope,lane,async () => {if(hold && lane==='intent')await barrier;return run();});
+    const current = create(store);
+    await vi.waitFor(() => expect(current.localReplica.entity('tasks','t1')?.count).toBe(1));
+    hold = true;
+    const first = current.reducer(ref,{}), second = current.reducer(ref,{}), third = current.reducer(ref,{});
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(current.localReplica.entity('tasks','t1')?.count).toBe(1);
+    expect(await store.load()).toHaveLength(1);
+    release();
+    expect(await Promise.all([first,second,third])).toEqual([2,3,4]);
+    expect((await store.load()).map(entry=>entry.patches?.[0]?.fields?.count)).toEqual([1,2,3,4]);
+  });
+
+  it('recomputes later edits after an earlier disk admission fails', async () => {
+    const {create,kv} = await fixture();
+    const store = createKvOutboxStore(kv);
+    const put = store.put;
+    let fail = true;
+    store.put = async entry => { if(fail){fail=false;throw new Error('Disk unavailable');} return put(entry); };
+    const client = create(store);
+    const first = client.reducer(ref,{}).catch(error=>error.message);
+    const second = client.reducer(ref,{});
+    expect(await first).toBe('Disk unavailable');
+    expect(await second).toBe(1);
+    expect(client.localReplica.entity('tasks','t1')?.count).toBe(1);
+    expect(await store.load()).toHaveLength(1);
+  });
+  it("serializes dependent offline edits across tabs and publishes both predictions", async () => {
+    const {create, kv} = await fixture();
+    const store = sharedStores(kv);
+    const first = create(store()), second = create(store());
+    expect(await Promise.all([first.reducer(ref, {}), second.reducer(ref, {})])).toEqual([1, 2]);
+    await vi.waitFor(() => {
+      expect(first.localReplica.entity("tasks", "t1")?.count).toBe(2);
+      expect(second.localReplica.entity("tasks", "t1")?.count).toBe(2);
+    });
+    expect((await store().load()).map(entry => entry.patches?.[0]?.fields?.count)).toEqual([1, 2]);
+  });
+
+  it("gives one tab delivery ownership without blocking new local edits on a server response", async () => {
+    const {create, kv} = await fixture();
+    const store = sharedStores(kv);
+    const first = create(store()), second = create(store());
+    await first.reducer(ref, {});
+    await connect(first); await connect(second);
+    const calls = () => Socket.all.flatMap(socket => socket.sent).filter(message => message.type === "reducer.call");
+    await vi.waitFor(() => expect(calls()).toHaveLength(1));
+    expect(await second.reducer(ref, {})).toBe(2);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(calls()).toHaveLength(1);
+    expect((await store().load()).map(entry => entry.state)).toEqual(["inflight", "pending"]);
+  });
+
   it.each([8, 3650, -1])("persists offline edits with unlimited admission after %i days, including clock rollback", async (days) => {
     const { create, kv, storage } = await fixture();
     const saved = (await storage.loadSession(owner))!;
@@ -131,6 +236,29 @@ describe("SDK-owned local reducer lifecycle", () => {
     expect(pending).toHaveLength(1);
     expect(pending[0]?.idempotencyKey).toBe(calls()[1].id);
   });
+  it("keeps the local prediction until every frame of the committed revision arrives", async () => {
+    const { create } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    const socket = await connect(client, true);
+    await vi.waitFor(() => expect(socket.sent.some(message => message.type === "reducer.call")).toBe(true));
+    const call = socket.sent.find(message => message.type === "reducer.call");
+    // Another collection can advance the shared cursor before the edited row's frame.
+    socket.receive({ type: "replica.transaction", cursor: { epoch: "epoch", revision: 4 },
+      changes: [{ entity: "members", id: "m1", operation: "update", newValue: { _id: "m1", name: "Member" } }],
+    });
+    await vi.waitFor(() => expect(client.localReplica.entity("members", "m1")?.name).toBe("Member"));
+    socket.receive({ type: "reducer.result", id: call.id, result: 1, originCommandId: call.id, committedRevision: 4 });
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1);
+    // A second user edit must read the still-visible prediction, not the old server row.
+    expect(await client.reducer(ref, {})).toBe(2);
+    socket.receive({ type: "replica.transaction", cursor: { epoch: "epoch", revision: 4 },
+      changes: [{ entity: "tasks", id: "t1", operation: "update", newValue: { _id: "t1", count: 1, statusId: "todo" } }],
+    });
+    socket.receive({ type: "replica.watermark", revision: 4 });
+    await vi.waitFor(() => expect(socket.sent.filter(message => message.type === "reducer.call")).toHaveLength(2));
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(2);
+  });
   it("returns the reducer result offline and stages it without handwritten optimistic metadata", async () => {
     const { create } = await fixture();
     const client = create();
@@ -184,13 +312,36 @@ describe("SDK-owned local reducer lifecycle", () => {
     expect(Socket.all.at(-1)).toBe(socket);
   });
 
-  it("does not expose edits when durable persistence fails", async () => {
+  it("removes a prediction when durable persistence fails", async () => {
     const { create, kv } = await fixture();
     const store = createKvOutboxStore(kv);
     store.put = async () => { throw new Error("Disk full"); };
     const client = create(store);
     await expect(client.reducer(ref, {})).rejects.toThrow("Disk full");
     expect(client.localReplica.entity("tasks", "t1")?.count).toBe(0);
+  });
+
+  it("publishes only after disk admission so immediate reload cannot lose visible changes", async () => {
+    const { create, kv } = await fixture();
+    const store = createKvOutboxStore(kv);
+    const put = store.put.bind(store);
+    let release!: () => void;
+    const disk = new Promise<void>(resolve => { release = resolve; });
+    store.put = async entry => { await disk; await put(entry); };
+    const client = create(store);
+    const socket = await connect(client);
+    let resolved = false;
+    const first = client.reducer(ref, {}).then(result => { resolved = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(0);
+    const second = client.reducer(ref, {});
+    expect(resolved).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(0);
+    expect(socket.sent.some(message => message.type === 'reducer.call')).toBe(false);
+    release();
+    expect(await first).toBe(1);
+    expect(await second).toBe(2);
   });
 });
 
@@ -262,7 +413,7 @@ it("captures arguments at admission before initialization or persistence awaits"
     version.mockRestore();
     await run;
     expect(result).toBe("yielded");
-    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(snapshot).not.toHaveBeenCalled();
   });
 
 it("runs a newly admitted edit before replaying the rest of a pending backlog", async () => {
@@ -271,13 +422,13 @@ it("runs a newly admitted edit before replaying the rest of a pending backlog", 
   for (let i = 0; i < 3; i++) await client.reducer(ref, {});
   await (client as any).localLane;
   const executor = (client as any).localExecutor;
-  const original = executor.execute.bind(executor);
+  const original = executor.executeRead.bind(executor);
   const order: number[] = [];
   let release!: () => void;
   let entered!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const spy = vi.spyOn(executor, "execute").mockImplementation(async (...args: any[]) => {
+  const spy = vi.spyOn(executor, "executeRead").mockImplementation(async (...args: any[]) => {
     order.push(args[1].amount ?? 1);
     if (order.length === 1) { entered(); await gate; }
     return original(...args);
@@ -298,7 +449,7 @@ it("does not replay the pending chain just because another edit was appended", a
   const client = create();
   await client.reducer(ref, {});
   await (client as any).localLane;
-  const spy = vi.spyOn((client as any).localExecutor, "execute");
+  const spy = vi.spyOn((client as any).localExecutor, "executeRead");
   await client.reducer(ref, { amount: 2 });
   await (client as any).localLane;
   expect(spy).toHaveBeenCalledTimes(1);
@@ -310,7 +461,7 @@ it("does not replay pending writes for freshness-only notifications", async () =
   const client = create();
   await client.reducer(ref, {});
   await (client as any).localLane;
-  const spy = vi.spyOn((client as any).localExecutor, "execute");
+  const spy = vi.spyOn((client as any).localExecutor, "executeRead");
   (client as any).replica.setFreshness("verifying");
   (client as any).replica.setFreshness("current");
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -324,7 +475,7 @@ it("drains acknowledged intents without replaying the remaining queue per acknow
   for (let i = 0; i < 4; i++) await client.reducer(ref, {});
   const socket = await connect(client);
   await vi.waitFor(() => expect(socket.sent.filter(m => m.type === "reducer.call")).toHaveLength(1));
-  const execute = vi.spyOn((client as any).localExecutor, "execute");
+  const execute = vi.spyOn((client as any).localExecutor, "executeRead");
   for (let i = 0; i < 4; i++) {
     const call = socket.sent.filter(m => m.type === "reducer.call")[i];
     socket.receive({ type: "reducer.result", id: call.id, result: i + 1, originCommandId: call.id });
@@ -343,12 +494,23 @@ it("does not allocate a local SQL worker before an authenticated tenant session 
   expect(create).not.toHaveBeenCalled();
 });
 
+it('prepares reducer code through the deferred executor without executing it', async () => {
+  const prepare = vi.fn(async () => {});
+  const execute = vi.fn();
+  const create = vi.fn(() => ({ ready: Promise.resolve(), prepare, execute, replay: vi.fn(), close: vi.fn() }));
+  const client = new GonvexClient(url, { localRuntime: { artifactHash: 'artifact', tables: [], create } });
+  clients.push(client);
+  await client.prepareReducer({ kind: 'reducer', path: 'tasks.assign', localExecution: 1 });
+  expect(prepare).toHaveBeenCalledExactlyOnceWith('tasks.assign');
+  expect(execute).not.toHaveBeenCalled();
+});
+
 it('sends only observed reducer tables and retries changed branches against the same snapshot', async () => {
   const host = new LocalReducerRuntime({
     tables: { tasks: { _id: 'text', count: 'integer' }, other: { _id: 'text', count: 'integer' }, history: { _id: 'text' } },
     reducers: { choose: reducer({ args: schema.any(), result: schema.any(), run: async (ctx, args: any) => {
       if (args.insert) return ctx.db.insert('other', { _id: 'o1', count: 2 });
-      return (await ctx.db.query(`SELECT * FROM "${args.table}"`))[0];
+      return (await selectRows(ctx.db, {table: args.table}))[0];
     } }) }, artifactHash: 'artifact',
   });
   hosts.push(host);
@@ -368,7 +530,7 @@ it('sends only observed reducer tables and retries changed branches against the 
   expect(await execute({ table: 'tasks' })).toMatchObject({ result: { count: 1 } });
   expect(seen).toEqual([['tasks', 'other', 'history'], ['tasks']]);
   // Omission cannot turn an existing ID into an apparently safe insert.
-  await expect(execute({ insert: true })).rejects.toThrow(/duplicate|unique/i);
+  await expect(execute({ insert: true })).rejects.toThrow(/already exists/i);
   expect(seen.slice(-2)).toEqual([['tasks'], ['tasks', 'other', 'history']]);
   expect(await execute({ table: 'other' })).toMatchObject({ result: { count: 9 } });
   expect(seen.slice(-2)).toEqual([['tasks'], ['tasks', 'other', 'history']]);
@@ -393,4 +555,96 @@ it('opens execution collections only for observed reads and missing tables', asy
   execute.mockRejectedValueOnce(missing);
   await expect((client as any).executeLocal('history', {}, snapshot, execution)).rejects.toThrow('incomplete');
   expect(subscribe.mock.calls.map(call => (call[0] as FunctionReference).path)).toEqual(['__local.tasks', '__local.history']);
+});
+
+
+it('admits a complete resident edit without waiting for unrelated cache hydration, but reconciles known peer changes', async () => {
+  const { create, kv } = await fixture();
+  const client = create();
+  await client.reducer(ref, {});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const replica = (client as any).replica;
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const synchronize = vi.spyOn(replica, 'synchronizeStorage').mockImplementation(() => blocked);
+  try {
+    const edit = client.reducer(ref, {});
+    expect(await Promise.race([edit, new Promise(resolve => setTimeout(() => resolve('blocked'), 100))])).toBe(2);
+    expect(synchronize).not.toHaveBeenCalled();
+    expect((await createKvOutboxStore(kv).load()).map(entry => entry.patches?.[0]?.fields?.count)).toEqual([1, 2]);
+    (client as any).peerRefreshDirty = true;
+    const peerEdit = client.reducer(ref, {});
+    await vi.waitFor(() => expect(synchronize).toHaveBeenCalled());
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(2);
+    release();
+    expect(await peerEdit).toBe(3);
+  } finally { release(); synchronize.mockRestore(); }
+});
+
+it('durably queues an uncovered read without blocking a subsequent resident edit on unrelated persistence', async () => {
+  const { create, kv } = await fixture();
+  const client = create();
+  await client.reducer(ref, {});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const replica = (client as any).replica;
+  const executor = (client as any).localExecutor;
+  const execute = executor.executeRead.bind(executor);
+  const read = { table: 'history', where: { column: 'kind', op: 'eq' as const, value: 'daily' } };
+  const prediction = vi.spyOn(executor, 'executeRead').mockImplementation((...args: any[]) => {
+    if (args[0] === 'background') throw new MissingReducerDataError(read);
+    return execute(...args);
+  });
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const synchronize = vi.spyOn(replica, 'synchronizeStorage').mockImplementation(() => blocked);
+  try {
+    const background = client.reducer({ ...ref, path: 'background' }, {});
+    const edit = client.reducer(ref, {});
+    const results = await Promise.race([Promise.all([background, edit]), new Promise(resolve => setTimeout(() => resolve('blocked'), 100))]);
+    expect(results).toEqual([expect.objectContaining({ status: 'queued' }), 2]);
+    expect(synchronize).not.toHaveBeenCalled();
+    const entries = await createKvOutboxStore(kv).load();
+    expect(entries.map(entry => entry.path)).toEqual(['increment', 'background', 'increment']);
+    expect(entries[1].patches).toEqual([]);
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(2);
+  } finally { release(); synchronize.mockRestore(); prediction.mockRestore(); }
+});
+
+
+it('retries a resident prediction after its preparation becomes stale without joining unrelated cache work', async () => {
+  const { create, kv } = await fixture();
+  const client = create();
+  await client.reducer(ref, {});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const replica = (client as any).replica;
+  let release!: () => void;
+  let started!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const backgroundStarted = new Promise<void>(resolve => { started = resolve; });
+  let background: Promise<void> | undefined;
+  const synchronize = vi.spyOn(replica, 'synchronizeStorage').mockImplementationOnce(async () => {
+    // A commit invalidates the speculative preparation. A subsequent cache
+    // write is still running when coordinated execution starts again.
+    await replica.replaceWindow({ signature: 'other', entity: 'other', key: 'id', rows: [{ id: 'one' }], source: 'server', completeness: 'complete' });
+    background = replica.enqueueApplication(async () => { started(); await blocked; });
+    await backgroundStarted;
+  });
+  (client as any).peerRefreshDirty = true;
+  try {
+    const edit = client.reducer(ref, {});
+    expect(await Promise.race([edit, new Promise(resolve => setTimeout(() => resolve('blocked'), 100))])).toBe(2);
+    expect(synchronize).toHaveBeenCalled();
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(2);
+    expect((await createKvOutboxStore(kv).load()).map(entry => entry.patches?.[0]?.fields?.count)).toEqual([1, 2]);
+  } finally { release(); await background; synchronize.mockRestore(); }
+});
+
+it('does not open replay storage work for incoming collections when there are no local intents', async () => {
+  const { create } = await fixture(); const client = create();
+  await connect(client);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const rebase = vi.spyOn(client as any, 'rebaseLocalEntries');
+  await (client as any).replica.replaceWindow({ signature: 'other', entity: 'other', key: 'id', rows: [{ id: 'one' }], source: 'server', completeness: 'complete' });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(rebase).not.toHaveBeenCalled();
 });

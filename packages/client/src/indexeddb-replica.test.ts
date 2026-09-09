@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import { IDBFactory, IDBKeyRange, IDBIndex } from "fake-indexeddb";
 import { Dexie } from "dexie";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica";
 import { LocalReplica } from "./local-replica";
@@ -187,6 +187,56 @@ it("persists only changed delta rows while retaining normalized projected fields
     expect(delta).toHaveBeenCalledOnce();
     expect(replace).not.toHaveBeenCalled();
     expect((await storage.load())?.entities.tasks).toEqual({ a: { id: "a", name: "A", status: "working" }, b: { id: "b", name: "B" } });
+  } finally {
+    storage.close();
+    Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
+  }
+});
+
+
+it.each([3, 128, 257])("reads %i checkpoint rows without losing equal-sequence records", async count => {
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalKeyRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const storage = new IndexedDBLocalReplicaStorage(`checkpoint-${Math.random()}`);
+  try {
+    const replica = new LocalReplica(storage);
+    const rows = Array.from({ length: count }, (_, index) => ({ id: `task-${index}`, status: "new" }));
+    await replica.replaceWindow({ signature: "tasks", kind: "replica", entity: "tasks", key: "id", rows, completeness: "complete", source: "server" });
+    const cursor = vi.spyOn(IDBIndex.prototype, "openCursor");
+    try {
+      const changes = await storage.readChanges("default", 0);
+      expect(Object.keys(changes.entities.tasks)).toHaveLength(count);
+      for (const row of rows) expect(changes.entities.tasks[row.id]).toEqual(row);
+      if (count < 128) expect(cursor).not.toHaveBeenCalled();
+      const next = await storage.readChanges("default", changes.sequence);
+      expect(next.entities).toEqual({});
+      expect(next.windows).toEqual({});
+    } finally { cursor.mockRestore(); }
+  } finally {
+    storage.close();
+    Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
+  }
+});
+
+
+it('persists metadata and explicit projections without materializing snapshot entities', async () => {
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalKeyRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const storage = new IndexedDBLocalReplicaStorage(`lazy-snapshot-${Math.random()}`);
+  try {
+    const window = {signature:'tasks',kind:'replica' as const,entity:'tasks',key:'id',ids:['a'],completeness:'complete' as const,source:'server' as const};
+    const snapshot = {entities:{tasks:{a:{id:'a',status:'new'}}},liveQueries:{tasks:window}};
+    await storage.replaceWindow(window,snapshot);
+    Object.defineProperty(snapshot,'entities',{get(){throw new Error('materialized unused table');}});
+    await storage.applyWindowDelta(window,{upserts:[],deleted:[]},snapshot);
+    await storage.replaceWindow(window,snapshot,'default',[{id:'a',status:'working'}]);
+    expect((await storage.load())?.entities.tasks.a).toEqual({id:'a',status:'working'});
   } finally {
     storage.close();
     Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });

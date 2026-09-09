@@ -68,9 +68,13 @@ export function nativeMessageScript(message: unknown): string {
 }
 
 /** Called by generated Expo bindings before constructing the client. */
-export function installNativeRuntimeGlobals(random: {getRandomValues(array: Uint8Array): Uint8Array; randomUUID(): string}): void {
+export function installNativeRuntimeGlobals(random: {getRandomValues(array: Uint8Array): Uint8Array; randomUUID(): string; digest?(data: BufferSource): Promise<ArrayBuffer>}): void {
   if (typeof globalThis.structuredClone !== 'function') Object.defineProperty(globalThis,'structuredClone',{value:(value: unknown)=>clone(value,{lossy:false}),configurable:true});
   if (typeof globalThis.crypto?.getRandomValues !== 'function') {
     Object.defineProperty(globalThis,'crypto',{value:{getRandomValues:random.getRandomValues,randomUUID:random.randomUUID},configurable:true});
   }
+  if (!globalThis.crypto.subtle && random.digest) Object.defineProperty(globalThis.crypto,'subtle',{value:{digest: (algorithm: string, data: BufferSource) => {
+    if (algorithm !== 'SHA-256') throw new Error('Unsupported native digest');
+    return random.digest!(data);
+  }},configurable:true});
 }

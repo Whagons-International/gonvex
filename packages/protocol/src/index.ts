@@ -120,14 +120,15 @@ export type LiveQueryPlan = {
 export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
 
 export type LiveExpression = {
-  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server";
+  operator: "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "in" | "contains" | "containsInsensitive" | "range" | "and" | "or" | "not" | "server" | "inRelation" | "arrayContains";
   column?: string;
   value?: LiveValue;
   valueTo?: LiveValue;
   children?: LiveExpression[];
+  relation?: { table: string; column: string; where?: LiveExpression };
 };
 
-export type LiveValue = { argument?: string; literal?: JsonValue };
+export type LiveValue = { context?: "account.id" | "member.id" | "tenant.id"; argument?: string; literal?: JsonValue };
 
 export type SubscriptionRevision = { epoch: string; sequence: number };
 

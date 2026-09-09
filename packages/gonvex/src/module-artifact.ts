@@ -1063,7 +1063,10 @@ function normalizeDelivery(value: JsonValue | undefined): ModuleFunction["delive
 }
 
 function liveQueryPlanFromOptions(options: ObjectEntries): LiveQueryPlan | undefined {
-  return parseLiveQueryPlan(options.get("liveQueryPlan")?.value);
+  const declared = options.get("liveQueryPlan");
+  const plan = parseLiveQueryPlan(declared?.value);
+  if (declared && !plan) throw new Error('liveQueryPlan must be a literal object, including nested metadata');
+  return plan;
 }
 
 function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undefined {
@@ -1081,8 +1084,52 @@ function parseLiveQueryPlan(value: JsonValue | undefined): LiveQueryPlan | undef
   if (where) plan.where = where;
   const searchValue = readMember(value, "search");
   const searchArgument = stringMember(searchValue, "argument");
-  const searchColumns = stringArray(readMember(searchValue, "columns"));
-  if (searchArgument && searchColumns) plan.search = { argument: searchArgument, columns: searchColumns };
+  const rawSearchColumns = readMember(searchValue, "columns");
+  const searchColumns = Array.isArray(rawSearchColumns) && rawSearchColumns.length === 0 ? [] : stringArray(rawSearchColumns);
+  if (searchArgument && searchColumns) {
+    plan.search = { argument: searchArgument, columns: searchColumns };
+    if (readMember(searchValue, 'booleanTerms') === true) plan.search.booleanTerms = true;
+    const offlineColumns = stringArray(readMember(searchValue, 'offlineColumns'));
+    if (offlineColumns) plan.search.offlineColumns = offlineColumns;
+    const sources = readMember(searchValue, 'sources');
+    if (sources !== undefined) {
+      if (!Array.isArray(sources)) throw new Error('Search sources must be a literal array');
+      plan.search.sources = sources.map(source => {
+        const table = stringMember(source, 'table'), key = stringMember(source, 'key'), column = stringMember(source, 'column');
+        if (!table || !key || !column) throw new Error('Search sources require table, key and column');
+        const dependencies = stringArray(readMember(source, 'dependencies'));
+        return {table,key,column,...(dependencies ? {dependencies} : {})};
+      });
+    }
+  }
+  const indexValue = readMember(value, 'index');
+  if (indexValue !== undefined) {
+    const table = stringMember(indexValue, 'table'), key = stringMember(indexValue, 'key');
+    const columns = stringArray(readMember(indexValue, 'columns'));
+    if (!table || !key || !columns) throw new Error('Live Query indexes require literal table, key and columns');
+    plan.index = {table,key,columns};
+    const referenceFields = readMember(indexValue,'referenceFields');
+    if(referenceFields!==undefined){
+      if(!isJsonObject(referenceFields))throw new Error('Index referenceFields must be a literal object');
+      plan.index.referenceFields=Object.fromEntries(Object.entries(referenceFields).map(([name,field])=>{
+        const table=stringMember(field,'table'),foreignKey=stringMember(field,'foreignKey'),column=stringMember(field,'column');
+        if(!table||!foreignKey||!column)throw new Error('Index reference fields require table, foreignKey and column');
+        const fallback=readMember(field,'fallback');
+        return [name,{table,foreignKey,column,...(fallback!==undefined?{fallback}:{})}];
+      }));
+    }
+    const dependencies = stringArray(readMember(indexValue, 'dependencies'));
+    if (dependencies) plan.index.dependencies = dependencies;
+    const sortColumns = readMember(indexValue, 'sortColumns');
+    if (sortColumns !== undefined) {
+      if (!isJsonObject(sortColumns)) throw new Error('Index sortColumns must be a literal object');
+      plan.index.sortColumns = Object.fromEntries(Object.entries(sortColumns).map(([column,value]) => {
+        const fields = stringArray(value);
+        if (!fields?.length) throw new Error('Index sort columns must be a nonempty string array');
+        return [column,fields];
+      }));
+    }
+  }
   const filtersValue = readMember(value, "filters");
   const filtersArgument = stringMember(filtersValue, "argument");
   const filtersColumns = stringArray(readMember(filtersValue, "allowedColumns"));
@@ -1131,9 +1178,17 @@ function parseLiveExpression(value: JsonValue | undefined): LiveExpression | und
   const operator = stringMember(value, "operator");
   if (!operator || ![
     "eq", "neq", "gt", "gte", "lt", "lte", "in", "contains",
-    "containsInsensitive", "range", "and", "or", "not", "server",
+    "containsInsensitive", "range", "and", "or", "not", "server", "inRelation", "arrayContains",
   ].includes(operator)) return undefined;
   const expression: LiveExpression = { operator: operator as LiveExpression["operator"] };
+  if (operator === 'inRelation') {
+    const relation = readMember(value, 'relation');
+    const table = stringMember(relation, 'table'), column = stringMember(relation, 'column');
+    if (!table || !column) throw new Error('Related query scopes require a literal table and column');
+    const where = parseLiveExpression(readMember(relation, 'where'));
+    if (readMember(relation, 'where') !== undefined && !where) throw new Error('Invalid related query predicate');
+    expression.relation = { table, column, ...(where ? { where } : {}) };
+  }
   const column = stringMember(value, "column");
   if (column) expression.column = column;
   const parsedValue = parseLiveValue(readMember(value, "value"));
@@ -1149,6 +1204,11 @@ function parseLiveExpression(value: JsonValue | undefined): LiveExpression | und
 }
 
 function parseLiveValue(value: JsonValue | undefined): LiveValue | undefined {
+  const context = stringMember(value, 'context');
+  if (context) {
+    if (!['account.id', 'member.id', 'tenant.id'].includes(context)) throw new Error('Invalid query identity context');
+    return { context: context as LiveValue['context'] };
+  }
   const argument = stringMember(value, "argument");
   if (argument) return { argument };
   const literal = readMember(value, "literal");

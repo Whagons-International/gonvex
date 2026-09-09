@@ -47,6 +47,11 @@ gonvex functions emit --format typescript --output agent-api.d.ts
 gonvex functions check
 ```
 
+When either conventional output file already exists, `gonvex dev` and
+`gonvex codegen` refresh it on every module rebuild. This keeps a browser-imported
+catalog on the active artifact during development; projects that do not use an
+agent catalog do not get extra files.
+
 NDJSON stores one complete JSON object per line. Each object contains the
 public path, kind, exact portable argument and result schemas, classification,
 offline policy, optimistic transaction, description, sorted tags,

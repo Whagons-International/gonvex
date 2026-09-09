@@ -1,13 +1,16 @@
 import type { JsonValue } from "@gonvex/module-sdk";
 import type { LocalExecution, LocalIntent, LocalReplay, LocalSnapshot, LocalTransactionResult } from "./index.js";
+import type { ReducerReadView } from './portable.js';
 
 export type LocalExecutor = {
   ready: Promise<void>;
+  prepare?(path: string): Promise<void>;
+  executeRead?(path: string, args: JsonValue, source: ReducerReadView, execution: LocalExecution): Promise<LocalTransactionResult>;
   execute(path: string, args: JsonValue, snapshot: LocalSnapshot, execution: LocalExecution): Promise<LocalTransactionResult>;
   replay(snapshot: LocalSnapshot, intents: readonly LocalIntent[]): Promise<LocalReplay>;
   close(): void;
 };
-export type LocalRuntimeBinding = { artifactHash: string; tables: readonly string[]; create(): LocalExecutor };
+export type LocalRuntimeBinding = { mode?: 'portable'; artifactHash: string; tables: readonly string[]; create(): LocalExecutor };
 
 export type LocalWorkerEndpoint = {
   postMessage(message: unknown): void;

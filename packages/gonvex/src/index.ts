@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { lazyReferenceRuntime, renderLazyReferences } from "./lazy-reference-bindings.js";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
@@ -1308,6 +1309,22 @@ async function writeBindings(root: string, manifest: Manifest): Promise<BindingW
   for (const [name, contents] of Object.entries(outputs)) {
     if (await writeFileIfChanged(join(dir, name), contents)) changedFiles += 1;
   }
+  // Agent catalogs are checked into some applications and imported by their
+  // browser bundle. Once a project opts in by creating either conventional
+  // output, keep it on the exact artifact built by `gonvex dev`/`codegen`.
+  // Otherwise a backend hot reload can activate a new artifact while the
+  // browser continues sending the old hash, making every delegated call fail
+  // with STALE_AGENT_CATALOG until somebody manually re-emits the files.
+  for (const [name, format] of [
+    ["agent-api.ndjson", "ndjson"],
+    ["agent-api.d.ts", "typescript"],
+  ] as const) {
+    const output = join(root, name);
+    if (existsSync(output) && await writeFileIfChanged(output, renderFunctionCatalog(manifest.module, format))) {
+      changedFiles += 1;
+      console.log(`[gonvex] refreshed ${name} for artifact ${manifest.module.hash}`);
+    }
+  }
   return { changedFiles };
 }
 
@@ -1420,8 +1437,8 @@ function renderAPI(manifest: Manifest) {
       ...(entry.delivery === "replica" && entry.replica ? { replica: entry.replica } : {}),
       ...(entry.offline !== undefined ? { offline: entry.offline } : {}),
       ...(entry.localExecution !== undefined ? { localExecution: entry.localExecution } : {}),
-      ...(isModuleSchema(entry.args) ? { args: entry.args } : {}),
-      ...(isModuleSchema(entry.result) ? { result: entry.result } : {}),
+      // Args/Result are phantom types below. Validation schemas remain in the
+      // module manifest and agent catalog; the browser never consumes them.
     };
     if (entry.delivery === "live" && entry.dependencies?.liveQueryPlan) {
       const plan = entry.dependencies.liveQueryPlan;
@@ -1471,11 +1488,13 @@ function renderAPI(manifest: Manifest) {
       `export type ${result} = ${renderSchemaType(manifest.functions[path]?.result)};`,
     ]),
     "",
-    `export const api = ${renderObject(publicRoot, 0)} as const;`,
+    lazyReferenceRuntime,
+    "",
+    `export const api = ${renderLazyReferences(publicRoot, 0, isFunctionRef, renderObject)};`,
     "",
     "export const control = gonvexControl;",
     "",
-    `export const internal = ${renderObject(internalRoot, 0)} as const;`,
+    `export const internal = ${renderLazyReferences(internalRoot, 0, isFunctionRef, renderObject)};`,
     "export type Api = typeof api;",
     "",
     `export const optimisticTransactions: Record<string, OptimisticTransactionDefinition> = ${renderObject(optimisticTransactions, 0)};`,

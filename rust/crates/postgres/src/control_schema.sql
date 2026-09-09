@@ -24,9 +24,11 @@ CREATE TABLE IF NOT EXISTS account_identities (
   account_id text NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   project_id text NOT NULL DEFAULT '', provider text NOT NULL, issuer text NOT NULL DEFAULT '',
   subject text NOT NULL, email text NOT NULL DEFAULT '', verified_email boolean NOT NULL DEFAULT false,
+  sign_in_provider text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(project_id,provider,issuer,subject)
 );
+ALTER TABLE account_identities ADD COLUMN IF NOT EXISTS sign_in_provider text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS account_identities_by_account ON account_identities(account_id);
 CREATE INDEX IF NOT EXISTS account_identities_by_verified_email ON account_identities(lower(email))
   WHERE verified_email AND email<>'';

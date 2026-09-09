@@ -88,6 +88,9 @@ enum RuntimeEvent {
     ControlChanged {
         project_id: String,
     },
+    PresenceChanged {
+        project_id: String,
+    },
     ModuleReloaded {
         project_id: String,
     },
@@ -195,6 +198,7 @@ impl Runtime {
         });
         let change_feeds = change_feed::ChangeFeedHub::new(pools.clone());
         let (runtime_events, _) = broadcast::channel(1_024);
+        let metrics = metrics::RuntimeMetrics::with_changes(runtime_events.clone());
         let sandboxes = sandbox::SandboxManager::new(config.sandbox.clone());
         let storage = storage::StorageManager::new(config.storage.clone());
         Self {
@@ -213,7 +217,7 @@ impl Runtime {
                 storage,
                 live_query_cache: live_query::SharedLiveQueryCache::default(),
                 membership_projector: membership_projector::MembershipProjector::default(),
-                metrics: metrics::RuntimeMetrics::default(),
+                metrics,
             }),
         }
     }
@@ -1446,6 +1450,15 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             )
                             .await
                         {
+                            if send_json(&mut socket, &message).await.is_err() { return; }
+                        }
+                    }
+                    Ok(RuntimeEvent::PresenceChanged { project_id })
+                        if project_id == control_connection.project_id =>
+                    {
+                        for message in runtime.refresh_control_queries(
+                            &control_connection, &mut control_queries, "presence-change",
+                        ).await {
                             if send_json(&mut socket, &message).await.is_err() { return; }
                         }
                     }

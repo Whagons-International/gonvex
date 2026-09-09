@@ -8,7 +8,7 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("client package artifact", () => {
   it("does not ship removed cache or sync modules", () => {
-    execFileSync("pnpm", ["run", "build"], { cwd: packageRoot, stdio: "ignore" });
+    execFileSync("npm", ["run", "build"], { cwd: packageRoot, stdio: "ignore", timeout: 60000 });
     const packed = execFileSync("npm", ["pack", "--dry-run", "--json"], {
       cwd: packageRoot,
       encoding: "utf8",
@@ -30,5 +30,5 @@ describe("client package artifact", () => {
     expect(readFileSync(resolve(packageRoot, "dist/index.js"), "utf8")).not.toContain("query-cache.js");
     expect(readFileSync(resolve(packageRoot, "dist/index.d.ts"), "utf8")).toContain("control");
     expect(readFileSync(resolve(packageRoot, "dist/local-replica.d.ts"), "utf8")).toContain("collectionState");
-  });
+  }, 60000);
 });

@@ -76,6 +76,19 @@ struct Snapshot {
 const INLINE_SNAPSHOT_HASH_LIMIT: usize = 2_048;
 
 impl Runtime {
+    pub(crate) async fn execute_replica_collection_query(
+        &self,
+        session: &TenantSession,
+        definition: &ReplicaCollectionDefinition,
+        visibility: &VisibilityPlan,
+        args: &Value,
+    ) -> Result<Value, ReplicaError> {
+        let snapshot = self
+            .replica_snapshot(session, definition, visibility, args)
+            .await?;
+        Ok(Value::Array(snapshot.rows))
+    }
+
     pub async fn open_replica(
         &self,
         session: &TenantSession,
@@ -395,12 +408,16 @@ impl Runtime {
                         subscription
                             .hashes
                             .insert(change.row_id.clone(), row_hash(new_projection));
-                        upserts.insert(change.row_id.clone(), new_projection.clone());
                     } else {
                         subscription.rows.remove(&change.row_id);
                         subscription.hashes.remove(&change.row_id);
-                        deleted.insert(change.row_id.clone());
                     }
+                    accumulate_projection_delta(
+                        &mut upserts,
+                        &mut deleted,
+                        &change.row_id,
+                        new_projection.as_ref(),
+                    );
                     entity_changes.insert(
                         (change.table.clone(), change.row_id.clone()),
                         ReplicaChange {
@@ -436,6 +453,9 @@ impl Runtime {
             ));
         }
         if !entity_changes.is_empty() {
+            normalize_entity_changes(&mut entity_changes, subscriptions.values().map(|subscription| (
+                subscription.definition.table.as_str(), &subscription.rows,
+            )));
             let origin_command_id = changes.iter().find_map(|change| {
                 (!change.origin_command_id.is_empty()).then(|| change.origin_command_id.clone())
             });
@@ -461,6 +481,32 @@ impl Runtime {
             );
         }
         Ok(messages)
+    }
+}
+
+// Each subscription owns a projection and membership. The normalized entity
+// owns their union; the last subscription visited must not erase another one's
+// fields or delete an entity still present in a different collection.
+fn normalize_entity_changes<'a>(
+    changes: &mut BTreeMap<(String, String), ReplicaChange>,
+    collections: impl Iterator<Item = (&'a str, &'a BTreeMap<String, Value>)>,
+) {
+    let collections: Vec<_> = collections.collect();
+    for ((table, id), change) in changes.iter_mut() {
+        let mut fields = serde_json::Map::new();
+        for (collection_table, rows) in &collections {
+            if *collection_table != table { continue; }
+            if let Some(row) = rows.get(id).and_then(Value::as_object) {
+                fields.extend(row.clone());
+            }
+        }
+        if fields.is_empty() {
+            change.operation = "delete".to_owned();
+            change.new_value = None;
+        } else {
+            change.operation = if change.old_value.is_some() { "update" } else { "insert" }.to_owned();
+            change.new_value = Some(Value::Object(fields));
+        }
     }
 }
 
@@ -884,6 +930,21 @@ fn replica_ready(
     }
 }
 
+fn accumulate_projection_delta(
+    upserts: &mut BTreeMap<String, Value>,
+    deleted: &mut BTreeSet<String>,
+    id: &str,
+    row: Option<&Value>,
+) {
+    if let Some(row) = row {
+        deleted.remove(id);
+        upserts.insert(id.to_owned(), row.clone());
+    } else {
+        upserts.remove(id);
+        deleted.insert(id.to_owned());
+    }
+}
+
 fn quote(value: &str) -> Result<String, ReplicaError> {
     if !value.is_empty()
         && value.len() <= 63
@@ -909,6 +970,43 @@ fn hex_digest(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_writes_publish_only_the_final_collection_membership() {
+        let mut upserts = BTreeMap::new();
+        let mut deleted = BTreeSet::new();
+        let intermediate = serde_json::json!({"id":"a","categoryId":null,"deletedAt":null});
+        // One atomic cleanup first clears references and then soft-deletes the
+        // same row. Sending both entries resurrects its intermediate projection
+        // on clients and makes the transaction's integrity digest disagree.
+        accumulate_projection_delta(&mut upserts, &mut deleted, "a", Some(&intermediate));
+        accumulate_projection_delta(&mut upserts, &mut deleted, "a", None);
+        assert!(upserts.is_empty());
+        assert_eq!(deleted, BTreeSet::from(["a".to_owned()]));
+        // A later write in the same intent can also restore visibility.
+        accumulate_projection_delta(&mut upserts, &mut deleted, "a", Some(&intermediate));
+        assert!(deleted.is_empty());
+        assert_eq!(upserts.get("a"), Some(&intermediate));
+    }
+
+    #[test]
+    fn normalized_changes_union_visible_projections_and_preserve_other_memberships() {
+        let key = ("tasks".to_owned(), "a".to_owned());
+        let mut changes = BTreeMap::from([(key.clone(), ReplicaChange {
+            entity: "tasks".to_owned(), id: "a".to_owned(), operation: "delete".to_owned(),
+            old_value: Some(serde_json::json!({"id":"a","status":"new"})),
+            new_value: None, changed_columns: vec!["status".to_owned()],
+        })]);
+        let empty = BTreeMap::new();
+        let names = BTreeMap::from([("a".to_owned(), serde_json::json!({"id":"a","name":"Task"}))]);
+        let statuses = BTreeMap::from([("a".to_owned(), serde_json::json!({"id":"a","status":"working","note":null}))]);
+        normalize_entity_changes(&mut changes, [("tasks", &empty), ("tasks", &names), ("tasks", &statuses)].into_iter());
+        assert_eq!(changes[&key].operation, "update");
+        assert_eq!(changes[&key].new_value, Some(serde_json::json!({"id":"a","name":"Task","status":"working","note":null})));
+        normalize_entity_changes(&mut changes, [("tasks", &empty)].into_iter());
+        assert_eq!(changes[&key].operation, "delete");
+        assert_eq!(changes[&key].new_value, None);
+    }
 
     fn visibility_with_task_dependency(source: &str) -> VisibilityPlan {
         VisibilityPlan {

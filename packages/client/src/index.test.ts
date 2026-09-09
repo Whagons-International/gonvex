@@ -116,6 +116,19 @@ function accountToken(accountId: string, issuer = "shop") {
 }
 
 describe("GonvexClient", () => {
+  it('reuses a generated query contract across subscriptions without conflating arguments or a new plan', () => {
+    const client = new GonvexClient('ws://runtime.test/ws');
+    let inspected = 0;
+    const plan = { table: 'items', key: 'id', get columns() { inspected++; return ['id', 'name']; } };
+    const reference: FunctionReference = { kind: 'query', path: 'items.list', delivery: 'live', live: { entity: 'items', key: 'id', plan } };
+    const first = client.replicaSignature(reference, { search: 'one' });
+    for (let i = 0; i < 1000; i++) expect(client.replicaSignature(reference, { search: 'one' })).toBe(first);
+    expect(client.replicaSignature(reference, { search: 'two' })).not.toBe(first);
+    expect(client.replicaSignature({ ...reference, live: { ...reference.live!, plan: { ...plan, columns: ['id'] } } }, { search: 'one' })).not.toBe(first);
+    expect(inspected).toBeLessThanOrEqual(2);
+    client.close();
+  });
+
 	it("holds native error telemetry until authentication establishes an attributable scope", async () => {
 		const client = new GonvexClient("ws://runtime.test/ws", {
 			project: "shop",
@@ -1439,6 +1452,48 @@ describe("GonvexClient", () => {
     second.close();
   });
 
+  it("keeps exact UTF-8 replica byte bounds without canonicalizing object keys", async () => {
+    const ref: FunctionReference = { kind: "query", path: "tasks.recent", delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"] } };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const watch = client.watchReplica(ref, {});
+    const socket = latestSocket(); socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => expect(sentMessages(socket).some(message => message.type === "replica.open")).toBe(true));
+    const open = sentMessages(socket).find(message => message.type === "replica.open");
+    const rows = [{ title: "café 😀\u2028line", id: "1" }, { id: "2", title: "next" }];
+    const maxBytes = new TextEncoder().encode(JSON.stringify(rows[0]).replace(/\u2028/g, "\\u2028")).length;
+    socket.receive({ type: "replica.snapshot", id: open.id, path: ref.path, result: rows,
+      cursor: { epoch: "epoch:test", revision: 12 }, key: "id", maxBytes });
+    await vi.waitFor(() => expect(watch.localReplicaResult()).toEqual([rows[0]]));
+    client.close();
+  });
+
+  it("reads watch rows from the replica without also materializing transport copies", async () => {
+    const ref: FunctionReference = { kind: "query", path: "tasks.recent", delivery: "replica",
+      replica: { table: "tasks", key: "id", columns: ["id", "title"], maxRows: 100 } };
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const copies = vi.spyOn((client as any).replica, "windowRows");
+    const watch = client.watchReplica(ref, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: "session.ready", replica: testReplicaDirective });
+    await vi.waitFor(() => expect(sentMessages(socket).some(message => message.type === "replica.open")).toBe(true));
+    const open = sentMessages(socket).find(message => message.type === "replica.open");
+    const rows = [{ id: "task-1", title: "Cached" }];
+    socket.receive({ type: "replica.snapshot", id: open.id, path: ref.path, result: rows,
+      cursor: { epoch: "epoch:test", revision: 12 }, key: "id" });
+    await vi.waitFor(() => expect(watch.localReplicaResult()).toEqual(rows));
+    expect(copies).not.toHaveBeenCalled();
+    const secondWatch = client.watchReplica(ref, {});
+    expect(secondWatch.localReplicaResult()?.[0]).toBe(watch.localReplicaResult()?.[0]);
+    const messages: any[] = [];
+    const stop = client.subscribeReplica(ref, {}, message => messages.push(message));
+    await vi.waitFor(() => expect(messages.some(message => message.type === "replica.snapshot" && message.result[0]?.title === "Cached")).toBe(true));
+    stop();
+    client.close();
+  });
+
   it("keeps Replica Collection state partial until ready and stable between revisions", async () => {
     const collectionRef: FunctionReference = {
       kind: "query",
@@ -1475,6 +1530,27 @@ describe("GonvexClient", () => {
     await vi.waitFor(() => {
       expect(watch.localReplicaState()).toMatchObject({ completeness: "partial", truncated: true, computedRevision: 12 });
     });
+    client.close();
+  });
+
+  it("reopens a retained replica reset while it had no listeners", async () => {
+    const collection: FunctionReference = { kind: 'query', path: 'tasks.rows', delivery: 'replica', replica: { table: 'tasks', key: 'id', columns: ['id'] } };
+    const client = new GonvexClient('ws://runtime.test/ws', { replicaSubscriptionRetentionMs: 30_000 });
+    const off = client.subscribeReplica(collection, {}, () => {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: 'session.ready', replica: testReplicaDirective });
+    await vi.waitFor(() => expect(sentMessages(socket).filter(m => m.type === 'replica.open')).toHaveLength(1));
+    const open = sentMessages(socket).find(m => m.type === 'replica.open');
+    off();
+    socket.receive({ type: 'replica.reset', id: open.id, path: collection.path, reason: 'integrity-mismatch' });
+    await flushMicrotasks();
+    const received: any[] = [];
+    const stop = client.subscribeReplica(collection, {}, m => received.push(m));
+    await vi.waitFor(() => expect(sentMessages(socket).filter(m => m.type === 'replica.open')).toHaveLength(2));
+    socket.receive({ type: 'replica.snapshot', id: open.id, result: [], key: 'id', cursor: { epoch: 'epoch:test', revision: 2 } });
+    await vi.waitFor(() => expect(received.some(m => m.type === 'replica.snapshot')).toBe(true));
+    stop();
     client.close();
   });
 

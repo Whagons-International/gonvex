@@ -6,7 +6,8 @@ export async function reducerRowId(context: ReducerContext, table: string, ordin
     "gonvex.reducer.ids.v1", context.tenant?.id ?? "", context.auth.account?.id ?? "",
     context.invocation.commandId, table, ordinal,
   ]);
-  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed)));
+  const digest = crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed));
+  const bytes = new Uint8Array(await (context.db?.keepAliveFor?.(digest) ?? digest));
   bytes[6] = (bytes[6]! & 15) | 128;
   bytes[8] = (bytes[8]! & 63) | 128;
   const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -25,7 +26,11 @@ export function reducerExecutionContext(context: ReducerContext): ReducerContext
     ...context,
     db: {
       ...context.db,
-      insert: async <T>(table: string, row: JsonObject): Promise<T> => {
+      insert: async <T>(table: string, row: JsonObject, allocation?: {generatedId?:string}): Promise<T> => {
+        // Structured batches reserve their own namespace on both adapters.
+        // Passing an explicit empty allocation also preserves application IDs
+        // without consuming the single-row counter.
+        if (allocation !== undefined) return context.db.insert<T>(table,row,allocation);
         const ordinal = counters.get(table) ?? 0;
         counters.set(table, ordinal + 1);
         return context.db.insert<T>(table, row, { generatedId: await reducerRowId(context, table, ordinal) });
@@ -50,6 +55,7 @@ export async function reducerToken(context: ReducerContext, purpose: string): Pr
   if (!context.intentEntropy) return crypto.randomUUID();
   if (!/^[0-9a-f]{64}$/.test(context.intentEntropy)) throw new Error("Invalid reducer entropy");
   const seed = JSON.stringify(["gonvex.reducer.tokens.v1", context.intentEntropy, context.tenant?.id ?? "", purpose]);
-  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed)));
+  const digest = crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed));
+  const bytes = new Uint8Array(await (context.db?.keepAliveFor?.(digest) ?? digest));
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }

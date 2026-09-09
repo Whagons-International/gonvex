@@ -1,4 +1,5 @@
 import "fake-indexeddb/auto";
+import { Dexie } from "dexie";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { browserUpgradeStorage } from "./browser-upgrades.js";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica.js";
@@ -67,4 +68,50 @@ it("keeps both original stores when a migration cannot preserve meaning", async 
   const old = open(1); await old.ready;
   expect((await old.store.load())[0]?.args).toEqual({ title: "World" });
   expect((await old.storage.load("tenant-a"))?.entities.tasks?.a).toEqual({ title: "Hello" });
+});
+
+
+it('appends distinct durable intents across tabs and fences old versions', async () => {
+  const first = open(1); await first.ready;
+  const second = open(1); await second.ready;
+  const draft = { scope: 'tenant', path: 'increment', args: {}, idempotencyKey: 'a', entityKeys: [], createdAt: 1, attempts: 0, nextAttemptAt: 1, state: 'pending' as const };
+  const entries = await Promise.all([first.store.append!(draft), second.store.append!({ ...draft, idempotencyKey: 'b' })]);
+  expect(entries.map(entry => entry.id).sort()).toEqual([1, 2]);
+  expect(await first.store.load()).toHaveLength(2);
+  const next = open(2, [{ from: 1, to: 2, intent: (intent: any) => intent }]); await next.ready;
+  await expect(first.store.append!(draft)).rejects.toThrow('Reload');
+  expect(await next.store.load()).toHaveLength(2);
+});
+
+
+it('never reuses append IDs after deletion when a later writer reserves an ID', async () => {
+  const first = open(1); await first.ready;
+  const draft = { scope: 'tenant', path: 'increment', args: {}, idempotencyKey: 'a', entityKeys: [], createdAt: 1, attempts: 0, nextAttemptAt: 1, state: 'pending' as const };
+  const appended = await first.store.append!(draft);
+  await first.store.delete(appended.id);
+  const second = open(1); await second.ready;
+  const reserved = await second.store.allocateId!();
+  const next = await first.store.append!({ ...draft, idempotencyKey: 'b' });
+  expect(reserved).toBeGreaterThan(appended.id);
+  expect(next.id).toBeGreaterThan(reserved);
+  expect((await first.store.load()).map(entry => entry.id)).toEqual([next.id]);
+});
+
+
+it('keeps the existing journal and shared sequence compatible with older readers', async () => {
+  const legacy = new Dexie(`${prefix}-queue`);
+  legacy.version(2).stores({ entries: '++id, scope, state, nextAttemptAt, [scope+state], [scope+nextAttemptAt]' });
+  await legacy.table('entries').put({ id: 50, scope: 'tenant', state: 'pending', nextAttemptAt: 0 });
+  await legacy.table('entries').delete(50);
+  const metadata = new Dexie(`${prefix}-upgrades`);
+  metadata.version(1).stores({ state: '&key' });
+  await metadata.table('state').put({ key: 'sequence', version: 50 });
+  try {
+    const current = open(1); await current.ready;
+    const draft = { scope: 'tenant', path: 'increment', args: {}, idempotencyKey: 'a', entityKeys: [], createdAt: 1, attempts: 0, nextAttemptAt: 1, state: 'pending' as const };
+    const entry = await current.store.append!(draft);
+    expect(entry.id).toBe(51);
+    expect((await legacy.table('entries').get(entry.id)).idempotencyKey).toBe('a');
+    expect((await metadata.table('state').get('sequence')).version).toBe(51);
+  } finally { legacy.close(); metadata.close(); }
 });

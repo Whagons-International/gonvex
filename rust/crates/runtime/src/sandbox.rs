@@ -98,6 +98,7 @@ impl SandboxManager {
         self.prune().await;
         match operation {
             "create" => self.create(scope, payload, duckdb_declared).await,
+            "destroy" => self.destroy(scope, payload).await,
             "run" => self.run(scope, payload).await,
             "cancel" => self.cancel(scope, payload).await,
             "status" => self.status(scope, payload).await,
@@ -158,6 +159,33 @@ impl SandboxManager {
         Ok(serde_json::json!({
             "sandboxId":id,"expiresAt":expires_at.timestamp_millis(),"duckdb":duckdb,
         }))
+    }
+
+    async fn destroy(&self, scope: Scope, payload: Value) -> Result<Value, String> {
+        exact_fields(&payload, &["sandboxId"])?;
+        let sandbox_id = required_string(&payload, "sandboxId")?.to_owned();
+        let root = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get(&sandbox_id)
+                .ok_or_else(|| "sandbox was not found".to_owned())?;
+            if workspace.scope != scope {
+                return Err("sandbox was not found".to_owned());
+            }
+            if workspace.active.is_some() {
+                return Err("cannot destroy a sandbox with an active execution".to_owned());
+            }
+            workspaces
+                .remove(&sandbox_id)
+                .ok_or_else(|| "sandbox was not found".to_owned())?
+                .root
+        };
+        match tokio::fs::remove_dir_all(&root).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        Ok(serde_json::json!({"sandboxId":sandbox_id,"destroyed":true}))
     }
 
     async fn run(&self, scope: Scope, payload: Value) -> Result<Value, String> {
@@ -236,7 +264,9 @@ impl SandboxManager {
         execution.finished_at = Some(Utc::now());
         match response {
             Ok(value) => {
-                execution.status = "completed".to_owned();
+                // Keep the wire status aligned with @gonvex/module-sdk's
+                // SandboxStatus contract.
+                execution.status = "succeeded".to_owned();
                 execution.result = value.get("result").cloned().unwrap_or(Value::Null);
                 execution.logs = value
                     .get("logs")
@@ -618,5 +648,44 @@ mod tests {
         assert!(safe_file(root, "report/data.csv").is_ok());
         assert!(safe_file(root, "../secret").is_err());
         assert!(safe_file(root, "/etc/passwd").is_err());
+    }
+
+    #[tokio::test]
+    async fn destroy_releases_a_completed_workspace_immediately() {
+        let root =
+            std::env::temp_dir().join(format!("gonvex-sandbox-destroy-test-{}", Uuid::new_v4()));
+        let manager = SandboxManager::new(SandboxConfig {
+            root: root.clone(),
+            ..SandboxConfig::default()
+        });
+        let scope = Scope {
+            project: "project".to_owned(),
+            tenant: "tenant".to_owned(),
+            account: "account".to_owned(),
+        };
+        let created = manager
+            .create(scope.clone(), serde_json::json!({}), true)
+            .await
+            .unwrap();
+        let sandbox_id = created["sandboxId"].as_str().unwrap().to_owned();
+        assert!(root.join(&sandbox_id).exists());
+
+        let destroyed = manager
+            .destroy(
+                scope.clone(),
+                serde_json::json!({ "sandboxId": sandbox_id }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(destroyed["destroyed"], true);
+        assert!(!root.join(created["sandboxId"].as_str().unwrap()).exists());
+        assert!(manager
+            .destroy(
+                scope,
+                serde_json::json!({ "sandboxId": created["sandboxId"] })
+            )
+            .await
+            .is_err());
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 }
