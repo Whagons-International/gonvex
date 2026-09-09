@@ -460,7 +460,12 @@ mod host_call_tests {
                     }],
                     metadata: Map::new(),
                 },
-                payload: br#"export async function run(ctx) {
+                payload: br#"export async function run(ctx, args) {
+                if (args?.warmup) {
+                    const timer = setInterval(() => {}, 30);
+                    clearInterval(timer);
+                    return 'completed';
+                }
                 const heartbeat = new Promise((resolve, reject) => {
                     setTimeout(() => ctx.tools.heartbeat({}).then(resolve, reject), 20);
                 });
@@ -473,6 +478,21 @@ mod host_call_tests {
             V8Config::default(),
         )
         .unwrap();
+        engine
+            .invoke(
+                &CountingHost(AtomicUsize::new(0)),
+                Invocation {
+                    function: "run".into(),
+                    kind: FunctionKind::Action,
+                    args: br#"{"warmup":true}"#.to_vec(),
+                    context: InvocationContext {
+                        generation: 1,
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .unwrap();
         let result = engine
             .invoke(
                 &HeartbeatHost(tokio::sync::Notify::new()),
