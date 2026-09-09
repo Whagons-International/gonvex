@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use futures_util::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
 use gonvex_module_host::framing::{read_frame, write_frame, FrameError};
 use gonvex_module_host::protocol::{
     ActivateRequest, ClientFrame, HostCallFrame, InvokeRequest, LoadRequest, RequestOp,
@@ -83,6 +84,14 @@ pub struct ModuleHost {
 #[async_trait]
 pub trait HostCallHandler: Send {
     async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String>;
+    /// Only stateless, capability-checked work may opt out of serial dispatch.
+    /// Database handlers retain the default so transaction calls stay ordered.
+    fn concurrent(
+        &self,
+        _call: &HostCallFrame,
+    ) -> Option<BoxFuture<'static, Result<Value, String>>> {
+        None
+    }
 }
 
 impl ModuleHost {
@@ -234,40 +243,8 @@ impl ModuleHost {
             payload: operation,
         };
         self.write_client_frame(&mut stream, &request).await?;
-        loop {
-            let frame = read_frame(&mut stream, self.config.max_frame_bytes).await?;
-            let frame: ServerFrame = serde_json::from_slice(&frame)
-                .map_err(|error| ModuleHostError::InvalidReady(error.to_string()))?;
-            match frame {
-                ServerFrame::Ready { protocol: 2, .. } => continue,
-                ServerFrame::Response { id: 1, payload } => return Ok(payload),
-                ServerFrame::Error { id: 1, error } => return Err(remote_error(error)),
-                ServerFrame::HostCall {
-                    id,
-                    invocation: 1,
-                    payload,
-                } => {
-                    let response = match handler.as_deref_mut() {
-                        Some(handler) => match handler.handle(payload).await {
-                            Ok(value) => ClientFrame::HostResponse { id, value },
-                            Err(message) => ClientFrame::HostError {
-                                id,
-                                error: WireError::new("host_call_failed", message),
-                            },
-                        },
-                        None => ClientFrame::HostError {
-                            id,
-                            error: WireError::new(
-                                "host_call_failed",
-                                "this module-host request has no capability dispatcher",
-                            ),
-                        },
-                    };
-                    self.write_client_frame(&mut stream, &response).await?;
-                }
-                _ => return Err(ModuleHostError::UnexpectedResponse),
-            }
-        }
+        let (reader, writer) = tokio::io::split(stream);
+        dispatch_frames(reader, writer, self.config.max_frame_bytes, handler.take()).await
     }
 
     async fn write_client_frame(
@@ -378,5 +355,177 @@ fn temporary_endpoint(pid: u32) -> String {
     {
         let _ = pid;
         "tcp:127.0.0.1:0".to_owned()
+    }
+}
+
+fn host_response(id: u64, result: Result<Value, String>) -> ClientFrame {
+    match result {
+        Ok(value) => ClientFrame::HostResponse { id, value },
+        Err(message) => ClientFrame::HostError {
+            id,
+            error: WireError::new("host_call_failed", message),
+        },
+    }
+}
+
+async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut reader: R,
+    mut writer: W,
+    max_frame_bytes: usize,
+    mut handler: Option<&mut dyn HostCallHandler>,
+) -> Result<ResponsePayload, ModuleHostError> {
+    let mut pending: FuturesUnordered<BoxFuture<'static, ClientFrame>> = FuturesUnordered::new();
+    loop {
+        // Preserve partial reads when a network request completes. read_exact
+        // cannot be cancelled safely after it has consumed part of a frame.
+        let read = read_frame(&mut reader, max_frame_bytes);
+        tokio::pin!(read);
+        let frame = loop {
+            tokio::select! {
+                frame = &mut read => break frame?,
+                Some(response) = pending.next(), if !pending.is_empty() => {
+                    let bytes = serde_json::to_vec(&response).map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
+                    write_frame(&mut writer, &bytes, max_frame_bytes).await?;
+                }
+            }
+        };
+        let frame: ServerFrame = serde_json::from_slice(&frame)
+            .map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
+        match frame {
+            ServerFrame::Ready { protocol: 2, .. } => continue,
+            ServerFrame::Response { id: 1, payload } => return Ok(payload),
+            ServerFrame::Error { id: 1, error } => return Err(remote_error(error)),
+            ServerFrame::HostCall {
+                id,
+                invocation: 1,
+                payload,
+            } => {
+                let result = match handler.as_deref_mut() {
+                    Some(handler) => {
+                        if let Some(work) = handler.concurrent(&payload) {
+                            if pending.len() < 16 {
+                                pending
+                                    .push(Box::pin(async move { host_response(id, work.await) }));
+                                continue;
+                            }
+                            Err("Action concurrent network request limit exceeded".to_owned())
+                        } else {
+                            handler.handle(payload).await
+                        }
+                    }
+                    None => Err("this module-host request has no capability dispatcher".to_owned()),
+                };
+                let bytes = serde_json::to_vec(&host_response(id, result))
+                    .map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
+                write_frame(&mut writer, &bytes, max_frame_bytes).await?;
+            }
+            _ => return Err(ModuleHostError::UnexpectedResponse),
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::sync::Notify;
+
+    struct DelayedNetwork {
+        release: Arc<Notify>,
+    }
+    #[async_trait]
+    impl HostCallHandler for DelayedNetwork {
+        async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
+            match call {
+                HostCallFrame::ToolInvoke { .. } => Ok(json!("heartbeat")),
+                HostCallFrame::Fetch { .. } => {
+                    self.release.notified().await;
+                    Ok(json!("network"))
+                }
+                _ => Err("unexpected serial call".into()),
+            }
+        }
+        fn concurrent(
+            &self,
+            call: &HostCallFrame,
+        ) -> Option<BoxFuture<'static, Result<Value, String>>> {
+            if !matches!(call, HostCallFrame::Fetch { .. }) {
+                return None;
+            }
+            let release = self.release.clone();
+            Some(Box::pin(async move {
+                release.notified().await;
+                Ok(json!("network"))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_completes_while_network_response_is_pending() {
+        let (runtime, mut host) = tokio::io::duplex(8192);
+        let release = Arc::new(Notify::new());
+        let mut handler = DelayedNetwork {
+            release: release.clone(),
+        };
+        let task = tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(runtime);
+            dispatch_frames(reader, writer, 8192, Some(&mut handler)).await
+        });
+        for (id, payload) in [
+            (1, HostCallFrame::Fetch { request: json!({}) }),
+            (
+                2,
+                HostCallFrame::ToolInvoke {
+                    tool: "heartbeat".into(),
+                    args: json!({}),
+                },
+            ),
+        ] {
+            let frame = ServerFrame::HostCall {
+                id,
+                invocation: 1,
+                payload,
+            };
+            write_frame(&mut host, &serde_json::to_vec(&frame).unwrap(), 8192)
+                .await
+                .unwrap();
+        }
+        let first = timeout(
+            std::time::Duration::from_secs(2),
+            read_frame(&mut host, 8192),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<ClientFrame>(&first).unwrap(),
+            ClientFrame::HostResponse { id: 2, .. }
+        ));
+        // Start the next frame but leave its payload incomplete while the
+        // network result arrives. The reader must retain these consumed bytes.
+        use tokio::io::AsyncWriteExt;
+        let done = ServerFrame::Response {
+            id: 1,
+            payload: ResponsePayload::Invoked { value: "{}".into() },
+        };
+        let done_bytes = serde_json::to_vec(&done).unwrap();
+        host.write_all(&(done_bytes.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        host.write_all(&done_bytes[..3]).await.unwrap();
+        release.notify_one();
+        let second = timeout(
+            std::time::Duration::from_secs(2),
+            read_frame(&mut host, 8192),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<ClientFrame>(&second).unwrap(),
+            ClientFrame::HostResponse { id: 1, .. }
+        ));
+        host.write_all(&done_bytes[3..]).await.unwrap();
+        assert!(task.await.unwrap().is_ok());
     }
 }

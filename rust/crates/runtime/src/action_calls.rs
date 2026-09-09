@@ -12,11 +12,11 @@ use serde_json::Value;
 use url::Url;
 use uuid::Uuid;
 
-use crate::Runtime;
 use crate::execution::{CommittedRevisionTracker, ExecutionAccess, NestedExecutionAccess};
 use crate::module_host::HostCallHandler;
 use crate::modules::FunctionDefinition;
 use crate::modules::ModuleCallLease;
+use crate::Runtime;
 
 const MAX_FETCH_RESPONSE_BYTES: usize = 8 << 20;
 
@@ -226,7 +226,11 @@ impl ActionHostCalls {
         }
     }
 
-    async fn fetch(&self, request: Value) -> Result<Value, String> {
+    async fn fetch(
+        request: Value,
+        network_origins: Vec<String>,
+        deadline_unix_ms: Option<u64>,
+    ) -> Result<Value, String> {
         #[derive(Deserialize)]
         struct FetchRequest {
             url: String,
@@ -244,9 +248,7 @@ impl ActionHostCalls {
         if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
             return Err("fetch only supports absolute http and https URLs".to_owned());
         }
-        let allowed = self
-            .capabilities
-            .network_origins
+        let allowed = network_origins
             .iter()
             .map(|origin| origin.trim().to_owned())
             .collect::<BTreeSet<_>>();
@@ -261,7 +263,7 @@ impl ActionHostCalls {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let timeout = action_fetch_timeout(self.provenance.deadline_unix_ms, now_unix_ms)?;
+        let timeout = action_fetch_timeout(deadline_unix_ms, now_unix_ms)?;
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(30).min(timeout))
@@ -332,6 +334,20 @@ impl ActionHostCalls {
 
 #[async_trait]
 impl HostCallHandler for ActionHostCalls {
+    fn concurrent(
+        &self,
+        call: &HostCallFrame,
+    ) -> Option<futures_util::future::BoxFuture<'static, Result<Value, String>>> {
+        match call {
+            HostCallFrame::Fetch { request } if self.network() => Some(Box::pin(Self::fetch(
+                request.clone(),
+                self.capabilities.network_origins.clone(),
+                self.provenance.deadline_unix_ms,
+            ))),
+            _ => None,
+        }
+    }
+
     async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
         match call {
             HostCallFrame::ToolInvoke { tool, args } => self.invoke_tool(&tool, args).await,
@@ -343,7 +359,14 @@ impl HostCallHandler for ActionHostCalls {
                 args,
                 artifact_hash,
             } => self.invoke_function(&path, args, &artifact_hash).await,
-            HostCallFrame::Fetch { request } if self.network() => self.fetch(request).await,
+            HostCallFrame::Fetch { request } if self.network() => {
+                Self::fetch(
+                    request,
+                    self.capabilities.network_origins.clone(),
+                    self.provenance.deadline_unix_ms,
+                )
+                .await
+            }
             HostCallFrame::Fetch { .. } => {
                 Err("network access is not declared for this Action".to_owned())
             }
