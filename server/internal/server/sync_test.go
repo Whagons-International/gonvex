@@ -846,3 +846,66 @@ func TestOperationalErrorIncludesRuntimeDeployment(t *testing.T) {
 		t.Fatal("operational logging must not increment function calls")
 	}
 }
+
+func TestSyncVisibilityColumnsSkipContentEditsButKeepMembershipChanges(t *testing.T) {
+	definition := effectiveSyncDefinition(manifest.FunctionEntry{Kind: manifest.FunctionKindSync,
+		Sync:         &manifest.SyncDefinition{Table: "spots", Key: "_id", Mode: "progressive"},
+		Dependencies: manifest.FunctionDependencies{Reads: []manifest.ReadDependency{{Table: "tasks", Columns: []string{"spotId", "workspaceId", "deletedAt"}}, {Table: "taskUsers"}}},
+	})
+	for _, column := range []string{"name", "statusId", "updatedAt"} {
+		if syncVisibilityAffected(definition, tableChange{table: "tasks", operation: "update", changedColumns: []string{column}}) {
+			t.Fatalf("content edit %s invalidated visibility", column)
+		}
+	}
+	for _, change := range []tableChange{
+		{table: "tasks", operation: "update", changedColumns: []string{"spotId"}},
+		{table: "tasks", operation: "insert", changedColumns: []string{"name"}},
+		{table: "tasks", operation: "delete"},
+		{table: "tasks", broad: true, operation: "update", changedColumns: []string{"name"}},
+		{table: "tasks", operation: "update"},
+		{table: "taskUsers", operation: "update", changedColumns: []string{"userId"}},
+	} {
+		if !syncVisibilityAffected(definition, change) {
+			t.Fatalf("missed visibility change: %+v", change)
+		}
+	}
+	base := syncLogChange{table: "tasks", operation: "update", oldValue: json.RawMessage(`{"spotId":"a","workspaceId":"w","deletedAt":null,"name":"old"}`), newValue: json.RawMessage(`{"spotId":"a","workspaceId":"w","deletedAt":null,"name":"new"}`)}
+	if got := relevantSyncChanges(definition, []syncLogChange{base}); len(got) != 0 {
+		t.Fatal("unrelated durable change would rerun progressive handler")
+	}
+	for _, after := range []string{`{"spotId":"b","workspaceId":"w","deletedAt":null}`, `{"spotId":"a","workspaceId":"other","deletedAt":null}`, `{"spotId":"a","workspaceId":"w","deletedAt":1}`, `{"spotId":"a"}`, `invalid`} {
+		changed := base
+		changed.newValue = json.RawMessage(after)
+		if len(relevantSyncChanges(definition, []syncLogChange{changed})) != 1 {
+			t.Fatalf("dropped membership or unknown change: %s", after)
+		}
+	}
+	base.table = "spots"
+	if len(relevantSyncChanges(definition, []syncLogChange{base})) != 1 {
+		t.Fatal("source rows must remain replayable")
+	}
+}
+
+func TestSyncVisibilityColumnsKeepBroadDeclarationsAndDurableCoverage(t *testing.T) {
+	entry := manifest.FunctionEntry{Kind: manifest.FunctionKindSync, Sync: &manifest.SyncDefinition{Table: "spots", Key: "_id"}, Dependencies: manifest.FunctionDependencies{Reads: []manifest.ReadDependency{{Table: "tasks", Columns: []string{"spotId"}, Filters: []string{"workspaceId"}}}}}
+	definition := effectiveSyncDefinition(entry)
+	defs, err := syncDefinitionsForSchema(map[string]manifest.SyncDefinition{"spots": definition}, manifest.Schema{Tables: map[string]manifest.Table{
+		"spots": {Columns: map[string]manifest.Column{"_id": {Type: "id", PrimaryKey: true}}},
+		"tasks": {Columns: map[string]manifest.Column{"_id": {Type: "id", PrimaryKey: true}, "spotId": {Type: "id"}, "workspaceId": {Type: "id"}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(defs["tasks"].Columns, ","); got != "_id,spotId,workspaceId" {
+		t.Fatalf("dependency log projection = %s", got)
+	}
+	entry.Sync.VisibilityTables = []string{"tasks"}
+	if len(effectiveSyncDefinition(entry).VisibilityColumns["tasks"]) != 0 {
+		t.Fatal("explicit whole-table dependency was narrowed")
+	}
+	entry.Sync.VisibilityTables = nil
+	entry.Dependencies.Reads = append(entry.Dependencies.Reads, manifest.ReadDependency{Table: "tasks"})
+	if len(effectiveSyncDefinition(entry).VisibilityColumns["tasks"]) != 0 {
+		t.Fatal("broad Read was narrowed")
+	}
+}

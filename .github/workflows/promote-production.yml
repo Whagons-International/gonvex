@@ -31,7 +31,7 @@ concurrency:
 jobs:
   validate:
     name: Validate production candidate
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     environment: gonvex-runtime
     outputs:
@@ -67,7 +67,7 @@ jobs:
   deploy:
     name: Approve and deploy production
     needs: validate
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     # One ordered rollout can consume 24 minutes. Reserve the same budget for
     # the compensating rollback if atomic release finalization is rejected.
     timeout-minutes: 60

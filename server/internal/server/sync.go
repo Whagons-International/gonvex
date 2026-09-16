@@ -111,6 +111,12 @@ func manifestSyncDefinitions(current manifest.Manifest) map[string]manifest.Sync
 				existing.EqualFilters[column] = argument
 			}
 			existing.VisibilityTables = appendUniqueStrings(existing.VisibilityTables, definition.VisibilityTables...)
+			if existing.VisibilityColumns == nil {
+				existing.VisibilityColumns = map[string][]string{}
+			}
+			for table, columns := range definition.VisibilityColumns {
+				existing.VisibilityColumns[table] = appendUniqueStrings(existing.VisibilityColumns[table], columns...)
+			}
 			existing.ExcludeWhenSet = appendUniqueStrings(existing.ExcludeWhenSet, definition.ExcludeWhenSet...)
 			if definition.OrderBy != "" {
 				existing.OrderBy = definition.OrderBy
@@ -127,12 +133,27 @@ func manifestSyncDefinitions(current manifest.Manifest) map[string]manifest.Sync
 func effectiveSyncDefinition(entry manifest.FunctionEntry) manifest.SyncDefinition {
 	definition := *entry.Sync
 	definition.VisibilityTables = appendUniqueStrings(nil, definition.VisibilityTables...)
+	definition.VisibilityColumns = map[string][]string{}
+	broad := map[string]bool{}
+	for _, table := range definition.VisibilityTables {
+		broad[table] = true
+	}
 	for _, read := range entry.Dependencies.Reads {
 		table := strings.TrimSpace(read.Table)
 		if table == "" || table == definition.Table {
 			continue
 		}
 		definition.VisibilityTables = appendUniqueStrings(definition.VisibilityTables, table)
+		columns := appendUniqueStrings(nil, read.Columns...)
+		columns = appendUniqueStrings(columns, read.Filters...)
+		columns = appendUniqueStrings(columns, read.OrdersBy...)
+		if len(columns) == 0 {
+			broad[table] = true
+		}
+		definition.VisibilityColumns[table] = appendUniqueStrings(definition.VisibilityColumns[table], columns...)
+	}
+	for table := range broad {
+		delete(definition.VisibilityColumns, table)
 	}
 	return definition
 }
@@ -154,7 +175,9 @@ func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, cu
 	// prove freshness after an offline reconnect.
 	for _, definition := range sourceDefinitions {
 		for _, tableName := range definition.VisibilityTables {
-			if _, exists := filtered[tableName]; exists {
+			if existing, exists := filtered[tableName]; exists {
+				existing.Columns = appendUniqueStrings(existing.Columns, definition.VisibilityColumns[tableName]...)
+				filtered[tableName] = existing
 				continue
 			}
 			table, exists := current.Tables[tableName]
@@ -173,7 +196,7 @@ func syncDefinitionsForSchema(definitions map[string]manifest.SyncDefinition, cu
 			filtered[tableName] = manifest.SyncDefinition{
 				Table:   tableName,
 				Key:     key,
-				Columns: []string{key},
+				Columns: appendUniqueStrings([]string{key}, definition.VisibilityColumns[tableName]...),
 			}
 		}
 	}
@@ -611,6 +634,9 @@ func (s *Server) deliverSync(subscription *syncSubscription) error {
 		}
 		return err
 	}
+	// Dependencies with unchanged membership columns only advance the cursor.
+	// This also covers notifications without precise columns and offline replay.
+	changes = relevantSyncChanges(subscription.definition, changes)
 	args := map[string]json.RawMessage{}
 	_ = json.Unmarshal(subscription.args, &args)
 	if len(changes) == 0 && subscription.verified {
@@ -1013,6 +1039,50 @@ func readSyncChanges(ctx context.Context, databaseURL string, after, through uin
 	return changes, nil
 }
 
+// Unknown, broad, insert and delete events remain conservative. Explicit
+// VisibilityDependsOn declarations intentionally retain whole-table behavior.
+func syncVisibilityAffected(definition manifest.SyncDefinition, change tableChange) bool {
+	for _, table := range definition.VisibilityTables {
+		if !changeContainsTable(change, table) {
+			continue
+		}
+		detail := tableDetail(change, table)
+		columns := definition.VisibilityColumns[table]
+		if len(columns) > 0 && detail.precise && !detail.broad && detail.operation == "update" && len(detail.changedColumns) > 0 && !intersectsStrings(columns, detail.changedColumns) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func relevantSyncChanges(definition manifest.SyncDefinition, changes []syncLogChange) []syncLogChange {
+	result := make([]syncLogChange, 0, len(changes))
+	for _, change := range changes {
+		columns := definition.VisibilityColumns[change.table]
+		if change.table != definition.Table && change.operation == "update" && len(columns) > 0 {
+			var before, after map[string]json.RawMessage
+			if json.Unmarshal(change.oldValue, &before) == nil && json.Unmarshal(change.newValue, &after) == nil {
+				unchanged := true
+				for _, column := range columns {
+					left, leftOK := before[column]
+					right, rightOK := after[column]
+					// Older durable logs may omit newly declared columns. Reconcile.
+					if !leftOK || !rightOK || !bytes.Equal(canonicalSyncJSON(left), canonicalSyncJSON(right)) {
+						unchanged = false
+						break
+					}
+				}
+				if unchanged {
+					continue
+				}
+			}
+		}
+		result = append(result, change)
+	}
+	return result
+}
+
 func syncVisibilityChanged(changes []syncLogChange, sourceTable string) bool {
 	for _, change := range changes {
 		if change.table != sourceTable {
@@ -1389,7 +1459,6 @@ func (s *Server) scheduleSyncDelivery(subscription *syncSubscription) {
 }
 
 func (s *Server) resetSyncsForVisibilityChange(change tableChange) {
-	changedTables := tableChangeTables(change)
 	s.wsMu.RLock()
 	connections := make([]*wsConn, 0)
 	for connection := range s.wsConns {
@@ -1403,7 +1472,7 @@ func (s *Server) resetSyncsForVisibilityChange(change tableChange) {
 		reset := make([]*syncSubscription, 0)
 		reconcile := make([]*syncSubscription, 0)
 		for id, subscription := range connection.syncs {
-			if intersectsStrings(subscription.definition.VisibilityTables, changedTables) {
+			if syncVisibilityAffected(subscription.definition, change) {
 				if subscription.definition.Mode == "progressive" {
 					reconcile = append(reconcile, subscription)
 					continue
