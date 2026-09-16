@@ -77,6 +77,8 @@ log.
 | `Progressive()` | Keep a bounded ordered top-N window and reconcile membership after changes. |
 | `Budget(rows, bytes)` | Cap the collection on both the server and client. |
 
+Use `Reads("tasks").Columns("spotId", "workspaceId", "deletedAt")` when only those fields can change membership. Updates to other columns advance the cursor without rerunning the handler. Inserts, deletes, and changes without enough evidence still reconcile. `VisibilityDependsOn("tasks")` explicitly requests whole-table invalidation and overrides column filtering. The runtime captures the dependency columns in durable logs for the same filtering after reconnect.
+
 `Progressive` is useful for feeds and recent-item lists. When an insert,
 delete, or reorder crosses the window boundary, the runtime reconciles the
 current keys and sends only the necessary upserts/deletes.

@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test:
     name: CI
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 30
     services:
       postgres:
@@ -57,6 +57,10 @@ jobs:
         run: go test -count=1 ./server/internal/server -run '^(TestPostgresScheduled|TestMigratingScheduler)'
         env:
           GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+      - name: Test durable sync visibility filtering
+        run: go test -tags integration -count=1 ./server/internal/server -run '^(TestSyncColumnVisibility|TestOfflineVisibilityChange)'
+        env:
+          TEST_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       - name: Build JavaScript packages
         run: pnpm build:packages
       - name: Test JavaScript workspace

@@ -74,7 +74,12 @@ Server auth, definition, or visibility changes reset the collection.
 
 Every table declared through `Reads(...)` is automatically an effective sync
 dependency. `VisibilityDependsOn(...)` remains available for dependencies that
-are not already declared as reads. A change to any dependency triggers an
+are not already declared as reads and explicitly observes the whole table.
+`Reads("tasks").Columns("spotId", "workspaceId", "deletedAt")` narrows update
+invalidation to those columns; filter and order columns are included too.
+Dependency columns are retained in the durable log so offline replay uses the
+same rule. Inserts, deletes, broad events, and old logs missing these columns
+still reconcile conservatively. A relevant dependency change triggers an
 authoritative handler reconciliation, so computed membership (for example a
 task appearing in an approver workspace) cannot be maintained by replaying the
 physical source row alone.
