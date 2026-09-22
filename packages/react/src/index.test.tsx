@@ -3,7 +3,7 @@ import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient, type OutboxIntent } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState, useOutboxIntents, useEntityIntentStatus } from "./index";
+import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState, useOutboxIntents, useEntityIntentStatus, useResetLocalReplica } from "./index";
 
 // Replica UI notifications coalesce at a browser paint. Keep every existing
 // identity, authority, and rendering assertion after that observable boundary.
@@ -604,6 +604,26 @@ describe("outbox intent hooks", () => {
   it("returns an empty list for clients without intent support", () => {
     const { result } = renderHook(() => useOutboxIntents(), { wrapper: wrapperFor(new FakeGonvexClient()) });
     expect(result.current).toEqual([]);
+  });
+});
+
+describe("useResetLocalReplica", () => {
+  it("tracks progress and surfaces the offline refusal", async () => {
+    let finish!: (value: { discardedIntents: number; resubscribed: number }) => void;
+    const resetLocalReplica = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockImplementationOnce(() => Promise.reject(new GonvexClientError("Cannot reset local data while offline.", { code: "disconnected" })));
+    const client = Object.assign(new FakeGonvexClient(), { resetLocalReplica });
+    const { result } = renderHook(() => useResetLocalReplica(), { wrapper: wrapperFor(client) });
+    let pending!: Promise<unknown>;
+    act(() => { pending = result.current.reset(); });
+    expect(result.current.isResetting).toBe(true);
+    await act(async () => { finish({ discardedIntents: 0, resubscribed: 2 }); await pending; });
+    expect(result.current.isResetting).toBe(false);
+    expect(resetLocalReplica).toHaveBeenCalledWith(undefined);
+    await act(async () => { await expect(result.current.reset({ keepOutbox: true })).rejects.toMatchObject({ code: "disconnected" }); });
+    expect(result.current.error).toMatchObject({ code: "disconnected" });
+    expect(result.current.isResetting).toBe(false);
   });
 });
 

@@ -1,9 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore as useReactSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
-import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type OutboxIntent, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
-export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type OutboxIntent } from "@gonvex/client";
+export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
 
 const GonvexContext = createContext<GonvexClient | null>(null);
@@ -2042,6 +2042,37 @@ export function useOutboxIntents(): readonly OutboxIntent[] {
 export function useEntityIntentStatus(entity: string, id: string | null | undefined): EntityIntentStatus | undefined {
   const intents = useOutboxIntents();
   return useMemo(() => (id ? entityStatusFromIntents(intents, entity, id) : undefined), [intents, entity, id]);
+}
+
+export type LocalReplicaReset = {
+  /** Rejects with `code: "disconnected"` while offline; nothing is cleared then. */
+  reset: (options?: ResetLocalReplicaOptions) => Promise<ResetLocalReplicaResult>;
+  isResetting: boolean;
+  error: Error | undefined;
+};
+
+/**
+ * Drive a "Clear cache" control: discards the persisted Local Replica and
+ * rehydrates it from the server, keeping queued intents unless asked.
+ */
+export function useResetLocalReplica(): LocalReplicaReset {
+  const client = useGonvexClient();
+  const [isResetting, setResetting] = useState(false);
+  const [error, setError] = useState<Error | undefined>();
+  const reset = useCallback(async (options?: ResetLocalReplicaOptions) => {
+    setResetting(true);
+    setError(undefined);
+    try {
+      return await client.resetLocalReplica(options);
+    } catch (cause) {
+      const failure = cause instanceof Error ? cause : new Error(String(cause));
+      setError(failure);
+      throw failure;
+    } finally {
+      setResetting(false);
+    }
+  }, [client]);
+  return { reset, isResetting, error };
 }
 
 export function useGonvexClient() {
