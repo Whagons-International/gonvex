@@ -797,6 +797,8 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
   }
 }
 
+export * from "./outbox.js";
+
 export function expoSQLite(database: ExpoSQLiteDatabase): LocalReplicaStorage {
   return new ExpoSQLiteLocalReplicaStorage(database);
 }
