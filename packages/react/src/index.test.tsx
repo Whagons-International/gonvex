@@ -1,9 +1,9 @@
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient } from "@gonvex/client";
+import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient, type OutboxIntent } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState } from "./index";
+import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState, useOutboxIntents, useEntityIntentStatus } from "./index";
 
 // Replica UI notifications coalesce at a browser paint. Keep every existing
 // identity, authority, and rendering assertion after that observable boundary.
@@ -564,6 +564,46 @@ describe("useGonvexConnectionState", () => {
 
     actAtPaint(() => client.setConnected(true));
     expect(result.current.isWebSocketConnected).toBe(true);
+  });
+});
+
+describe("outbox intent hooks", () => {
+  function intent(overrides: Partial<OutboxIntent>): OutboxIntent {
+    return { id: "r1", entryId: 1, reducer: "tasks.update", state: "pending", attempts: 0, createdAt: 1, nextAttemptAt: 1, args: {}, argsSummary: "{}", entities: [{ entity: "tasks", id: "t1" }], ...overrides };
+  }
+
+  it("tracks intents and per-row status reactively", () => {
+    const listeners = new Set<() => void>();
+    let snapshot: readonly OutboxIntent[] = [intent({})];
+    const client = Object.assign(new FakeGonvexClient(), {
+      subscribeIntents: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+      intentsSnapshot: () => snapshot,
+    });
+    const { result } = renderHook(() => ({
+      intents: useOutboxIntents(),
+      task: useEntityIntentStatus("tasks", "t1"),
+      other: useEntityIntentStatus("tasks", "t2"),
+      none: useEntityIntentStatus("tasks", undefined),
+    }), { wrapper: wrapperFor(client) });
+    expect(result.current.intents).toHaveLength(1);
+    expect(result.current.task).toBe("syncing");
+    expect(result.current.other).toBeUndefined();
+    expect(result.current.none).toBeUndefined();
+
+    act(() => { snapshot = [intent({ state: "failed", lastError: "pool timed out", errorClass: "transient" })]; for (const listener of listeners) listener(); });
+    expect(result.current.task).toBe("failed");
+
+    act(() => { snapshot = [intent({ state: "rejected" }), intent({ id: "r2", entryId: 2, state: "pending" })]; for (const listener of listeners) listener(); });
+    expect(result.current.task).toBe("rejected");
+
+    act(() => { snapshot = []; for (const listener of listeners) listener(); });
+    expect(result.current.task).toBeUndefined();
+    expect(result.current.intents).toEqual([]);
+  });
+
+  it("returns an empty list for clients without intent support", () => {
+    const { result } = renderHook(() => useOutboxIntents(), { wrapper: wrapperFor(new FakeGonvexClient()) });
+    expect(result.current).toEqual([]);
   });
 });
 
