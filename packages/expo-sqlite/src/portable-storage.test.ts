@@ -349,3 +349,15 @@ it("never rewinds a cursor and clears obsolete row authority during a full repla
     (await storage.loadEntityRows("tenant", "tasks", ["a"]))[0].row.name,
   ).toBe("Updated");
 });
+
+it("clears one replica scope for a cache reset without touching the offline session or other scopes", async () => {
+  const { storage } = fixture();
+  const identity = "identity\u0000ws://runtime\u0000account";
+  await storage.saveSession(identity, { directive: { protocolVersion: 1, scope: "s", visibilityScope: "visible", epoch: "e" } } as any);
+  await storage.replaceSnapshot({ entities: { tasks: { t1: { _id: "t1", name: "Cached" } } }, liveQueries: {} }, "visible");
+  await storage.replaceSnapshot({ entities: { tasks: { t2: { _id: "t2", name: "Other" } } }, liveQueries: {} }, "other");
+  await storage.clear("visible");
+  expect((await storage.load("visible"))?.entities.tasks?.t1).toBeUndefined();
+  expect((await storage.load("other"))?.entities.tasks?.t2).toMatchObject({ name: "Other" });
+  expect(await storage.loadSession(identity)).toMatchObject({ directive: { visibilityScope: "visible" } });
+});

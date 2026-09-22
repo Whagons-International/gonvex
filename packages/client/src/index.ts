@@ -367,6 +367,24 @@ export type OutboxRetryOptions = {
   maxBackoffMs?: number;
 };
 
+export type ResetLocalReplicaOptions = {
+  /**
+   * Keep the durable outbox (default true). Pending, failed and rejected
+   * intents survive the reset and their predictions are re-applied on top of
+   * the rehydrated data. `false` also deletes every intent of the active
+   * identity that is not already inflight or committed; use it only for an
+   * explicit "discard unsynced changes" action.
+   */
+  keepOutbox?: boolean;
+};
+
+export type ResetLocalReplicaResult = {
+  /** Intents deleted because `keepOutbox: false` was requested. */
+  discardedIntents: number;
+  /** Replica Collections and Live Queries re-requested from the server. */
+  resubscribed: number;
+};
+
 export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 10;
 export const DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS = 60_000;
 
@@ -780,6 +798,82 @@ export class GonvexClient {
         if (removed.localExecution && this.localExecutor) await this.rebaseLocalEntriesLocked(true);
       }
       return true;
+    }));
+  }
+
+  /**
+   * Discard the persisted Local Replica of the active identity (IndexedDB,
+   * Expo SQLite or any configured storage) and rehydrate it from the server.
+   *
+   * Online only: without an authenticated connection the call rejects with a
+   * `GonvexClientError` (`code: "disconnected"`) and changes nothing, so the
+   * user is never left with an empty cache that cannot be refilled. The saved
+   * offline session (identity and replica directive) is kept.
+   *
+   * By default the outbox is untouched: pending, failed and rejected intents
+   * stay durable, and the predictions of every live intent are re-applied
+   * immediately and recomputed as server data arrives. Active Replica
+   * Collections and Live Queries are re-requested without their old cursors,
+   * so the server sends full snapshots.
+   */
+  async resetLocalReplica(options: ResetLocalReplicaOptions = {}): Promise<ResetLocalReplicaResult> {
+    const refuse = (message: string) => new GonvexClientError(message, { code: "disconnected", operation: "query" });
+    if (this.manuallyClosed) throw new GonvexClientError("Gonvex client is closed", { code: "closed", operation: "query" });
+    await this.outboxReady;
+    await this.replicaReady;
+    if (!this.canSendReducerNow() || !this.hasAuthoritativeReplicaScope) {
+      throw refuse("Cannot reset local data while offline. Reconnect and try again; cached data was kept.");
+    }
+    const keepOutbox = options.keepOutbox !== false;
+    return this.inLocalLane(() => this.coordinateOutbox("intent", async () => {
+      const scope = this.outboxScope;
+      const replicaScope = this.replicaScope;
+      // Re-check under the lock: the connection may have dropped while waiting.
+      if (!this.canSendReducerNow() || !this.hasAuthoritativeReplicaScope) {
+        throw refuse("Cannot reset local data while offline. Reconnect and try again; cached data was kept.");
+      }
+      // Stop the server streaming into subscription ids we are about to retire.
+      for (const subscription of this.replicaSubscriptions.values()) {
+        if (subscription.socketGeneration !== undefined) this.send({ type: "replica.close", id: subscription.id });
+      }
+      for (const subscription of this.querySubscriptions.values()) {
+        if (subscription.socketGeneration !== undefined) this.send({ type: "query.unsubscribe", id: subscription.id });
+      }
+      this.pendingReplicaTransactions.length = 0;
+      await this.replica.clear(replicaScope);
+      this.resetReplicaScopeState();
+      this.rotateSubscriptionScopes();
+
+      let discardedIntents = 0;
+      if (!keepOutbox) {
+        for (const entry of await this.reducerOutbox.list(scope)) {
+          if (await this.reducerOutbox.discard(entry.id, ["pending", "failed", "rejected"])) discardedIntents += 1;
+        }
+      }
+      // replica.clear() dropped every overlay. Restore the stored predictions
+      // of live intents now; local intents are re-executed by the replay that
+      // each arriving snapshot schedules.
+      const entries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
+      this.replacingLocal = true;
+      try {
+        this.replaceLocalPredictions(entries.filter(entry => entry.state !== "committed").map(entry => ({ commandId: entry.idempotencyKey, patches: entry.patches ?? [] })));
+      } finally { this.replacingLocal = false; }
+      this.optimisticReducerIds.clear();
+      this.optimisticOutboxEntryIds.clear();
+      for (const entry of entries) {
+        this.optimisticOutboxEntryIds.set(entry.idempotencyKey, entry.id);
+        if (entry.state !== "committed" && entry.patches?.length) this.optimisticReducerIds.add(entry.idempotencyKey);
+      }
+
+      let resubscribed = 0;
+      if (scope === this.outboxScope && replicaScope === this.replicaScope) {
+        for (const subscription of this.replicaSubscriptions.values()) if (subscription.listeners.size > 0) resubscribed += 1;
+        for (const subscription of this.querySubscriptions.values()) if (subscription.listeners.size > 0) resubscribed += 1;
+        this.resumeQuerySubscriptions(true);
+        this.resumeReplicaSubscriptions();
+      }
+      this.refreshIntents();
+      return { discardedIntents, resubscribed };
     }));
   }
 

@@ -35,6 +35,14 @@ const increment = reducer({
   },
 });
 const ref: FunctionReference = { kind: "reducer", path: "increment", offline: { mode: "allowed" }, localExecution: 1 };
+const createTask = reducer({
+  args: schema.object({}), result: schema.string(),
+  run: async (ctx) => {
+    const created = await ctx.db.insert<{ _id: string } | string>("tasks", { count: 0, statusId: "new" });
+    return typeof created === "string" ? created : created._id;
+  },
+});
+const createRef: FunctionReference = { kind: "reducer", path: "createTask", offline: { mode: "allowed" }, localExecution: 1 };
 const clients: GonvexClient[] = [];
 const hosts: LocalReducerRuntime[] = [];
 
@@ -49,7 +57,7 @@ async function fixture() {
     liveQueries: { [collectionKey]: { signature: collectionKey, kind: "replica", entity: "tasks", key: "_id", ids: ["t1"], completeness: "complete", source: "server" } },
   }, "visible");
   const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }, retry?: OutboxRetryOptions) => {
-    const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment},artifactHash: "artifact"});
+    const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment, createTask},artifactHash: "artifact"});
     const client = new GonvexClient(url, {
       clientContract,
       project: "project", tenant: "tenant", identity: { sub: "account", iss: "issuer" },
@@ -869,5 +877,102 @@ describe("outbox scopes", () => {
     await expect(client.purgeOutboxScope(owner)).rejects.toThrow("active outbox scope");
     expect(await client.purgeForeignOutboxScopes()).toBe(1);
     expect((await createKvOutboxStore(kv).load()).map((entry) => entry.scope)).toEqual([owner]);
+  });
+});
+
+describe("local replica reset", () => {
+  const calls = (socket: Socket) => socket.sent.filter((message) => message.type === "reducer.call");
+  const opens = (socket: Socket) => socket.sent.filter((message) => message.type === "replica.open");
+
+  it("refuses while offline and keeps every cached row", async () => {
+    const { create, storage } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    await expect(client.resetLocalReplica()).rejects.toMatchObject({ code: "disconnected", message: expect.stringContaining("offline") });
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1);
+    expect((await storage.load("visible"))?.entities.tasks?.t1).toBeDefined();
+  });
+
+  it("discards persisted rows, resubscribes without cursors and re-applies kept intents", async () => {
+    const { create, kv, storage } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    await client.reducer(ref, {});
+    await client.reducer(ref, { amount: 10 });
+    const watch = client.watchReplica(collection, {});
+    const stop = watch.onUpdate(() => undefined);
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    // First intent parks as failed, the second is rejected: both stay durable.
+    socket.receive({ type: "reducer.error", id: calls(socket)[0].id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(2));
+    socket.receive({ type: "reducer.error", id: calls(socket)[1].id, error: "Task is archived", class: "rejected", retryable: false });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load()).map((entry) => entry.state)).toEqual(["failed", "rejected"]));
+    // A third edit on top of the parked one is still pending (sent, awaiting a verdict).
+    expect(await client.reducer(ref, { amount: 100 })).toBe(101);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(3));
+    await vi.waitFor(() => expect(opens(socket).length).toBeGreaterThan(0));
+    const opensBefore = opens(socket).length;
+
+    const result = await client.resetLocalReplica();
+    expect(result).toMatchObject({ discardedIntents: 0 });
+    expect(result.resubscribed).toBeGreaterThan(0);
+    // Persisted replica rows are gone; the outbox is untouched.
+    expect((await storage.load("visible"))?.entities.tasks?.t1).toBeUndefined();
+    expect((await createKvOutboxStore(kv).load()).map((entry) => entry.state)).toEqual(["failed", "rejected", "inflight"]);
+    expect(socket.sent.some((message) => message.type === "replica.close")).toBe(true);
+    await vi.waitFor(() => expect(opens(socket).length).toBeGreaterThan(opensBefore));
+    const reopen = opens(socket).at(-1)!;
+    expect(reopen.cursor).toBeUndefined();
+    expect(await client.outboxCount()).toBe(1);
+
+    // Rehydrate from the server: the failed and pending predictions are
+    // re-applied on top of the fresh base; the rejected one is not.
+    socket.receive({ type: "replica.snapshot", id: reopen.id, path: collection.path, key: "_id",
+      result: [{ _id: "t1", count: 0, statusId: "todo" }], cursor: { epoch: "epoch", revision: 5 } });
+    socket.receive({ type: "replica.ready", id: reopen.id, cursor: { epoch: "epoch", revision: 5 } });
+    await vi.waitFor(() => expect(client.localReplica.entity("tasks", "t1")?.count).toBe(101));
+    await vi.waitFor(async () => expect((await storage.load("visible"))?.entities.tasks?.t1).toMatchObject({ count: 0 }));
+    stop();
+  });
+
+  it("drops unsynced intents only when explicitly asked", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    socket.receive({ type: "reducer.error", id: calls(socket)[0].id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load())[0]?.state).toBe("failed"));
+    expect(await client.resetLocalReplica({ keepOutbox: false })).toMatchObject({ discardedIntents: 1 });
+    expect(await createKvOutboxStore(kv).load()).toEqual([]);
+    expect(client.localReplica.entity("tasks", "t1")).toBeUndefined();
+  });
+});
+
+describe("per-row intent status", () => {
+  it("reports syncing and failed for rows created locally and for updates", async () => {
+    const { create } = await fixture();
+    const client = create(undefined, undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    const stop = client.subscribeIntents(() => undefined);
+    const createdId = await client.reducer(createRef, {}) as string;
+    expect(typeof createdId).toBe("string");
+    expect(client.localReplica.entity("tasks", createdId)).toMatchObject({ count: 0, statusId: "new" });
+    await client.reducer(ref, {});
+    await vi.waitFor(() => {
+      expect(client.entityIntentStatus("tasks", createdId)).toBe("syncing");
+      expect(client.entityIntentStatus("tasks", "t1")).toBe("syncing");
+    });
+    const socket = await connect(client);
+    const calls = () => socket.sent.filter((message) => message.type === "reducer.call");
+    await vi.waitFor(() => expect(calls()).toHaveLength(1));
+    socket.receive({ type: "reducer.error", id: calls()[0].id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(() => expect(client.entityIntentStatus("tasks", createdId)).toBe("failed"));
+    // The unrelated update proceeds past the parked create and is still syncing.
+    await vi.waitFor(() => expect(calls()).toHaveLength(2));
+    expect(client.entityIntentStatus("tasks", "t1")).toBe("syncing");
+    socket.receive({ type: "reducer.result", id: calls()[1].id, result: 1, originCommandId: calls()[1].id });
+    await vi.waitFor(() => expect(client.entityIntentStatus("tasks", "t1")).toBeUndefined());
+    expect(client.entityIntentStatus("tasks", createdId)).toBe("failed");
+    stop();
   });
 });

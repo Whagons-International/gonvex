@@ -237,6 +237,35 @@ describe("GonvexClient", () => {
 		client.close();
 	});
 
+	it("re-applies optimistic overlays of queued reducers after a local replica reset", async () => {
+		vi.stubGlobal("navigator", { onLine: true });
+		const client = new GonvexClient("ws://runtime.test/ws", { outbox: { enabled: false } });
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.receive({ type: "session.ready", replica: testReplicaDirective });
+		await flushMicrotasks();
+		const reducerRef: FunctionReference = {
+			kind: "reducer", path: "tasks.create", offline: { mode: "allowed" },
+			optimistic: { transaction: { effects: [{ operation: "upsert", entity: "tasks", id: ["id"], value: { id: { $arg: "id" }, title: { $arg: "title" } } }] } },
+		};
+		const outcome = client.reducer(reducerRef, { id: "task-new", title: "Created offline" });
+		await vi.waitFor(() => expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1));
+		const call = sentMessages(socket).find((message) => message.type === "reducer.call")!;
+		socket.receive({ type: "reducer.error", id: call.id, path: call.path, error: "pool timed out", class: "transient", retryable: true });
+		await expect(outcome).resolves.toMatchObject({ status: "queued" });
+		expect(client.entityIntentStatus("tasks", "task-new")).toBeUndefined();
+		const stop = client.subscribeIntents(() => undefined);
+		await vi.waitFor(() => expect(client.entityIntentStatus("tasks", "task-new")).toBe("syncing"));
+
+		await client.resetLocalReplica();
+		expect(client.localReplica.entity("tasks", "task-new")).toMatchObject({ title: "Created offline" });
+		expect(await client.listIntents()).toEqual([expect.objectContaining({ id: call.id, state: "pending" })]);
+		expect(client.entityIntentStatus("tasks", "task-new")).toBe("syncing");
+		stop();
+		client.close();
+	});
+
 	it("queues an offline reducer before opening a socket when the current socket is closed", async () => {
 		installBrowserOnlineEvents();
 		vi.stubGlobal("navigator", { onLine: false });

@@ -287,6 +287,22 @@ await client.purgeForeignOutboxScopes();          // never automatic
 `@gonvex/react` exposes the same list through `useOutboxIntents()` and a
 per-row `useEntityIntentStatus(entity, id)`.
 
+### Resetting the local cache
+
+`client.resetLocalReplica({ keepOutbox = true })` implements a "Clear cache"
+setting without the app touching replica storage. It deletes the active
+identity's persisted replica rows (IndexedDB, Expo SQLite, or the configured
+storage), keeps the saved offline session, closes and re-opens every active
+Replica Collection and Live Query without cursors, and re-applies the
+predictions of all live intents so they reappear on top of the fresh
+snapshots. Pending, failed and rejected intents are kept unless
+`keepOutbox: false` is passed explicitly (inflight intents are never dropped).
+
+It is **online only**: offline (or before the socket is authenticated) it
+rejects with `GonvexClientError` `code: "disconnected"` and changes nothing,
+so the user is never left with an empty cache that cannot be refilled. React
+apps can use `useResetLocalReplica()` for `{ reset, isResetting, error }`.
+
 A parked intent lets later intents proceed; the server validates each of them
 on its own, so an intent that depended on the parked one is rejected rather
 than applied out of order. Retrying a parked intent after later intents
