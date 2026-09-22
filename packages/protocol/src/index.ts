@@ -324,6 +324,19 @@ export type ClientMessage =
     device?: BrowserTelemetryInfo;
   };
 
+/**
+ * Machine-readable disposition of a failed Reducer call.
+ *
+ * - `rejected`: the Reducer refused the intent (application throw, validation,
+ *   permission, conflict). Retrying the same call cannot succeed.
+ * - `transient`: infrastructure failed and the transaction rolled back. The
+ *   same idempotency key may be retried.
+ * - `update_required`: the client's Reducer artifact or contract is stale.
+ * - `unauthenticated`: the connection has no usable tenant session. Keep the
+ *   intent, re-authenticate, and retry.
+ */
+export type ReducerErrorClass = "rejected" | "transient" | "update_required" | "unauthenticated";
+
 export type ServerMessage =
 	| {
 		type: "query.batch";
@@ -489,7 +502,13 @@ export type ServerMessage =
   | { type: "query.error"; id: string; path?: string; error: string }
   | { type: "control.watermark"; id: string }
   | { type: "reducer.result"; id: string; path?: string; result: JsonValue; originCommandId: string; committedRevision?: number; trace?: MessageTrace }
-  | { type: "reducer.error"; id: string; path?: string; error: string; trace?: MessageTrace }
+  | {
+    type: "reducer.error"; id: string; path?: string; error: string; trace?: MessageTrace;
+    /** Absent from runtimes before 0.5.2-staging.15; treat absence as a legacy rejection. */
+    class?: ReducerErrorClass;
+    /** True when the same call (same idempotency key) may succeed later. */
+    retryable?: boolean;
+  }
   | { type: "action.result"; id: string; path?: string; result: JsonValue; committedRevision?: number; trace?: MessageTrace }
   | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "client.updateRequired"; reason: string; contract: number }

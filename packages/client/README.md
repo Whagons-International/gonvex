@@ -259,6 +259,39 @@ Reducer also declares optimistic UI metadata. Actions are never queued.
 Deterministic server errors are never queued and always roll an optimistic
 entity overlay back when one exists.
 
+### Queued intent lifecycle
+
+Runtimes from 0.5.2-staging.15 classify every `reducer.error` as `rejected`,
+`transient`, `update_required` or `unauthenticated` (also exposed as
+`GonvexClientError.errorClass` / `retryable`). The outbox acts on it:
+
+| Class | Outbox behaviour |
+| --- | --- |
+| `transient` (and timeouts) | Retry with exponential backoff. After `outbox.retry.maxAttempts` (default 10, backoff capped at `maxBackoffMs`, default 60s) the intent is parked as `failed`: kept durably with its prediction, and no longer blocking later intents. |
+| `unauthenticated` | Keep the intent, re-authenticate, retry. Does not spend the retry budget. |
+| `update_required` | Keep the intent pending and call `onUpdateRequired`. |
+| `rejected` | Roll the prediction back, rebase later local intents, fire `onReducerRejection`, and keep the intent as a `rejected` record until the app discards or retries it. |
+
+Older runtimes send no class: their errors are treated as rejections, except
+the legacy stale-artifact and "authenticate with an active tenant" messages.
+
+```ts
+const intents = await client.listIntents();       // or subscribeIntents()/intentsSnapshot()
+client.entityIntentStatus("tasks", taskId);       // "syncing" | "failed" | "rejected" | undefined
+await client.retryIntent(intent.id);              // same idempotency key, fresh budget
+await client.discardIntent(intent.id);            // pending/failed/rejected only
+await client.listOutboxScopes();                  // includes identities that never returned
+await client.purgeForeignOutboxScopes();          // never automatic
+```
+
+`@gonvex/react` exposes the same list through `useOutboxIntents()` and a
+per-row `useEntityIntentStatus(entity, id)`.
+
+A parked intent lets later intents proceed; the server validates each of them
+on its own, so an intent that depended on the parked one is rejected rather
+than applied out of order. Retrying a parked intent after later intents
+committed re-applies it on top of them.
+
 Live Queries persist their last verified window in the Local Replica and
 resubscribe after reconnect. Call `client.retryLiveQuery(ref, args)` to force a
 re-request after a server error. `useQueryResult` is for one-shot Queries.
