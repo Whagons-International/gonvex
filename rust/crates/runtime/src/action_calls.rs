@@ -613,15 +613,27 @@ fn origin(url: &Url) -> Result<String, String> {
 mod fetch_tests {
     use super::*;
 
+    /// Consumes the HTTP request head so the test server replies only after
+    /// the client has finished sending it.
+    async fn read_request_head(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "client closed before sending the request head");
+            request.extend_from_slice(&chunk[..read]);
+        }
+    }
+
     #[tokio::test]
     async fn a_body_timeout_is_reported_as_a_timeout_not_a_decode_failure() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            read_request_head(&mut socket).await;
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
                 .await
@@ -649,13 +661,12 @@ mod fetch_tests {
 
     #[tokio::test]
     async fn response_body_can_arrive_after_thirty_seconds_within_the_action_deadline() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            read_request_head(&mut socket).await;
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
                 .await
