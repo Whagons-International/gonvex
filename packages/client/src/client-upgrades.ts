@@ -49,7 +49,8 @@ export function migrateClientData(
       return { ...entry, path: intent.path, args: intent.args,
         receiptPath: originalPath, patches: [],
         // Committed responses awaiting a watermark must be reconciled by their original receipt too.
-        state: "pending", nextAttemptAt: 0 };
+        // Parked and rejected records wait for the user; an upgrade must not resend them.
+        state: entry.state === "failed" || entry.state === "rejected" ? entry.state : "pending", nextAttemptAt: 0 };
     });
   }
   return { snapshots: nextSnapshots, entries: nextEntries };
