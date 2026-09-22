@@ -806,22 +806,6 @@ async fn execute_in_transaction(
     Ok(shape_result(rows, &plan.result_path, total, offset, limit))
 }
 
-fn compile_expression(
-    expression: &LiveExpression,
-    args: &Map<String, Value>,
-    parameters: &mut Vec<Value>,
-    row_alias: &str,
-) -> Result<String, LiveQueryError> {
-    compile_related_expression(
-        expression,
-        args,
-        parameters,
-        row_alias,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-    )
-}
-
 fn relation_tables(expression: Option<&LiveExpression>) -> BTreeSet<String> {
     let mut result = BTreeSet::new();
     if let Some(expression) = expression {
@@ -1586,6 +1570,22 @@ fn bind_scalar<'query>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compile_expression(
+        expression: &LiveExpression,
+        args: &Map<String, Value>,
+        parameters: &mut Vec<Value>,
+        row_alias: &str,
+    ) -> Result<String, LiveQueryError> {
+        compile_related_expression(
+            expression,
+            args,
+            parameters,
+            row_alias,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+    }
 
     fn feed_change(table: &str, changed_columns: &[&str]) -> LogChange {
         LogChange {
