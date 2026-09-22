@@ -45,12 +45,13 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.1.2 --activate
       - name: Install workspace
         run: pnpm install --frozen-lockfile
-      - name: Validate repository script contracts
-        run: node --test scripts/*.test.mjs
       - name: Reject retired Go sources
         run: test -z "$(find . -path ./node_modules -prune -o -path ./rust/target -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -print)"
       - name: Build JavaScript packages
         run: pnpm build:packages
+      # Some script contracts import built package output (packages/*/dist).
+      - name: Validate repository script contracts
+        run: node --test scripts/*.test.mjs
       - name: Test JavaScript workspace
         run: pnpm -r test
       - name: Type-check JavaScript workspace
