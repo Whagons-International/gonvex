@@ -5,6 +5,7 @@ pub mod control;
 mod data_ingest;
 mod dashboard;
 pub mod execution;
+pub mod error_class;
 pub mod external_auth;
 pub mod host_calls;
 pub mod live_query;
@@ -36,8 +37,8 @@ use chrono::{SecondsFormat, Utc};
 use futures_util::{Stream, StreamExt};
 use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_protocol::{
-    ClientMessage, ExecutionScope, ReducerCallRequest, ReplicaOpenRequest, ServerCapabilities,
-    ServerMessage, PROTOCOL_VERSION,
+    ClientMessage, ExecutionScope, ReducerCallRequest, ReducerErrorClass, ReplicaOpenRequest,
+    ServerCapabilities, ServerMessage, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -1843,12 +1844,12 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                 }
                 Ok(ClientMessage::ReducerCallMany { calls }) => {
                     if calls.len() > 256 {
-                        let response = ServerMessage::ReducerError {
-                            id: String::new(),
-                            path: None,
-                            error: "reducer batch cannot contain more than 256 calls".to_owned(),
-                            trace: None,
-                        };
+                        let response = ReducerErrorClass::Rejected.reducer_error(
+                            String::new(),
+                            None,
+                            "reducer batch cannot contain more than 256 calls".to_owned(),
+                            None,
+                        );
                         if send_json(&mut socket, &response).await.is_err() {
                             break;
                         }
@@ -2757,21 +2758,22 @@ async fn call_reducer(
                 committed_revision: None,
                 trace,
             },
-            Err(error) => ServerMessage::ReducerError {
-                id,
-                path: Some(path),
-                error: error.to_string(),
-                trace,
-            },
+            Err(error) => {
+                error
+                    .reducer_error_class()
+                    .reducer_error(id, Some(path), error.to_string(), trace)
+            }
         };
     }
     let Some(session) = session else {
-        return ServerMessage::ReducerError {
+        // The intent is fine; this connection just has no tenant session yet
+        // (or lost it). Clients keep the intent and re-authenticate.
+        return ReducerErrorClass::Unauthenticated.reducer_error(
             id,
-            path: Some(path),
-            error: "authenticate with an active tenant before calling a Reducer".to_owned(),
+            Some(path),
+            "authenticate with an active tenant before calling a Reducer".to_owned(),
             trace,
-        };
+        );
     };
     match runtime
         .execute_tenant_reducer_with_access(session, &id, idempotency_key.as_deref(), &path, args,
@@ -2786,12 +2788,11 @@ async fn call_reducer(
             committed_revision: result.committed_revision,
             trace,
         },
-        Err(error) => ServerMessage::ReducerError {
-            id,
-            path: Some(path),
-            error: error.to_string(),
-            trace,
-        },
+        Err(error) => {
+            error
+                .reducer_error_class()
+                .reducer_error(id, Some(path), error.to_string(), trace)
+        }
     }
 }
 
@@ -3507,12 +3508,12 @@ mod tests {
 
     #[test]
     fn failed_or_tenant_calls_do_not_emit_control_watermarks() {
-        let response = ServerMessage::ReducerError {
-            id: "control-command".to_owned(),
-            path: Some("control.invitations.update".to_owned()),
-            error: "denied".to_owned(),
-            trace: None,
-        };
+        let response = ReducerErrorClass::Rejected.reducer_error(
+            "control-command".to_owned(),
+            Some("control.invitations.update".to_owned()),
+            "denied".to_owned(),
+            None,
+        );
         let messages = ordered_control_completion(response, Vec::new(), false);
         assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0], ServerMessage::ReducerError { .. }));

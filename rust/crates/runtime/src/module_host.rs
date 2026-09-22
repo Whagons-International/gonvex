@@ -62,7 +62,12 @@ pub enum ModuleHostError {
     #[error(transparent)]
     Frame(#[from] FrameError),
     #[error("TypeScript module host returned {code}: {message}")]
-    Remote { code: String, message: String },
+    Remote {
+        code: String,
+        message: String,
+        /// The host's own verdict that the same request could succeed later.
+        retryable: bool,
+    },
     #[error("TypeScript module host returned an unexpected response")]
     UnexpectedResponse,
 }
@@ -335,6 +340,7 @@ fn remote_error(error: WireError) -> ModuleHostError {
     ModuleHostError::Remote {
         code: error.code,
         message: error.message,
+        retryable: error.retryable,
     }
 }
 

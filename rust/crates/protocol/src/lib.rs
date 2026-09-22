@@ -18,6 +18,55 @@ pub enum ExecutionScope {
     Control,
 }
 
+/// Machine-readable disposition of a failed Reducer call.
+///
+/// Optional on the wire: a client that does not know the field ignores it,
+/// and a client talking to an older runtime that never sends it falls back to
+/// treating every `reducer.error` as a permanent rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReducerErrorClass {
+    /// The Reducer ran (or was validated) and refused the intent. Retrying the
+    /// same call cannot succeed: application throws, argument validation,
+    /// permission and conflict errors.
+    Rejected,
+    /// Infrastructure failed before the intent could commit: database
+    /// connectivity, pool exhaustion, deadlines, module-host restarts. The
+    /// transaction rolled back; the same idempotency key may be retried.
+    Transient,
+    /// The client's Reducer artifact or client contract is no longer accepted.
+    /// Keep the intent and install the new application build first.
+    UpdateRequired,
+    /// The connection has no usable tenant session. Keep the intent,
+    /// re-authenticate, then retry.
+    Unauthenticated,
+}
+
+impl ReducerErrorClass {
+    /// Build the classified wire error for one failed Reducer call.
+    pub fn reducer_error(
+        self,
+        id: String,
+        path: Option<String>,
+        error: String,
+        trace: Option<MessageTrace>,
+    ) -> ServerMessage {
+        ServerMessage::ReducerError {
+            id,
+            path,
+            error,
+            class: Some(self),
+            retryable: Some(self.retryable()),
+            trace,
+        }
+    }
+
+    /// True when the same call (same idempotency key) may succeed later.
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::Transient | Self::Unauthenticated)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplicaCursor {
@@ -456,6 +505,12 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         error: String,
+        /// Optional classification; absent from runtimes before 0.5.2-staging.15.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<ReducerErrorClass>,
+        /// Mirrors `class.retryable()` for consumers that only need a boolean.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trace: Option<MessageTrace>,
     },
@@ -617,8 +672,52 @@ mod tests {
             r#"{"type":"replica.transaction","cursor":{"epoch":"epoch-1","revision":42},"originCommandId":"command-1","changes":[{"entity":"tasks","id":"task-1","operation":"update","oldValue":{"status":"ready"},"newValue":{"status":"started"},"changedColumns":["status"]}]}"#,
             r#"{"type":"replica.transaction","cursor":{"epoch":"epoch-1","revision":43},"originCommandId":"agent-child","provenance":{"rootCommandId":"agent-root","rootChannel":"ui","channel":"agent","actorAccountId":"account-1","actorMemberId":"member-1","onBehalfOfMemberId":"member-1","agentExecutionId":"agent-1"},"changes":[{"entity":"tasks","id":"task-1","operation":"update","newValue":{"status":"started"}}]}"#,
             r#"{"type":"replica.ready","id":"replica-1","cursor":{"epoch":"epoch-1","revision":42},"digest":"digest-2","truncated":false}"#,
+            r#"{"type":"reducer.error","id":"r-1","path":"tasks.start","error":"permission denied"}"#,
+            r#"{"type":"reducer.error","id":"r-2","path":"tasks.start","error":"pool timed out","class":"transient","retryable":true}"#,
+            r#"{"type":"reducer.error","id":"r-3","error":"STALE_REDUCER_ARTIFACT","class":"update_required","retryable":false}"#,
+            r#"{"type":"reducer.error","id":"r-4","error":"sign in","class":"unauthenticated","retryable":true}"#,
+            r#"{"type":"reducer.error","id":"r-5","error":"denied","class":"rejected","retryable":false}"#,
         ] {
             round_trip_server(frame);
         }
+    }
+
+    #[test]
+    fn classified_reducer_errors_serialize_class_and_retryable() {
+        let frame = ReducerErrorClass::Transient.reducer_error(
+            "r-1".to_owned(),
+            Some("tasks.start".to_owned()),
+            "database unavailable".to_owned(),
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(frame).expect("serialized"),
+            serde_json::json!({
+                "type": "reducer.error",
+                "id": "r-1",
+                "path": "tasks.start",
+                "error": "database unavailable",
+                "class": "transient",
+                "retryable": true,
+            })
+        );
+        assert!(ReducerErrorClass::Unauthenticated.retryable());
+        assert!(!ReducerErrorClass::Rejected.retryable());
+        assert!(!ReducerErrorClass::UpdateRequired.retryable());
+    }
+
+    #[test]
+    fn legacy_reducer_errors_without_a_class_still_decode() {
+        let frame: ServerMessage =
+            serde_json::from_str(r#"{"type":"reducer.error","id":"r-1","error":"boom"}"#)
+                .expect("legacy frame");
+        assert!(matches!(
+            frame,
+            ServerMessage::ReducerError {
+                class: None,
+                retryable: None,
+                ..
+            }
+        ));
     }
 }

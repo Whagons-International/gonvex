@@ -6,6 +6,7 @@
 //! after the JavaScript handler returns successfully.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
@@ -22,6 +23,7 @@ use sqlx::types::Json;
 use sqlx::{Column, Either, Executor, Postgres, Row, TypeInfo, ValueRef};
 use uuid::Uuid;
 
+use crate::error_class::TransientFault;
 use crate::module_host::HostCallHandler;
 
 const DEFAULT_KEY: &str = "id";
@@ -65,6 +67,7 @@ pub struct DatabaseHostCalls {
     intent_tenant: String,
     intent_command: String,
     deferred_ordinals: BTreeMap<String, u64>,
+    fault: Arc<TransientFault>,
 }
 
 impl DatabaseHostCalls {
@@ -81,7 +84,13 @@ impl DatabaseHostCalls {
             intent_tenant: String::new(),
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
+            fault: Arc::default(),
         }
+    }
+
+    /// Shared record of transient database failures seen by this invocation.
+    pub fn transient_fault(&self) -> Arc<TransientFault> {
+        self.fault.clone()
     }
 
     pub fn with_provenance(
@@ -130,16 +139,17 @@ impl DatabaseHostCalls {
             .transaction
             .take()
             .ok_or_else(|| "the invocation transaction is already closed".to_owned())?;
+        let fault = self.fault.clone();
         if self.capability == DatabaseCapability::Reducer && success {
             transaction
                 .commit()
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| fault.database(error))
         } else {
             transaction
                 .rollback()
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| fault.database(error))
         }
     }
 
@@ -208,11 +218,12 @@ impl HostCallHandler for DatabaseHostCalls {
                 let email = self.actor_email.clone();
                 let provenance = self.provenance.clone();
                 let allocated_id = self.deferred_id("action");
+                let fault = self.fault.clone();
                 let id = self
                     .transaction()?
                     .enqueue_action_with_id(&allocated_id, function, &args, &account_id, &email, &provenance)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| fault.database(error))?;
                 Ok(Value::String(id))
             }
             HostCallFrame::ScheduleAfter {
@@ -278,6 +289,7 @@ impl DatabaseHostCalls {
         let account_id = self.actor_account_id.clone();
         let email = self.actor_email.clone();
         let provenance = self.provenance.clone();
+        let fault = self.fault.clone();
         self.transaction()?
             .enqueue_action(
                 SCHEDULE_OUTBOX_PATH,
@@ -287,7 +299,7 @@ impl DatabaseHostCalls {
                 &provenance,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.database(error))?;
         Ok(Value::String(job_id))
     }
 
@@ -302,11 +314,15 @@ impl DatabaseHostCalls {
             _ => return Err("query parameters must be an array".to_owned()),
         };
         let parameter_types = if parameters.iter().any(Value::is_array) {
+            let fault = self.fault.clone();
             let description = (&mut **self.transaction()?.transaction())
                 .describe(statement.trim())
                 .await
                 .map_err(|error| {
-                    format!("could not resolve PostgreSQL parameter types: {error}")
+                    format!(
+                        "could not resolve PostgreSQL parameter types: {}",
+                        fault.sql(error)
+                    )
                 })?;
             match description.parameters() {
                 Some(Either::Left(types)) => types
@@ -323,11 +339,12 @@ impl DatabaseHostCalls {
             query = bind_query_value(query, value, parameter_types.get(index).map(String::as_str))
                 .map_err(|error| format!("parameter ${}: {error}", index + 1))?;
         }
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let rows = query
             .fetch_all(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         rows_to_json(rows)
     }
 
@@ -376,11 +393,12 @@ impl DatabaseHostCalls {
         );
         let payload = Value::Object(values.into_iter().collect());
         let query = sqlx::query(&statement).bind(Json(payload));
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let row = query
             .fetch_optional(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         row.map(row_to_json)
             .transpose()
             .map(|row| row.unwrap_or(Value::Null))
@@ -414,11 +432,12 @@ impl DatabaseHostCalls {
         let payload = Value::Object(values.into_iter().collect());
         let mut query = sqlx::query(&statement).bind(Json(payload));
         query = bind_value(query, &id)?;
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let row = query
             .fetch_optional(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         row.map(row_to_json)
             .transpose()
             .map(|row| row.unwrap_or(Value::Null))
@@ -430,11 +449,12 @@ impl DatabaseHostCalls {
         require_row_id(&id)?;
         let statement = format!("DELETE FROM {table} WHERE {key} = $1");
         let query = bind_value(sqlx::query(&statement), &id)?;
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let result = query
             .execute(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
     }
 
@@ -462,11 +482,12 @@ impl DatabaseHostCalls {
         for id in ids {
             query = bind_value(query, id)?;
         }
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let result = query
             .execute(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
     }
 
@@ -518,12 +539,13 @@ impl DatabaseHostCalls {
               AND index.indisprimary
             ORDER BY key.position
         "#;
+        let fault = self.fault.clone();
         let keys = sqlx::query_as::<_, (String, String, bool)>(statement)
             .bind(schema_name)
             .bind(table_name)
             .fetch_all(&mut **self.transaction()?.transaction())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         let key = match keys.as_slice() {
             [] => TableKey {
                 column: DEFAULT_KEY.to_owned(),
@@ -1031,6 +1053,7 @@ mod tests {
             intent_tenant: String::new(),
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
+            fault: Default::default(),
         };
         let mut calls = calls;
         assert_eq!(
@@ -1062,6 +1085,7 @@ mod tests {
             intent_tenant: String::new(),
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
+            fault: Default::default(),
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());
