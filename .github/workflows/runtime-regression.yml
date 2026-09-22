@@ -45,6 +45,9 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.1.2 --activate
       - name: Install workspace
         run: pnpm install --frozen-lockfile
+      # packages/gonvex local-bindings tests execute generated code in headless Chromium.
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps --only-shell chromium
       - name: Reject retired Go sources
         run: test -z "$(find . -path ./node_modules -prune -o -path ./rust/target -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -print)"
       - name: Build JavaScript packages
