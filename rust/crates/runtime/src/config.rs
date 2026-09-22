@@ -32,7 +32,25 @@ pub struct Config {
     pub runtime_version: String,
     pub sandbox: SandboxConfig,
     pub storage: StorageConfig,
+    /// Trusted backend services that may open tenant-scoped service sessions.
+    /// Parsed from `GONVEX_SERVICE_PRINCIPALS`; empty disables the feature.
+    pub service_principals: Vec<ServicePrincipalConfig>,
 }
+
+/// One trusted backend service credential. Only the SHA-256 digest of the
+/// credential is configured, so the runtime environment never holds the
+/// secret itself. See `service_principal.rs` for the capability model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServicePrincipalConfig {
+    pub id: String,
+    pub token_sha256: String,
+    pub projects: Vec<String>,
+    pub functions: Vec<String>,
+    pub max_delegation: Duration,
+}
+
+pub const SERVICE_PRINCIPAL_DEFAULT_DELEGATION_SECONDS: u64 = 900;
+pub const SERVICE_PRINCIPAL_MAX_DELEGATION_SECONDS: u64 = 3600;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StorageConfig {
@@ -131,6 +149,8 @@ pub enum ConfigError {
     Integer { name: &'static str, value: String },
     #[error("{name} must be a JSON object of string values")]
     StringMap { name: &'static str },
+    #[error("GONVEX_SERVICE_PRINCIPALS is invalid: {0}")]
+    ServicePrincipals(String),
 }
 
 impl Config {
@@ -347,6 +367,7 @@ impl Config {
                 )?,
                 public_base_url: non_empty(lookup("GONVEX_PUBLIC_URL")).unwrap_or_default(),
             },
+            service_principals: service_principals(lookup("GONVEX_SERVICE_PRINCIPALS"))?,
         })
     }
 }
@@ -434,6 +455,103 @@ fn string_map(
         .collect())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServicePrincipalEntry {
+    id: String,
+    token_sha256: String,
+    projects: Vec<String>,
+    #[serde(default)]
+    functions: Vec<String>,
+    #[serde(default)]
+    max_delegation_seconds: Option<u64>,
+}
+
+/// Parses `GONVEX_SERVICE_PRINCIPALS`, a JSON array such as
+/// `[{"id":"api-gateway","tokenSha256":"<64 hex>","projects":["p1"],
+///    "functions":["apiKeys.authenticate"],"maxDelegationSeconds":900}]`.
+/// Invalid entries fail startup instead of silently disabling a credential.
+fn service_principals(value: Option<String>) -> Result<Vec<ServicePrincipalConfig>, ConfigError> {
+    let Some(value) = non_empty(value) else {
+        return Ok(Vec::new());
+    };
+    let invalid = |message: String| ConfigError::ServicePrincipals(message);
+    let entries: Vec<ServicePrincipalEntry> =
+        serde_json::from_str(&value).map_err(|error| invalid(error.to_string()))?;
+    let mut principals: Vec<ServicePrincipalConfig> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let id = entry.id.trim().to_owned();
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(invalid(format!(
+                "principal id {id:?} must be 1-64 of [A-Za-z0-9_-]"
+            )));
+        }
+        if principals.iter().any(|principal| principal.id == id) {
+            return Err(invalid(format!("principal id {id:?} is duplicated")));
+        }
+        let token_sha256 = entry.token_sha256.trim().to_ascii_lowercase();
+        if token_sha256.len() != 64 || !token_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid(format!(
+                "principal {id:?} tokenSha256 must be 64 hex characters"
+            )));
+        }
+        if principals
+            .iter()
+            .any(|principal| principal.token_sha256 == token_sha256)
+        {
+            return Err(invalid(format!(
+                "principal {id:?} reuses another principal's credential"
+            )));
+        }
+        let projects: Vec<String> = entry
+            .projects
+            .iter()
+            .map(|project| project.trim().to_owned())
+            .filter(|project| !project.is_empty())
+            .collect();
+        if projects.is_empty() {
+            return Err(invalid(format!(
+                "principal {id:?} must list at least one project"
+            )));
+        }
+        let functions: Vec<String> = entry
+            .functions
+            .iter()
+            .map(|function| function.trim().to_owned())
+            .filter(|function| !function.is_empty())
+            .collect();
+        if functions
+            .iter()
+            .any(|function| function.starts_with("control.") || function.contains('*'))
+        {
+            return Err(invalid(format!(
+                "principal {id:?} functions must be exact tenant module paths"
+            )));
+        }
+        let seconds = entry
+            .max_delegation_seconds
+            .unwrap_or(SERVICE_PRINCIPAL_DEFAULT_DELEGATION_SECONDS);
+        if !(60..=SERVICE_PRINCIPAL_MAX_DELEGATION_SECONDS).contains(&seconds) {
+            return Err(invalid(format!(
+                "principal {id:?} maxDelegationSeconds must be between 60 and {SERVICE_PRINCIPAL_MAX_DELEGATION_SECONDS}"
+            )));
+        }
+        principals.push(ServicePrincipalConfig {
+            id,
+            token_sha256,
+            projects,
+            functions,
+            max_delegation: Duration::from_secs(seconds),
+        });
+    }
+    Ok(principals)
+}
+
 fn is_git_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -478,6 +596,59 @@ mod tests {
             config.runtime_version,
             "0123456789abcdef0123456789abcdef01234567"
         );
+    }
+
+    #[test]
+    fn parses_service_principals() {
+        let hash = "AB".repeat(32);
+        let config = config(&[(
+            "GONVEX_SERVICE_PRINCIPALS",
+            &format!(
+                r#"[{{"id":"api-gateway","tokenSha256":"{hash}","projects":[" p1 "],"functions":["keys.authenticate"]}}]"#
+            ),
+        )])
+        .expect("config");
+        assert_eq!(config.service_principals.len(), 1);
+        let principal = &config.service_principals[0];
+        assert_eq!(principal.id, "api-gateway");
+        assert_eq!(principal.token_sha256, "ab".repeat(32));
+        assert_eq!(principal.projects, vec!["p1".to_owned()]);
+        assert_eq!(principal.functions, vec!["keys.authenticate".to_owned()]);
+        assert_eq!(principal.max_delegation, Duration::from_secs(900));
+        assert!(config_default_has_no_principals());
+    }
+
+    fn config_default_has_no_principals() -> bool {
+        config(&[]).expect("config").service_principals.is_empty()
+    }
+
+    #[test]
+    fn rejects_invalid_service_principals() {
+        let hash = "ab".repeat(32);
+        for value in [
+            "not json".to_owned(),
+            format!(r#"[{{"id":"","tokenSha256":"{hash}","projects":["p"]}}]"#),
+            r#"[{"id":"a","tokenSha256":"short","projects":["p"]}]"#.to_owned(),
+            format!(r#"[{{"id":"a","tokenSha256":"{hash}","projects":[]}}]"#),
+            format!(
+                r#"[{{"id":"a","tokenSha256":"{hash}","projects":["p"],"functions":["control.x"]}}]"#
+            ),
+            format!(
+                r#"[{{"id":"a","tokenSha256":"{hash}","projects":["p"],"maxDelegationSeconds":5}}]"#
+            ),
+            format!(r#"[{{"id":"a","tokenSha256":"{hash}","projects":["p"],"extra":true}}]"#),
+            format!(
+                r#"[{{"id":"a","tokenSha256":"{hash}","projects":["p"]}},{{"id":"b","tokenSha256":"{hash}","projects":["p"]}}]"#
+            ),
+        ] {
+            assert!(
+                matches!(
+                    config(&[("GONVEX_SERVICE_PRINCIPALS", &value)]),
+                    Err(ConfigError::ServicePrincipals(_))
+                ),
+                "{value} should be rejected"
+            );
+        }
     }
 
     #[test]

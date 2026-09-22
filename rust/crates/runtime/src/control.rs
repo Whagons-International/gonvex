@@ -4141,6 +4141,11 @@ fn random_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
 }
 
+/// A single-use grant credential redeemed through the impersonation path.
+pub(crate) fn service_grant_token() -> String {
+    secure_token("imp")
+}
+
 fn secure_token(kind: &str) -> String {
     let mut secret = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut secret);
