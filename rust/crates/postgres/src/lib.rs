@@ -1215,7 +1215,7 @@ impl TenantTransaction {
                (id, action_path, args, actor_user_id, actor_email, provenance)
                VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6)"#,
         )
-        .bind(&id)
+        .bind(id)
         .bind(action_path)
         .bind(Json(args.clone()))
         .bind(actor_account_id)
