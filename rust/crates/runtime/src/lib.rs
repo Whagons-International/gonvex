@@ -2,10 +2,10 @@ pub mod action_calls;
 pub mod change_feed;
 pub mod config;
 pub mod control;
-mod data_ingest;
 mod dashboard;
-pub mod execution;
+mod data_ingest;
 pub mod error_class;
+pub mod execution;
 pub mod external_auth;
 pub mod host_calls;
 pub mod live_query;
@@ -344,7 +344,10 @@ impl Runtime {
             .route("/dev/internal/e2e/members", post(provision_e2e_member))
             .layer(DefaultBodyLimit::max(64 << 20))
             .layer(middleware::from_fn(dev_cors))
-            .layer(middleware::from_fn_with_state(self.clone(), dashboard::invalidate))
+            .layer(middleware::from_fn_with_state(
+                self.clone(),
+                dashboard::invalidate,
+            ))
             .with_state(self.clone())
     }
 
@@ -1505,10 +1508,22 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
             break;
         };
         if tenant_session.is_some() {
-            if let Some(module) = runtime.inner.modules.project(&control_connection.project_id).await {
+            if let Some(module) = runtime
+                .inner
+                .modules
+                .project(&control_connection.project_id)
+                .await
+            {
                 if let Some(required) = module.client_contract {
                     if connected_client_contract != Some(required) {
-                        let _ = send_json(&mut socket, &ServerMessage::ClientUpdateRequired { reason: "CLIENT_UPDATE_REQUIRED".into(), contract: required }).await;
+                        let _ = send_json(
+                            &mut socket,
+                            &ServerMessage::ClientUpdateRequired {
+                                reason: "CLIENT_UPDATE_REQUIRED".into(),
+                                contract: required,
+                            },
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -1537,10 +1552,24 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     )
                     .await;
                     connected_client_contract = client_contract;
-                    if let Some(module) = runtime.inner.modules.project(&authenticated_control.project_id).await {
+                    if let Some(module) = runtime
+                        .inner
+                        .modules
+                        .project(&authenticated_control.project_id)
+                        .await
+                    {
                         if let Some(required) = module.client_contract {
-                            if authenticated_control.tenant.is_some() && client_contract != Some(required) {
-                                let _ = send_json(&mut socket, &ServerMessage::ClientUpdateRequired { reason: "CLIENT_UPDATE_REQUIRED".into(), contract: required }).await;
+                            if authenticated_control.tenant.is_some()
+                                && client_contract != Some(required)
+                            {
+                                let _ = send_json(
+                                    &mut socket,
+                                    &ServerMessage::ClientUpdateRequired {
+                                        reason: "CLIENT_UPDATE_REQUIRED".into(),
+                                        contract: required,
+                                    },
+                                )
+                                .await;
                                 break;
                             }
                         }
@@ -2776,8 +2805,20 @@ async fn call_reducer(
         );
     };
     match runtime
-        .execute_tenant_reducer_with_access(session, &id, idempotency_key.as_deref(), &path, args,
-            execution::ExecutionAccess { expected_artifact_hash: artifact_hash, client_contract, receipt_path, intent_entropy, ..Default::default() })
+        .execute_tenant_reducer_with_access(
+            session,
+            &id,
+            idempotency_key.as_deref(),
+            &path,
+            args,
+            execution::ExecutionAccess {
+                expected_artifact_hash: artifact_hash,
+                client_contract,
+                receipt_path,
+                intent_entropy,
+                ..Default::default()
+            },
+        )
         .await
     {
         Ok(result) => ServerMessage::ReducerResult {

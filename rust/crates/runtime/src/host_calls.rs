@@ -30,10 +30,22 @@ const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
 
 // Same seed and UUID layout as module-sdk reducerRowId.
-fn intent_deferred_id(tenant: &str, account: &str, command: &str, kind: &str, ordinal: u64) -> String {
+fn intent_deferred_id(
+    tenant: &str,
+    account: &str,
+    command: &str,
+    kind: &str,
+    ordinal: u64,
+) -> String {
     let seed = serde_json::to_vec(&serde_json::json!([
-        "gonvex.reducer.ids.v1", tenant, account, command, format!("deferred:{kind}"), ordinal
-    ])).expect("intent seed serializes");
+        "gonvex.reducer.ids.v1",
+        tenant,
+        account,
+        command,
+        format!("deferred:{kind}"),
+        ordinal
+    ]))
+    .expect("intent seed serializes");
     let digest = Sha256::digest(seed);
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
@@ -114,9 +126,17 @@ impl DatabaseHostCalls {
     }
 
     fn deferred_id(&mut self, kind: &str) -> String {
-        if self.intent_command.is_empty() { return Uuid::new_v4().to_string(); }
+        if self.intent_command.is_empty() {
+            return Uuid::new_v4().to_string();
+        }
         let ordinal = self.deferred_ordinals.entry(kind.to_owned()).or_default();
-        let id = intent_deferred_id(&self.intent_tenant, &self.actor_account_id, &self.intent_command, kind, *ordinal);
+        let id = intent_deferred_id(
+            &self.intent_tenant,
+            &self.actor_account_id,
+            &self.intent_command,
+            kind,
+            *ordinal,
+        );
         *ordinal += 1;
         id
     }
@@ -182,7 +202,11 @@ impl HostCallHandler for DatabaseHostCalls {
                 statement,
                 parameters,
             } => self.query(&statement, parameters).await,
-            HostCallFrame::DbInsert { table, row, generated_id } => {
+            HostCallFrame::DbInsert {
+                table,
+                row,
+                generated_id,
+            } => {
                 self.require_write()?;
                 self.insert(&table, row, generated_id).await
             }
@@ -221,7 +245,14 @@ impl HostCallHandler for DatabaseHostCalls {
                 let fault = self.fault.clone();
                 let id = self
                     .transaction()?
-                    .enqueue_action_with_id(&allocated_id, function, &args, &account_id, &email, &provenance)
+                    .enqueue_action_with_id(
+                        &allocated_id,
+                        function,
+                        &args,
+                        &account_id,
+                        &email,
+                        &provenance,
+                    )
                     .await
                     .map_err(|error| fault.database(error))?;
                 Ok(Value::String(id))
@@ -348,7 +379,12 @@ impl DatabaseHostCalls {
         rows_to_json(rows)
     }
 
-    async fn insert(&mut self, table: &str, row: Value, generated_id: Option<String>) -> Result<Value, String> {
+    async fn insert(
+        &mut self,
+        table: &str,
+        row: Value,
+        generated_id: Option<String>,
+    ) -> Result<Value, String> {
         let row = object(row, "row")?;
         if row.is_empty() {
             return Err("an insert requires at least one column".to_owned());
@@ -356,7 +392,12 @@ impl DatabaseHostCalls {
         let mut values: BTreeMap<String, Value> = row.into_iter().collect();
         let key = self.catalog_table_key(table).await?;
         if !values.contains_key(&key.column) {
-            if let Some(id) = generated_id.filter(|_| matches!(key.data_type.as_deref(), Some("text" | "character varying" | "character" | "uuid"))) {
+            if let Some(id) = generated_id.filter(|_| {
+                matches!(
+                    key.data_type.as_deref(),
+                    Some("text" | "character varying" | "character" | "uuid")
+                )
+            }) {
                 values.insert(key.column.clone(), Value::String(id));
             }
         }
@@ -984,9 +1025,18 @@ fn require_single_statement(statement: &str) -> Result<(), String> {
 mod tests {
     #[test]
     fn deferred_ids_match_the_browser_sdk_vectors() {
-        assert_eq!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0), "aa14126b-2f16-814a-8623-07601307140c");
-        assert_eq!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "schedule", 0), "c9983b7c-273c-8f8e-91df-ef1b9ba899f6");
-        assert_ne!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0), super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 1));
+        assert_eq!(
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0),
+            "aa14126b-2f16-814a-8623-07601307140c"
+        );
+        assert_eq!(
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "schedule", 0),
+            "c9983b7c-273c-8f8e-91df-ef1b9ba899f6"
+        );
+        assert_ne!(
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0),
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 1)
+        );
     }
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1002,10 +1052,28 @@ mod tests {
     #[test]
     fn query_arrays_accept_postgres_driver_type_names() {
         for name in ["INT2[]", "INT4[]", "INT8[]", "FLOAT4[]", "FLOAT8[]"] {
-            assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([1, 2]), Some(name)).is_ok(), "{name}");
+            assert!(
+                bind_query_value(
+                    sqlx::query("SELECT $1"),
+                    &serde_json::json!([1, 2]),
+                    Some(name)
+                )
+                .is_ok(),
+                "{name}"
+            );
         }
-        assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([true, false]), Some("BOOL[]")).is_ok());
-        assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([2147483648_i64]), Some("INT4[]")).is_err());
+        assert!(bind_query_value(
+            sqlx::query("SELECT $1"),
+            &serde_json::json!([true, false]),
+            Some("BOOL[]")
+        )
+        .is_ok());
+        assert!(bind_query_value(
+            sqlx::query("SELECT $1"),
+            &serde_json::json!([2147483648_i64]),
+            Some("INT4[]")
+        )
+        .is_err());
     }
 
     #[test]
@@ -1180,18 +1248,43 @@ mod tests {
         assert_eq!(inserted["metadata"], serde_json::json!("created"));
         assert_eq!(inserted["tags"], serde_json::json!(["one", "two"]));
         assert_eq!(inserted["score"], serde_json::json!(1));
-        assert_eq!(calls.query(
-            "SELECT \"_id\" FROM \"tasks\" WHERE \"score\" = ANY($1)",
-            serde_json::json!([[1, 2, 3]]),
-        ).await.unwrap(), serde_json::json!([{"_id":"first"}]));
+        assert_eq!(
+            calls
+                .query(
+                    "SELECT \"_id\" FROM \"tasks\" WHERE \"score\" = ANY($1)",
+                    serde_json::json!([[1, 2, 3]]),
+                )
+                .await
+                .unwrap(),
+            serde_json::json!([{"_id":"first"}])
+        );
 
-
-        let allocated = calls.insert("tasks", serde_json::json!({"title": "allocated"}), Some("intent-owned".to_owned())).await.unwrap();
+        let allocated = calls
+            .insert(
+                "tasks",
+                serde_json::json!({"title": "allocated"}),
+                Some("intent-owned".to_owned()),
+            )
+            .await
+            .unwrap();
         assert_eq!(allocated["_id"], "intent-owned");
-        calls.delete("tasks", "", serde_json::json!("intent-owned")).await.unwrap();
-        let explicit = calls.insert("tasks", serde_json::json!({"_id": "explicit", "title": "explicit"}), Some("unused-allocation".to_owned())).await.unwrap();
+        calls
+            .delete("tasks", "", serde_json::json!("intent-owned"))
+            .await
+            .unwrap();
+        let explicit = calls
+            .insert(
+                "tasks",
+                serde_json::json!({"_id": "explicit", "title": "explicit"}),
+                Some("unused-allocation".to_owned()),
+            )
+            .await
+            .unwrap();
         assert_eq!(explicit["_id"], "explicit");
-        calls.delete("tasks", "", serde_json::json!("explicit")).await.unwrap();
+        calls
+            .delete("tasks", "", serde_json::json!("explicit"))
+            .await
+            .unwrap();
 
         let updated = calls
             .update(

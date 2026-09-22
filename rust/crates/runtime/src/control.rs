@@ -1927,7 +1927,9 @@ impl Runtime {
     ) -> Vec<ServerMessage> {
         let mut messages = Vec::new();
         for subscription in subscriptions.values_mut() {
-            if reason == "presence-change" && subscription.path != "control.support.listTenants" { continue; }
+            if reason == "presence-change" && subscription.path != "control.support.listTenants" {
+                continue;
+            }
             match self
                 .execute_control_query(connection, &subscription.path, &subscription.args)
                 .await
@@ -2293,7 +2295,10 @@ impl Runtime {
                 .bind(&connection.project_id)
                 .fetch_all(&mut **transaction.transaction())
                 .await?;
-                let connections = self.inner.metrics.tenant_connection_counts(&connection.project_id);
+                let connections = self
+                    .inner
+                    .metrics
+                    .tenant_connection_counts(&connection.project_id);
                 let tenants = futures_util::stream::iter(rows).map(|row| {
                     let tenant_id: String = row.get("tenant_id");
                     let live = connections.get(&tenant_id).copied().unwrap_or_default();

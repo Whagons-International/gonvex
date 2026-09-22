@@ -250,7 +250,11 @@ pub enum ClientMessage {
     #[serde(rename = "auth")]
     Auth {
         id: String,
-        #[serde(default, rename = "clientContract", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "clientContract",
+            skip_serializing_if = "Option::is_none"
+        )]
         client_contract: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token: Option<String>,

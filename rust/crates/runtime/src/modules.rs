@@ -163,7 +163,12 @@ impl ModuleRegistry {
                 message,
             }
         })?;
-        let client_contract = client_contract_from_module(module).map_err(|message| ModuleRegistryError::InvalidArtifact { project: project.clone(), message })?;
+        let client_contract = client_contract_from_module(module).map_err(|message| {
+            ModuleRegistryError::InvalidArtifact {
+                project: project.clone(),
+                message,
+            }
+        })?;
         let crons = crons_from_module(module, &project)?;
         let (artifact, functions, visibility) = artifact_from_manifest(&record)?;
         for cron in &crons {
@@ -983,7 +988,15 @@ mod tests {
         };
         let (artifact, functions, _) = artifact_from_manifest(&record).unwrap();
         assert_eq!(functions["callbacks.receive"].action_profile, "agent");
-        assert_eq!(artifact.functions.iter().find(|f| f.path == "callbacks.receive").unwrap().metadata["actionProfile"], "agent");
+        assert_eq!(
+            artifact
+                .functions
+                .iter()
+                .find(|f| f.path == "callbacks.receive")
+                .unwrap()
+                .metadata["actionProfile"],
+            "agent"
+        );
         let start = &functions["tasks.start"];
         assert!(start.interactive);
         assert_eq!(start.classification, "interactive");
@@ -1006,11 +1019,30 @@ mod tests {
 }
 
 fn client_contract_from_module(module: &Map<String, Value>) -> Result<Option<u64>, String> {
-    let Some(encoded) = module.get("files").and_then(|f| f.get("client-contract.json")) else { return Ok(None); };
-    let bytes = STANDARD.decode(encoded.as_str().ok_or("invalid client contract encoding")?).map_err(|e| e.to_string())?;
+    let Some(encoded) = module
+        .get("files")
+        .and_then(|f| f.get("client-contract.json"))
+    else {
+        return Ok(None);
+    };
+    let bytes = STANDARD
+        .decode(encoded.as_str().ok_or("invalid client contract encoding")?)
+        .map_err(|e| e.to_string())?;
     let contract: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let version = contract.get("version").and_then(Value::as_u64).filter(|v| *v > 0).ok_or("invalid client contract version")?;
-    if contract.get("offlineMaxAgeMs") != Some(&Value::Null) && contract.get("offlineMaxAgeMs").and_then(Value::as_u64).filter(|v| *v > 0).is_none() { return Err("invalid offline window".into()); }
+    let version = contract
+        .get("version")
+        .and_then(Value::as_u64)
+        .filter(|v| *v > 0)
+        .ok_or("invalid client contract version")?;
+    if contract.get("offlineMaxAgeMs") != Some(&Value::Null)
+        && contract
+            .get("offlineMaxAgeMs")
+            .and_then(Value::as_u64)
+            .filter(|v| *v > 0)
+            .is_none()
+    {
+        return Err("invalid offline window".into());
+    }
     Ok(Some(version))
 }
 
@@ -1019,10 +1051,19 @@ mod offline_contract_tests {
     use super::*;
     #[test]
     fn unlimited_offline_policy_is_valid_but_missing_or_invalid_window_is_not() {
-        for (window, valid) in [(Value::Null, true), (serde_json::json!(604800000), true), (serde_json::json!(0), false), (serde_json::json!(-1), false), (serde_json::json!("forever"), false)] {
+        for (window, valid) in [
+            (Value::Null, true),
+            (serde_json::json!(604800000), true),
+            (serde_json::json!(0), false),
+            (serde_json::json!(-1), false),
+            (serde_json::json!("forever"), false),
+        ] {
             let policy = serde_json::json!({"version": 1, "offlineMaxAgeMs": window});
             let module = serde_json::json!({"files": {"client-contract.json": STANDARD.encode(serde_json::to_vec(&policy).unwrap())}});
-            assert_eq!(client_contract_from_module(module.as_object().unwrap()).is_ok(), valid);
+            assert_eq!(
+                client_contract_from_module(module.as_object().unwrap()).is_ok(),
+                valid
+            );
         }
         let policy = serde_json::json!({"version": 1});
         let module = serde_json::json!({"files": {"client-contract.json": STANDARD.encode(serde_json::to_vec(&policy).unwrap())}});

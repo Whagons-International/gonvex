@@ -547,7 +547,11 @@ impl HostCallFrame {
                 statement,
                 parameters: decode(parameters, "parameters")?,
             },
-            HostCall::DbInsert { table, row, generated_id } => Self::DbInsert {
+            HostCall::DbInsert {
+                table,
+                row,
+                generated_id,
+            } => Self::DbInsert {
                 table,
                 generated_id,
                 row: decode(row, "row")?,
@@ -632,9 +636,11 @@ mod tests {
     #[test]
     fn insert_allocation_survives_the_module_host_wire() {
         let frame = HostCallFrame::from_host_call(HostCall::DbInsert {
-            table: "messages".to_owned(), row: br#"{"id":"explicit"}"#.to_vec(),
+            table: "messages".to_owned(),
+            row: br#"{"id":"explicit"}"#.to_vec(),
             generated_id: Some("intent-id".to_owned()),
-        }).expect("insert encodes");
+        })
+        .expect("insert encodes");
         let encoded = serde_json::to_value(frame).unwrap();
         assert_eq!(encoded["generatedId"], "intent-id");
         assert_eq!(encoded["row"]["id"], "explicit");
