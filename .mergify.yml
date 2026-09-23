@@ -5,10 +5,6 @@
 # just because main moved.
 queue_rules:
   - name: default
-    autoqueue: true
-    # Macroscope and review threads are checked on the PR itself; they do not
-    # run on Mergify's temporary batch PRs, so they are not injected into the
-    # batch conditions. GitHub still enforces branch protection on each merge.
     branch_protection_injection_mode: none
     # Required by Mergify whenever injection is off; merges run as this user.
     merge_bot_account: Desarso
@@ -34,3 +30,5 @@ queue_rules:
 
 merge_queue:
   max_parallel_checks: 3
+merge_protections_settings:
+  auto_merge_conditions: true
