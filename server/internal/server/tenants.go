@@ -1184,15 +1184,7 @@ func applyTenantSchemas(
 	desiredSchema manifest.Schema,
 	apply tenantSchemaApplyFunc,
 ) (schema.Result, error) {
-	targets := make([]tenantTarget, 0, len(tenants))
-	seen := map[string]bool{}
-	for _, tenant := range dedupeTenantTargets(tenants) {
-		if tenant.databaseURL == "" || seen[tenant.databaseURL] {
-			continue
-		}
-		seen[tenant.databaseURL] = true
-		targets = append(targets, tenant)
-	}
+	targets := schemaTenantTargets(tenants)
 	if len(targets) == 0 {
 		return schema.Result{}, nil
 	}

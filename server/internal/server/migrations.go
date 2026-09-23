@@ -79,19 +79,43 @@ func migrationsFromBundle(bundle *manifest.SourceBundle) ([]sqlmigration.Migrati
 	return sqlmigration.Parse(files)
 }
 
+// projectTenantTargets returns exactly the databases a deploy's schema apply
+// reaches. Migrations and column inspection must never run on a database the
+// schema step skipped: a lower-priority duplicate registration of the same
+// tenant database alias (e.g. a legacy tenant id pointing at an older copy)
+// never receives new tables, so a migration indexing one fails the deploy.
 func (s *Server) projectTenantTargets(ctx context.Context, project string) []tenantTarget {
 	s.hydrateProjectTenantDatabases(ctx, project)
 	s.projectMu.RLock()
 	defer s.projectMu.RUnlock()
-	result := make([]tenantTarget, 0, len(s.tenants))
-	seen := map[string]bool{}
-	for _, tenant := range s.tenants {
-		if tenant.ProjectID == project && tenant.databaseURL != "" && !seen[tenant.databaseURL] {
-			seen[tenant.databaseURL] = true
-			result = append(result, tenant)
+	return tenantTargetsForProject(s.tenants, project)
+}
+
+func tenantTargetsForProject(registered map[string]tenantTarget, project string) []tenantTarget {
+	tenants := make([]tenantTarget, 0, len(registered))
+	for _, tenant := range registered {
+		if tenant.ProjectID == project {
+			tenants = append(tenants, tenant)
 		}
 	}
+	result := schemaTenantTargets(tenants)
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+// schemaTenantTargets is the one selection shared by the schema apply and SQL
+// migrations: one target per tenant database alias (highest priority wins),
+// then one per database URL.
+func schemaTenantTargets(tenants []tenantTarget) []tenantTarget {
+	result := make([]tenantTarget, 0, len(tenants))
+	seen := map[string]bool{}
+	for _, tenant := range dedupeTenantTargets(tenants) {
+		if tenant.databaseURL == "" || seen[tenant.databaseURL] {
+			continue
+		}
+		seen[tenant.databaseURL] = true
+		result = append(result, tenant)
+	}
 	return result
 }
 
@@ -145,6 +169,12 @@ func applyTenantSQLMigrations(ctx context.Context, tenants []tenantTarget, migra
 	var failures []error
 	for index, tenant := range tenants {
 		if outcomes[index].err != nil {
+			// Same rule as the schema apply: a registration whose database is gone
+			// is skipped rather than failing the whole deploy.
+			if isMissingTenantDatabaseError(outcomes[index].err) {
+				slog.Warn("skipped SQL migrations for missing tenant database", "tenant", tenant.ID)
+				continue
+			}
 			databaseName := databaseNameFromURL(tenant.databaseURL, tenant.databaseName)
 			failures = append(failures, fmt.Errorf("tenant %s database %s migration failed: %w", tenant.ID, databaseName, outcomes[index].err))
 			continue
