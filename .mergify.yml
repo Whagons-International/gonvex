@@ -1,0 +1,34 @@
+# Merge queue for main. Add the `queue` label to a green, reviewed PR; Mergify
+# tests main + the queued PRs together on a temporary mergify/merge-queue/*
+# PR (the normal `CI` job runs there via pull_request) and squash-merges the
+# batch only when that combined state passes, so PRs never need to be updated
+# just because main moved.
+queue_rules:
+  - name: default
+    autoqueue: true
+    # Macroscope and review threads are checked on the PR itself; they do not
+    # run on Mergify's temporary batch PRs, so they are not injected into the
+    # batch conditions. GitHub still enforces branch protection on each merge.
+    branch_protection_injection_mode: none
+    queue_branch_prefix: mergify/merge-queue/
+    queue_conditions:
+      - base = main
+      - label = queue
+      - -draft
+      - -conflict
+      - "#review-threads-unresolved = 0"
+      - check-success = CI
+      - or:
+          - check-success = Macroscope - Correctness Check
+          - check-neutral = Macroscope - Correctness Check
+          - check-skipped = Macroscope - Correctness Check
+    merge_conditions:
+      - check-success = CI
+    merge_method: squash
+    batch_size: 5
+    batch_max_wait_time: 1 min
+    max_checks_retries: 1
+    checks_timeout: 45 min
+
+merge_queue:
+  max_parallel_checks: 3
