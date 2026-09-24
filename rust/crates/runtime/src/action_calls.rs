@@ -1,6 +1,7 @@
 //! Capability-scoped Action host operations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -19,6 +20,125 @@ use crate::modules::ModuleCallLease;
 use crate::Runtime;
 
 const MAX_FETCH_RESPONSE_BYTES: usize = 8 << 20;
+
+/// Event-stream fetch bodies an Action is still reading with `fetchRead`.
+/// They belong to one invocation and are dropped with it, which closes any
+/// connection the module left open.
+#[derive(Clone, Default)]
+struct OpenFetchBodies(Arc<Mutex<OpenFetchState>>);
+
+#[derive(Default)]
+struct OpenFetchState {
+    next: u64,
+    bodies: HashMap<u64, Arc<tokio::sync::Mutex<OpenFetchBody>>>,
+}
+
+struct OpenFetchBody {
+    response: reqwest::Response,
+    /// Bytes of a UTF-8 character split across network chunks.
+    pending: Vec<u8>,
+    received: usize,
+    timeout: Option<Duration>,
+}
+
+impl OpenFetchBodies {
+    fn open(&self, response: reqwest::Response, timeout: Option<Duration>) -> u64 {
+        let mut state = self.0.lock().expect("fetch body registry poisoned");
+        state.next += 1;
+        let id = state.next;
+        state.bodies.insert(
+            id,
+            Arc::new(tokio::sync::Mutex::new(OpenFetchBody {
+                response,
+                pending: Vec::new(),
+                received: 0,
+                timeout,
+            })),
+        );
+        id
+    }
+
+    fn get(&self, id: u64) -> Option<Arc<tokio::sync::Mutex<OpenFetchBody>>> {
+        self.0.lock().expect("fetch body registry poisoned").bodies.get(&id).cloned()
+    }
+
+    fn close(&self, id: u64) {
+        self.0.lock().expect("fetch body registry poisoned").bodies.remove(&id);
+    }
+
+    /// The next chunk of complete UTF-8 text, or `done` once the body ended.
+    /// Never returns an empty, unfinished chunk.
+    async fn read(self, id: u64) -> Result<Value, String> {
+        let Some(body) = self.get(id) else {
+            return Ok(serde_json::json!({ "done": true }));
+        };
+        let mut body = body.lock().await;
+        loop {
+            let timeout = body.timeout;
+            let next = body.response.chunk().await;
+            let next = match next {
+                Ok(next) => next,
+                Err(error) => {
+                    self.close(id);
+                    return Err(fetch_error(error, "response body", timeout));
+                }
+            };
+            let Some(bytes) = next else {
+                let rest = String::from_utf8_lossy(&body.pending).into_owned();
+                drop(body);
+                self.close(id);
+                return Ok(if rest.is_empty() {
+                    serde_json::json!({ "done": true })
+                } else {
+                    serde_json::json!({ "chunk": rest, "done": false })
+                });
+            };
+            body.received += bytes.len();
+            if body.received > MAX_FETCH_RESPONSE_BYTES {
+                drop(body);
+                self.close(id);
+                return Err(format!(
+                    "fetch response exceeds the {MAX_FETCH_RESPONSE_BYTES} byte limit"
+                ));
+            }
+            body.pending.extend_from_slice(&bytes);
+            let end = complete_utf8_len(&body.pending);
+            if end == 0 {
+                continue;
+            }
+            let chunk = String::from_utf8_lossy(&body.pending[..end]).into_owned();
+            body.pending.drain(..end);
+            return Ok(serde_json::json!({ "chunk": chunk, "done": false }));
+        }
+    }
+}
+
+/// Length of the prefix ending on a complete UTF-8 sequence.
+fn complete_utf8_len(bytes: &[u8]) -> usize {
+    for back in 1..=bytes.len().min(3) {
+        let byte = bytes[bytes.len() - back];
+        if byte & 0xc0 == 0x80 {
+            continue;
+        }
+        let needed = if byte >= 0xf0 {
+            4
+        } else if byte >= 0xe0 {
+            3
+        } else if byte >= 0xc0 {
+            2
+        } else {
+            1
+        };
+        return if needed > back { bytes.len() - back } else { bytes.len() };
+    }
+    bytes.len()
+}
+
+fn is_event_stream(headers: &BTreeMap<String, String>) -> bool {
+    headers
+        .get("content-type")
+        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("text/event-stream"))
+}
 
 fn action_fetch_timeout(
     deadline_unix_ms: Option<u64>,
@@ -80,6 +200,7 @@ pub struct ActionHostCalls {
     provenance: gonvex_module_runtime::InvocationProvenance,
     module: ModuleCallLease,
     committed_revisions: CommittedRevisionTracker,
+    fetch_bodies: OpenFetchBodies,
 }
 
 impl ActionHostCalls {
@@ -109,6 +230,7 @@ impl ActionHostCalls {
             provenance,
             module,
             committed_revisions,
+            fetch_bodies: OpenFetchBodies::default(),
         })
     }
 
@@ -230,6 +352,7 @@ impl ActionHostCalls {
         request: Value,
         network_origins: Vec<String>,
         deadline_unix_ms: Option<u64>,
+        bodies: OpenFetchBodies,
     ) -> Result<Value, String> {
         #[derive(Deserialize)]
         struct FetchRequest {
@@ -315,6 +438,17 @@ impl ActionHostCalls {
                     .map(|value| (name.as_str().to_ascii_lowercase(), value.to_owned()))
             })
             .collect::<BTreeMap<_, _>>();
+        if is_event_stream(&headers) {
+            // Events are delivered as they arrive through `fetchRead`.
+            let stream = bodies.open(response, timeout);
+            return Ok(serde_json::json!({
+                "status": status.as_u16(),
+                "statusText": status.canonical_reason().unwrap_or_default(),
+                "url": response_url,
+                "headers": headers,
+                "stream": stream,
+            }));
+        }
         let bytes = response
             .bytes()
             .await
@@ -345,7 +479,20 @@ impl HostCallHandler for ActionHostCalls {
                 request.clone(),
                 self.capabilities.network_origins.clone(),
                 self.provenance.deadline_unix_ms,
+                self.fetch_bodies.clone(),
             ))),
+            // A body read waits on the network, so it must not block serial calls.
+            HostCallFrame::FetchRead { stream } if self.network() => {
+                Some(Box::pin(self.fetch_bodies.clone().read(*stream)))
+            }
+            HostCallFrame::FetchCancel { stream } if self.network() => {
+                let bodies = self.fetch_bodies.clone();
+                let stream = *stream;
+                Some(Box::pin(async move {
+                    bodies.close(stream);
+                    Ok(Value::Null)
+                }))
+            }
             _ => None,
         }
     }
@@ -366,10 +513,20 @@ impl HostCallHandler for ActionHostCalls {
                     request,
                     self.capabilities.network_origins.clone(),
                     self.provenance.deadline_unix_ms,
+                    self.fetch_bodies.clone(),
                 )
                 .await
             }
-            HostCallFrame::Fetch { .. } => {
+            HostCallFrame::FetchRead { stream } if self.network() => {
+                self.fetch_bodies.clone().read(stream).await
+            }
+            HostCallFrame::FetchCancel { stream } if self.network() => {
+                self.fetch_bodies.close(stream);
+                Ok(Value::Null)
+            }
+            HostCallFrame::Fetch { .. }
+            | HostCallFrame::FetchRead { .. }
+            | HostCallFrame::FetchCancel { .. } => {
                 Err("network access is not declared for this Action".to_owned())
             }
             HostCallFrame::ScheduleAfter { .. } | HostCallFrame::ScheduleAt { .. }
@@ -517,6 +674,106 @@ mod fetch_tests {
             .unwrap();
         assert_eq!(response.bytes().await.unwrap().as_ref(), b"ok");
         server.await.unwrap();
+    }
+
+    async fn serve_once(head: &'static str, parts: Vec<&'static [u8]>, gate: Arc<tokio::sync::Notify>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(head.as_bytes()).await.unwrap();
+            for (index, part) in parts.into_iter().enumerate() {
+                if index > 0 {
+                    // Later parts wait until the reader has seen the earlier ones.
+                    gate.notified().await;
+                }
+                socket.write_all(part).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn event_stream_bodies_are_read_while_the_server_is_still_writing() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        // "é" is split across the two writes.
+        let (origin, server) = serve_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+            vec![b"data: caf\xc3", b"\xa9\n\ndata: [DONE]\n\n"],
+            gate.clone(),
+        )
+        .await;
+        let bodies = OpenFetchBodies::default();
+        let head = ActionHostCalls::fetch(
+            serde_json::json!({ "url": format!("{origin}/stream"), "method": "POST", "body": "{}" }),
+            vec![origin.clone()],
+            None,
+            bodies.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(head["status"], 200);
+        assert!(head.get("body").is_none());
+        let stream = head["stream"].as_u64().unwrap();
+
+        // The first chunk arrives before the server writes the rest, and holds
+        // back the incomplete character.
+        let first = bodies.clone().read(stream).await.unwrap();
+        assert_eq!(first, serde_json::json!({ "chunk": "data: caf", "done": false }));
+        gate.notify_one();
+        let mut text = first["chunk"].as_str().unwrap().to_owned();
+        loop {
+            let next = bodies.clone().read(stream).await.unwrap();
+            if next["done"] == true {
+                break;
+            }
+            text.push_str(next["chunk"].as_str().unwrap());
+        }
+        assert_eq!(text, "data: café\n\ndata: [DONE]\n\n");
+        assert!(bodies.get(stream).is_none(), "a finished body is released");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_responses_stay_buffered_in_one_host_call() {
+        let (origin, server) = serve_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n",
+            vec![b"{\"ok\":true}"],
+            Arc::new(tokio::sync::Notify::new()),
+        )
+        .await;
+        let bodies = OpenFetchBodies::default();
+        let response = ActionHostCalls::fetch(
+            serde_json::json!({ "url": format!("{origin}/json") }),
+            vec![origin.clone()],
+            None,
+            bodies.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["body"], "{\"ok\":true}");
+        assert!(response.get("stream").is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_or_unknown_body_reads_as_finished() {
+        let bodies = OpenFetchBodies::default();
+        bodies.close(7);
+        assert_eq!(bodies.read(7).await.unwrap(), serde_json::json!({ "done": true }));
+    }
+
+    #[test]
+    fn chunks_end_on_complete_utf8_characters() {
+        assert_eq!(complete_utf8_len(b"abc"), 3);
+        assert_eq!(complete_utf8_len("café".as_bytes()), 5);
+        assert_eq!(complete_utf8_len(&"café".as_bytes()[..4]), 3);
+        assert_eq!(complete_utf8_len(&"😀".as_bytes()[..3]), 0);
+        assert_eq!(complete_utf8_len("😀".as_bytes()), 4);
     }
 
     #[test]

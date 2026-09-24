@@ -462,6 +462,107 @@ mod host_call_tests {
         assert_eq!(host.0.load(Ordering::SeqCst), 150);
         });
     }
+    /// Serves one event-stream fetch whose body arrives over three reads.
+    struct StreamingHost(AtomicUsize);
+    impl ModuleHost for StreamingHost {
+        fn call<'a>(
+            &'a self,
+            _: &'a InvocationContext,
+            call: HostCall,
+        ) -> BoxFuture<'a, Result<HostResponse, HostError>> {
+            Box::pin(async move {
+                let value: &[u8] = match call {
+                    HostCall::Fetch { .. } => br#"{"status":200,"headers":{"content-type":"text/event-stream"},"stream":1}"#,
+                    HostCall::FetchRead { stream: 1 } => match self.0.fetch_add(1, Ordering::SeqCst) {
+                        0 => br#"{"chunk":"data: one\n\nda","done":false}"#,
+                        1 => br#"{"chunk":"ta: caf\u00e9\n\n","done":false}"#,
+                        _ => br#"{"done":true}"#,
+                    },
+                    other => return Err(HostError::Failed(format!("unexpected call {other:?}"))),
+                };
+                Ok(HostResponse { value: value.to_vec() })
+            })
+        }
+    }
+
+    #[test]
+    fn fetch_bodies_stream_through_standard_web_streams() {
+        run_v8_test(async {
+        let engine = V8ModuleEngine::from_artifact(
+            ModuleArtifact {
+                manifest: ModuleManifest {
+                    module_id: "streaming-fetch".into(),
+                    generation: 1,
+                    language: ModuleLanguage::TypeScript,
+                    artifact_hash: "test".into(),
+                    functions: vec![FunctionContract {
+                        path: "run".into(),
+                        kind: FunctionKind::Action,
+                        internal: false,
+                        delivery: None,
+                        args_schema: Some(json!({"kind":"any"})),
+                        result_schema: Some(json!({"kind":"any"})),
+                        metadata: Map::from_iter([("export".into(), json!("run"))]),
+                    }],
+                    metadata: Map::new(),
+                },
+                payload: br#"export async function run(ctx) {
+                const response = await ctx.fetch('https://example.com/stream', { method: 'POST', body: '{}' });
+                const [events, copy] = response.body.tee();
+                // Shaped like the AI SDK's EventSourceParserStream: state set up in start().
+                let buffer;
+                const splitter = new TransformStream({
+                    start() { buffer = ''; },
+                    transform(chunk, controller) {
+                        buffer += chunk;
+                        const parts = buffer.split('\n\n');
+                        buffer = parts.pop();
+                        for (const part of parts) controller.enqueue(part.replace(/^data: /, ''));
+                    },
+                });
+                const seen = [];
+                const reader = events.pipeThrough(new TextDecoderStream()).pipeThrough(splitter).getReader();
+                for (;;) { const { value, done } = await reader.read(); if (done) break; seen.push(value); }
+                const text = await new Response(copy).text();
+                let next = 0;
+                const pulled = [];
+                for await (const value of new ReadableStream({ pull(c) { next < 3 ? c.enqueue(next++) : c.close(); } })) pulled.push(value);
+                const bytes = new TextEncoder().encode('\u00e9');
+                const decoder = new TextDecoder();
+                const split = decoder.decode(bytes.subarray(0, 1), { stream: true }) + decoder.decode(bytes.subarray(1));
+                return { seen, text, pulled, split };
+            }"#
+                .to_vec(),
+            },
+            V8Config::default(),
+        )
+        .unwrap();
+        let result = engine
+            .invoke(
+                &StreamingHost(AtomicUsize::new(0)),
+                Invocation {
+                    function: "run".into(),
+                    kind: FunctionKind::Action,
+                    args: b"null".to_vec(),
+                    context: InvocationContext {
+                        generation: 1,
+                        capabilities: Capabilities { network: true, ..Default::default() },
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .expect("streamed fetch body must be readable with standard streams");
+        let value: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+        assert_eq!(value, json!({
+            "seen": ["one", "caf\u{e9}"],
+            "text": "data: one\n\ndata: caf\u{e9}\n\n",
+            "pulled": [0, 1, 2],
+            "split": "\u{e9}",
+        }));
+        });
+    }
+
     struct HeartbeatHost(tokio::sync::Notify);
     impl ModuleHost for HeartbeatHost {
         fn call<'a>(

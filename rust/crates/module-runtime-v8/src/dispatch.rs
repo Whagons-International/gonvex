@@ -216,6 +216,12 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         args: serde_json::Value,
     },
+    FetchRead {
+        stream: u64,
+    },
+    FetchCancel {
+        stream: u64,
+    },
     Fetch {
         #[serde(default)]
         request: serde_json::Value,
@@ -310,6 +316,8 @@ impl HostCallRequest {
                 function,
                 args: encode(args)?,
             },
+            Self::FetchRead { stream } => HostCall::FetchRead { stream },
+            Self::FetchCancel { stream } => HostCall::FetchCancel { stream },
             Self::Fetch { request } => HostCall::Fetch {
                 request: encode(request)?,
             },

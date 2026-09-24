@@ -159,14 +159,32 @@
       }
     };
   }
+  // Length of the prefix that ends on a complete UTF-8 sequence, so a
+  // streaming decode can hold back a character split across chunks.
+  const completeUtf8Length = (bytes) => {
+    for (let back = 1; back <= Math.min(3, bytes.length); back++) {
+      const byte = bytes[bytes.length - back];
+      if ((byte & 0xc0) === 0x80) continue;
+      const needed = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+      return needed > back ? bytes.length - back : bytes.length;
+    }
+    return bytes.length;
+  };
   if (typeof globalThis.TextDecoder === "undefined") {
     globalThis.TextDecoder = class TextDecoder {
       constructor(label = "utf-8", options = {}) {
         if (!/^utf-?8$/i.test(label)) throw new RangeError("only UTF-8 is supported");
         this.fatal = Boolean(options.fatal);
+        this.pending = new Uint8Array();
       }
       get encoding() { return "utf-8"; }
-      decode(input = new Uint8Array()) { return utf8Decode(input, this.fatal); }
+      decode(input = new Uint8Array(), options = {}) {
+        const incoming = input instanceof Uint8Array ? input : new Uint8Array(input?.buffer ?? input ?? []);
+        const bytes = this.pending.length ? new Uint8Array([...this.pending, ...incoming]) : incoming;
+        const end = options.stream ? completeUtf8Length(bytes) : bytes.length;
+        this.pending = bytes.slice(end);
+        return utf8Decode(bytes.subarray(0, end), this.fatal);
+      }
     };
   }
 
@@ -221,81 +239,33 @@
   globalThis.setInterval ??= (callback, delay = 0, ...args) => scheduleTimer(callback, delay, true, args);
   globalThis.clearInterval ??= globalThis.clearTimeout;
 
-  class GonvexReadableStream {
-    constructor(source = {}) {
-      this.queue = [];
-      this.waiters = [];
-      this.closed = false;
-      this.failure = null;
-      this.locked = false;
-      const controller = Object.freeze({
-        enqueue: (chunk) => this.enqueue(chunk),
-        close: () => this.close(),
-        error: (error) => this.error(error),
+  // WHATWG streams come from the vendored web-streams-polyfill (loaded as
+  // gonvex:web-streams.js before this file). Libraries such as the AI SDK need
+  // the complete behavior: pull sources, tee, cancel and TransformStream start.
+  const webStreams = globalThis.WebStreamsPolyfill;
+  delete globalThis.WebStreamsPolyfill;
+  globalThis.ReadableStream ??= webStreams.ReadableStream;
+  globalThis.WritableStream ??= webStreams.WritableStream;
+  globalThis.TransformStream ??= webStreams.TransformStream;
+  globalThis.ByteLengthQueuingStrategy ??= webStreams.ByteLengthQueuingStrategy;
+  globalThis.CountQueuingStrategy ??= webStreams.CountQueuingStrategy;
+  globalThis.TextDecoderStream ??= class TextDecoderStream extends globalThis.TransformStream {
+    constructor(label = "utf-8", options = {}) {
+      const decoder = new globalThis.TextDecoder(label, options);
+      super({
+        transform(chunk, controller) { const text = decoder.decode(chunk, { stream: true }); if (text) controller.enqueue(text); },
+        flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); },
       });
-      try { Promise.resolve(source.start?.(controller)).catch((error) => this.error(error)); } catch (error) { this.error(error); }
+      this.encoding = decoder.encoding;
     }
-    enqueue(chunk) {
-      if (this.closed || this.failure) throw new TypeError("stream is not readable");
-      const waiter = this.waiters.shift();
-      if (waiter) waiter.resolve({ value: chunk, done: false }); else this.queue.push(chunk);
+  };
+  globalThis.TextEncoderStream ??= class TextEncoderStream extends globalThis.TransformStream {
+    constructor() {
+      const encoder = new globalThis.TextEncoder();
+      super({ transform(chunk, controller) { controller.enqueue(encoder.encode(String(chunk))); } });
+      this.encoding = "utf-8";
     }
-    close() {
-      if (this.closed) return;
-      this.closed = true;
-      for (const waiter of this.waiters.splice(0)) waiter.resolve({ value: undefined, done: true });
-    }
-    error(error) {
-      this.failure = error instanceof Error ? error : new Error(String(error));
-      for (const waiter of this.waiters.splice(0)) waiter.reject(this.failure);
-    }
-    read() {
-      if (this.failure) return Promise.reject(this.failure);
-      if (this.queue.length) return Promise.resolve({ value: this.queue.shift(), done: false });
-      if (this.closed) return Promise.resolve({ value: undefined, done: true });
-      return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
-    }
-    getReader() {
-      if (this.locked) throw new TypeError("ReadableStream is locked");
-      this.locked = true;
-      let released = false;
-      return Object.freeze({
-        read: () => { if (released) return Promise.reject(new TypeError("reader was released")); return this.read(); },
-        cancel: (reason) => { this.error(reason ?? new Error("stream cancelled")); return Promise.resolve(); },
-        releaseLock: () => { released = true; this.locked = false; },
-      });
-    }
-    async pipeTo(destination) {
-      const reader = this.getReader();
-      const writer = destination.getWriter();
-      try { while (true) { const item = await reader.read(); if (item.done) break; await writer.write(item.value); } await writer.close(); }
-      finally { reader.releaseLock(); writer.releaseLock?.(); }
-    }
-    pipeThrough(transform) { void this.pipeTo(transform.writable); return transform.readable; }
-    [Symbol.asyncIterator]() { const reader = this.getReader(); return { next: () => reader.read(), return: async () => { reader.releaseLock(); return { done: true }; } }; }
-  }
-  class GonvexWritableStream {
-    constructor(sink = {}) { this.sink = sink; this.locked = false; }
-    getWriter() {
-      if (this.locked) throw new TypeError("WritableStream is locked");
-      this.locked = true;
-      return { write: (chunk) => Promise.resolve(this.sink.write?.(chunk)), close: () => Promise.resolve(this.sink.close?.()), abort: (reason) => Promise.resolve(this.sink.abort?.(reason)), releaseLock: () => { this.locked = false; } };
-    }
-  }
-  class GonvexTransformStream {
-    constructor(transformer = {}) {
-      let controller;
-      this.readable = new GonvexReadableStream({ start: (value) => { controller = value; } });
-      this.writable = new GonvexWritableStream({
-        write: (chunk) => transformer.transform ? transformer.transform(chunk, controller) : controller.enqueue(chunk),
-        close: async () => { await transformer.flush?.(controller); controller.close(); },
-        abort: (reason) => controller.error(reason),
-      });
-    }
-  }
-  globalThis.ReadableStream ??= GonvexReadableStream;
-  globalThis.WritableStream ??= GonvexWritableStream;
-  globalThis.TransformStream ??= GonvexTransformStream;
+  };
 
   const bytesFrom = (value) => {
     if (value === undefined || value === null) return new Uint8Array();
@@ -330,15 +300,41 @@
       this.redirected = false;
       this.type = "basic";
       this.bodyUsed = false;
-      this._bytes = bytesFrom(body);
-      this.body = new GonvexReadableStream({ start: (controller) => { if (this._bytes.length) controller.enqueue(this._bytes); controller.close(); } });
+      if (body instanceof globalThis.ReadableStream) {
+        // A body still arriving from the network (see fetchRead).
+        this._bytes = null;
+        this.body = body;
+      } else {
+        this._bytes = bytesFrom(body);
+        const bytes = this._bytes;
+        this.body = new globalThis.ReadableStream({ start: (controller) => { if (bytes.length) controller.enqueue(bytes); controller.close(); } });
+      }
     }
     get ok() { return this.status >= 200 && this.status < 300; }
-    async bytes() { this.bodyUsed = true; return new Uint8Array(this._bytes); }
+    async bytes() {
+      if (this.bodyUsed) throw new TypeError("Response body has already been used");
+      this.bodyUsed = true;
+      if (this._bytes) return new Uint8Array(this._bytes);
+      const chunks = [];
+      let length = 0;
+      const reader = this.body.getReader();
+      for (;;) { const { value, done } = await reader.read(); if (done) break; chunks.push(value); length += value.length; }
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+      return bytes;
+    }
     async arrayBuffer() { const bytes = await this.bytes(); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); }
     async text() { return utf8Decode(await this.bytes()); }
     async json() { return JSON.parse(await this.text()); }
-    clone() { if (this.bodyUsed) throw new TypeError("Response body has already been used"); return new GonvexResponse(this._bytes, { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url }); }
+    clone() {
+      if (this.bodyUsed) throw new TypeError("Response body has already been used");
+      const init = { status: this.status, statusText: this.statusText, headers: this.headers, url: this.url };
+      if (this._bytes) return new GonvexResponse(this._bytes, init);
+      const [mine, theirs] = this.body.tee();
+      this.body = mine;
+      return new GonvexResponse(theirs, init);
+    }
     static json(value, init = {}) { const headers = new GonvexHeaders(init.headers); if (!headers.has("content-type")) headers.set("content-type", "application/json"); return new GonvexResponse(JSON.stringify(value), { ...init, headers }); }
     static error() { return new GonvexResponse(null, { status: 0, statusText: "" }); }
   }
@@ -426,8 +422,26 @@
     return [...parameters];
   };
 
+  // An event-stream response keeps its connection open on the host; each read
+  // returns the next chunk of complete UTF-8 text until done.
+  const streamedBody = (stream) => {
+    const encoder = new globalThis.TextEncoder();
+    return new globalThis.ReadableStream({
+      async pull(controller) {
+        // A pull that enqueues nothing would leave a waiting reader stalled.
+        for (;;) {
+          const next = await hostCall({ kind: "fetchRead", stream });
+          if (next?.done) { controller.close(); return; }
+          if (next?.chunk) { controller.enqueue(encoder.encode(next.chunk)); return; }
+        }
+      },
+      cancel() { return hostCall({ kind: "fetchCancel", stream }).catch(() => undefined); },
+    });
+  };
+
   const createResponse = (raw) => {
-    return new GonvexResponse(typeof raw?.body === "string" ? raw.body : "", {
+    const body = typeof raw?.stream === "number" ? streamedBody(raw.stream) : (typeof raw?.body === "string" ? raw.body : "");
+    return new GonvexResponse(body, {
       status: raw?.status ?? 0,
       statusText: raw?.statusText ?? "",
       url: raw?.url ?? "",

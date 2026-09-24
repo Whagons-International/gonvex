@@ -33,6 +33,8 @@ use crate::dispatch::{
 use crate::V8Config;
 
 const BOOTSTRAP: &str = include_str!("gonvex_bootstrap.js");
+/// web-streams-polyfill 3.3.3 (MIT), the WHATWG streams the bootstrap installs.
+const WEB_STREAMS: &str = include_str!("vendor/web_streams_ponyfill.js");
 
 /// The bundled ESM artifact, shared by every isolate of one generation.
 pub(crate) struct ModuleSource {
@@ -393,6 +395,9 @@ impl ModuleIsolate {
 
         // The bootstrap's completion value is the dispatcher, so it is reachable
         // from Rust without being installed on globalThis.
+        runtime
+            .execute_script("gonvex:web-streams.js", WEB_STREAMS)
+            .map_err(|err| ModuleError::Execution(format!("web streams bootstrap failed: {err}")))?;
         let dispatch = runtime
             .execute_script("gonvex:bootstrap.js", BOOTSTRAP)
             .map_err(|err| ModuleError::Execution(format!("module bootstrap failed: {err}")))?;

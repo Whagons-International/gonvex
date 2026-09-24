@@ -511,6 +511,12 @@ pub enum HostCallFrame {
     Fetch {
         request: serde_json::Value,
     },
+    FetchRead {
+        stream: u64,
+    },
+    FetchCancel {
+        stream: u64,
+    },
     Storage {
         operation: String,
         payload: serde_json::Value,
@@ -605,6 +611,8 @@ impl HostCallFrame {
             HostCall::Fetch { request } => Self::Fetch {
                 request: decode(request, "request")?,
             },
+            HostCall::FetchRead { stream } => Self::FetchRead { stream },
+            HostCall::FetchCancel { stream } => Self::FetchCancel { stream },
             HostCall::Storage { operation, payload } => Self::Storage {
                 operation,
                 payload: decode(payload, "payload")?,

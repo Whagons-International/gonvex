@@ -328,6 +328,14 @@ pub enum HostCall {
     Fetch {
         request: Vec<u8>,
     },
+    /// Next chunk of an event-stream fetch body left open by `Fetch`.
+    FetchRead {
+        stream: u64,
+    },
+    /// Close an event-stream fetch body the module stopped reading.
+    FetchCancel {
+        stream: u64,
+    },
     Storage {
         operation: String,
         payload: Vec<u8>,
@@ -365,7 +373,7 @@ impl HostCall {
             Self::ToolInvoke { .. } => "action_tools",
             Self::FunctionInvoke { .. } => "functions",
             Self::ScheduleAfter { .. } | Self::ScheduleAt { .. } => "scheduler",
-            Self::Fetch { .. } => "network",
+            Self::Fetch { .. } | Self::FetchRead { .. } | Self::FetchCancel { .. } => "network",
             Self::Storage { .. } => "storage",
             Self::Sandbox { .. } => "sandbox",
         }
