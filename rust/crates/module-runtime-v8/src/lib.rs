@@ -844,4 +844,91 @@ mod host_call_tests {
             }
         });
     }
+
+    #[test]
+    fn invocation_delegation_reaches_the_module_context() {
+        run_v8_test(async {
+            use gonvex_module_runtime::{
+                InvocationChannel, InvocationDelegation, InvocationDelegationActor, InvocationInfo,
+            };
+            let engine = V8ModuleEngine::from_artifact(
+                ModuleArtifact {
+                    manifest: ModuleManifest {
+                        module_id: "invocation-delegation".into(),
+                        generation: 1,
+                        language: ModuleLanguage::TypeScript,
+                        artifact_hash: "test".into(),
+                        functions: vec![FunctionContract {
+                            path: "run".into(),
+                            kind: FunctionKind::Query,
+                            internal: false,
+                            delivery: None,
+                            args_schema: Some(json!({"kind":"any"})),
+                            result_schema: Some(json!({"kind":"any"})),
+                            metadata: Map::from_iter([("export".into(), json!("run"))]),
+                        }],
+                        metadata: Map::new(),
+                    },
+                    payload: br#"export async function run(ctx) {
+                const { channel, rootChannel, delegation } = ctx.invocation;
+                return { channel, rootChannel, delegation };
+            }"#
+                    .to_vec(),
+                },
+                V8Config::default(),
+            )
+            .unwrap();
+            let delegated = InvocationInfo {
+                channel: InvocationChannel::Api,
+                root_channel: InvocationChannel::Api,
+                delegation: Some(InvocationDelegation {
+                    principal: "gateway".into(),
+                    actor: Some(InvocationDelegationActor {
+                        kind: "api_key".into(),
+                        name: "CI key".into(),
+                        reference: None,
+                    }),
+                }),
+                ..Default::default()
+            };
+            for (invocation, expected) in [
+                (
+                    delegated,
+                    json!({
+                        "channel": "api",
+                        "rootChannel": "api",
+                        "delegation": {
+                            "principal": "gateway",
+                            "actor": {"kind": "api_key", "name": "CI key"},
+                        },
+                    }),
+                ),
+                (
+                    InvocationInfo::default(),
+                    json!({"channel": "ui", "rootChannel": "ui", "delegation": null}),
+                ),
+            ] {
+                let result = engine
+                    .invoke(
+                        &CountingHost(AtomicUsize::new(0)),
+                        Invocation {
+                            function: "run".into(),
+                            kind: FunctionKind::Query,
+                            args: b"null".to_vec(),
+                            context: InvocationContext {
+                                generation: 1,
+                                invocation,
+                                ..Default::default()
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&result.value).unwrap(),
+                    expected
+                );
+            }
+        });
+    }
 }
