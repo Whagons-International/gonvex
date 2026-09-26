@@ -110,6 +110,42 @@ pub(crate) fn find_principal<'a>(
     found
 }
 
+/// How `/dev/manifest` treats the presented bearer credential.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ManifestAccess {
+    /// Not a configured service credential; project-key and operator
+    /// authorization apply unchanged.
+    NotServicePrincipal,
+    /// A service principal with `manifest: true` for this project. It gets
+    /// the function manifest without schema or visibility plans.
+    Allowed { principal: String },
+    /// A service principal without manifest access to this project.
+    Denied { principal: String },
+}
+
+/// Decides manifest access for a bearer credential. A recognized service
+/// credential is authorized only by its own configuration, never by the
+/// operator or project-key paths.
+pub(crate) fn manifest_access(
+    principals: &[ServicePrincipalConfig],
+    token: &str,
+    project: &str,
+) -> ManifestAccess {
+    let Some(principal) = find_principal(principals, token) else {
+        return ManifestAccess::NotServicePrincipal;
+    };
+    let principal_id = principal.id.clone();
+    if principal.manifest && principal.projects.iter().any(|allowed| allowed == project) {
+        ManifestAccess::Allowed {
+            principal: principal_id,
+        }
+    } else {
+        ManifestAccess::Denied {
+            principal: principal_id,
+        }
+    }
+}
+
 pub(crate) enum ServiceFrame {
     /// The frame is an `auth` frame and must be handled by the normal path.
     PassThrough,
@@ -621,6 +657,14 @@ mod tests {
             projects: vec!["project".to_owned()],
             functions: vec!["keys.authenticate".to_owned()],
             max_delegation: Duration::from_secs(900),
+            manifest: false,
+        }
+    }
+
+    fn manifest_principal(id: &str, token: &str) -> ServicePrincipalConfig {
+        ServicePrincipalConfig {
+            manifest: true,
+            ..principal(id, token)
         }
     }
 
@@ -796,6 +840,123 @@ mod tests {
             errors.windows(2).all(|pair| pair[0] == pair[1]),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn manifest_access_requires_the_flag_and_a_listed_project() {
+        let principals = vec![
+            manifest_principal("reader", "gvx_svc_reader"),
+            principal("caller", "gvx_svc_caller"),
+        ];
+        assert_eq!(
+            manifest_access(&principals, "gvx_svc_reader", "project"),
+            ManifestAccess::Allowed {
+                principal: "reader".to_owned()
+            }
+        );
+        assert_eq!(
+            manifest_access(&principals, "gvx_svc_reader", "other-project"),
+            ManifestAccess::Denied {
+                principal: "reader".to_owned()
+            }
+        );
+        assert_eq!(
+            manifest_access(&principals, "gvx_svc_caller", "project"),
+            ManifestAccess::Denied {
+                principal: "caller".to_owned()
+            }
+        );
+        // Unknown service tokens and every other credential keep the existing
+        // project-key and operator authorization.
+        for token in ["gvx_svc_unknown", "gvx_pat_x.y", "admin-key", ""] {
+            assert_eq!(
+                manifest_access(&principals, token, "project"),
+                ManifestAccess::NotServicePrincipal,
+                "{token}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn manifest_route_gives_service_principals_only_the_function_catalog() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let mut config = crate::config::Config::from_env().expect("default config");
+        config.control_plane_database_url = None;
+        config.default_database_url = None;
+        config.module_host.enabled = false;
+        config.admin_key = Some("test-admin-key".to_owned());
+        config.service_principals = vec![
+            manifest_principal("reader", "gvx_svc_reader"),
+            principal("caller", "gvx_svc_caller"),
+        ];
+        let runtime = Runtime::new(config);
+        runtime
+            .inner
+            .modules
+            .insert_for_test(crate::modules::ProjectModule {
+                project_id: "project".to_owned(),
+                generation: 7,
+                artifact_hash: "artifact".to_owned(),
+                client_contract: None,
+                functions: Default::default(),
+                manifest_functions: json!({"keys.authenticate": {"kind": "query"}}),
+                replica_epochs: Default::default(),
+                schema: json!({"tables": {"apiKeys": {}}}),
+                visibility: Default::default(),
+                invitation_acceptance_reducer: String::new(),
+                migrations: Vec::new(),
+                crons: Vec::new(),
+            })
+            .await;
+        let get = |uri: &str, token: &str, header_project: Option<&str>| {
+            let mut request = Request::get(uri).header("authorization", format!("Bearer {token}"));
+            if let Some(project) = header_project {
+                request = request.header("x-gonvex-project-id", project);
+            }
+            let router = runtime.router();
+            let request = request.body(Body::empty()).unwrap();
+            async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body: Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
+                        .unwrap_or(Value::Null);
+                (status, body)
+            }
+        };
+
+        let (status, body) = get("/dev/manifest?project=project", "gvx_svc_reader", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            json!({
+                "project": "project",
+                "functions": {"keys.authenticate": {"kind": "query"}},
+                "module": {"hash": "artifact", "generation": 7},
+            })
+        );
+        let (status, header_body) = get("/dev/manifest", "gvx_svc_reader", Some("project")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header_body, body);
+
+        // Without `manifest: true`, or outside the principal's projects, a
+        // service credential is refused even though it authenticates.
+        let (status, _) = get("/dev/manifest?project=project", "gvx_svc_caller", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = get("/dev/manifest?project=other", "gvx_svc_reader", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = get("/dev/manifest?project=project", "gvx_svc_unknown", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Operators keep the full manifest.
+        let (status, full) = get("/dev/manifest?project=project", "test-admin-key", None).await;
+        assert_eq!(status, StatusCode::OK, "{full}");
+        assert_eq!(full["schema"], json!({"tables": {"apiKeys": {}}}));
+        assert_eq!(full["visibility"], json!({}));
+        assert_eq!(full["functions"], body["functions"]);
     }
 
     /// Full delegation contract against a disposable PostgreSQL database.

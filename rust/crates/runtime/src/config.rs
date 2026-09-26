@@ -47,6 +47,9 @@ pub struct ServicePrincipalConfig {
     pub projects: Vec<String>,
     pub functions: Vec<String>,
     pub max_delegation: Duration,
+    /// Whether the credential may read `/dev/manifest` for its projects. The
+    /// response omits the schema and visibility plans.
+    pub manifest: bool,
 }
 
 pub const SERVICE_PRINCIPAL_DEFAULT_DELEGATION_SECONDS: u64 = 900;
@@ -465,11 +468,14 @@ struct ServicePrincipalEntry {
     functions: Vec<String>,
     #[serde(default)]
     max_delegation_seconds: Option<u64>,
+    #[serde(default)]
+    manifest: bool,
 }
 
 /// Parses `GONVEX_SERVICE_PRINCIPALS`, a JSON array such as
 /// `[{"id":"api-gateway","tokenSha256":"<64 hex>","projects":["p1"],
-///    "functions":["apiKeys.authenticate"],"maxDelegationSeconds":900}]`.
+///    "functions":["apiKeys.authenticate"],"maxDelegationSeconds":900,
+///    "manifest":true}]`.
 /// Invalid entries fail startup instead of silently disabling a credential.
 fn service_principals(value: Option<String>) -> Result<Vec<ServicePrincipalConfig>, ConfigError> {
     let Some(value) = non_empty(value) else {
@@ -547,6 +553,7 @@ fn service_principals(value: Option<String>) -> Result<Vec<ServicePrincipalConfi
             projects,
             functions,
             max_delegation: Duration::from_secs(seconds),
+            manifest: entry.manifest,
         });
     }
     Ok(principals)
@@ -615,11 +622,39 @@ mod tests {
         assert_eq!(principal.projects, vec!["p1".to_owned()]);
         assert_eq!(principal.functions, vec!["keys.authenticate".to_owned()]);
         assert_eq!(principal.max_delegation, Duration::from_secs(900));
+        assert!(!principal.manifest, "manifest access is opt-in");
         assert!(config_default_has_no_principals());
     }
 
     fn config_default_has_no_principals() -> bool {
         config(&[]).expect("config").service_principals.is_empty()
+    }
+
+    #[test]
+    fn parses_service_principal_manifest_access() {
+        let hash = "ab".repeat(32);
+        for (flag, expected) in [("true", true), ("false", false)] {
+            let config = config(&[(
+                "GONVEX_SERVICE_PRINCIPALS",
+                &format!(
+                    r#"[{{"id":"gateway","tokenSha256":"{hash}","projects":["p1"],"manifest":{flag}}}]"#
+                ),
+            )])
+            .expect("config");
+            assert_eq!(config.service_principals[0].manifest, expected, "{flag}");
+        }
+        for flag in [r#""true""#, "1", "null", "{}"] {
+            let value = format!(
+                r#"[{{"id":"gateway","tokenSha256":"{hash}","projects":["p1"],"manifest":{flag}}}]"#
+            );
+            assert!(
+                matches!(
+                    config(&[("GONVEX_SERVICE_PRINCIPALS", &value)]),
+                    Err(ConfigError::ServicePrincipals(_))
+                ),
+                "manifest {flag} should be rejected"
+            );
+        }
     }
 
     #[test]

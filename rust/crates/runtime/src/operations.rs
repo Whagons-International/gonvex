@@ -1452,7 +1452,30 @@ async fn manifest(
     if project.is_empty() {
         return error(StatusCode::BAD_REQUEST, "project is required");
     }
-    if !project_key_matches(&runtime, &headers, project).await {
+    // A service principal (for example an API gateway) needs the function
+    // catalog to validate calls, but never the table schema or visibility
+    // plans, so it gets a reduced body.
+    let service_principal = match crate::service_principal::manifest_access(
+        &runtime.inner.config.service_principals,
+        bearer(&headers),
+        project,
+    ) {
+        crate::service_principal::ManifestAccess::NotServicePrincipal => None,
+        crate::service_principal::ManifestAccess::Allowed { principal } => Some(principal),
+        crate::service_principal::ManifestAccess::Denied { principal } => {
+            tracing::warn!(
+                target: "gonvex_runtime::service_principal",
+                principal = %principal,
+                project,
+                "service principal denied manifest access"
+            );
+            return error(
+                StatusCode::FORBIDDEN,
+                "service principal is not allowed to read this project's manifest",
+            );
+        }
+    };
+    if service_principal.is_none() && !project_key_matches(&runtime, &headers, project).await {
         let actor = match authorize(&runtime, &headers, "projects:read").await {
             Ok(actor) => actor,
             Err(response) => return response,
@@ -1464,6 +1487,20 @@ async fn manifest(
     let Some(module) = runtime.inner.modules.project(project).await else {
         return error(StatusCode::NOT_FOUND, "project module is not installed");
     };
+    if let Some(principal) = service_principal {
+        tracing::debug!(
+            target: "gonvex_runtime::service_principal",
+            principal = %principal,
+            project,
+            "service principal read the function manifest"
+        );
+        return Json(json!({
+            "project":project,
+            "functions":module.manifest_functions,
+            "module":{"hash":module.artifact_hash,"generation":module.generation},
+        }))
+        .into_response();
+    }
     Json(json!({
         "project":project,
         "functions":module.manifest_functions,
