@@ -6,6 +6,7 @@
 //! after the JavaScript handler returns successfully.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
@@ -22,16 +23,29 @@ use sqlx::types::Json;
 use sqlx::{Column, Either, Executor, Postgres, Row, TypeInfo, ValueRef};
 use uuid::Uuid;
 
+use crate::error_class::TransientFault;
 use crate::module_host::HostCallHandler;
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
 
 // Same seed and UUID layout as module-sdk reducerRowId.
-fn intent_deferred_id(tenant: &str, account: &str, command: &str, kind: &str, ordinal: u64) -> String {
+fn intent_deferred_id(
+    tenant: &str,
+    account: &str,
+    command: &str,
+    kind: &str,
+    ordinal: u64,
+) -> String {
     let seed = serde_json::to_vec(&serde_json::json!([
-        "gonvex.reducer.ids.v1", tenant, account, command, format!("deferred:{kind}"), ordinal
-    ])).expect("intent seed serializes");
+        "gonvex.reducer.ids.v1",
+        tenant,
+        account,
+        command,
+        format!("deferred:{kind}"),
+        ordinal
+    ]))
+    .expect("intent seed serializes");
     let digest = Sha256::digest(seed);
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
@@ -65,6 +79,7 @@ pub struct DatabaseHostCalls {
     intent_tenant: String,
     intent_command: String,
     deferred_ordinals: BTreeMap<String, u64>,
+    fault: Arc<TransientFault>,
 }
 
 impl DatabaseHostCalls {
@@ -81,7 +96,13 @@ impl DatabaseHostCalls {
             intent_tenant: String::new(),
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
+            fault: Arc::default(),
         }
+    }
+
+    /// Shared record of transient database failures seen by this invocation.
+    pub fn transient_fault(&self) -> Arc<TransientFault> {
+        self.fault.clone()
     }
 
     pub fn with_provenance(
@@ -105,9 +126,17 @@ impl DatabaseHostCalls {
     }
 
     fn deferred_id(&mut self, kind: &str) -> String {
-        if self.intent_command.is_empty() { return Uuid::new_v4().to_string(); }
+        if self.intent_command.is_empty() {
+            return Uuid::new_v4().to_string();
+        }
         let ordinal = self.deferred_ordinals.entry(kind.to_owned()).or_default();
-        let id = intent_deferred_id(&self.intent_tenant, &self.actor_account_id, &self.intent_command, kind, *ordinal);
+        let id = intent_deferred_id(
+            &self.intent_tenant,
+            &self.actor_account_id,
+            &self.intent_command,
+            kind,
+            *ordinal,
+        );
         *ordinal += 1;
         id
     }
@@ -130,16 +159,17 @@ impl DatabaseHostCalls {
             .transaction
             .take()
             .ok_or_else(|| "the invocation transaction is already closed".to_owned())?;
+        let fault = self.fault.clone();
         if self.capability == DatabaseCapability::Reducer && success {
             transaction
                 .commit()
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| fault.database(error))
         } else {
             transaction
                 .rollback()
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| fault.database(error))
         }
     }
 
@@ -172,7 +202,11 @@ impl HostCallHandler for DatabaseHostCalls {
                 statement,
                 parameters,
             } => self.query(&statement, parameters).await,
-            HostCallFrame::DbInsert { table, row, generated_id } => {
+            HostCallFrame::DbInsert {
+                table,
+                row,
+                generated_id,
+            } => {
                 self.require_write()?;
                 self.insert(&table, row, generated_id).await
             }
@@ -208,11 +242,19 @@ impl HostCallHandler for DatabaseHostCalls {
                 let email = self.actor_email.clone();
                 let provenance = self.provenance.clone();
                 let allocated_id = self.deferred_id("action");
+                let fault = self.fault.clone();
                 let id = self
                     .transaction()?
-                    .enqueue_action_with_id(&allocated_id, function, &args, &account_id, &email, &provenance)
+                    .enqueue_action_with_id(
+                        &allocated_id,
+                        function,
+                        &args,
+                        &account_id,
+                        &email,
+                        &provenance,
+                    )
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| fault.database(error))?;
                 Ok(Value::String(id))
             }
             HostCallFrame::ScheduleAfter {
@@ -278,6 +320,7 @@ impl DatabaseHostCalls {
         let account_id = self.actor_account_id.clone();
         let email = self.actor_email.clone();
         let provenance = self.provenance.clone();
+        let fault = self.fault.clone();
         self.transaction()?
             .enqueue_action(
                 SCHEDULE_OUTBOX_PATH,
@@ -287,7 +330,7 @@ impl DatabaseHostCalls {
                 &provenance,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.database(error))?;
         Ok(Value::String(job_id))
     }
 
@@ -302,11 +345,15 @@ impl DatabaseHostCalls {
             _ => return Err("query parameters must be an array".to_owned()),
         };
         let parameter_types = if parameters.iter().any(Value::is_array) {
+            let fault = self.fault.clone();
             let description = (&mut **self.transaction()?.transaction())
                 .describe(statement.trim())
                 .await
                 .map_err(|error| {
-                    format!("could not resolve PostgreSQL parameter types: {error}")
+                    format!(
+                        "could not resolve PostgreSQL parameter types: {}",
+                        fault.sql(error)
+                    )
                 })?;
             match description.parameters() {
                 Some(Either::Left(types)) => types
@@ -323,15 +370,21 @@ impl DatabaseHostCalls {
             query = bind_query_value(query, value, parameter_types.get(index).map(String::as_str))
                 .map_err(|error| format!("parameter ${}: {error}", index + 1))?;
         }
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let rows = query
             .fetch_all(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         rows_to_json(rows)
     }
 
-    async fn insert(&mut self, table: &str, row: Value, generated_id: Option<String>) -> Result<Value, String> {
+    async fn insert(
+        &mut self,
+        table: &str,
+        row: Value,
+        generated_id: Option<String>,
+    ) -> Result<Value, String> {
         let row = object(row, "row")?;
         if row.is_empty() {
             return Err("an insert requires at least one column".to_owned());
@@ -339,7 +392,12 @@ impl DatabaseHostCalls {
         let mut values: BTreeMap<String, Value> = row.into_iter().collect();
         let key = self.catalog_table_key(table).await?;
         if !values.contains_key(&key.column) {
-            if let Some(id) = generated_id.filter(|_| matches!(key.data_type.as_deref(), Some("text" | "character varying" | "character" | "uuid"))) {
+            if let Some(id) = generated_id.filter(|_| {
+                matches!(
+                    key.data_type.as_deref(),
+                    Some("text" | "character varying" | "character" | "uuid")
+                )
+            }) {
                 values.insert(key.column.clone(), Value::String(id));
             }
         }
@@ -376,11 +434,12 @@ impl DatabaseHostCalls {
         );
         let payload = Value::Object(values.into_iter().collect());
         let query = sqlx::query(&statement).bind(Json(payload));
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let row = query
             .fetch_optional(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         row.map(row_to_json)
             .transpose()
             .map(|row| row.unwrap_or(Value::Null))
@@ -414,11 +473,12 @@ impl DatabaseHostCalls {
         let payload = Value::Object(values.into_iter().collect());
         let mut query = sqlx::query(&statement).bind(Json(payload));
         query = bind_value(query, &id)?;
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let row = query
             .fetch_optional(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         row.map(row_to_json)
             .transpose()
             .map(|row| row.unwrap_or(Value::Null))
@@ -430,11 +490,12 @@ impl DatabaseHostCalls {
         require_row_id(&id)?;
         let statement = format!("DELETE FROM {table} WHERE {key} = $1");
         let query = bind_value(sqlx::query(&statement), &id)?;
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let result = query
             .execute(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
     }
 
@@ -462,11 +523,12 @@ impl DatabaseHostCalls {
         for id in ids {
             query = bind_value(query, id)?;
         }
+        let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let result = query
             .execute(&mut **transaction)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
     }
 
@@ -518,12 +580,13 @@ impl DatabaseHostCalls {
               AND index.indisprimary
             ORDER BY key.position
         "#;
+        let fault = self.fault.clone();
         let keys = sqlx::query_as::<_, (String, String, bool)>(statement)
             .bind(schema_name)
             .bind(table_name)
             .fetch_all(&mut **self.transaction()?.transaction())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fault.sql(error))?;
         let key = match keys.as_slice() {
             [] => TableKey {
                 column: DEFAULT_KEY.to_owned(),
@@ -962,9 +1025,18 @@ fn require_single_statement(statement: &str) -> Result<(), String> {
 mod tests {
     #[test]
     fn deferred_ids_match_the_browser_sdk_vectors() {
-        assert_eq!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0), "aa14126b-2f16-814a-8623-07601307140c");
-        assert_eq!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "schedule", 0), "c9983b7c-273c-8f8e-91df-ef1b9ba899f6");
-        assert_ne!(super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0), super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 1));
+        assert_eq!(
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0),
+            "aa14126b-2f16-814a-8623-07601307140c"
+        );
+        assert_eq!(
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "schedule", 0),
+            "c9983b7c-273c-8f8e-91df-ef1b9ba899f6"
+        );
+        assert_ne!(
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 0),
+            super::intent_deferred_id("tenant-1", "account-1", "command-1", "action", 1)
+        );
     }
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -980,10 +1052,28 @@ mod tests {
     #[test]
     fn query_arrays_accept_postgres_driver_type_names() {
         for name in ["INT2[]", "INT4[]", "INT8[]", "FLOAT4[]", "FLOAT8[]"] {
-            assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([1, 2]), Some(name)).is_ok(), "{name}");
+            assert!(
+                bind_query_value(
+                    sqlx::query("SELECT $1"),
+                    &serde_json::json!([1, 2]),
+                    Some(name)
+                )
+                .is_ok(),
+                "{name}"
+            );
         }
-        assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([true, false]), Some("BOOL[]")).is_ok());
-        assert!(bind_query_value(sqlx::query("SELECT $1"), &serde_json::json!([2147483648_i64]), Some("INT4[]")).is_err());
+        assert!(bind_query_value(
+            sqlx::query("SELECT $1"),
+            &serde_json::json!([true, false]),
+            Some("BOOL[]")
+        )
+        .is_ok());
+        assert!(bind_query_value(
+            sqlx::query("SELECT $1"),
+            &serde_json::json!([2147483648_i64]),
+            Some("INT4[]")
+        )
+        .is_err());
     }
 
     #[test]
@@ -1031,6 +1121,7 @@ mod tests {
             intent_tenant: String::new(),
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
+            fault: Default::default(),
         };
         let mut calls = calls;
         assert_eq!(
@@ -1062,6 +1153,7 @@ mod tests {
             intent_tenant: String::new(),
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
+            fault: Default::default(),
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());
@@ -1156,18 +1248,43 @@ mod tests {
         assert_eq!(inserted["metadata"], serde_json::json!("created"));
         assert_eq!(inserted["tags"], serde_json::json!(["one", "two"]));
         assert_eq!(inserted["score"], serde_json::json!(1));
-        assert_eq!(calls.query(
-            "SELECT \"_id\" FROM \"tasks\" WHERE \"score\" = ANY($1)",
-            serde_json::json!([[1, 2, 3]]),
-        ).await.unwrap(), serde_json::json!([{"_id":"first"}]));
+        assert_eq!(
+            calls
+                .query(
+                    "SELECT \"_id\" FROM \"tasks\" WHERE \"score\" = ANY($1)",
+                    serde_json::json!([[1, 2, 3]]),
+                )
+                .await
+                .unwrap(),
+            serde_json::json!([{"_id":"first"}])
+        );
 
-
-        let allocated = calls.insert("tasks", serde_json::json!({"title": "allocated"}), Some("intent-owned".to_owned())).await.unwrap();
+        let allocated = calls
+            .insert(
+                "tasks",
+                serde_json::json!({"title": "allocated"}),
+                Some("intent-owned".to_owned()),
+            )
+            .await
+            .unwrap();
         assert_eq!(allocated["_id"], "intent-owned");
-        calls.delete("tasks", "", serde_json::json!("intent-owned")).await.unwrap();
-        let explicit = calls.insert("tasks", serde_json::json!({"_id": "explicit", "title": "explicit"}), Some("unused-allocation".to_owned())).await.unwrap();
+        calls
+            .delete("tasks", "", serde_json::json!("intent-owned"))
+            .await
+            .unwrap();
+        let explicit = calls
+            .insert(
+                "tasks",
+                serde_json::json!({"_id": "explicit", "title": "explicit"}),
+                Some("unused-allocation".to_owned()),
+            )
+            .await
+            .unwrap();
         assert_eq!(explicit["_id"], "explicit");
-        calls.delete("tasks", "", serde_json::json!("explicit")).await.unwrap();
+        calls
+            .delete("tasks", "", serde_json::json!("explicit"))
+            .await
+            .unwrap();
 
         let updated = calls
             .update(

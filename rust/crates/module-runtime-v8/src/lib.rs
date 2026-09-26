@@ -373,23 +373,34 @@ mod host_call_tests {
         // Match module-host: initialize V8 and start all isolate generations
         // from one persistent parent thread, rather than libtest's short-lived threads.
         type Job = Box<dyn FnOnce() + Send>;
-        static RUNNER: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+        static RUNNER: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> =
+            std::sync::OnceLock::new();
         let runner = RUNNER.get_or_init(|| {
             let (sender, jobs) = std::sync::mpsc::channel::<Job>();
             std::thread::spawn(move || {
                 initialize_v8_platform();
-                for job in jobs { job(); }
+                for job in jobs {
+                    job();
+                }
             });
             sender
         });
         let (done, result) = std::sync::mpsc::channel();
-        runner.send(Box::new(move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(test);
-            }));
-            done.send(outcome).unwrap();
-        })).unwrap();
-        if let Err(panic) = result.recv().unwrap() { std::panic::resume_unwind(panic); }
+        runner
+            .send(Box::new(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(test);
+                }));
+                done.send(outcome).unwrap();
+            }))
+            .unwrap();
+        if let Err(panic) = result.recv().unwrap() {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     struct CountingHost(AtomicUsize);
@@ -411,55 +422,55 @@ mod host_call_tests {
     #[test]
     fn invocation_can_complete_more_than_one_hundred_host_calls() {
         run_v8_test(async {
-        let engine = V8ModuleEngine::from_artifact(
-            ModuleArtifact {
-                manifest: ModuleManifest {
-                    module_id: "bulk-host-calls".into(),
-                    generation: 1,
-                    language: ModuleLanguage::TypeScript,
-                    artifact_hash: "test".into(),
-                    functions: vec![FunctionContract {
-                        path: "run".into(),
-                        kind: FunctionKind::Query,
-                        internal: false,
-                        delivery: None,
-                        args_schema: Some(json!({"kind":"any"})),
-                        result_schema: Some(json!({"kind":"any"})),
-                        metadata: Map::from_iter([("export".into(), json!("run"))]),
-                    }],
-                    metadata: Map::new(),
-                },
-                payload: br#"export async function run(ctx) {
+            let engine = V8ModuleEngine::from_artifact(
+                ModuleArtifact {
+                    manifest: ModuleManifest {
+                        module_id: "bulk-host-calls".into(),
+                        generation: 1,
+                        language: ModuleLanguage::TypeScript,
+                        artifact_hash: "test".into(),
+                        functions: vec![FunctionContract {
+                            path: "run".into(),
+                            kind: FunctionKind::Query,
+                            internal: false,
+                            delivery: None,
+                            args_schema: Some(json!({"kind":"any"})),
+                            result_schema: Some(json!({"kind":"any"})),
+                            metadata: Map::from_iter([("export".into(), json!("run"))]),
+                        }],
+                        metadata: Map::new(),
+                    },
+                    payload: br#"export async function run(ctx) {
                 for (let i = 0; i < 150; i++) await ctx.db.query('SELECT 1', []);
                 return 150;
             }"#
-                .to_vec(),
-            },
-            V8Config::default(),
-        )
-        .unwrap();
-        let host = CountingHost(AtomicUsize::new(0));
-        let result = engine
-            .invoke(
-                &host,
-                Invocation {
-                    function: "run".into(),
-                    kind: FunctionKind::Query,
-                    args: b"null".to_vec(),
-                    context: InvocationContext {
-                        generation: 1,
-                        capabilities: Capabilities {
-                            db_read: true,
+                    .to_vec(),
+                },
+                V8Config::default(),
+            )
+            .unwrap();
+            let host = CountingHost(AtomicUsize::new(0));
+            let result = engine
+                .invoke(
+                    &host,
+                    Invocation {
+                        function: "run".into(),
+                        kind: FunctionKind::Query,
+                        args: b"null".to_vec(),
+                        context: InvocationContext {
+                            generation: 1,
+                            capabilities: Capabilities {
+                                db_read: true,
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
-                        ..Default::default()
                     },
-                },
-            )
-            .await
-            .expect("bulk work must not stop at a host-call count ceiling");
-        assert_eq!(result.value, b"150");
-        assert_eq!(host.0.load(Ordering::SeqCst), 150);
+                )
+                .await
+                .expect("bulk work must not stop at a host-call count ceiling");
+            assert_eq!(result.value, b"150");
+            assert_eq!(host.0.load(Ordering::SeqCst), 150);
         });
     }
     /// Serves one event-stream fetch whose body arrives over three reads.
@@ -480,7 +491,9 @@ mod host_call_tests {
                     },
                     other => return Err(HostError::Failed(format!("unexpected call {other:?}"))),
                 };
-                Ok(HostResponse { value: value.to_vec() })
+                Ok(HostResponse {
+                    value: value.to_vec(),
+                })
             })
         }
     }
@@ -488,7 +501,7 @@ mod host_call_tests {
     #[test]
     fn fetch_bodies_stream_through_standard_web_streams() {
         run_v8_test(async {
-        let engine = V8ModuleEngine::from_artifact(
+            let engine = V8ModuleEngine::from_artifact(
             ModuleArtifact {
                 manifest: ModuleManifest {
                     module_id: "streaming-fetch".into(),
@@ -537,29 +550,35 @@ mod host_call_tests {
             V8Config::default(),
         )
         .unwrap();
-        let result = engine
-            .invoke(
-                &StreamingHost(AtomicUsize::new(0)),
-                Invocation {
-                    function: "run".into(),
-                    kind: FunctionKind::Action,
-                    args: b"null".to_vec(),
-                    context: InvocationContext {
-                        generation: 1,
-                        capabilities: Capabilities { network: true, ..Default::default() },
-                        ..Default::default()
+            let result = engine
+                .invoke(
+                    &StreamingHost(AtomicUsize::new(0)),
+                    Invocation {
+                        function: "run".into(),
+                        kind: FunctionKind::Action,
+                        args: b"null".to_vec(),
+                        context: InvocationContext {
+                            generation: 1,
+                            capabilities: Capabilities {
+                                network: true,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
                     },
-                },
-            )
-            .await
-            .expect("streamed fetch body must be readable with standard streams");
-        let value: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
-        assert_eq!(value, json!({
-            "seen": ["one", "caf\u{e9}"],
-            "text": "data: one\n\ndata: caf\u{e9}\n\n",
-            "pulled": [0, 1, 2],
-            "split": "\u{e9}",
-        }));
+                )
+                .await
+                .expect("streamed fetch body must be readable with standard streams");
+            let value: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+            assert_eq!(
+                value,
+                json!({
+                    "seen": ["one", "caf\u{e9}"],
+                    "text": "data: one\n\ndata: caf\u{e9}\n\n",
+                    "pulled": [0, 1, 2],
+                    "split": "\u{e9}",
+                })
+            );
         });
     }
 
@@ -591,25 +610,25 @@ mod host_call_tests {
     #[test]
     fn timer_heartbeat_reaches_host_while_fetch_is_pending() {
         run_v8_test(async {
-        let engine = V8ModuleEngine::from_artifact(
-            ModuleArtifact {
-                manifest: ModuleManifest {
-                    module_id: "heartbeat-fetch".into(),
-                    generation: 1,
-                    language: ModuleLanguage::TypeScript,
-                    artifact_hash: "test".into(),
-                    functions: vec![FunctionContract {
-                        path: "run".into(),
-                        kind: FunctionKind::Action,
-                        internal: false,
-                        delivery: None,
-                        args_schema: Some(json!({"kind":"any"})),
-                        result_schema: Some(json!({"kind":"any"})),
-                        metadata: Map::from_iter([("export".into(), json!("run"))]),
-                    }],
-                    metadata: Map::new(),
-                },
-                payload: br#"export async function run(ctx, args) {
+            let engine = V8ModuleEngine::from_artifact(
+                ModuleArtifact {
+                    manifest: ModuleManifest {
+                        module_id: "heartbeat-fetch".into(),
+                        generation: 1,
+                        language: ModuleLanguage::TypeScript,
+                        artifact_hash: "test".into(),
+                        functions: vec![FunctionContract {
+                            path: "run".into(),
+                            kind: FunctionKind::Action,
+                            internal: false,
+                            delivery: None,
+                            args_schema: Some(json!({"kind":"any"})),
+                            result_schema: Some(json!({"kind":"any"})),
+                            metadata: Map::from_iter([("export".into(), json!("run"))]),
+                        }],
+                        metadata: Map::new(),
+                    },
+                    payload: br#"export async function run(ctx, args) {
                 if (args?.warmup) {
                     const timer = setInterval(() => {}, 5);
                     clearInterval(timer);
@@ -626,140 +645,140 @@ mod host_call_tests {
                 await heartbeat;
                 return 'completed';
             }"#
-                .to_vec(),
-            },
-            V8Config::default(),
-        )
-        .unwrap();
-        engine
-            .invoke(
-                &CountingHost(AtomicUsize::new(0)),
-                Invocation {
-                    function: "run".into(),
-                    kind: FunctionKind::Action,
-                    args: br#"{"warmup":true}"#.to_vec(),
-                    context: InvocationContext {
-                        generation: 1,
-                        ..Default::default()
-                    },
+                    .to_vec(),
                 },
+                V8Config::default(),
             )
-            .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let result = engine
-            .invoke(
-                &HeartbeatHost(tokio::sync::Notify::new()),
-                Invocation {
-                    function: "run".into(),
-                    kind: FunctionKind::Action,
-                    args: b"null".to_vec(),
-                    context: InvocationContext {
-                        generation: 1,
-                        action_tools: vec!["heartbeat".into()],
-                        capabilities: Capabilities {
-                            network: true,
-                            action_tools: true,
+            engine
+                .invoke(
+                    &CountingHost(AtomicUsize::new(0)),
+                    Invocation {
+                        function: "run".into(),
+                        kind: FunctionKind::Action,
+                        args: br#"{"warmup":true}"#.to_vec(),
+                        context: InvocationContext {
+                            generation: 1,
                             ..Default::default()
                         },
-                        ..Default::default()
                     },
-                },
-            )
-            .await
-            .expect("timer heartbeat must not wait for a network response");
-        assert_eq!(result.value, br#""completed""#);
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let result = engine
+                .invoke(
+                    &HeartbeatHost(tokio::sync::Notify::new()),
+                    Invocation {
+                        function: "run".into(),
+                        kind: FunctionKind::Action,
+                        args: b"null".to_vec(),
+                        context: InvocationContext {
+                            generation: 1,
+                            action_tools: vec!["heartbeat".into()],
+                            capabilities: Capabilities {
+                                network: true,
+                                action_tools: true,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    },
+                )
+                .await
+                .expect("timer heartbeat must not wait for a network response");
+            assert_eq!(result.value, br#""completed""#);
         });
     }
     #[test]
     fn actions_can_wait_beyond_query_budget_without_extending_queries() {
         run_v8_test(async {
-        for kind in [
-            FunctionKind::Action,
-            FunctionKind::Query,
-            FunctionKind::Reducer,
-        ] {
-            let engine = V8ModuleEngine::from_artifact(
-                ModuleArtifact {
-                    manifest: ModuleManifest {
-                        module_id: "kind-budget".into(),
-                        generation: 1,
-                        language: ModuleLanguage::TypeScript,
-                        artifact_hash: "test".into(),
-                        functions: vec![FunctionContract {
-                            path: "run".into(),
-                            kind: kind.clone(),
-                            internal: false,
-                            delivery: None,
-                            args_schema: Some(json!({"kind":"any"})),
-                            result_schema: Some(json!({"kind":"any"})),
-                            metadata: Map::from_iter([("export".into(), json!("run"))]),
-                        }],
-                        metadata: Map::new(),
-                    },
-                    payload: br#"export async function run() {
+            for kind in [
+                FunctionKind::Action,
+                FunctionKind::Query,
+                FunctionKind::Reducer,
+            ] {
+                let engine = V8ModuleEngine::from_artifact(
+                    ModuleArtifact {
+                        manifest: ModuleManifest {
+                            module_id: "kind-budget".into(),
+                            generation: 1,
+                            language: ModuleLanguage::TypeScript,
+                            artifact_hash: "test".into(),
+                            functions: vec![FunctionContract {
+                                path: "run".into(),
+                                kind: kind.clone(),
+                                internal: false,
+                                delivery: None,
+                                args_schema: Some(json!({"kind":"any"})),
+                                result_schema: Some(json!({"kind":"any"})),
+                                metadata: Map::from_iter([("export".into(), json!("run"))]),
+                            }],
+                            metadata: Map::new(),
+                        },
+                        payload: br#"export async function run() {
                     await new Promise(resolve => setTimeout(resolve, 50));
                     return 'completed';
                 }"#
-                    .to_vec(),
-                },
-                V8Config {
-                    execution_timeout: Duration::from_millis(10),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            let result = engine
-                .invoke(
-                    &CountingHost(AtomicUsize::new(0)),
-                    Invocation {
-                        function: "run".into(),
-                        kind: kind.clone(),
-                        args: b"null".to_vec(),
-                        context: InvocationContext {
-                            generation: 1,
-                            deadline: Some(SystemTime::now() + Duration::from_millis(200)),
-                            ..Default::default()
-                        },
+                        .to_vec(),
+                    },
+                    V8Config {
+                        execution_timeout: Duration::from_millis(10),
+                        ..Default::default()
                     },
                 )
-                .await;
-            if matches!(kind, FunctionKind::Action) {
-                assert_eq!(
-                    result
-                        .expect("Action must use its own deadline, not the short query budget")
-                        .value,
-                    br#""completed""#
-                );
-            } else {
-                assert!(
-                    matches!(result, Err(ModuleError::BudgetExceeded(_))),
-                    "Query budget must remain short: {result:?}"
-                );
+                .unwrap();
+                let result = engine
+                    .invoke(
+                        &CountingHost(AtomicUsize::new(0)),
+                        Invocation {
+                            function: "run".into(),
+                            kind: kind.clone(),
+                            args: b"null".to_vec(),
+                            context: InvocationContext {
+                                generation: 1,
+                                deadline: Some(SystemTime::now() + Duration::from_millis(200)),
+                                ..Default::default()
+                            },
+                        },
+                    )
+                    .await;
+                if matches!(kind, FunctionKind::Action) {
+                    assert_eq!(
+                        result
+                            .expect("Action must use its own deadline, not the short query budget")
+                            .value,
+                        br#""completed""#
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(ModuleError::BudgetExceeded(_))),
+                        "Query budget must remain short: {result:?}"
+                    );
+                }
             }
-        }
         });
     }
 
     #[test]
     fn agent_waits_without_wall_clock_cutoff_and_recovers_from_tool_timeout() {
         run_v8_test(async {
-        struct TimeoutHost;
-        impl ModuleHost for TimeoutHost {
-            fn call<'a>(
-                &'a self,
-                _: &'a InvocationContext,
-                call: HostCall,
-            ) -> BoxFuture<'a, Result<HostResponse, HostError>> {
-                Box::pin(async move {
-                    if matches!(call, HostCall::Fetch { .. }) {
-                        std::future::pending::<()>().await;
-                    }
-                    Err(HostError::Failed("tool execution timed out".into()))
-                })
+            struct TimeoutHost;
+            impl ModuleHost for TimeoutHost {
+                fn call<'a>(
+                    &'a self,
+                    _: &'a InvocationContext,
+                    call: HostCall,
+                ) -> BoxFuture<'a, Result<HostResponse, HostError>> {
+                    Box::pin(async move {
+                        if matches!(call, HostCall::Fetch { .. }) {
+                            std::future::pending::<()>().await;
+                        }
+                        Err(HostError::Failed("tool execution timed out".into()))
+                    })
+                }
             }
-        }
-        let engine = V8ModuleEngine::from_artifact(ModuleArtifact {
+            let engine = V8ModuleEngine::from_artifact(ModuleArtifact {
             manifest: ModuleManifest {
                 module_id: "agent-budget".into(), generation: 1,
                 language: ModuleLanguage::TypeScript, artifact_hash: "test".into(),
@@ -785,44 +804,44 @@ mod host_call_tests {
                 throw new Error('expected tool timeout');
             }"#.to_vec(),
         }, V8Config { execution_timeout: Duration::from_millis(10), action_execution_timeout: Duration::from_millis(10), ..Default::default() }).unwrap();
-        for (explicit_deadline, args) in [
-            (false, b"null".to_vec()),
-            (true, b"null".to_vec()),
-            (false, br#""cancel""#.to_vec()),
-        ] {
-            let result = engine
-                .invoke(
-                    &TimeoutHost,
-                    Invocation {
-                        function: "run".into(),
-                        kind: FunctionKind::Action,
-                        args,
-                        context: InvocationContext {
-                            generation: 1,
-                            deadline: explicit_deadline
-                                .then(|| SystemTime::now() + Duration::from_millis(10)),
-                            action_tools: vec!["slow".into()],
-                            capabilities: Capabilities {
-                                action_tools: true,
-                                network: true,
+            for (explicit_deadline, args) in [
+                (false, b"null".to_vec()),
+                (true, b"null".to_vec()),
+                (false, br#""cancel""#.to_vec()),
+            ] {
+                let result = engine
+                    .invoke(
+                        &TimeoutHost,
+                        Invocation {
+                            function: "run".into(),
+                            kind: FunctionKind::Action,
+                            args,
+                            context: InvocationContext {
+                                generation: 1,
+                                deadline: explicit_deadline
+                                    .then(|| SystemTime::now() + Duration::from_millis(10)),
+                                action_tools: vec!["slow".into()],
+                                capabilities: Capabilities {
+                                    action_tools: true,
+                                    network: true,
+                                    ..Default::default()
+                                },
                                 ..Default::default()
                             },
-                            ..Default::default()
                         },
-                    },
-                )
-                .await;
-            if explicit_deadline {
-                assert!(matches!(result, Err(ModuleError::BudgetExceeded(_))));
-            } else {
-                assert_eq!(
-                    result
-                        .expect("tool timeout must be catchable by the agent after a long wait")
-                        .value,
-                    br#""recovered""#
-                );
+                    )
+                    .await;
+                if explicit_deadline {
+                    assert!(matches!(result, Err(ModuleError::BudgetExceeded(_))));
+                } else {
+                    assert_eq!(
+                        result
+                            .expect("tool timeout must be catchable by the agent after a long wait")
+                            .value,
+                        br#""recovered""#
+                    );
+                }
             }
-        }
         });
     }
 }

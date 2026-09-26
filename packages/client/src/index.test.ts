@@ -201,6 +201,71 @@ describe("GonvexClient", () => {
 		client.close();
 	});
 
+	it("queues a queueable reducer through a transient server fault instead of rolling it back", async () => {
+		vi.stubGlobal("navigator", { onLine: true });
+		const client = new GonvexClient("ws://runtime.test/ws", { outbox: { enabled: false } });
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		await flushMicrotasks();
+		const reducerRef: FunctionReference = {
+			kind: "reducer", path: "tasks.update", offline: { mode: "allowed" },
+			optimistic: { transaction: { effects: [{ operation: "upsert", entity: "tasks", id: ["id"], value: { id: { $arg: "id" }, title: { $arg: "title" } } }] } },
+		};
+		const outcome = client.reducer(reducerRef, { id: "task-a", title: "Kept" });
+		await vi.waitFor(() => expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1));
+		const call = sentMessages(socket).find((message) => message.type === "reducer.call")!;
+		socket.receive({ type: "reducer.error", id: call.id, path: call.path, error: "database admission timed out", class: "transient", retryable: true });
+		await expect(outcome).resolves.toMatchObject({ status: "queued", reducerId: call.id });
+		expect(client.localReplica.entity("tasks", "task-a")).toMatchObject({ title: "Kept" });
+		expect(await client.listIntents()).toEqual([expect.objectContaining({ id: call.id, state: "pending", attempts: 1, errorClass: "transient", entities: [{ entity: "tasks", id: "task-a" }] })]);
+
+		// The backed-off retry reuses the idempotency key. A permanent verdict
+		// is then recorded durably and announced instead of silently dropped.
+		const rejected = vi.fn(); client.onReducerRejection(rejected);
+		await vi.advanceTimersByTimeAsync(2_500);
+		const calls = sentMessages(socket).filter((message) => message.type === "reducer.call");
+		expect(calls).toHaveLength(2);
+		expect(calls[1]).toMatchObject({ id: call.id, idempotencyKey: call.idempotencyKey });
+		socket.receive({ type: "reducer.error", id: call.id, path: call.path, error: "Task is archived", class: "rejected", retryable: false });
+		await vi.waitFor(() => expect(rejected).toHaveBeenCalledWith({ reducerId: call.id, path: "tasks.update", error: "Task is archived", errorClass: "rejected" }));
+		expect(client.localReplica.entity("tasks", "task-a")).toBeUndefined();
+		expect(await client.listIntents()).toEqual([expect.objectContaining({ id: call.id, state: "rejected", lastError: "Task is archived" })]);
+		expect(await client.outboxCount()).toBe(0);
+		expect(await client.retryIntent(call.id)).toBe(true);
+		expect(client.localReplica.entity("tasks", "task-a")).toMatchObject({ title: "Kept" });
+		client.close();
+	});
+
+	it("re-applies optimistic overlays of queued reducers after a local replica reset", async () => {
+		vi.stubGlobal("navigator", { onLine: true });
+		const client = new GonvexClient("ws://runtime.test/ws", { outbox: { enabled: false } });
+		client.connect();
+		const socket = latestSocket();
+		socket.open();
+		socket.receive({ type: "session.ready", replica: testReplicaDirective });
+		await flushMicrotasks();
+		const reducerRef: FunctionReference = {
+			kind: "reducer", path: "tasks.create", offline: { mode: "allowed" },
+			optimistic: { transaction: { effects: [{ operation: "upsert", entity: "tasks", id: ["id"], value: { id: { $arg: "id" }, title: { $arg: "title" } } }] } },
+		};
+		const outcome = client.reducer(reducerRef, { id: "task-new", title: "Created offline" });
+		await vi.waitFor(() => expect(sentMessages(socket).filter((message) => message.type === "reducer.call")).toHaveLength(1));
+		const call = sentMessages(socket).find((message) => message.type === "reducer.call")!;
+		socket.receive({ type: "reducer.error", id: call.id, path: call.path, error: "pool timed out", class: "transient", retryable: true });
+		await expect(outcome).resolves.toMatchObject({ status: "queued" });
+		expect(client.entityIntentStatus("tasks", "task-new")).toBeUndefined();
+		const stop = client.subscribeIntents(() => undefined);
+		await vi.waitFor(() => expect(client.entityIntentStatus("tasks", "task-new")).toBe("syncing"));
+
+		await client.resetLocalReplica();
+		expect(client.localReplica.entity("tasks", "task-new")).toMatchObject({ title: "Created offline" });
+		expect(await client.listIntents()).toEqual([expect.objectContaining({ id: call.id, state: "pending" })]);
+		expect(client.entityIntentStatus("tasks", "task-new")).toBe("syncing");
+		stop();
+		client.close();
+	});
+
 	it("queues an offline reducer before opening a socket when the current socket is closed", async () => {
 		installBrowserOnlineEvents();
 		vi.stubGlobal("navigator", { onLine: false });
@@ -2951,6 +3016,22 @@ describe("GonvexClient", () => {
     );
     expect(error).toBeInstanceOf(GonvexClientError);
     expect(error).toMatchObject({ code: "server", operation: "reducer", message: "permission denied" });
+    // Legacy runtimes send no classification.
+    expect((error as GonvexClientError).errorClass).toBeUndefined();
+  });
+
+  it("exposes the runtime's reducer error classification on typed errors", async () => {
+    const client = new GonvexClient("ws://runtime.test/ws");
+    const transient = client.reducer({ kind: "reducer", path: "tasks.create" });
+    const stale = client.reducer({ kind: "reducer", path: "tasks.create" });
+    const socket = latestSocket();
+    socket.open();
+    const [first, second] = sentMessages(socket);
+    socket.receive({ type: "reducer.error", id: first.id, error: "pool timed out", class: "transient", retryable: true });
+    // Legacy prose for a stale artifact is still recognized without a class.
+    socket.receive({ type: "reducer.error", id: second.id, error: "STALE_REDUCER_ARTIFACT: expected a" });
+    await expect(transient).rejects.toMatchObject({ code: "server", errorClass: "transient", retryable: true });
+    await expect(stale).rejects.toMatchObject({ code: "server", errorClass: "update_required", retryable: false });
   });
 
   it("tracks connection state across connect, disconnect, and reconnect", () => {

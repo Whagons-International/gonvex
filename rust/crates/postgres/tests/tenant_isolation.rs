@@ -347,9 +347,19 @@ async fn tenant_database_is_the_final_membership_authority() {
     // expired claim, while a stale attempt cannot renew it.
     sqlx::query(&format!(r#"UPDATE "{tenant_a_schema}"._gonvex_action_outbox SET locked_at = now() - interval '6 minutes' WHERE id = $1"#))
         .bind(&claimed.id).execute(&admin).await.unwrap();
-    assert!(!control.renew_action(&tenant_session.route, &claimed.id, claimed.attempts + 1).await.unwrap());
-    assert!(control.renew_action(&tenant_session.route, &claimed.id, claimed.attempts).await.unwrap());
-    assert!(control.claim_action(&tenant_session.route).await.unwrap().is_none());
+    assert!(!control
+        .renew_action(&tenant_session.route, &claimed.id, claimed.attempts + 1)
+        .await
+        .unwrap());
+    assert!(control
+        .renew_action(&tenant_session.route, &claimed.id, claimed.attempts)
+        .await
+        .unwrap());
+    assert!(control
+        .claim_action(&tenant_session.route)
+        .await
+        .unwrap()
+        .is_none());
     control
         .complete_action(&tenant_session.route, &claimed.id)
         .await

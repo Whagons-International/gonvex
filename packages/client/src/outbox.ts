@@ -1,6 +1,9 @@
 import type { Dexie as DexieDatabase, Table } from "dexie";
 import type { OptimisticPatch } from "./optimistic.js";
 import type { LocalExecution } from "@gonvex/local-runtime";
+import type { ReducerErrorClass } from "@gonvex/protocol";
+
+export type { ReducerErrorClass };
 
 export type ReducerOutboxOptions = {
   databaseName?: string;
@@ -56,11 +59,63 @@ export type ReducerOutboxEntry = {
   patches?: OptimisticPatch[];
   localExecution?: LocalExecution;
   createdAt: number;
+  /** Failed deliveries that count toward the retry budget. */
   attempts: number;
   nextAttemptAt: number;
   lastError?: string;
-  state: "pending" | "inflight" | "committed";
+  /** Classification of `lastError`; absent for entries written by older SDKs. */
+  lastErrorClass?: OutboxErrorClass;
+  /** When the entry entered its current `failed` or `rejected` state. */
+  settledAt?: number;
+  state: ReducerOutboxState;
 };
+
+/**
+ * Lifecycle of one durable intent.
+ *
+ * - `pending`: waiting to be sent (possibly backing off after a failure).
+ * - `inflight`: sent, waiting for the server's verdict.
+ * - `committed`: the server accepted it; retained until reconciliation.
+ * - `failed`: transient delivery failures exhausted the retry budget. The
+ *   intent and its optimistic prediction are kept until the app retries or
+ *   discards it. A failed entry no longer blocks later intents.
+ * - `rejected`: the server permanently refused it. Its prediction was rolled
+ *   back; the record stays so a UI can explain what happened until the app
+ *   dismisses (discards) or retries it.
+ */
+export type ReducerOutboxState = "pending" | "inflight" | "committed" | "failed" | "rejected";
+
+/** Server classification, plus `network` for a dropped connection with no verdict. */
+export type OutboxErrorClass = ReducerErrorClass | "network";
+
+export type OutboxFailureOptions = {
+  errorClass?: OutboxErrorClass;
+  /** False keeps `attempts` unchanged (connectivity loss, re-authentication). */
+  countAttempt?: boolean;
+  /** Park as `failed` once counted attempts reach this many. */
+  maxAttempts?: number;
+  /** Cap for exponential backoff. Default 30s. */
+  maxBackoffMs?: number;
+  /** Explicit retry delay instead of exponential backoff. */
+  delayMs?: number;
+};
+
+export type ReducerOutboxScopeSummary = {
+  scope: string;
+  /** Every entry for the scope, including failed and rejected records. */
+  count: number;
+  oldestCreatedAt: number;
+};
+
+/** Entries whose optimistic prediction is still part of the local overlay. */
+export function outboxEntryIsLive(entry: Pick<ReducerOutboxEntry, "state">): boolean {
+  return entry.state !== "rejected";
+}
+
+/** Entries that still wait for delivery without user action. */
+export function outboxEntryIsQueued(entry: Pick<ReducerOutboxEntry, "state">): boolean {
+  return entry.state === "pending" || entry.state === "inflight" || entry.state === "committed";
+}
 
 export type EnqueueReducer = {
   scope: string;
@@ -82,14 +137,27 @@ export type ReducerOutbox = {
   list(scope: string): Promise<ReducerOutboxEntry[]>;
   updateLocal(id: number, patches: OptimisticPatch[], execution: LocalExecution): Promise<void>;
   nextReady(scope: string, now: number): Promise<ReducerOutboxEntry | undefined>;
-  markInflight(id: number): Promise<void>;
+  /** Resolves true when the entry is inflight; failed/rejected/missing entries are never revived. */
+  markInflight(id: number): Promise<boolean | void>;
   /** Return a just-admitted entry to pending without recording a failed attempt. */
   markPending(id: number): Promise<void>;
   markCommitted(id: number): Promise<void>;
   ack(id: number): Promise<void>;
-  fail(id: number, error: string): Promise<void>;
+  /** Record a failed delivery: back off, or park as `failed` once the budget is spent. */
+  fail(id: number, error: string, options?: OutboxFailureOptions): Promise<ReducerOutboxEntry | undefined | void>;
+  /** Record a permanent server rejection durably instead of deleting the entry. */
+  reject(id: number, error: string): Promise<ReducerOutboxEntry | undefined>;
+  /** Re-arm a failed or rejected entry with a fresh retry budget. */
+  retry(id: number): Promise<ReducerOutboxEntry | undefined>;
+  /** Atomically delete an entry only while it is in one of `states`. */
+  discard(id: number, states: readonly ReducerOutboxState[]): Promise<ReducerOutboxEntry | undefined>;
+  /** Owners with durable entries, including identities that never signed back in. */
+  listScopes(): Promise<ReducerOutboxScopeSummary[]>;
+  /** Entries still queued for delivery (excludes failed and rejected records). */
   count(scope: string): Promise<number>;
   clear(scope: string): Promise<void>;
+  /** Delete every durable entry for a scope that is not currently active. */
+  purgeScope(scope: string): Promise<number>;
   subscribe(listener: () => void): () => void;
 };
 
@@ -222,27 +290,9 @@ export class DexieReducerOutbox implements ReducerOutbox {
     }
   }
 
-  async markInflight(id: number): Promise<void> {
-    if (this.memoryOnly) {
-      this.markInflightInMemory(id);
-      return;
-    }
-    try {
-      const database = await this.open();
-      let updated: ReducerOutboxEntry | undefined;
-      await database.transaction("rw", database.entries, async () => {
-        const entry = await database.entries.get(id);
-        if (!entry || entry.state === "inflight") return;
-        updated = { ...entry, state: "inflight" as const };
-        await database.entries.put(updated);
-      });
-      if (!updated) return;
-      this.remember(updated);
-      this.notify();
-    } catch {
-      this.degradeToMemory();
-      this.markInflightInMemory(id);
-    }
+  async markInflight(id: number): Promise<boolean> {
+    const { before, after } = await this.transition(id, markInflightChange);
+    return (after ?? before)?.state === "inflight";
   }
 
   async markPending(id: number): Promise<void> {
@@ -255,7 +305,7 @@ export class DexieReducerOutbox implements ReducerOutbox {
       let updated: ReducerOutboxEntry | undefined;
       await database.transaction("rw", database.entries, async () => {
         const entry = await database.entries.get(id);
-        if (!entry || entry.state === "pending") return;
+        if (!entry || entry.state === "pending" || isParked(entry)) return;
         updated = {
           ...entry,
           state: "pending",
@@ -314,36 +364,46 @@ export class DexieReducerOutbox implements ReducerOutbox {
     }
   }
 
-  async fail(id: number, error: string): Promise<void> {
-    if (this.memoryOnly) {
-      this.failInMemory(id, error);
-      return;
-    }
+  async fail(id: number, error: string, options: OutboxFailureOptions = {}): Promise<ReducerOutboxEntry | undefined> {
+    const now = Date.now();
+    const { after } = await this.transition(id, (entry) => failChange(entry, error, now, options));
+    return after ?? undefined;
+  }
+
+  async reject(id: number, error: string): Promise<ReducerOutboxEntry | undefined> {
+    const now = Date.now();
+    const { after } = await this.transition(id, (entry) => rejectChange(entry, error, now));
+    return after ?? undefined;
+  }
+
+  async retry(id: number): Promise<ReducerOutboxEntry | undefined> {
+    const now = Date.now();
+    const { after } = await this.transition(id, (entry) => retryChange(entry, now));
+    return after ?? undefined;
+  }
+
+  async discard(id: number, states: readonly ReducerOutboxState[]): Promise<ReducerOutboxEntry | undefined> {
+    const { before, after } = await this.transition(id, (entry) => (states.includes(entry.state) ? null : undefined));
+    return after === null ? before : undefined;
+  }
+
+  async listScopes(): Promise<ReducerOutboxScopeSummary[]> {
+    if (this.memoryOnly) return summarizeScopes(this.sortedMemoryEntries());
     try {
-      const database = await this.open();
-      let updated: ReducerOutboxEntry | undefined;
-      await database.transaction("rw", database.entries, async () => {
-        const entry = await database.entries.get(id);
-        if (!entry) return;
-        updated = failedEntry(entry, error, Date.now());
-        await database.entries.put(updated);
-      });
-      if (!updated) return;
-      this.remember(updated);
-      this.notify();
+      return summarizeScopes(await (await this.open()).entries.toArray());
     } catch {
       this.degradeToMemory();
-      this.failInMemory(id, error);
+      return summarizeScopes(this.sortedMemoryEntries());
     }
   }
 
   async count(scope: string): Promise<number> {
-    if (this.memoryOnly) return this.sortedMemoryEntries(scope).length;
+    if (this.memoryOnly) return this.sortedMemoryEntries(scope).filter(outboxEntryIsQueued).length;
     try {
-      return await (await this.open()).entries.where("scope").equals(scope).count();
+      return await (await this.open()).entries.where("scope").equals(scope).filter(outboxEntryIsQueued).count();
     } catch {
       this.degradeToMemory();
-      return this.sortedMemoryEntries(scope).length;
+      return this.sortedMemoryEntries(scope).filter(outboxEntryIsQueued).length;
     }
   }
 
@@ -362,6 +422,25 @@ export class DexieReducerOutbox implements ReducerOutbox {
       }
     }
     this.notify();
+  }
+
+  async purgeScope(scope: string): Promise<number> {
+    let removed = 0;
+    for (const [id, entry] of this.memoryEntries) {
+      if (entry.scope !== scope) continue;
+      this.memoryEntries.delete(id);
+      removed += 1;
+    }
+    if (!this.memoryOnly) {
+      try {
+        // Foreign scopes are never hydrated into memory, so delete by index.
+        removed = Math.max(removed, await (await this.open()).entries.where("scope").equals(scope).delete());
+      } catch {
+        this.degradeToMemory();
+      }
+    }
+    if (removed > 0) this.notify();
+    return removed;
   }
 
   subscribe(listener: () => void): () => void {
@@ -388,16 +467,9 @@ export class DexieReducerOutbox implements ReducerOutbox {
     return this.sortedMemoryEntries(scope).map(cloneEntry);
   }
 
-  private markInflightInMemory(id: number) {
-    const entry = this.memoryEntries.get(id);
-    if (!entry || entry.state === "inflight") return;
-    this.memoryEntries.set(id, { ...entry, state: "inflight" });
-    this.notify();
-  }
-
   private markPendingInMemory(id: number) {
     const entry = this.memoryEntries.get(id);
-    if (!entry || entry.state === "pending") return;
+    if (!entry || entry.state === "pending" || isParked(entry)) return;
     this.memoryEntries.set(id, {
       ...entry,
       state: "pending",
@@ -419,11 +491,42 @@ export class DexieReducerOutbox implements ReducerOutbox {
     this.notify();
   }
 
-  private failInMemory(id: number, error: string) {
+  /**
+   * Apply one atomic read-modify-write. `change` returns the replacement,
+   * `null` to delete the entry, or `undefined` to leave it untouched.
+   */
+  private async transition(id: number, change: EntryChange): Promise<TransitionResult> {
+    if (this.memoryOnly) return this.transitionInMemory(id, change);
+    try {
+      const database = await this.open();
+      let before: ReducerOutboxEntry | undefined;
+      let after: ReducerOutboxEntry | null | undefined;
+      await database.transaction("rw", database.entries, async () => {
+        const entry = await database.entries.get(id);
+        if (!entry) return;
+        before = entry;
+        after = change(cloneEntry(entry));
+        if (after === null) await database.entries.delete(id);
+        else if (after) await database.entries.put(after);
+      });
+      if (after === null) this.memoryEntries.delete(id);
+      else if (after) this.remember(after);
+      if (after !== undefined) this.notify();
+      return { before: before && cloneEntry(before), after: after ? cloneEntry(after) : after };
+    } catch {
+      this.degradeToMemory();
+      return this.transitionInMemory(id, change);
+    }
+  }
+
+  private transitionInMemory(id: number, change: EntryChange): TransitionResult {
     const entry = this.memoryEntries.get(id);
-    if (!entry) return;
-    this.memoryEntries.set(id, failedEntry(entry, error, Date.now()));
-    this.notify();
+    if (!entry) return {};
+    const after = change(cloneEntry(entry));
+    if (after === null) this.memoryEntries.delete(id);
+    else if (after) this.memoryEntries.set(id, cloneEntry(after));
+    if (after !== undefined) this.notify();
+    return { before: cloneEntry(entry), after: after ? cloneEntry(after) : after };
   }
 
   private sortedMemoryEntries(scope?: string) {
@@ -595,22 +698,17 @@ export class StoreReducerOutbox implements ReducerOutbox {
     return cloneOptionalEntry(firstReady(this.sortedEntries(scope), now));
   }
 
-  async markInflight(id: number): Promise<void> {
+  async markInflight(id: number): Promise<boolean> {
     await this.ready;
-    if(this.store.update) { await this.updateShared(id,entry=>({...entry,state:'inflight'}));this.notify();return; }
-    const entry = this.entries.get(id);
-    if (!entry || entry.state === "inflight") return;
-    const updated = { ...entry, state: "inflight" as const };
-    this.entries.set(id, updated);
-    await this.persistPut(updated);
-    this.notify();
+    const { before, after } = await this.transition(id, markInflightChange);
+    return (after ?? before)?.state === "inflight";
   }
 
   async markPending(id: number): Promise<void> {
     await this.ready;
-    if(this.store.update) { await this.updateShared(id,entry=>({...entry,state:'pending',nextAttemptAt:Date.now(),lastError:undefined}));this.notify();return; }
+    if(this.store.update) { await this.updateShared(id,entry=>isParked(entry) ? entry : ({...entry,state:'pending',nextAttemptAt:Date.now(),lastError:undefined}));this.notify();return; }
     const entry = this.entries.get(id);
-    if (!entry || entry.state === "pending") return;
+    if (!entry || entry.state === "pending" || isParked(entry)) return;
     const updated: ReducerOutboxEntry = {
       ...entry,
       state: "pending",
@@ -640,21 +738,43 @@ export class StoreReducerOutbox implements ReducerOutbox {
     this.notify();
   }
 
-  async fail(id: number, error: string): Promise<void> {
+  async fail(id: number, error: string, options: OutboxFailureOptions = {}): Promise<ReducerOutboxEntry | undefined> {
     await this.ready;
-    if(this.store.update) { await this.updateShared(id,entry=>failedEntry(entry,error,Date.now()));this.notify();return; }
-    const entry = this.entries.get(id);
-    if (!entry) return;
-    const updated = failedEntry(entry, error, Date.now());
-    this.entries.set(id, updated);
-    await this.persistPut(updated);
-    this.notify();
+    const now = Date.now();
+    const { after } = await this.transition(id, (entry) => failChange(entry, error, now, options));
+    return after ?? undefined;
+  }
+
+  async reject(id: number, error: string): Promise<ReducerOutboxEntry | undefined> {
+    await this.ready;
+    const now = Date.now();
+    const { after } = await this.transition(id, (entry) => rejectChange(entry, error, now));
+    return after ?? undefined;
+  }
+
+  async retry(id: number): Promise<ReducerOutboxEntry | undefined> {
+    await this.ready;
+    const now = Date.now();
+    const { after } = await this.transition(id, (entry) => retryChange(entry, now));
+    return after ?? undefined;
+  }
+
+  async discard(id: number, states: readonly ReducerOutboxState[]): Promise<ReducerOutboxEntry | undefined> {
+    await this.ready;
+    const { before, after } = await this.transition(id, (entry) => (states.includes(entry.state) ? null : undefined));
+    return after === null ? before : undefined;
+  }
+
+  async listScopes(): Promise<ReducerOutboxScopeSummary[]> {
+    await this.ready;
+    if (this.store.shared && !this.memoryOnly) return summarizeScopes(await this.store.load());
+    return summarizeScopes([...this.entries.values()]);
   }
 
   async count(scope: string): Promise<number> {
     await this.ready;
     await this.refreshShared(scope);
-    return this.sortedEntries(scope).length;
+    return this.sortedEntries(scope).filter(outboxEntryIsQueued).length;
   }
 
   async clear(scope: string): Promise<void> {
@@ -672,6 +792,27 @@ export class StoreReducerOutbox implements ReducerOutbox {
     this.notify();
   }
 
+  async purgeScope(scope: string): Promise<number> {
+    await this.ready;
+    const persisted = this.store.shared && !this.memoryOnly ? await this.store.load(scope) : [];
+    const ids = new Set(persisted.filter((entry) => entry.scope === scope).map((entry) => entry.id));
+    for (const [id, entry] of this.entries) {
+      if (entry.scope !== scope) continue;
+      this.entries.delete(id);
+      ids.add(id);
+    }
+    if (!this.memoryOnly) {
+      try {
+        await this.store.clear(scope);
+      } catch (error) {
+        if (this.store.strictPersistence) throw error;
+        this.degradeToMemory();
+      }
+    }
+    if (ids.size > 0) this.notify();
+    return ids.size;
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -687,6 +828,46 @@ export class StoreReducerOutbox implements ReducerOutbox {
     const entries=await this.store.load(scope);
     this.entries.clear();
     for(const entry of entries) this.entries.set(entry.id,cloneEntry(entry));
+  }
+
+  /**
+   * Apply one atomic read-modify-write. `change` returns the replacement,
+   * `null` to delete the entry, or `undefined` to leave it untouched.
+   * Shared stores run the decision inside their own transaction so another
+   * tab's delivery cannot interleave; a deletion first fences the entry as
+   * `rejected` (never sendable), then removes it.
+   */
+  private async transition(id: number, change: EntryChange): Promise<TransitionResult> {
+    if (this.store.update && !this.memoryOnly) {
+      let before: ReducerOutboxEntry | undefined;
+      let decided: ReducerOutboxEntry | null | undefined;
+      const stored = await this.store.update(id, (entry) => {
+        before = cloneEntry(entry);
+        decided = change(cloneEntry(entry));
+        if (decided === undefined) return entry;
+        if (decided === null) return { ...entry, state: "rejected", lastError: entry.lastError ?? "Discarded" };
+        return decided;
+      });
+      if (decided === null) {
+        this.entries.delete(id);
+        await this.persistDelete(id);
+      } else if (stored) this.entries.set(id, cloneEntry(stored));
+      else this.entries.delete(id);
+      if (decided !== undefined) this.notify();
+      return { before, after: decided === null ? null : decided === undefined ? undefined : stored && cloneEntry(stored) };
+    }
+    const entry = this.entries.get(id);
+    if (!entry) return {};
+    const after = change(cloneEntry(entry));
+    if (after === null) {
+      this.entries.delete(id);
+      await this.persistDelete(id);
+    } else if (after) {
+      this.entries.set(id, after);
+      await this.persistPut(after);
+    }
+    if (after !== undefined) this.notify();
+    return { before: cloneEntry(entry), after: after ? cloneEntry(after) : after };
   }
 
   private async updateShared(id:number,change:(entry:ReducerOutboxEntry)=>ReducerOutboxEntry) {
@@ -757,6 +938,9 @@ export function createReducerOutbox(options: ReducerOutboxOptions = {}): Reducer
   return new DexieReducerOutbox(options);
 }
 
+type EntryChange = (entry: ReducerOutboxEntry) => ReducerOutboxEntry | null | undefined;
+type TransitionResult = { before?: ReducerOutboxEntry; after?: ReducerOutboxEntry | null };
+
 function firstReady(entries: ReducerOutboxEntry[], now: number) {
   const blockedEntityKeys = new Set<string>();
   for (const entry of entries) {
@@ -764,6 +948,10 @@ function firstReady(entries: ReducerOutboxEntry[], now: number) {
     // protect stale cached projections until reconciliation and must not block
     // a newer pending write to the same entity.
     if (entry.state === "committed") continue;
+    // Parked (failed) and rejected records wait for the app, not the server.
+    // They must not hold every later intent hostage. Later intents that truly
+    // depended on them are validated by the server and rejected on their own.
+    if (entry.state === "failed" || entry.state === "rejected") continue;
     if (
       entry.state === "pending"
       && entry.nextAttemptAt <= now
@@ -776,15 +964,77 @@ function firstReady(entries: ReducerOutboxEntry[], now: number) {
   return undefined;
 }
 
-function failedEntry(entry: ReducerOutboxEntry, error: string, now: number): ReducerOutboxEntry {
-  const attempts = entry.attempts + 1;
+export const DEFAULT_OUTBOX_MAX_BACKOFF_MS = 30_000;
+
+/** Exponential backoff after `attempts` counted failures. */
+export function outboxBackoffMs(attempts: number, maxBackoffMs = DEFAULT_OUTBOX_MAX_BACKOFF_MS) {
+  return Math.min(maxBackoffMs, 1_000 * (2 ** Math.min(attempts, 30)));
+}
+
+function failedEntry(entry: ReducerOutboxEntry, error: string, now: number, options: OutboxFailureOptions = {}): ReducerOutboxEntry {
+  const counted = options.countAttempt !== false;
+  const attempts = counted ? entry.attempts + 1 : entry.attempts;
+  const park = counted
+    && options.maxAttempts !== undefined
+    && attempts >= options.maxAttempts;
   return {
     ...entry,
     attempts,
-    state: "pending",
-    nextAttemptAt: now + Math.min(30_000, 1_000 * (2 ** attempts)),
+    state: park ? "failed" : "pending",
+    nextAttemptAt: now + (options.delayMs ?? outboxBackoffMs(attempts, options.maxBackoffMs)),
     lastError: error,
+    ...(options.errorClass ? { lastErrorClass: options.errorClass } : {}),
+    ...(park ? { settledAt: now } : {}),
   };
+}
+
+/** Failed and rejected records leave their state only through retry(). */
+function isParked(entry: Pick<ReducerOutboxEntry, "state">) {
+  return entry.state === "failed" || entry.state === "rejected";
+}
+
+function markInflightChange(entry: ReducerOutboxEntry): ReducerOutboxEntry | undefined {
+  // A parked or rejected record only leaves its state through retry().
+  if (entry.state === "inflight" || entry.state === "failed" || entry.state === "rejected") return undefined;
+  return { ...entry, state: "inflight" };
+}
+
+function failChange(entry: ReducerOutboxEntry, error: string, now: number, options: OutboxFailureOptions) {
+  // A concurrent discard/reject/commit already decided this entry's fate.
+  if (isParked(entry) || entry.state === "committed") return undefined;
+  return failedEntry(entry, error, now, options);
+}
+
+function rejectChange(entry: ReducerOutboxEntry, error: string, now: number): ReducerOutboxEntry {
+  return {
+    ...entry,
+    state: "rejected",
+    lastError: error,
+    lastErrorClass: "rejected",
+    nextAttemptAt: now,
+    settledAt: now,
+  };
+}
+
+function retryChange(entry: ReducerOutboxEntry, now: number): ReducerOutboxEntry | undefined {
+  if (entry.state !== "failed" && entry.state !== "rejected") return undefined;
+  const { lastError: _error, lastErrorClass: _class, settledAt: _settled, ...rest } = entry;
+  // Same id, same idempotency key: the server replays instead of re-applying
+  // if an earlier attempt did commit before its response was lost.
+  return { ...rest, state: "pending", attempts: 0, nextAttemptAt: now };
+}
+
+function summarizeScopes(entries: Iterable<ReducerOutboxEntry>): ReducerOutboxScopeSummary[] {
+  const scopes = new Map<string, ReducerOutboxScopeSummary>();
+  for (const entry of entries) {
+    if (typeof entry.scope !== "string") continue;
+    const summary = scopes.get(entry.scope);
+    if (summary) {
+      summary.count += 1;
+      summary.oldestCreatedAt = Math.min(summary.oldestCreatedAt, entry.createdAt);
+    } else scopes.set(entry.scope, { scope: entry.scope, count: 1, oldestCreatedAt: entry.createdAt });
+  }
+  return [...scopes.values()].sort((left, right) => left.oldestCreatedAt - right.oldestCreatedAt);
 }
 
 function createIdempotencyKey() {

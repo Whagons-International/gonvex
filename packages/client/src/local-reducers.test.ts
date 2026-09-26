@@ -3,7 +3,7 @@ import { reducer, schema, selectRows } from "@gonvex/module-sdk";
 import { createPortableReducer } from "@gonvex/local-runtime/portable-client";
 import { MissingReducerDataError } from "@gonvex/local-runtime/portable";
 import { LocalReducerRuntime } from "@gonvex/local-runtime";
-import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, type FunctionReference, type OutboxStore } from "./index.js";
+import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, type FunctionReference, type OutboxRetryOptions, type OutboxStore } from "./index.js";
 
 class Socket {
   static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -35,6 +35,14 @@ const increment = reducer({
   },
 });
 const ref: FunctionReference = { kind: "reducer", path: "increment", offline: { mode: "allowed" }, localExecution: 1 };
+const createTask = reducer({
+  args: schema.object({}), result: schema.string(),
+  run: async (ctx) => {
+    const created = await ctx.db.insert<{ _id: string } | string>("tasks", { count: 0, statusId: "new" });
+    return typeof created === "string" ? created : created._id;
+  },
+});
+const createRef: FunctionReference = { kind: "reducer", path: "createTask", offline: { mode: "allowed" }, localExecution: 1 };
 const clients: GonvexClient[] = [];
 const hosts: LocalReducerRuntime[] = [];
 
@@ -48,12 +56,12 @@ async function fixture() {
   await storage.replaceSnapshot({ entities: { tasks: { t1: { _id: "t1", count: 0, statusId: "todo" } } },
     liveQueries: { [collectionKey]: { signature: collectionKey, kind: "replica", entity: "tasks", key: "_id", ids: ["t1"], completeness: "complete", source: "server" } },
   }, "visible");
-  const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }) => {
-    const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment},artifactHash: "artifact"});
+  const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }, retry?: OutboxRetryOptions) => {
+    const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment, createTask},artifactHash: "artifact"});
     const client = new GonvexClient(url, {
       clientContract,
       project: "project", tenant: "tenant", identity: { sub: "account", iss: "issuer" },
-      localReplica: { storage }, outbox: { store },
+      localReplica: { storage }, outbox: { store, retry },
       localRuntime: { mode: "portable", artifactHash: "artifact", tables: ["tasks"], collections: [collection], create: () => host },
     });
     clients.push(client);
@@ -293,6 +301,7 @@ describe("SDK-owned local reducer lifecycle", () => {
     expect(rejected).toHaveBeenCalledWith(expect.objectContaining({ reducerId: call.id, error: "Permission revoked" }));
     await vi.waitFor(() => expect(socket.sent.filter((message) => message.type === "reducer.call")).toHaveLength(2));
   });
+
 
   it("keeps offline work when a deployment rejects its reducer artifact", async () => {
     const { create, kv } = await fixture();
@@ -647,4 +656,323 @@ it('does not open replay storage work for incoming collections when there are no
   await (client as any).replica.replaceWindow({ signature: 'other', entity: 'other', key: 'id', rows: [{ id: 'one' }], source: 'server', completeness: 'complete' });
   await new Promise(resolve => setTimeout(resolve, 30));
   expect(rebase).not.toHaveBeenCalled();
+});
+
+describe("durable intent lifecycle", () => {
+  const calls = (socket: Socket) => socket.sent.filter((message) => message.type === "reducer.call");
+  const fast = { maxAttempts: 2, maxBackoffMs: 1 };
+
+  it("retries transient server faults, then parks the intent as failed without losing it", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, fast);
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const first = calls(socket)[0];
+    socket.receive({ type: "reducer.error", id: first.id, error: "database admission timed out", class: "transient", retryable: true });
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(2));
+    const second = calls(socket)[1];
+    // Exactly-once: every retry reuses the command id and idempotency key.
+    expect(second.id).toBe(first.id);
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+    socket.receive({ type: "reducer.error", id: second.id, error: "database admission timed out", class: "transient", retryable: true });
+    await vi.waitFor(async () => {
+      const [entry] = await createKvOutboxStore(kv).load();
+      expect(entry).toMatchObject({ idempotencyKey: first.id, state: "failed", attempts: 2, lastErrorClass: "transient", lastError: "database admission timed out" });
+    });
+    // The prediction stays visible; the intent waits for the app to act.
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls(socket)).toHaveLength(2);
+    expect(await client.outboxCount()).toBe(0);
+    expect(await client.listIntents()).toEqual([expect.objectContaining({ id: first.id, reducer: "increment", state: "failed", errorClass: "transient", entities: [{ entity: "tasks", id: "t1" }] })]);
+  });
+
+  it("records a rejection durably, rolls it back and fires the event", async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    await client.reducer(ref, { amount: 5 });
+    const rejected = vi.fn(); client.onReducerRejection(rejected);
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const call = calls(socket)[0];
+    socket.receive({ type: "reducer.error", id: call.id, error: "Task is archived", class: "rejected", retryable: false });
+    await vi.waitFor(() => expect(client.localReplica.entity("tasks", "t1")?.count).toBe(0));
+    expect(rejected).toHaveBeenCalledWith({ reducerId: call.id, path: "increment", error: "Task is archived", errorClass: "rejected" });
+    const [entry] = await createKvOutboxStore(kv).load();
+    expect(entry).toMatchObject({ idempotencyKey: call.id, state: "rejected", lastError: "Task is archived", lastErrorClass: "rejected", args: { amount: 5 } });
+    const [intent] = await client.listIntents();
+    expect(intent).toMatchObject({ id: call.id, state: "rejected", argsSummary: '{"amount":5}' });
+    // A rejected record is never re-sent and survives a restart without being predicted.
+    client.close();
+    const restarted = create();
+    await connect(restarted);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(restarted.localReplica.entity("tasks", "t1")?.count).toBe(0);
+    expect(Socket.all.at(-1)!.sent.filter((message) => message.type === "reducer.call")).toHaveLength(0);
+    // Dismissing it removes the record.
+    expect(await restarted.discardIntent(call.id)).toBe(true);
+    expect(await createKvOutboxStore(kv).load()).toEqual([]);
+  });
+
+  it("keeps an intent across an unauthenticated response and re-authenticates", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, fast);
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const call = calls(socket)[0];
+    const authFrames = () => socket.sent.filter((message) => message.type === "auth");
+    expect(authFrames()).toHaveLength(1);
+    socket.receive({ type: "reducer.error", id: call.id, error: "authenticate with an active tenant before calling a Reducer", class: "unauthenticated", retryable: true });
+    await vi.waitFor(() => expect(authFrames()).toHaveLength(2));
+    const [kept] = await createKvOutboxStore(kv).load();
+    expect(kept).toMatchObject({ idempotencyKey: call.id, state: "pending", attempts: 0, lastErrorClass: "unauthenticated" });
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1);
+    const reauth = authFrames()[1];
+    socket.receive({ type: "auth.result", id: reauth.id, result: { replica: directive, localIdentity: identity, artifactHash: "artifact", accountId: "account", tenantId: "tenant" } });
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(2));
+    expect(calls(socket)[1].id).toBe(call.id);
+  });
+
+  it("treats the legacy unauthenticated message from an unclassified runtime as keep-and-retry", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, fast);
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const call = calls(socket)[0];
+    socket.receive({ type: "reducer.error", id: call.id, error: "authenticate with an active tenant before calling a Reducer" });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load())[0]).toMatchObject({ state: "pending", lastErrorClass: "unauthenticated" }));
+  });
+
+  it("falls back to a durable rejection when an old runtime sends no classification", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, fast);
+    await client.reducer(ref, {});
+    const rejected = vi.fn(); client.onReducerRejection(rejected);
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const call = calls(socket)[0];
+    socket.receive({ type: "reducer.error", id: call.id, error: "database connection lost" });
+    await vi.waitFor(() => expect(rejected).toHaveBeenCalled());
+    expect((await createKvOutboxStore(kv).load())[0]).toMatchObject({ state: "rejected", lastError: "database connection lost" });
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(0);
+  });
+
+  it("does not let a parked failure block an unrelated later intent", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    await client.reducer(ref, {});
+    await client.reducer(ref, { amount: 10 });
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const first = calls(socket)[0];
+    socket.receive({ type: "reducer.error", id: first.id, error: "module host restarted", class: "transient", retryable: true });
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(2));
+    const second = calls(socket)[1];
+    expect(second.id).not.toBe(first.id);
+    expect(second.args).toEqual({ amount: 10 });
+    // The server applies the later intent without the parked one.
+    socket.receive({ type: "reducer.result", id: second.id, result: 10, originCommandId: second.id });
+    socket.receive({ type: "replica.transaction", cursor: { epoch: "epoch", revision: 1 }, originCommandId: second.id,
+      changes: [{ entity: "tasks", id: "t1", operation: "update", newValue: { _id: "t1", count: 10, statusId: "todo" } }] });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load()).map((entry) => [entry.idempotencyKey, entry.state])).toEqual([[first.id, "failed"]]));
+    // The parked intent still shows its prediction on top of server truth.
+    await vi.waitFor(() => expect(client.localReplica.entity("tasks", "t1")?.count).toBe(11));
+  });
+
+  it("retries a parked intent with its original idempotency key and settles it once", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const first = calls(socket)[0];
+    // The first attempt committed server-side but its response was lost to a
+    // deadline; the server reports the failure as transient.
+    socket.receive({ type: "reducer.error", id: first.id, error: "deadline exceeded", class: "transient", retryable: true });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load())[0]?.state).toBe("failed"));
+    expect(await client.retryIntent("missing")).toBe(false);
+    expect(await client.retryIntent(first.id)).toBe(true);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(2));
+    const replay = calls(socket)[1];
+    expect(replay.id).toBe(first.id);
+    expect(replay.idempotencyKey).toBe(first.idempotencyKey);
+    expect(replay.intentEntropy).toBe(first.intentEntropy);
+    // The runtime's idempotency claim replays the stored result instead of
+    // applying the reducer again; the client acknowledges exactly one intent.
+    socket.receive({ type: "reducer.result", id: replay.id, result: 1, originCommandId: replay.id });
+    socket.receive({ type: "replica.transaction", cursor: { epoch: "epoch", revision: 1 }, originCommandId: replay.id,
+      changes: [{ entity: "tasks", id: "t1", operation: "update", newValue: { _id: "t1", count: 1, statusId: "todo" } }] });
+    await vi.waitFor(async () => expect(await createKvOutboxStore(kv).load()).toEqual([]));
+    await vi.waitFor(() => expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls(socket)).toHaveLength(2);
+  });
+
+  it("discards a parked intent, removes its prediction and rebases later intents", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    const first = calls(socket)[0];
+    socket.receive({ type: "reducer.error", id: first.id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load())[0]?.state).toBe("failed"));
+    // Offline again: a new edit is predicted on top of the parked one.
+    socket.close();
+    expect(await client.reducer(ref, { amount: 3 })).toBe(4);
+    const later = (await createKvOutboxStore(kv).load())[1]!;
+    expect(await client.discardIntent(first.id)).toBe(true);
+    // The later intent is re-executed without the discarded prediction.
+    await vi.waitFor(() => expect(client.localReplica.entity("tasks", "t1")?.count).toBe(3));
+    const remaining = await createKvOutboxStore(kv).load();
+    expect(remaining.map((entry) => entry.idempotencyKey)).toEqual([later.idempotencyKey]);
+    expect(remaining[0]?.patches?.[0]?.fields?.count).toBe(3);
+    expect(await client.discardIntent(first.id)).toBe(false);
+  });
+
+  it("refuses to discard an intent that is already inflight", async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    expect(await client.discardIntent(calls(socket)[0].id)).toBe(false);
+    expect((await createKvOutboxStore(kv).load())[0]?.state).toBe("inflight");
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1);
+  });
+
+  it("publishes a reactive intent snapshot and per-row status", async () => {
+    const { create } = await fixture();
+    const client = create(undefined, undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    const seen: string[][] = [];
+    const stop = client.subscribeIntents(() => seen.push(client.intentsSnapshot().map((intent) => intent.state)));
+    await client.reducer(ref, {});
+    await vi.waitFor(() => expect(client.entityIntentStatus("tasks", "t1")).toBe("syncing"));
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    socket.receive({ type: "reducer.error", id: calls(socket)[0].id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(() => expect(client.entityIntentStatus("tasks", "t1")).toBe("failed"));
+    expect(client.entityIntentStatus("tasks", "other")).toBeUndefined();
+    expect(seen.at(-1)).toEqual(["failed"]);
+    stop();
+  });
+});
+
+describe("outbox scopes", () => {
+  it("lists and purges scopes left behind by other identities, never the active one", async () => {
+    const { create, kv } = await fixture();
+    const store = createKvOutboxStore(kv);
+    const foreign = ["identity", url, "project", "tenant", "issuer", "someone-else"].join("\u0000");
+    await store.put({ id: 900, scope: foreign, path: "increment", args: {}, idempotencyKey: "foreign-1", entityKeys: [], createdAt: 1, attempts: 0, nextAttemptAt: 1, state: "pending" });
+    const client = create(store);
+    await client.reducer(ref, {});
+    const scopes = await client.listOutboxScopes();
+    expect(scopes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ scope: foreign, count: 1, current: false }),
+      expect.objectContaining({ scope: owner, count: 1, current: true }),
+    ]));
+    await expect(client.purgeOutboxScope(owner)).rejects.toThrow("active outbox scope");
+    expect(await client.purgeForeignOutboxScopes()).toBe(1);
+    expect((await createKvOutboxStore(kv).load()).map((entry) => entry.scope)).toEqual([owner]);
+  });
+});
+
+describe("local replica reset", () => {
+  const calls = (socket: Socket) => socket.sent.filter((message) => message.type === "reducer.call");
+  const opens = (socket: Socket) => socket.sent.filter((message) => message.type === "replica.open");
+
+  it("refuses while offline and keeps every cached row", async () => {
+    const { create, storage } = await fixture();
+    const client = create();
+    await client.reducer(ref, {});
+    await expect(client.resetLocalReplica()).rejects.toMatchObject({ code: "disconnected", message: expect.stringContaining("offline") });
+    expect(client.localReplica.entity("tasks", "t1")?.count).toBe(1);
+    expect((await storage.load("visible"))?.entities.tasks?.t1).toBeDefined();
+  });
+
+  it("discards persisted rows, resubscribes without cursors and re-applies kept intents", async () => {
+    const { create, kv, storage } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    await client.reducer(ref, {});
+    await client.reducer(ref, { amount: 10 });
+    const watch = client.watchReplica(collection, {});
+    const stop = watch.onUpdate(() => undefined);
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    // First intent parks as failed, the second is rejected: both stay durable.
+    socket.receive({ type: "reducer.error", id: calls(socket)[0].id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(2));
+    socket.receive({ type: "reducer.error", id: calls(socket)[1].id, error: "Task is archived", class: "rejected", retryable: false });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load()).map((entry) => entry.state)).toEqual(["failed", "rejected"]));
+    // A third edit on top of the parked one is still pending (sent, awaiting a verdict).
+    expect(await client.reducer(ref, { amount: 100 })).toBe(101);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(3));
+    await vi.waitFor(() => expect(opens(socket).length).toBeGreaterThan(0));
+    const opensBefore = opens(socket).length;
+
+    const result = await client.resetLocalReplica();
+    expect(result).toMatchObject({ discardedIntents: 0 });
+    expect(result.resubscribed).toBeGreaterThan(0);
+    // Persisted replica rows are gone; the outbox is untouched.
+    expect((await storage.load("visible"))?.entities.tasks?.t1).toBeUndefined();
+    expect((await createKvOutboxStore(kv).load()).map((entry) => entry.state)).toEqual(["failed", "rejected", "inflight"]);
+    expect(socket.sent.some((message) => message.type === "replica.close")).toBe(true);
+    await vi.waitFor(() => expect(opens(socket).length).toBeGreaterThan(opensBefore));
+    const reopen = opens(socket).at(-1)!;
+    expect(reopen.cursor).toBeUndefined();
+    expect(await client.outboxCount()).toBe(1);
+
+    // Rehydrate from the server: the failed and pending predictions are
+    // re-applied on top of the fresh base; the rejected one is not.
+    socket.receive({ type: "replica.snapshot", id: reopen.id, path: collection.path, key: "_id",
+      result: [{ _id: "t1", count: 0, statusId: "todo" }], cursor: { epoch: "epoch", revision: 5 } });
+    socket.receive({ type: "replica.ready", id: reopen.id, cursor: { epoch: "epoch", revision: 5 } });
+    await vi.waitFor(() => expect(client.localReplica.entity("tasks", "t1")?.count).toBe(101));
+    await vi.waitFor(async () => expect((await storage.load("visible"))?.entities.tasks?.t1).toMatchObject({ count: 0 }));
+    stop();
+  });
+
+  it("drops unsynced intents only when explicitly asked", async () => {
+    const { create, kv } = await fixture();
+    const client = create(createKvOutboxStore(kv), undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    await client.reducer(ref, {});
+    const socket = await connect(client);
+    await vi.waitFor(() => expect(calls(socket)).toHaveLength(1));
+    socket.receive({ type: "reducer.error", id: calls(socket)[0].id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(async () => expect((await createKvOutboxStore(kv).load())[0]?.state).toBe("failed"));
+    expect(await client.resetLocalReplica({ keepOutbox: false })).toMatchObject({ discardedIntents: 1 });
+    expect(await createKvOutboxStore(kv).load()).toEqual([]);
+    expect(client.localReplica.entity("tasks", "t1")).toBeUndefined();
+  });
+});
+
+describe("per-row intent status", () => {
+  it("reports syncing and failed for rows created locally and for updates", async () => {
+    const { create } = await fixture();
+    const client = create(undefined, undefined, { maxAttempts: 1, maxBackoffMs: 1 });
+    const stop = client.subscribeIntents(() => undefined);
+    const createdId = await client.reducer(createRef, {}) as string;
+    expect(typeof createdId).toBe("string");
+    expect(client.localReplica.entity("tasks", createdId)).toMatchObject({ count: 0, statusId: "new" });
+    await client.reducer(ref, {});
+    await vi.waitFor(() => {
+      expect(client.entityIntentStatus("tasks", createdId)).toBe("syncing");
+      expect(client.entityIntentStatus("tasks", "t1")).toBe("syncing");
+    });
+    const socket = await connect(client);
+    const calls = () => socket.sent.filter((message) => message.type === "reducer.call");
+    await vi.waitFor(() => expect(calls()).toHaveLength(1));
+    socket.receive({ type: "reducer.error", id: calls()[0].id, error: "pool timed out", class: "transient", retryable: true });
+    await vi.waitFor(() => expect(client.entityIntentStatus("tasks", createdId)).toBe("failed"));
+    // The unrelated update proceeds past the parked create and is still syncing.
+    await vi.waitFor(() => expect(calls()).toHaveLength(2));
+    expect(client.entityIntentStatus("tasks", "t1")).toBe("syncing");
+    socket.receive({ type: "reducer.result", id: calls()[1].id, result: 1, originCommandId: calls()[1].id });
+    await vi.waitFor(() => expect(client.entityIntentStatus("tasks", "t1")).toBeUndefined());
+    expect(client.entityIntentStatus("tasks", createdId)).toBe("failed");
+    stop();
+  });
 });

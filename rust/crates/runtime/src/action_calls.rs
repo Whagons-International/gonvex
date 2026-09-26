@@ -59,11 +59,20 @@ impl OpenFetchBodies {
     }
 
     fn get(&self, id: u64) -> Option<Arc<tokio::sync::Mutex<OpenFetchBody>>> {
-        self.0.lock().expect("fetch body registry poisoned").bodies.get(&id).cloned()
+        self.0
+            .lock()
+            .expect("fetch body registry poisoned")
+            .bodies
+            .get(&id)
+            .cloned()
     }
 
     fn close(&self, id: u64) {
-        self.0.lock().expect("fetch body registry poisoned").bodies.remove(&id);
+        self.0
+            .lock()
+            .expect("fetch body registry poisoned")
+            .bodies
+            .remove(&id);
     }
 
     /// The next chunk of complete UTF-8 text, or `done` once the body ended.
@@ -129,15 +138,22 @@ fn complete_utf8_len(bytes: &[u8]) -> usize {
         } else {
             1
         };
-        return if needed > back { bytes.len() - back } else { bytes.len() };
+        return if needed > back {
+            bytes.len() - back
+        } else {
+            bytes.len()
+        };
     }
     bytes.len()
 }
 
 fn is_event_stream(headers: &BTreeMap<String, String>) -> bool {
-    headers
-        .get("content-type")
-        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("text/event-stream"))
+    headers.get("content-type").is_some_and(|value| {
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("text/event-stream")
+    })
 }
 
 fn action_fetch_timeout(
@@ -613,15 +629,27 @@ fn origin(url: &Url) -> Result<String, String> {
 mod fetch_tests {
     use super::*;
 
+    /// Consumes the HTTP request head so the test server replies only after
+    /// the client has finished sending it.
+    async fn read_request_head(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "client closed before sending the request head");
+            request.extend_from_slice(&chunk[..read]);
+        }
+    }
+
     #[tokio::test]
     async fn a_body_timeout_is_reported_as_a_timeout_not_a_decode_failure() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            read_request_head(&mut socket).await;
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
                 .await
@@ -649,13 +677,12 @@ mod fetch_tests {
 
     #[tokio::test]
     async fn response_body_can_arrive_after_thirty_seconds_within_the_action_deadline() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            read_request_head(&mut socket).await;
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
                 .await
@@ -676,14 +703,17 @@ mod fetch_tests {
         server.await.unwrap();
     }
 
-    async fn serve_once(head: &'static str, parts: Vec<&'static [u8]>, gate: Arc<tokio::sync::Notify>) -> (String, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn serve_once(
+        head: &'static str,
+        parts: Vec<&'static [u8]>,
+        gate: Arc<tokio::sync::Notify>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            read_request_head(&mut socket).await;
             socket.write_all(head.as_bytes()).await.unwrap();
             for (index, part) in parts.into_iter().enumerate() {
                 if index > 0 {
@@ -723,7 +753,10 @@ mod fetch_tests {
         // The first chunk arrives before the server writes the rest, and holds
         // back the incomplete character.
         let first = bodies.clone().read(stream).await.unwrap();
-        assert_eq!(first, serde_json::json!({ "chunk": "data: caf", "done": false }));
+        assert_eq!(
+            first,
+            serde_json::json!({ "chunk": "data: caf", "done": false })
+        );
         gate.notify_one();
         let mut text = first["chunk"].as_str().unwrap().to_owned();
         loop {
@@ -764,7 +797,10 @@ mod fetch_tests {
     async fn a_cancelled_or_unknown_body_reads_as_finished() {
         let bodies = OpenFetchBodies::default();
         bodies.close(7);
-        assert_eq!(bodies.read(7).await.unwrap(), serde_json::json!({ "done": true }));
+        assert_eq!(
+            bodies.read(7).await.unwrap(),
+            serde_json::json!({ "done": true })
+        );
     }
 
     #[test]

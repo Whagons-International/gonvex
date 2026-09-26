@@ -12,6 +12,7 @@ import type {
   ReplicaCursor,
   ReplicaDirective,
   ReplicaOpenRequest,
+  ReducerErrorClass,
 } from "@gonvex/protocol";
 import { applyReplicaHashDelta, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
 import type { LocalExecution, LocalSnapshot, LocalTransactionResult } from "@gonvex/local-runtime";
@@ -26,7 +27,14 @@ import {
 } from "./optimistic.js";
 import {
   createReducerOutbox,
+  DEFAULT_OUTBOX_MAX_BACKOFF_MS,
+  outboxBackoffMs,
+  outboxEntryIsLive,
+  type OutboxErrorClass,
   type ReducerOutbox,
+  type ReducerOutboxEntry,
+  type ReducerOutboxScopeSummary,
+  type ReducerOutboxState,
   type OutboxStore,
 } from "./outbox.js";
 import {
@@ -291,15 +299,94 @@ export class GonvexClientError extends Error {
   readonly code: GonvexClientErrorCode;
   readonly path?: string;
   readonly operation?: "query" | "reducer" | "action";
+  /**
+   * For `server` Reducer errors: the runtime's classification, or a legacy
+   * inference when an older runtime sent none. Undefined means a legacy
+   * runtime's unclassified error, which is handled as a rejection.
+   */
+  readonly errorClass?: ReducerErrorClass;
+  /** True when the same call (same idempotency key) may succeed later. */
+  readonly retryable?: boolean;
 
-  constructor(message: string, options: { code: GonvexClientErrorCode; path?: string; operation?: "query" | "reducer" | "action" }) {
+  constructor(message: string, options: { code: GonvexClientErrorCode; path?: string; operation?: "query" | "reducer" | "action"; errorClass?: ReducerErrorClass; retryable?: boolean }) {
     super(message);
     this.name = "GonvexClientError";
     this.code = options.code;
     this.path = options.path;
     this.operation = options.operation;
+    if (options.errorClass) this.errorClass = options.errorClass;
+    if (options.retryable !== undefined) this.retryable = options.retryable;
   }
 }
+
+/** One durable reducer intent, as exposed to application UI. */
+export type OutboxIntent = {
+  /** The reducer id / idempotency key. Stable across retries, reloads and tabs. */
+  id: string;
+  /** Local queue sequence number. Lower numbers were issued first. */
+  entryId: number;
+  reducer: string;
+  state: ReducerOutboxState;
+  /** Failed deliveries counted toward the retry budget. */
+  attempts: number;
+  lastError?: string;
+  errorClass?: OutboxErrorClass;
+  createdAt: number;
+  nextAttemptAt: number;
+  /** When the intent became `failed` or `rejected`. */
+  settledAt?: number;
+  args: unknown;
+  /** Short, display-safe JSON preview of the arguments. */
+  argsSummary: string;
+  /** Rows this intent's optimistic prediction touched (best effort). */
+  entities: Array<{ entity: string; id: string }>;
+};
+
+/** Per-row delivery status derived from the outbox. */
+export type EntityIntentStatus = "syncing" | "failed" | "rejected";
+
+export type ReducerRejectionEvent = {
+  reducerId: string;
+  path: string;
+  error: string;
+  errorClass?: OutboxErrorClass;
+};
+
+export type OutboxScope = ReducerOutboxScopeSummary & {
+  /** True for the identity this client is currently signed in as. */
+  current: boolean;
+};
+
+export type OutboxRetryOptions = {
+  /**
+   * Counted delivery failures (transient server errors and timeouts) before an
+   * intent is parked as `failed`. Default 10. `Infinity` retries forever.
+   */
+  maxAttempts?: number;
+  /** Cap for the exponential backoff between attempts. Default 60s. */
+  maxBackoffMs?: number;
+};
+
+export type ResetLocalReplicaOptions = {
+  /**
+   * Keep the durable outbox (default true). Pending, failed and rejected
+   * intents survive the reset and their predictions are re-applied on top of
+   * the rehydrated data. `false` also deletes every intent of the active
+   * identity that is not already inflight or committed; use it only for an
+   * explicit "discard unsynced changes" action.
+   */
+  keepOutbox?: boolean;
+};
+
+export type ResetLocalReplicaResult = {
+  /** Intents deleted because `keepOutbox: false` was requested. */
+  discardedIntents: number;
+  /** Replica Collections and Live Queries re-requested from the server. */
+  resubscribed: number;
+};
+
+export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 10;
+export const DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS = 60_000;
 
 export type ConnectionState = {
   isWebSocketConnected: boolean;
@@ -388,7 +475,7 @@ export type GonvexClientOptions = GonvexClientAuth & {
    * Runtimes without IndexedDB inject `store` to keep queued reducers
    * durable; queue semantics always stay in the SDK.
    */
-  outbox?: { databaseName?: string; enabled?: boolean; store?: OutboxStore };
+  outbox?: { databaseName?: string; enabled?: boolean; store?: OutboxStore; retry?: OutboxRetryOptions };
   /** Transactional normalized store used by Replica Collections and Live Queries. */
   localReplica?: { storage?: LocalReplicaStorage; maxResidentRows?:number; maxResidentBytes?:number };
   errorReporting?: false | Omit<ErrorReporterOptions, "transport" | "project" | "tenant">;
@@ -438,7 +525,13 @@ export class GonvexClient {
   private readonly localCollectionClosers: Array<() => void> = [];
   private readonly localCollectionKeys = new Set<string>();
   private readonly localExecutionTables = new Map<string, Set<string>>();
-  private readonly reducerRejectionHandlers = new Set<(event: { reducerId: string; path: string; error: string }) => void>();
+  private readonly reducerRejectionHandlers = new Set<(event: ReducerRejectionEvent) => void>();
+  private readonly outboxRetry: Required<OutboxRetryOptions>;
+  private unauthenticatedRetries = 0;
+  private intentsSnapshotValue: readonly OutboxIntent[] = [];
+  private readonly intentListeners = new Set<() => void>();
+  private intentsRefreshRunning = false;
+  private intentsRefreshDirty = false;
   private socket: WebSocket | undefined;
   private readonly handlers = new Map<string, SubscriptionHandler>();
   private readonly querySubscriptions = new Map<string, QuerySubscription>();
@@ -503,6 +596,8 @@ export class GonvexClient {
   private peerRefreshDirty = false;
   private readonly unsubscribeBrowserOnline: (() => void) | undefined;
   private drainingOutbox = false;
+  /** A wake-up (timer, enqueue, reconnect) that arrived while a drain was running. */
+  private outboxDrainRequested = false;
   private outboxDrainTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly sessionScopeHandlers = new Set<() => void>();
   private readonly errorReporter: GonvexErrorReporter | undefined;
@@ -552,6 +647,10 @@ export class GonvexClient {
     );
     this.sharedOutboxStore = options.outbox?.store?.shared ? options.outbox.store : undefined;
     this.reducerOutbox = createReducerOutbox(options.outbox);
+    this.outboxRetry = {
+      maxAttempts: positiveOr(options.outbox?.retry?.maxAttempts, DEFAULT_OUTBOX_MAX_ATTEMPTS),
+      maxBackoffMs: positiveOr(options.outbox?.retry?.maxBackoffMs, DEFAULT_OUTBOX_RETRY_MAX_BACKOFF_MS),
+    };
     this.replica = new LocalReplica(options.localReplica?.storage,{maxResidentRows:options.localReplica?.maxResidentRows,maxResidentBytes:options.localReplica?.maxResidentBytes});
     this.replicaView = createLocalReplicaView(this.replica);
     if (this.localExecutor) {
@@ -568,6 +667,7 @@ export class GonvexClient {
       if (scope === this.replicaScope) this.refreshPeerOutbox();
     });
     this.unsubscribeOutbox = this.reducerOutbox.subscribe(() => {
+      this.refreshIntents();
       void this.drainOutbox();
     });
     if (typeof globalThis.addEventListener === "function") {
@@ -605,10 +705,231 @@ export class GonvexClient {
     if (this.localBinding) this.outboxReady = this.restoreLocalSession(initialScope, this.outboxScopeGeneration);
   }
 
-  /** Authoritative sync failures arrive after an offline call returned locally. */
-  onReducerRejection(listener: (event: { reducerId: string; path: string; error: string }) => void): () => void {
+  /**
+   * Authoritative sync failures arrive after an offline call returned locally.
+   * The intent also stays in the outbox as `rejected` until it is discarded
+   * or retried, so a UI that mounts later can still show it.
+   */
+  onReducerRejection(listener: (event: ReducerRejectionEvent) => void): () => void {
     this.reducerRejectionHandlers.add(listener);
     return () => this.reducerRejectionHandlers.delete(listener);
+  }
+
+  /** Every durable intent of the current identity, oldest first. */
+  async listIntents(): Promise<OutboxIntent[]> {
+    await this.outboxReady;
+    return (await this.reducerOutbox.list(this.outboxScope)).map(outboxIntentFromEntry);
+  }
+
+  /**
+   * Synchronous snapshot for external stores (React `useSyncExternalStore`).
+   * Kept current while at least one {@link subscribeIntents} listener exists.
+   */
+  intentsSnapshot(): readonly OutboxIntent[] {
+    return this.intentsSnapshotValue;
+  }
+
+  /** Observe intent changes; call {@link intentsSnapshot} for the new value. */
+  subscribeIntents(listener: () => void): () => void {
+    this.intentListeners.add(listener);
+    if (this.intentListeners.size === 1) this.refreshIntents();
+    return () => { this.intentListeners.delete(listener); };
+  }
+
+  /**
+   * Delivery status for one row from the current snapshot: `failed` or
+   * `rejected` when an intent touching it needs attention, `syncing` while one
+   * is still queued, otherwise undefined.
+   */
+  entityIntentStatus(entity: string, id: string): EntityIntentStatus | undefined {
+    return entityStatusFromIntents(this.intentsSnapshotValue, entity, id);
+  }
+
+  /**
+   * Re-arm a `failed` or `rejected` intent with a fresh retry budget. The
+   * original idempotency key is reused, so an attempt that had actually
+   * committed is replayed by the server rather than applied twice.
+   */
+  async retryIntent(id: string): Promise<boolean> {
+    await this.outboxReady;
+    const retried = await this.inLocalLane(() => this.coordinateOutbox("intent", async () => {
+      const scope = this.outboxScope;
+      const entry = (await this.reducerOutbox.list(scope)).find((candidate) => candidate.idempotencyKey === id);
+      if (!entry || scope !== this.outboxScope) return false;
+      const updated = await this.reducerOutbox.retry(entry.id);
+      if (!updated) return false;
+      this.optimisticOutboxEntryIds.set(id, updated.id);
+      if (!outboxEntryIsLive(entry)) {
+        // A rejection rolled the prediction back; restore it at its original
+        // position in the causal chain.
+        if (updated.localExecution && this.localExecutor) await this.rebaseLocalEntriesLocked(true);
+        else this.addOptimisticReducer(id, updated.patches ?? []);
+      }
+      return true;
+    }));
+    if (retried) {
+      this.unauthenticatedRetries = 0;
+      void this.drainOutbox();
+    }
+    return retried;
+  }
+
+  /**
+   * Drop a `pending`, `failed` or `rejected` intent: it will never be sent,
+   * its optimistic prediction is removed and later local intents are rebased.
+   * Inflight and committed intents cannot be discarded. Discarding an intent
+   * whose earlier attempt timed out does not undo a commit that the server
+   * may already have applied; the replica then shows the server's truth.
+   */
+  async discardIntent(id: string): Promise<boolean> {
+    await this.outboxReady;
+    return this.inLocalLane(() => this.coordinateOutbox("intent", async () => {
+      const scope = this.outboxScope;
+      const entry = (await this.reducerOutbox.list(scope)).find((candidate) => candidate.idempotencyKey === id);
+      if (!entry || scope !== this.outboxScope) return false;
+      const removed = await this.reducerOutbox.discard(entry.id, ["pending", "failed", "rejected"]);
+      if (!removed) return false;
+      this.optimisticOutboxEntryIds.delete(id);
+      this.optimisticReducerIds.delete(id);
+      if (outboxEntryIsLive(removed)) {
+        this.replacingLocal = true;
+        try { this.replica.rejectCommand(id); }
+        finally { this.replacingLocal = false; }
+        if (removed.localExecution && this.localExecutor) await this.rebaseLocalEntriesLocked(true);
+      }
+      return true;
+    }));
+  }
+
+  /**
+   * Discard the persisted Local Replica of the active identity (IndexedDB,
+   * Expo SQLite or any configured storage) and rehydrate it from the server.
+   *
+   * Online only: without an authenticated connection the call rejects with a
+   * `GonvexClientError` (`code: "disconnected"`) and changes nothing, so the
+   * user is never left with an empty cache that cannot be refilled. The saved
+   * offline session (identity and replica directive) is kept.
+   *
+   * By default the outbox is untouched: pending, failed and rejected intents
+   * stay durable, and the predictions of every live intent are re-applied
+   * immediately and recomputed as server data arrives. Active Replica
+   * Collections and Live Queries are re-requested without their old cursors,
+   * so the server sends full snapshots.
+   */
+  async resetLocalReplica(options: ResetLocalReplicaOptions = {}): Promise<ResetLocalReplicaResult> {
+    const refuse = (message: string) => new GonvexClientError(message, { code: "disconnected", operation: "query" });
+    if (this.manuallyClosed) throw new GonvexClientError("Gonvex client is closed", { code: "closed", operation: "query" });
+    await this.outboxReady;
+    await this.replicaReady;
+    if (!this.canSendReducerNow() || !this.hasAuthoritativeReplicaScope) {
+      throw refuse("Cannot reset local data while offline. Reconnect and try again; cached data was kept.");
+    }
+    const keepOutbox = options.keepOutbox !== false;
+    return this.inLocalLane(() => this.coordinateOutbox("intent", async () => {
+      const scope = this.outboxScope;
+      const replicaScope = this.replicaScope;
+      // Re-check under the lock: the connection may have dropped while waiting.
+      if (!this.canSendReducerNow() || !this.hasAuthoritativeReplicaScope) {
+        throw refuse("Cannot reset local data while offline. Reconnect and try again; cached data was kept.");
+      }
+      // Stop the server streaming into subscription ids we are about to retire.
+      for (const subscription of this.replicaSubscriptions.values()) {
+        if (subscription.socketGeneration !== undefined) this.send({ type: "replica.close", id: subscription.id });
+      }
+      for (const subscription of this.querySubscriptions.values()) {
+        if (subscription.socketGeneration !== undefined) this.send({ type: "query.unsubscribe", id: subscription.id });
+      }
+      this.pendingReplicaTransactions.length = 0;
+      await this.replica.clear(replicaScope);
+      this.resetReplicaScopeState();
+      this.rotateSubscriptionScopes();
+
+      let discardedIntents = 0;
+      if (!keepOutbox) {
+        for (const entry of await this.reducerOutbox.list(scope)) {
+          if (await this.reducerOutbox.discard(entry.id, ["pending", "failed", "rejected"])) discardedIntents += 1;
+        }
+      }
+      // replica.clear() dropped every overlay. Restore the stored predictions
+      // of live intents now; local intents are re-executed by the replay that
+      // each arriving snapshot schedules.
+      const entries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
+      this.replacingLocal = true;
+      try {
+        this.replaceLocalPredictions(entries.filter(entry => entry.state !== "committed").map(entry => ({ commandId: entry.idempotencyKey, patches: entry.patches ?? [] })));
+      } finally { this.replacingLocal = false; }
+      this.optimisticReducerIds.clear();
+      this.optimisticOutboxEntryIds.clear();
+      for (const entry of entries) {
+        this.optimisticOutboxEntryIds.set(entry.idempotencyKey, entry.id);
+        if (entry.state !== "committed" && entry.patches?.length) this.optimisticReducerIds.add(entry.idempotencyKey);
+      }
+
+      let resubscribed = 0;
+      if (scope === this.outboxScope && replicaScope === this.replicaScope) {
+        for (const subscription of this.replicaSubscriptions.values()) if (subscription.listeners.size > 0) resubscribed += 1;
+        for (const subscription of this.querySubscriptions.values()) if (subscription.listeners.size > 0) resubscribed += 1;
+        this.resumeQuerySubscriptions(true);
+        this.resumeReplicaSubscriptions();
+      }
+      this.refreshIntents();
+      return { discardedIntents, resubscribed };
+    }));
+  }
+
+  /** Outbox owners with durable entries, including identities that never returned. */
+  async listOutboxScopes(): Promise<OutboxScope[]> {
+    await this.outboxReady;
+    const current = this.outboxScope;
+    return (await this.reducerOutbox.listScopes()).map((scope) => ({ ...scope, current: scope.scope === current }));
+  }
+
+  /**
+   * Permanently delete another identity's durable intents. The active scope
+   * cannot be purged this way; use {@link discardIntent} for its entries.
+   */
+  async purgeOutboxScope(scope: string): Promise<number> {
+    await this.outboxReady;
+    if (scope === this.outboxScope) throw new Error("Cannot purge the active outbox scope");
+    return this.reducerOutbox.purgeScope(scope);
+  }
+
+  /** Purge every outbox scope except the current identity's. Never runs automatically. */
+  async purgeForeignOutboxScopes(): Promise<number> {
+    let removed = 0;
+    for (const scope of await this.listOutboxScopes()) {
+      if (!scope.current) removed += await this.purgeOutboxScope(scope.scope);
+    }
+    return removed;
+  }
+
+  private refreshIntents() {
+    if (this.intentListeners.size === 0 || this.manuallyClosed) return;
+    this.intentsRefreshDirty = true;
+    if (this.intentsRefreshRunning) return;
+    this.intentsRefreshRunning = true;
+    void (async () => {
+      try {
+        while (this.intentsRefreshDirty && !this.manuallyClosed) {
+          this.intentsRefreshDirty = false;
+          await this.outboxReady.catch(() => undefined);
+          const scope = this.outboxScope;
+          const entries = await this.reducerOutbox.list(scope).catch(() => undefined);
+          if (!entries || scope !== this.outboxScope) { this.intentsRefreshDirty ||= scope !== this.outboxScope; continue; }
+          this.publishIntents(entries.map(outboxIntentFromEntry));
+        }
+      } finally {
+        this.intentsRefreshRunning = false;
+      }
+    })();
+  }
+
+  private publishIntents(next: readonly OutboxIntent[]) {
+    if (sameIntents(this.intentsSnapshotValue, next)) return;
+    this.intentsSnapshotValue = next;
+    for (const listener of this.intentListeners) {
+      try { listener(); } catch { /* A listener must not break delivery. */ }
+    }
   }
 
   private async restoreLocalSession(scope: string, generation: number): Promise<void> {
@@ -738,7 +1059,7 @@ export class GonvexClient {
       await this.inLocalLane(() => this.coordinateOutbox("intent", async () => {
         const scope = this.outboxScope;
         await this.replica.synchronizeStorage();
-        const entries = await this.reducerOutbox.list(scope);
+        const entries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
         if (this.manuallyClosed || scope !== this.outboxScope) return;
         this.replaceLocalPredictions(entries.filter(entry => entry.state !== "committed").map(entry => ({commandId: entry.idempotencyKey, patches: entry.patches ?? []})));
         this.optimisticReducerIds.clear();
@@ -749,6 +1070,7 @@ export class GonvexClient {
         }
       }));
       } while (this.peerRefreshDirty && !this.manuallyClosed);
+      this.refreshIntents();
       void this.drainOutbox();
     })().catch(() => undefined).finally(() => { this.peerRefreshScheduled = false; });
   }
@@ -769,7 +1091,10 @@ export class GonvexClient {
 
   private reportLocalRejection(reducerId: string, path: string, error: unknown) {
     const message = reducerErrorMessage(error);
-    for (const listener of this.reducerRejectionHandlers) listener({ reducerId, path, error: message });
+    for (const listener of this.reducerRejectionHandlers) {
+      try { listener({ reducerId, path, error: message, errorClass: "rejected" }); }
+      catch { /* A listener must not break delivery. */ }
+    }
   }
 
   private rebaseLocalEntries(afterRejection = false): Promise<void> {
@@ -785,7 +1110,9 @@ export class GonvexClient {
     await this.replica.synchronizeStorage();
     const scope = this.outboxScope;
     const replicaScope = this.replicaScope;
-    const entries = await this.reducerOutbox.list(scope);
+    // Rejected records keep their payload for the UI but are never predicted.
+    // Failed (parked) intents stay predicted until retried or discarded.
+    const entries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
     if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
     if (entries.length === 0) {
       this.replacingLocal = true;
@@ -887,7 +1214,7 @@ export class GonvexClient {
       if (this.clientContract && this.clientContract.offlineMaxAgeMs !== null && !this.canSendReducerNow() && (Date.now() - this.lastOnlineAtMs > this.clientContract.offlineMaxAgeMs || Date.now() < this.lastOnlineAtMs)) throw new Error("Offline editing window expired. Reconnect before making more changes.");
       const scope = this.outboxScope;
       if (!execution || execution.scope !== this.replicaScope) throw new GonvexClientError("Session changed before local reducer execution", {code:'superseded'});
-      const sharedEntries = await this.reducerOutbox.list(scope);
+      const sharedEntries = (await this.reducerOutbox.list(scope)).filter(outboxEntryIsLive);
       const sharedPatches = sharedEntries?.filter(entry => entry.state !== "committed").flatMap(entry => (entry.patches ?? []).map(patch => patch.op === "delete"
         ? {entity: patch.entity ?? patch.collection!, rowId: patch.rowId, op: "delete" as const}
         : {entity: patch.entity ?? patch.collection!, rowId: patch.rowId, op: patch.op === "upsert" ? "insert" as const : patch.op, fields: patch.fields as import("@gonvex/module-sdk").JsonObject}));
@@ -1036,7 +1363,7 @@ export class GonvexClient {
     );
   }
 
-  /** Number of reducers waiting for a definitive server result. */
+  /** Number of reducers still queued for delivery (excludes failed and rejected intents). */
   async outboxCount(): Promise<number> {
     await this.outboxReady;
     return this.reducerOutbox.count(this.outboxScope);
@@ -2630,6 +2957,9 @@ export class GonvexClient {
       ? this.restoreOutbox(scope, generation)
       : this.restoreLocalSession(scope, generation);
     this.outboxReady = ready;
+    // Never show the previous identity's intents under the new one.
+    this.publishIntents([]);
+    this.refreshIntents();
     return ready;
   }
 
@@ -2712,6 +3042,7 @@ export class GonvexClient {
     }
     for (const entry of entries) {
       if (entry.localExecution && this.localExecutor) continue;
+      if (!outboxEntryIsLive(entry)) continue;
       if (entry.state === "committed" && (entry.patches?.length ?? 0) === 0) {
         await this.reducerOutbox.ack(entry.id);
         continue;
@@ -2730,6 +3061,7 @@ export class GonvexClient {
     // If this scope was installed after the socket authenticated, no reconnect
     // or new enqueue may occur to wake the queue. The await inside drainOutbox
     // yields until this restore promise resolves, then safely resumes it.
+    this.refreshIntents();
     void this.drainOutbox();
   }
 
@@ -2762,13 +3094,16 @@ export class GonvexClient {
 
   private async drainOutbox() {
     await this.outboxReady;
-    if (
-      this.drainingOutbox
-      || this.manuallyClosed
-      || !this.canSendReducerNow()
-    ) return;
+    if (this.drainingOutbox) {
+      // The running drain may already be past the entry this wake-up is for
+      // (for example a short backoff timer firing before the drain returned).
+      this.outboxDrainRequested = true;
+      return;
+    }
+    if (this.manuallyClosed || !this.canSendReducerNow()) return;
     const drainScope = this.outboxScope;
     this.drainingOutbox = true;
+    this.outboxDrainRequested = false;
     try {
       await this.coordinateOutbox("delivery", async () => {
       if (this.manuallyClosed || drainScope !== this.outboxScope || !this.canSendReducerNow()) return;
@@ -2777,10 +3112,16 @@ export class GonvexClient {
         const scope = this.outboxScope;
         const entry = await this.inLocalLane(async () => {
           const next = await this.reducerOutbox.nextReady(scope, Date.now());
-          if (next) await this.reducerOutbox.markInflight(next.id);
+          // A concurrent discard (this or another tab) fences the entry; a
+          // refused transition means it must not be sent.
+          if (next && (await this.reducerOutbox.markInflight(next.id)) === false) return null;
           return next;
         });
-        if (!entry) return;
+        if (entry === null) continue;
+        if (!entry) {
+          await this.scheduleNextOutboxAttempt(scope);
+          return;
+        }
         if (scope !== this.outboxScope) return;
         if (this.directOutboxReducerIds.has(entry.idempotencyKey)) {
           // Scope recovery may observe an inflight row created by this live
@@ -2795,7 +3136,7 @@ export class GonvexClient {
           await this.reducerOutbox.markPending(entry.id);
           return;
         }
-        await this.reducerOutbox.markInflight(entry.id);
+        if ((await this.reducerOutbox.markInflight(entry.id)) === false) continue;
         if (scope !== this.outboxScope) return;
         if (!this.canSendReducerNow()) {
           await this.reducerOutbox.markPending(entry.id);
@@ -2810,6 +3151,7 @@ export class GonvexClient {
             entry.idempotencyKey,
             entry.idempotencyKey,
           );
+          this.unauthenticatedRetries = 0;
           await this.reducerOutbox.markCommitted(entry.id);
           if (entry.localExecution && this.localExecutor) {
             await this.inLocalLane(async () => {
@@ -2822,25 +3164,31 @@ export class GonvexClient {
             await this.ackOptimisticReducer(entry.idempotencyKey, entry.id);
           }
         } catch (error) {
-          if (error instanceof Error && /STALE_REDUCER_ARTIFACT|CLIENT_UPDATE_REQUIRED/.test(error.message)) {
-            await this.reducerOutbox.markPending(entry.id);
-            this.requireClientUpdate(error.message);
-            return;
-          }
-          if (error instanceof GonvexClientError && error.code === "server") {
+          const disposition = deliveryErrorClass(error);
+          if (disposition === "rejected") {
+            // Keep today's rollback and rebase, but record the rejection
+            // durably instead of deleting the intent without a trace.
             if (entry.localExecution && this.localExecutor) {
               await this.inLocalLane(async () => {
-                await this.reducerOutbox.ack(entry.id);
+                await this.reducerOutbox.reject(entry.id, reducerErrorMessage(error));
                 if (scope === this.outboxScope) {
                   await this.rebaseLocalEntries(true);
                   this.reportLocalRejection(entry.idempotencyKey, entry.path, error);
                 }
               });
-            } else await this.rejectOptimisticReducer(entry.idempotencyKey, entry.id);
+            } else {
+              this.optimisticReducerIds.delete(entry.idempotencyKey);
+              this.optimisticOutboxEntryIds.delete(entry.idempotencyKey);
+              this.replica.rejectCommand(entry.idempotencyKey);
+              await this.reducerOutbox.reject(entry.id, reducerErrorMessage(error));
+              if (scope === this.outboxScope) this.reportLocalRejection(entry.idempotencyKey, entry.path, error);
+            }
             continue;
           }
-          await this.reducerOutbox.fail(entry.id, reducerErrorMessage(error));
-          this.scheduleOutboxDrain(Math.min(30_000, 1_000 * (2 ** (entry.attempts + 1))));
+          const outcome = await this.recordDeliveryFailure(entry, error, disposition);
+          // A parked intent keeps its prediction but no longer blocks the
+          // chain; later intents proceed and the server validates them.
+          if (outcome === "parked") continue;
           return;
         }
       }
@@ -2848,10 +3196,75 @@ export class GonvexClient {
     } finally {
       this.drainingOutbox = false;
       this.scheduleLocalReplay();
-      if (!this.manuallyClosed && drainScope !== this.outboxScope) {
+      const requested = this.outboxDrainRequested;
+      this.outboxDrainRequested = false;
+      if (!this.manuallyClosed && (drainScope !== this.outboxScope || requested)) {
         void this.drainOutbox();
       }
     }
+  }
+
+  /**
+   * Record a non-rejection delivery failure and arm the next attempt.
+   * - update_required: keep the intent pending and stop for an app update.
+   * - unauthenticated: keep the intent, re-authenticate, retry with backoff
+   *   that never spends the retry budget.
+   * - network: connectivity loss; retried on reconnect without spending budget.
+   * - transient (and timeouts): exponential backoff, parked as `failed` once
+   *   the retry budget is spent.
+   */
+  private async recordDeliveryFailure(
+    entry: Pick<ReducerOutboxEntry, "id">,
+    error: unknown,
+    disposition: Exclude<OutboxErrorClass, "rejected">,
+  ): Promise<"parked" | "retrying" | "update_required"> {
+    const message = reducerErrorMessage(error);
+    if (disposition === "update_required") {
+      await this.reducerOutbox.fail(entry.id, message, { errorClass: disposition, countAttempt: false, delayMs: 0 });
+      this.requireClientUpdate(message);
+      return "update_required";
+    }
+    if (disposition === "unauthenticated") {
+      const delay = outboxBackoffMs(this.unauthenticatedRetries++, this.outboxRetry.maxBackoffMs);
+      await this.reducerOutbox.fail(entry.id, message, { errorClass: disposition, countAttempt: false, delayMs: delay });
+      this.requestReauthentication();
+      this.scheduleOutboxDrain(delay);
+      return "retrying";
+    }
+    const counted = disposition === "transient";
+    const updated = await this.reducerOutbox.fail(entry.id, message, {
+      errorClass: disposition,
+      countAttempt: counted,
+      maxAttempts: this.outboxRetry.maxAttempts,
+      maxBackoffMs: this.outboxRetry.maxBackoffMs,
+      ...(counted ? {} : { delayMs: 1_000 }),
+    });
+    if (updated && updated.state === "failed") return "parked";
+    const delay = updated ? Math.max(0, updated.nextAttemptAt - Date.now()) : DEFAULT_OUTBOX_MAX_BACKOFF_MS;
+    this.scheduleOutboxDrain(delay);
+    return "retrying";
+  }
+
+  /**
+   * Arm a timer for the earliest backed-off entry. Timer clocks and
+   * `Date.now()` can disagree by a millisecond, so a wake-up may find its
+   * entry not quite due; without this the queue would wait for an unrelated
+   * event to resume.
+   */
+  private async scheduleNextOutboxAttempt(scope: string) {
+    const now = Date.now();
+    let next = Infinity;
+    for (const entry of await this.reducerOutbox.list(scope)) {
+      if (entry.state === "pending" && entry.nextAttemptAt > now) next = Math.min(next, entry.nextAttemptAt);
+    }
+    if (Number.isFinite(next) && scope === this.outboxScope) this.scheduleOutboxDrain(next - now + 1);
+  }
+
+  /** Re-send auth on the open socket so a lost tenant session is restored. */
+  private requestReauthentication() {
+    if (this.manuallyClosed || this.authInFlight || this.socket?.readyState !== WebSocket.OPEN) return;
+    if (!this.auth.project && !this.auth.tenant && !this.auth.token && !this.auth.fetchToken) return;
+    this.sendAuth(false);
   }
 
   private scheduleOutboxDrain(delay: number) {
@@ -2920,7 +3333,6 @@ export class GonvexClient {
     }
     this.directOutboxReducerIds.add(reducerId);
     let entryId: number | undefined;
-    let entryAttempts = 0;
     try {
       const scope = this.outboxScope;
       const entry = await this.reducerOutbox.enqueue({
@@ -2933,7 +3345,6 @@ export class GonvexClient {
         state: "inflight",
       });
       entryId = entry.id;
-      entryAttempts = entry.attempts;
       if (this.manuallyClosed) {
         await this.reducerOutbox.ack(entry.id);
         throw new GonvexClientError(
@@ -2972,14 +3383,13 @@ export class GonvexClient {
       }
       return result;
     } catch (error: unknown) {
-      if (isQueueableReducerError(error) && options.offline === "queue") {
+      const disposition = deliveryErrorClass(error);
+      if (disposition !== "rejected" && options.offline === "queue") {
         const queuedEntryId = this.optimisticOutboxEntryIds.get(reducerId) ?? entryId;
         if (queuedEntryId !== undefined) {
-          await this.reducerOutbox.fail(queuedEntryId, reducerErrorMessage(error));
-          // `fail` deliberately records backoff, but it does not own the
-          // client's timer. The foreground queueable path must schedule the
-          // next deterministic drain just like the background drain path.
-          this.scheduleOutboxDrain(Math.min(30_000, 1_000 * (2 ** (entryAttempts + 1))));
+          // Records backoff (or parks the entry) and arms the client's timer,
+          // exactly like the background drain path.
+          await this.recordDeliveryFailure({ id: queuedEntryId }, error, disposition);
         }
         return { status: "queued", reducerId };
       }
@@ -3246,7 +3656,11 @@ export class GonvexClient {
         if (kind === "reducer" && message.type === "reducer.error") {
           settle();
           this.emitTelemetryFromCall(kind, id, ref.path, "error", clientSentAtMs, message.trace, message.error);
-          reject(new GonvexClientError(message.error, { code: "server", path: ref.path, operation: kind }));
+          const errorClass = reducerErrorClassFromMessage(message);
+          reject(new GonvexClientError(message.error, {
+            code: "server", path: ref.path, operation: kind,
+            ...(errorClass ? { errorClass, retryable: message.retryable ?? (errorClass === "transient" || errorClass === "unauthenticated") } : {}),
+          }));
         }
         if (kind === "action" && message.type === "action.result") {
           const complete = () => {
@@ -3922,9 +4336,88 @@ function countPendingCalls(calls: Map<string, PendingCall>, kind: "reducer" | "a
   return count;
 }
 
-function isQueueableReducerError(error: unknown) {
-  return error instanceof GonvexClientError
-    && (error.code === "disconnected" || error.code === "timeout");
+/**
+ * How the outbox treats one failed delivery. Runtimes before
+ * 0.5.2-staging.15 send no class: their server errors stay rejections, as
+ * before, except the two cases the legacy runtime could only express in prose.
+ */
+function deliveryErrorClass(error: unknown): OutboxErrorClass {
+  if (!(error instanceof GonvexClientError)) return "transient";
+  switch (error.code) {
+    case "server": return error.errorClass ?? "rejected";
+    case "timeout": return "transient";
+    default: return "network";
+  }
+}
+
+const legacyUnauthenticatedReducerError = "authenticate with an active tenant before calling a Reducer";
+
+function reducerErrorClassFromMessage(message: { error: string; class?: ReducerErrorClass }): ReducerErrorClass | undefined {
+  if (message.class === "rejected" || message.class === "transient" || message.class === "update_required" || message.class === "unauthenticated") {
+    return message.class;
+  }
+  // Legacy runtimes: the only structured signals were these literal messages.
+  if (/STALE_REDUCER_ARTIFACT|CLIENT_UPDATE_REQUIRED/.test(message.error)) return "update_required";
+  if (message.error === legacyUnauthenticatedReducerError) return "unauthenticated";
+  return undefined;
+}
+
+function positiveOr(value: number | undefined, fallback: number) {
+  return typeof value === "number" && value > 0 ? value : fallback;
+}
+
+function summarizeArgs(args: unknown): string {
+  let text: string;
+  try { text = JSON.stringify(args) ?? ""; } catch { text = String(args); }
+  return text.length > 160 ? `${text.slice(0, 157)}...` : text;
+}
+
+function outboxIntentFromEntry(entry: ReducerOutboxEntry): OutboxIntent {
+  const entities = new Map<string, { entity: string; id: string }>();
+  for (const patch of entry.patches ?? []) {
+    const entity = patch.entity ?? patch.collection;
+    if (!entity) continue;
+    entities.set(`${entity}\u0000${patch.rowId}`, { entity, id: patch.rowId });
+  }
+  return {
+    id: entry.idempotencyKey,
+    entryId: entry.id,
+    reducer: entry.path,
+    state: entry.state,
+    attempts: entry.attempts,
+    ...(entry.lastError !== undefined ? { lastError: entry.lastError } : {}),
+    ...(entry.lastErrorClass ? { errorClass: entry.lastErrorClass } : {}),
+    createdAt: entry.createdAt,
+    nextAttemptAt: entry.nextAttemptAt,
+    ...(entry.settledAt !== undefined ? { settledAt: entry.settledAt } : {}),
+    args: entry.args,
+    argsSummary: summarizeArgs(entry.args),
+    entities: [...entities.values()],
+  };
+}
+
+function sameIntents(left: readonly OutboxIntent[], right: readonly OutboxIntent[]) {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]!, b = right[index]!;
+    if (a.id !== b.id || a.entryId !== b.entryId || a.state !== b.state || a.attempts !== b.attempts
+      || a.lastError !== b.lastError || a.errorClass !== b.errorClass || a.nextAttemptAt !== b.nextAttemptAt
+      || a.settledAt !== b.settledAt || a.entities.length !== b.entities.length
+      || a.entities.some((entity, position) => entity.entity !== b.entities[position]!.entity || entity.id !== b.entities[position]!.id)) return false;
+  }
+  return true;
+}
+
+/** Row status from a list of intents: failed > rejected > syncing. */
+export function entityStatusFromIntents(intents: readonly OutboxIntent[], entity: string, id: string): EntityIntentStatus | undefined {
+  let status: EntityIntentStatus | undefined;
+  for (const intent of intents) {
+    if (!intent.entities.some((candidate) => candidate.entity === entity && candidate.id === id)) continue;
+    if (intent.state === "failed") return "failed";
+    if (intent.state === "rejected") status = "rejected";
+    else if (intent.state !== "committed" && status === undefined) status = "syncing";
+  }
+  return status;
 }
 
 function reducerErrorMessage(error: unknown) {

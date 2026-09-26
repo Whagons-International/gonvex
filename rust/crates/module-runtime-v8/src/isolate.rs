@@ -397,7 +397,9 @@ impl ModuleIsolate {
         // from Rust without being installed on globalThis.
         runtime
             .execute_script("gonvex:web-streams.js", WEB_STREAMS)
-            .map_err(|err| ModuleError::Execution(format!("web streams bootstrap failed: {err}")))?;
+            .map_err(|err| {
+                ModuleError::Execution(format!("web streams bootstrap failed: {err}"))
+            })?;
         let dispatch = runtime
             .execute_script("gonvex:bootstrap.js", BOOTSTRAP)
             .map_err(|err| ModuleError::Execution(format!("module bootstrap failed: {err}")))?;

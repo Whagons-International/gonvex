@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { IDBKeyRange, indexedDB } from "fake-indexeddb";
-import { DexieReducerOutbox, createReducerOutbox } from "./outbox";
+import { DexieReducerOutbox, createReducerOutbox, type OutboxStore } from "./outbox";
+import { createKvOutboxStore, createMemoryGonvexKv } from "./kv-stores";
 
 const scope = "project-a\u0000tenant-a\u0000user-a";
 
@@ -259,5 +260,102 @@ describe("DexieReducerOutbox", () => {
     await outbox.ack(first.id);
     await expect(outbox.nextReady(scope, Date.now())).resolves.toMatchObject({ id: second.id });
     await expect(outbox.loadAll(scope)).resolves.toHaveLength(1);
+  });
+});
+
+describe.each([
+  ["Dexie", () => new DexieReducerOutbox({ databaseName: `gonvex-outbox-lifecycle-${crypto.randomUUID()}`, indexedDB, IDBKeyRange })],
+  ["Store", () => createReducerOutbox({ store: createKvOutboxStore(createMemoryGonvexKv()) })],
+  ["shared Store", () => {
+    const base = createKvOutboxStore(createMemoryGonvexKv());
+    const store: OutboxStore = {
+      ...base, shared: true, strictPersistence: true,
+      load: async (scope) => (await base.load()).filter((entry) => !scope || entry.scope === scope),
+      update: async (id, change) => {
+        const entry = (await base.load()).find((candidate) => candidate.id === id);
+        if (!entry) return undefined;
+        const next = change(entry); await base.put(next); return next;
+      },
+    };
+    let sequence = 0;
+    store.allocateId = async () => ++sequence;
+    return createReducerOutbox({ store });
+  }],
+] as const)("%s outbox intent lifecycle", (_name, create) => {
+  it("backs off transient failures, then parks them as failed without deleting them", async () => {
+    const outbox = create();
+    const entry = await outbox.enqueue({ scope, path: "tasks.update", args: {}, entityKeys: ["task:a"] });
+    const options = { errorClass: "transient" as const, maxAttempts: 2, maxBackoffMs: 5 };
+    await outbox.markInflight(entry.id);
+    expect(await outbox.fail(entry.id, "pool timed out", options)).toMatchObject({ state: "pending", attempts: 1, lastErrorClass: "transient" });
+    await outbox.markInflight(entry.id);
+    const parked = await outbox.fail(entry.id, "pool timed out", options);
+    expect(parked).toMatchObject({ state: "failed", attempts: 2, lastError: "pool timed out", settledAt: expect.any(Number) });
+    expect(await outbox.list(scope)).toHaveLength(1);
+    expect(await outbox.count(scope)).toBe(0);
+    // Never revived by delivery bookkeeping, only by retry().
+    expect(await outbox.markInflight(entry.id)).toBe(false);
+    await outbox.markPending(entry.id);
+    expect((await outbox.list(scope))[0]?.state).toBe("failed");
+    expect(await outbox.nextReady(scope, Date.now() + 60_000)).toBeUndefined();
+  });
+
+  it("does not count connectivity loss or re-authentication toward the retry budget", async () => {
+    const outbox = create();
+    const entry = await outbox.enqueue({ scope, path: "tasks.update", args: {} });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await outbox.markInflight(entry.id);
+      await outbox.fail(entry.id, "socket closed", { errorClass: "network", countAttempt: false, delayMs: 0, maxAttempts: 1 });
+    }
+    expect((await outbox.list(scope))[0]).toMatchObject({ state: "pending", attempts: 0, lastErrorClass: "network" });
+  });
+
+  it("lets later intents with the same conflict key proceed past parked and rejected records", async () => {
+    const outbox = create();
+    const failed = await outbox.enqueue({ scope, path: "tasks.update", args: { n: 1 }, entityKeys: ["__gonvex_local_intents"] });
+    const rejected = await outbox.enqueue({ scope, path: "tasks.update", args: { n: 2 }, entityKeys: ["__gonvex_local_intents"] });
+    const later = await outbox.enqueue({ scope, path: "tasks.update", args: { n: 3 }, entityKeys: ["__gonvex_local_intents"] });
+    // While the first entry is backing off it still blocks the chain.
+    await outbox.fail(failed.id, "deadline", { errorClass: "transient", maxAttempts: 3 });
+    expect(await outbox.nextReady(scope, Date.now())).toBeUndefined();
+    await outbox.fail(failed.id, "deadline", { errorClass: "transient", maxAttempts: 2 });
+    expect((await outbox.nextReady(scope, Date.now()))?.id).toBe(rejected.id);
+    await outbox.reject(rejected.id, "archived");
+    expect((await outbox.nextReady(scope, Date.now()))?.id).toBe(later.id);
+    expect((await outbox.list(scope)).map((entry) => entry.state)).toEqual(["failed", "rejected", "pending"]);
+  });
+
+  it("retries a failed or rejected record with the same idempotency key and a fresh budget", async () => {
+    const outbox = create();
+    const entry = await outbox.enqueue({ scope, path: "tasks.update", args: {}, idempotencyKey: "command-1" });
+    await outbox.reject(entry.id, "denied");
+    const retried = await outbox.retry(entry.id);
+    expect(retried).toMatchObject({ id: entry.id, idempotencyKey: "command-1", state: "pending", attempts: 0 });
+    expect(retried?.lastError).toBeUndefined();
+    expect(await outbox.retry(entry.id)).toBeUndefined();
+    expect((await outbox.nextReady(scope, Date.now()))?.idempotencyKey).toBe("command-1");
+  });
+
+  it("discards atomically only from the allowed states", async () => {
+    const outbox = create();
+    const entry = await outbox.enqueue({ scope, path: "tasks.update", args: {} });
+    await outbox.markInflight(entry.id);
+    expect(await outbox.discard(entry.id, ["pending", "failed", "rejected"])).toBeUndefined();
+    await outbox.markPending(entry.id);
+    expect(await outbox.discard(entry.id, ["pending", "failed", "rejected"])).toMatchObject({ id: entry.id });
+    expect(await outbox.list(scope)).toEqual([]);
+    expect(await outbox.markInflight(entry.id)).toBe(false);
+  });
+
+  it("lists and purges other identities' scopes", async () => {
+    const outbox = create();
+    const other = "project-a\u0000tenant-a\u0000user-b";
+    await outbox.enqueue({ scope, path: "tasks.update", args: {} });
+    await outbox.enqueue({ scope: other, path: "tasks.update", args: {} });
+    await outbox.enqueue({ scope: other, path: "tasks.update", args: {} });
+    expect((await outbox.listScopes()).map(({ scope: owner, count }) => [owner, count]).sort()).toEqual([[scope, 1], [other, 2]].sort());
+    expect(await outbox.purgeScope(other)).toBe(2);
+    expect((await outbox.listScopes()).map(({ scope: owner }) => owner)).toEqual([scope]);
+    expect(await outbox.list(scope)).toHaveLength(1);
   });
 });

@@ -64,6 +64,11 @@ pub enum ExecutionError {
     InvocationDepth,
     #[error("recursive Action invocation detected for {0:?}")]
     RecursiveAction(String),
+    /// The invocation failed while database or host infrastructure was
+    /// failing underneath it. The message stays the inner error's; only the
+    /// classification changes, so clients keep the intent and retry.
+    #[error(transparent)]
+    Transient(Box<ExecutionError>),
 }
 
 pub struct ReducerExecution {
@@ -319,12 +324,21 @@ impl Runtime {
             if !claimed {
                 transaction.rollback().await?;
                 let value = control
-                    .replay_reducer_result(&session.route, &session.identity.account.id, key, receipt_path)
+                    .replay_reducer_result(
+                        &session.route,
+                        &session.identity.account.id,
+                        key,
+                        receipt_path,
+                    )
                     .await?;
                 // Offline retries reuse the command ID. Preserve the commit
                 // barrier even when a response was lost after the first commit.
-                let committed_revision = control.command_revision(&session.route, command_id).await?;
-                return Ok(ReducerExecution { value, committed_revision });
+                let committed_revision =
+                    control.command_revision(&session.route, command_id).await?;
+                return Ok(ReducerExecution {
+                    value,
+                    committed_revision,
+                });
             }
         }
         if let (Some(expected), Some(active)) = (access.client_contract, module.client_contract) {
@@ -337,13 +351,17 @@ impl Runtime {
             if !module.accepts_client_artifact(expected, access.client_contract) {
                 transaction.rollback().await?;
                 return Err(ExecutionError::StaleReducerArtifact {
-                    expected: expected.clone(), active: module.artifact_hash.clone(),
+                    expected: expected.clone(),
+                    active: module.artifact_hash.clone(),
                 });
             }
         }
         let definition = require_function(&module, path, "reducer", access.allow_internal)?;
         validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
-            ExecutionError::InvalidArguments { path: path.to_owned(), message }
+            ExecutionError::InvalidArguments {
+                path: path.to_owned(),
+                message,
+            }
         })?;
         let mut provenance = access.provenance.unwrap_or_else(|| {
             direct_provenance(
@@ -393,9 +411,17 @@ impl Runtime {
         );
         invocation.context.capabilities.action_outbox = true;
         invocation.context.capabilities.scheduler = true;
-        if access.intent_entropy.as_ref().is_some_and(|seed| seed.len() != 64 || !seed.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))) {
+        if access.intent_entropy.as_ref().is_some_and(|seed| {
+            seed.len() != 64
+                || !seed
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
             let _ = handler.finish(false).await;
-            return Err(ExecutionError::InvalidArguments { path: path.to_owned(), message: "Invalid reducer entropy".to_owned() });
+            return Err(ExecutionError::InvalidArguments {
+                path: path.to_owned(),
+                message: "Invalid reducer entropy".to_owned(),
+            });
         }
         invocation.context.intent_entropy = access.intent_entropy;
         let result = self
@@ -403,6 +429,7 @@ impl Runtime {
             .module_host
             .invoke(invocation, &mut handler)
             .await;
+        let fault = handler.transient_fault();
         match result {
             Ok(value) => {
                 if let Some(key) = idempotency_key {
@@ -411,10 +438,15 @@ impl Runtime {
                         .store_reducer_result(&session.identity.account.id, key, &value)
                         .await?;
                 }
-                handler
-                    .finish(true)
-                    .await
-                    .map_err(ExecutionError::HostCall)?;
+                handler.finish(true).await.map_err(|error| {
+                    // A commit lost to the connection is retried under the same
+                    // idempotency key: if it did commit, the retry replays it.
+                    if fault.observed() {
+                        ExecutionError::Transient(Box::new(ExecutionError::HostCall(error)))
+                    } else {
+                        ExecutionError::HostCall(error)
+                    }
+                })?;
                 let committed_revision =
                     control.command_revision(&session.route, command_id).await?;
                 if let Some(tracker) = committed_revisions {
@@ -431,8 +463,14 @@ impl Runtime {
                 })
             }
             Err(error) => {
-                let _ = handler.finish(false).await;
-                Err(error.into())
+                // A rollback that fails means the connection itself is gone.
+                let rolled_back = handler.finish(false).await.is_ok();
+                let error = ExecutionError::from(error);
+                if !rolled_back || fault.observed() {
+                    Err(ExecutionError::Transient(Box::new(error)))
+                } else {
+                    Err(error)
+                }
             }
         }
     }

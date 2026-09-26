@@ -233,8 +233,22 @@ pub enum LiveQueryError {
 impl LiveQueryPlan {
     fn index_change_affects(&self, table: &str) -> bool {
         relation_tables(self.predicate.as_ref()).contains(table)
-            || self.index.as_ref().is_some_and(|index| index.table == table || index.dependencies.iter().any(|dependency| dependency == table))
-            || self.search.as_ref().is_some_and(|search| search.sources.iter().any(|source| source.table == table || source.dependencies.iter().any(|dependency| dependency == table)))
+            || self.index.as_ref().is_some_and(|index| {
+                index.table == table
+                    || index
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency == table)
+            })
+            || self.search.as_ref().is_some_and(|search| {
+                search.sources.iter().any(|source| {
+                    source.table == table
+                        || source
+                            .dependencies
+                            .iter()
+                            .any(|dependency| dependency == table)
+                })
+            })
     }
 
     pub fn validate(&self) -> Result<(), LiveQueryError> {
@@ -274,18 +288,30 @@ impl LiveQueryPlan {
                 quote(&source.table)?;
                 quote(&source.key)?;
                 quote(&source.column)?;
-                for dependency in &source.dependencies { quote(dependency)?; }
+                for dependency in &source.dependencies {
+                    quote(dependency)?;
+                }
             }
         }
         if let Some(index) = &self.index {
             quote(&index.table)?;
             quote(&index.key)?;
-            for column in &index.columns { quote(column)?; }
-            for dependency in &index.dependencies { quote(dependency)?; }
+            for column in &index.columns {
+                quote(column)?;
+            }
+            for dependency in &index.dependencies {
+                quote(dependency)?;
+            }
             for (logical, columns) in &index.sort_columns {
                 quote(logical)?;
-                if columns.is_empty() { return Err(LiveQueryError::Invalid("index sort must contain columns".to_owned())); }
-                for column in columns { quote(column)?; }
+                if columns.is_empty() {
+                    return Err(LiveQueryError::Invalid(
+                        "index sort must contain columns".to_owned(),
+                    ));
+                }
+                for column in columns {
+                    quote(column)?;
+                }
             }
         }
         if let Some(filters) = &self.filters {
@@ -427,7 +453,11 @@ impl Runtime {
                 path,
                 args,
                 visibility_dependencies: visibility_plan.dependency_columns(),
-                related_dependencies: relation_tables(plan.predicate.as_ref()).iter().filter_map(|table| module.visibility.get(table)).map(VisibilityPlan::dependency_columns).collect(),
+                related_dependencies: relation_tables(plan.predicate.as_ref())
+                    .iter()
+                    .filter_map(|table| module.visibility.get(table))
+                    .map(VisibilityPlan::dependency_columns)
+                    .collect(),
                 plan,
                 visibility: visibility_plan,
                 required_revision: snapshot.revision,
@@ -460,7 +490,16 @@ impl Runtime {
                             &subscription.visibility_dependencies,
                             change,
                         ) || subscription.plan.index_change_affects(&change.table)
-                        || subscription.related_dependencies.iter().any(|dependencies| dependencies.change_affects(&change.table, &change.operation, &change.changed_columns))
+                            || subscription
+                                .related_dependencies
+                                .iter()
+                                .any(|dependencies| {
+                                    dependencies.change_affects(
+                                        &change.table,
+                                        &change.operation,
+                                        &change.changed_columns,
+                                    )
+                                })
                     }))
             {
                 continue;
@@ -529,16 +568,28 @@ impl Runtime {
         let mut related = BTreeMap::new();
         let tables = relation_tables(plan.predicate.as_ref());
         if !tables.is_empty() {
-            let module = self.inner.modules.project(&session.identity.project_id).await
-                .ok_or_else(|| LiveQueryError::Invalid("project module is not loaded".to_owned()))?;
+            let module = self
+                .inner
+                .modules
+                .project(&session.identity.project_id)
+                .await
+                .ok_or_else(|| {
+                    LiveQueryError::Invalid("project module is not loaded".to_owned())
+                })?;
             for table in tables {
-                let related_plan = module.visibility.get(&table)
+                let related_plan = module
+                    .visibility
+                    .get(&table)
                     .ok_or_else(|| LiveQueryError::VisibilityMissing(table.clone()))?;
-                let related_resolved = visibility::resolve(&mut transaction, session, related_plan).await?;
+                let related_resolved =
+                    visibility::resolve(&mut transaction, session, related_plan).await?;
                 related.insert(table, (related_plan.clone(), related_resolved));
             }
         }
-        let fingerprint = std::iter::once(resolved.fingerprint.as_str()).chain(related.values().map(|(_, item)| item.fingerprint.as_str())).collect::<Vec<_>>().join(":");
+        let fingerprint = std::iter::once(resolved.fingerprint.as_str())
+            .chain(related.values().map(|(_, item)| item.fingerprint.as_str()))
+            .collect::<Vec<_>>()
+            .join(":");
 
         let clock =
             sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = true")
@@ -553,9 +604,15 @@ impl Runtime {
             transaction.commit().await?;
             return Ok(snapshot);
         }
-        let result =
-            execute_in_transaction(&mut transaction, plan, visibility_plan, &resolved, args, &related)
-                .await?;
+        let result = execute_in_transaction(
+            &mut transaction,
+            plan,
+            visibility_plan,
+            &resolved,
+            args,
+            &related,
+        )
+        .await?;
         let result_bytes = serde_json::to_vec(&result)
             .map_err(|error| LiveQueryError::Invalid(error.to_string()))?
             .len();
@@ -648,7 +705,17 @@ async fn execute_in_transaction(
         ),
     ];
     if let Some(expression) = &plan.predicate {
-        predicates.push(index_predicate(plan, compile_related_expression(expression, args, &mut parameters, "r", related, &resolved.direct)?)?);
+        predicates.push(index_predicate(
+            plan,
+            compile_related_expression(
+                expression,
+                args,
+                &mut parameters,
+                "r",
+                related,
+                &resolved.direct,
+            )?,
+        )?);
     }
     if let Some(filters) = &plan.filters {
         let filter = compile_filters(filters, args, &mut parameters, "r")?;
@@ -660,9 +727,21 @@ async fn execute_in_transaction(
         // Push simple projection filters into related search documents. Repeating
         // membership subqueries there can scan the entire projection for a tiny
         // document match; the outer predicate already enforces that membership.
-        let index_filter=predicates.iter().filter(|predicate| predicate.contains("g.") && !predicate.contains("r.") && !predicate.contains("SELECT ")).cloned().collect::<Vec<_>>().join(" AND ");
-        let predicate = compile_search_filtered(plan, search, args, &mut parameters, &index_filter)?;
-        if !predicate.is_empty() { predicates.push(predicate); }
+        let index_filter = predicates
+            .iter()
+            .filter(|predicate| {
+                predicate.contains("g.")
+                    && !predicate.contains("r.")
+                    && !predicate.contains("SELECT ")
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let predicate =
+            compile_search_filtered(plan, search, args, &mut parameters, &index_filter)?;
+        if !predicate.is_empty() {
+            predicates.push(predicate);
+        }
     }
     let (offset, limit) = window(plan.window.as_ref(), args);
     let order = compile_order(plan, args)?;
@@ -727,15 +806,6 @@ async fn execute_in_transaction(
     Ok(shape_result(rows, &plan.result_path, total, offset, limit))
 }
 
-fn compile_expression(
-    expression: &LiveExpression,
-    args: &Map<String, Value>,
-    parameters: &mut Vec<Value>,
-    row_alias: &str,
-) -> Result<String, LiveQueryError> {
-    compile_related_expression(expression, args, parameters, row_alias, &BTreeMap::new(), &BTreeMap::new())
-}
-
 fn relation_tables(expression: Option<&LiveExpression>) -> BTreeSet<String> {
     let mut result = BTreeSet::new();
     if let Some(expression) = expression {
@@ -743,23 +813,39 @@ fn relation_tables(expression: Option<&LiveExpression>) -> BTreeSet<String> {
             result.insert(relation.table.clone());
             result.extend(relation_tables(relation.predicate.as_deref()));
         }
-        for child in &expression.children { result.extend(relation_tables(Some(child))); }
+        for child in &expression.children {
+            result.extend(relation_tables(Some(child)));
+        }
     }
     result
 }
 
 fn compile_related_expression(
-    expression: &LiveExpression, args: &Map<String, Value>, parameters: &mut Vec<Value>, row_alias: &str,
-    related: &BTreeMap<String, (VisibilityPlan, ResolvedVisibility)>, context: &BTreeMap<String, String>,
+    expression: &LiveExpression,
+    args: &Map<String, Value>,
+    parameters: &mut Vec<Value>,
+    row_alias: &str,
+    related: &BTreeMap<String, (VisibilityPlan, ResolvedVisibility)>,
+    context: &BTreeMap<String, String>,
 ) -> Result<String, LiveQueryError> {
     match expression.operator.as_str() {
         "inRelation" => {
-            let relation = expression.relation.as_ref().ok_or_else(|| LiveQueryError::Invalid("inRelation requires a relation".to_owned()))?;
-            let (plan, resolved) = related.get(&relation.table).ok_or_else(|| LiveQueryError::VisibilityMissing(relation.table.clone()))?;
+            let relation = expression.relation.as_ref().ok_or_else(|| {
+                LiveQueryError::Invalid("inRelation requires a relation".to_owned())
+            })?;
+            let (plan, resolved) = related
+                .get(&relation.table)
+                .ok_or_else(|| LiveQueryError::VisibilityMissing(relation.table.clone()))?;
             let alias = format!("{row_alias}_related");
             let guard = visibility::compile_predicate(plan, resolved, &alias, parameters)?;
-            let predicate = relation.predicate.as_ref().map(|child| compile_related_expression(child, args, parameters, &alias, related, context))
-                .transpose()?.unwrap_or_else(|| "TRUE".to_owned());
+            let predicate = relation
+                .predicate
+                .as_ref()
+                .map(|child| {
+                    compile_related_expression(child, args, parameters, &alias, related, context)
+                })
+                .transpose()?
+                .unwrap_or_else(|| "TRUE".to_owned());
             return Ok(format!("{row_alias}.{}::text IN (SELECT {alias}.{}::text FROM {} AS {alias} WHERE ({guard}) AND ({predicate}))",
                 quote(&expression.column)?, quote(&relation.column)?, quote(&relation.table)?));
         }
@@ -775,11 +861,14 @@ fn compile_related_expression(
                         .map(|part| format!("({part})"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(format!("({})", parts.join(if expression.operator == "and" {
-                " AND "
-            } else {
-                " OR "
-            })));
+            return Ok(format!(
+                "({})",
+                parts.join(if expression.operator == "and" {
+                    " AND "
+                } else {
+                    " OR "
+                })
+            ));
         }
         "not" => {
             if expression.children.len() != 1 {
@@ -789,7 +878,14 @@ fn compile_related_expression(
             }
             return Ok(format!(
                 "NOT ({})",
-                compile_related_expression(&expression.children[0], args, parameters, row_alias, related, context)?
+                compile_related_expression(
+                    &expression.children[0],
+                    args,
+                    parameters,
+                    row_alias,
+                    related,
+                    context
+                )?
             ));
         }
         "server" => {
@@ -800,9 +896,22 @@ fn compile_related_expression(
         _ => {}
     }
     let left = format!("{row_alias}.{}", quote(&expression.column)?);
-    let value = if let Some(value) = expression.value.as_ref().filter(|value| !value.context.is_empty()) {
-        Value::String(context.get(&value.context).ok_or_else(|| LiveQueryError::Invalid("Missing query identity context".to_owned()))?.clone())
-    } else { live_value(expression.value.as_ref(), args) };
+    let value = if let Some(value) = expression
+        .value
+        .as_ref()
+        .filter(|value| !value.context.is_empty())
+    {
+        Value::String(
+            context
+                .get(&value.context)
+                .ok_or_else(|| {
+                    LiveQueryError::Invalid("Missing query identity context".to_owned())
+                })?
+                .clone(),
+        )
+    } else {
+        live_value(expression.value.as_ref(), args)
+    };
     let add = |parameters: &mut Vec<Value>, value: Value| {
         parameters.push(value);
         format!("${}", parameters.len())
@@ -821,7 +930,10 @@ fn compile_related_expression(
             add(parameters, value),
             add(parameters, live_value(expression.value_to.as_ref(), args))
         ),
-        "arrayContains" => format!("COALESCE({left}::jsonb, '[]'::jsonb) @> {}::jsonb", add(parameters, Value::Array(vec![value]))),
+        "arrayContains" => format!(
+            "COALESCE({left}::jsonb, '[]'::jsonb) @> {}::jsonb",
+            add(parameters, Value::Array(vec![value]))
+        ),
         "contains" => format!(
             "strpos(COALESCE({left}::text, ''), {}::text) > 0",
             add(parameters, Value::String(argument_text(Some(&value))))
@@ -855,7 +967,12 @@ fn compile_related_expression(
 fn compile_source(plan: &LiveQueryPlan) -> Result<String, LiveQueryError> {
     let source = format!("{} AS r", quote(&plan.table)?);
     match &plan.index {
-        Some(index) => Ok(format!("{source} JOIN {} AS g ON g.{} = r.{}::text", quote(&index.table)?, quote(&index.key)?, quote(&plan.key)?)),
+        Some(index) => Ok(format!(
+            "{source} JOIN {} AS g ON g.{} = r.{}::text",
+            quote(&index.table)?,
+            quote(&index.key)?,
+            quote(&plan.key)?
+        )),
         None => Ok(source),
     }
 }
@@ -877,50 +994,116 @@ fn index_predicate(plan: &LiveQueryPlan, mut sql: String) -> Result<String, Live
     Ok(sql)
 }
 
-fn compile_order(plan: &LiveQueryPlan, args: &Map<String, Value>) -> Result<String, LiveQueryError> {
+fn compile_order(
+    plan: &LiveQueryPlan,
+    args: &Map<String, Value>,
+) -> Result<String, LiveQueryError> {
     let (column, direction) = sort(plan.sort.as_ref(), args);
     let mut terms = Vec::new();
-    if let Some(columns) = plan.index.as_ref().and_then(|index| index.sort_columns.get(&column)) {
-        for column in columns { terms.push(format!("g.{} {}", quote(column)?, direction.to_uppercase())); }
+    if let Some(columns) = plan
+        .index
+        .as_ref()
+        .and_then(|index| index.sort_columns.get(&column))
+    {
+        for column in columns {
+            terms.push(format!("g.{} {}", quote(column)?, direction.to_uppercase()));
+        }
     } else if !column.is_empty() {
-        terms.push(index_predicate(plan, format!("r.{} {}", quote(&column)?, direction.to_uppercase()))?);
+        terms.push(index_predicate(
+            plan,
+            format!("r.{} {}", quote(&column)?, direction.to_uppercase()),
+        )?);
     }
-    if column != plan.key { terms.push(format!("r.{} ASC", quote(&plan.key)?)); }
+    if column != plan.key {
+        terms.push(format!("r.{} ASC", quote(&plan.key)?));
+    }
     Ok(terms.join(", "))
 }
 
 fn search_terms(input: &str, boolean_terms: bool) -> (Vec<String>, &'static str) {
     let input = input.trim().to_lowercase();
-    let operator = if boolean_terms && input.contains("$and") { "$and" } else if boolean_terms && input.contains("$or") { "$or" } else { "" };
-    let terms = if operator.is_empty() { vec![input] } else { input.split(operator).map(|term| term.trim().to_owned()).collect() };
-    (terms.into_iter().filter(|term| !term.is_empty()).collect(), if operator == "$or" { " OR " } else { " AND " })
+    let operator = if boolean_terms && input.contains("$and") {
+        "$and"
+    } else if boolean_terms && input.contains("$or") {
+        "$or"
+    } else {
+        ""
+    };
+    let terms = if operator.is_empty() {
+        vec![input]
+    } else {
+        input
+            .split(operator)
+            .map(|term| term.trim().to_owned())
+            .collect()
+    };
+    (
+        terms.into_iter().filter(|term| !term.is_empty()).collect(),
+        if operator == "$or" { " OR " } else { " AND " },
+    )
 }
 
 fn search_pattern(term: &str) -> String {
-    format!("%{}%", term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+    format!(
+        "%{}%",
+        term.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
 }
 
 #[cfg(test)]
-fn compile_search(plan: &LiveQueryPlan, search: &LiveSearch, args: &Map<String, Value>, parameters: &mut Vec<Value>) -> Result<String, LiveQueryError> {
-    compile_search_filtered(plan,search,args,parameters,"")
+fn compile_search(
+    plan: &LiveQueryPlan,
+    search: &LiveSearch,
+    args: &Map<String, Value>,
+    parameters: &mut Vec<Value>,
+) -> Result<String, LiveQueryError> {
+    compile_search_filtered(plan, search, args, parameters, "")
 }
 
-fn compile_search_filtered(plan: &LiveQueryPlan, search: &LiveSearch, args: &Map<String, Value>, parameters: &mut Vec<Value>, index_filter:&str) -> Result<String, LiveQueryError> {
-    let (terms, joiner) = search_terms(&argument_text(args.get(&search.argument)), search.boolean_terms);
+fn compile_search_filtered(
+    plan: &LiveQueryPlan,
+    search: &LiveSearch,
+    args: &Map<String, Value>,
+    parameters: &mut Vec<Value>,
+    index_filter: &str,
+) -> Result<String, LiveQueryError> {
+    let (terms, joiner) = search_terms(
+        &argument_text(args.get(&search.argument)),
+        search.boolean_terms,
+    );
     let mut predicates = Vec::new();
-    let mut document_sets=Vec::new();
-    let direct_index=plan.index.as_ref().filter(|index| search.sources.iter().any(|source| source.table==index.table && source.key==index.key));
+    let mut document_sets = Vec::new();
+    let direct_index = plan.index.as_ref().filter(|index| {
+        search
+            .sources
+            .iter()
+            .any(|source| source.table == index.table && source.key == index.key)
+    });
     for term in terms {
         let pattern = push(parameters, Value::String(search_pattern(&term)));
         let mut alternatives = Vec::new();
         for column in &search.columns {
-            alternatives.push(format!("r.{}::text ILIKE {pattern} ESCAPE '\\'", quote(column)?));
+            alternatives.push(format!(
+                "r.{}::text ILIKE {pattern} ESCAPE '\\'",
+                quote(column)?
+            ));
         }
         if !search.sources.is_empty() {
             // A union of indexed candidate IDs avoids a correlated OR EXISTS
             // that would scan the entire entity table for every search term.
-            if let Some(index)=direct_index {
-                for source in search.sources.iter().filter(|source|source.table==index.table && source.key==index.key){alternatives.push(format!("g.{} ILIKE {pattern} ESCAPE '\\'",quote(&source.column)?));}
+            if let Some(index) = direct_index {
+                for source in search
+                    .sources
+                    .iter()
+                    .filter(|source| source.table == index.table && source.key == index.key)
+                {
+                    alternatives.push(format!(
+                        "g.{} ILIKE {pattern} ESCAPE '\\'",
+                        quote(&source.column)?
+                    ));
+                }
             }
             let sources = search.sources.iter().filter(|source| !direct_index.is_some_and(|index|source.table==index.table && source.key==index.key)).map(|source| {
                 let (alias, join, filter) = match &plan.index {
@@ -930,21 +1113,43 @@ fn compile_search_filtered(plan: &LiveQueryPlan, search: &LiveSearch, args: &Map
                 };
                 Ok(format!("SELECT {alias}.{} FROM {} AS {alias}{join} WHERE {alias}.{} ILIKE {pattern} ESCAPE '\\'{filter}",quote(&source.key)?,quote(&source.table)?,quote(&source.column)?))
             }).collect::<Result<Vec<_>, LiveQueryError>>()?;
-            if !sources.is_empty(){
-                let documents=sources.join(" UNION ");
-                if let Some(index)=direct_index {
+            if !sources.is_empty() {
+                let documents = sources.join(" UNION ");
+                if let Some(index) = direct_index {
                     // An InitPlan array lets PostgreSQL combine the document
                     // trigram index with the projection key index, and lets a
                     // broad search stop early on the requested ordering index.
-                    alternatives.push(format!("g.{} = ANY(ARRAY({documents}))",quote(&index.key)?));
-                } else if search.columns.is_empty(){document_sets.push(format!("({documents})"));}
-                else{alternatives.push(format!("r.{}::text IN ({documents})",quote(&plan.key)?));}
+                    alternatives.push(format!(
+                        "g.{} = ANY(ARRAY({documents}))",
+                        quote(&index.key)?
+                    ));
+                } else if search.columns.is_empty() {
+                    document_sets.push(format!("({documents})"));
+                } else {
+                    alternatives.push(format!("r.{}::text IN ({documents})", quote(&plan.key)?));
+                }
             }
         }
-        if !alternatives.is_empty() { predicates.push(format!("({})", alternatives.join(" OR "))); }
+        if !alternatives.is_empty() {
+            predicates.push(format!("({})", alternatives.join(" OR ")));
+        }
     }
-    if !document_sets.is_empty(){return Ok(format!("r.{}::text IN ({})",quote(&plan.key)?,document_sets.join(if joiner==" OR " {" UNION "} else {" INTERSECT "})));}
-    Ok(if predicates.is_empty() { String::new() } else { format!("({})", predicates.join(joiner)) })
+    if !document_sets.is_empty() {
+        return Ok(format!(
+            "r.{}::text IN ({})",
+            quote(&plan.key)?,
+            document_sets.join(if joiner == " OR " {
+                " UNION "
+            } else {
+                " INTERSECT "
+            })
+        ));
+    }
+    Ok(if predicates.is_empty() {
+        String::new()
+    } else {
+        format!("({})", predicates.join(joiner))
+    })
 }
 
 fn compile_filters(
@@ -1021,8 +1226,14 @@ fn compile_filters(
         let numeric_comparison = ordered_comparison && column_type == "number";
         let parameter_value = if numeric_comparison {
             parse_filter_number(value, index)?
-        } else if matches!(operator, "contains" | "notContains" | "startsWith" | "endsWith") {
-            let escaped = value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        } else if matches!(
+            operator,
+            "contains" | "notContains" | "startsWith" | "endsWith"
+        ) {
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
             Value::String(match operator {
                 "startsWith" => format!("{escaped}%"),
                 "endsWith" => format!("%{escaped}"),
@@ -1042,8 +1253,12 @@ fn compile_filters(
             &text
         };
         let predicate = match operator {
-            "contains" | "startsWith" | "endsWith" if value.is_empty() => format!("{text} ILIKE {value_arg} ESCAPE '\\'"),
-            "notContains" if value.is_empty() => format!("{text} NOT ILIKE {value_arg} ESCAPE '\\'"),
+            "contains" | "startsWith" | "endsWith" if value.is_empty() => {
+                format!("{text} ILIKE {value_arg} ESCAPE '\\'")
+            }
+            "notContains" if value.is_empty() => {
+                format!("{text} NOT ILIKE {value_arg} ESCAPE '\\'")
+            }
             "contains" => format!("{left}::text ILIKE {value_arg} ESCAPE '\\'"),
             "notContains" => {
                 format!("({left} IS NULL OR {left}::text NOT ILIKE {value_arg} ESCAPE '\\')")
@@ -1063,12 +1278,18 @@ fn compile_filters(
                 if values.is_empty() {
                     "FALSE".to_owned()
                 } else {
-                    let includes_empty = values.iter().any(|value| argument_text(Some(value)).is_empty());
+                    let includes_empty = values
+                        .iter()
+                        .any(|value| argument_text(Some(value)).is_empty());
                     let values = values
                         .into_iter()
                         .map(|value| push(parameters, Value::String(argument_text(Some(&value)))))
                         .collect::<Vec<_>>();
-                    let expression = if includes_empty { text.clone() } else { format!("{left}::text") };
+                    let expression = if includes_empty {
+                        text.clone()
+                    } else {
+                        format!("{left}::text")
+                    };
                     format!("{expression} IN ({})", values.join(", "))
                 }
             }
@@ -1211,16 +1432,29 @@ fn push(parameters: &mut Vec<Value>, value: Value) -> String {
 }
 
 fn validate_expression(expression: &LiveExpression) -> Result<(), LiveQueryError> {
-    for value in [expression.value.as_ref(), expression.value_to.as_ref()].into_iter().flatten() {
-        if !value.context.is_empty() && !["account.id", "member.id", "tenant.id"].contains(&value.context.as_str()) {
-            return Err(LiveQueryError::Invalid("Invalid query identity context".to_owned()));
+    for value in [expression.value.as_ref(), expression.value_to.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !value.context.is_empty()
+            && !["account.id", "member.id", "tenant.id"].contains(&value.context.as_str())
+        {
+            return Err(LiveQueryError::Invalid(
+                "Invalid query identity context".to_owned(),
+            ));
         }
     }
     if expression.operator == "inRelation" {
         quote(&expression.column)?;
-        let relation = expression.relation.as_ref().ok_or_else(|| LiveQueryError::Invalid("inRelation requires a relation".to_owned()))?;
-        quote(&relation.table)?; quote(&relation.column)?;
-        if let Some(child) = &relation.predicate { validate_expression(child)?; }
+        let relation = expression
+            .relation
+            .as_ref()
+            .ok_or_else(|| LiveQueryError::Invalid("inRelation requires a relation".to_owned()))?;
+        quote(&relation.table)?;
+        quote(&relation.column)?;
+        if let Some(child) = &relation.predicate {
+            validate_expression(child)?;
+        }
         return Ok(());
     }
     match expression.operator.as_str() {
@@ -1337,6 +1571,22 @@ fn bind_scalar<'query>(
 mod tests {
     use super::*;
 
+    fn compile_expression(
+        expression: &LiveExpression,
+        args: &Map<String, Value>,
+        parameters: &mut Vec<Value>,
+        row_alias: &str,
+    ) -> Result<String, LiveQueryError> {
+        compile_related_expression(
+            expression,
+            args,
+            parameters,
+            row_alias,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+    }
+
     fn feed_change(table: &str, changed_columns: &[&str]) -> LogChange {
         LogChange {
             revision: 2,
@@ -1414,23 +1664,58 @@ mod tests {
                     {"operator":"eq", "column":"revoked", "value":{"literal":null}}
                 ]}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         validate_expression(&expression).unwrap();
         let plan: VisibilityPlan = serde_json::from_value(serde_json::json!({
             "table":"routing", "key":"id", "where":{"operator":"eqContext","column":"owner","context":"member.id"}
         })).unwrap();
-        let resolved = ResolvedVisibility { revision: 1, direct: BTreeMap::from([("member.id".to_owned(),"member-a".to_owned())]), role:"member".to_owned(), permissions:Value::Null, sets:BTreeMap::new(), fingerprint:"scope-a".to_owned() };
+        let resolved = ResolvedVisibility {
+            revision: 1,
+            direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]),
+            role: "member".to_owned(),
+            permissions: Value::Null,
+            sets: BTreeMap::new(),
+            fingerprint: "scope-a".to_owned(),
+        };
         let related = BTreeMap::from([("routing".to_owned(), (plan, resolved.clone()))]);
         let args = serde_json::json!({"space":"inbox", "member.id":"attacker"});
         let mut parameters = Vec::new();
-        let sql = compile_related_expression(&expression, args.as_object().unwrap(), &mut parameters, "r", &related, &resolved.direct).unwrap();
-        assert!(sql.contains("IN (SELECT r_related.\"itemId\"::text FROM \"routing\" AS r_related"), "{sql}");
-        assert!(sql.contains("r_related.\"owner\""), "Related-table visibility must be injected: {sql}");
+        let sql = compile_related_expression(
+            &expression,
+            args.as_object().unwrap(),
+            &mut parameters,
+            "r",
+            &related,
+            &resolved.direct,
+        )
+        .unwrap();
+        assert!(
+            sql.contains("IN (SELECT r_related.\"itemId\"::text FROM \"routing\" AS r_related"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("r_related.\"owner\""),
+            "Related-table visibility must be injected: {sql}"
+        );
         assert!(sql.contains("r_related.\"revoked\" IS NULL"));
         assert!(parameters.contains(&Value::String("member-a".to_owned())));
         assert!(!parameters.contains(&Value::String("attacker".to_owned())));
-        assert_eq!(relation_tables(Some(&expression)), BTreeSet::from(["routing".to_owned()]));
-        assert!(matches!(compile_related_expression(&expression, args.as_object().unwrap(), &mut Vec::new(), "r", &BTreeMap::new(), &resolved.direct), Err(LiveQueryError::VisibilityMissing(_))));
+        assert_eq!(
+            relation_tables(Some(&expression)),
+            BTreeSet::from(["routing".to_owned()])
+        );
+        assert!(matches!(
+            compile_related_expression(
+                &expression,
+                args.as_object().unwrap(),
+                &mut Vec::new(),
+                "r",
+                &BTreeMap::new(),
+                &resolved.direct
+            ),
+            Err(LiveQueryError::VisibilityMissing(_))
+        ));
     }
 
     #[test]
@@ -1439,7 +1724,9 @@ mod tests {
             serde_json::json!({"operator":"inRelation","column":"id","relation":{"table":"routing; DROP TABLE items","column":"itemId"}}),
             serde_json::json!({"operator":"eq","column":"owner","value":{"context":"client.member"}}),
             serde_json::json!({"operator":"inRelation","column":"id"}),
-        ] { assert!(validate_expression(&serde_json::from_value(expression).unwrap()).is_err()); }
+        ] {
+            assert!(validate_expression(&serde_json::from_value(expression).unwrap()).is_err());
+        }
     }
 
     #[test]
@@ -1516,7 +1803,7 @@ mod tests {
                 value: None,
                 value_to: None,
                 children: Vec::new(),
-            relation: None,
+                relation: None,
             }),
             search: None,
             filters: None,
@@ -1533,7 +1820,13 @@ mod tests {
 
     #[test]
     fn indexed_search_preserves_phrases_boolean_precedence_and_literal_wildcards() {
-        assert_eq!(search_terms(" Status $AND high $or low ", true), (vec!["status".to_owned(), "high $or low".to_owned()], " AND "));
+        assert_eq!(
+            search_terms(" Status $AND high $or low ", true),
+            (
+                vec!["status".to_owned(), "high $or low".to_owned()],
+                " AND "
+            )
+        );
         assert_eq!(search_terms("hello world", true).0, vec!["hello world"]);
         assert_eq!(search_pattern("50%_\\"), "%50\\%\\_\\\\%");
         let plan: LiveQueryPlan = serde_json::from_value(serde_json::json!({
@@ -1546,18 +1839,46 @@ mod tests {
             "sort":{"defaultColumn":"statusId","defaultDirection":"asc","allowedColumns":["statusId"]}
         })).unwrap();
         plan.validate().unwrap();
-        let mut parameters=Vec::new();
-        let args=serde_json::json!({"search":"pump $or repair"});
-        let sql=compile_search(&plan,plan.search.as_ref().unwrap(),args.as_object().unwrap(),&mut parameters).unwrap();
+        let mut parameters = Vec::new();
+        let args = serde_json::json!({"search":"pump $or repair"});
+        let sql = compile_search(
+            &plan,
+            plan.search.as_ref().unwrap(),
+            args.as_object().unwrap(),
+            &mut parameters,
+        )
+        .unwrap();
         assert!(sql.contains(" UNION "));
         assert!(sql.matches(" UNION ").count() >= 3);
         assert!(!sql.contains("strpos"));
         assert!(!sql.contains("EXISTS"));
-        assert_eq!(parameters,vec![Value::String("%pump%".into()),Value::String("%repair%".into())]);
-        assert_eq!(compile_order(&plan,args.as_object().unwrap()).unwrap(),"g.\"statusOrder\" ASC, g.\"statusName\" ASC, r.\"_id\" ASC");
-        assert_eq!(index_predicate(&plan,"r.\"name\" = $1 AND r.\"owner\" = $2".into()).unwrap(),"g.\"name\" = $1 AND r.\"owner\" = $2");
-        assert_eq!(index_predicate(&plan, "r.\"_id\"::text IN (SELECT member_id FROM related) OR r.\"name\" = $1".into()).unwrap(), "g.\"itemId\" IN (SELECT member_id FROM related) OR g.\"name\" = $1");
-        assert_eq!(index_predicate(&plan, "r.\"_id\" = $1".into()).unwrap(), "r.\"_id\" = $1");
+        assert_eq!(
+            parameters,
+            vec![
+                Value::String("%pump%".into()),
+                Value::String("%repair%".into())
+            ]
+        );
+        assert_eq!(
+            compile_order(&plan, args.as_object().unwrap()).unwrap(),
+            "g.\"statusOrder\" ASC, g.\"statusName\" ASC, r.\"_id\" ASC"
+        );
+        assert_eq!(
+            index_predicate(&plan, "r.\"name\" = $1 AND r.\"owner\" = $2".into()).unwrap(),
+            "g.\"name\" = $1 AND r.\"owner\" = $2"
+        );
+        assert_eq!(
+            index_predicate(
+                &plan,
+                "r.\"_id\"::text IN (SELECT member_id FROM related) OR r.\"name\" = $1".into()
+            )
+            .unwrap(),
+            "g.\"itemId\" IN (SELECT member_id FROM related) OR g.\"name\" = $1"
+        );
+        assert_eq!(
+            index_predicate(&plan, "r.\"_id\" = $1".into()).unwrap(),
+            "r.\"_id\" = $1"
+        );
         assert!(plan.index_change_affects("labels"));
         assert!(plan.index_change_affects("statuses"));
         assert!(!plan.index_change_affects("unrelated"));
@@ -1565,26 +1886,55 @@ mod tests {
 
     #[test]
     fn export_indexed_query_benchmark_statements() {
-        let Ok(path)=std::env::var("GONVEX_QUERY_BENCH_SQL") else { return; };
+        let Ok(path) = std::env::var("GONVEX_QUERY_BENCH_SQL") else {
+            return;
+        };
         let plan:LiveQueryPlan=serde_json::from_value(serde_json::json!({
             "table":"tasks","key":"_id","columns":["_id","name"],
             "index":{"table":"taskGridRows","key":"taskId","columns":["workspaceId","priorityId","statusId"],"sortColumns":{"priorityId":["priorityOrder","priorityName","updatedAt"],"statusId":["statusOrder","statusName","updatedAt"]}},
             "search":{"argument":"search","columns":[],"booleanTerms":true,"sources":[{"table":"taskGridRows","key":"taskId","column":"searchText"},{"table":"taskRelatedSearchDocuments","key":"taskId","column":"searchText"}]},
             "sort":{"columnArgument":"sortColumn","directionArgument":"sortDirection","defaultColumn":"id","defaultDirection":"desc","allowedColumns":["id","priorityId","statusId"]}
         })).unwrap();
-        let mut output=String::from("SET statement_timeout='20s';\n");
-        for (name,args,filter) in [
-            ("rare",serde_json::json!({"search":"needle"}),"TRUE"),
-            ("and_priority",serde_json::json!({"search":"pump $and needle","sortColumn":"priorityId","sortDirection":"asc"}),"g.\"workspaceId\" = 'workspace-0' AND g.\"statusId\" = 'new'"),
-            ("or_status",serde_json::json!({"search":"needle tag $or needle custom","sortColumn":"statusId","sortDirection":"asc"}),"TRUE"),
-            ("common_filtered",serde_json::json!({"search":"inspection","sortColumn":"priorityId","sortDirection":"asc"}),"g.\"workspaceId\" = 'workspace-1' AND g.\"statusId\" = 'progress'"),
-            ("no_search_status",serde_json::json!({"sortColumn":"statusId","sortDirection":"asc"}),"g.\"workspaceId\" = 'workspace-1'"),
+        let mut output = String::from("SET statement_timeout='20s';\n");
+        for (name, args, filter) in [
+            ("rare", serde_json::json!({"search":"needle"}), "TRUE"),
+            (
+                "and_priority",
+                serde_json::json!({"search":"pump $and needle","sortColumn":"priorityId","sortDirection":"asc"}),
+                "g.\"workspaceId\" = 'workspace-0' AND g.\"statusId\" = 'new'",
+            ),
+            (
+                "or_status",
+                serde_json::json!({"search":"needle tag $or needle custom","sortColumn":"statusId","sortDirection":"asc"}),
+                "TRUE",
+            ),
+            (
+                "common_filtered",
+                serde_json::json!({"search":"inspection","sortColumn":"priorityId","sortDirection":"asc"}),
+                "g.\"workspaceId\" = 'workspace-1' AND g.\"statusId\" = 'progress'",
+            ),
+            (
+                "no_search_status",
+                serde_json::json!({"sortColumn":"statusId","sortDirection":"asc"}),
+                "g.\"workspaceId\" = 'workspace-1'",
+            ),
         ] {
-            let mut parameters=Vec::new();
-            let search=compile_search_filtered(&plan,plan.search.as_ref().unwrap(),args.as_object().unwrap(),&mut parameters,filter).unwrap();
-            let predicate=if search.is_empty(){filter.to_owned()}else{format!("{filter} AND {search}")};
-            let source=compile_source(&plan).unwrap();
-            let order=compile_order(&plan,args.as_object().unwrap()).unwrap();
+            let mut parameters = Vec::new();
+            let search = compile_search_filtered(
+                &plan,
+                plan.search.as_ref().unwrap(),
+                args.as_object().unwrap(),
+                &mut parameters,
+                filter,
+            )
+            .unwrap();
+            let predicate = if search.is_empty() {
+                filter.to_owned()
+            } else {
+                format!("{filter} AND {search}")
+            };
+            let source = compile_source(&plan).unwrap();
+            let order = compile_order(&plan, args.as_object().unwrap()).unwrap();
             for (kind,mut sql) in [
                 ("window",format!("SELECT r.\"_id\",r.name FROM {source} WHERE {predicate} ORDER BY {order} LIMIT 100")),
                 ("count",format!("SELECT count(*) FROM {source} WHERE {predicate}")),
@@ -1593,7 +1943,7 @@ mod tests {
                 for run in 0..3 {output.push_str(&format!("SELECT 'CASE:{name}:{kind}:{run}';\nEXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql};\n"));}
             }
         }
-        std::fs::write(path,output).unwrap();
+        std::fs::write(path, output).unwrap();
     }
 
     /// Export application-supplied plans for disposable PostgreSQL benchmarks.
@@ -1606,62 +1956,140 @@ mod tests {
                 {"operator": "eq", "column": "workspaceId", "value": {"literal": "workspace-a"}},
                 {"operator": "eq", "column": "workspaceId", "value": {"literal": "workspace-b"}}
             ]
-        })).unwrap();
-        let sql = compile_related_expression(&expression, &Map::new(), &mut Vec::new(), "r", &BTreeMap::new(), &BTreeMap::new()).unwrap();
-        assert_eq!(format!("visible AND {sql} AND matches_search"),
-            "visible AND ((r.\"workspaceId\" = $1) OR (r.\"workspaceId\" = $2)) AND matches_search");
+        }))
+        .unwrap();
+        let sql = compile_related_expression(
+            &expression,
+            &Map::new(),
+            &mut Vec::new(),
+            "r",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            format!("visible AND {sql} AND matches_search"),
+            "visible AND ((r.\"workspaceId\" = $1) OR (r.\"workspaceId\" = $2)) AND matches_search"
+        );
     }
 
     #[test]
     fn export_external_live_query_benchmark_statements() {
-        let Ok(fixture_path) = std::env::var("GONVEX_QUERY_BENCH_FIXTURE") else { return; };
+        let Ok(fixture_path) = std::env::var("GONVEX_QUERY_BENCH_FIXTURE") else {
+            return;
+        };
         let fixture: Value = serde_json::from_slice(&std::fs::read(fixture_path).unwrap()).unwrap();
         let plan: LiveQueryPlan = serde_json::from_value(fixture["plan"].clone()).unwrap();
         plan.validate().unwrap();
-        let context: BTreeMap<String, String> = serde_json::from_value(fixture["context"].clone()).unwrap();
-        let related = relation_tables(plan.predicate.as_ref()).into_iter().map(|table| {
-            let guard: VisibilityPlan = serde_json::from_value(serde_json::json!({
-                "table": table, "key": "_id", "where": {"operator": "public"}
-            })).unwrap();
-            let resolved = ResolvedVisibility { revision: 1, direct: context.clone(), role: "member".into(),
-                permissions: Value::Null, sets: BTreeMap::new(), fingerprint: "benchmark".into() };
-            (table, (guard, resolved))
-        }).collect::<BTreeMap<_, _>>();
-        let mut output = String::from("SET statement_timeout='20s';\nSET max_parallel_workers_per_gather=0;\n");
+        let context: BTreeMap<String, String> =
+            serde_json::from_value(fixture["context"].clone()).unwrap();
+        let related = relation_tables(plan.predicate.as_ref())
+            .into_iter()
+            .map(|table| {
+                let guard: VisibilityPlan = serde_json::from_value(serde_json::json!({
+                    "table": table, "key": "_id", "where": {"operator": "public"}
+                }))
+                .unwrap();
+                let resolved = ResolvedVisibility {
+                    revision: 1,
+                    direct: context.clone(),
+                    role: "member".into(),
+                    permissions: Value::Null,
+                    sets: BTreeMap::new(),
+                    fingerprint: "benchmark".into(),
+                };
+                (table, (guard, resolved))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut output =
+            String::from("SET statement_timeout='20s';\nSET max_parallel_workers_per_gather=0;\n");
         for case in fixture["cases"].as_array().unwrap() {
             let args = case["args"].as_object().unwrap();
             let name = case["name"].as_str().unwrap();
-            assert!(name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
+            assert!(name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
             let mut parameters = Vec::new();
             let mut predicates = Vec::new();
             if let Some(expression) = &plan.predicate {
-                predicates.push(index_predicate(&plan, compile_related_expression(expression, args, &mut parameters, "r", &related, &context).unwrap()).unwrap());
+                predicates.push(
+                    index_predicate(
+                        &plan,
+                        compile_related_expression(
+                            expression,
+                            args,
+                            &mut parameters,
+                            "r",
+                            &related,
+                            &context,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                );
             }
             if let Some(filters) = &plan.filters {
                 let predicate = compile_filters(filters, args, &mut parameters, "r").unwrap();
-                if !predicate.is_empty() { predicates.push(index_predicate(&plan, predicate).unwrap()); }
+                if !predicate.is_empty() {
+                    predicates.push(index_predicate(&plan, predicate).unwrap());
+                }
             }
             if let Some(search) = &plan.search {
-                let index_filter = predicates.iter().filter(|predicate| predicate.contains("g.") && !predicate.contains("r.") && !predicate.contains("SELECT ")).cloned().collect::<Vec<_>>().join(" AND ");
-                let predicate = compile_search_filtered(&plan, search, args, &mut parameters, &index_filter).unwrap();
-                if !predicate.is_empty() { predicates.push(predicate); }
+                let index_filter = predicates
+                    .iter()
+                    .filter(|predicate| {
+                        predicate.contains("g.")
+                            && !predicate.contains("r.")
+                            && !predicate.contains("SELECT ")
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let predicate =
+                    compile_search_filtered(&plan, search, args, &mut parameters, &index_filter)
+                        .unwrap();
+                if !predicate.is_empty() {
+                    predicates.push(predicate);
+                }
             }
-            let predicate = if predicates.is_empty() { "TRUE".into() } else { predicates.join(" AND ") };
+            let predicate = if predicates.is_empty() {
+                "TRUE".into()
+            } else {
+                predicates.join(" AND ")
+            };
             let source = compile_source(&plan).unwrap();
             let order = compile_order(&plan, args).unwrap();
             for (kind, mut sql) in [
-                ("window", format!("SELECT r.{} FROM {source} WHERE {predicate} ORDER BY {order} LIMIT 100", quote(&plan.key).unwrap())),
-                ("count", format!("SELECT count(*) FROM {source} WHERE {predicate}")),
+                (
+                    "window",
+                    format!(
+                        "SELECT r.{} FROM {source} WHERE {predicate} ORDER BY {order} LIMIT 100",
+                        quote(&plan.key).unwrap()
+                    ),
+                ),
+                (
+                    "count",
+                    format!("SELECT count(*) FROM {source} WHERE {predicate}"),
+                ),
             ] {
                 for (index, value) in parameters.iter().enumerate().rev() {
                     let literal = match value {
                         Value::Null => "NULL".into(),
                         Value::Bool(_) | Value::Number(_) => value.to_string(),
-                        _ => format!("'{}'", value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()).replace('\'', "''")),
+                        _ => format!(
+                            "'{}'",
+                            value
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| value.to_string())
+                                .replace('\'', "''")
+                        ),
                     };
                     sql = sql.replace(&format!("${}", index + 1), &literal);
                 }
-                for run in 0..3 { output.push_str(&format!("SELECT 'CASE:{name}:{kind}:{run}';\nEXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql};\n")); }
+                for run in 0..3 {
+                    output.push_str(&format!("SELECT 'CASE:{name}:{kind}:{run}';\nEXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql};\n"));
+                }
             }
         }
         std::fs::write(fixture["output"].as_str().unwrap(), output).unwrap();

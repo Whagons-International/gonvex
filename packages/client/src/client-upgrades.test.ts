@@ -16,6 +16,15 @@ describe("client contract migrations", () => {
       receiptPath: "tasks.rename", state: "pending", nextAttemptAt: 0 });
     expect(entry).not.toHaveProperty("receiptPath");
   });
+  it("keeps failed and rejected records parked across an upgrade", () => {
+    const chain = migrationChain(1, 2, [{ from: 1, to: 2, intent: ({ args }) => ({ path: "tasks.setName", args }) }]);
+    const [failed, rejected] = migrateClientData({}, [
+      { ...entry, state: "failed", lastError: "pool timed out" },
+      { ...entry, id: 8, idempotencyKey: "other", state: "rejected", lastError: "denied" },
+    ], chain).entries;
+    expect(failed).toMatchObject({ path: "tasks.setName", state: "failed", lastError: "pool timed out" });
+    expect(rejected).toMatchObject({ path: "tasks.setName", state: "rejected", lastError: "denied" });
+  });
   it("refuses missing paths and downgrades", () => {
     expect(() => migrationChain(1, 3, [{ from: 1, to: 2 }])).toThrow("Missing");
     expect(() => migrationChain(3, 2, [])).toThrow("Unsupported");

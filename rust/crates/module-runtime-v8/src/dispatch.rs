@@ -255,7 +255,11 @@ impl HostCallRequest {
                 statement,
                 parameters: encode(parameters)?,
             },
-            Self::DbInsert { table, row, generated_id } => HostCall::DbInsert {
+            Self::DbInsert {
+                table,
+                row,
+                generated_id,
+            } => HostCall::DbInsert {
                 table,
                 generated_id,
                 row: encode(row)?,
@@ -426,9 +430,12 @@ mod tests {
         let request: HostCallRequest = serde_json::from_value(serde_json::json!({
             "kind": "dbInsert", "table": "messages",
             "row": {"id": "explicit", "body": "hello"}, "generatedId": "intent-id"
-        })).expect("insert request decodes");
+        }))
+        .expect("insert request decodes");
         match request.into_host_call().expect("insert lowers") {
-            HostCall::DbInsert { row, generated_id, .. } => {
+            HostCall::DbInsert {
+                row, generated_id, ..
+            } => {
                 assert_eq!(generated_id.as_deref(), Some("intent-id"));
                 let row: serde_json::Value = serde_json::from_slice(&row).unwrap();
                 assert_eq!(row["id"], "explicit");

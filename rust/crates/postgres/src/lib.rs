@@ -1029,7 +1029,10 @@ impl ControlPlane {
 
     /// Only the current delivery attempt may extend its claim.
     pub async fn renew_action(
-        &self, route: &TenantRoute, action_id: &str, attempt: i32,
+        &self,
+        route: &TenantRoute,
+        action_id: &str,
+        attempt: i32,
     ) -> Result<bool, DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit().await?;
@@ -1187,7 +1190,15 @@ impl TenantTransaction {
         provenance: &Value,
     ) -> Result<String, DatabaseError> {
         let id = uuid::Uuid::new_v4().to_string();
-        self.enqueue_action_with_id(&id, action_path, args, actor_account_id, actor_email, provenance).await
+        self.enqueue_action_with_id(
+            &id,
+            action_path,
+            args,
+            actor_account_id,
+            actor_email,
+            provenance,
+        )
+        .await
     }
 
     pub async fn enqueue_action_with_id(
@@ -1204,7 +1215,7 @@ impl TenantTransaction {
                (id, action_path, args, actor_user_id, actor_email, provenance)
                VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6)"#,
         )
-        .bind(&id)
+        .bind(id)
         .bind(action_path)
         .bind(Json(args.clone()))
         .bind(actor_account_id)
