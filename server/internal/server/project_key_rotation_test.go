@@ -73,7 +73,7 @@ func TestProjectKeyRotationFailsClosedWithoutDurableRegistry(t *testing.T) {
 	if bytes.Contains(recorder.Body.Bytes(), []byte(priorKey)) {
 		t.Fatal("failed rotation response disclosed the prior project key")
 	}
-	if !server.acceptsSyncKey(projectID, priorKey) || !server.acceptsProjectEnvKey(projectID, priorKey) {
+	if !server.acceptsSyncKey(projectID, priorKey, nil) || !server.acceptsProjectEnvKey(projectID, priorKey) {
 		t.Fatal("failed durable rotation invalidated the prior project key")
 	}
 
@@ -123,10 +123,10 @@ func TestPostgresProjectKeyRotationPersistsAcrossRestart(t *testing.T) {
 	if replacement == priorKey || bytes.Contains(recorder.Body.Bytes(), []byte(priorKey)) {
 		t.Fatal("successful rotation returned or disclosed the prior project key")
 	}
-	if server.acceptsSyncKey(projectID, priorKey) || server.acceptsProjectEnvKey(projectID, priorKey) {
+	if server.acceptsSyncKey(projectID, priorKey, nil) || server.acceptsProjectEnvKey(projectID, priorKey) {
 		t.Fatal("prior project key remained authorized after rotation")
 	}
-	if !server.acceptsSyncKey(projectID, replacement) || !server.acceptsProjectEnvKey(projectID, replacement) {
+	if !server.acceptsSyncKey(projectID, replacement, nil) || !server.acceptsProjectEnvKey(projectID, replacement) {
 		t.Fatal("replacement project key was not authorized after rotation")
 	}
 
@@ -145,10 +145,10 @@ func TestPostgresProjectKeyRotationPersistsAcrossRestart(t *testing.T) {
 
 	restarted := New(config.Config{LandlordURL: controlURL, PostgresURL: baseURL, AdminKey: "runtime-admin-key"})
 	restarted.hydrateProjects()
-	if restarted.acceptsSyncKey(projectID, priorKey) || restarted.acceptsProjectEnvKey(projectID, priorKey) {
+	if restarted.acceptsSyncKey(projectID, priorKey, nil) || restarted.acceptsProjectEnvKey(projectID, priorKey) {
 		t.Fatal("restarted runtime accepted the prior project key")
 	}
-	if !restarted.acceptsSyncKey(projectID, replacement) || !restarted.acceptsProjectEnvKey(projectID, replacement) {
+	if !restarted.acceptsSyncKey(projectID, replacement, nil) || !restarted.acceptsProjectEnvKey(projectID, replacement) {
 		t.Fatal("restarted runtime did not accept the persisted replacement key")
 	}
 }
@@ -181,7 +181,7 @@ func TestPostgresProjectKeyRotationPersistenceFailureLeavesPriorKeyActive(t *tes
 	if bytes.Contains(recorder.Body.Bytes(), []byte(priorKey)) {
 		t.Fatal("failed rotation response disclosed the prior project key")
 	}
-	if !server.acceptsSyncKey(projectID, priorKey) || !server.acceptsProjectEnvKey(projectID, priorKey) {
+	if !server.acceptsSyncKey(projectID, priorKey, nil) || !server.acceptsProjectEnvKey(projectID, priorKey) {
 		t.Fatal("failed persistence invalidated the prior project key")
 	}
 }

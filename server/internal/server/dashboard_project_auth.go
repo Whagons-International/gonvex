@@ -21,7 +21,7 @@ func (s *Server) withDashboardProjectAuth(next http.Handler) http.Handler {
 		// non-200 as "state missing", and the watch loop resyncs every couple of
 		// seconds forever.
 		if r.Method == http.MethodGet && r.URL.Path == "/dev/manifest" {
-			if project := projectID(r); project != "" && s.acceptsSyncKey(project, syncKey(r)) {
+			if project := projectID(r); project != "" && s.acceptsSyncKey(project, syncKey(r), r) {
 				next.ServeHTTP(w, r)
 				return
 			}

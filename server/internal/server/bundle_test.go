@@ -58,8 +58,9 @@ func TestDevSyncLoadsProjectBundle(t *testing.T) {
 	}
 
 	server := New(config.Config{
-		GonvexModuleRoot: moduleRoot,
-		PluginCacheDir:   t.TempDir(),
+		AllowUnauthenticatedSync: true,
+		GonvexModuleRoot:         moduleRoot,
+		PluginCacheDir:           t.TempDir(),
 	})
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))
@@ -133,8 +134,9 @@ func TestDevSyncRecycleHeaderOnlyForModuleReplacement(t *testing.T) {
 	}
 
 	server := New(config.Config{
-		GonvexModuleRoot: moduleRoot,
-		PluginCacheDir:   t.TempDir(),
+		GonvexModuleRoot:         moduleRoot,
+		PluginCacheDir:           t.TempDir(),
+		AllowUnauthenticatedSync: true,
 	})
 	sync := func(payload []byte) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
