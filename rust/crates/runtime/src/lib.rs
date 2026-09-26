@@ -3653,6 +3653,7 @@ mod tests {
                 membership_revision: 1,
             },
             admission_revision: 5,
+            delegation: None,
         };
         let event = |revision, changed_columns: Vec<&str>| change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),

@@ -1802,6 +1802,7 @@ impl Runtime {
                     route: route.clone(),
                     member,
                     admission_revision: 0,
+                    delegation: None,
                 };
                 let mut handler = DatabaseHostCalls::new(tenant_tx, DatabaseCapability::Reducer)
                     .with_actor(&identity.account.id, &identity.account.email);

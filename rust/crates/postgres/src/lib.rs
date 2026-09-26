@@ -262,6 +262,35 @@ pub struct TenantSession {
     pub member: Member,
     /// Durable tenant change-feed revision covered by the admission snapshot.
     pub admission_revision: u64,
+    /// Set only for a member session a service principal drives through a
+    /// delegation grant. Developer and support impersonation leave it empty.
+    pub delegation: Option<SessionDelegation>,
+}
+
+/// Impersonation grants whose actor account starts with this prefix were
+/// minted by the service principal named after it.
+pub const SERVICE_PRINCIPAL_ACTOR_PREFIX: &str = "service:";
+
+/// The service principal behind a delegated member session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDelegation {
+    /// Configured service principal id.
+    pub principal: String,
+    /// The end actor the service reported when it minted the grant, such as
+    /// an API key. It is attribution, never authority.
+    #[serde(default)]
+    pub actor: Option<DelegationActor>,
+}
+
+/// The end actor recorded on a service principal delegation grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationActor {
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -450,6 +479,7 @@ impl ControlPlane {
             route,
             member,
             admission_revision,
+            delegation: None,
         })
     }
 
@@ -473,13 +503,13 @@ impl ControlPlane {
             r#"UPDATE gonvex_impersonation_grants SET
                  used_at=now(),used_connection_id=$2,reconnect_token_hash=$3
                WHERE token_hash=$1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>now()
-               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id"#
+               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor"#
         } else {
             r#"UPDATE gonvex_impersonation_grants SET
                  used_connection_id=$2,reconnect_token_hash=$3
                WHERE reconnect_token_hash=$1 AND used_at IS NOT NULL
                  AND revoked_at IS NULL AND expires_at>now()
-               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id"#
+               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor"#
         };
         let row = sqlx::query(statement)
             .bind(token_hash(token))
@@ -493,6 +523,13 @@ impl ControlPlane {
         let actor_account_id: String = row.get("actor_account_id");
         let account_id: String = row.get("target_account_id");
         let tenant_id: String = row.get("tenant_id");
+        // Returning early drops the transaction, so a grant whose delegation
+        // cannot be read is not consumed.
+        let delegation = session_delegation(
+            &actor_account_id,
+            row.get::<Option<Json<Value>>, _>("delegation_actor")
+                .map(|actor| actor.0),
+        )?;
         if requested_project_id
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -542,6 +579,7 @@ impl ControlPlane {
                 route,
                 member,
                 admission_revision,
+                delegation,
             },
             grant_id,
             actor_account_id,
@@ -634,6 +672,7 @@ impl ControlPlane {
             route,
             member,
             admission_revision,
+            delegation: None,
         })
     }
 
@@ -1304,9 +1343,83 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && bool::from(left.ct_eq(right))
 }
 
+/// Recognizes a grant minted by a service principal. Only the runtime writes
+/// grant rows and it validates the actor first, so an actor that cannot be
+/// read here means the row was altered. Such a grant is refused: dropping the
+/// actor would let a module that trusts `actor.kind` see a weaker claim.
+fn session_delegation(
+    actor_account_id: &str,
+    actor: Option<Value>,
+) -> Result<Option<SessionDelegation>, DatabaseError> {
+    let Some(principal) = actor_account_id.strip_prefix(SERVICE_PRINCIPAL_ACTOR_PREFIX) else {
+        return Ok(None);
+    };
+    if principal.is_empty() {
+        return Err(DatabaseError::InvalidSession);
+    }
+    let actor = match actor {
+        None | Some(Value::Null) => None,
+        Some(actor) => Some(
+            serde_json::from_value::<DelegationActor>(actor)
+                .map_err(|_| DatabaseError::InvalidSession)?,
+        ),
+    };
+    Ok(Some(SessionDelegation {
+        principal: principal.to_owned(),
+        actor,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_service_principal_grants_produce_delegated_sessions() {
+        // Developer mode and support impersonation grants name an account.
+        assert_eq!(
+            session_delegation("acct_123", None).unwrap(),
+            None,
+            "support impersonation is not a delegation"
+        );
+        assert_eq!(
+            session_delegation(
+                "acct_123",
+                Some(serde_json::json!({"kind":"api_key","name":"x"}))
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            session_delegation("service:gateway", None).unwrap(),
+            Some(SessionDelegation {
+                principal: "gateway".to_owned(),
+                actor: None,
+            })
+        );
+        assert_eq!(
+            session_delegation(
+                "service:gateway",
+                Some(serde_json::json!({"kind":"api_key","name":"CI key","reference":"key_1"}))
+            )
+            .unwrap(),
+            Some(SessionDelegation {
+                principal: "gateway".to_owned(),
+                actor: Some(DelegationActor {
+                    kind: "api_key".to_owned(),
+                    name: "CI key".to_owned(),
+                    reference: Some("key_1".to_owned()),
+                }),
+            })
+        );
+        assert!(session_delegation("service:", None).is_err());
+        assert!(session_delegation("service:gateway", Some(serde_json::json!("api_key"))).is_err());
+        assert!(session_delegation(
+            "service:gateway",
+            Some(serde_json::json!({"kind":"api_key"}))
+        )
+        .is_err());
+    }
 
     #[test]
     fn clamps_connection_limits() {

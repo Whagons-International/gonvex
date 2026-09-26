@@ -17,15 +17,21 @@
 //!    grant (`gvx_imp_` then rotating `gvx_dev_` reconnect credentials), so the
 //!    delegated socket gets the member's normal permissions, visibility,
 //!    membership revalidation and `membership-changed` resets. Delegations are
-//!    recorded in `gonvex_impersonation_grants` with actor `service:<id>` and
-//!    can be revoked with `control.servicePrincipals.revokeDelegation`.
+//!    recorded in `gonvex_impersonation_grants` with actor `service:<id>`,
+//!    plus the optional end `actor` the service reports (for example one API
+//!    key), and can be revoked with `control.servicePrincipals.revokeDelegation`.
 //!
 //! Every other frame on a service socket is rejected. Service sockets have no
-//! change feed, replicas, live queries or Control Plane administration.
+//! change feed, replicas, live queries or Control Plane administration. These
+//! restrictions apply to the service socket only, never to the member
+//! sockets that redeem its delegation grants.
 
 use chrono::Utc;
 use gonvex_module_runtime::InvocationChannel;
-use gonvex_postgres::{Account, Member, SessionIdentity, TenantRoute, TenantSession};
+use gonvex_postgres::{
+    Account, DelegationActor, Member, SessionIdentity, TenantRoute, TenantSession,
+    SERVICE_PRINCIPAL_ACTOR_PREFIX,
+};
 use gonvex_protocol::{ClientMessage, ExecutionScope, ServerMessage};
 use serde_json::{json, Value};
 use subtle::ConstantTimeEq;
@@ -39,6 +45,9 @@ pub(crate) const DELEGATE_PATH: &str = "control.servicePrincipals.delegate";
 pub(crate) const REVOKE_PATH: &str = "control.servicePrincipals.revokeDelegation";
 const MIN_DELEGATION_SECONDS: i64 = 30;
 const MAX_REASON_BYTES: usize = 200;
+const MAX_ACTOR_KIND_CHARS: usize = 32;
+const MAX_ACTOR_NAME_CHARS: usize = 120;
+const MAX_ACTOR_REFERENCE_CHARS: usize = 200;
 const AUTH_FAILURE: &str = "service credential is invalid or not permitted for this project";
 
 /// The authenticated state of one service socket.
@@ -52,7 +61,7 @@ pub(crate) struct ServiceGrant {
 
 impl ServiceGrant {
     fn actor(&self) -> String {
-        format!("service:{}", self.principal_id)
+        format!("{SERVICE_PRINCIPAL_ACTOR_PREFIX}{}", self.principal_id)
     }
 
     fn session(&self) -> TenantSession {
@@ -81,6 +90,8 @@ impl ServiceGrant {
                 membership_revision: 0,
             },
             admission_revision: 0,
+            // The principal's own calls are not a delegated member session.
+            delegation: None,
         }
     }
 
@@ -108,6 +119,76 @@ pub(crate) fn find_principal<'a>(
         }
     }
     found
+}
+
+/// Validates the optional `actor` of a delegation: the end actor the service
+/// acts for, such as one API key. It is stored on the grant and shown to
+/// modules as `ctx.invocation.delegation.actor`; it never grants access.
+fn delegation_actor(value: Option<&Value>) -> Result<Option<DelegationActor>, String> {
+    let object = match value {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(object)) => object,
+        Some(_) => return Err("invalid arguments: actor must be an object".to_owned()),
+    };
+    if let Some(unknown) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "kind" | "name" | "reference"))
+    {
+        return Err(format!(
+            "invalid arguments: unknown actor field {unknown:?}"
+        ));
+    }
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind.is_empty()
+        || kind.len() > MAX_ACTOR_KIND_CHARS
+        || !kind.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
+    {
+        return Err(format!(
+            "invalid arguments: actor.kind must be 1-{MAX_ACTOR_KIND_CHARS} characters of [a-z0-9_-]"
+        ));
+    }
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if name.is_empty()
+        || name.chars().count() > MAX_ACTOR_NAME_CHARS
+        || name.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "invalid arguments: actor.name must be 1-{MAX_ACTOR_NAME_CHARS} characters without control characters"
+        ));
+    }
+    let invalid_reference = || {
+        format!(
+            "invalid arguments: actor.reference must be a string of at most {MAX_ACTOR_REFERENCE_CHARS} characters without control characters"
+        )
+    };
+    let reference = match object.get("reference") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(reference)) => {
+            let reference = reference.trim();
+            if reference.chars().count() > MAX_ACTOR_REFERENCE_CHARS
+                || reference.chars().any(char::is_control)
+            {
+                return Err(invalid_reference());
+            }
+            // An empty reference carries nothing; store it as absent.
+            (!reference.is_empty()).then(|| reference.to_owned())
+        }
+        Some(_) => return Err(invalid_reference()),
+    };
+    Ok(Some(DelegationActor {
+        kind: kind.to_owned(),
+        name: name.to_owned(),
+        reference,
+    }))
 }
 
 /// How `/dev/manifest` treats the presented bearer credential.
@@ -492,7 +573,7 @@ impl Runtime {
         if let Some(unknown) = object.keys().find(|key| {
             !matches!(
                 key.as_str(),
-                "accountId" | "memberId" | "reason" | "expiresInSeconds"
+                "accountId" | "memberId" | "reason" | "expiresInSeconds" | "actor"
             )
         }) {
             return Err(format!("invalid arguments: unknown field {unknown:?}"));
@@ -523,6 +604,7 @@ impl Runtime {
                     format!("invalid arguments: expiresInSeconds must be between {MIN_DELEGATION_SECONDS} and {maximum}")
                 })?,
         };
+        let actor = delegation_actor(object.get("actor"))?;
         let control = self
             .inner
             .control_plane
@@ -554,8 +636,9 @@ impl Runtime {
             .map_err(|error| error.to_string())?;
         sqlx::query(
             r#"INSERT INTO gonvex_impersonation_grants
-               (id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8)"#,
+               (id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at,
+                delegation_actor)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)"#,
         )
         .bind(&grant_id)
         .bind(&grant.route.project_id)
@@ -565,6 +648,7 @@ impl Runtime {
         .bind(&grant.route.tenant_id)
         .bind(format!("{}: {reason}", grant.actor()))
         .bind(expires)
+        .bind(actor.clone().map(sqlx::types::Json))
         .execute(&mut **transaction.transaction())
         .await
         .map_err(|error| error.to_string())?;
@@ -580,6 +664,8 @@ impl Runtime {
             member = member_id,
             grant = %grant_id,
             reason,
+            actor_kind = actor.as_ref().map(|actor| actor.kind.as_str()),
+            actor_reference = actor.as_ref().and_then(|actor| actor.reference.as_deref()),
             expires_in_seconds = seconds,
             "service principal delegated a member session"
         );
@@ -803,6 +889,9 @@ mod tests {
             json!({"accountId":"a","memberId":"m","reason":"x","expiresInSeconds":5}),
             json!({"accountId":"a","memberId":"m","reason":"x","expiresInSeconds":901}),
             json!({"accountId":"a","memberId":"m","reason":"x".repeat(201)}),
+            json!({"accountId":"a","memberId":"m","reason":"x","actor":"api_key"}),
+            json!({"accountId":"a","memberId":"m","reason":"x","actor":{"kind":"API","name":"k"}}),
+            json!({"accountId":"a","memberId":"m","reason":"x","actor":{"kind":"api_key","name":"k","role":"admin"}}),
         ] {
             let error = runtime
                 .delegate_service_session(&grant, &args)
@@ -810,14 +899,100 @@ mod tests {
                 .unwrap_err();
             assert!(error.starts_with("invalid arguments"), "{args}: {error}");
         }
-        let error = runtime
-            .delegate_service_session(
-                &grant,
-                &json!({"accountId":"a","memberId":"m","reason":"api-key:k1"}),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error, "auth session store is unavailable");
+        for args in [
+            json!({"accountId":"a","memberId":"m","reason":"api-key:k1"}),
+            json!({"accountId":"a","memberId":"m","reason":"api-key:k1","actor":null}),
+            json!({"accountId":"a","memberId":"m","reason":"api-key:k1",
+                   "actor":{"kind":"api_key","name":"CI key","reference":"k1"}}),
+        ] {
+            let error = runtime
+                .delegate_service_session(&grant, &args)
+                .await
+                .unwrap_err();
+            assert_eq!(error, "auth session store is unavailable", "{args}");
+        }
+    }
+
+    #[test]
+    fn delegation_actors_are_validated() {
+        let actor = |value: Value| delegation_actor(Some(&value));
+        assert_eq!(delegation_actor(None), Ok(None));
+        assert_eq!(actor(Value::Null), Ok(None));
+        assert_eq!(
+            actor(json!({"kind":"api_key","name":"  CI key  ","reference":" key_1 "})),
+            Ok(Some(DelegationActor {
+                kind: "api_key".to_owned(),
+                name: "CI key".to_owned(),
+                reference: Some("key_1".to_owned()),
+            }))
+        );
+        assert_eq!(
+            actor(json!({"kind":"svc-2_x","name":"Ñandú ✓ key"})),
+            Ok(Some(DelegationActor {
+                kind: "svc-2_x".to_owned(),
+                name: "Ñandú ✓ key".to_owned(),
+                reference: None,
+            }))
+        );
+        // Empty and null references are stored as absent.
+        for reference in [json!(""), json!("   "), Value::Null] {
+            assert_eq!(
+                actor(json!({"kind":"api_key","name":"k","reference":reference}))
+                    .unwrap()
+                    .unwrap()
+                    .reference,
+                None
+            );
+        }
+        // Limits are counted in characters, not bytes.
+        assert!(actor(
+            json!({"kind":"k".repeat(32),"name":"é".repeat(120),"reference":"é".repeat(200)})
+        )
+        .is_ok());
+
+        for (value, field) in [
+            (json!("api_key"), "actor must be an object"),
+            (json!(["api_key"]), "actor must be an object"),
+            (
+                json!({"kind":"api_key","name":"k","scopes":["*"]}),
+                "unknown actor field \"scopes\"",
+            ),
+            (json!({"name":"k"}), "actor.kind"),
+            (json!({"kind":"","name":"k"}), "actor.kind"),
+            (json!({"kind":"k".repeat(33),"name":"k"}), "actor.kind"),
+            (json!({"kind":"Api_Key","name":"k"}), "actor.kind"),
+            (json!({"kind":"api key","name":"k"}), "actor.kind"),
+            (json!({"kind":"api.key","name":"k"}), "actor.kind"),
+            (json!({"kind":"clé","name":"k"}), "actor.kind"),
+            (json!({"kind":7,"name":"k"}), "actor.kind"),
+            (json!({"kind":"api_key"}), "actor.name"),
+            (json!({"kind":"api_key","name":"   "}), "actor.name"),
+            (
+                json!({"kind":"api_key","name":"x".repeat(121)}),
+                "actor.name",
+            ),
+            (json!({"kind":"api_key","name":"line\nbreak"}), "actor.name"),
+            (json!({"kind":"api_key","name":"bell\u{7}"}), "actor.name"),
+            (json!({"kind":"api_key","name":{"first":"k"}}), "actor.name"),
+            (
+                json!({"kind":"api_key","name":"k","reference":"r".repeat(201)}),
+                "actor.reference",
+            ),
+            (
+                json!({"kind":"api_key","name":"k","reference":"a\u{1b}[31m"}),
+                "actor.reference",
+            ),
+            (
+                json!({"kind":"api_key","name":"k","reference":42}),
+                "actor.reference",
+            ),
+        ] {
+            let error = actor(value.clone()).unwrap_err();
+            assert!(
+                error.starts_with("invalid arguments: ") && error.contains(field),
+                "{value}: {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1072,7 +1247,7 @@ mod tests {
             ));
         }
         let (account, member) = members[0].clone();
-        let (other_account, _) = members[1].clone();
+        let (other_account, other_member) = members[1].clone();
 
         let (message, grant) = runtime
             .authenticate_service_principal(
@@ -1098,14 +1273,15 @@ mod tests {
         let delegated = runtime
             .delegate_service_session(
                 &grant,
-                &json!({"accountId": account, "memberId": member, "reason": "api-key:k1", "expiresInSeconds": 120}),
+                &json!({"accountId": account, "memberId": member, "reason": "api-key:k1", "expiresInSeconds": 120,
+                        "actor": {"kind": "api_key", "name": " CI key ", "reference": "key_1"}}),
             )
             .await
             .unwrap();
         let token = delegated["token"].as_str().unwrap();
         assert!(token.starts_with("gvx_imp_"));
-        let stored = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT actor_account_id,reason,token_hash FROM gonvex_impersonation_grants WHERE id=$1",
+        let stored = sqlx::query_as::<_, (String, String, String, Option<sqlx::types::Json<Value>>)>(
+            "SELECT actor_account_id,reason,token_hash,delegation_actor FROM gonvex_impersonation_grants WHERE id=$1",
         )
         .bind(delegated["id"].as_str().unwrap())
         .fetch_one(&fixture)
@@ -1114,6 +1290,18 @@ mod tests {
         assert_eq!(stored.0, "service:gateway");
         assert_eq!(stored.1, "service:gateway: api-key:k1");
         assert_ne!(stored.2, token, "only the digest is stored");
+        assert_eq!(
+            stored.3.map(|actor| actor.0),
+            Some(json!({"kind": "api_key", "name": "CI key", "reference": "key_1"}))
+        );
+        let expected_delegation = gonvex_postgres::SessionDelegation {
+            principal: "gateway".to_owned(),
+            actor: Some(DelegationActor {
+                kind: "api_key".to_owned(),
+                name: "CI key".to_owned(),
+                reference: Some("key_1".to_owned()),
+            }),
+        };
 
         // A delegated grant cannot be redeemed for another tenant.
         assert!(control
@@ -1127,11 +1315,23 @@ mod tests {
         assert_eq!(session.tenant.member.id, member);
         assert_eq!(session.tenant.identity.account.id, account);
         assert_eq!(session.actor_account_id, "service:gateway");
+        assert_eq!(session.tenant.delegation, Some(expected_delegation.clone()));
         // Single use: the grant itself cannot be redeemed twice.
         assert!(control
             .authenticate_impersonation(token, Some("project"), Some("tenant"), "conn-2")
             .await
             .is_err());
+        // A reconnect with the rotating credential stays delegated.
+        let session = control
+            .authenticate_impersonation(
+                &session.reconnect_token,
+                Some("project"),
+                Some("tenant"),
+                "conn-1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.tenant.delegation, Some(expected_delegation));
         control
             .validate_impersonation_session(&session.reconnect_token, "project", "tenant", "conn-1")
             .await
@@ -1148,6 +1348,88 @@ mod tests {
             .validate_impersonation_session(&session.reconnect_token, "project", "tenant", "conn-1")
             .await
             .is_err());
+
+        // Without an actor the grant stores NULL and the session is still
+        // delegated, with `actor: null`.
+        let unattributed = runtime
+            .delegate_service_session(
+                &grant,
+                &json!({"accountId": other_account, "memberId": other_member, "reason": "api-key:k2"}),
+            )
+            .await
+            .unwrap();
+        let stored_actor = sqlx::query_scalar::<_, Option<sqlx::types::Json<Value>>>(
+            "SELECT delegation_actor FROM gonvex_impersonation_grants WHERE id=$1",
+        )
+        .bind(unattributed["id"].as_str().unwrap())
+        .fetch_one(&fixture)
+        .await
+        .unwrap();
+        assert!(stored_actor.is_none());
+        let unattributed_session = control
+            .authenticate_impersonation(
+                unattributed["token"].as_str().unwrap(),
+                Some("project"),
+                Some("tenant"),
+                "conn-3",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unattributed_session.tenant.delegation,
+            Some(gonvex_postgres::SessionDelegation {
+                principal: "gateway".to_owned(),
+                actor: None,
+            })
+        );
+
+        // Support impersonation and developer mode grants name an account and
+        // never produce a delegated session.
+        let support_token = "gvx_imp_support_contract";
+        sqlx::query(
+            r#"INSERT INTO gonvex_impersonation_grants
+               (id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at)
+               VALUES('imp_support','project',$1,$2,$3,'tenant','support',now()+interval '5 minutes')"#,
+        )
+        .bind(gonvex_postgres::token_hash(support_token))
+        .bind(&other_account)
+        .bind(&account)
+        .execute(&fixture)
+        .await
+        .unwrap();
+        let support = control
+            .authenticate_impersonation(support_token, Some("project"), Some("tenant"), "conn-4")
+            .await
+            .unwrap();
+        assert_eq!(support.actor_account_id, other_account);
+        assert_eq!(support.tenant.delegation, None);
+
+        // A service grant whose stored actor was altered is refused and left
+        // unconsumed rather than redeemed without its attribution.
+        let tampered_token = "gvx_imp_tampered_contract";
+        sqlx::query(
+            r#"INSERT INTO gonvex_impersonation_grants
+               (id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at,
+                delegation_actor)
+               VALUES('svcdel_tampered','project',$1,'service:gateway',$2,'tenant','service:gateway: x',
+                      now()+interval '5 minutes','{"kind":"api_key"}')"#,
+        )
+        .bind(gonvex_postgres::token_hash(tampered_token))
+        .bind(&account)
+        .execute(&fixture)
+        .await
+        .unwrap();
+        assert!(control
+            .authenticate_impersonation(tampered_token, Some("project"), Some("tenant"), "conn-5")
+            .await
+            .is_err());
+        let consumed: bool = sqlx::query_scalar(
+            "SELECT used_at IS NOT NULL FROM gonvex_impersonation_grants WHERE id='svcdel_tampered'",
+        )
+        .fetch_one(&fixture)
+        .await
+        .unwrap();
+        assert!(!consumed);
 
         // Deactivated members cannot be delegated.
         let tenant_pool = PgPoolOptions::new()
@@ -1168,6 +1450,25 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(refused, "target is not an active tenant member");
+
+        // A Control Plane created before delegation actors existed gains the
+        // column the next time a runtime starts against it.
+        sqlx::query("ALTER TABLE gonvex_impersonation_grants DROP COLUMN delegation_actor")
+            .execute(&fixture)
+            .await
+            .unwrap();
+        ControlPlane::connect(&control_url, pools.clone(), Default::default())
+            .await
+            .unwrap();
+        let restored: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM information_schema.columns
+               WHERE table_schema=current_schema() AND table_name='gonvex_impersonation_grants'
+                 AND column_name='delegation_actor' AND data_type='jsonb' AND is_nullable='YES')"#,
+        )
+        .fetch_one(&fixture)
+        .await
+        .unwrap();
+        assert!(restored);
 
         tenant_pool.close().await;
         runtime.shutdown().await;

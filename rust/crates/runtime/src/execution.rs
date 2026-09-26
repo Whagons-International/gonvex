@@ -920,6 +920,7 @@ pub(crate) fn system_tenant_session(project: &str, route: TenantRoute) -> Tenant
             membership_revision: 0,
         },
         admission_revision: 0,
+        delegation: None,
     }
 }
 
@@ -1228,6 +1229,7 @@ mod tests {
                 membership_revision: 1,
             },
             admission_revision: 7,
+            delegation: None,
         }
     }
 
