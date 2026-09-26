@@ -97,6 +97,12 @@ func TestAcceptsSyncKeyFallbackRequiresLoopback(t *testing.T) {
 	// Any registered project key means this is a real deployment, so the
 	// loopback fallback must switch off entirely -- this is what protects a
 	// runtime behind a reverse proxy that shares its network namespace.
+	// A request that names no project must never take the unkeyed fallback,
+	// even from loopback on a runtime with no keys at all.
+	if server.acceptsSyncKey("", "", local) {
+		t.Fatal("unkeyed sync accepted for a request that names no project")
+	}
+
 	deployed := New(config.Config{ProjectKeys: map[string]string{"other": "k"}})
 	if deployed.acceptsSyncKey("p", "", local) {
 		t.Fatal("unkeyed sync accepted on a runtime that has registered project keys")

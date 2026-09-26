@@ -985,7 +985,7 @@ func TestDevSyncKeepsProjectManifestAvailableAfterSync(t *testing.T) {
 }
 
 func TestDevSyncAlwaysStampsRuntimeDatabaseArtifactVersion(t *testing.T) {
-	server := New(config.Config{})
+	server := New(config.Config{AllowUnauthenticatedSync: true})
 	body := bytes.NewBufferString(`{"project":"artifact-version-project","generatedAt":"now","functions":{},"schema":{"tables":{}},"notifySchemaVersion":"1"}`)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", body))

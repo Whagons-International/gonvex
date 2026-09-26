@@ -38,6 +38,11 @@ var blockedGoTokens = []*regexp.Regexp{
 	regexp.MustCompile(`\bplugin\b`),
 	regexp.MustCompile(`\bC\.`),
 	regexp.MustCompile(`//\s*#cgo`),
+	// The host file's RPC plumbing shares package main with the user file, so
+	// its package-level identifiers are in scope there even though its imports
+	// are not. Keep user code off the RPC channel's lock and reader.
+	regexp.MustCompile(`\bsandboxRPCMu\b`),
+	regexp.MustCompile(`\bsandboxRPCReader\b`),
 }
 
 type Runner struct {

@@ -1109,6 +1109,12 @@ func (s *Server) acceptsSyncKey(projectID, provided string, r *http.Request) boo
 	if s.config.DevSyncKey != "" {
 		return provided != "" && constantTimeString(provided, s.config.DevSyncKey)
 	}
+	// A request that names no project is never let through without a key: it is
+	// exactly the shape of the original bypass (omit the project, fall through to
+	// the open default), and no legitimate local sync needs it.
+	if projectID == "" {
+		return false
+	}
 	return s.allowsUnauthenticatedSync(r, registeredKeyCount)
 }
 

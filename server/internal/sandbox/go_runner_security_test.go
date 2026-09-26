@@ -121,3 +121,14 @@ func TestUserFileHasNoHostImports(t *testing.T) {
 		t.Fatalf("user code was spliced into the host file; the split is what removes os from scope")
 	}
 }
+
+func TestBlocklistRejectsHostRPCIdentifiers(t *testing.T) {
+	for _, body := range []string{
+		"line, _ := sandboxRPCReader.ReadString('\\n')\nreturn line, nil",
+		"sandboxRPCMu.Lock()\nreturn nil, nil",
+	} {
+		if err := validateGoBody(body); err == nil {
+			t.Errorf("validateGoBody accepted host RPC identifier in %q", body)
+		}
+	}
+}

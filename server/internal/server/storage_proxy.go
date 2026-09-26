@@ -58,11 +58,14 @@ func (s *Server) handleStorageProxy(w http.ResponseWriter, r *http.Request) {
 	// closing, and cheap to close.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-		if !inlineSafeContentType(ct) {
-			w.Header().Set("Content-Disposition", "attachment")
-		}
+	// A missing or unknown type is not safe to render inline either: without a
+	// stored type the browser would sniff the body.
+	contentType := resp.Header.Get("Content-Type")
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	if !inlineSafeContentType(contentType) {
+		w.Header().Set("Content-Disposition", "attachment")
 	}
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.WriteHeader(resp.StatusCode)

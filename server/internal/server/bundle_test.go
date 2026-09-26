@@ -134,8 +134,9 @@ func TestDevSyncRecycleHeaderOnlyForModuleReplacement(t *testing.T) {
 	}
 
 	server := New(config.Config{
-		GonvexModuleRoot: moduleRoot,
-		PluginCacheDir:   t.TempDir(),
+		GonvexModuleRoot:         moduleRoot,
+		PluginCacheDir:           t.TempDir(),
+		AllowUnauthenticatedSync: true,
 	})
 	sync := func(payload []byte) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
