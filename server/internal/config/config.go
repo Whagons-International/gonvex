@@ -46,6 +46,7 @@ type Config struct {
 	StoragePublicURL            string
 	DevSyncKey                  string
 	AdminKey                    string
+	AllowUnauthenticatedSync    bool
 	RequireAuth                 bool
 	QueryCacheEnabled           bool
 	TenantListenerLimit         int
@@ -132,6 +133,7 @@ func FromEnv() Config {
 		StoragePublicURL:             env("GONVEX_PUBLIC_URL", ""),
 		DevSyncKey:                   env("GONVEX_DEV_SYNC_KEY", env("GONVEX_PROJECT_KEY", env("GONVEX_DEPLOY_KEY", ""))),
 		AdminKey:                     env("GONVEX_ADMIN_KEY", ""),
+		AllowUnauthenticatedSync:     envBool("GONVEX_ALLOW_UNAUTHENTICATED_SYNC", false),
 		RequireAuth:                  envBool("GONVEX_REQUIRE_AUTH", false),
 		QueryCacheEnabled:            envBool("GONVEX_BROWSER_QUERY_CACHE_ENABLED", true),
 		TenantListenerLimit:          envInt("GONVEX_TENANT_LISTENER_LIMIT", defaultTenantListenerLimit),

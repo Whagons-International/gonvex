@@ -16,7 +16,7 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project id is required"})
 		return
 	}
-	if !s.acceptsSyncKey(project, syncKeyFromRequest(r)) {
+	if !s.acceptsSyncKey(project, syncKeyFromRequest(r), r) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex sync key"})
 		return
 	}

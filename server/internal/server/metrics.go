@@ -1285,8 +1285,17 @@ func (m *runtimeMetrics) snapshot(current manifest.Manifest, connections int, su
 	for key, metrics := range m.transactions {
 		transactions[key] = metrics.snapshot(now)
 	}
-	telemetryLogs := make([]transactionTelemetryEntry, len(m.telemetryLogs))
-	copy(telemetryLogs, m.telemetryLogs)
+	// Honour projectFilter here too. These entries carry per-request metadata
+	// (tenant, path, user), so copying every project's telemetry into a
+	// single-project snapshot leaked other projects' activity to whoever could
+	// read this one.
+	telemetryLogs := make([]transactionTelemetryEntry, 0, len(m.telemetryLogs))
+	for _, entry := range m.telemetryLogs {
+		if projectFilter != "" && entry.Project != "" && entry.Project != projectFilter {
+			continue
+		}
+		telemetryLogs = append(telemetryLogs, entry)
+	}
 	sort.Slice(telemetryLogs, func(left, right int) bool {
 		return telemetryLogs[left].Time > telemetryLogs[right].Time
 	})

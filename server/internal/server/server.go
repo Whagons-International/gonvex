@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -27,6 +28,12 @@ import (
 	"github.com/gonvex/gonvex/server/internal/schema"
 	"golang.org/x/sync/singleflight"
 )
+
+// maxSyncManifestBytes bounds the manifest body. The body is now decoded before
+// the sync key is checked (the key must be validated against the project the
+// body names), so this cap keeps that decode from being an unauthenticated
+// memory-pressure lever.
+const maxSyncManifestBytes = 64 << 20
 
 type Server struct {
 	ctx             context.Context
@@ -815,22 +822,18 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Per-project auth: the sync uploads source the runtime compiles and runs,
-	// so it must present the target project's own key. Hydrate the project first
-	// so its key is loaded, then require it. Falls back to the global
-	// GONVEX_DEV_SYNC_KEY only for projects that have no key yet.
-	syncProjectID := strings.TrimSpace(r.Header.Get("x-gonvex-project-id"))
-	logProject = syncProjectID
-	if syncProjectID != "" {
-		s.hydrateRuntimeStateForProject(r.Context(), syncProjectID)
-	}
-	if !s.acceptsSyncKey(syncProjectID, syncKey(r)) {
-		syncErr = fmt.Errorf("invalid Gonvex sync key")
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex sync key"})
-		return
-	}
+	// so it must present the target project's own key.
+	//
+	// The manifest is decoded BEFORE the key check on purpose. The deploy acts on
+	// the project named in the body, so that is the identity the key must be
+	// checked against. Authenticating against the header while deploying the body
+	// let an anonymous caller omit the header, authenticate as "no project", and
+	// deploy arbitrary Go into someone else's project.
+	headerProject := strings.TrimSpace(r.Header.Get("x-gonvex-project-id"))
+	logProject = headerProject
 
 	var next manifest.Manifest
-	if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSyncManifestBytes)).Decode(&next); err != nil {
 		syncErr = err
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -839,15 +842,27 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	if next.Functions == nil {
 		next.Functions = map[string]manifest.FunctionEntry{}
 	}
+	next.Project = strings.TrimSpace(next.Project)
+	if headerProject != "" && next.Project != "" && headerProject != next.Project {
+		syncErr = fmt.Errorf("manifest project does not match x-gonvex-project-id")
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "manifest project does not match x-gonvex-project-id"})
+		return
+	}
 	if next.Project == "" {
-		next.Project = r.Header.Get("x-gonvex-project-id")
+		next.Project = headerProject
 	}
 	if next.Project != "" {
 		logProject = next.Project
 	}
-	if headerProject := r.Header.Get("x-gonvex-project-id"); headerProject != "" && next.Project != "" && headerProject != next.Project {
-		syncErr = fmt.Errorf("manifest project does not match x-gonvex-project-id")
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "manifest project does not match x-gonvex-project-id"})
+
+	// Hydrate the resolved project so its registered key is loaded, then require
+	// that key. Both values now refer to the same project.
+	if next.Project != "" {
+		s.hydrateRuntimeStateForProject(r.Context(), next.Project)
+	}
+	if !s.acceptsSyncKey(next.Project, syncKey(r), r) {
+		syncErr = fmt.Errorf("invalid Gonvex sync key")
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid Gonvex sync key"})
 		return
 	}
 	if err := s.requireProjectDatabase(next.Project); err != nil {
@@ -1075,15 +1090,18 @@ func (s *Server) acceptsAdminKey(key string) bool {
 
 // acceptsSyncKey gates POST /dev/sync. If the target project has a registered
 // key, exactly that key is required (per-project). Otherwise it falls back to
-// the global GONVEX_DEV_SYNC_KEY, and if neither is configured the endpoint is
-// open (local dev only).
-func (s *Server) acceptsSyncKey(projectID, provided string) bool {
+// the global GONVEX_DEV_SYNC_KEY. If neither is configured the endpoint is open
+// only on a runtime that looks like an untouched local dev box -- see
+// allowsUnauthenticatedSync. projectID must be the project the deploy will
+// actually act on, not a value read from a different part of the request.
+func (s *Server) acceptsSyncKey(projectID, provided string, r *http.Request) bool {
 	provided = strings.TrimSpace(provided)
 	s.projectMu.RLock()
 	registered := ""
 	if projectID != "" {
 		registered = strings.TrimSpace(s.config.ProjectKeys[projectID])
 	}
+	registeredKeyCount := len(s.config.ProjectKeys)
 	s.projectMu.RUnlock()
 	if registered != "" {
 		return provided != "" && constantTimeString(provided, registered)
@@ -1091,7 +1109,53 @@ func (s *Server) acceptsSyncKey(projectID, provided string) bool {
 	if s.config.DevSyncKey != "" {
 		return provided != "" && constantTimeString(provided, s.config.DevSyncKey)
 	}
+	// A request that names no project is never let through without a key: it is
+	// exactly the shape of the original bypass (omit the project, fall through to
+	// the open default), and no legitimate local sync needs it.
+	if projectID == "" {
+		return false
+	}
+	return s.allowsUnauthenticatedSync(r, registeredKeyCount)
+}
+
+// allowsUnauthenticatedSync decides whether an unkeyed /dev/sync is acceptable.
+//
+// /dev/sync compiles and loads attacker-controlled Go into the runtime process,
+// so an open one is remote code execution. It previously returned true whenever
+// no key happened to be configured, which fails open on exactly the runtime that
+// was deployed without one. It now fails closed unless this really is a local
+// dev box: no keys of any kind configured anywhere, and the request arrived over
+// loopback.
+//
+// Caveat worth knowing: a runtime behind a reverse proxy that shares its network
+// namespace sees proxied requests as loopback. The registeredKeyCount check is
+// what covers that case -- any real deployment has at least one project key --
+// but operators should still set GONVEX_DEV_SYNC_KEY.
+func (s *Server) allowsUnauthenticatedSync(r *http.Request, registeredKeyCount int) bool {
+	if s.config.AllowUnauthenticatedSync {
+		return true
+	}
+	if s.config.AdminKey != "" || registeredKeyCount > 0 {
+		return false
+	}
+	if !requestFromLoopback(r) {
+		return false
+	}
+	slog.Warn("accepting unauthenticated /dev/sync: no project key and no GONVEX_DEV_SYNC_KEY configured; allowed because the request is loopback-only. Set GONVEX_DEV_SYNC_KEY before exposing this runtime.",
+		"remote_addr", r.RemoteAddr)
 	return true
+}
+
+func requestFromLoopback(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func projectID(r *http.Request) string {
