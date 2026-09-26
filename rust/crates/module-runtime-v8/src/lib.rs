@@ -491,7 +491,9 @@ mod host_call_tests {
                     },
                     other => return Err(HostError::Failed(format!("unexpected call {other:?}"))),
                 };
-                Ok(HostResponse { value: value.to_vec() })
+                Ok(HostResponse {
+                    value: value.to_vec(),
+                })
             })
         }
     }
@@ -499,7 +501,7 @@ mod host_call_tests {
     #[test]
     fn fetch_bodies_stream_through_standard_web_streams() {
         run_v8_test(async {
-        let engine = V8ModuleEngine::from_artifact(
+            let engine = V8ModuleEngine::from_artifact(
             ModuleArtifact {
                 manifest: ModuleManifest {
                     module_id: "streaming-fetch".into(),
@@ -548,29 +550,35 @@ mod host_call_tests {
             V8Config::default(),
         )
         .unwrap();
-        let result = engine
-            .invoke(
-                &StreamingHost(AtomicUsize::new(0)),
-                Invocation {
-                    function: "run".into(),
-                    kind: FunctionKind::Action,
-                    args: b"null".to_vec(),
-                    context: InvocationContext {
-                        generation: 1,
-                        capabilities: Capabilities { network: true, ..Default::default() },
-                        ..Default::default()
+            let result = engine
+                .invoke(
+                    &StreamingHost(AtomicUsize::new(0)),
+                    Invocation {
+                        function: "run".into(),
+                        kind: FunctionKind::Action,
+                        args: b"null".to_vec(),
+                        context: InvocationContext {
+                            generation: 1,
+                            capabilities: Capabilities {
+                                network: true,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
                     },
-                },
-            )
-            .await
-            .expect("streamed fetch body must be readable with standard streams");
-        let value: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
-        assert_eq!(value, json!({
-            "seen": ["one", "caf\u{e9}"],
-            "text": "data: one\n\ndata: caf\u{e9}\n\n",
-            "pulled": [0, 1, 2],
-            "split": "\u{e9}",
-        }));
+                )
+                .await
+                .expect("streamed fetch body must be readable with standard streams");
+            let value: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+            assert_eq!(
+                value,
+                json!({
+                    "seen": ["one", "caf\u{e9}"],
+                    "text": "data: one\n\ndata: caf\u{e9}\n\n",
+                    "pulled": [0, 1, 2],
+                    "split": "\u{e9}",
+                })
+            );
         });
     }
 

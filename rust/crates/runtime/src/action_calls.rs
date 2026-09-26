@@ -59,11 +59,20 @@ impl OpenFetchBodies {
     }
 
     fn get(&self, id: u64) -> Option<Arc<tokio::sync::Mutex<OpenFetchBody>>> {
-        self.0.lock().expect("fetch body registry poisoned").bodies.get(&id).cloned()
+        self.0
+            .lock()
+            .expect("fetch body registry poisoned")
+            .bodies
+            .get(&id)
+            .cloned()
     }
 
     fn close(&self, id: u64) {
-        self.0.lock().expect("fetch body registry poisoned").bodies.remove(&id);
+        self.0
+            .lock()
+            .expect("fetch body registry poisoned")
+            .bodies
+            .remove(&id);
     }
 
     /// The next chunk of complete UTF-8 text, or `done` once the body ended.
@@ -129,15 +138,22 @@ fn complete_utf8_len(bytes: &[u8]) -> usize {
         } else {
             1
         };
-        return if needed > back { bytes.len() - back } else { bytes.len() };
+        return if needed > back {
+            bytes.len() - back
+        } else {
+            bytes.len()
+        };
     }
     bytes.len()
 }
 
 fn is_event_stream(headers: &BTreeMap<String, String>) -> bool {
-    headers
-        .get("content-type")
-        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("text/event-stream"))
+    headers.get("content-type").is_some_and(|value| {
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("text/event-stream")
+    })
 }
 
 fn action_fetch_timeout(
@@ -687,7 +703,11 @@ mod fetch_tests {
         server.await.unwrap();
     }
 
-    async fn serve_once(head: &'static str, parts: Vec<&'static [u8]>, gate: Arc<tokio::sync::Notify>) -> (String, tokio::task::JoinHandle<()>) {
+    async fn serve_once(
+        head: &'static str,
+        parts: Vec<&'static [u8]>,
+        gate: Arc<tokio::sync::Notify>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -734,7 +754,10 @@ mod fetch_tests {
         // The first chunk arrives before the server writes the rest, and holds
         // back the incomplete character.
         let first = bodies.clone().read(stream).await.unwrap();
-        assert_eq!(first, serde_json::json!({ "chunk": "data: caf", "done": false }));
+        assert_eq!(
+            first,
+            serde_json::json!({ "chunk": "data: caf", "done": false })
+        );
         gate.notify_one();
         let mut text = first["chunk"].as_str().unwrap().to_owned();
         loop {
@@ -775,7 +798,10 @@ mod fetch_tests {
     async fn a_cancelled_or_unknown_body_reads_as_finished() {
         let bodies = OpenFetchBodies::default();
         bodies.close(7);
-        assert_eq!(bodies.read(7).await.unwrap(), serde_json::json!({ "done": true }));
+        assert_eq!(
+            bodies.read(7).await.unwrap(),
+            serde_json::json!({ "done": true })
+        );
     }
 
     #[test]
