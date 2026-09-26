@@ -708,13 +708,12 @@ mod fetch_tests {
         parts: Vec<&'static [u8]>,
         gate: Arc<tokio::sync::Notify>,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            read_request_head(&mut socket).await;
             socket.write_all(head.as_bytes()).await.unwrap();
             for (index, part) in parts.into_iter().enumerate() {
                 if index > 0 {
