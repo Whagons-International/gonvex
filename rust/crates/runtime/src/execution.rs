@@ -9,8 +9,8 @@ use gonvex_module_host::protocol::{
     unix_millis, CapabilitiesWire, InvocationContextWire, InvokeRequest,
 };
 use gonvex_module_runtime::{
-    validate_portable_schema, AccountIdentity, InvocationChannel, InvocationProvenance,
-    MemberIdentity, TenantIdentity,
+    validate_portable_schema, AccountIdentity, InvocationChannel, InvocationDelegation,
+    InvocationDelegationActor, InvocationProvenance, MemberIdentity, TenantIdentity,
 };
 use gonvex_postgres::{
     Account, Member, SessionIdentity, TenantRoute, TenantSession, TransactionAttribution,
@@ -513,8 +513,9 @@ impl Runtime {
         })?;
         let command_id = format!("action-{}", uuid::Uuid::new_v4());
         // The browser starts every ordinary application invocation as `ui`,
-        // including the agent-profile Action that owns an agent turn. Only
-        // host-authorized child calls made through `ctx.functions.invoke`
+        // including the agent-profile Action that owns an agent turn; a
+        // member session driven by a service principal starts it as `api`.
+        // Only host-authorized child calls made through `ctx.functions.invoke`
         // become `agent`. This preserves the real root initiator instead of
         // relabeling a client call merely because of its Action profile.
         let mut provenance = initial_action_provenance(
@@ -1015,6 +1016,13 @@ pub(crate) fn direct_provenance(
     command_id: &str,
     artifact_hash: &str,
 ) -> InvocationProvenance {
+    let delegation = invocation_delegation(session);
+    // A service principal, not the member's own interface, drives a
+    // delegated session, so its direct calls start on the `api` channel.
+    let channel = match channel {
+        InvocationChannel::Ui if delegation.is_some() => InvocationChannel::Api,
+        channel => channel,
+    };
     InvocationProvenance {
         channel,
         root_channel: channel,
@@ -1032,7 +1040,26 @@ pub(crate) fn direct_provenance(
         depth: 0,
         action_stack: Vec::new(),
         deadline_unix_ms: None,
+        delegation,
     }
+}
+
+/// The module-facing view of a delegated session's service principal.
+fn invocation_delegation(session: &TenantSession) -> Option<InvocationDelegation> {
+    session
+        .delegation
+        .as_ref()
+        .map(|delegation| InvocationDelegation {
+            principal: delegation.principal.clone(),
+            actor: delegation
+                .actor
+                .as_ref()
+                .map(|actor| InvocationDelegationActor {
+                    kind: actor.kind.clone(),
+                    name: actor.name.clone(),
+                    reference: actor.reference.clone(),
+                }),
+        })
 }
 
 fn initial_action_provenance(
@@ -1087,6 +1114,9 @@ fn delegated_provenance(
         depth: parent.depth.saturating_add(1),
         action_stack: parent.action_stack.clone(),
         deadline_unix_ms: parent.deadline_unix_ms,
+        // The re-admitted session is built from the account alone, so the
+        // chain's delegation comes from the host-built parent provenance.
+        delegation: parent.delegation.clone(),
     }
 }
 
@@ -1231,6 +1261,116 @@ mod tests {
             admission_revision: 7,
             delegation: None,
         }
+    }
+
+    fn delegated_session() -> TenantSession {
+        TenantSession {
+            delegation: Some(gonvex_postgres::SessionDelegation {
+                principal: "gateway".to_owned(),
+                actor: Some(gonvex_postgres::DelegationActor {
+                    kind: "api_key".to_owned(),
+                    name: "CI key".to_owned(),
+                    reference: Some("key_1".to_owned()),
+                }),
+            }),
+            ..session()
+        }
+    }
+
+    #[test]
+    fn delegated_sessions_start_on_the_api_channel_and_expose_the_delegation() {
+        let expected = json!({
+            "principal": "gateway",
+            "actor": {"kind": "api_key", "name": "CI key", "reference": "key_1"},
+        });
+        let reducer = direct_provenance(
+            &delegated_session(),
+            InvocationChannel::Ui,
+            "reducer-command",
+            "active-hash",
+        );
+        assert_eq!(reducer.channel, InvocationChannel::Api);
+        assert_eq!(reducer.root_channel, InvocationChannel::Api);
+        assert_eq!(reducer.actor_account_id.as_deref(), Some("account"));
+        assert_eq!(reducer.actor_member_id.as_deref(), Some("member"));
+        let info = serde_json::to_value(reducer.public_info()).unwrap();
+        assert_eq!(info["channel"], "api");
+        assert_eq!(info["rootChannel"], "api");
+        assert_eq!(info["delegation"], expected);
+
+        // Actions (including agent-profile Actions) start the same way.
+        let action = initial_action_provenance(
+            &delegated_session(),
+            None,
+            "action-command",
+            "active-hash",
+            true,
+        );
+        assert_eq!(action.channel, InvocationChannel::Api);
+        assert_eq!(action.root_channel, InvocationChannel::Api);
+        assert_eq!(
+            serde_json::to_value(action.public_info()).unwrap()["delegation"],
+            expected
+        );
+
+        // Ordinary member sessions are unchanged and expose `null`.
+        let ordinary = direct_provenance(
+            &session(),
+            InvocationChannel::Ui,
+            "reducer-command",
+            "active-hash",
+        );
+        assert_eq!(ordinary.channel, InvocationChannel::Ui);
+        assert_eq!(ordinary.root_channel, InvocationChannel::Ui);
+        assert_eq!(
+            serde_json::to_value(ordinary.public_info()).unwrap()["delegation"],
+            json!(null)
+        );
+
+        // Only the interactive default is relabeled; host-owned channels keep
+        // their meaning.
+        let system = direct_provenance(
+            &delegated_session(),
+            InvocationChannel::System,
+            "outbox-command",
+            "",
+        );
+        assert_eq!(system.channel, InvocationChannel::System);
+    }
+
+    #[test]
+    fn nested_invocations_keep_the_api_root_and_the_delegation() {
+        let parent = initial_action_provenance(
+            &delegated_session(),
+            None,
+            "action-command",
+            "active-hash",
+            true,
+        );
+        // `invoke_interactive_function` re-admits the Member from the account
+        // alone, so the fresh session never carries the delegation itself.
+        let child = delegated_provenance(&session(), &parent, "child-command", "active-hash");
+        assert_eq!(child.channel, InvocationChannel::Agent);
+        assert_eq!(child.root_channel, InvocationChannel::Api);
+        assert_eq!(child.delegation, parent.delegation);
+        assert_eq!(child.parent_command_id.as_deref(), Some("action-command"));
+        let info = serde_json::to_value(child.public_info()).unwrap();
+        assert_eq!(info["channel"], "agent");
+        assert_eq!(info["rootChannel"], "api");
+        assert_eq!(info["delegation"]["principal"], "gateway");
+        assert_eq!(info["delegation"]["actor"]["reference"], "key_1");
+
+        let grandchild =
+            delegated_provenance(&session(), &child, "grandchild-command", "active-hash");
+        assert_eq!(grandchild.root_channel, InvocationChannel::Api);
+        assert_eq!(grandchild.delegation, parent.delegation);
+
+        let ordinary_parent =
+            initial_action_provenance(&session(), None, "action-command", "active-hash", true);
+        let ordinary_child =
+            delegated_provenance(&session(), &ordinary_parent, "child-command", "active-hash");
+        assert_eq!(ordinary_child.root_channel, InvocationChannel::Ui);
+        assert_eq!(ordinary_child.delegation, None);
     }
 
     #[test]

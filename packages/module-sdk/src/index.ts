@@ -161,6 +161,20 @@ export type TenantContext = { readonly tenant: Tenant | null; readonly member: M
 
 export type InvocationChannel = "ui" | "agent" | "api" | "scheduler" | "system";
 
+/**
+ * The trusted backend service (service principal) driving a delegated member
+ * session, and the end actor it reported, such as one API key. Attribution
+ * only: the member's own permissions still decide what the call may do.
+ */
+export type InvocationDelegation = {
+  readonly principal: string;
+  readonly actor: {
+    readonly kind: string;
+    readonly name: string;
+    readonly reference?: string;
+  } | null;
+};
+
 /** Immutable, host-authenticated provenance for the current execution. */
 export type InvocationInfo = {
   readonly channel: InvocationChannel;
@@ -176,6 +190,12 @@ export type InvocationInfo = {
   readonly turnId?: string;
   readonly toolCallId?: string;
   readonly artifactHash: string;
+  /**
+   * Set when a service principal drives this member session (its direct
+   * calls use channel `api`), including nested and durable follow-up work.
+   * `null` for every other session; absent on runtimes that predate it.
+   */
+  readonly delegation?: InvocationDelegation | null;
 };
 
 type InvocationAware = { readonly invocation: InvocationInfo };

@@ -162,6 +162,33 @@ pub struct InvocationProvenance {
     /// persists it across an outbox or scheduler boundary.
     #[serde(skip)]
     pub deadline_unix_ms: Option<u64>,
+    /// The service principal driving a delegated member session. The host
+    /// sets it from the authenticated session and carries it through nested
+    /// calls, outbox Actions and scheduled jobs. Omitted when absent so
+    /// persisted provenance of ordinary calls keeps its shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<InvocationDelegation>,
+}
+
+/// The trusted backend service behind a delegated member session, exposed as
+/// `ctx.invocation.delegation`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationDelegation {
+    /// Configured service principal id.
+    pub principal: String,
+    /// The end actor the service reported, such as an API key, or `null`.
+    #[serde(default)]
+    pub actor: Option<InvocationDelegationActor>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationDelegationActor {
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -180,6 +207,9 @@ pub struct InvocationInfo {
     pub turn_id: Option<String>,
     pub tool_call_id: Option<String>,
     pub artifact_hash: String,
+    /// `null` unless a service principal drives the session.
+    #[serde(default)]
+    pub delegation: Option<InvocationDelegation>,
 }
 
 impl InvocationProvenance {
@@ -198,6 +228,7 @@ impl InvocationProvenance {
             turn_id: self.turn_id.clone(),
             tool_call_id: self.tool_call_id.clone(),
             artifact_hash: self.artifact_hash.clone(),
+            delegation: self.delegation.clone(),
         }
     }
 }
@@ -771,5 +802,66 @@ mod portable_schema_tests {
             "value": { "kind": "string" }
         }))
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod invocation_delegation_tests {
+    use serde_json::json;
+
+    use super::{
+        InvocationChannel, InvocationDelegation, InvocationDelegationActor, InvocationProvenance,
+    };
+
+    fn delegated() -> InvocationProvenance {
+        InvocationProvenance {
+            channel: InvocationChannel::Api,
+            root_channel: InvocationChannel::Api,
+            root_command_id: "root".to_owned(),
+            command_id: "root".to_owned(),
+            delegation: Some(InvocationDelegation {
+                principal: "gateway".to_owned(),
+                actor: Some(InvocationDelegationActor {
+                    kind: "api_key".to_owned(),
+                    name: "CI key".to_owned(),
+                    reference: None,
+                }),
+            }),
+            ..InvocationProvenance::default()
+        }
+    }
+
+    #[test]
+    fn public_info_exposes_the_delegation_or_null() {
+        let info = serde_json::to_value(delegated().public_info()).unwrap();
+        assert_eq!(info["channel"], "api");
+        assert_eq!(info["rootChannel"], "api");
+        // An absent reference is omitted, matching `reference?: string`.
+        assert_eq!(
+            info["delegation"],
+            json!({"principal": "gateway", "actor": {"kind": "api_key", "name": "CI key"}})
+        );
+        let mut without_actor = delegated();
+        without_actor.delegation.as_mut().unwrap().actor = None;
+        assert_eq!(
+            serde_json::to_value(without_actor.public_info()).unwrap()["delegation"],
+            json!({"principal": "gateway", "actor": null})
+        );
+        let ordinary = serde_json::to_value(InvocationProvenance::default().public_info()).unwrap();
+        assert!(ordinary.as_object().unwrap().contains_key("delegation"));
+        assert_eq!(ordinary["delegation"], json!(null));
+    }
+
+    #[test]
+    fn persisted_provenance_keeps_its_shape_and_round_trips_a_delegation() {
+        let ordinary = serde_json::to_value(InvocationProvenance::default()).unwrap();
+        assert!(!ordinary.as_object().unwrap().contains_key("delegation"));
+        // Outbox rows and scheduled jobs written before delegation existed
+        // still decode.
+        let legacy: InvocationProvenance = serde_json::from_value(ordinary).unwrap();
+        assert_eq!(legacy.delegation, None);
+        let stored = serde_json::to_value(delegated()).unwrap();
+        let restored: InvocationProvenance = serde_json::from_value(stored).unwrap();
+        assert_eq!(restored.delegation, delegated().delegation);
     }
 }

@@ -20,6 +20,9 @@
 //!    recorded in `gonvex_impersonation_grants` with actor `service:<id>`,
 //!    plus the optional end `actor` the service reports (for example one API
 //!    key), and can be revoked with `control.servicePrincipals.revokeDelegation`.
+//!    A redeemed grant yields a delegated session: its direct calls use the
+//!    `api` invocation channel and modules see
+//!    `ctx.invocation.delegation = {principal, actor}`.
 //!
 //! Every other frame on a service socket is rejected. Service sockets have no
 //! change feed, replicas, live queries or Control Plane administration. These
@@ -1316,6 +1319,21 @@ mod tests {
         assert_eq!(session.tenant.identity.account.id, account);
         assert_eq!(session.actor_account_id, "service:gateway");
         assert_eq!(session.tenant.delegation, Some(expected_delegation.clone()));
+        // Direct calls on the redeemed session are attributed to the API
+        // channel and show the delegation to modules.
+        let provenance = direct_provenance(
+            &session.tenant,
+            InvocationChannel::Ui,
+            "reducer-command",
+            "artifact",
+        );
+        assert_eq!(provenance.channel, InvocationChannel::Api);
+        assert_eq!(provenance.root_channel, InvocationChannel::Api);
+        assert_eq!(
+            serde_json::to_value(provenance.public_info()).unwrap()["delegation"],
+            json!({"principal": "gateway",
+                   "actor": {"kind": "api_key", "name": "CI key", "reference": "key_1"}})
+        );
         // Single use: the grant itself cannot be redeemed twice.
         assert!(control
             .authenticate_impersonation(token, Some("project"), Some("tenant"), "conn-2")
