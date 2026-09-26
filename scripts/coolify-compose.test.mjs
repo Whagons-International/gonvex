@@ -32,4 +32,13 @@ test("Coolify Compose is a stable data plane only", () => {
   for (const service of Object.values(compose.services)) {
     assert.equal(service.ports, undefined, "durable dependencies must not publish host ports");
   }
+
+  const postgresNetworks = compose.services["gonvex-postgres"].networks;
+  const valkeyNetworks = compose.services["gonvex-valkey"].networks;
+  assert.deepEqual(Object.keys(postgresNetworks).sort(), ["coolify-edge", "default"]);
+  assert.deepEqual(Object.keys(valkeyNetworks).sort(), ["coolify-edge", "default"]);
+  assert.deepEqual(postgresNetworks["coolify-edge"].aliases, ["gonvex-postgres"]);
+  assert.deepEqual(valkeyNetworks["coolify-edge"].aliases, ["gonvex-valkey"]);
+  assert.equal(compose.networks["coolify-edge"].external, true);
+  assert.equal(compose.networks["coolify-edge"].name, "coolify");
 });
