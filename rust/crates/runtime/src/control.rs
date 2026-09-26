@@ -1802,6 +1802,7 @@ impl Runtime {
                     route: route.clone(),
                     member,
                     admission_revision: 0,
+                    delegation: None,
                 };
                 let mut handler = DatabaseHostCalls::new(tenant_tx, DatabaseCapability::Reducer)
                     .with_actor(&identity.account.id, &identity.account.email);
@@ -4139,6 +4140,11 @@ fn invitation_providers(value: Option<&Value>) -> Result<Vec<String>, ControlErr
 
 fn random_id(prefix: &str) -> String {
     format!("{prefix}_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// A single-use grant credential redeemed through the impersonation path.
+pub(crate) fn service_grant_token() -> String {
+    secure_token("imp")
 }
 
 fn secure_token(kind: &str) -> String {

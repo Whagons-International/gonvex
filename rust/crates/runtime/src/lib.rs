@@ -19,6 +19,7 @@ mod operator_data;
 pub mod replica;
 pub mod sandbox;
 pub mod scheduler;
+mod service_principal;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
@@ -1247,6 +1248,7 @@ async fn websocket_upgrade(
 
 async fn websocket(mut socket: WebSocket, runtime: Runtime) {
     let mut tenant_session: Option<TenantSession> = None;
+    let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
     let _connection_presence = runtime.inner.metrics.register(&connection_id);
@@ -1529,8 +1531,67 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                 }
             }
         }
+        // A service principal socket accepts only its narrow capability set;
+        // it never reaches the member, replica or Control Plane handlers below.
+        if let (Some(grant), Message::Text(text)) = (service_grant.as_ref(), &message) {
+            match runtime.handle_service_frame(grant, text).await {
+                service_principal::ServiceFrame::PassThrough => {}
+                service_principal::ServiceFrame::Reply(response) => {
+                    if send_json(&mut socket, &response).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                service_principal::ServiceFrame::Ignore => continue,
+                service_principal::ServiceFrame::Close => {
+                    let _ = socket
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: 1003,
+                            reason: "invalid Gonvex protocol frame".into(),
+                        })))
+                        .await;
+                    break;
+                }
+            }
+        }
         match message {
             Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                Ok(ClientMessage::Auth {
+                    id,
+                    token: Some(token),
+                    project,
+                    tenant,
+                    ..
+                }) if token.trim().starts_with(service_principal::TOKEN_PREFIX) => {
+                    let (response, grant) = runtime
+                        .authenticate_service_principal(
+                            id,
+                            &token,
+                            project.as_deref(),
+                            tenant.as_deref(),
+                        )
+                        .await;
+                    replicas.clear();
+                    live_queries.clear();
+                    control_queries.clear();
+                    feed = None;
+                    feed_scheduler.reset();
+                    sent_replica_revision = 0;
+                    tenant_session = None;
+                    connected_client_contract = None;
+                    control_connection = control::ControlConnection {
+                        connection_id: connection_id.clone(),
+                        project_id: grant
+                            .as_ref()
+                            .map(|grant| grant.route.project_id.clone())
+                            .unwrap_or_default(),
+                        ..control::ControlConnection::default()
+                    };
+                    service_grant = grant;
+                    if send_json(&mut socket, &response).await.is_err() {
+                        break;
+                    }
+                }
                 Ok(ClientMessage::Auth {
                     id,
                     client_contract,
@@ -1541,6 +1602,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     device,
                     ..
                 }) => {
+                    service_grant = None;
                     let (response, authenticated_control) = authenticate(
                         &runtime,
                         id,
@@ -3009,6 +3071,7 @@ mod tests {
             runtime_version: "0.4.1-test".to_owned(),
             sandbox: Default::default(),
             storage: Default::default(),
+            service_principals: Vec::new(),
         }
     }
 
@@ -3590,6 +3653,7 @@ mod tests {
                 membership_revision: 1,
             },
             admission_revision: 5,
+            delegation: None,
         };
         let event = |revision, changed_columns: Vec<&str>| change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),

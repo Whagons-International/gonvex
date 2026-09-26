@@ -288,8 +288,10 @@ CREATE TABLE IF NOT EXISTS gonvex_impersonation_grants (
   target_account_id text NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, tenant_id text NOT NULL,
   reason text NOT NULL, expires_at timestamptz NOT NULL, used_at timestamptz,
   used_connection_id text NOT NULL DEFAULT '', reconnect_token_hash text NOT NULL DEFAULT '', revoked_at timestamptz,
+  delegation_actor jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE gonvex_impersonation_grants ADD COLUMN IF NOT EXISTS delegation_actor jsonb;
 CREATE UNIQUE INDEX IF NOT EXISTS gonvex_impersonation_grants_reconnect_token
   ON gonvex_impersonation_grants(reconnect_token_hash) WHERE reconnect_token_hash<>'';
 CREATE TABLE IF NOT EXISTS gonvex_demo_accounts (

@@ -279,6 +279,16 @@ impl ModuleRegistry {
             self.failures.read().await.len(),
         )
     }
+
+    /// Registers a module without loading it into a module host, for tests of
+    /// HTTP surfaces that only read the installed manifest.
+    #[cfg(test)]
+    pub(crate) async fn insert_for_test(&self, module: ProjectModule) {
+        self.projects
+            .write()
+            .await
+            .insert(module.project_id.clone(), Arc::new(module));
+    }
 }
 
 fn crons_from_module(

@@ -52,6 +52,7 @@ fn test_config(database_url: String) -> Config {
         runtime_version: "test".to_owned(),
         sandbox: SandboxConfig::default(),
         storage: StorageConfig::default(),
+        service_principals: Vec::new(),
     }
 }
 

@@ -327,6 +327,7 @@ export class PortableReducerRuntime {
         actorAccountId: execution.identity.auth.account?.id ?? null,
         actorMemberId: execution.identity.member?.id ?? null,
         onBehalfOfMemberId: null,
+        delegation: null,
       },
       db: {
         keepAliveFor: source.keepAliveFor,

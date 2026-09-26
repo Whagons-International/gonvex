@@ -315,6 +315,7 @@ export class LocalReducerRuntime {
           rootCommandId: execution.commandId, artifactHash: execution.artifactHash,
           actorAccountId: execution.identity.auth.account?.id ?? null,
           actorMemberId: execution.identity.member?.id ?? null, onBehalfOfMemberId: null,
+          delegation: null,
         },
         db: {
           query,
