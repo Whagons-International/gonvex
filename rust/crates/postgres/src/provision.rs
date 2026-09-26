@@ -788,6 +788,10 @@ async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+/// PostgreSQL functions take at most 100 arguments, so a change-feed row image
+/// is built from one `jsonb_build_object` per 50 columns, concatenated.
+const JSONB_BUILD_OBJECT_COLUMNS: usize = 50;
+
 async fn install_table_trigger(
     pool: &sqlx::PgPool,
     table: &str,
@@ -824,11 +828,22 @@ async fn install_table_trigger(
     let quote = |identifier: &str| format!("\"{identifier}\"");
     let literal = |value: &str| format!("'{}'", value.replace('\'', "''"));
     let projection = |alias: &str| {
-        columns
-            .iter()
-            .map(|column| format!("{},{}.{}", literal(column), alias, quote(column)))
-            .collect::<Vec<_>>()
-            .join(",")
+        let objects = columns
+            .chunks(JSONB_BUILD_OBJECT_COLUMNS)
+            .map(|chunk| {
+                let pairs = chunk
+                    .iter()
+                    .map(|column| format!("{},{}.{}", literal(column), alias, quote(column)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("jsonb_build_object({pairs})")
+            })
+            .collect::<Vec<_>>();
+        if objects.is_empty() {
+            "jsonb_build_object()".to_owned()
+        } else {
+            objects.join("||")
+        }
     };
     let stage_function = quote(&artifact("stage"));
     let stage_trigger = quote(&artifact("stage_trigger"));
@@ -840,13 +855,13 @@ async fn install_table_trigger(
 DECLARE old_data jsonb; new_data jsonb; changed_columns text[]; row_key text;
 BEGIN
   IF TG_OP='INSERT' THEN
-    old_data:=NULL; new_data:=jsonb_build_object({new_projection});
+    old_data:=NULL; new_data:={new_projection};
     row_key:=NEW.{key_ident}::text; changed_columns:=ARRAY(SELECT jsonb_object_keys(new_data));
   ELSIF TG_OP='DELETE' THEN
-    old_data:=jsonb_build_object({old_projection}); new_data:=NULL;
+    old_data:={old_projection}; new_data:=NULL;
     row_key:=OLD.{key_ident}::text; changed_columns:=ARRAY(SELECT jsonb_object_keys(old_data));
   ELSE
-    old_data:=jsonb_build_object({old_projection}); new_data:=jsonb_build_object({new_projection});
+    old_data:={old_projection}; new_data:={new_projection};
     row_key:=NEW.{key_ident}::text;
     changed_columns:=ARRAY(SELECT key FROM jsonb_object_keys(old_data||new_data) changed(key)
                            WHERE old_data->key IS DISTINCT FROM new_data->key ORDER BY key);
