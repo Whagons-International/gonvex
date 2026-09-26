@@ -14,6 +14,11 @@ services:
       POSTGRES_DB: gonvex
     volumes:
       - gonvex-postgres-data:/var/lib/postgresql/data
+    networks:
+      default:
+      coolify-edge:
+        aliases:
+          - gonvex-postgres
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U gonvex -d gonvex"]
       interval: 5s
@@ -36,6 +41,11 @@ services:
       - everysec
     volumes:
       - gonvex-valkey-data:/data
+    networks:
+      default:
+      coolify-edge:
+        aliases:
+          - gonvex-valkey
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
@@ -45,3 +55,8 @@ services:
 volumes:
   gonvex-postgres-data:
   gonvex-valkey-data:
+
+networks:
+  coolify-edge:
+    external: true
+    name: coolify
