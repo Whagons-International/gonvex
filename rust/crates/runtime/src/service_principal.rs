@@ -375,10 +375,14 @@ impl Runtime {
                         committed_revision,
                         trace: None,
                     },
+                    // The allowlisted call already rendered its error; without
+                    // the typed error there is no class to report.
                     Err(error) => ServerMessage::ReducerError {
                         id,
                         path: Some(path),
                         error,
+                        class: None,
+                        retryable: None,
                         trace: None,
                     },
                 })
@@ -468,6 +472,8 @@ impl Runtime {
                     id: String::new(),
                     path: None,
                     error: "batched frames are not available to service principals".to_owned(),
+                    class: Some(gonvex_protocol::ReducerErrorClass::Rejected),
+                    retryable: Some(gonvex_protocol::ReducerErrorClass::Rejected.retryable()),
                     trace: None,
                 })
             }
