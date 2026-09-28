@@ -687,7 +687,7 @@ export class GonvexClient {
     this.outboxScope = initialScope;
     this.replicaScope = ["awaiting-server-scope", this.url, this.outboxEphemeralScope].join("\u0000");
     this.outboxScopeGeneration += 1;
-    this.replicaReady = this.replica.activateScope(this.replicaScope, true);
+    this.setReplicaReady(this.replica.activateScope(this.replicaScope, true));
     this.outboxReady = Promise.resolve();
     this.timeouts = {
       queryTimeoutMs: options.timeouts?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS,
@@ -2984,7 +2984,7 @@ export class GonvexClient {
     this.resetReplicaScopeState();
     this.replicaScope = scope;
     this.hasAuthoritativeReplicaScope = true;
-    this.replicaReady = this.replica.activateScope(scope);
+    this.setReplicaReady(this.replica.activateScope(scope));
     this.rotateSubscriptionScopes();
     const generation = this.outboxScopeGeneration;
     // Publish the recovery barrier before yielding to Replica storage. A
@@ -2995,6 +2995,15 @@ export class GonvexClient {
     // and sends a second time with the same command ID.
     this.outboxReady = this.restoreOutbox(this.outboxScope, generation);
     await this.outboxReady;
+  }
+
+  // Scope activation rejects once the replica is disposed (for example when
+  // an auth error quarantines a client that was already closed). Callers that
+  // await replicaReady still see the rejection; the stored promise itself must
+  // not surface as an unhandled rejection that kills Node processes.
+  private setReplicaReady(ready: Promise<void>) {
+    this.replicaReady = ready;
+    ready.catch(() => undefined);
   }
 
   private quarantineReplicaScope() {
@@ -3009,7 +3018,7 @@ export class GonvexClient {
     this.resetReplicaScopeState();
     this.replicaScope = scope;
     this.hasAuthoritativeReplicaScope = false;
-    this.replicaReady = this.replica.activateScope(scope, true);
+    this.setReplicaReady(this.replica.activateScope(scope, true));
     this.rotateSubscriptionScopes();
   }
 
