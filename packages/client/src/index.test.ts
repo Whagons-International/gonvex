@@ -380,6 +380,24 @@ describe("GonvexClient", () => {
 			.toEqual(["tasks.list", "teams.list"]);
 	});
 
+	it("does not leak an unhandled rejection when a closed client quarantines its replica", async () => {
+		const unhandled = vi.fn();
+		process.on("unhandledRejection", unhandled);
+		try {
+			const client = new GonvexClient("ws://runtime.test/ws");
+			client.connect();
+			latestSocket().open();
+			client.close();
+			(client as unknown as { quarantineReplicaScope(): void }).quarantineReplicaScope();
+			await vi.advanceTimersByTimeAsync(0);
+			await flushMicrotasks();
+			await flushMicrotasks();
+			expect(unhandled).not.toHaveBeenCalled();
+		} finally {
+			process.off("unhandledRejection", unhandled);
+		}
+	});
+
 	it("fails closed when the runtime omits the authoritative Local Replica scope", () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const onAuthError = vi.fn();
