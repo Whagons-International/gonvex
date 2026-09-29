@@ -4245,7 +4245,16 @@ export class GonvexClient {
             socket.send(JSON.stringify(message));
             return;
           }
-          this.send(message);
+          // A replaced socket re-sends its own work; don't route this message
+          // onto the newer connection a second time.
+          if (this.socket !== socket) return;
+          // Public control calls (such as the token exchange) renew the
+          // session that the pending auth is waiting for. Queueing them behind
+          // that auth deadlocks the connection, so keep their auth bypass.
+          const id = "id" in message ? message.id : undefined;
+          const pending = id ? this.pendingCalls.get(id) ?? this.oneShotQueries.get(id) : undefined;
+          if ("scope" in message && message.scope === "control" && pending?.authorization === "public") this.sendNow(message);
+          else this.send(message);
         },
         { once: true },
       );

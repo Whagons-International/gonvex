@@ -139,7 +139,9 @@ export type VisibilityJoin = {
 export type VisibilityConstraint = {
   table: string;
   column: string;
-  context: VisibilityContextKey;
+  /** Exactly one of context or value. */
+  context?: VisibilityContextKey;
+  value?: { literal: JsonValue };
 };
 
 export type VisibilityOperator = "public" | "permission" | "role" | "eqContext" | "inSet" | "and" | "or" | "not";

@@ -364,10 +364,20 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
     const constraints = rawWhere.map((constraint) => ({
       table: stringMember(constraint, "table") ?? "",
       column: stringMember(constraint, "column") ?? "",
-      context: stringMember(constraint, "context") as "account.id" | "member.id" | "tenant.id",
+      ...(stringMember(constraint, "context") ? { context: stringMember(constraint, "context") as "account.id" | "member.id" | "tenant.id" } : {}),
+      ...(readMember(constraint, "value") !== undefined ? { value: readMember(constraint, "value") as { literal: JsonValue } } : {}),
     }));
+    // A constraint compares its column with either a request context value or
+    // a literal ({ literal }), as the module SDK and runtime allow.
+    const invalidConstraint = (constraint: (typeof constraints)[number]) => {
+      const hasContext = constraint.context !== undefined;
+      const hasValue = constraint.value !== undefined;
+      if (!constraint.table || !constraint.column || hasContext === hasValue) return true;
+      if (hasContext) return !["account.id", "member.id", "tenant.id"].includes(constraint.context!);
+      return !isJsonObject(constraint.value) || !Object.prototype.hasOwnProperty.call(constraint.value, "literal") || constraint.value.literal === undefined;
+    };
     if (joins.some((join) => !join.table || !join.leftColumn || !join.rightColumn) ||
-      constraints.some((constraint) => !constraint.table || !constraint.column || !["account.id", "member.id", "tenant.id"].includes(constraint.context))) {
+      constraints.some(invalidConstraint)) {
       return undefined;
     }
     sets[name] = {
