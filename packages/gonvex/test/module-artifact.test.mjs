@@ -316,6 +316,57 @@ export const locationVisibility = visibility({
   });
 });
 
+test("TypeScript artifacts keep literal visibility set constraints", async (t) => {
+  const project = await moduleProject(t, `
+const visibility = (definition) => definition;
+export const documentVisibility = visibility({
+  table: "documents",
+  key: "_id",
+  sets: {
+    published: {
+      table: "documents",
+      select: "_id",
+      joins: [],
+      where: [{ table: "documents", column: "isPublic", value: { literal: true } }],
+    },
+    mine: {
+      table: "documents",
+      select: "_id",
+      joins: [],
+      where: [{ table: "documents", column: "createdBy", context: "member.id" }],
+    },
+  },
+  where: { operator: "or", children: [
+    { operator: "inSet", column: "_id", set: "published" },
+    { operator: "inSet", column: "_id", set: "mine" },
+  ] },
+});
+`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.visibility.documents.sets.published.where, [{ table: "documents", column: "isPublic", value: { literal: true } }]);
+  assert.deepEqual(artifact.visibility.documents.sets.mine.where, [{ table: "documents", column: "createdBy", context: "member.id" }]);
+});
+
+test("TypeScript artifacts reject visibility constraints with both, neither or a malformed value", async (t) => {
+  for (const constraint of [
+    `{ table: "documents", column: "isPublic", context: "member.id", value: { literal: true } }`,
+    `{ table: "documents", column: "isPublic" }`,
+    `{ table: "documents", column: "isPublic", value: true }`,
+  ]) {
+    const project = await moduleProject(t, `
+const visibility = (definition) => definition;
+export const documentVisibility = visibility({
+  table: "documents",
+  key: "_id",
+  sets: { published: { table: "documents", select: "_id", joins: [], where: [${constraint}] } },
+  where: { operator: "inSet", column: "_id", set: "published" },
+});
+`);
+    const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }).catch((error) => error);
+    assert.ok(artifact instanceof Error || artifact.visibility?.documents === undefined, `accepted ${constraint}`);
+  }
+});
+
 test("TypeScript artifacts reject missing and non-static function schemas", async (t) => {
   const missing = await moduleProject(t, `
 const query = (definition: unknown) => definition;

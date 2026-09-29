@@ -380,6 +380,22 @@ describe("GonvexClient", () => {
 			.toEqual(["tasks.list", "teams.list"]);
 	});
 
+	it("sends a public control call queued while connecting even though auth is still pending", async () => {
+		const client = new GonvexClient("ws://runtime.test/ws");
+		client.setAuth({ project: "shop", tenant: "tenant-a", token: "expired-session" });
+		client.connect();
+		const socket = latestSocket();
+		// Queued before the socket opens: the token exchange is how the pending
+		// auth gets a valid session, so it must not wait behind that auth.
+		void client.action(control.auth.exchangeExternalToken, { provider: "firebase", token: "id-token" }).catch(() => undefined);
+		socket.open();
+		await flushMicrotasks();
+		const types = sentMessages(socket).map((message) => `${message.type}:${message.path ?? ""}`);
+		expect(types).toContain("auth:");
+		expect(types).toContain("action.call:control.auth.exchangeExternalToken");
+		client.close();
+	});
+
 	it("does not leak an unhandled rejection when a closed client quarantines its replica", async () => {
 		const unhandled = vi.fn();
 		process.on("unhandledRejection", unhandled);
