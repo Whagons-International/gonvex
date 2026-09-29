@@ -702,7 +702,7 @@ export class GonvexClient {
         transport: (type, payload) => this.sendNativeError(type, payload),
       });
     }
-    if (this.localBinding) this.outboxReady = this.restoreLocalSession(initialScope, this.outboxScopeGeneration);
+    if (this.localBinding) this.setOutboxReady(this.restoreLocalSession(initialScope, this.outboxScopeGeneration));
   }
 
   /**
@@ -2956,7 +2956,7 @@ export class GonvexClient {
     const ready = this.hasAuthoritativeReplicaScope
       ? this.restoreOutbox(scope, generation)
       : this.restoreLocalSession(scope, generation);
-    this.outboxReady = ready;
+    this.setOutboxReady(ready);
     // Never show the previous identity's intents under the new one.
     this.publishIntents([]);
     this.refreshIntents();
@@ -2993,7 +2993,7 @@ export class GonvexClient {
     // points at the old resolved promise, that reducer can enqueue an inflight
     // row which the concurrent recovery then mistakes for an abandoned call
     // and sends a second time with the same command ID.
-    this.outboxReady = this.restoreOutbox(this.outboxScope, generation);
+    this.setOutboxReady(this.restoreOutbox(this.outboxScope, generation));
     await this.outboxReady;
   }
 
@@ -3003,6 +3003,12 @@ export class GonvexClient {
   // not surface as an unhandled rejection that kills Node processes.
   private setReplicaReady(ready: Promise<void>) {
     this.replicaReady = ready;
+    ready.catch(() => undefined);
+  }
+
+  // Outbox restore awaits replicaReady, so it rejects the same way.
+  private setOutboxReady(ready: Promise<void>) {
+    this.outboxReady = ready;
     ready.catch(() => undefined);
   }
 
@@ -3102,7 +3108,9 @@ export class GonvexClient {
   }
 
   private async drainOutbox() {
-    await this.outboxReady;
+    // A failed restore is reported to whoever awaits the scope transition;
+    // there is nothing to drain from a scope that never became ready.
+    try { await this.outboxReady; } catch { return; }
     if (this.drainingOutbox) {
       // The running drain may already be past the entry this wake-up is for
       // (for example a short backoff timer firing before the drain returned).

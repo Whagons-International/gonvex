@@ -1286,6 +1286,32 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
         return;
     }
 
+    // Discards the tenant scope after the session's own Member changed. The
+    // caller then sends `membership_changed_frames`.
+    macro_rules! discard_tenant_session {
+        () => {{
+            replicas.clear();
+            live_queries.clear();
+            control_queries.clear();
+            tenant_session = None;
+            feed = None;
+            feed_scheduler.reset();
+            sent_replica_revision = 0;
+            runtime.inner.metrics.authenticated(
+                &connection_id,
+                &control::ControlConnection {
+                    connection_id: connection_id.clone(),
+                    ..control::ControlConnection::default()
+                },
+                None,
+            );
+            runtime
+                .inner
+                .metrics
+                .subscriptions(&connection_id, std::iter::empty::<&str>());
+        }};
+    }
+
     loop {
         let message = tokio::select! {
             _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
@@ -1342,25 +1368,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         let transaction_watermark = replica_watermark(&event);
                         if let Some(session) = tenant_session.as_ref() {
                             if membership_affects(session, &event) {
-                                replicas.clear();
-                                live_queries.clear();
-                                control_queries.clear();
-                                tenant_session = None;
-                                feed = None;
-                                feed_scheduler.reset();
-                                sent_replica_revision = 0;
-                                runtime.inner.metrics.authenticated(
-                                    &connection_id,
-                                    &control::ControlConnection {
-                                        connection_id: connection_id.clone(),
-                                        ..control::ControlConnection::default()
-                                    },
-                                    None,
-                                );
-                                runtime
-                                    .inner
-                                    .metrics
-                                    .subscriptions(&connection_id, std::iter::empty::<&str>());
+                                discard_tenant_session!();
                                 for message in membership_changed_frames(transaction_watermark) {
                                     if send_json(&mut socket, &message).await.is_err() { return; }
                                 }
@@ -1915,7 +1923,14 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         }
                     }
                     if let Some(watermark) = terminal_watermark {
-                        if send_json(&mut socket, &watermark).await.is_err() {
+                        let frames =
+                            if own_membership_changed(&runtime, tenant_session.as_ref()).await {
+                                discard_tenant_session!();
+                                membership_changed_frames(Some(watermark))
+                            } else {
+                                vec![watermark]
+                            };
+                        if send_all(&mut socket, &frames).await.is_err() {
                             break;
                         }
                     }
@@ -1988,7 +2003,18 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                             }
                         }
                         if let Some(watermark) = terminal_watermark {
-                            if send_json(&mut socket, &watermark).await.is_err() {
+                            let frames = if own_membership_changed(
+                                &runtime,
+                                tenant_session.as_ref(),
+                            )
+                            .await
+                            {
+                                discard_tenant_session!();
+                                membership_changed_frames(Some(watermark))
+                            } else {
+                                vec![watermark]
+                            };
+                            if send_all(&mut socket, &frames).await.is_err() {
                                 return;
                             }
                         }
@@ -2089,7 +2115,14 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         }
                     }
                     if let Some(watermark) = terminal_watermark {
-                        if send_json(&mut socket, &watermark).await.is_err() {
+                        let frames =
+                            if own_membership_changed(&runtime, tenant_session.as_ref()).await {
+                                discard_tenant_session!();
+                                membership_changed_frames(Some(watermark))
+                            } else {
+                                vec![watermark]
+                            };
+                        if send_all(&mut socket, &frames).await.is_err() {
                             break;
                         }
                     }
@@ -2565,6 +2598,63 @@ fn membership_affects(session: &TenantSession, event: &change_feed::FeedEvent) -
                         == Some(session.member.id.as_str())
             })
         })
+}
+
+/// Whether a commit on this connection changed the session's own Member.
+///
+/// `call_watermark_after_sent_replica_work` completes a call immediately when
+/// the connection has no subscription waiting on the change feed. If that
+/// call changed the caller's own Member (granting it permissions, say), the
+/// feed would close the session only after the client had already seen the
+/// call complete, so the client's next call could arrive on the closed
+/// session and fail as unauthenticated. Reading the Member before sending
+/// that watermark closes the session first, in order. A failed read falls
+/// back to the change feed, which still closes the session.
+async fn own_membership_changed(runtime: &Runtime, session: Option<&TenantSession>) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+    // Service principal sessions have no Member row.
+    if session.member.id.starts_with("_gonvex_service:") {
+        return false;
+    }
+    let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+        return false;
+    };
+    match control
+        .member_by_id(&session.route, &session.member.id)
+        .await
+    {
+        Ok(current) => member_access_changed(&session.member, current.as_ref()),
+        Err(error) => {
+            tracing::warn!(%error, "could not re-read the session Member after a commit");
+            false
+        }
+    }
+}
+
+/// The columns `membership_affects` treats as an access change.
+fn member_access_changed(
+    admitted: &gonvex_postgres::Member,
+    current: Option<&gonvex_postgres::Member>,
+) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    admitted.account_id != current.account_id
+        || admitted.status != current.status
+        || admitted.role != current.role
+        || admitted.permissions != current.permissions
+        || admitted.membership_revision != current.membership_revision
+}
+
+async fn send_all(socket: &mut WebSocket, messages: &[ServerMessage]) -> Result<(), ()> {
+    for message in messages {
+        if send_json(socket, message).await.is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 async fn authenticate(
@@ -3699,6 +3789,54 @@ mod tests {
             &session,
             &event(6, vec!["role", "permissions"]),
         ));
+    }
+
+    #[test]
+    fn member_access_change_detection_matches_the_feed_columns() {
+        let admitted = gonvex_postgres::Member {
+            id: "member".to_owned(),
+            account_id: "account".to_owned(),
+            status: "active".to_owned(),
+            display_name: "Before".to_owned(),
+            avatar_url: String::new(),
+            role: "member".to_owned(),
+            permissions: serde_json::json!({ "view-tasks": true }),
+            membership_revision: 3,
+        };
+        // Profile edits do not revoke the session.
+        let renamed = gonvex_postgres::Member {
+            display_name: "After".to_owned(),
+            avatar_url: "https://example.test/a.png".to_owned(),
+            ..admitted.clone()
+        };
+        assert!(!member_access_changed(&admitted, Some(&admitted)));
+        assert!(!member_access_changed(&admitted, Some(&renamed)));
+        // A removed Member or any access column change does.
+        assert!(member_access_changed(&admitted, None));
+        for changed in [
+            gonvex_postgres::Member {
+                permissions: serde_json::json!({ "view-tasks": true, "create-tasks": true }),
+                ..admitted.clone()
+            },
+            gonvex_postgres::Member {
+                role: "admin".to_owned(),
+                ..admitted.clone()
+            },
+            gonvex_postgres::Member {
+                status: "suspended".to_owned(),
+                ..admitted.clone()
+            },
+            gonvex_postgres::Member {
+                account_id: "other".to_owned(),
+                ..admitted.clone()
+            },
+            gonvex_postgres::Member {
+                membership_revision: 4,
+                ..admitted.clone()
+            },
+        ] {
+            assert!(member_access_changed(&admitted, Some(&changed)));
+        }
     }
 
     #[test]
