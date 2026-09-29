@@ -36,11 +36,11 @@
     "@gonvex/react": "workspace:*",
     "rolldown": "^1.2.3",
     "@gonvex/local-runtime": "workspace:*",
-    "@electric-sql/pglite": "0.5.8"
+    "@electric-sql/pglite": "0.5.8",
+    "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@types/node": "^24.12.4",
-    "typescript": "^6.0.3"
+    "@types/node": "^24.12.4"
   },
   "main": "./dist/index.js"
 }
