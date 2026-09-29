@@ -1,9 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore as useReactSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
-import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
-export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
+export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
 
 const GonvexContext = createContext<GonvexClient | null>(null);
@@ -2047,6 +2047,21 @@ export function useOutboxIntents(): readonly OutboxIntent[] {
 export function useEntityIntentStatus(entity: string, id: string | null | undefined): EntityIntentStatus | undefined {
   const intents = useOutboxIntents();
   return useMemo(() => (id ? entityStatusFromIntents(intents, entity, id) : undefined), [intents, entity, id]);
+}
+
+/**
+ * Observe locally executing Reducers that fell back to a queued-only intent
+ * (no local result), for logging. The latest listener is always called; it
+ * does not need to be memoized.
+ */
+export function useLocalExecutionFallback(listener: (event: LocalExecutionFallbackEvent) => void): void {
+  const client = useGonvexClient();
+  const latest = useRef(listener);
+  useEffect(() => { latest.current = listener; });
+  useEffect(() => {
+    if (typeof client.onLocalExecutionFallback !== "function") return undefined;
+    return client.onLocalExecutionFallback((event) => latest.current(event));
+  }, [client]);
 }
 
 export type LocalReplicaReset = {

@@ -1,9 +1,9 @@
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient, type OutboxIntent } from "@gonvex/client";
+import { control, GonvexClientError, type ConnectionState, type FunctionReference, type GonvexClient, type LocalExecutionFallbackEvent, type OutboxIntent } from "@gonvex/client";
 import type { ServerMessage } from "@gonvex/protocol";
-import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState, useOutboxIntents, useEntityIntentStatus, useResetLocalReplica } from "./index";
+import { GonvexAuthProvider, GonvexProviderWithAuth, GonvexProvider, useAction, useGonvexAuth, useGonvexAuthState, useGonvexConnectionState, useInvitationList, useReducer, useQuery, useQueryResult, useReplicaCollection, useReplicaCollectionState, useReplicaCollectionStates, useReplicaCollectionStateSelector, useReplicaEntities, useReplicaSelector, useRetainedLiveQuery, useLiveQueryState, useOutboxIntents, useEntityIntentStatus, useResetLocalReplica, useLocalExecutionFallback } from "./index";
 
 // Replica UI notifications coalesce at a browser paint. Keep every existing
 // identity, authority, and rendering assertion after that observable boundary.
@@ -604,6 +604,29 @@ describe("outbox intent hooks", () => {
   it("returns an empty list for clients without intent support", () => {
     const { result } = renderHook(() => useOutboxIntents(), { wrapper: wrapperFor(new FakeGonvexClient()) });
     expect(result.current).toEqual([]);
+  });
+});
+
+describe("useLocalExecutionFallback", () => {
+  it("delivers fallback events to the latest listener and unsubscribes on unmount", () => {
+    const listeners = new Set<(event: LocalExecutionFallbackEvent) => void>();
+    const client = Object.assign(new FakeGonvexClient(), {
+      onLocalExecutionFallback: (listener: (event: LocalExecutionFallbackEvent) => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    });
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender, unmount } = renderHook(({ listener }) => useLocalExecutionFallback(listener), { wrapper: wrapperFor(client), initialProps: { listener: first } });
+    expect(listeners.size).toBe(1);
+    const event: LocalExecutionFallbackEvent = { path: "tasks.move", intentId: "i1", phase: "call", reason: "incompleteReplica", table: "statuses", error: "missing" };
+    for (const listener of listeners) listener(event);
+    expect(first).toHaveBeenCalledWith(event);
+    rerender({ listener: second });
+    expect(listeners.size).toBe(1);
+    for (const listener of listeners) listener(event);
+    expect(second).toHaveBeenCalledWith(event);
+    expect(first).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(listeners.size).toBe(0);
   });
 });
 

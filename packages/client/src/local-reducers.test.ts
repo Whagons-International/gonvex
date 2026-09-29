@@ -3,7 +3,7 @@ import { reducer, schema, selectRows } from "@gonvex/module-sdk";
 import { createPortableReducer } from "@gonvex/local-runtime/portable-client";
 import { MissingReducerDataError } from "@gonvex/local-runtime/portable";
 import { LocalReducerRuntime } from "@gonvex/local-runtime";
-import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, type FunctionReference, type OutboxRetryOptions, type OutboxStore } from "./index.js";
+import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, residentLocalDependencyTables, type FunctionReference, type LocalExecutionFallbackEvent, type OutboxRetryOptions, type OutboxStore } from "./index.js";
 
 class Socket {
   static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -974,5 +974,90 @@ describe("per-row intent status", () => {
     await vi.waitFor(() => expect(client.entityIntentStatus("tasks", "t1")).toBeUndefined());
     expect(client.entityIntentStatus("tasks", createdId)).toBe("failed");
     stop();
+  });
+});
+
+describe("local execution fallback events", () => {
+  it("reports a Reducer call that is queued without a local result", async () => {
+    const { create, kv } = await fixture();
+    const client = create();
+    const events: LocalExecutionFallbackEvent[] = [];
+    const stop = client.onLocalExecutionFallback((event) => events.push(event));
+    const executor = (client as any).localExecutor;
+    const execute = executor.executeRead.bind(executor);
+    vi.spyOn(executor, 'executeRead').mockImplementation((...args: any[]) => {
+      if (args[0] === 'background') throw new MissingReducerDataError({ table: 'history', where: { column: 'kind', op: 'eq', value: 'daily' } });
+      return execute(...args);
+    });
+    const queued = await client.reducer({ ...ref, path: 'background' }, {}) as { status: string; reducerId: string };
+    expect(queued.status).toBe('queued');
+    expect(events).toEqual([{ path: 'background', intentId: queued.reducerId, phase: 'call', reason: 'incompleteReplica', table: 'history', error: expect.stringContaining('history') }]);
+    expect((await createKvOutboxStore(kv).load()).map(entry => entry.idempotencyKey)).toEqual([queued.reducerId]);
+    // A locally executed call reports nothing.
+    expect(await client.reducer(ref, {})).toBe(1);
+    expect(events).toHaveLength(1);
+    stop();
+    await client.reducer({ ...ref, path: 'background' }, {});
+    expect(events).toHaveLength(1);
+  });
+
+  it("reports once when replay loses a prediction the intent had", async () => {
+    const { create } = await fixture();
+    const client = create();
+    const events: LocalExecutionFallbackEvent[] = [];
+    client.onLocalExecutionFallback((event) => events.push(event));
+    expect(await client.reducer(ref, {})).toBe(1);
+    const executor = (client as any).localExecutor;
+    vi.spyOn(executor, 'executeRead').mockRejectedValue(new Error('Invalid integer for tasks.count'));
+    const rebase = () => (client as any).inLocalLane(() => (client as any).rebaseLocalEntries(true));
+    await rebase();
+    expect(events).toEqual([expect.objectContaining({ path: 'increment', phase: 'replay', reason: 'localError', error: 'Invalid integer for tasks.count' })]);
+    expect(events[0]!.table).toBeUndefined();
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(0);
+    await rebase();
+    expect(events).toHaveLength(1);
+  });
+
+  it("accepts the listener as a client option", async () => {
+    const onLocalExecutionFallback = vi.fn();
+    const client = new GonvexClient(url, { onLocalExecutionFallback });
+    clients.push(client);
+    (client as any).reportLocalFallback('path', 'intent', 'call', Object.assign(new Error('Local replica for notes is incomplete; x'), { name: 'IncompleteReplicaError' }));
+    expect(onLocalExecutionFallback).toHaveBeenCalledWith({ path: 'path', intentId: 'intent', phase: 'call', reason: 'incompleteReplica', table: 'notes', error: 'Local replica for notes is incomplete; x' });
+  });
+});
+
+describe("local dependency residency", () => {
+  const local = (table: string, replica: Record<string, unknown> = {}): FunctionReference => ({ ...collection, path: `__local.${table}`, replica: { ...collection.replica!, table, ...replica } });
+  const collections = [
+    local('tasks', { maxRows: 100, maxBytes: 100_000 }),
+    local('statuses', { maxRows: 1000, maxBytes: 64 * 1024 * 1024 }),
+    local('history', { maxRows: 50_000, maxBytes: 64 * 1024 * 1024 }),
+    local('undeclared'),
+  ];
+  const localDependencies = { increment: ['tasks', 'history'], move: ['statuses', 'undeclared', 'tasks'], unknownTable: ['nowhere'] };
+
+  it("keeps only dependency tables whose declared collection bounds are small", () => {
+    expect(residentLocalDependencyTables({ collections, localDependencies })).toEqual(['statuses', 'tasks']);
+    expect(residentLocalDependencyTables({ collections, localDependencies }, 'off')).toEqual([]);
+    expect(residentLocalDependencyTables({ collections, localDependencies }, { maxRows: 100_000 })).toEqual(['history', 'statuses', 'tasks']);
+    expect(residentLocalDependencyTables({ collections, localDependencies }, { maxBytes: 1_000_000 })).toEqual(['tasks']);
+    expect(residentLocalDependencyTables({ collections })).toEqual([]);
+    // A filtered collection is a page of the table, never proof of the whole table.
+    expect(residentLocalDependencyTables({ collections: [local('tasks', { maxRows: 10, equalFilters: { _id: 'id' } })], localDependencies })).toEqual([]);
+  });
+
+  it.each([['bounded', ['__local.statuses', '__local.tasks']], ['off', []]] as const)("opens resident collections once the session scope is known (%s)", async (policy, expected) => {
+    const client = new GonvexClient(url, {
+      project: 'project', tenant: 'tenant', localDependencyResidency: policy,
+      localRuntime: { mode: 'portable', artifactHash: 'artifact', tables: ['tasks', 'statuses', 'history', 'undeclared'], collections, localDependencies, create: () => ({ ready: Promise.resolve(), execute: vi.fn(), replay: vi.fn(), close: vi.fn() }) },
+    });
+    clients.push(client);
+    const subscribe = vi.spyOn(client as any, 'subscribeReplicaTransport');
+    expect(subscribe).not.toHaveBeenCalled();
+    await connect(client);
+    await vi.waitFor(() => expect((client as any).hasAuthoritativeReplicaScope).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(subscribe.mock.calls.map(call => (call[0] as FunctionReference).path).sort()).toEqual(expected);
   });
 });
