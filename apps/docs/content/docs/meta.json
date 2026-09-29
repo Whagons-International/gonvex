@@ -14,6 +14,7 @@
     "realtime-subscriptions",
     "replica-collections",
     "local-replica",
+    "local-reducers",
     "error-tracking",
     "committed-change-feed",
     "scheduling",

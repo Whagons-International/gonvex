@@ -287,6 +287,19 @@ await client.purgeForeignOutboxScopes();          // never automatic
 `@gonvex/react` exposes the same list through `useOutboxIntents()` and a
 per-row `useEntityIntentStatus(entity, id)`.
 
+### Local execution fallbacks and residency
+
+A locally executing Reducer whose body reads rows the Local Replica does not
+hold is queued with no local result (`{ status: "queued", reducerId }`).
+`client.onLocalExecutionFallback(listener)` (or the `onLocalExecutionFallback`
+option, or `useLocalExecutionFallback` in `@gonvex/react`) reports every such
+fallback with the Reducer path, intent id, phase (`call` or `replay`), reason,
+and missing table. Generated clients also carry each Reducer's codegen-derived
+`localDependencies`; with `localDependencyResidency: "bounded"` (the default)
+the client keeps dependency tables whose generated collection declares
+`maxRows <= 1000` subscribed for the session, so those Reducers run locally
+from their first call. See the Local Reducer Execution docs page.
+
 ### Resetting the local cache
 
 `client.resetLocalReplica({ keepOutbox = true })` implements a "Clear cache"
