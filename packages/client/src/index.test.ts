@@ -414,6 +414,29 @@ describe("GonvexClient", () => {
 		}
 	});
 
+	it("does not leak an unhandled rejection when closed while an accepted scope is activating", async () => {
+		const unhandled = vi.fn();
+		process.on("unhandledRejection", unhandled);
+		try {
+			const client = new GonvexClient("ws://runtime.test/ws", {
+				project: "shop", tenant: "tenant-a", token: "initial-token", outbox: { enabled: false },
+			});
+			client.connect();
+			const socket = latestSocket();
+			socket.open();
+			const auth = sentMessages(socket).find((message) => message.type === "auth")!;
+			socket.receive({ type: "auth.result", id: auth.id, result: authenticatedResult({ accountId: "account-a", tenantId: "tenant-a" }) });
+			// The accepted scope is still activating in the Local Replica.
+			client.close();
+			await vi.advanceTimersByTimeAsync(0);
+			await flushMicrotasks();
+			await flushMicrotasks();
+			expect(unhandled).not.toHaveBeenCalled();
+		} finally {
+			process.off("unhandledRejection", unhandled);
+		}
+	});
+
 	it("fails closed when the runtime omits the authoritative Local Replica scope", () => {
 		const client = new GonvexClient("ws://runtime.test/ws");
 		const onAuthError = vi.fn();
