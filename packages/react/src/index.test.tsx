@@ -1512,6 +1512,8 @@ describe("GonvexAuthProvider", () => {
     expect(client.reducer).toHaveBeenCalledWith(
       expect.objectContaining({ path: "control.tenants.create" }),
       { name: "New Tenant", domain: "new-tenant" },
+      // Provisioning a tenant database outlasts the default reducer timeout.
+      { timeoutMs: 120_000 },
     );
 
     await act(async () => {

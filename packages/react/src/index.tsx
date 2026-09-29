@@ -225,6 +225,11 @@ export function GonvexProviderWithAuth(props: {
 // clears sessionStorage PKCE before the remount can finish verification.
 const authBootstrapPromises = new Map<string, Promise<GonvexAuthSession | null>>();
 
+// Creating a tenant provisions its database and runs every tenant migration,
+// which routinely takes longer than the default reducer timeout. Timing out
+// made onboarding report a failure for a tenant that was still being created.
+const TENANT_CREATE_TIMEOUT_MS = 120_000;
+
 export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient; children: ReactNode }) {
   const runtimeUrl = props.runtimeUrl.replace(/\/+$/, "");
   const hasExplicitInitialTenant = props.initialTenantId !== undefined;
@@ -826,7 +831,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const tenant = await props.client.reducer(control.tenants.create, {
       name,
       ...(options?.domain ? { domain: options.domain } : {}),
-    }) as GonvexAuthTenant;
+    }, { timeoutMs: TENANT_CREATE_TIMEOUT_MS }) as GonvexAuthTenant;
     const current = sessionRef.current!;
     installSession({ ...current, tenants: [...current.tenants.filter((item) => item.id !== tenant.id), tenant], activeTenantId: tenant.id });
     return tenant;
