@@ -923,6 +923,26 @@ impl ControlPlane {
         ))
     }
 
+    /// The current row of one Member by ID, whatever its status.
+    pub async fn member_by_id(
+        &self,
+        route: &TenantRoute,
+        member_id: &str,
+    ) -> Result<Option<Member>, DatabaseError> {
+        let tenant_pool = self.pools.pool(&route.database_url).await?;
+        let _admission = self.pools.admit().await?;
+        let row = sqlx::query(
+            r#"SELECT id, account_id, status, display_name, avatar_url, role,
+                      permissions, membership_revision
+               FROM members
+               WHERE id = $1"#,
+        )
+        .bind(member_id)
+        .fetch_optional(&tenant_pool)
+        .await?;
+        Ok(row.map(member_from_row))
+    }
+
     pub async fn begin_tenant_transaction(
         &self,
         route: &TenantRoute,
