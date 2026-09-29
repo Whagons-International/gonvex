@@ -19,6 +19,12 @@ export type FunctionEntry = {
   /** Reducer delivery policy declared by a TypeScript module. */
   offline?: JsonValue;
   localExecution?: 1;
+  /**
+   * Tables a locally executing Reducer reads (or writes by key) in the Local
+   * Replica, from static analysis of its body and every project function it
+   * calls. Sorted; emitted by codegen for `localExecution` Reducers only.
+   */
+  localDependencies?: string[];
   /** Ordered atomic optimistic transaction declared by a TypeScript module. */
   optimistic?: JsonValue;
   actionProfile?: "standard" | "agent";

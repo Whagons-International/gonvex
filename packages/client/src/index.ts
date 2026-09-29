@@ -352,6 +352,52 @@ export type ReducerRejectionEvent = {
   errorClass?: OutboxErrorClass;
 };
 
+/**
+ * Why a locally executing Reducer ran without a local result.
+ * - `incompleteReplica`: the body read rows the Local Replica does not hold
+ *   (no generated local collection, or one that has not hydrated yet).
+ * - `localError`: a replayed prediction failed locally for another reason.
+ */
+export type LocalExecutionFallbackReason = "incompleteReplica" | "localError";
+
+/**
+ * Emitted when the client degrades from local execution to a queued-only
+ * intent: the change is durable and will reach the server, but it has no
+ * optimistic result, so it is not visible until the server commits it (and
+ * never while offline).
+ */
+export type LocalExecutionFallbackEvent = {
+  /** Reducer path. */
+  path: string;
+  /** Durable intent id, the Reducer's idempotency key. */
+  intentId: string;
+  /**
+   * `call`: the Reducer call returned `{ status: "queued" }` without a local
+   * result. `replay`: re-executing a pending intent lost the prediction it had.
+   */
+  phase: "call" | "replay";
+  reason: LocalExecutionFallbackReason;
+  /** The table whose rows were missing, for `incompleteReplica`. */
+  table?: string;
+  /** The local error message. */
+  error: string;
+};
+
+/**
+ * Which local dependency tables the client keeps hydrated so locally
+ * executing Reducers can run from their first call. See
+ * {@link GonvexClientOptions.localDependencyResidency}.
+ */
+export type LocalDependencyResidency = "bounded" | "off" | {
+  /** Largest declared `maxRows` of a collection kept resident. Default 1000. */
+  maxRows?: number;
+  /** Largest declared `maxBytes` of a collection kept resident. Default: no byte bound. */
+  maxBytes?: number;
+};
+
+/** Default row bound of `localDependencyResidency: "bounded"`. */
+export const DEFAULT_LOCAL_DEPENDENCY_RESIDENT_MAX_ROWS = 1000;
+
 export type OutboxScope = ReducerOutboxScopeSummary & {
   /** True for the identity this client is currently signed in as. */
   current: boolean;
@@ -457,7 +503,27 @@ export type GonvexClientOptions = GonvexClientAuth & {
   clientContract?: import("./client-upgrades.js").ClientContract;
   onUpdateRequired?: (reason: string) => void;
   /** Supplied by generated client bindings, once for the entire application. */
-  localRuntime?: LocalRuntimeBinding & { clientContract?: import("./client-upgrades.js").ClientContract; collections?: readonly FunctionReference[] };
+  localRuntime?: LocalRuntimeBinding & {
+    clientContract?: import("./client-upgrades.js").ClientContract;
+    collections?: readonly FunctionReference[];
+    /** Per locally executing Reducer, the tables its body reads locally (from codegen). */
+    localDependencies?: Readonly<Record<string, readonly string[]>>;
+  };
+  /**
+   * Keep the generated local collections that locally executing Reducers
+   * depend on subscribed for the whole session, so a Reducer's first call
+   * runs locally instead of falling back to a queued-only intent.
+   *
+   * `"bounded"` (default) keeps a dependency table resident only when its
+   * generated collection declares `maxRows` of at most 1000 (the smallest
+   * `maxRows` among the table's unfiltered Replica Collections). Larger or
+   * undeclared collections stay page-driven: the screens that show them
+   * subscribe. Pass `{ maxRows, maxBytes }` to change the bounds, or `"off"`
+   * to disable residency.
+   */
+  localDependencyResidency?: LocalDependencyResidency;
+  /** Observe local-execution fallbacks; see {@link GonvexClient.onLocalExecutionFallback}. */
+  onLocalExecutionFallback?: (event: LocalExecutionFallbackEvent) => void;
   /**
    * Keep listenerless live queries subscribed for this long so route
    * backtracking can reuse their current result without WebSocket churn.
@@ -526,6 +592,8 @@ export class GonvexClient {
   private readonly localCollectionKeys = new Set<string>();
   private readonly localExecutionTables = new Map<string, Set<string>>();
   private readonly reducerRejectionHandlers = new Set<(event: ReducerRejectionEvent) => void>();
+  private readonly localFallbackHandlers = new Set<(event: LocalExecutionFallbackEvent) => void>();
+  private readonly residentDependencyTables: readonly string[];
   private readonly outboxRetry: Required<OutboxRetryOptions>;
   private unauthenticatedRetries = 0;
   private intentsSnapshotValue: readonly OutboxIntent[] = [];
@@ -636,6 +704,8 @@ export class GonvexClient {
         columns: [...new Set(references.flatMap(ref => ref.replica?.columns ?? []))] });
     }
     this.localExecutor = options.localRuntime ? deferredLocalExecutor(() => options.localRuntime!.create()) : undefined;
+    this.residentDependencyTables = residentLocalDependencyTables(options.localRuntime, options.localDependencyResidency);
+    if (options.onLocalExecutionFallback) this.localFallbackHandlers.add(options.onLocalExecutionFallback);
     this.localStorage = options.localReplica?.storage;
     this.auth = authFromOptions(options);
     this.telemetryEnabled = options.telemetry === true;
@@ -713,6 +783,33 @@ export class GonvexClient {
   onReducerRejection(listener: (event: ReducerRejectionEvent) => void): () => void {
     this.reducerRejectionHandlers.add(listener);
     return () => this.reducerRejectionHandlers.delete(listener);
+  }
+
+  /**
+   * Observe every point where a locally executing Reducer degrades to a
+   * queued-only intent (no local result). The intent is still durable and is
+   * delivered to the server; this exists so apps can log and fix the missing
+   * local data. Returns an unsubscribe function.
+   */
+  onLocalExecutionFallback(listener: (event: LocalExecutionFallbackEvent) => void): () => void {
+    this.localFallbackHandlers.add(listener);
+    return () => { this.localFallbackHandlers.delete(listener); };
+  }
+
+  private reportLocalFallback(path: string, intentId: string, phase: LocalExecutionFallbackEvent["phase"], error: unknown) {
+    if (!this.localFallbackHandlers.size) return;
+    const incomplete = error instanceof Error && error.name === "IncompleteReplicaError";
+    const table = incomplete
+      ? (error as Error & { read?: DataRead }).read?.table ?? /^Local replica for (.+?) is incomplete;/.exec(error.message)?.[1]
+      : undefined;
+    const event: LocalExecutionFallbackEvent = {
+      path, intentId, phase, reason: incomplete ? "incompleteReplica" : "localError",
+      ...(table ? { table } : {}),
+      error: error instanceof Error ? error.message : String(error),
+    };
+    for (const listener of this.localFallbackHandlers) {
+      try { listener(event); } catch { /* A listener must not break delivery. */ }
+    }
   }
 
   /** Every durable intent of the current identity, oldest first. */
@@ -1145,6 +1242,7 @@ export class GonvexClient {
           // Re-execution is a prediction. Only an authoritative server rejection
           // removes a durable intent; missing data or local validation can make
           // its predicted transaction unavailable without rejecting the intent.
+          if (patches.length && scope === this.outboxScope && replicaScope === this.replicaScope) this.reportLocalFallback(entry.path, entry.idempotencyKey, "replay", error);
           patches = [];
         }
         if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
@@ -1235,6 +1333,7 @@ export class GonvexClient {
       if (sharedEntries) this.replaceLocalPredictions(sharedEntries.filter(entry => entry.state !== "committed").map(entry => ({commandId: entry.idempotencyKey, patches: entry.patches ?? []})));
       const executionBaseVersion = this.replica.executionVersion();
       let transaction: LocalTransactionResult | undefined;
+      let fallback: unknown;
       try {
         if (preparedResult && preparedResult.base === executionBaseVersion && preparedResult.pending === JSON.stringify(sharedPatches)) {
           transaction = preparedResult.transaction;
@@ -1252,7 +1351,7 @@ export class GonvexClient {
           transaction = await this.executeLocal(ref.path, args, this.localSnapshot(true), execution, sharedPatches ?? true);
         }
       }
-      catch (error) { if (!(error instanceof Error) || error.name !== "IncompleteReplicaError") throw error; }
+      catch (error) { if (!(error instanceof Error) || error.name !== "IncompleteReplicaError") throw error; fallback = error; }
       if (scope !== this.outboxScope || execution.scope !== this.replicaScope) throw new GonvexClientError("Session changed during local reducer execution", { code: "superseded" });
       const patches = transaction?.patches ?? [];
       this.directOutboxReducerIds.add(reducerId);
@@ -1274,7 +1373,11 @@ export class GonvexClient {
         this.replacingLocal = true;
         try { this.addOptimisticReducer(reducerId, patches); }
         finally { this.replacingLocal = false; }
-        return transaction ? transaction.result as T : { status: "queued" as const, reducerId };
+        if (!transaction) {
+          this.reportLocalFallback(ref.path, reducerId, "call", fallback);
+          return { status: "queued" as const, reducerId };
+        }
+        return transaction.result as T;
       } catch (error) {
         this.optimisticReducerIds.delete(reducerId);
         this.replica.rejectCommand(reducerId);
@@ -2986,6 +3089,9 @@ export class GonvexClient {
     this.hasAuthoritativeReplicaScope = true;
     this.setReplicaReady(this.replica.activateScope(scope));
     this.rotateSubscriptionScopes();
+    // Subscriptions follow scope rotation, so this opens each resident
+    // dependency collection once per client, from cache first when offline.
+    this.ensureLocalCollections(this.residentDependencyTables);
     const generation = this.outboxScopeGeneration;
     // Publish the recovery barrier before yielding to Replica storage. A
     // reducer may be invoked as soon as the auth result arrives, while the
@@ -4819,6 +4925,29 @@ function detectDeviceType(userAgent: string) {
   if (/ipad|tablet/i.test(userAgent)) return "tablet";
   if (/mobi|iphone|android/i.test(userAgent)) return "mobile";
   return "desktop";
+}
+
+/**
+ * Dependency tables of locally executing Reducers that stay resident. A
+ * table qualifies when its unfiltered generated collection declares a small
+ * enough `maxRows` (and `maxBytes`, when bounded). Collections without a
+ * declared bound are never resident: their size is unknown.
+ */
+export function residentLocalDependencyTables(
+  binding: { collections?: readonly FunctionReference[]; localDependencies?: Readonly<Record<string, readonly string[]>> } | undefined,
+  policy: LocalDependencyResidency = "bounded",
+): string[] {
+  if (!binding?.localDependencies || policy === "off") return [];
+  const bounds = policy === "bounded" ? {} : policy;
+  const maxRows = bounds.maxRows ?? DEFAULT_LOCAL_DEPENDENCY_RESIDENT_MAX_ROWS;
+  const maxBytes = bounds.maxBytes;
+  const tables = new Set(Object.values(binding.localDependencies).flat());
+  return [...tables].filter((table) => (binding.collections ?? []).some((reference) => {
+    const replica = reference.replica;
+    if (replica?.table !== table || Object.keys(replica.equalFilters ?? {}).length || replica.excludeWhenSet?.length) return false;
+    if (!replica.maxRows || replica.maxRows > maxRows) return false;
+    return maxBytes === undefined || (!!replica.maxBytes && replica.maxBytes <= maxBytes);
+  })).sort();
 }
 
 /** Sign-in and account-only pages do not need reducer code loaded. */

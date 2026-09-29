@@ -19,7 +19,13 @@ import {
   type ProjectLanguage,
 } from "./module-artifact.js";
 import { renderFunctionCatalog, type FunctionCatalogFormat } from "./function-catalog.js";
-import { localBindings } from "./local-bindings.js";
+import { localBindings, projectLocalSchema } from "./local-bindings.js";
+import {
+  analyzeLocalReducerDependencies,
+  formatLocalDependencyViolations,
+  localDependencyTables,
+  localDependencyViolations,
+} from "./local-dependencies.js";
 import type {
   FunctionEntry,
   JsonValue,
@@ -57,6 +63,18 @@ type ProjectConfig = {
     entrypoint?: string;
     /** Project-relative ESM output path under gonvex/_build. */
     bundle?: string;
+    /**
+     * Project-relative tsconfig whose compiler options (paths, module
+     * resolution) apply to the backend. Used by the local Reducer dependency
+     * analysis; defaults to gonvex/tsconfig.json, then tsconfig.json.
+     */
+    tsconfig?: string;
+    /**
+     * How codegen treats a locally executing Reducer that touches data the
+     * device cannot hold. "error" (default) fails the build; "warn" prints the
+     * report and continues, for projects still migrating.
+     */
+    localDependencyCheck?: "error" | "warn";
   };
   auth?: {
     providers?: {
@@ -1271,14 +1289,46 @@ async function buildManifest(root: string, sources: BackendSources, projectID: s
       entrypoint: sources.config.module?.entrypoint,
       bundle: sources.config.module?.bundle,
     });
+  const functions = moduleManifestFunctions(module);
+  await applyLocalDependencies(root, sources, functions);
   return {
     project: projectID,
     generatedAt: new Date().toISOString(),
-    functions: moduleManifestFunctions(module),
+    functions,
     schema: emptySchemaDefinition(),
     module,
     ...(Object.keys(module.visibility).length > 0 ? { visibility: module.visibility } : {}),
   };
+}
+
+/**
+ * Record each locally executing Reducer's table dependencies in the manifest
+ * and reject dependencies that no generated local collection can satisfy.
+ * See local-dependencies.ts for the analysis and its precision limits.
+ */
+async function applyLocalDependencies(root: string, sources: BackendSources, functions: Record<string, FunctionEntry>) {
+  const reducers = Object.entries(functions)
+    .filter(([, entry]) => entry.kind === "reducer" && entry.localExecution === 1 && !entry.internal)
+    .map(([path, entry]) => ({ path, file: entry.file, exportName: entry.handler }));
+  if (!reducers.length) return;
+  const mode = sources.config.module?.localDependencyCheck ?? "error";
+  if (mode !== "error" && mode !== "warn") throw new Error('gonvex.json module.localDependencyCheck must be "error" or "warn"');
+  const analyses = await analyzeLocalReducerDependencies({
+    root, backendDir: join(root, "gonvex"), files: sources.moduleFiles, reducers, tsconfig: sources.config.module?.tsconfig,
+  });
+  const schema = await projectLocalSchema(root);
+  const tableKeys = new Map(Object.entries(schema).map(([table, shape]) => [table, shape.key]));
+  const localTables = new Set(Object.entries(functions)
+    .filter(([path, entry]) => path.startsWith("__local.") && entry.replica)
+    .map(([, entry]) => entry.replica!.table));
+  for (const analysis of analyses) functions[analysis.path]!.localDependencies = localDependencyTables(analysis, tableKeys);
+  const violations = localDependencyViolations(analyses, localTables, tableKeys);
+  if (!violations.length) return;
+  const report = formatLocalDependencyViolations(violations);
+  if (mode === "error") {
+    throw new Error(`Local Reducer dependency check failed. ${report}\nSet gonvex.json module.localDependencyCheck to "warn" only while migrating.`);
+  }
+  console.warn(color.yellow(`[gonvex] warning: ${report}`));
 }
 
 async function writeBindings(root: string, manifest: Manifest): Promise<BindingWriteResult> {

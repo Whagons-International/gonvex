@@ -1,0 +1,146 @@
+---
+title: Local Reducer Execution
+description: How Reducers run on the device first, which data they need there, and how to see when they cannot.
+---
+
+# Local Reducer Execution
+
+An interactive Reducer that allows offline use and declares no handwritten
+`optimistic` transaction runs locally: the generated client executes the same
+TypeScript body against the Local Replica, shows its result immediately,
+queues the intent durably, and replays it on the server. The manifest marks
+these Reducers with `localExecution: 1`.
+
+A local run can only read rows the device holds. Codegen generates one
+`__local.<table>` Replica Collection for every table that has a visibility plan
+and at least one Replica Collection or Live Query exposing its key; those are
+the only tables a local run can read. When a body reads a table the Local
+Replica does not hold completely, the local runtime stops with
+`IncompleteReplicaError`. The client then still queues the intent, but with no
+local result: the call returns `{ status: "queued", reducerId }`, the change
+is invisible until the server commits it, and it never shows while offline.
+
+Gonvex closes that gap in three places.
+
+## 1. Codegen checks each Reducer's dependencies
+
+`gonvex dev`, `gonvex codegen`, `gonvex functions emit`, and
+`gonvex functions check` analyze every locally executing Reducer with the TypeScript type checker. They
+follow its body and every project function it calls, and record the tables it
+needs locally in the manifest:
+
+```json
+"tasks.move": {
+  "kind": "reducer",
+  "localExecution": 1,
+  "localDependencies": ["statuses", "tasks", "workspaces"]
+}
+```
+
+A table is a local dependency when the body reads it (`db.select`, `selectRows`,
+`selectFirst`, `getRow`, `selectDataBatch`, `existsDataRows`,
+`summarizeRows`) or writes an existing row (`db.update`, `db.delete`,
+`db.deleteMany`, `updateDataRows`, `deleteDataRows`, `updateDataWhere`,
+`deleteDataWhere`, and non-insert `applyDataWrites` operations), because those
+read the row first. An insert is a dependency only when the row carries an
+explicit primary key, or the table is keyed by a column other than `_id`; an
+insert with an intent-generated key is new by construction.
+
+Codegen fails when a locally executing Reducer:
+
+- depends on a table with no generated local collection,
+- names a table that is not in the tenant schema,
+- uses raw SQL (`db.query`), which never runs locally, or
+- takes a table name the analysis cannot determine statically.
+
+The report lists each table with the file and line of every access. Fix it by
+giving the table a visibility plan and a Replica Collection, by moving the
+access out of the Reducer body, or by making the Reducer online-only with
+`offline: { mode: "onlineOnly", reason }`, which turns off local execution.
+
+While migrating an existing project, `gonvex.json` can downgrade the failure to
+a warning:
+
+```json
+{ "module": { "localDependencyCheck": "warn" } }
+```
+
+The analysis compiles the backend with `gonvex/tsconfig.json`, then
+`tsconfig.json`; set `module.tsconfig` when the backend uses another config
+(for example for `paths` aliases).
+
+### Precision
+
+The analysis over-approximates. Every branch counts whether or not it runs
+for a given argument, and a table typed as a union of literals contributes
+every member. Table names are resolved through string literals, literal types,
+constants, object and array literals, spreads, destructuring, `for...of`, array
+callbacks, and helper parameters: a helper that receives a table name is
+resolved separately at each call site. Functions reached only through dynamic
+dispatch (a function stored in a map and called by key, a method called
+through an interface) are not followed; a table taken from such a function's
+parameter is reported as undetermined rather than guessed.
+
+## 2. Small dependency tables stay resident
+
+Generated clients also receive each Reducer's local dependencies. When a
+session's Local Replica scope is established, online or restored offline, the
+client subscribes to the generated collections of dependency tables that are
+small enough to keep for the whole session, so those Reducers run locally from
+their first call.
+
+```ts
+const client = new GonvexClient(runtimeURL, {
+  // default
+  localDependencyResidency: "bounded",
+});
+```
+
+- `"bounded"` (default): a table is resident when its generated collection
+  declares `maxRows` of at most 1000. A generated collection takes the smallest
+  `maxRows` and `maxBytes` among the table's unfiltered Replica Collections;
+  with none declared it defaults to 50,000 rows and is therefore not resident.
+- `{ maxRows, maxBytes }`: the same policy with other bounds. `maxBytes` is
+  only checked when given.
+- `"off"`: no residency. Collections open when a screen subscribes or after
+  a local run finds them missing.
+
+Larger tables (task lists, logs, comments) stay page-driven: the screens that
+show them subscribe to them. A Reducer that reads such a table runs locally
+once a screen has loaded the rows it needs, and falls back otherwise.
+
+## 3. Fallbacks are observable
+
+Every point where the client degrades from local execution to a queued-only
+intent emits an event:
+
+```ts
+client.onLocalExecutionFallback((event) => {
+  logger.warn("Reducer ran without a local result", event);
+});
+// or: new GonvexClient(url, { onLocalExecutionFallback: (event) => ... })
+```
+
+```ts
+type LocalExecutionFallbackEvent = {
+  path: string;            // Reducer path
+  intentId: string;        // durable intent id (idempotency key)
+  phase: "call" | "replay";
+  reason: "incompleteReplica" | "localError";
+  table?: string;          // the table with missing rows
+  error: string;
+};
+```
+
+`phase: "call"` means a Reducer call returned `{ status: "queued" }` without
+a local result. `phase: "replay"` means re-executing a pending intent against
+newer data lost the prediction it previously had. The intent stays durable and
+is still delivered to the server in both cases.
+
+In React:
+
+```tsx
+import { useLocalExecutionFallback } from "@gonvex/react";
+
+useLocalExecutionFallback((event) => logger.warn("local fallback", event));
+```
