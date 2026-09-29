@@ -1361,11 +1361,9 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                                     .inner
                                     .metrics
                                     .subscriptions(&connection_id, std::iter::empty::<&str>());
-                                let response = ServerMessage::AuthError {
-                                    id: "membership-changed".to_owned(),
-                                    error: "tenant membership changed; authenticate again".to_owned(),
-                                };
-                                if send_json(&mut socket, &response).await.is_err() { break; }
+                                for message in membership_changed_frames(transaction_watermark) {
+                                    if send_json(&mut socket, &message).await.is_err() { return; }
+                                }
                                 continue;
                             }
                             for message in runtime
@@ -2517,6 +2515,25 @@ fn call_watermark_after_sent_replica_work(
     Some(ServerMessage::ReplicaWatermark {
         revision: committed_revision,
     })
+}
+
+/// Frames that close a tenant session whose own membership changed.
+///
+/// The session and every subscription are discarded, so none of the
+/// transaction's Replica or Live Query frames are sent. A reducer or Action
+/// on this connection may have committed that very transaction (granting the
+/// caller permissions, for example) and already received its result; clients
+/// complete such calls only at a replica watermark at or past the committed
+/// revision. The connection holds no subscription after the auth error, so
+/// the watermark trivially holds and must follow it. Without it the call never
+/// completes: the next session's feed starts after this revision.
+fn membership_changed_frames(transaction_watermark: Option<ServerMessage>) -> Vec<ServerMessage> {
+    let mut frames = vec![ServerMessage::AuthError {
+        id: "membership-changed".to_owned(),
+        error: "tenant membership changed; authenticate again".to_owned(),
+    }];
+    frames.extend(transaction_watermark);
+    frames
 }
 
 fn membership_affects(session: &TenantSession, event: &change_feed::FeedEvent) -> bool {
@@ -3682,5 +3699,35 @@ mod tests {
             &session,
             &event(6, vec!["role", "permissions"]),
         ));
+    }
+
+    #[test]
+    fn membership_change_closes_the_session_with_the_transaction_watermark() {
+        // A reducer that grants the caller permissions commits revision 7 and
+        // replies with committed_revision 7. The feed then drops the session;
+        // the client completes the call only once it sees watermark 7, after
+        // the auth error has discarded its subscriptions.
+        let transaction = change_feed::FeedEvent::Transaction {
+            database_epoch: "epoch".to_owned(),
+            revision: 7,
+            changes: Vec::new(),
+        };
+        let frames = membership_changed_frames(replica_watermark(&transaction));
+        assert_eq!(frames.len(), 2);
+        assert!(matches!(
+            &frames[0],
+            ServerMessage::AuthError { id, .. } if id == "membership-changed"
+        ));
+        assert!(matches!(
+            frames[1],
+            ServerMessage::ReplicaWatermark { revision: 7 }
+        ));
+
+        let reset = change_feed::FeedEvent::Reset {
+            reason: "reset".to_owned(),
+        };
+        let frames = membership_changed_frames(replica_watermark(&reset));
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(&frames[0], ServerMessage::AuthError { .. }));
     }
 }
