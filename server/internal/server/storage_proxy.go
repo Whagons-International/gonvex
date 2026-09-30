@@ -81,7 +81,9 @@ func inlineSafeContentType(contentType string) bool {
 	switch strings.ToLower(strings.TrimSpace(base)) {
 	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
 		"image/bmp", "image/x-icon", "image/vnd.microsoft.icon",
-		"video/mp4", "video/webm", "audio/mpeg", "audio/ogg", "audio/wav",
+		"video/mp4", "video/webm", "video/quicktime", "video/x-m4v", "video/3gpp",
+		"audio/mpeg", "audio/ogg", "audio/wav", "audio/webm", "audio/mp4",
+		"audio/x-m4a", "audio/aac",
 		"application/pdf", "text/plain":
 		return true
 	default:
