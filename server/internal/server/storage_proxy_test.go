@@ -90,6 +90,9 @@ func TestStorageProxyServesUnsafeOrUntypedObjectsAsDownloads(t *testing.T) {
 		{name: "svg", contentType: "image/svg+xml", wantDisposition: "attachment"},
 		{name: "missing type", contentType: "", wantDisposition: "attachment"},
 		{name: "inline image", contentType: "image/png", wantDisposition: ""},
+		// Phones upload .mov and .m4a; downloading them broke in-browser playback.
+		{name: "inline quicktime video", contentType: "video/quicktime", wantDisposition: ""},
+		{name: "inline m4a audio", contentType: "audio/x-m4a", wantDisposition: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -60,6 +61,10 @@ func (c Config) Configured() bool {
 type Client struct {
 	cfg        Config
 	httpClient *http.Client
+	// streamClient serves GetObject. Its body is streamed to a caller that
+	// controls the lifetime through ctx, so it has no total deadline: a
+	// whole-request timeout would cut video playback off mid-stream.
+	streamClient *http.Client
 	// now is injectable so signing is deterministic in tests.
 	now func() time.Time
 }
@@ -73,10 +78,21 @@ func NewClient(cfg Config) *Client {
 	}
 	cfg.Region = region
 	return &Client{
-		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		now:        time.Now,
+		cfg:          cfg,
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		streamClient: newStreamClient(),
+		now:          time.Now,
 	}
+}
+
+// newStreamClient bounds connecting and waiting for response headers, but not
+// reading the body.
+func newStreamClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = 10 * time.Second
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	return &http.Client{Transport: transport}
 }
 
 // Bucket returns the configured bucket name.
@@ -102,7 +118,7 @@ func (c *Client) GetObject(ctx context.Context, key string, byteRange ...string)
 	if len(byteRange) > 0 && strings.TrimSpace(byteRange[0]) != "" {
 		req.Header.Set("Range", byteRange[0])
 	}
-	return c.httpClient.Do(req)
+	return c.streamClient.Do(req)
 }
 
 // PublicURL returns the unsigned object URL, suitable for public-read objects.
