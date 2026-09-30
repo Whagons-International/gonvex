@@ -219,3 +219,39 @@ func TestPutHeadDeleteRoundTrip(t *testing.T) {
 		t.Fatalf("expected object to be gone after delete")
 	}
 }
+
+func TestGetObjectStreamsPastTheRequestTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 5; i++ {
+			_, _ = w.Write([]byte("chunk"))
+			w.(http.Flusher).Flush()
+			time.Sleep(40 * time.Millisecond)
+		}
+	}))
+	defer upstream.Close()
+
+	client := NewClient(Config{
+		Endpoint:        upstream.URL,
+		Bucket:          "gonvex-test",
+		AccessKeyID:     "test-key",
+		SecretAccessKey: "test-secret",
+		ForcePathStyle:  true,
+	})
+	// Metadata calls keep a total deadline; streaming must not inherit it.
+	client.httpClient.Timeout = 50 * time.Millisecond
+
+	resp, err := client.GetObject(context.Background(), "whagons/tenant/video.mp4")
+	if err != nil {
+		t.Fatalf("GetObject: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read streamed body: %v", err)
+	}
+	if got := string(body); got != strings.Repeat("chunk", 5) {
+		t.Fatalf("body = %q", got)
+	}
+}
