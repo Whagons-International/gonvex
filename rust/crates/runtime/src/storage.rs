@@ -47,6 +47,10 @@ const FILES_TABLE_DDL: &str = r#"CREATE TABLE IF NOT EXISTS _gonvex_files (
 pub struct StorageManager {
     config: StorageConfig,
     client: reqwest::Client,
+    /// Serves proxied downloads. The body streams to a viewer for as long as
+    /// playback lasts, so only connecting and idle reads are bounded; a total
+    /// timeout would cut video off mid-stream.
+    stream_client: reqwest::Client,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -93,10 +97,19 @@ struct StorageRequest {
 
 impl StorageManager {
     pub fn new(config: StorageConfig) -> Self {
+        Self::with_request_timeout(config, Duration::from_secs(30))
+    }
+
+    fn with_request_timeout(config: StorageConfig, request_timeout: Duration) -> Self {
         Self {
             config,
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(request_timeout)
+                .build()
+                .expect("static storage client configuration is valid"),
+            stream_client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(60))
                 .build()
                 .expect("static storage client configuration is valid"),
         }
@@ -324,7 +337,8 @@ impl StorageManager {
     }
 
     pub async fn proxy_get(&self, key: &str, range: Option<&str>) -> Result<Response, String> {
-        let mut request = self.signed_request(Method::GET, key, Vec::new(), "")?;
+        let mut request =
+            self.signed_request_on(&self.stream_client, Method::GET, key, Vec::new(), "")?;
         if let Some(range) = range.filter(|range| !range.trim().is_empty()) {
             request = request.header("range", range);
         }
@@ -561,6 +575,17 @@ impl StorageManager {
         body: Vec<u8>,
         content_type: &str,
     ) -> Result<reqwest::RequestBuilder, String> {
+        self.signed_request_on(&self.client, method, key, body, content_type)
+    }
+
+    fn signed_request_on(
+        &self,
+        client: &reqwest::Client,
+        method: Method,
+        key: &str,
+        body: Vec<u8>,
+        content_type: &str,
+    ) -> Result<reqwest::RequestBuilder, String> {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date = now.format("%Y%m%d").to_string();
@@ -593,8 +618,7 @@ impl StorageManager {
             self.config.access_key_id,
             hex(&signature)
         );
-        let mut request = self
-            .client
+        let mut request = client
             .request(method, url)
             .header("host", host)
             .header("x-amz-content-sha256", payload_hash)
@@ -844,5 +868,45 @@ mod tests {
         let put = manager.proxy_signature("p/t/f", 100, true);
         assert_ne!(get, put);
         assert!(constant_time(get.as_bytes(), get.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn proxied_downloads_stream_past_the_request_timeout() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: video/mp4\r\ncontent-length: 25\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            for _ in 0..5 {
+                socket.write_all(b"chunk").await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        // Metadata calls keep a total deadline; streaming must not inherit it.
+        let manager = StorageManager::with_request_timeout(
+            StorageConfig {
+                endpoint: format!("http://{address}"),
+                region: "us-east-1".to_owned(),
+                bucket: "gonvex-test".to_owned(),
+                access_key_id: "key".to_owned(),
+                secret_access_key: "secret".to_owned(),
+                force_path_style: true,
+                ..StorageConfig::default()
+            },
+            Duration::from_millis(50),
+        );
+        let response = manager.proxy_get("p/t/video", None).await.unwrap();
+        let body = response.bytes().await.unwrap();
+        assert_eq!(&body[..], "chunk".repeat(5).as_bytes());
     }
 }
