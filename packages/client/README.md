@@ -41,8 +41,10 @@ tenant selection.
 `authenticate` installs a new authentication scope and resolves only after the
 runtime accepts it. It exists for provider-owned transitions such as developer
 mode; React applications should use `GonvexAuthProvider`. The runtime rotates
-single-use developer credentials on every connection, and the client retains
-their successor only in memory.
+single-use developer credentials on every connection. The client uses the
+successor for its own reconnects and publishes it through
+`onDeveloperCredential` so the React provider can resume developer mode after a
+reload of the same tab.
 
 ## Install
 
