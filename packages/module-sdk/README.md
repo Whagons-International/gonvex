@@ -90,6 +90,18 @@ The trusted host validates and claims the invitation, creates or activates the
 canonical member, and invokes this Reducer in the same tenant transaction. The
 Reducer never receives Control Plane credentials.
 
+Acceptance rechecks that the stored inviter is still an active tenant owner or
+administrator and may still issue the requested membership role. The inviter's
+canonical member row is locked until the tenant transaction completes.
+`ctx.invitationInviter` is supplied only to this internal Reducer by the host,
+from the invitation's server-owned issuer. It captures the locked member's
+current role and permission flags before recipient writes, including when the
+inviter and recipient are the same account. Revalidate application permission
+flags and team grants against this authority before writing anything;
+never use `args.payload` as inviter identity or authority. A rejected hook rolls
+back the member and application writes and releases the acceptance claim, so a
+corrected invitation can be retried. Completed idempotent accepts remain no-ops.
+
 The host-specific implementation is intentionally separate from this SDK.
 The manifest describes a TypeScript module executed by the bounded V8 host.
 

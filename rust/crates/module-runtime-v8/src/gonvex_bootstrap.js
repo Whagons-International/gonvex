@@ -488,6 +488,7 @@
       member: identity.member ?? null,
       invocation: Object.freeze({ ...(request.invocation ?? {}) }),
       ...(request.kind === "reducer" && request.intentEntropy ? { intentEntropy: request.intentEntropy } : {}),
+      ...(request.kind === "reducer" && request.invitationInviter ? { invitationInviter: Object.freeze({ ...request.invitationInviter, permissions: Object.freeze({ ...request.invitationInviter.permissions }) }) } : {}),
     };
 
     const db = {};

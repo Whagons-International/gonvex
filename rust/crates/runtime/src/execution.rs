@@ -966,6 +966,7 @@ pub(crate) fn invocation(
         kind: kind.to_owned(),
         args: serde_json::to_string(&args).unwrap_or_else(|_| "null".to_owned()),
         context: InvocationContextWire {
+            invitation_inviter: None,
             intent_entropy: None,
             project_id: session.identity.project_id.clone(),
             tenant_id: session.route.tenant_id.clone(),

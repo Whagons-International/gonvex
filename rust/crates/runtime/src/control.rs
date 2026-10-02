@@ -1592,7 +1592,7 @@ impl Runtime {
             .ok_or_else(|| ControlError::InvalidArguments("token is required".to_owned()))?;
         let mut claim_tx = control.begin_control_transaction(false).await?;
         let row = sqlx::query(
-            r#"SELECT id,tenant_id,email,role,permissions,team_ids,
+            r#"SELECT id,tenant_id,email,role,permissions,team_ids,invited_by,
                       allowed_auth_providers,application_payload,expires_at,
                       revoked_at,accepted_at,accepted_account_id,accepted_idempotency_key,
                       handoff_state
@@ -1608,6 +1608,7 @@ impl Runtime {
         let tenant_id: String = row.get("tenant_id");
         let email: String = row.get("email");
         let role: String = row.get("role");
+        let inviter_account_id: String = row.get("invited_by");
         let permissions = row.get::<Json<Value>, _>("permissions").0;
         let team_ids = row.get::<Json<Value>, _>("team_ids").0;
         let allowed_providers = row.get::<Json<Value>, _>("allowed_auth_providers").0;
@@ -1737,6 +1738,48 @@ impl Runtime {
             })
             .await?;
         if claimed {
+            // Re-admit inside the authoritative transaction and retain the lock
+            // through the application hook and commit. A stale connection or
+            // concurrent downgrade cannot lend its former authority to an invite.
+            // A previously committed tenant command only needs handoff recovery;
+            // it must not replay grants or depend on the issuer's later status.
+            let authority = async {
+              let inviter_session = control
+                .tenant_session_for_account(&connection.project_id, &tenant_id, &inviter_account_id)
+                .await.map_err(|_| invitation_authority_denial())?;
+              let inviter = sqlx::query(
+                "SELECT status,role,permissions FROM members WHERE id=$1 AND account_id=$2 FOR SHARE",
+            )
+            .bind(&inviter_session.member.id)
+            .bind(&inviter_account_id)
+            .fetch_optional(&mut **tenant_tx.transaction())
+            .await?.ok_or_else(invitation_authority_denial)?;
+                    validate_invitation_authority(
+                        &inviter.get::<String, _>("status"),
+                        &inviter.get::<String, _>("role"),
+                        &role,
+                    )?;
+              Ok::<_, ControlError>(gonvex_module_runtime::MemberIdentity {
+                id: inviter_session.member.id.clone(), account_id: inviter_account_id.clone(),
+                status: Some(inviter.get("status")), role: Some(inviter.get("role")),
+                permissions: inviter.get::<Json<Value>, _>("permissions").0, display_name: None,
+              })
+            }.await;
+            let inviter_authority = match authority {
+                Ok(authority) => authority,
+                Err(error) => {
+                    tenant_tx.rollback().await?;
+                    release_invitation_claim(
+                        control,
+                        &connection.project_id,
+                        &invitation_id,
+                        &identity.account.id,
+                        idempotency_key,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
             sqlx::query(
                 r#"INSERT INTO members
                    (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
@@ -1827,12 +1870,30 @@ impl Runtime {
                     ),
                 );
                 invocation.context.capabilities.action_outbox = true;
-                reducer_result = self
+                invocation.context.invitation_inviter = Some(inviter_authority);
+                reducer_result = match self
                     .inner
                     .module_host
                     .invoke(invocation, &mut handler)
                     .await
-                    .map_err(|error| ControlError::InvalidArguments(error.to_string()))?;
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        handler
+                            .finish(false)
+                            .await
+                            .map_err(ControlError::InvalidArguments)?;
+                        release_invitation_claim(
+                            control,
+                            &connection.project_id,
+                            &invitation_id,
+                            &identity.account.id,
+                            idempotency_key,
+                        )
+                        .await?;
+                        return Err(ControlError::InvalidArguments(error.to_string()));
+                    }
+                };
                 handler
                     .transaction_mut()
                     .store_reducer_result(&identity.account.id, idempotency_key, &reducer_result)
@@ -2923,7 +2984,7 @@ impl Runtime {
                 let affected = sqlx::query(
                     r#"UPDATE gonvex_auth_membership_invitations
                        SET role=$4,permissions=$5,team_ids=$6,allowed_auth_providers=$7,
-                           application_payload=$8,updated_at=now()
+                           application_payload=$8,invited_by=$9,updated_at=now()
                        WHERE project_id=$1 AND tenant_id=$2 AND id=$3
                          AND accepted_at IS NULL AND revoked_at IS NULL"#,
                 )
@@ -2939,6 +3000,7 @@ impl Runtime {
                     providers.into_iter().map(Value::String).collect(),
                 )))
                 .bind(Json(payload))
+                .bind(account_id)
                 .execute(&mut **transaction.transaction())
                 .await?
                 .rows_affected();
@@ -4619,6 +4681,80 @@ pub(crate) fn decrypt_control_secret(
     String::from_utf8(decrypted).map_err(|_| {
         ControlError::InvalidArguments("stored provider credential is invalid".to_owned())
     })
+}
+
+fn invitation_authority_denial() -> ControlError {
+    ControlError::InvalidArguments(
+        "invitation inviter can no longer issue these membership grants".to_owned(),
+    )
+}
+
+fn validate_invitation_authority(
+    status: &str,
+    inviter_role: &str,
+    requested_role: &str,
+) -> Result<(), ControlError> {
+    membership_role(requested_role)?;
+    if status != "active"
+        || !matches!(inviter_role, "owner" | "admin")
+        || (inviter_role == "admin" && matches!(requested_role, "owner" | "admin"))
+    {
+        return Err(invitation_authority_denial());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod invitation_authority_tests {
+    use super::validate_invitation_authority;
+
+    #[test]
+    fn current_issuer_must_still_be_allowed_to_create_the_invitation() {
+        for (status, issuer, desired) in [
+            ("disabled", "owner", "member"),
+            ("active", "member", "member"),
+            ("active", "viewer", "member"),
+            ("active", "admin", "admin"),
+            ("active", "admin", "owner"),
+            ("active", "owner", "system_admin"),
+        ] {
+            assert!(validate_invitation_authority(status, issuer, desired).is_err());
+        }
+        for (issuer, desired) in [
+            ("owner", "admin"),
+            ("owner", "member"),
+            ("admin", "member"),
+            ("admin", "viewer"),
+        ] {
+            assert!(validate_invitation_authority("active", issuer, desired).is_ok());
+        }
+    }
+}
+
+// Only release after a confirmed rollback, never after an uncertain commit.
+async fn release_invitation_claim(
+    control: &gonvex_postgres::ControlPlane,
+    project: &str,
+    invitation: &str,
+    account: &str,
+    key: &str,
+) -> Result<(), ControlError> {
+    let mut tx = control.begin_control_transaction(false).await?;
+    sqlx::query(
+        r#"UPDATE gonvex_auth_membership_invitations
+        SET handoff_state='pending',handoff_command_id='',accepted_account_id=NULL,
+            accepted_idempotency_key=NULL,updated_at=now()
+        WHERE project_id=$1 AND id=$2 AND accepted_at IS NULL
+          AND handoff_state='claimed' AND accepted_account_id=$3 AND accepted_idempotency_key=$4"#,
+    )
+    .bind(project)
+    .bind(invitation)
+    .bind(account)
+    .bind(key)
+    .execute(&mut **tx.transaction())
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 fn invalid_invitation() -> ControlError {

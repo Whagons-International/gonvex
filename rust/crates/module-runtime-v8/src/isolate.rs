@@ -471,6 +471,7 @@ impl ModuleIsolate {
             }
         };
         let request = DispatchRequest {
+            invitation_inviter: spec.invocation.context.invitation_inviter.as_ref(),
             intent_entropy: spec.invocation.context.intent_entropy.as_deref(),
             function: &spec.invocation.function,
             kind: kind_name(&spec.contract.kind),

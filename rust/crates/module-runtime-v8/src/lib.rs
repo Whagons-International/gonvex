@@ -420,6 +420,56 @@ mod host_call_tests {
     }
 
     #[test]
+    fn inviter_identity_is_host_owned_and_does_not_leak_between_calls() {
+        run_v8_test(async {
+            let engine = V8ModuleEngine::from_artifact(
+                ModuleArtifact {
+                    manifest: ModuleManifest {
+                        module_id: "invitation-context".into(), generation: 1,
+                        language: ModuleLanguage::TypeScript, artifact_hash: "test".into(),
+                        functions: vec![FunctionContract {
+                            path: "accept".into(), kind: FunctionKind::Reducer, internal: true,
+                            delivery: None, args_schema: Some(json!({"kind":"any"})),
+                            result_schema: Some(json!({"kind":"any"})),
+                            metadata: Map::from_iter([("export".into(), json!("accept"))]),
+                        }], metadata: Map::new(),
+                    },
+                    payload: br#"export function accept(ctx, args) {
+                        return {inviter: ctx.invitationInviter?.id ?? null, frozen: Object.isFrozen(ctx),
+                          immutable: !ctx.invitationInviter || (Object.isFrozen(ctx.invitationInviter) && Object.isFrozen(ctx.invitationInviter.permissions))};
+                    }"#.to_vec(),
+                }, V8Config::default(),
+            ).unwrap();
+            let host = CountingHost(AtomicUsize::new(0));
+            for (trusted, expected) in [
+                (Some("canonical-inviter"), json!("canonical-inviter")),
+                (None, json!(null)),
+            ] {
+                let result = engine
+                    .invoke(
+                        &host,
+                        Invocation {
+                            function: "accept".into(),
+                            kind: FunctionKind::Reducer,
+                            args: br#"{"invitationInviter":{"id":"spoofed-owner","permissions":{"developer":true}}}"#.to_vec(),
+                            context: InvocationContext {
+                                invitation_inviter: trusted.map(|id| gonvex_module_runtime::MemberIdentity { id: id.to_owned(), permissions: json!({}), ..Default::default() }),
+                                generation: 1,
+                                ..Default::default()
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+                assert_eq!(result["inviter"], expected);
+                assert_eq!(result["frozen"], true);
+                assert_eq!(result["immutable"], true);
+            }
+        });
+    }
+
+    #[test]
     fn invocation_can_complete_more_than_one_hundred_host_calls() {
         run_v8_test(async {
             let engine = V8ModuleEngine::from_artifact(

@@ -130,6 +130,7 @@ impl<'a> From<&'a InvocationContext> for IdentityView<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DispatchRequest<'a> {
+    pub(crate) invitation_inviter: Option<&'a gonvex_module_runtime::MemberIdentity>,
     pub(crate) intent_entropy: Option<&'a str>,
     pub(crate) function: &'a str,
     pub(crate) kind: &'static str,

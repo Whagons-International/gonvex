@@ -232,6 +232,8 @@ export type Scheduler = {
 export type QueryContext = AuthContext & TenantContext & InvocationAware & { readonly db: ReadDB; readonly now: number };
 
 export type ReducerContext = AuthContext & TenantContext & InvocationAware & {
+  /** Current inviter authority, locked and captured by the host before recipient writes; acceptance Reducer only. */
+  readonly invitationInviter?: NonNullable<TenantContext['member']>;
   /** SDK-owned replay entropy. Never include it in rows, logs, or Action provenance. */
   readonly intentEntropy?: string;
   readonly db: WriteDB;
