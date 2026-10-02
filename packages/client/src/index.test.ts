@@ -1161,6 +1161,8 @@ describe("GonvexClient", () => {
     firstSocket.open();
     firstSocket.receive({ type: "session.ready", capabilities: {}, replica: testReplicaDirective });
 
+    const credentials: string[] = [];
+    client.onDeveloperCredential((token) => credentials.push(token));
     const activation = client.authenticate({ project: "shop", tenant: "tenant-a", token: "gvx_imp_activation" });
     const firstAuth = sentMessages(firstSocket).at(-1);
     expect(firstAuth).toMatchObject({ type: "auth", token: "gvx_imp_activation", tenant: "tenant-a" });
@@ -1185,6 +1187,7 @@ describe("GonvexClient", () => {
     const thirdSocket = latestSocket();
     thirdSocket.open();
     expect(sentMessages(thirdSocket)[0]).toMatchObject({ type: "auth", token: "gvx_dev_rotation_2", tenant: "tenant-a" });
+    expect(credentials).toEqual(["gvx_dev_rotation_1", "gvx_dev_rotation_2"]);
   });
 
   it("rejects an awaited authentication transition without installing a partial success", async () => {

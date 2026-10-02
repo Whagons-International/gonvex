@@ -60,6 +60,28 @@ export type GonvexDeveloperModeState = {
   grantId?: string;
   expiresAt?: string;
 };
+type ActiveDeveloperMode = {
+  active: true;
+  tenantId: string;
+  grantId: string;
+  expiresAt: string;
+  accountId: string;
+  originalTenantId?: string;
+  /** The grant credential, not the account session, is installed on the client. */
+  clientInstalled: boolean;
+  /** Restored from tab storage and not yet accepted by the runtime. */
+  restoring: boolean;
+};
+type StoredDeveloperGrant = {
+  projectId: string;
+  accountId: string;
+  tenantId: string;
+  grantId: string;
+  /** Newest single-use reconnect credential. Secret: never log it. */
+  token: string;
+  expiresAt: string;
+  originalTenantId?: string;
+};
 type PKCEState = { state: string; verifier: string; redirectUri: string; returnTo: string; provider: GonvexAuthProviderName; createdAt: number };
 
 class GonvexAuthRequestError extends Error {
@@ -240,19 +262,42 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const initialAuthRef = useRef<{
     session: GonvexAuthSession | null;
     warmSession: GonvexAuthSession | null;
+    developer: ActiveDeveloperMode | null;
+    developerToken: string | null;
   } | null>(null);
   if (!initialAuthRef.current) {
     const persisted = readAuthSession(storageKey);
+    const warmSession = props.externalAuth
+      ? reusableExternalAuthSession(
+          persisted,
+          initialTenantId,
+          props.externalAuth.provider,
+          hasExplicitInitialTenant,
+        )
+      : null;
+    // A reload keeps developer mode only while this tab's stored grant
+    // belongs to the same account and project and has not expired.
+    const candidate = warmSession ?? persisted;
+    const storedDeveloper = candidate
+      ? readDeveloperGrant(storageKey, props.projectId, candidate.account.id)
+      : null;
+    clearDeveloperGrants(storageKey, storedDeveloper?.accountId);
     initialAuthRef.current = {
       session: persisted,
-      warmSession: props.externalAuth
-        ? reusableExternalAuthSession(
-            persisted,
-            initialTenantId,
-            props.externalAuth.provider,
-            hasExplicitInitialTenant,
-          )
+      warmSession,
+      developer: storedDeveloper
+        ? {
+            active: true,
+            tenantId: storedDeveloper.tenantId,
+            grantId: storedDeveloper.grantId,
+            expiresAt: storedDeveloper.expiresAt,
+            accountId: storedDeveloper.accountId,
+            originalTenantId: storedDeveloper.originalTenantId,
+            clientInstalled: false,
+            restoring: true,
+          }
         : null,
+      developerToken: storedDeveloper?.token ?? null,
     };
   }
   const initialAuth = initialAuthRef.current;
@@ -270,10 +315,16 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const [error, setError] = useState<string | null>(null);
   const [refreshRetryAt, setRefreshRetryAt] = useState(0);
   const [canonicalRefreshRequested, setCanonicalRefreshRequested] = useState(false);
-  const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>({ active: false });
+  const [developerMode, setDeveloperMode] = useState<GonvexDeveloperModeState>(
+    () => initialAuth.developer ? publicDeveloperMode(initialAuth.developer) : { active: false },
+  );
   const sessionRef = useRef(session);
   const refreshRef = useRef<Promise<GonvexAuthSession | null> | null>(null);
-  const developerModeRef = useRef<(GonvexDeveloperModeState & { active: true; originalTenantId?: string }) | null>(null);
+  const developerModeRef = useRef<ActiveDeveloperMode | null>(initialAuth.developer);
+  // The newest grant credential lives beside, never inside, the developer
+  // state so it cannot leak through the public auth value.
+  const developerTokenRef = useRef<string | null>(initialAuth.developerToken);
+  const pendingDeveloperTokenRef = useRef<{ token: string } | null>(null);
   // A persisted session is only a candidate until bootstrap/external auth has
   // installed its complete project + tenant + account scope on the client.
   // Never let the token-refresh effect authenticate an account-only socket in
@@ -286,7 +337,14 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
   const installedWarmSessionRef = useRef(false);
   if (initialAuth.warmSession && !installedWarmSessionRef.current) {
     installedWarmSessionRef.current = true;
-    installClientSession(props.client, props.projectId, initialAuth.warmSession);
+    const developer = developerModeRef.current;
+    const developerToken = developerTokenRef.current;
+    if (developer && developerToken) {
+      installDeveloperClientAuth(props.client, props.projectId, developer, developerToken);
+      developer.clientInstalled = true;
+    } else {
+      installClientSession(props.client, props.projectId, initialAuth.warmSession);
+    }
   }
 
   const installSession = useCallback((
@@ -295,20 +353,34 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     installClientAuth = true,
   ) => {
     sessionRef.current = next;
+    const developer = developerModeRef.current;
+    if (developer && next?.account.id !== developer.accountId) {
+      // Signing out or switching accounts ends developer mode. The grant was
+      // issued to the previous account and must not survive into this one.
+      developerModeRef.current = null;
+      developerTokenRef.current = null;
+      setDeveloperMode({ active: false });
+      clearDeveloperGrants(storageKey);
+    }
+    const activeDeveloper = developerModeRef.current;
     if (next) {
       if (persist) safeLocalStorageSet(storageKey, JSON.stringify(next));
-      if (!developerModeRef.current && installClientAuth) {
-        installClientSession(props.client, props.projectId, next);
-      }
-      if (!developerModeRef.current) {
+      if (!activeDeveloper) {
+        if (installClientAuth) installClientSession(props.client, props.projectId, next);
+        installedClientScopeRef.current = authSessionScope(props.projectId, next);
+      } else if (!activeDeveloper.clientInstalled && installClientAuth && developerTokenRef.current) {
+        // A grant restored after reload waits for its account session to be
+        // confirmed, then connects with the grant instead of that session.
+        installDeveloperClientAuth(props.client, props.projectId, activeDeveloper, developerTokenRef.current);
+        activeDeveloper.clientInstalled = true;
         installedClientScopeRef.current = authSessionScope(props.projectId, next);
       }
     } else {
       if (persist) safeLocalStorageRemove(storageKey);
-      if (!developerModeRef.current && installClientAuth) {
+      if (installClientAuth) {
         props.client.setAuth({ project: props.projectId, tenant: undefined, token: undefined, identity: undefined });
       }
-      if (!developerModeRef.current) installedClientScopeRef.current = null;
+      installedClientScopeRef.current = null;
     }
     setSession(next);
   }, [props.client, props.projectId, storageKey]);
@@ -366,19 +438,40 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const developer = developerModeRef.current;
     if (!developer) return;
     developerModeRef.current = null;
+    developerTokenRef.current = null;
+    clearDeveloperGrants(storageKey);
     setDeveloperMode({ active: false });
     const current = sessionRef.current;
     const activeTenantId = current?.tenants.some((tenant) => tenant.id === developer.originalTenantId)
       ? developer.originalTenantId
       : current?.activeTenantId;
     installSession(current ? { ...current, activeTenantId } : null);
-  }, [installSession]);
+  }, [installSession, storageKey]);
 
   useEffect(() => props.client.onAuthError((message) => {
-    if (!developerModeRef.current) return;
+    const developer = developerModeRef.current;
+    if (!developer) return;
     restoreAccountSession();
-    setError(message || "Developer mode ended because its authorization is no longer valid.");
+    // A grant restored after a reload may already be gone (exited in another
+    // tab, revoked, or expired server-side). Falling back to the account
+    // session is the expected outcome there, not an error to surface.
+    setError(developer.restoring ? null : message || "Developer mode ended because its authorization is no longer valid.");
   }), [props.client, restoreAccountSession]);
+
+  useEffect(() => props.client.onDeveloperCredential?.((token) => {
+    // The runtime consumed the previous credential and issued a single-use
+    // successor. Keep only the newest one so a reload can resume the grant.
+    const pending = pendingDeveloperTokenRef.current;
+    if (pending) {
+      pending.token = token;
+      return;
+    }
+    const developer = developerModeRef.current;
+    if (!developer?.clientInstalled) return;
+    developer.restoring = false;
+    developerTokenRef.current = token;
+    writeDeveloperGrant(storageKey, props.projectId, developer, token);
+  }), [props.client, props.projectId, storageKey]);
 
   useEffect(() => {
     if (!developerMode.active || !developerMode.expiresAt) return;
@@ -764,9 +857,14 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     const revokeSession = current
       ? props.client.reducer(control.auth.logout, { refreshToken: current.refreshToken, all: options?.allDevices === true }).catch(() => undefined)
       : Promise.resolve();
+    const developer = developerModeRef.current;
+    const revokeDeveloper = developer
+      ? props.client.reducer(control.developer.exit, { grantId: developer.grantId }).catch(() => undefined)
+      : Promise.resolve();
+    // installSession(null) also ends developer mode and clears its stored grant.
     installSession(null);
     const signOutExternal = props.externalAuth?.signOut?.() ?? Promise.resolve();
-    await Promise.all([revokeSession, signOutExternal]);
+    await Promise.all([revokeSession, revokeDeveloper, signOutExternal]);
   }, [installSession, props.client, props.externalAuth]);
 
   const fetchAccessToken = useCallback(async (args: { forceRefreshToken: boolean }) => {
@@ -939,6 +1037,10 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (!grant.id || !grant.token || !Number.isFinite(Date.parse(expiresAt))) {
       throw new Error("Gonvex returned an invalid developer grant.");
     }
+    // The activation token is consumed by this authentication; the runtime
+    // answers with the reconnect credential that a reload must use instead.
+    const pending = { token: grant.token };
+    pendingDeveloperTokenRef.current = pending;
     try {
       await props.client.authenticate({
         project: props.projectId,
@@ -956,11 +1058,24 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
         identity: { sub: current.account.id, iss: props.projectId },
       });
       throw cause;
+    } finally {
+      if (pendingDeveloperTokenRef.current === pending) pendingDeveloperTokenRef.current = null;
     }
-    const next = { active: true as const, tenantId, grantId: grant.id, expiresAt, originalTenantId: current.activeTenantId };
+    const next: ActiveDeveloperMode = {
+      active: true,
+      tenantId,
+      grantId: grant.id,
+      expiresAt,
+      accountId: current.account.id,
+      originalTenantId: current.activeTenantId,
+      clientInstalled: true,
+      restoring: false,
+    };
     developerModeRef.current = next;
-    setDeveloperMode({ active: true, tenantId, grantId: grant.id, expiresAt });
-  }, [props.client, props.projectId]);
+    developerTokenRef.current = pending.token;
+    writeDeveloperGrant(storageKey, props.projectId, next, pending.token);
+    setDeveloperMode(publicDeveloperMode(next));
+  }, [props.client, props.projectId, storageKey]);
 
   const exitDeveloperMode = useCallback(async () => {
     const developer = developerModeRef.current;
@@ -1287,6 +1402,96 @@ const WARM_SESSION_ACCESS_SAFETY_MS = 30_000;
 
 function authSessionScope(projectId: string, session: GonvexAuthSession) {
   return `${projectId}\u0000${session.activeTenantId ?? ""}\u0000${session.account.id}`;
+}
+
+const DEVELOPER_GRANT_RESTORE_MARGIN_MS = 5_000;
+
+function developerGrantStoragePrefix(storageKey: string) {
+  return `${storageKey}:developer:`;
+}
+
+function developerGrantStorageKey(storageKey: string, accountId: string) {
+  return `${developerGrantStoragePrefix(storageKey)}${encodeURIComponent(accountId)}`;
+}
+
+function publicDeveloperMode(developer: ActiveDeveloperMode): GonvexDeveloperModeState {
+  return { active: true, tenantId: developer.tenantId, grantId: developer.grantId, expiresAt: developer.expiresAt };
+}
+
+/**
+ * Developer grants live in sessionStorage: they survive a reload of the same
+ * tab but never reach other tabs or outlive the browser session.
+ */
+function readDeveloperGrant(storageKey: string, projectId: string, accountId: string): StoredDeveloperGrant | null {
+  if (typeof window === "undefined") return null;
+  const key = developerGrantStorageKey(storageKey, accountId);
+  let parsed: Partial<StoredDeveloperGrant> | null = null;
+  try {
+    parsed = JSON.parse(sessionStorage.getItem(key) ?? "null") as Partial<StoredDeveloperGrant> | null;
+  } catch {
+    parsed = null;
+  }
+  if (!parsed) {
+    safeSessionStorageRemove(key);
+    return null;
+  }
+  const expiresAt = typeof parsed.expiresAt === "string" ? Date.parse(parsed.expiresAt) : Number.NaN;
+  if (
+    parsed.projectId !== projectId
+    || parsed.accountId !== accountId
+    || typeof parsed.tenantId !== "string" || !parsed.tenantId
+    || typeof parsed.grantId !== "string" || !parsed.grantId
+    || typeof parsed.token !== "string" || !(parsed.token.startsWith("gvx_imp_") || parsed.token.startsWith("gvx_dev_"))
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= Date.now() + DEVELOPER_GRANT_RESTORE_MARGIN_MS
+  ) {
+    safeSessionStorageRemove(key);
+    return null;
+  }
+  return parsed as StoredDeveloperGrant;
+}
+
+function writeDeveloperGrant(storageKey: string, projectId: string, developer: ActiveDeveloperMode, token: string) {
+  const grant: StoredDeveloperGrant = {
+    projectId,
+    accountId: developer.accountId,
+    tenantId: developer.tenantId,
+    grantId: developer.grantId,
+    token,
+    expiresAt: developer.expiresAt,
+    ...(developer.originalTenantId ? { originalTenantId: developer.originalTenantId } : {}),
+  };
+  safeSessionStorageSet(developerGrantStorageKey(storageKey, developer.accountId), JSON.stringify(grant));
+}
+
+/** Removes every stored developer grant for this project, except `keepAccountId`'s. */
+function clearDeveloperGrants(storageKey: string, keepAccountId?: string) {
+  if (typeof window === "undefined") return;
+  const prefix = developerGrantStoragePrefix(storageKey);
+  const keep = keepAccountId ? developerGrantStorageKey(storageKey, keepAccountId) : undefined;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < sessionStorage.length; index += 1) {
+      const key = sessionStorage.key(index);
+      if (key?.startsWith(prefix) && key !== keep) keys.push(key);
+    }
+    for (const key of keys) sessionStorage.removeItem(key);
+  } catch { /* storage can be unavailable in hardened browsers */ }
+}
+
+function installDeveloperClientAuth(
+  client: GonvexClient,
+  projectId: string,
+  developer: ActiveDeveloperMode,
+  token: string,
+) {
+  client.setAuth({
+    project: projectId,
+    tenant: developer.tenantId,
+    token,
+    fetchToken: undefined,
+    identity: { sub: developer.accountId, iss: projectId },
+  });
 }
 
 function installClientSession(

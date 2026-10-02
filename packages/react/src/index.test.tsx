@@ -135,6 +135,16 @@ class FakeGonvexClient {
     for (const handler of Array.from(this.authErrorHandlers)) handler(error);
   }
 
+  readonly developerCredentialHandlers = new Set<(token: string) => void>();
+  onDeveloperCredential(handler: (token: string) => void) {
+    this.developerCredentialHandlers.add(handler);
+    return () => this.developerCredentialHandlers.delete(handler);
+  }
+
+  emitDeveloperCredential(token: string) {
+    for (const handler of Array.from(this.developerCredentialHandlers)) handler(token);
+  }
+
   emitQuery(message: ServerMessage) {
     for (const handler of Array.from(this.queryListeners)) handler(message);
   }
@@ -2060,7 +2070,7 @@ describe("GonvexAuthProvider", () => {
     expect(auth!.error).toBe("grant revoked");
   });
 
-  it("keeps refreshed account credentials separate and recovers the normal session after reload", async () => {
+  it("keeps refreshed account credentials separate and recovers the normal session in a new browser session", async () => {
     const client = new FakeGonvexClient();
     const now = Date.now();
     const storageKey = "gonvex-auth:https%3A%2F%2Fdeveloper-reload.test:shop";
@@ -2078,11 +2088,255 @@ describe("GonvexAuthProvider", () => {
     expect(JSON.parse(localStorage.getItem(storageKey)!)).toMatchObject({accessToken:"refreshed-access",refreshToken:"refreshed-refresh"});
     expect(client.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"refreshed-access"}));
     view.unmount();
+    // Closing the browser ends its sessionStorage, and with it the grant.
+    sessionStorage.clear();
 
     const reloadedClient = new FakeGonvexClient();
     render(<GonvexAuthProvider client={reloadedClient as unknown as GonvexClient} runtimeUrl="https://developer-reload.test" projectId="shop"><Consumer/></GonvexAuthProvider>);
     await act(async()=>{await Promise.resolve();await Promise.resolve();});
     expect(reloadedClient.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"refreshed-access"}));
+    expect(reloadedClient.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"gvx_imp_memory_only"}));
+    expect(auth!.developerMode).toEqual({active:false});
     expect(localStorage.getItem(storageKey)).not.toContain("gvx_imp_memory_only");
+  });
+});
+
+describe("GonvexAuthProvider developer mode across reloads", () => {
+  // Flush the deduplicated bootstrap promise so each test bootstraps its own session.
+  afterEach(() => { cleanup(); vi.runOnlyPendingTimers(); localStorage.clear(); sessionStorage.clear(); });
+
+  const runtimeUrl = "https://developer-persist.test";
+  const storageKey = "gonvex-auth:https%3A%2F%2Fdeveloper-persist.test:shop";
+  const grantKey = (accountId: string) => `${storageKey}:developer:${accountId}`;
+  const tenants = [
+    {id:"tenant-home",name:"Home",role:"admin",permissions:{},domain:"home",timezone:"UTC",description:"",profile:{}},
+    {id:"tenant-target",name:"Target",role:"member",permissions:{},domain:"target",timezone:"UTC",description:"",profile:{}},
+  ];
+  function accountSession(accountId = "acct-1", provider = "password") {
+    const now = Date.now();
+    return {
+      accessToken:`${accountId}-access`,expiresAt:now+900_000,refreshToken:`${accountId}-refresh`,refreshExpiresAt:now+86_400_000,
+      account:{id:accountId,email:`${accountId}@example.test`,emailVerified:true,provider},
+      tenants,activeTenantId:"tenant-home",
+    };
+  }
+  function storedGrant(overrides: Record<string, unknown> = {}) {
+    return {
+      projectId:"shop",accountId:"acct-1",tenantId:"tenant-target",grantId:"grant-stored",
+      token:"gvx_dev_stored",expiresAt:new Date(Date.now()+600_000).toISOString(),originalTenantId:"tenant-home",
+      ...overrides,
+    };
+  }
+  let auth: ReturnType<typeof useGonvexAuth> | undefined;
+  function Consumer(){auth=useGonvexAuth();return null;}
+  function renderNative(client: FakeGonvexClient) {
+    return render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl={runtimeUrl} projectId="shop"><Consumer/></GonvexAuthProvider>);
+  }
+  async function settle() {
+    await act(async()=>{await Promise.resolve();await Promise.resolve();await Promise.resolve();});
+  }
+  function grantClient() {
+    const client = new FakeGonvexClient();
+    const expiresAt = new Date(Date.now()+1_800_000).toISOString();
+    client.reducer.mockImplementation(((reference: FunctionReference) => reference.path === "control.developer.enter"
+      ? Promise.resolve({id:"grant-1",token:"gvx_imp_activation",expiresAt})
+      : Promise.resolve({updated:true})) as never);
+    // The runtime consumes the activation token and answers with a rotated
+    // reconnect credential before the authentication settles.
+    client.authenticate.mockImplementation(async (value: unknown) => {
+      client.setAuth(value);
+      if ((value as {token?: string}).token?.startsWith("gvx_imp_")) client.emitDeveloperCredential("gvx_dev_rotated_1");
+    });
+    return { client, expiresAt };
+  }
+
+  it("persists the grant with its newest rotated credential in sessionStorage only", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    const { client, expiresAt } = grantClient();
+    renderNative(client);
+    await settle();
+
+    await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
+    expect(JSON.parse(sessionStorage.getItem(grantKey("acct-1"))!)).toEqual({
+      projectId:"shop",accountId:"acct-1",tenantId:"tenant-target",grantId:"grant-1",
+      token:"gvx_dev_rotated_1",expiresAt,originalTenantId:"tenant-home",
+    });
+    act(()=>client.emitDeveloperCredential("gvx_dev_rotated_2"));
+    expect(JSON.parse(sessionStorage.getItem(grantKey("acct-1"))!).token).toBe("gvx_dev_rotated_2");
+    expect(localStorage.getItem(storageKey)).not.toContain("gvx_");
+    expect(JSON.stringify(auth)).not.toContain("gvx_");
+  });
+
+  it("restores developer mode after a reload of the same tab", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    const { client, expiresAt } = grantClient();
+    const view = renderNative(client);
+    await settle();
+    await act(async()=>{await auth!.enterDeveloperMode("tenant-target");});
+    view.unmount();
+
+    const reloaded = new FakeGonvexClient();
+    renderNative(reloaded);
+    expect(auth!.developerMode).toEqual({active:true,tenantId:"tenant-target",grantId:"grant-1",expiresAt});
+    await settle();
+    expect(auth!.developerMode).toEqual({active:true,tenantId:"tenant-target",grantId:"grant-1",expiresAt});
+    expect(auth!.activeTenant?.id).toBe("tenant-target");
+    expect(reloaded.setAuth).toHaveBeenCalledWith({
+      project:"shop",tenant:"tenant-target",token:"gvx_dev_rotated_1",fetchToken:undefined,identity:{sub:"acct-1",iss:"shop"},
+    });
+    expect(reloaded.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"acct-1-access"}));
+
+    // The restored connection rotates again; exit later revokes the same grant.
+    act(()=>reloaded.emitDeveloperCredential("gvx_dev_rotated_after_reload"));
+    expect(JSON.parse(sessionStorage.getItem(grantKey("acct-1"))!).token).toBe("gvx_dev_rotated_after_reload");
+  });
+
+  it("installs a restored grant before releasing a warm Firebase-backed session", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession("acct-1", "firebase")));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant()));
+    const client = new FakeGonvexClient();
+    let tokenListener: ((identity: { uid: string } | null) => void) | undefined;
+    const externalAuth = {
+      provider:"firebase" as const,
+      getIdToken:vi.fn(async()=>"firebase-id-token"),
+      onIdTokenChanged(listener: typeof tokenListener){tokenListener=listener;return vi.fn();},
+    };
+    client.action.mockResolvedValue({...accountSession("acct-1","firebase"),accessToken:"rotated-access"});
+    render(<GonvexAuthProvider client={client as unknown as GonvexClient} runtimeUrl={runtimeUrl} projectId="shop" externalAuth={externalAuth}><Consumer/></GonvexAuthProvider>);
+    expect(client.setAuth).toHaveBeenCalledTimes(1);
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-target",token:"gvx_dev_stored"}));
+    expect(auth).toMatchObject({isLoading:false,developerMode:{active:true,tenantId:"tenant-target",grantId:"grant-stored"}});
+
+    await act(async()=>{tokenListener?.({uid:"firebase-uid"});await Promise.resolve();await Promise.resolve();await Promise.resolve();});
+    expect(auth!.developerMode.active).toBe(true);
+    expect(client.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"acct-1-access"}));
+    expect(client.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"rotated-access"}));
+  });
+
+  it("drops an expired stored grant and uses the account session", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant({expiresAt:new Date(Date.now()-1_000).toISOString()})));
+    const client = new FakeGonvexClient();
+    renderNative(client);
+    await settle();
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"acct-1-access"}));
+    expect(client.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"gvx_dev_stored"}));
+  });
+
+  it("never applies a grant stored for another account or project", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession("acct-2")));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant()));
+    sessionStorage.setItem(grantKey("acct-2"), JSON.stringify(storedGrant({projectId:"other-project",accountId:"acct-2"})));
+    const client = new FakeGonvexClient();
+    renderNative(client);
+    await settle();
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
+    expect(sessionStorage.getItem(grantKey("acct-2"))).toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"acct-2-access"}));
+    expect(client.setAuth).not.toHaveBeenCalledWith(expect.objectContaining({token:"gvx_dev_stored"}));
+  });
+
+  it("ends developer mode when another tab switches to a different account", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant()));
+    const client = new FakeGonvexClient();
+    renderNative(client);
+    await settle();
+    expect(auth!.developerMode.active).toBe(true);
+
+    localStorage.setItem(storageKey, JSON.stringify(accountSession("acct-2")));
+    act(()=>{window.dispatchEvent(new StorageEvent("storage",{key:storageKey}));});
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"acct-2-access",identity:{sub:"acct-2",iss:"shop"}}));
+    expect(client.setAuth).toHaveBeenLastCalledWith({token:"acct-2-access",fetchToken:expect.any(Function)});
+  });
+
+  it("revokes and forgets the grant on exit", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant()));
+    const client = new FakeGonvexClient();
+    client.reducer.mockResolvedValue({updated:true} as never);
+    renderNative(client);
+    await settle();
+
+    await act(async()=>{await auth!.exitDeveloperMode();});
+    expect(client.reducer).toHaveBeenCalledWith(expect.objectContaining({path:"control.developer.exit"}),{grantId:"grant-stored"});
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"acct-1-access"}));
+  });
+
+  it("revokes and forgets the grant on sign-out", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant()));
+    const client = new FakeGonvexClient();
+    client.reducer.mockResolvedValue({updated:true} as never);
+    renderNative(client);
+    await settle();
+
+    await act(async()=>{await auth!.signOut();});
+    expect(client.reducer).toHaveBeenCalledWith(expect.objectContaining({path:"control.developer.exit"}),{grantId:"grant-stored"});
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(auth!.account).toBeNull();
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
+    expect(client.setAuth).toHaveBeenLastCalledWith({project:"shop",tenant:undefined,token:undefined,identity:undefined});
+  });
+
+  it("forgets the grant when its expiry timer ends developer mode", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant({expiresAt:new Date(Date.now()+10_000).toISOString()})));
+    const client = new FakeGonvexClient();
+    renderNative(client);
+    await settle();
+    expect(auth!.developerMode.active).toBe(true);
+
+    act(()=>vi.advanceTimersByTime(10_001));
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"acct-1-access"}));
+  });
+
+  it("falls back cleanly to the account session when the runtime rejects a restored grant", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant()));
+    const client = new FakeGonvexClient();
+    renderNative(client);
+    await settle();
+    expect(auth!.developerMode.active).toBe(true);
+
+    act(()=>client.emitAuthError("impersonation grant is invalid, expired, revoked, or already used"));
+    await settle();
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(auth!.error).toBeNull();
+    expect(auth).toMatchObject({isAuthenticated:true,isLoading:false,sessionState:"current"});
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
+    expect(client.setAuth).toHaveBeenCalledWith(expect.objectContaining({tenant:"tenant-home",token:"acct-1-access"}));
+    expect(client.setAuth).toHaveBeenLastCalledWith({token:"acct-1-access",fetchToken:expect.any(Function)});
+    expect(client.authenticate).not.toHaveBeenCalled();
+    expect(client.action).not.toHaveBeenCalled();
+
+    // A later auth error belongs to the account session, not developer mode.
+    const calls = client.setAuth.mock.calls.length;
+    act(()=>client.emitAuthError("account token rejected"));
+    expect(client.setAuth.mock.calls.length).toBe(calls);
+    expect(auth!.developerMode).toEqual({active:false});
+  });
+
+  it("still reports a rejection of a grant the runtime had already accepted", async () => {
+    localStorage.setItem(storageKey, JSON.stringify(accountSession()));
+    sessionStorage.setItem(grantKey("acct-1"), JSON.stringify(storedGrant()));
+    const client = new FakeGonvexClient();
+    renderNative(client);
+    await settle();
+    act(()=>client.emitDeveloperCredential("gvx_dev_accepted"));
+
+    act(()=>client.emitAuthError("grant revoked"));
+    expect(auth!.developerMode).toEqual({active:false});
+    expect(auth!.error).toBe("grant revoked");
+    expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
   });
 });

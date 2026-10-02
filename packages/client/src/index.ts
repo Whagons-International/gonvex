@@ -631,6 +631,7 @@ export class GonvexClient {
   // or a fresh send cycle starts, so a bad token can't refresh-loop forever.
   private authRetriedAfterError = false;
   private readonly authErrorHandlers = new Set<(error: string) => void>();
+  private readonly developerCredentialHandlers = new Set<(token: string) => void>();
   private managedAuthAttempt: {
     ids: Set<string>;
     resolve: () => void;
@@ -1589,6 +1590,21 @@ export class GonvexClient {
     };
   }
 
+  /**
+   * Subscribe to rotated developer-mode reconnect credentials. The runtime
+   * consumes each developer credential when it accepts a connection and
+   * returns a single-use successor; the client already uses that successor
+   * for its own reconnects. Auth providers subscribe so they can keep the
+   * newest credential in tab-scoped storage and resume developer mode after a
+   * page reload. The value is a secret: never log it or put it in a URL.
+   */
+  onDeveloperCredential(handler: (token: string) => void): () => void {
+    this.developerCredentialHandlers.add(handler);
+    return () => {
+      this.developerCredentialHandlers.delete(handler);
+    };
+  }
+
   private applyAuth(auth: GonvexClientAuth) {
     const nextAuth = { ...this.auth, ...auth };
     const tokenScopeChanged = hasOwn(auth, "token")
@@ -1808,9 +1824,11 @@ export class GonvexClient {
           this.activeArtifactHashValue = artifactHashFromAuthResult(message.result) ?? this.activeArtifactHashValue;
           const developerSessionToken = developerSessionTokenFromAuthResult(message.result);
           if (developerSessionToken) {
-            // The activation token is single-use. Keep its rotating successor
-            // only in process memory and use it for the next reconnect.
+            // The activation token is single-use. Use its rotating successor
+            // for the next reconnect, and hand it to the provider that owns
+            // developer mode so a reload can resume the same grant.
             this.auth = { ...this.auth, token: developerSessionToken, fetchToken: undefined };
+            for (const handler of Array.from(this.developerCredentialHandlers)) handler(developerSessionToken);
           }
           this.authRetriedAfterError = false;
           const directive = replicaDirectiveFromAuthResult(message.result);
@@ -2002,6 +2020,7 @@ export class GonvexClient {
     this.replicaSubscriptions.clear();
     this.sessionScopeHandlers.clear();
     this.authErrorHandlers.clear();
+    this.developerCredentialHandlers.clear();
     // Invalidate any token fetch still in flight so its resolve can't touch
     // the closed client's caches.
     this.authFetchGeneration += 1;
