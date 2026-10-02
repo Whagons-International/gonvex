@@ -236,6 +236,9 @@ impl InvocationProvenance {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContext {
+    /// Server-owned inviter, never taken from application payload or client arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation_inviter: Option<MemberIdentity>,
     #[serde(default)]
     pub intent_entropy: Option<String>,
     pub project_id: String,
