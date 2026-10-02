@@ -920,7 +920,7 @@ func (s *Server) handleDevSync(w http.ResponseWriter, r *http.Request) {
 	syncDefinitions := manifestSyncDefinitions(next)
 	unchangedSchema := !s.config.DropEmptyUndeclaredColumns && fingerprint != "" && (s.schemaFingerprintApplied(next.Project, fingerprint) || (loadedFingerprint == fingerprint && loadedManifest.NotifySchemaVersion == next.NotifySchemaVersion))
 	if unchangedSchema {
-		storageInstalled, storageErr := s.projectSyncStorageInstalled(r.Context(), next.Project, next.Schema, syncDefinitions)
+		storageInstalled, storageErr := s.projectSchemaArtifactsInstalled(r.Context(), next.Project, next.Schema, syncDefinitions)
 		if storageErr != nil {
 			syncErr = storageErr
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": storageErr.Error()})

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gonvex/gonvex/pkg/manifest"
+	"github.com/gonvex/gonvex/server/internal/dbpool"
 )
 
 const NotifyChannel = "gonvex_table_change"
@@ -135,6 +136,27 @@ func notifyTriggersInstalled(ctx context.Context, db *sql.DB, tableName string) 
 		return false, err
 	}
 	return artifacts.installed(tableName), nil
+}
+
+// NotifyTriggersInstalled reports whether every named table in the database
+// has current notify triggers. Deploys use it before skipping an unchanged
+// schema, so a database that was never migrated still gets its triggers.
+func NotifyTriggersInstalled(ctx context.Context, databaseURL string, tableNames []string) (bool, error) {
+	db, err := dbpool.Open(databaseURL)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	artifacts, err := loadNotifyArtifacts(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	for _, tableName := range tableNames {
+		if !artifacts.installed(tableName) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func NotifySQLForTable(tableName string, table manifest.Table) (string, error) {

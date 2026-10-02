@@ -190,7 +190,7 @@ func TestProjectSyncStorageCheckReturnsTenantDiscoveryFailure(t *testing.T) {
 		"tasks": {Table: "tasks", Key: "id", Columns: []string{"id"}},
 	}
 
-	installed, err := server.projectSyncStorageInstalled(context.Background(), "project-a", desired, definitions)
+	installed, err := server.projectSchemaArtifactsInstalled(context.Background(), "project-a", desired, definitions)
 	if err == nil {
 		t.Fatal("tenant discovery failure was treated as installed sync storage")
 	}
