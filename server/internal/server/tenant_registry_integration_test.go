@@ -88,7 +88,9 @@ func TestUnchangedDevSyncRepairsMissingDurableSyncStorage(t *testing.T) {
 	runtime := New(config.Config{ProjectDatabases: map[string]string{project: databaseURL}})
 	syncProject := func() map[string]any {
 		recorder := httptest.NewRecorder()
-		runtime.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload)))
+		request := httptest.NewRequest(http.MethodPost, "/dev/sync", bytes.NewReader(payload))
+		request.RemoteAddr = "127.0.0.1:41000" // unkeyed dev sync is loopback-only
+		runtime.Handler().ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("sync status %d: %s", recorder.Code, recorder.Body.String())
 		}

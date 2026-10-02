@@ -1102,27 +1102,66 @@ func (s *Server) applyTenantSchemasForProject(
 	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
 		return schema.Result{}, fmt.Errorf("discover tenant databases: %w", err)
 	}
-	desiredSchema = desiredSchema.TenantSchema()
+	tenants, projectDatabase := s.tenantSchemaTargets(project)
+	tenantSchema := tenantSchemaForTargets(desiredSchema, projectDatabase)
 
+	tenantSyncDefinitions, err := syncDefinitionsForSchema(syncDefinitions, tenantSchema)
+	if err != nil {
+		return schema.Result{}, err
+	}
+	return applyTenantSchemas(ctx, tenants, tenantSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
+		return schema.ApplyWithOptions(ctx, databaseURL, desired, tenantSyncDefinitions, options)
+	})
+}
+
+// tenantSchemaTargets returns the databases that hold a project's tenant
+// tables. A project without any tenant database keeps them in its own
+// database: databaseURLForTenant routes tenant == project there, so queries
+// and mutations already use it. Deploys must migrate it as well. Otherwise its
+// tables never get notify triggers, and once the LISTEN connection is healthy
+// every declared mutation write is dropped as a no-op, which leaves cached
+// query results and shared subscriptions stale until their listeners leave.
+// projectDatabase reports that fallback.
+func (s *Server) tenantSchemaTargets(project string) (tenants []tenantTarget, projectDatabase bool) {
 	s.projectMu.RLock()
-	tenants := make([]tenantTarget, 0, len(s.tenants))
 	for _, tenant := range s.tenants {
 		if tenant.ProjectID == project && tenant.databaseURL != "" {
 			tenants = append(tenants, tenant)
 		}
 	}
 	s.projectMu.RUnlock()
-
-	tenantSyncDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema)
-	if err != nil {
-		return schema.Result{}, err
+	if len(tenants) > 0 {
+		return tenants, false
 	}
-	return applyTenantSchemas(ctx, tenants, desiredSchema, func(ctx context.Context, databaseURL string, desired manifest.Schema) (schema.Result, error) {
-		return schema.ApplyWithOptions(ctx, databaseURL, desired, tenantSyncDefinitions, options)
-	})
+	databaseURL := strings.TrimSpace(s.databaseURLForTenant(project, project))
+	if databaseURL == "" {
+		return nil, false
+	}
+	return []tenantTarget{{ID: project, ProjectID: project, databaseURL: databaseURL}}, true
 }
 
-func (s *Server) projectSyncStorageInstalled(
+// tenantSchemaForTargets drops tenant tables that share a name with a
+// landlord table when both schemas land in the project database; the landlord
+// apply owns those.
+func tenantSchemaForTargets(desiredSchema manifest.Schema, projectDatabase bool) manifest.Schema {
+	tenantSchema := desiredSchema.TenantSchema()
+	if !projectDatabase {
+		return tenantSchema
+	}
+	landlord := desiredSchema.LandlordSchema().Tables
+	tables := make(map[string]manifest.Table, len(tenantSchema.Tables))
+	for name, table := range tenantSchema.Tables {
+		if _, shared := landlord[name]; !shared {
+			tables[name] = table
+		}
+	}
+	return manifest.Schema{Tables: tables}
+}
+
+// projectSchemaArtifactsInstalled reports whether an unchanged schema may skip
+// the DDL reapply: sync storage must exist wherever sync tables live, and a
+// project database that holds tenant tables must have their notify triggers.
+func (s *Server) projectSchemaArtifactsInstalled(
 	ctx context.Context,
 	project string,
 	desiredSchema manifest.Schema,
@@ -1139,24 +1178,27 @@ func (s *Server) projectSyncStorageInstalled(
 		}
 	}
 
-	tenantDefinitions, err := syncDefinitionsForSchema(syncDefinitions, desiredSchema.TenantSchema())
+	if len(desiredSchema.TenantSchema().Tables) == 0 {
+		return true, nil
+	}
+	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
+		return false, fmt.Errorf("discover tenant databases: %w", err)
+	}
+	tenants, projectDatabase := s.tenantSchemaTargets(project)
+	tenantSchema := tenantSchemaForTargets(desiredSchema, projectDatabase)
+	if projectDatabase {
+		installed, err := schema.NotifyTriggersInstalled(ctx, tenants[0].databaseURL, sortedSchemaTableNames(tenantSchema))
+		if err != nil || !installed {
+			return installed, err
+		}
+	}
+	tenantDefinitions, err := syncDefinitionsForSchema(syncDefinitions, tenantSchema)
 	if err != nil {
 		return false, err
 	}
 	if len(tenantDefinitions) == 0 {
 		return true, nil
 	}
-	if err := s.hydrateProjectTenantDatabasesWithError(ctx, project, s.hydrateProjectTenantDatabasesUncachedWithError); err != nil {
-		return false, fmt.Errorf("discover tenant databases: %w", err)
-	}
-	s.projectMu.RLock()
-	tenants := make([]tenantTarget, 0, len(s.tenants))
-	for _, tenant := range s.tenants {
-		if tenant.ProjectID == project && tenant.databaseURL != "" {
-			tenants = append(tenants, tenant)
-		}
-	}
-	s.projectMu.RUnlock()
 	for _, tenant := range dedupeTenantTargets(tenants) {
 		installed, err := schema.SyncStorageInstalled(ctx, tenant.databaseURL)
 		if err != nil || !installed {
@@ -1164,6 +1206,15 @@ func (s *Server) projectSyncStorageInstalled(
 		}
 	}
 	return true, nil
+}
+
+func sortedSchemaTableNames(desired manifest.Schema) []string {
+	names := make([]string, 0, len(desired.Tables))
+	for name := range desired.Tables {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 type tenantSchemaApplyFunc func(context.Context, string, manifest.Schema) (schema.Result, error)
