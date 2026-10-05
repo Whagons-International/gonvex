@@ -15,6 +15,7 @@ chrono.workspace = true
 cron.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
+ipnet.workspace = true
 gonvex-module-host = { path = "../module-host" }
 gonvex-module-runtime = { path = "../module-runtime" }
 gonvex-protocol = { path = "../protocol" }
