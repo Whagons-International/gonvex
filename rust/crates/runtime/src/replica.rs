@@ -19,6 +19,8 @@ use crate::Runtime;
 
 #[derive(Debug, Error)]
 pub enum ReplicaError {
+    #[error("{0}")]
+    PublicSession(String),
     #[error("project has no active TypeScript module")]
     ModuleMissing,
     #[error("replica function {0:?} is not registered")]
@@ -94,6 +96,11 @@ impl Runtime {
         session: &TenantSession,
         request: ReplicaOpenRequest,
     ) -> Result<ReplicaOpenResult, ReplicaError> {
+        if session.is_anonymous() {
+            return Err(ReplicaError::PublicSession(
+                "authenticate with an active tenant before opening a Replica Collection".to_owned(),
+            ));
+        }
         let module = self
             .inner
             .modules

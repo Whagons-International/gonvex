@@ -68,6 +68,7 @@ pub enum DatabaseCapability {
 }
 
 pub struct DatabaseHostCalls {
+    storage_context: Option<(crate::Runtime, gonvex_postgres::TenantSession)>,
     transaction: Option<TenantTransaction>,
     capability: DatabaseCapability,
     schema: Value,
@@ -85,6 +86,7 @@ pub struct DatabaseHostCalls {
 impl DatabaseHostCalls {
     pub fn new(transaction: TenantTransaction, capability: DatabaseCapability) -> Self {
         Self {
+            storage_context: None,
             transaction: Some(transaction),
             capability,
             schema: Value::Null,
@@ -98,6 +100,15 @@ impl DatabaseHostCalls {
             deferred_ordinals: BTreeMap::new(),
             fault: Arc::default(),
         }
+    }
+
+    pub fn with_storage(
+        mut self,
+        runtime: crate::Runtime,
+        session: gonvex_postgres::TenantSession,
+    ) -> Self {
+        self.storage_context = Some((runtime, session));
+        self
     }
 
     /// Shared record of transient database failures seen by this invocation.
@@ -198,6 +209,23 @@ impl DatabaseHostCalls {
 impl HostCallHandler for DatabaseHostCalls {
     async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
         match call {
+            HostCallFrame::Storage { operation, payload } if operation == "getMetadata" => {
+                let (runtime, session) = self
+                    .storage_context
+                    .clone()
+                    .ok_or_else(|| "storage metadata is unavailable".to_owned())?;
+                let file_id = payload
+                    .get("fileId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "fileId is required".to_owned())?;
+                runtime
+                    .inner
+                    .storage
+                    .reducer_metadata(&session, self.transaction_mut(), file_id)
+                    .await
+            }
+
             HostCallFrame::DbQuery {
                 statement,
                 parameters,
@@ -1110,6 +1138,7 @@ mod tests {
         assert_eq!(declared_table_key(&schema, "tasks").unwrap(), Some("_id"));
 
         let calls = DatabaseHostCalls {
+            storage_context: None,
             transaction: None,
             capability: DatabaseCapability::Reducer,
             schema,
@@ -1142,6 +1171,7 @@ mod tests {
             }
         });
         let calls = DatabaseHostCalls {
+            storage_context: None,
             transaction: None,
             capability: DatabaseCapability::Reducer,
             schema,

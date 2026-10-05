@@ -15,7 +15,7 @@ replicate. This document is the architecture contract, not a future wishlist.
 7. Unbounded data uses indexed Live Queries.
 8. Live Queries require a structured, inspectable query plan.
 9. One server transaction is applied atomically to the Local Replica before UI notification.
-10. The Local Replica is the only server-state store exposed to UI bindings.
+10. The Local Replica is the only replicated server-state store exposed to UI bindings.
 11. Interactive Reducers require an optimistic contract or an explicit reviewed exception.
 12. Capacity limits protect execution but never determine freshness.
 
@@ -66,6 +66,18 @@ environment object in an Action.
 
 Business rows and external-work requests should be committed together through
 a durable outbox. The Action worker processes the outbox idempotently.
+
+## Public tenant functions
+
+Tenant calls normally require an active Member. Explicit `public: true` Query,
+Action, and server-only Reducer declarations also admit anonymous browsers on
+one active tenant route. They receive `ctx.auth.account === null`,
+`ctx.member === null`, and the canonical `ctx.tenant.id`. Public Queries run
+an application-owned read-only handler, which must enforce token and data
+visibility policy. Public reducers require `interactive: false` and have no
+local execution, offline outbox, or anonymous scheduling. Live Queries and
+Replica Collections remain member-only. See [public-functions.md](docs/public-functions.md)
+for protocol shapes, storage rules, and configurable abuse limits.
 
 ## Authoritative change feed
 

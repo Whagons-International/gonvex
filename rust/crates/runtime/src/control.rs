@@ -1964,6 +1964,13 @@ impl Runtime {
         path: String,
         args: Value,
     ) -> Result<(ServerMessage, ControlSubscription), ControlError> {
+        if connection
+            .tenant
+            .as_ref()
+            .is_some_and(TenantSession::is_anonymous)
+        {
+            return Err(ControlError::AuthenticationRequired);
+        }
         if !Self::control_query_is_live(&path) {
             return Err(ControlError::InvalidArguments(format!(
                 "Control Plane query {path:?} is not subscribable"
@@ -4506,6 +4513,7 @@ fn tenant(connection: &ControlConnection) -> Result<&TenantSession, ControlError
     connection
         .tenant
         .as_ref()
+        .filter(|session| !session.is_anonymous())
         .ok_or(ControlError::TenantAdminRequired)
 }
 

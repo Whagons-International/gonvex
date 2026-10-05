@@ -228,7 +228,7 @@ impl ActionHostCalls {
         module: ModuleCallLease,
         committed_revisions: CommittedRevisionTracker,
     ) -> Result<Self, String> {
-        let capabilities = if definition.action_capabilities.is_null() {
+        let mut capabilities = if definition.action_capabilities.is_null() {
             ActionCapabilities::default()
         } else {
             serde_json::from_value(definition.action_capabilities.clone())
@@ -238,6 +238,9 @@ impl ActionHostCalls {
             return Err(
                 "interactive function invocation requires an agent Action profile".to_owned(),
             );
+        }
+        if session.is_anonymous() {
+            capabilities.scheduler = false;
         }
         Ok(Self {
             runtime,
@@ -315,7 +318,8 @@ impl ActionHostCalls {
         provenance.command_id = command_id.clone();
         provenance.channel = gonvex_module_runtime::InvocationChannel::Agent;
         provenance.depth = provenance.depth.saturating_add(1);
-        provenance.on_behalf_of_member_id = Some(self.session.member.id.clone());
+        provenance.on_behalf_of_member_id =
+            (!self.session.is_anonymous()).then(|| self.session.member.id.clone());
         match binding.kind.as_str() {
             "query" => self
                 .runtime

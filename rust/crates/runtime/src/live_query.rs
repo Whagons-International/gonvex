@@ -406,6 +406,11 @@ impl Runtime {
         path: String,
         args: Value,
     ) -> Result<LiveQueryOpenResult, LiveQueryError> {
+        if session.is_anonymous() {
+            return Err(LiveQueryError::Invalid(
+                "authenticate with an active tenant before subscribing to a Live Query".to_owned(),
+            ));
+        }
         let module = self
             .inner
             .modules

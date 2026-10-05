@@ -67,7 +67,13 @@ async fn main() -> ExitCode {
     };
 
     info!(%addr, "starting Gonvex Rust runtime");
-    let server = axum::serve(listener, runtime.router()).with_graceful_shutdown(async {
+    let server = axum::serve(
+        listener,
+        runtime
+            .router()
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
         let _ = signal::ctrl_c().await;
     });
     let result = server.await;

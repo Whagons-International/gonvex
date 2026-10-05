@@ -156,7 +156,7 @@ export type AuthContext = {
   readonly auth: { readonly account: Account | null };
 };
 
-/** Tenant and tenant-local member identity, both nullable at the ABI boundary. */
+/** Public tenant calls have a tenant and null member. Control calls may have neither. */
 export type TenantContext = { readonly tenant: Tenant | null; readonly member: Member | null };
 
 export type InvocationChannel = "ui" | "agent" | "api" | "scheduler" | "system";
@@ -236,6 +236,8 @@ export type ReducerContext = AuthContext & TenantContext & InvocationAware & {
   readonly invitationInviter?: NonNullable<TenantContext['member']>;
   /** SDK-owned replay entropy. Never include it in rows, logs, or Action provenance. */
   readonly intentEntropy?: string;
+  /** Server-only Reducers can verify authoritative uploaded file metadata. Absent locally. */
+  readonly storage?: Pick<ActionStorage, "getMetadata">;
   readonly db: WriteDB;
   readonly actions: ReducerActions;
   readonly scheduler: Scheduler;
@@ -378,6 +380,8 @@ export type FunctionAgentMetadata = {
 };
 
 export type FunctionMetadata = {
+  /** Allow anonymous tenant calls. Reducers must set interactive: false. */
+  readonly public?: boolean;
   /** Include this function in the generated agent catalog. */
   readonly interactive?: boolean;
   /** Literal catalog description. Gonvex never guesses one. */
@@ -422,12 +426,12 @@ export type ReplicaCollectionOptions<Args, Result> = Omit<QueryOptions<Args, Res
 export type ReducerOptions<Args, Result> = FunctionMetadata & {
   readonly args?: PortableSchema;
   readonly result?: PortableSchema;
-  /** Public interactive reducers execute locally and queue by default. */
+  /** Client-callable interactive reducers execute locally and queue by default. */
   readonly offline?: OfflinePolicy;
   /** Set false for reducers that are not invoked directly by an interactive client. */
   readonly interactive?: boolean;
   readonly optimistic?: OptimisticTransaction;
-  /** Required exception for a public interactive reducer that cannot predict a safe local transaction. */
+  /** Required exception for an interactive reducer that cannot predict a safe local transaction. */
   readonly nonOptimisticReason?: string;
   readonly internal?: boolean;
   readonly run?: Handler<ReducerContext, Args, Result>;
@@ -559,6 +563,7 @@ export type CronSpec = Readonly<{
 export type CronOptions = Omit<CronSpec, "scope">;
 
 export type ModuleFunctionManifest = {
+  readonly public?: boolean;
   readonly path: string;
   readonly kind: ModuleFunctionKind;
   readonly args?: PortableSchema;
@@ -1082,6 +1087,7 @@ export class ModuleManifestCollector {
   }
 
   register(path: string, entry: Omit<ModuleFunctionManifest, "path">): ModuleFunctionManifest {
+    validatePublicFunction(entry.kind, entry);
     const normalized = normalizePath(path);
     if (this.entries.has(normalized)) throw new Error(`duplicate module function: ${normalized}`);
     const result = freeze({ path: normalized, ...entry });
@@ -1169,11 +1175,21 @@ export type ActionDefinition<Args, Result, Capabilities extends ActionCapabiliti
 
 const executableOptions = <T extends object>(options: T): Readonly<T> => freeze({ ...options });
 
+function validatePublicFunction(kind: string, options: FunctionMetadata & { internal?: boolean; delivery?: string; replica?: unknown; offline?: OfflinePolicy; optimistic?: unknown; localExecution?: number }): void {
+  if (options.public !== undefined && typeof options.public !== "boolean") throw new Error("public must be a boolean");
+  if (!options.public) return;
+  if (options.internal) throw new Error("public functions cannot be internal");
+  if (kind === "query" && (options.delivery && options.delivery !== "oneShot" || options.replica !== undefined)) throw new Error("public queries must be one-shot");
+  if (kind === "reducer" && (options.interactive !== false || options.offline?.mode === "allowed" || options.optimistic !== undefined || options.localExecution !== undefined)) {
+    throw new Error("public reducers require interactive: false and server-only execution");
+  }
+}
+
 function functionManifestMetadata(
   kind: ModuleFunctionKind,
   options: FunctionMetadata,
   internal: boolean,
-): Pick<ModuleFunctionManifest, "interactive" | "classification" | "description" | "agent"> {
+): Pick<ModuleFunctionManifest, "public" | "interactive" | "classification" | "description" | "agent"> {
   if (options.description !== undefined && typeof options.description !== "string") {
     throw new Error(`${kind} description must be a string`);
   }
@@ -1193,7 +1209,8 @@ function functionManifestMetadata(
       ...(confirmation === undefined ? {} : { confirmation }),
     });
   return {
-    ...(interactive ? { interactive: true } : {}),
+    ...(options.public ? { public: true } : {}),
+    ...(interactive ? { interactive: true } : options.public && kind === "reducer" ? { interactive: false } : {}),
     classification: internal ? "internal" : interactive ? "interactive" : "system",
     ...(options.description === undefined ? {} : { description: options.description }),
     ...(agent === undefined ? {} : { agent }),
@@ -1210,8 +1227,9 @@ const queryDefinition = <Args, Result>(
   // selected only by the dedicated helpers below; a structured plan does not
   // silently change the execution mode.
   const delivery = deliveryOverride ?? options.delivery ?? "oneShot";
+  validatePublicFunction("query", { ...options, delivery });
   if (delivery === "live" && !liveQueryPlan) throw new Error("live query requires a live query plan");
-  if (delivery === "oneShot") {
+  if (delivery === "oneShot" && !options.public) {
     if (!liveQueryPlan) throw new Error("one-shot query requires a structured live query plan");
     validateStructuredQueryPlan(liveQueryPlan, "<export>");
   }
@@ -1257,6 +1275,7 @@ const reducerDefinition = <Args, Result>(
   options: ReducerOptions<Args, Result>,
   internal = false,
 ): ReducerDefinition<Args, Result> => {
+  validatePublicFunction("reducer", { ...options, internal: internal || options.internal });
   options = { ...options, offline: options.offline ?? { mode: internal || options.interactive === false ? "forbidden" : "allowed" } };
   validateOfflinePolicy(options.offline, "<export>");
   if (options.optimistic !== undefined) validateOptimisticTransaction(options.optimistic, "<export>");
@@ -1274,7 +1293,7 @@ const reducerDefinition = <Args, Result>(
   });
 };
 
-/** Declare an executable public reducer export. */
+/** Declare a client-callable reducer export. */
 /* @__NO_SIDE_EFFECTS__ */
 export function reducer<Args = JsonValue, Result = JsonValue>(options: ReducerOptions<Args, Result>): ReducerDefinition<Args, Result> {
   return reducerDefinition(options);
@@ -1294,6 +1313,7 @@ export function internalReducer<Args = JsonValue, Result = JsonValue>(options: I
 /** Declare an executable action export. */
 /* @__NO_SIDE_EFFECTS__ */
 export function action<Args = JsonValue, Result = JsonValue, const Capabilities extends ActionCapabilities = ActionCapabilities>(options: ActionOptions<Args, Result, Capabilities> = {}): ActionDefinition<Args, Result, Capabilities> {
+  validatePublicFunction("action", options);
   validateActionCapabilities(options.profile ?? "standard", options.capabilities, options.name?.trim() || "<export>");
   return freeze({ kind: "action", options: executableOptions(options), handler: options.run });
 }
@@ -1335,7 +1355,7 @@ export class ModuleBuilder {
     // parser: a plan describes the SQL source, not the delivery mode.
     const delivery = options.delivery ?? "oneShot";
     if (delivery === "live" && !liveQueryPlan) throw new Error(`live query ${normalizePath(path)} requires a live query plan`);
-    if (delivery === "oneShot") {
+    if (delivery === "oneShot" && !options.public) {
       if (!liveQueryPlan) throw new Error(`one-shot query ${normalizePath(path)} requires a structured live query plan`);
       validateStructuredQueryPlan(liveQueryPlan, normalizePath(path));
     }
@@ -1408,6 +1428,7 @@ export class ModuleBuilder {
   }
 
   action<Args = JsonValue, Result = JsonValue, const Capabilities extends ActionCapabilities = ActionCapabilities>(path: string, options: ActionOptions<Args, Result, Capabilities> = {}): RegisteredFunction<Args, Result> {
+    validatePublicFunction("action", options);
     const profile = options.profile ?? "standard";
     validateActionCapabilities(profile, options.capabilities, normalizePath(path));
     const definition = this.manifestCollector.register(path, {
@@ -1482,7 +1503,8 @@ export class ModuleRuntimeRegistry {
         validateOptimisticTransaction(registration.definition.optimistic, path);
       }
     }
-    if (registration.kind === "query" && (registration.definition.delivery ?? "oneShot") === "oneShot") {
+    validatePublicFunction(registration.kind, registration.definition);
+    if (registration.kind === "query" && !registration.definition.public && (registration.definition.delivery ?? "oneShot") === "oneShot") {
       if (!registration.definition.liveQueryPlan) throw new Error(`one-shot query ${path} requires a structured live query plan`);
       validateStructuredQueryPlan(registration.definition.liveQueryPlan, path);
     }

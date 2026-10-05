@@ -267,6 +267,42 @@ pub struct TenantSession {
     pub delegation: Option<SessionDelegation>,
 }
 
+impl TenantSession {
+    /// Empty identity IDs represent an anonymous tenant session, never a Member.
+    pub fn anonymous(route: TenantRoute) -> Self {
+        Self {
+            identity: SessionIdentity {
+                project_id: route.project_id.clone(),
+                account: Account {
+                    id: String::new(),
+                    email: String::new(),
+                    email_verified: false,
+                    name: String::new(),
+                    avatar_url: String::new(),
+                    provider: String::new(),
+                },
+            },
+            route,
+            member: Member {
+                id: String::new(),
+                account_id: String::new(),
+                status: String::new(),
+                display_name: String::new(),
+                avatar_url: String::new(),
+                role: String::new(),
+                permissions: serde_json::json!({}),
+                membership_revision: 0,
+            },
+            admission_revision: 0,
+            delegation: None,
+        }
+    }
+
+    pub fn is_anonymous(&self) -> bool {
+        self.identity.account.id.is_empty()
+    }
+}
+
 /// Impersonation grants whose actor account starts with this prefix were
 /// minted by the service principal named after it.
 pub const SERVICE_PRINCIPAL_ACTOR_PREFIX: &str = "service:";
@@ -864,7 +900,8 @@ impl ControlPlane {
                WHERE project_id = $1
                  AND (tenant_id = $2 OR lower(domain) = lower($2))
                  AND deleted_at IS NULL
-                 AND status NOT IN ('deleted', 'disabled')"#,
+                 AND status NOT IN ('deleted', 'disabled')
+               ORDER BY (tenant_id = $2) DESC LIMIT 1"#,
         )
         .bind(project_id)
         .bind(tenant_id)
@@ -883,6 +920,20 @@ impl ControlPlane {
             tenant_id: canonical_tenant_id,
             database_url,
         })
+    }
+
+    /// Public admission requires an active directory row, including configured routes.
+    pub async fn resolve_public_tenant(
+        &self,
+        project: &str,
+        tenant: &str,
+    ) -> Result<TenantRoute, DatabaseError> {
+        self.project(project).await?;
+        let row = sqlx::query("SELECT tenant_id FROM gonvex_runtime_tenants WHERE project_id=$1 AND (tenant_id=$2 OR lower(domain)=lower($2)) AND status='active' AND deleted_at IS NULL ORDER BY (tenant_id=$2) DESC LIMIT 1")
+            .bind(project).bind(tenant).fetch_optional(&self.pool).await?
+            .ok_or_else(|| DatabaseError::TenantDatabaseMissing { tenant: tenant.to_owned() })?;
+        self.resolve_tenant(project, row.get::<String, _>("tenant_id").as_str())
+            .await
     }
 
     /// This is the final tenant admission gate. Directory rows only locate the

@@ -500,6 +500,8 @@ export type GonvexClientAuth = {
 };
 
 export type GonvexClientOptions = GonvexClientAuth & {
+  /** Anonymous, online-only connection scoped to one tenant ID or routing domain. */
+  public?: { tenant: string };
   clientContract?: import("./client-upgrades.js").ClientContract;
   onUpdateRequired?: (reason: string) => void;
   /** Supplied by generated client bindings, once for the entire application. */
@@ -614,6 +616,7 @@ export class GonvexClient {
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
   private activeArtifactHashValue = "";
+  private readonly publicTenant?: string;
   private auth: GonvexClientAuth = {};
   private authInFlight = false;
   // Only the newest auth frame may change socket authorization. The runtime
@@ -695,6 +698,13 @@ export class GonvexClient {
   private lastOnlineAtMs = 0;
 
   constructor(private readonly url: string, options: GonvexClientOptions = {}) {
+    if (options.public) {
+      if (!options.public.tenant.trim() || !options.project?.trim()) throw new Error("Public connections require project and tenant");
+      if (options.token || options.fetchToken || options.identity || options.tenant) throw new Error("Public connections cannot include session credentials or a separate tenant");
+      this.publicTenant = options.public.tenant.trim();
+      options = { ...options, clientContract: options.clientContract ?? options.localRuntime?.clientContract, tenant: this.publicTenant, localRuntime: undefined, localReplica: undefined, outbox: { enabled: false }, telemetry: false };
+    }
+
     this.clientContract = options.clientContract ?? options.localRuntime?.clientContract;
     this.updateRequiredHandler = options.onUpdateRequired;
     this.localBinding = options.localRuntime;
@@ -1606,6 +1616,10 @@ export class GonvexClient {
   }
 
   private applyAuth(auth: GonvexClientAuth) {
+    if (this.publicTenant && (auth.token || auth.fetchToken || auth.identity || auth.tenant !== undefined && auth.tenant !== this.publicTenant || auth.project !== undefined && auth.project !== this.auth.project)) {
+      throw new Error("Public connection scope is fixed; create another client to sign in or change tenants");
+    }
+
     const nextAuth = { ...this.auth, ...auth };
     const tokenScopeChanged = hasOwn(auth, "token")
       && auth.token !== this.auth.token
@@ -1657,7 +1671,13 @@ export class GonvexClient {
     const isReconnect = this.socket !== undefined;
     this.manuallyClosed = false;
     const generation = ++this.socketGeneration;
-    const socket = new WebSocket(this.url);
+    let transportUrl = this.url;
+    if (this.publicTenant) {
+      const publicUrl = new URL(this.url);
+      publicUrl.searchParams.set("public", "1");
+      transportUrl = publicUrl.toString();
+    }
+    const socket = new WebSocket(transportUrl);
     this.socket = socket;
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
@@ -1777,7 +1797,7 @@ export class GonvexClient {
             return;
           }
 
-          const fetcher = this.auth.fetchToken;
+          const fetcher = this.publicTenant ? undefined : this.auth.fetchToken;
           if (fetcher) {
             this.authInFlight = true;
             this.authRetriedAfterError = true;
@@ -1839,7 +1859,7 @@ export class GonvexClient {
           }
           if (!directive) {
             this.authInFlight = false;
-            if (!this.auth.tenant) {
+            if (!this.auth.tenant || this.publicTenant) {
               this.resumeQuerySubscriptions(reauthenticatedSameSocket);
               this.settleManagedAuthAttempt(message.id);
             } else {
@@ -3233,6 +3253,7 @@ export class GonvexClient {
   }
 
   private async drainOutbox() {
+    if (this.publicTenant) return;
     // A failed restore is reported to whoever awaits the scope transition;
     // there is nothing to drain from a scope that never became ready.
     try { await this.outboxReady; } catch { return; }
@@ -3429,6 +3450,10 @@ export class GonvexClient {
     args: Args = {} as Args,
     options: CallOptions = {},
   ): Promise<T | QueuedReducerOutcome> {
+    if (this.publicTenant) {
+      if (options.offline === "queue" || options.optimistic?.length) return Promise.reject(new GonvexClientError("Public reducers are server-only and cannot queue or execute optimistically", { code: "disconnected", path: ref.path, operation: "reducer" }));
+      return this.call<T>("reducer", ref, args, options.timeoutMs ?? this.timeouts.reducerTimeoutMs);
+    }
     if (ref.localExecution === 1) return this.runLocalReducer<T>(ref, args);
     if (options.offline === "queue" && ref.offline?.mode !== "allowed") {
       return Promise.reject(new GonvexClientError(
@@ -4244,6 +4269,7 @@ export class GonvexClient {
       project: this.auth.project,
       tenant: this.auth.tenant,
       controlOnly: !this.auth.tenant,
+      ...(this.publicTenant ? { public: true } : {}),
       device: browserTelemetryInfo(),
 		capabilities: { replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1 },
     });

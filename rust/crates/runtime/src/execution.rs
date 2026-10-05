@@ -146,6 +146,7 @@ impl Runtime {
                 })?,
         };
         let definition = require_function(&module, path, "query", access.allow_internal)?;
+        require_public_access(session, definition, access.allow_internal)?;
         validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
             ExecutionError::InvalidArguments {
                 path: path.to_owned(),
@@ -165,7 +166,11 @@ impl Runtime {
                 definition.delivery
             )));
         }
-        if let Some(plan) = definition.live_query_plan.as_ref() {
+        if let Some(plan) = definition
+            .live_query_plan
+            .as_ref()
+            .filter(|_| !definition.public && !session.is_anonymous())
+        {
             return self
                 .execute_structured_live_query(session, plan, &args)
                 .await
@@ -192,9 +197,9 @@ impl Runtime {
         // clients cannot smuggle arbitrary SQL through a query handler. An agent
         // child call is different: require_interactive_target already validates
         // the catalog entry and provenance, and the host gives the handler a
-        // read-only transaction. This is the only safe path for legacy/richer
-        // application Queries whose result cannot be represented by one plan.
-        if !delegated_agent_read {
+        // read-only transaction. Explicit public handlers use that same path
+        // so their token and public visibility checks always run.
+        if !delegated_agent_read && !definition.public {
             return Err(ExecutionError::HostCall(format!(
                 "one-shot query {path:?} requires a structured live query plan"
             )));
@@ -207,9 +212,14 @@ impl Runtime {
             .await
             .clone()
             .ok_or_else(|| ExecutionError::ModuleMissing(session.identity.project_id.clone()))?;
-        let mut provenance = access
-            .provenance
-            .expect("delegated agent read has provenance");
+        let mut provenance = access.provenance.unwrap_or_else(|| {
+            direct_provenance(
+                session,
+                InvocationChannel::Ui,
+                &format!("query-{}", uuid::Uuid::new_v4()),
+                &module.artifact_hash,
+            )
+        });
         install_execution_deadline(self, &mut provenance, false);
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
@@ -301,6 +311,8 @@ impl Runtime {
                     ExecutionError::ModuleMissing(session.identity.project_id.clone())
                 })?,
         };
+        let definition = require_function(&module, path, "reducer", access.allow_internal)?;
+        require_public_access(session, definition, access.allow_internal)?;
         let control = self
             .inner
             .control_plane
@@ -308,7 +320,10 @@ impl Runtime {
             .await
             .clone()
             .ok_or_else(|| ExecutionError::ModuleMissing(session.identity.project_id.clone()))?;
-        let idempotency_key = idempotency_key.map(str::trim).filter(|key| !key.is_empty());
+        let idempotency_key = idempotency_key
+            .filter(|_| !session.is_anonymous())
+            .map(str::trim)
+            .filter(|key| !key.is_empty());
         if idempotency_key.is_some() {
             control.ensure_reducer_idempotency(&session.route).await?;
         }
@@ -356,7 +371,7 @@ impl Runtime {
                 });
             }
         }
-        let definition = require_function(&module, path, "reducer", access.allow_internal)?;
+
         validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
             ExecutionError::InvalidArguments {
                 path: path.to_owned(),
@@ -399,7 +414,8 @@ impl Runtime {
                 &session.identity.account.id,
                 &session.identity.account.email,
             )
-            .with_provenance(&provenance);
+            .with_provenance(&provenance)
+            .with_storage(self.clone(), session.clone());
         let mut invocation = invocation(
             session,
             module.generation,
@@ -409,8 +425,10 @@ impl Runtime {
             Some(DatabaseCapability::Reducer),
             provenance,
         );
-        invocation.context.capabilities.action_outbox = true;
-        invocation.context.capabilities.scheduler = true;
+        invocation.context.capabilities.action_outbox = !session.is_anonymous();
+        invocation.context.capabilities.scheduler = !session.is_anonymous();
+        invocation.context.capabilities.storage =
+            definition.public || definition.internal || !definition.interactive;
         if access.intent_entropy.as_ref().is_some_and(|seed| {
             seed.len() != 64
                 || !seed
@@ -505,6 +523,7 @@ impl Runtime {
                 })?,
         };
         let definition = require_function(&module, path, "action", access.allow_internal)?;
+        require_public_access(session, definition, access.allow_internal)?;
         validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
             ExecutionError::InvalidArguments {
                 path: path.to_owned(),
@@ -525,8 +544,19 @@ impl Runtime {
             &module.artifact_hash,
             definition.action_profile == "agent",
         );
-        if definition.action_profile != "agent" {
+        if definition.action_profile != "agent" || session.is_anonymous() {
             install_execution_deadline(self, &mut provenance, true);
+            if session.is_anonymous() {
+                let limit = unix_millis(SystemTime::now()).saturating_add(
+                    self.inner
+                        .config
+                        .public_functions
+                        .action_timeout
+                        .as_millis() as u64,
+                );
+                provenance.deadline_unix_ms =
+                    Some(provenance.deadline_unix_ms.unwrap_or(limit).min(limit));
+            }
         }
         if !provenance.action_stack.iter().any(|item| item == path) {
             provenance.action_stack.push(path.to_owned());
@@ -561,12 +591,25 @@ impl Runtime {
         invocation.context.capabilities.functions = handler.functions();
         invocation.context.environment = environment;
         invocation.context.action_tools = handler.tools();
-        let value = self
-            .inner
-            .module_host
-            .invoke(invocation, &mut handler)
-            .await
-            .map_err(ExecutionError::from)?;
+        let deadline = invocation.context.deadline_unix_ms;
+        let call = self.inner.module_host.invoke(invocation, &mut handler);
+        let value = if session.is_anonymous() {
+            // The host's engine watchdog has transport slack. Do not let that
+            // grace period keep an anonymous connection's serial loop occupied.
+            let remaining = std::time::Duration::from_millis(
+                deadline
+                    .unwrap_or_default()
+                    .saturating_sub(unix_millis(SystemTime::now())),
+            );
+            tokio::time::timeout(remaining, call)
+                .await
+                .map_err(|_| {
+                    ExecutionError::HostCall("public Action execution deadline exceeded".into())
+                })?
+                .map_err(ExecutionError::from)?
+        } else {
+            call.await.map_err(ExecutionError::from)?
+        };
         Ok(ActionExecution {
             value,
             committed_revision: committed_revisions.maximum(),
@@ -925,6 +968,24 @@ pub(crate) fn system_tenant_session(project: &str, route: TenantRoute) -> Tenant
     }
 }
 
+fn require_public_access(
+    session: &TenantSession,
+    function: &crate::modules::FunctionDefinition,
+    allow_internal: bool,
+) -> Result<(), ExecutionError> {
+    if session.is_anonymous()
+        && (!(function.public || allow_internal && function.internal)
+            || function.replica.is_some()
+            || matches!(function.delivery.as_str(), "live" | "replica"))
+    {
+        return Err(ExecutionError::HostCall(format!(
+            "authenticate with an active tenant before calling a non-public {}",
+            function.kind
+        )));
+    }
+    Ok(())
+}
+
 fn require_function<'module>(
     module: &'module crate::modules::ProjectModule,
     path: &str,
@@ -976,13 +1037,13 @@ pub(crate) fn invocation(
                 project_id: session.identity.project_id.clone(),
                 name: None,
             }),
-            account: Some(AccountIdentity {
+            account: (!session.is_anonymous()).then(|| AccountIdentity {
                 id: session.identity.account.id.clone(),
                 email: nonempty(&session.identity.account.email),
                 name: nonempty(&session.identity.account.name),
                 avatar_url: nonempty(&session.identity.account.avatar_url),
             }),
-            member: Some(MemberIdentity {
+            member: (!session.is_anonymous()).then(|| MemberIdentity {
                 id: session.member.id.clone(),
                 account_id: session.member.account_id.clone(),
                 status: nonempty(&session.member.status),
@@ -1027,8 +1088,8 @@ pub(crate) fn direct_provenance(
     InvocationProvenance {
         channel,
         root_channel: channel,
-        actor_account_id: Some(session.identity.account.id.clone()),
-        actor_member_id: Some(session.member.id.clone()),
+        actor_account_id: nonempty(&session.identity.account.id),
+        actor_member_id: nonempty(&session.member.id),
         on_behalf_of_member_id: None,
         root_command_id: command_id.to_owned(),
         command_id: command_id.to_owned(),
@@ -1075,7 +1136,7 @@ fn initial_action_provenance(
     });
     if agent_profile && provenance.agent_execution_id.is_none() {
         if provenance.on_behalf_of_member_id.is_none() {
-            provenance.on_behalf_of_member_id = Some(session.member.id.clone());
+            provenance.on_behalf_of_member_id = nonempty(&session.member.id);
         }
         provenance.agent_execution_id = Some(format!("agent_{}", uuid::Uuid::new_v4().simple()));
     }
@@ -1098,9 +1159,9 @@ fn delegated_provenance(
         root_channel: parent.root_channel,
         // Actor identity is always replaced with the freshly admitted tenant
         // session. No field inherited from a client or model is authoritative.
-        actor_account_id: Some(session.identity.account.id.clone()),
-        actor_member_id: Some(session.member.id.clone()),
-        on_behalf_of_member_id: Some(session.member.id.clone()),
+        actor_account_id: nonempty(&session.identity.account.id),
+        actor_member_id: nonempty(&session.member.id),
+        on_behalf_of_member_id: nonempty(&session.member.id),
         root_command_id,
         command_id: command_id.to_owned(),
         parent_command_id: Some(parent.command_id.clone()),
@@ -1189,6 +1250,7 @@ mod tests {
 
     fn function(kind: &str, classification: &str, internal: bool) -> FunctionDefinition {
         FunctionDefinition {
+            public: false,
             kind: kind.to_owned(),
             internal,
             delivery: "oneShot".to_owned(),
@@ -1205,6 +1267,42 @@ mod tests {
             args_schema: json!({"kind":"object","fields":{}}),
             result_schema: json!({"kind":"null"}),
         }
+    }
+
+    #[test]
+    fn anonymous_context_and_function_gates_preserve_member_sessions() {
+        let member = session();
+        let anonymous = TenantSession::anonymous(member.route.clone());
+        for kind in ["query", "reducer", "action"] {
+            let mut definition = function(kind, "system", false);
+            assert!(require_public_access(&anonymous, &definition, false).is_err());
+            assert!(require_public_access(&member, &definition, false).is_ok());
+            definition.public = true;
+            assert!(require_public_access(&anonymous, &definition, false).is_ok());
+            definition.delivery = "live".into();
+            assert!(require_public_access(&anonymous, &definition, false).is_err());
+        }
+        let internal = function("reducer", "internal", true);
+        assert!(require_public_access(&anonymous, &internal, true).is_ok());
+        assert!(require_public_access(&anonymous, &internal, false).is_err());
+        let request = invocation(
+            &anonymous,
+            1,
+            "public",
+            "action",
+            json!({}),
+            None,
+            direct_provenance(&anonymous, InvocationChannel::Ui, "command", "hash"),
+        );
+        assert!(request.context.account.is_none());
+        assert!(request.context.member.is_none());
+        assert_eq!(
+            request.context.tenant.unwrap().id,
+            anonymous.route.tenant_id
+        );
+        assert_eq!(request.context.permissions, json!({}));
+        assert!(request.context.invocation.actor_account_id.is_none());
+        assert!(request.context.invocation.actor_member_id.is_none());
     }
 
     fn module(functions: BTreeMap<String, FunctionDefinition>) -> ProjectModule {

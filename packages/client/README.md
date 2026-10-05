@@ -350,3 +350,5 @@ The package exports:
 ## Documentation
 
 Full docs live at https://desarso.github.io/gonvex/
+
+[Open online anonymous tenant connections with `public: { tenant }`](../../docs/public-functions.md).

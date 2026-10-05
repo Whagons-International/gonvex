@@ -327,3 +327,13 @@ CREATE TABLE IF NOT EXISTS gonvex_performance_events (
 );
 CREATE INDEX IF NOT EXISTS gonvex_performance_events_recent
   ON gonvex_performance_events(project_id,created_at DESC);
+
+-- Upload signatures are bearer credentials. Keep successful proxy PUTs consumed
+-- even if an application later deletes the object or its tenant metadata.
+CREATE TABLE IF NOT EXISTS gonvex_storage_uploads (
+  object_key text PRIMARY KEY,
+  project_id text NOT NULL DEFAULT '',
+  tenant_id text NOT NULL DEFAULT '',
+  file_id text NOT NULL DEFAULT '',
+  consumed_at timestamptz
+);

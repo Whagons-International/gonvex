@@ -551,3 +551,34 @@ test("related Live Query scopes preserve nested predicates and trusted identity 
   assert.equal(where.operator, 'inRelation');
   assert.deepEqual(where.relation.where.value, { context: 'member.id' });
 });
+
+test("public functions preserve anonymous admission and server-only reducer metadata", async t => {
+  const project = await moduleProject(t, `
+const schema = { object: fields => ({ kind: "object", fields }), any: () => ({ kind: "any" }) };
+const query = definition => definition;
+const reducer = definition => definition;
+const action = definition => definition;
+export const preview = query({ args: schema.object({}), result: schema.any(), public: true, run: async ctx => ctx.tenant.id });
+export const apply = reducer({ args: schema.object({}), result: schema.any(), public: true, interactive: false, run: async ctx => ctx.member });
+export const upload = action({ args: schema.object({}), result: schema.any(), public: true, capabilities: { storage: true }, run: async ctx => ctx.storage.generateUploadUrl() });
+`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  for (const entry of Object.values(artifact.functions)) assert.equal(entry.public, true);
+  const write = Object.values(artifact.functions).find(entry => entry.kind === 'reducer');
+  assert.equal(write.interactive, false);
+  assert.equal(write.offline.mode, 'forbidden');
+  assert.equal(write.localExecution, undefined);
+  for (const entry of Object.values(moduleManifestFunctions(artifact))) assert.equal(entry.public, true);
+});
+
+test("artifact parser rejects unsafe public function declarations", async t => {
+  for (const declaration of [
+    'query({ args: schema.object({}), result: schema.any(), public: true, internal: true, run: async () => null })',
+    'reducer({ args: schema.object({}), result: schema.any(), public: true, run: async () => null })',
+    'reducer({ args: schema.object({}), result: schema.any(), public: true, interactive: false, offline: { mode: "allowed" }, run: async () => null })',
+    'liveQuery({ args: schema.object({}), result: schema.any(), public: true, liveQueryPlan: { table: "jobs", key: "id", columns: ["id"] } })',
+  ]) {
+    const project = await moduleProject(t, `const schema = { object: fields => ({ kind: "object", fields }), any: () => ({ kind: "any" }) }; const query = d => d; const reducer = d => d; const liveQuery = d => d; export const unsafe = ${declaration};`);
+    await assert.rejects(buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }), /public.*(internal|interactive|one-shot|server-only)/);
+  }
+});

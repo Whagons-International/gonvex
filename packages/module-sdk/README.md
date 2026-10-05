@@ -261,3 +261,5 @@ Application modules expose exactly three executable kinds: Query, Reducer, and
 Action. An infrastructure adapter that accepts an inbound webhook verifies and
 normalizes the request, then invokes an Action; webhooks are not a fourth module
 function kind.
+
+[Declare anonymous tenant functions with `public: true`; public reducers require `interactive: false`](../../docs/public-functions.md).

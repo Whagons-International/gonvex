@@ -16,6 +16,7 @@ pub mod modules;
 mod native_auth;
 mod operations;
 mod operator_data;
+pub mod public_functions;
 pub mod replica;
 pub mod sandbox;
 pub mod scheduler;
@@ -71,6 +72,7 @@ struct RuntimeInner {
     live_query_cache: live_query::SharedLiveQueryCache,
     membership_projector: membership_projector::MembershipProjector,
     metrics: metrics::RuntimeMetrics,
+    public_limiter: Arc<public_functions::PublicLimiter>,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -220,6 +222,7 @@ impl Runtime {
                 live_query_cache: live_query::SharedLiveQueryCache::default(),
                 membership_projector: membership_projector::MembershipProjector::default(),
                 metrics,
+                public_limiter: Arc::new(public_functions::PublicLimiter::default()),
             }),
         }
     }
@@ -517,7 +520,7 @@ async fn storage_upload_inner(
     match runtime
         .inner
         .storage
-        .proxy_put(&key, bytes, &content_type)
+        .proxy_put(&runtime, &key, bytes, &content_type)
         .await
     {
         Ok(()) => (
@@ -528,7 +531,11 @@ async fn storage_upload_inner(
         )
             .into_response(),
         Err(error) => (
-            StatusCode::BAD_GATEWAY,
+            if error == "upload already consumed" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
             Json(serde_json::json!({"error":error})),
         )
             .into_response(),
@@ -1241,12 +1248,80 @@ async fn health(State(runtime): State<Runtime>) -> Response {
 
 async fn websocket_upgrade(
     State(runtime): State<Runtime>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    Query(params): Query<BTreeMap<String, String>>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
-) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| websocket(socket, runtime))
+) -> Response {
+    let peer = peer
+        .map(|peer| peer.0 .0.ip())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let limits = &runtime.inner.config.public_functions;
+    let ip = public_functions::client_ip(peer, &headers, limits);
+    let public_transport = params.get("public").is_some_and(|v| v == "1");
+    let Some(pending) = runtime
+        .inner
+        .public_limiter
+        .admit_pending(ip, limits.pending_per_ip)
+    else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "pending connection limit exceeded",
+        )
+            .into_response();
+    };
+    let public_connection = if public_transport {
+        let Some(slot) = runtime
+            .inner
+            .public_limiter
+            .admit(ip, limits.connections_per_ip)
+        else {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "public connection limit exceeded",
+            )
+                .into_response();
+        };
+        Some(slot)
+    } else {
+        None
+    };
+    let upgrade = if public_transport {
+        upgrade
+            .max_frame_size(limits.payload_bytes)
+            .max_message_size(limits.payload_bytes)
+    } else {
+        upgrade
+    };
+    upgrade
+        .on_upgrade(move |socket| {
+            websocket(
+                socket,
+                runtime,
+                ip,
+                public_transport,
+                public_connection,
+                pending,
+            )
+        })
+        .into_response()
 }
 
-async fn websocket(mut socket: WebSocket, runtime: Runtime) {
+async fn websocket(
+    mut socket: WebSocket,
+    runtime: Runtime,
+    ip: std::net::IpAddr,
+    public_transport: bool,
+    _public_connection: Option<public_functions::PublicConnection>,
+    pending: public_functions::PublicConnection,
+) {
+    let mut pending_connection = Some(pending);
+    let auth_deadline =
+        tokio::time::Instant::now() + runtime.inner.config.public_functions.auth_timeout;
+    let mut public_scope: Option<(String, String)> = None;
+    let mut public_admission: Option<Arc<public_functions::PublicAdmission>> = None;
+    let mut _public_monitor: Option<public_functions::AdmissionMonitor> = None;
+    let mut public_window = public_functions::Window::default();
     let mut tenant_session: Option<TenantSession> = None;
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
@@ -1314,6 +1389,16 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
 
     loop {
         let message = tokio::select! {
+            _ = tokio::time::sleep_until(auth_deadline), if pending_connection.is_some() => {
+                let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1008, reason: "authentication deadline exceeded".into(),
+                }))).await;
+                break;
+            }
+            _ = async { if let Some(admission) = &public_admission { admission.changed.notified().await; } else { std::future::pending::<()>().await; } } => {
+                let _ = send_json(&mut socket, &ServerMessage::AuthError { id: "session-expired".into(), error: "public tenant session is unavailable".into() }).await;
+                break;
+            }
             _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
                 if !revalidate_connection(&runtime, &control_connection).await {
                     replicas.clear();
@@ -1513,6 +1598,14 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
             }
         };
         let Ok(message) = message else {
+            if public_transport {
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1009,
+                        reason: "public transport limit exceeded".into(),
+                    })))
+                    .await;
+            }
             break;
         };
         if tenant_session.is_some() {
@@ -1560,23 +1653,145 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                 }
             }
         }
+        if let Message::Binary(bytes) = &message {
+            let anonymous = tenant_session
+                .as_ref()
+                .is_some_and(TenantSession::is_anonymous);
+            let unscoped = tenant_session.is_none()
+                && control_connection.identity.is_none()
+                && service_grant.is_none();
+            if (anonymous || unscoped)
+                && bytes.len() > runtime.inner.config.public_functions.payload_bytes
+            {
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1009,
+                        reason: "public payload too large".into(),
+                    })))
+                    .await;
+                break;
+            }
+        }
+        if let Message::Text(text) = &message {
+            let unscoped = tenant_session.is_none()
+                && control_connection.identity.is_none()
+                && service_grant.is_none();
+            let anonymous = tenant_session
+                .as_ref()
+                .is_some_and(TenantSession::is_anonymous);
+            if (anonymous || unscoped)
+                && text.len() > runtime.inner.config.public_functions.payload_bytes
+            {
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1009,
+                        reason: "public payload too large".into(),
+                    })))
+                    .await;
+                break;
+            }
+            if let Ok(frame) = serde_json::from_str::<ClientMessage>(text) {
+                let public_auth = matches!(&frame, ClientMessage::Auth { public: true, .. });
+                if let ClientMessage::Auth { id, public, .. } = &frame {
+                    if *public != public_transport {
+                        let _ = send_json(
+                            &mut socket,
+                            &ServerMessage::AuthError {
+                                id: id.clone(),
+                                error:
+                                    "public authentication requires the public WebSocket transport"
+                                        .into(),
+                            },
+                        )
+                        .await;
+                        break;
+                    }
+                }
+                if public_admission.as_ref().is_some_and(|a| a.revoked()) {
+                    let _ = send_json(
+                        &mut socket,
+                        &ServerMessage::AuthError {
+                            id: "session-expired".into(),
+                            error: "public tenant session is unavailable".into(),
+                        },
+                    )
+                    .await;
+                    break;
+                }
+                if public_auth && text.len() > runtime.inner.config.public_functions.payload_bytes {
+                    let _ = socket
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: 1009,
+                            reason: "public payload too large".into(),
+                        })))
+                        .await;
+                    break;
+                }
+                if public_transport {
+                    let cost = match &frame {
+                        ClientMessage::ReducerCallMany { calls } => calls.len().max(1),
+                        ClientMessage::QuerySubscribeMany { subscribes } => subscribes.len().max(1),
+                        ClientMessage::ReplicaOpenMany { opens } => opens.len().max(1),
+                        _ => 1,
+                    };
+                    if !runtime.inner.public_limiter.allow(
+                        ip,
+                        &mut public_window,
+                        cost,
+                        &runtime.inner.config.public_functions,
+                    ) {
+                        for response in public_limit_errors(frame) {
+                            if send_json(&mut socket, &response).await.is_err() {
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        if let (Some(admission), Some(scope), Message::Text(text)) =
+            (&public_admission, &public_scope, &message)
+        {
+            if let Ok(frame) = serde_json::from_str::<ClientMessage>(text) {
+                if !matches!(&frame, ClientMessage::Auth { .. })
+                    && !check_public_admission(&runtime, admission, scope).await
+                {
+                    for response in public_admission_errors(frame) {
+                        let _ = send_json(&mut socket, &response).await;
+                    }
+                    break;
+                }
+            }
+        }
         match message {
             Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                 Ok(ClientMessage::Auth {
                     id,
                     token: Some(token),
+                    public: false,
                     project,
                     tenant,
                     ..
                 }) if token.trim().starts_with(service_principal::TOKEN_PREFIX) => {
-                    let (response, grant) = runtime
-                        .authenticate_service_principal(
+                    let service_auth = tokio::time::timeout_at(
+                        if pending_connection.is_some() {
+                            auth_deadline
+                        } else {
+                            tokio::time::Instant::now()
+                                + runtime.inner.config.public_functions.auth_timeout
+                        },
+                        runtime.authenticate_service_principal(
                             id,
                             &token,
                             project.as_deref(),
                             tenant.as_deref(),
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
+                    let Ok((response, grant)) = service_auth else {
+                        break;
+                    };
                     replicas.clear();
                     live_queries.clear();
                     control_queries.clear();
@@ -1594,6 +1809,9 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         ..control::ControlConnection::default()
                     };
                     service_grant = grant;
+                    if service_grant.is_some() {
+                        pending_connection.take();
+                    }
                     if send_json(&mut socket, &response).await.is_err() {
                         break;
                     }
@@ -1605,20 +1823,86 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     project,
                     tenant,
                     control_only,
+                    public,
                     device,
                     ..
                 }) => {
                     service_grant = None;
-                    let (response, authenticated_control) = authenticate(
-                        &runtime,
-                        id,
-                        token.as_deref(),
-                        project.as_deref(),
-                        tenant.as_deref(),
-                        control_only,
-                        &connection_id,
+                    let auth_result = tokio::time::timeout_at(
+                        if pending_connection.is_some() {
+                            auth_deadline
+                        } else {
+                            tokio::time::Instant::now()
+                                + runtime.inner.config.public_functions.auth_timeout
+                        },
+                        authenticate(
+                            &runtime,
+                            id,
+                            token.as_deref(),
+                            project.as_deref(),
+                            tenant.as_deref(),
+                            AuthMode {
+                                control_only,
+                                public,
+                            },
+                            &connection_id,
+                        ),
                     )
                     .await;
+                    let Ok((response, authenticated_control)) = auth_result else {
+                        break;
+                    };
+                    if let Some(session) = authenticated_control
+                        .tenant
+                        .as_ref()
+                        .filter(|s| s.is_anonymous())
+                    {
+                        let scope = (
+                            authenticated_control.project_id.clone(),
+                            session.route.tenant_id.clone(),
+                        );
+                        if public_scope.as_ref().is_some_and(|pinned| {
+                            !public_functions::same_scope(pinned, &scope.0, &scope.1)
+                        }) {
+                            let _ = send_json(
+                                &mut socket,
+                                &ServerMessage::AuthError {
+                                    id: match &response {
+                                        ServerMessage::AuthResult { id, .. } => id.clone(),
+                                        _ => String::new(),
+                                    },
+                                    error: "public connection scope is fixed".into(),
+                                },
+                            )
+                            .await;
+                            let _ = socket
+                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                    code: 1008,
+                                    reason: "public connection scope is fixed".into(),
+                                })))
+                                .await;
+                            break;
+                        }
+                        if public_scope.is_none() {
+                            public_scope = Some(scope.clone());
+                            let admission = public_functions::PublicAdmission::new();
+                            public_admission = Some(admission.clone());
+                            let monitor_runtime = runtime.clone();
+                            _public_monitor = Some(admission.monitor(
+                                std::time::Duration::from_secs(30),
+                                move || {
+                                    let runtime = monitor_runtime.clone();
+                                    let scope = scope.clone();
+                                    async move { validate_public_scope(&runtime, &scope).await }
+                                },
+                            ));
+                        }
+                    }
+                    if authenticated_control.identity.is_some()
+                        || authenticated_control.tenant.is_some()
+                    {
+                        pending_connection.take();
+                    }
                     connected_client_contract = client_contract;
                     if let Some(module) = runtime
                         .inner
@@ -1645,7 +1929,11 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                     replicas.clear();
                     live_queries.clear();
                     control_queries.clear();
-                    if let Some(session) = authenticated_control.tenant.as_ref() {
+                    if let Some(session) = authenticated_control
+                        .tenant
+                        .as_ref()
+                        .filter(|s| !s.is_anonymous())
+                    {
                         feed = Some(runtime.inner.change_feeds.subscribe(&session.route).await);
                     } else {
                         feed = None;
@@ -1960,6 +2248,20 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
                         continue;
                     }
                     for call in calls {
+                        if let (Some(admission), Some(scope)) = (&public_admission, &public_scope) {
+                            if !check_public_admission(&runtime, admission, scope).await {
+                                let response = ReducerErrorClass::Rejected.reducer_error(
+                                    call.id,
+                                    Some(call.path),
+                                    "public tenant session is unavailable".into(),
+                                    None,
+                                );
+                                if send_json(&mut socket, &response).await.is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
                         runtime
                             .inner
                             .metrics
@@ -2311,7 +2613,63 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime) {
     }
 }
 
+async fn validate_public_scope(runtime: &Runtime, scope: &(String, String)) -> bool {
+    match runtime.inner.control_plane.read().await.clone() {
+        Some(control) => tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            control.resolve_public_tenant(&scope.0, &scope.1),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok()),
+        None => false,
+    }
+}
+
+async fn check_public_admission(
+    runtime: &Runtime,
+    admission: &public_functions::PublicAdmission,
+    scope: &(String, String),
+) -> bool {
+    admission
+        .check(std::time::Duration::from_secs(30), || {
+            validate_public_scope(runtime, scope)
+        })
+        .await
+}
+
+fn public_admission_errors(frame: ClientMessage) -> Vec<ServerMessage> {
+    public_limit_errors(frame)
+        .into_iter()
+        .map(|mut response| {
+            match &mut response {
+                ServerMessage::AuthError { error, .. }
+                | ServerMessage::QueryError { error, .. }
+                | ServerMessage::ActionError { error, .. }
+                | ServerMessage::ReducerError { error, .. }
+                | ServerMessage::ReplicaError { error, .. } => {
+                    *error = "public tenant session is unavailable".into()
+                }
+                _ => {}
+            }
+            response
+        })
+        .collect()
+}
+
 async fn revalidate_connection(runtime: &Runtime, connection: &control::ControlConnection) -> bool {
+    if let Some(session) = connection
+        .tenant
+        .as_ref()
+        .filter(|session| session.is_anonymous())
+    {
+        return match runtime.inner.control_plane.read().await.clone() {
+            Some(control) => control
+                .resolve_public_tenant(&connection.project_id, &session.route.tenant_id)
+                .await
+                .is_ok(),
+            None => false,
+        };
+    }
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
         return false;
     };
@@ -2615,7 +2973,7 @@ async fn own_membership_changed(runtime: &Runtime, session: Option<&TenantSessio
         return false;
     };
     // Service principal sessions have no Member row.
-    if session.member.id.starts_with("_gonvex_service:") {
+    if session.is_anonymous() || session.member.id.starts_with("_gonvex_service:") {
         return false;
     }
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
@@ -2657,15 +3015,83 @@ async fn send_all(socket: &mut WebSocket, messages: &[ServerMessage]) -> Result<
     Ok(())
 }
 
+fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
+    let error = "public call rate limit exceeded".to_owned();
+    match frame {
+        ClientMessage::Auth { id, .. } => vec![ServerMessage::AuthError { id, error }],
+        ClientMessage::QueryCall { id, path, .. }
+        | ClientMessage::QuerySubscribe { id, path, .. } => vec![ServerMessage::QueryError {
+            id,
+            path: Some(path),
+            error,
+        }],
+        ClientMessage::ReducerCall(call) => {
+            vec![ReducerErrorClass::Rejected.reducer_error(call.id, Some(call.path), error, None)]
+        }
+        ClientMessage::ReducerCallMany { calls } => calls
+            .into_iter()
+            .map(|call| {
+                ReducerErrorClass::Rejected.reducer_error(
+                    call.id,
+                    Some(call.path),
+                    error.clone(),
+                    None,
+                )
+            })
+            .collect(),
+        ClientMessage::QuerySubscribeMany { subscribes } => subscribes
+            .into_iter()
+            .map(|call| ServerMessage::QueryError {
+                id: call.id,
+                path: Some(call.path),
+                error: error.clone(),
+            })
+            .collect(),
+        ClientMessage::ReplicaOpen(call) => vec![ServerMessage::ReplicaError {
+            id: call.id,
+            path: Some(call.path),
+            error,
+        }],
+        ClientMessage::ReplicaOpenMany { opens } => opens
+            .into_iter()
+            .map(|call| ServerMessage::ReplicaError {
+                id: call.id,
+                path: Some(call.path),
+                error: error.clone(),
+            })
+            .collect(),
+        ClientMessage::ActionCall { id, path, .. } => vec![ServerMessage::ActionError {
+            id,
+            path: Some(path),
+            error,
+            trace: None,
+        }],
+        _ => vec![ServerMessage::AuthError {
+            id: "public-rate-limit".into(),
+            error,
+        }],
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AuthMode {
+    control_only: bool,
+    public: bool,
+}
+
 async fn authenticate(
     runtime: &Runtime,
     id: String,
     token: Option<&str>,
     project: Option<&str>,
     tenant: Option<&str>,
-    control_only: bool,
+    mode: AuthMode,
     connection_id: &str,
 ) -> (ServerMessage, control::ControlConnection) {
+    let AuthMode {
+        control_only,
+        public,
+    } = mode;
     let control = runtime.inner.control_plane.read().await.clone();
     let Some(control) = control else {
         return (
@@ -2678,6 +3104,48 @@ async fn authenticate(
     };
     let requested_project = project.map(str::trim).filter(|value| !value.is_empty());
     let token = token.map(str::trim).filter(|value| !value.is_empty());
+    if public {
+        let route = if token.is_none() && !control_only {
+            if let (Some(project), Some(tenant)) =
+                (requested_project, tenant.filter(|v| !v.trim().is_empty()))
+            {
+                control
+                    .resolve_public_tenant(project, tenant.trim())
+                    .await
+                    .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some(route) = route else {
+            return (
+                ServerMessage::AuthError {
+                    id,
+                    error: "public tenant session is unavailable".to_owned(),
+                },
+                control::ControlConnection::default(),
+            );
+        };
+        let artifact_hash = runtime
+            .inner
+            .modules
+            .project(&route.project_id)
+            .await
+            .map(|module| module.artifact_hash.clone())
+            .unwrap_or_default();
+        let result = serde_json::json!({"projectId":route.project_id,"tenantId":route.tenant_id,"accountId":"","public":true,"artifactHash":artifact_hash});
+        return (
+            ServerMessage::AuthResult { id, result },
+            control::ControlConnection {
+                connection_id: connection_id.to_owned(),
+                project_id: route.project_id.clone(),
+                tenant: Some(TenantSession::anonymous(route)),
+                ..Default::default()
+            },
+        );
+    }
     if control_only && token.is_none() {
         let Some(project) = requested_project else {
             return (
@@ -3179,7 +3647,399 @@ mod tests {
             sandbox: Default::default(),
             storage: Default::default(),
             service_principals: Vec::new(),
+            public_functions: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn public_tenant_auth_and_execution_contract() {
+        use base64::Engine as _;
+        use futures_util::SinkExt;
+        use gonvex_postgres::{RuntimeManifestRecord, TenantRoute};
+        use sha2::{Digest, Sha256};
+        use sqlx::Row;
+
+        let Some(base) = std::env::var("GONVEX_TEST_POSTGRES_URL").ok() else {
+            return;
+        };
+        let Some(binary) = std::env::var("GONVEX_TEST_MODULE_HOST_BINARY").ok() else {
+            return;
+        };
+        let schema = format!("public_functions_{}", uuid::Uuid::new_v4().simple());
+        let admin = sqlx::PgPool::connect(&base).await.unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let mut cfg = config(true);
+        cfg.module_host.binary = Some(binary.into());
+        cfg.module_host.execution_timeout = Duration::from_secs(45);
+        cfg.public_functions.action_timeout = Duration::from_secs(2);
+        cfg.storage = crate::config::StorageConfig {
+            endpoint: "http://127.0.0.1:1".into(),
+            region: "us-east-1".into(),
+            bucket: "files".into(),
+            access_key_id: "test".into(),
+            secret_access_key: "test".into(),
+            force_path_style: true,
+            public_base_url: "https://uploads.example.test".into(),
+        };
+        let runtime = Runtime::new(cfg);
+        let control = ControlPlane::connect(&url, runtime.inner.pools.clone(), BTreeMap::new())
+            .await
+            .unwrap();
+        let fixture = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('project','Project','multiTenant','active')").execute(&fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('route','project','tenant-id','Tenant','careers',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        let route = TenantRoute {
+            project_id: "project".into(),
+            tenant_id: "tenant-id".into(),
+            database_url: url.clone(),
+        };
+        sqlx::query("CREATE TABLE applications(id TEXT PRIMARY KEY, consent BOOLEAN NOT NULL)")
+            .execute(&fixture)
+            .await
+            .unwrap();
+        control
+            .clone()
+            .provision_tenant_database(route.clone(), Vec::new())
+            .await
+            .unwrap();
+        *runtime.inner.control_plane.write().await = Some(control);
+        runtime.inner.module_host.start().await.unwrap();
+        let code = r#"
+const identity = ctx => ({ account: ctx.auth.account, member: ctx.member, tenant: ctx.tenant.id, invocation: ctx.invocation });
+export async function preview(ctx) { return identity(ctx); }
+export async function apply(ctx, args) { await ctx.db.insert("applications", { id: args.id, consent: true }); return identity(ctx); }
+export async function action(ctx) { return identity(ctx); }
+export async function tool(ctx) { return ctx.tools.save({}); }
+export async function internal(ctx) { return identity(ctx); }
+export async function upload(ctx) { return ctx.storage.generateUploadUrl({ visibility: "public", ownerId: "spoofed", size: 3, contentType: "application/pdf" }); }
+export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.fileId); }
+export async function slow(ctx, args) { await ctx.db.query("SELECT 1 FROM pg_sleep(31)", []); return apply(ctx, args); }
+export async function slowAction(ctx) { await new Promise(resolve => setTimeout(resolve, 5000)); return identity(ctx); }
+"#;
+        let mut functions = serde_json::json!({});
+        for (path, kind, public, internal) in [
+            ("preview", "query", true, false),
+            ("slow", "reducer", true, false),
+            ("slowAction", "action", true, false),
+            ("apply", "reducer", true, false),
+            ("action", "action", true, false),
+            ("private", "action", false, false),
+            ("internal", "reducer", false, true),
+            ("tool", "action", true, false),
+            ("upload", "action", true, false),
+            ("metadata", "reducer", true, false),
+        ] {
+            functions[path] = serde_json::json!({"kind":kind,"public":public,"internal":internal,
+                "interactive":false,"classification":if internal {"internal"} else {"system"},
+                "handler":if path == "private" {"action"} else {path},"file":"test.js","delivery":"oneShot",
+                "args":{"kind":"any"},"result":{"kind":"any"}});
+        }
+        functions["upload"]["actionCapabilities"] = serde_json::json!({"storage":true});
+        functions["tool"]["actionProfile"] = serde_json::json!("agent");
+        functions["tool"]["actionCapabilities"] =
+            serde_json::json!({"tools":{"save":{"kind":"internalReducer","function":"internal"}}});
+        let mut module = serde_json::json!({"generation":1,"language":"typescript","entrypoint":"test.js",
+            "files":{},"visibility":{},"crons":[],"functions":functions,
+            "javascript":{"path":"test.js","hash":format!("{:x}", Sha256::digest(code.as_bytes())),"code":base64::engine::general_purpose::STANDARD.encode(code)}});
+        let hash = crate::modules::canonical_artifact_hash(module.as_object().unwrap()).unwrap();
+        module["hash"] = serde_json::json!(hash);
+        runtime
+            .inner
+            .modules
+            .install(
+                &runtime.inner.module_host,
+                RuntimeManifestRecord {
+                    project_id: "project".into(),
+                    module_hash: hash,
+                    manifest: serde_json::json!({"module":module}),
+                },
+            )
+            .await
+            .unwrap();
+        for tenant in ["tenant-id", "CAREERS"] {
+            let (message, connection) = authenticate(
+                &runtime,
+                "auth".into(),
+                None,
+                Some("project"),
+                Some(tenant),
+                AuthMode {
+                    control_only: false,
+                    public: true,
+                },
+                "connection",
+            )
+            .await;
+            assert!(matches!(message, ServerMessage::AuthResult { .. }));
+            let session = connection.tenant.unwrap();
+            assert!(session.is_anonymous());
+            assert!(connection.identity.is_none());
+            assert_eq!(session.route.tenant_id, "tenant-id");
+            let value = runtime
+                .execute_tenant_query(&session, "preview", serde_json::json!({}))
+                .await
+                .unwrap();
+            assert!(value["account"].is_null());
+            assert!(value["member"].is_null());
+            assert_eq!(value["tenant"], "tenant-id");
+            assert!(value["invocation"]["actorAccountId"].is_null());
+        }
+        for (project, tenant) in [("project", "unknown"), ("other", "tenant-id")] {
+            let (message, connection) = authenticate(
+                &runtime,
+                "auth".into(),
+                None,
+                Some(project),
+                Some(tenant),
+                AuthMode {
+                    control_only: false,
+                    public: true,
+                },
+                "connection",
+            )
+            .await;
+            assert_eq!(
+                message,
+                ServerMessage::AuthError {
+                    id: "auth".into(),
+                    error: "public tenant session is unavailable".into()
+                }
+            );
+            assert!(connection.tenant.is_none());
+        }
+        let session = TenantSession::anonymous(route);
+        let result = runtime
+            .execute_tenant_reducer(
+                &session,
+                "public-apply",
+                None,
+                "apply",
+                serde_json::json!({"id":"application"}),
+            )
+            .await
+            .unwrap();
+        assert!(result.value["member"].is_null());
+        assert!(result.committed_revision.is_some());
+        assert!(call_watermark_after_sent_replica_work(
+            &ServerMessage::ReducerResult {
+                id: "r".into(),
+                path: None,
+                result: result.value,
+                origin_command_id: "r".into(),
+                committed_revision: result.committed_revision,
+                trace: None
+            },
+            true,
+            None
+        )
+        .is_some());
+        for path in ["action", "tool"] {
+            let result = runtime
+                .execute_tenant_action(&session, path, serde_json::json!({}))
+                .await
+                .unwrap();
+            assert!(result.value["member"].is_null());
+            assert!(result.value["account"].is_null());
+        }
+        assert!(runtime
+            .execute_tenant_action(&session, "private", serde_json::json!({}))
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("authenticate with an active tenant"));
+        assert!(runtime
+            .execute_tenant_reducer(&session, "r", None, "internal", serde_json::json!({}))
+            .await
+            .is_err());
+        assert!(runtime
+            .open_live_query(
+                &session,
+                "l".into(),
+                "preview".into(),
+                serde_json::json!({})
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("authenticate with an active tenant"));
+        let request =
+            serde_json::from_value(serde_json::json!({"id":"replica","path":"preview","args":{}}))
+                .unwrap();
+        assert!(runtime
+            .open_replica(&session, request)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("authenticate with an active tenant"));
+        let upload = runtime
+            .execute_tenant_action(&session, "upload", serde_json::json!({}))
+            .await
+            .unwrap()
+            .value;
+        assert!(upload["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://uploads.example.test/storage/"));
+        let file_id = upload["fileId"].as_str().unwrap();
+        let row = sqlx::query("SELECT owner_id,visibility FROM _gonvex_files WHERE id=$1")
+            .bind(file_id)
+            .fetch_one(&fixture)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("owner_id"), "");
+        assert_eq!(row.get::<String, _>("visibility"), "tenant");
+        sqlx::query("UPDATE _gonvex_files SET status='uploaded',size_bytes=3 WHERE id=$1")
+            .bind(file_id)
+            .execute(&fixture)
+            .await
+            .unwrap();
+        let metadata = runtime
+            .execute_tenant_reducer(
+                &session,
+                "metadata",
+                None,
+                "metadata",
+                serde_json::json!({"fileId":file_id}),
+            )
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(metadata["tenantId"], "tenant-id");
+        assert_eq!(metadata["size"], 3);
+        assert_eq!(metadata["status"], "uploaded");
+        let mut member_session = session.clone();
+        member_session.identity.account.id = "account".into();
+        member_session.member.id = "member".into();
+        member_session.member.account_id = "account".into();
+        member_session.member.status = "active".into();
+        let signed_in = runtime
+            .execute_tenant_query(&member_session, "preview", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(signed_in["account"]["id"], "account");
+        assert_eq!(signed_in["member"]["id"], "member");
+        runtime
+            .execute_tenant_action(&member_session, "private", serde_json::json!({}))
+            .await
+            .unwrap();
+        // Public Actions cannot inherit the member's 15-minute budget.
+        let started = std::time::Instant::now();
+        assert!(runtime
+            .execute_tenant_action(&session, "slowAction", serde_json::json!({}))
+            .await
+            .is_err());
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(runtime
+            .execute_tenant_action(&member_session, "slowAction", serde_json::json!({}))
+            .await
+            .is_ok());
+
+        use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+        async fn read_socket(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> serde_json::Value {
+            let frame = tokio::time::timeout(Duration::from_secs(40), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(frame.to_text().unwrap()).unwrap()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                server_runtime
+                    .router()
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let socket_url = format!("ws://{address}/ws?public=1");
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('other','Other','multiTenant','active')").execute(&fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('other-route','other','tenant-id','Other','other-careers',$1,'active'),('other-tenant','project','tenant-other','Other','other',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        for (project, tenant) in [("project", "tenant-other"), ("other", "tenant-id")] {
+            let (mut socket, _) = connect_async(&socket_url).await.unwrap();
+            read_socket(&mut socket).await;
+            socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"first","public":true,"project":"project","tenant":"careers"}).to_string().into())).await.unwrap();
+            assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
+            // Domain and canonical ID denote the same pinned scope.
+            socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"same","public":true,"project":"project","tenant":"tenant-id"}).to_string().into())).await.unwrap();
+            assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
+            socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"switch","public":true,"project":project,"tenant":tenant}).to_string().into())).await.unwrap();
+            assert_eq!(
+                read_socket(&mut socket).await["error"],
+                "public connection scope is fixed"
+            );
+            assert!(matches!(socket.next().await, Some(Ok(WsMessage::Close(_)))));
+        }
+        let (mut socket, _) = connect_async(&socket_url).await.unwrap();
+        read_socket(&mut socket).await;
+        socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"batch-auth","public":true,"project":"project","tenant":"careers"}).to_string().into())).await.unwrap();
+        assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
+        socket.send(WsMessage::Text(serde_json::json!({"type":"reducer.callMany","calls":[{"id":"slow-first","path":"slow","args":{"id":"before-revocation"}},{"id":"after","path":"apply","args":{"id":"after-revocation"}}]}).to_string().into())).await.unwrap();
+        // Wait until the first call is running before revoking its tenant.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let running: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE state='active' AND query = 'SELECT 1 FROM pg_sleep(31)')").fetch_one(&fixture).await.unwrap();
+                if running { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&fixture).await.unwrap();
+        let first = read_socket(&mut socket).await;
+        assert_eq!(first["type"], "reducer.result");
+        assert_eq!(first["id"], "slow-first");
+        assert_eq!(read_socket(&mut socket).await["type"], "replica.watermark");
+        let rejected = read_socket(&mut socket).await;
+        assert_eq!(rejected["id"], "after");
+        assert_eq!(rejected["error"], "public tenant session is unavailable");
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM applications WHERE id='after-revocation'")
+                .fetch_one(&fixture)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+        socket.close(None).await.ok();
+        server.abort();
+        sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled'")
+            .execute(&fixture)
+            .await
+            .unwrap();
+        let (message, _) = authenticate(
+            &runtime,
+            "auth".into(),
+            None,
+            Some("project"),
+            Some("careers"),
+            AuthMode {
+                control_only: false,
+                public: true,
+            },
+            "connection",
+        )
+        .await;
+        assert!(matches!(message, ServerMessage::AuthError { .. }));
+        runtime.inner.module_host.shutdown().await;
+        fixture.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
     }
 
     fn upload_signature(secret: &str, key: &str, expires: i64) -> String {

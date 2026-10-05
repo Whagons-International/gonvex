@@ -377,6 +377,7 @@ Still in progress before a stable production release:
 - Current limits: https://desarso.github.io/gonvex/docs/current-limits/
 - Replica Collections and Local Replica: https://desarso.github.io/gonvex/docs/replica-collections/
 - Scheduling: https://desarso.github.io/gonvex/docs/scheduling/
+- Public tenant functions for signed-out browsers: [docs/public-functions.md](docs/public-functions.md)
 - Agent function catalog and attribution: [docs/agent-function-catalog-and-attribution.md](docs/agent-function-catalog-and-attribution.md)
 
 Run the docs locally:

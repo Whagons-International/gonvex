@@ -264,6 +264,8 @@ pub enum ClientMessage {
         tenant: Option<String>,
         #[serde(default, rename = "controlOnly", skip_serializing_if = "is_false")]
         control_only: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        public: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device: Option<BrowserTelemetryInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -650,6 +652,27 @@ mod tests {
             serde_json::from_value(expected.clone()).expect("server frame");
         let actual = serde_json::to_value(message).expect("serialized server frame");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn public_auth_round_trips_without_credentials() {
+        let frame = serde_json::json!({"type":"auth","id":"public","project":"project","tenant":"careers","public":true});
+        let message: ClientMessage = serde_json::from_value(frame.clone()).unwrap();
+        assert!(matches!(
+            &message,
+            ClientMessage::Auth {
+                public: true,
+                token: None,
+                control_only: false,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(message).unwrap(), frame);
+        let legacy: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type":"auth","id":"signed-in","token":"session"}),
+        )
+        .unwrap();
+        assert!(matches!(legacy, ClientMessage::Auth { public: false, .. }));
     }
 
     #[test]

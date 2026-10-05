@@ -35,6 +35,7 @@ pub struct Config {
     /// Trusted backend services that may open tenant-scoped service sessions.
     /// Parsed from `GONVEX_SERVICE_PRINCIPALS`; empty disables the feature.
     pub service_principals: Vec<ServicePrincipalConfig>,
+    pub public_functions: crate::public_functions::PublicLimits,
 }
 
 /// One trusted backend service credential. Only the SHA-256 digest of the
@@ -154,6 +155,8 @@ pub enum ConfigError {
     StringMap { name: &'static str },
     #[error("GONVEX_SERVICE_PRINCIPALS is invalid: {0}")]
     ServicePrincipals(String),
+    #[error("GONVEX_PUBLIC_TRUSTED_PROXY_IPS must be comma-separated IP addresses")]
+    PublicProxies,
 }
 
 impl Config {
@@ -369,6 +372,56 @@ impl Config {
                     true,
                 )?,
                 public_base_url: non_empty(lookup("GONVEX_PUBLIC_URL")).unwrap_or_default(),
+            },
+            public_functions: crate::public_functions::PublicLimits {
+                pending_per_ip: integer(
+                    "GONVEX_PENDING_CONNECTIONS_PER_IP",
+                    lookup("GONVEX_PENDING_CONNECTIONS_PER_IP"),
+                    100,
+                )?,
+                auth_timeout: Duration::from_secs(integer(
+                    "GONVEX_AUTH_TIMEOUT_SECONDS",
+                    lookup("GONVEX_AUTH_TIMEOUT_SECONDS"),
+                    10,
+                )? as u64),
+                action_timeout: Duration::from_secs(integer(
+                    "GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS",
+                    lookup("GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS"),
+                    60,
+                )? as u64),
+                connection_calls: integer(
+                    "GONVEX_PUBLIC_CALLS_PER_CONNECTION",
+                    lookup("GONVEX_PUBLIC_CALLS_PER_CONNECTION"),
+                    30,
+                )?,
+                ip_calls: integer(
+                    "GONVEX_PUBLIC_CALLS_PER_IP",
+                    lookup("GONVEX_PUBLIC_CALLS_PER_IP"),
+                    120,
+                )?,
+                payload_bytes: integer(
+                    "GONVEX_PUBLIC_MAX_PAYLOAD_BYTES",
+                    lookup("GONVEX_PUBLIC_MAX_PAYLOAD_BYTES"),
+                    64 << 10,
+                )?,
+                connections_per_ip: integer(
+                    "GONVEX_PUBLIC_CONNECTIONS_PER_IP",
+                    lookup("GONVEX_PUBLIC_CONNECTIONS_PER_IP"),
+                    20,
+                )?,
+                trusted_proxies: non_empty(lookup("GONVEX_PUBLIC_TRUSTED_PROXY_IPS"))
+                    .map(|value| {
+                        value
+                            .split(',')
+                            .map(|ip| {
+                                ip.trim()
+                                    .parse::<IpAddr>()
+                                    .map_err(|_| ConfigError::PublicProxies)
+                            })
+                            .collect()
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
             },
             service_principals: service_principals(lookup("GONVEX_SERVICE_PRINCIPALS"))?,
         })

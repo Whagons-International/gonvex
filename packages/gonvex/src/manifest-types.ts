@@ -13,6 +13,7 @@ export type FunctionEntry = {
   /** Language-neutral result metadata from a TypeScript module artifact. */
   result?: ModuleSchema;
   internal?: boolean;
+  public?: boolean;
   delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;
   replica?: ReplicaCollectionDefinition;
@@ -216,6 +217,7 @@ export type ModuleFunction = {
   result: ModuleSchema;
   dependencies?: FunctionDependencies;
   internal?: boolean;
+  public?: boolean;
   delivery?: "oneShot" | "live" | "replica";
   replica?: ReplicaCollectionDefinition;
   // Declarative metadata is emitted into the signed artifact contract and

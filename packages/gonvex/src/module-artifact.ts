@@ -447,6 +447,7 @@ export function moduleManifestFunctions(artifact: ModuleArtifact): Record<string
       ...(entry.optimistic === undefined ? {} : { optimistic: entry.optimistic }),
       ...(entry.actionProfile === undefined ? {} : { actionProfile: entry.actionProfile }),
       ...(entry.actionCapabilities === undefined ? {} : { actionCapabilities: entry.actionCapabilities }),
+      ...(entry.public === undefined ? {} : { public: entry.public }),
       ...(entry.interactive === undefined ? {} : { interactive: entry.interactive }),
       ...(entry.classification === undefined ? {} : { classification: entry.classification }),
       ...(entry.description === undefined ? {} : { description: entry.description }),
@@ -678,7 +679,7 @@ function moduleFunction(input: {
   if (delivery === "replica" && !replica) {
     throw new Error(`Replica Collection ${input.path} requires a replica definition`);
   }
-  if (input.kind === "query" && (delivery ?? "oneShot") === "oneShot") {
+  if (input.kind === "query" && (delivery ?? "oneShot") === "oneShot" && input.options?.get("public")?.value !== true) {
     const plan = dependencies?.liveQueryPlan;
     if (!plan) throw new Error(`one-shot query ${input.path} requires a structured live query plan`);
     if (!plan.table.trim() || !plan.key.trim() || !plan.columns?.length || !plan.columns.includes(plan.key)) {
@@ -692,6 +693,12 @@ function moduleFunction(input: {
     throw new Error(`${input.kind} ${input.path} internal must be a boolean literal`);
   }
   const internal = input.internal || internalEntry?.value === true;
+  const publicEntry = input.options?.get("public");
+  if (publicEntry && typeof publicEntry.value !== "boolean") throw new Error(`${input.kind} ${input.path} public must be a boolean literal`);
+  const isPublic = publicEntry?.value === true;
+  if (isPublic && internal) throw new Error(`public function ${input.path} cannot be internal`);
+  if (isPublic && input.kind === "query" && ((delivery ?? "oneShot") !== "oneShot" || replica !== undefined)) throw new Error(`public query ${input.path} must be one-shot`);
+
   const interactiveEntry = input.options?.get("interactive");
   const interactiveValue = interactiveEntry?.value;
   if (interactiveEntry && typeof interactiveValue !== "boolean") {
@@ -701,6 +708,9 @@ function moduleFunction(input: {
   const offline = declaredOffline ?? (input.kind === "reducer" ? { mode: interactive ? "allowed" : "forbidden" } : undefined);
   const localExecution = input.kind === "reducer" && interactive && (offline as { mode?: string } | undefined)?.mode === "allowed"
     && optimistic === undefined && !input.options?.get("nonOptimisticReason");
+  if (isPublic && input.kind === "reducer" && (interactiveValue !== false || (offline as { mode?: string })?.mode === "allowed" || optimistic !== undefined || localExecution)) {
+    throw new Error(`public reducer ${input.path} requires interactive: false and server-only execution`);
+  }
   const classification = internal ? "internal" : interactive ? "interactive" : "system";
   const descriptionEntry = input.options?.get("description");
   let description: string | undefined;
@@ -734,6 +744,7 @@ function moduleFunction(input: {
     handler: input.handler,
     file: input.file,
     ...(internal ? { internal: true } : {}),
+    ...(isPublic ? { public: true } : {}),
     ...(input.exportName ? { export: input.exportName } : {}),
     args: schemas.args,
     result: schemas.result,

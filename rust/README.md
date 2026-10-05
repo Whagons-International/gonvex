@@ -63,3 +63,5 @@ gonvex-admin migrate identity-v2 --plan --source PROJECT --run-id RUN --input id
 gonvex-admin migrate identity-v2 --apply --plan-file identity-v2-plan.json
 gonvex-admin migrate identity-v2 --verify --plan-file identity-v2-plan.json
 ```
+
+[Public tenant function admission and abuse limits](../docs/public-functions.md).
