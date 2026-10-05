@@ -26,6 +26,7 @@ fn structural_capabilities(kind: &FunctionKind) -> Capabilities {
         FunctionKind::Reducer => Capabilities {
             db_read: true,
             db_write: true,
+            storage: true,
             action_outbox: true,
             scheduler: true,
             ..Capabilities::default()

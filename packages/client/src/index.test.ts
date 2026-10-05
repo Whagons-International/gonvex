@@ -3378,3 +3378,67 @@ it('does not retain abandoned React watches and can subscribe again after cleanu
   await vi.waitFor(() => expect((client as any).replica.listeners.size).toBe(before));
   client.close();
 });
+
+describe("public tenant connections", () => {
+  it("authenticates without credentials or a replica directive and completes server calls", async () => {
+    const localStorage = new MemoryLocalReplicaStorage();
+    const restore = vi.spyOn(localStorage, "loadSession");
+    const createLocal = vi.fn(() => { throw new Error("Public clients must not create a local executor"); });
+    const client = new GonvexClient("ws://public.test", {
+      project: "project", public: { tenant: "careers" }, localReplica: { storage: localStorage },
+      localRuntime: { artifactHash: "test", tables: [], create: createLocal, clientContract: { version: 7, offlineMaxAgeMs: null } },
+    });
+    const read = client.query({ kind: "query", path: "jobs.list" });
+    const socket = latestSocket();
+    socket.open();
+    const auth = sentMessages().find(message => message.type === "auth");
+    expect(auth).toMatchObject({ public: true, project: "project", tenant: "careers", controlOnly: false, clientContract: 7 });
+    expect(auth.token).toBeUndefined();
+    expect(sentMessages().some(message => message.type === "query.call")).toBe(false);
+    socket.receive({ type: "auth.result", id: auth.id, result: { public: true, projectId: "project", tenantId: "tenant-id", accountId: "" } });
+    const queryCall = sentMessages().find(message => message.type === "query.call");
+    socket.receive({ type: "query.result", id: queryCall.id, result: ["job"] });
+    await expect(read).resolves.toEqual(["job"]);
+    const write = client.reducer({ kind: "reducer", path: "jobs.apply", localExecution: 1, offline: { mode: "allowed" } }, {});
+    const call = sentMessages().find(message => message.type === "reducer.call");
+    socket.receive({ type: "reducer.result", id: call.id, originCommandId: call.id, committedRevision: 4, result: "submitted" });
+    socket.receive({ type: "replica.watermark", revision: 4 });
+    await expect(write).resolves.toBe("submitted");
+    const action = client.action({ kind: "action", path: "jobs.upload" });
+    const actionCall = sentMessages().find(message => message.type === "action.call");
+    socket.receive({ type: "action.result", id: actionCall.id, result: "upload-url" });
+    await expect(action).resolves.toBe("upload-url");
+    expect(restore).not.toHaveBeenCalled();
+    expect(createLocal).not.toHaveBeenCalled();
+    expect(sentMessages().some(message => message.type === "replica.open" || message.type === "replica.openMany")).toBe(false);
+    expect(await client.outboxCount()).toBe(0);
+    client.close();
+  });
+
+  it("rejects credentials, tenant switching and offline queueing", async () => {
+    expect(() => new GonvexClient("ws://public.test", { public: { tenant: "t" } })).toThrow(/project/);
+    expect(() => new GonvexClient("ws://public.test", { project: "p", public: { tenant: "t" }, token: "token" })).toThrow(/credentials/);
+    expect(() => new GonvexClient("ws://public.test", { project: "p", public: { tenant: "t" }, fetchToken: async () => "token" })).toThrow(/credentials/);
+    const client = new GonvexClient("ws://public.test", { project: "p", public: { tenant: "t" } });
+    expect(() => client.setAuth({ tenant: "other" })).toThrow(/scope is fixed/);
+    expect(() => client.setAuth({ token: "token" })).toThrow(/scope is fixed/);
+    await expect(client.reducer({ kind: "reducer", path: "apply" }, {}, { offline: "queue" })).rejects.toThrow(/server-only/);
+    client.close();
+  });
+
+  it("reconnects by repeating public auth without refreshing a token", async () => {
+    const client = new GonvexClient("ws://public.test", { project: "p", public: { tenant: "t" } });
+    client.connect();
+    const first = latestSocket();
+    first.open();
+    const firstAuth = sentMessages(first)[0];
+    first.receive({ type: "auth.result", id: firstAuth.id, result: { public: true, tenantId: "t" } });
+    first.disconnect();
+    await vi.advanceTimersByTimeAsync(2000);
+    const next = latestSocket();
+    expect(next).not.toBe(first);
+    next.open();
+    expect(sentMessages(next)[0]).toMatchObject({ type: "auth", public: true, tenant: "t" });
+    client.close();
+  });
+});

@@ -53,6 +53,7 @@ fn test_config(database_url: String) -> Config {
         sandbox: SandboxConfig::default(),
         storage: StorageConfig::default(),
         service_principals: Vec::new(),
+        public_functions: Default::default(),
     }
 }
 

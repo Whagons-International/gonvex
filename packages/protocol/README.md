@@ -42,3 +42,5 @@ The package includes:
 ## Documentation
 
 Full docs live at https://desarso.github.io/gonvex/
+
+[Public tenant authentication adds `public: true` to an `auth` frame](../../docs/public-functions.md).

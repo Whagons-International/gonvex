@@ -41,6 +41,7 @@ export type FunctionManifestEntry = {
   args?: ModuleSchema;
   result?: ModuleSchema;
   internal?: boolean;
+  public?: boolean;
   delivery?: "oneShot" | "live" | "replica";
   dependencies?: FunctionDependencies;
   replica?: ReplicaCollectionDefinition;
@@ -268,7 +269,7 @@ export type GonvexManifest = {
 };
 
 export type ClientMessage =
-  | { type: "auth"; clientContract?: number; id: string; token?: string; project?: string; tenant?: string; controlOnly?: boolean; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
+  | { type: "auth"; clientContract?: number; id: string; token?: string; project?: string; tenant?: string; controlOnly?: boolean; public?: boolean; device?: BrowserTelemetryInfo; capabilities?: ClientCapabilities }
   | { type: "query.call"; id: string; path: string; args: JsonValue; scope?: ExecutionScope }
   | { type: "query.subscribe"; id: string; path: string; args: JsonValue; scope?: ExecutionScope; windowRevision?: string }
   | { type: "query.unsubscribe"; id: string }

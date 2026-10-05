@@ -39,4 +39,5 @@ url.workspace = true
 duckdb.workspace = true
 
 [dev-dependencies]
+tokio-tungstenite = "0.29"
 tower.workspace = true

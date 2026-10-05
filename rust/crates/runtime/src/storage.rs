@@ -143,9 +143,23 @@ impl StorageManager {
         self.ensure_table(&control, &session).await?;
         match operation.trim() {
             "generateUploadUrl" => {
+                if session.is_anonymous() && self.config.public_base_url.is_empty() {
+                    return Err(
+                        "public uploads require GONVEX_PUBLIC_URL for bounded proxy uploads"
+                            .to_owned(),
+                    );
+                }
+                if request.size > MAX_DIRECT_STORE_BYTES as i64 {
+                    return Err("upload too large".to_owned());
+                }
+
                 let file_id = Uuid::new_v4().simple().to_string();
                 let key = self.object_key(&session, &file_id);
-                let visibility = visibility(&request.visibility);
+                let visibility = if session.is_anonymous() {
+                    "tenant"
+                } else {
+                    visibility(&request.visibility)
+                };
                 let owner = owner(&session, &request.owner_id);
                 let mut transaction = control
                     .begin_tenant_transaction(&session.route, false)
@@ -253,7 +267,11 @@ impl StorageManager {
                 self.object_request(Method::PUT, &key, content.clone(), &request.content_type)
                     .await?;
                 let checksum = hex_sha256(&content);
-                let visibility = visibility(&request.visibility);
+                let visibility = if session.is_anonymous() {
+                    "tenant"
+                } else {
+                    visibility(&request.visibility)
+                };
                 let owner = owner(&session, &request.owner_id);
                 let mut transaction = control
                     .begin_tenant_transaction(&session.route, false)
@@ -480,6 +498,36 @@ impl StorageManager {
             .begin_tenant_transaction(&session.route, false)
             .await
             .map_err(|error| error.to_string())?;
+        let metadata = self
+            .metadata_in_transaction(session, &mut transaction, file_id, finalize)
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(metadata)
+    }
+
+    pub(crate) async fn reducer_metadata(
+        &self,
+        session: &TenantSession,
+        transaction: &mut gonvex_postgres::TenantTransaction,
+        file_id: &str,
+    ) -> Result<Value, String> {
+        self.require_configured()?;
+        let metadata = self
+            .metadata_in_transaction(session, transaction, file_id, true)
+            .await?;
+        serde_json::to_value(metadata).map_err(|error| error.to_string())
+    }
+
+    async fn metadata_in_transaction(
+        &self,
+        session: &TenantSession,
+        transaction: &mut gonvex_postgres::TenantTransaction,
+        file_id: &str,
+        finalize: bool,
+    ) -> Result<FileMetadata, String> {
         let row = sqlx::query(
             r#"SELECT id,tenant_id,owner_id,bucket,object_key,content_type,
                     size_bytes,checksum,visibility,status,created_at,uploaded_at
@@ -508,10 +556,6 @@ impl StorageManager {
                 metadata = metadata_from_row(&row);
             }
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| error.to_string())?;
         Ok(metadata)
     }
 
@@ -768,6 +812,9 @@ fn visibility(value: &str) -> &'static str {
 }
 
 fn owner(session: &TenantSession, requested: &str) -> String {
+    if session.is_anonymous() {
+        return String::new();
+    }
     if requested.trim().is_empty() {
         session.identity.account.id.clone()
     } else {

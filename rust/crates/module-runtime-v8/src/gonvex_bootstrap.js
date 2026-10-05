@@ -591,18 +591,19 @@
     }
     if (granted.storage) {
       const storage = (operation, payload) => hostCall({ kind: "storage", operation, payload: optional(payload) });
-      context.storage = Object.freeze({
+      const metadata = { getMetadata: (fileId) => storage("getMetadata", { fileId: text("fileId", fileId) }) };
+      context.storage = Object.freeze(request.kind === "reducer" ? metadata : {
+        ...metadata,
         generateUploadUrl: (options) => storage("generateUploadUrl", options ?? {}),
         getUrl: (fileId) => storage("getUrl", { fileId: text("fileId", fileId) }),
         generateDownloadUrl: (fileId, ttlMs) => storage("generateDownloadUrl", { fileId: text("fileId", fileId), ttlMs: ttlMs ?? 0 }),
-        getMetadata: (fileId) => storage("getMetadata", { fileId: text("fileId", fileId) }),
         delete: (fileId) => storage("delete", { fileId: text("fileId", fileId) }),
-        // Bytes travel base64-encoded: the op boundary is JSON text in both
-        // directions, so binary payloads have to be named as such.
+        // Bytes travel base64-encoded across the JSON boundary.
         store: (contentBase64, options) => storage("store", { contentBase64: text("content", contentBase64), ...(options ?? {}) }),
         call: (operation, payload) => storage(text("operation", operation), payload),
       });
     }
+
     if (granted.sandbox) {
       const sandbox = (operation, payload) => hostCall({ kind: "sandbox", operation, payload: optional(payload) });
       context.sandbox = Object.freeze({

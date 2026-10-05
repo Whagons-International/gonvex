@@ -22,6 +22,7 @@ use crate::module_host::{ModuleHost, ModuleHostError};
 pub struct FunctionDefinition {
     pub kind: String,
     pub internal: bool,
+    pub public: bool,
     pub delivery: String,
     pub action_profile: String,
     pub action_capabilities: Value,
@@ -578,8 +579,45 @@ fn artifact_from_manifest(
         }
         let internal = function
             .get("internal")
-            .and_then(Value::as_bool)
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(format!("function {path:?} internal must be a boolean")))
+            })
+            .transpose()?
             .unwrap_or(false);
+        let public = function
+            .get("public")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or_else(|| invalid(format!("function {path:?} public must be a boolean")))
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if public
+            && (internal
+                || (kind == "query"
+                    && (function.contains_key("replica")
+                        || function
+                            .get("delivery")
+                            .and_then(Value::as_str)
+                            .unwrap_or("oneShot")
+                            != "oneShot"))
+                || (kind == "reducer"
+                    && (function.get("interactive").and_then(Value::as_bool) != Some(false)
+                        || function
+                            .get("offline")
+                            .and_then(|v| v.get("mode"))
+                            .and_then(Value::as_str)
+                            == Some("allowed")
+                        || function.contains_key("localExecution")
+                        || function.contains_key("optimistic"))))
+        {
+            return Err(invalid(format!(
+                "public function {path:?} must be non-internal, one-shot and server-only"
+            )));
+        }
         let declared_interactive = function
             .get("interactive")
             .map(|value| {
@@ -656,6 +694,7 @@ fn artifact_from_manifest(
             .to_owned();
         let mut metadata = Map::new();
         for name in [
+            "public",
             "actionProfile",
             "offline",
             "optimistic",
@@ -683,6 +722,7 @@ fn artifact_from_manifest(
         definitions.insert(
             path.clone(),
             FunctionDefinition {
+                public,
                 kind,
                 internal,
                 delivery,
@@ -786,7 +826,7 @@ fn artifact_from_manifest(
     ))
 }
 
-fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, String> {
+pub(crate) fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, String> {
     let javascript = module
         .get("javascript")
         .and_then(Value::as_object)
@@ -952,6 +992,43 @@ mod tests {
             Value::Null
         );
         assert_eq!(functions["tasks.find"].kind, "query");
+    }
+
+    #[test]
+    fn public_manifest_admission_is_explicit_and_server_only() {
+        for entry in [
+            serde_json::json!({"kind":"query","public":true,"internal":true}),
+            serde_json::json!({"kind":"query","public":true,"delivery":"live"}),
+            serde_json::json!({"kind":"query","public":true,"delivery":"replica"}),
+            serde_json::json!({"kind":"reducer","public":true}),
+            serde_json::json!({"kind":"reducer","public":true,"interactive":false,"localExecution":1}),
+            serde_json::json!({"kind":"reducer","public":true,"interactive":false,"offline":{"mode":"allowed"}}),
+            serde_json::json!({"kind":"action","public":"true"}),
+        ] {
+            let mut module = serde_json::json!({"generation":1,"language":"typescript","entrypoint":"test.js","files":{},"functions":{"test":entry},"javascript":{"path":"test.js","hash":"abc","code":"eA=="}});
+            let hash = canonical_artifact_hash(module.as_object().unwrap()).unwrap();
+            module["hash"] = serde_json::json!(hash);
+            let record = RuntimeManifestRecord {
+                project_id: "project".into(),
+                module_hash: hash,
+                manifest: serde_json::json!({"module":module}),
+            };
+            assert!(artifact_from_manifest(&record).is_err());
+        }
+        let mut module = serde_json::json!({"generation":1,"language":"typescript","entrypoint":"test.js","files":{},"functions":{"test":{"kind":"reducer","public":true,"interactive":false,"classification":"system"}},"javascript":{"path":"test.js","hash":"abc","code":"eA=="}});
+        let hash = canonical_artifact_hash(module.as_object().unwrap()).unwrap();
+        module["hash"] = serde_json::json!(hash);
+        let record = RuntimeManifestRecord {
+            project_id: "project".into(),
+            module_hash: hash,
+            manifest: serde_json::json!({"module":module}),
+        };
+        let (artifact, functions, _) = artifact_from_manifest(&record).unwrap();
+        assert!(functions["test"].public);
+        assert_eq!(
+            artifact.functions[0].metadata["public"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]
