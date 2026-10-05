@@ -66,7 +66,7 @@ Use this client with the regular `GonvexProvider`, `useQuery`, `useQueryResult`,
 
 Public mode is fixed for the lifetime of the client. Create another client to change project or tenant, or to sign in. Credentials and refresh callbacks cannot be combined with public mode. The client uses online server calls and does not restore persisted replicas, local executors, or reducer outboxes. It repeats public authentication after reconnecting. Live Query and Replica subscriptions remain unavailable.
 
-The actual protocol uses `auth`, not `authenticate`:
+The client selects `/ws?public=1` at upgrade time, which enforces the public frame and cumulative message ceilings before authentication or JSON parsing. Raw WebSocket callers must also select this transport. `/ws` retains member transport limits and rejects public authentication. The actual protocol uses `auth`, not `authenticate`:
 
 ```json
 {"type":"auth","id":"auth-1","project":"whagons","tenant":"careers","public":true,"controlOnly":false}
@@ -84,7 +84,9 @@ There is no replica directive or local identity. Invalid, unknown, cross-project
 {"type":"auth.error","id":"auth-1","error":"public tenant session is unavailable"}
 ```
 
-The runtime checks an active Control Plane tenant directory row, even for configured tenant database URLs. Routing domains are case insensitive. A matching tenant ID takes precedence over a matching domain. A session stays scoped to one canonical tenant database; caller arguments cannot change it. The runtime rechecks public admission every 30 seconds and closes authorization when the tenant is disabled.
+The runtime checks an active Control Plane tenant directory row, even for configured tenant database URLs. Routing domains are case insensitive. A matching tenant ID takes precedence over a matching domain. A session stays scoped to one canonical tenant database; caller arguments cannot change it. The runtime pins the canonical project and tenant on the first successful public admission. Reauthentication to that same scope may use its ID or domain; admission to another project or tenant returns an error and closes the socket.
+
+The runtime checks public admission before every call, including each reducer batch item, using a cache with a maximum age of 30 seconds. An independent monitor refreshes admission while the connection loop is executing work. Failed admission stays revoked for that socket. Work started before revocation may complete and commit; new calls after a failed check are rejected. Public Actions have a 60-second maximum deadline, configurable with `GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS`, also bounded by the normal Action deadline.
 
 Query, Action, and Reducer call frames are unchanged. Non-public calls return an error containing `authenticate with an active tenant`. Anonymous sessions cannot subscribe to Live Queries or open Replica Collections, including batched requests. They have no change-feed subscription. Committed calls still receive the terminal replica watermark needed to resolve normal client promises.
 
@@ -100,7 +102,9 @@ ctx.tenant?.id; // Canonical tenant ID.
 
 There are no actor account or member IDs in invocation attribution. The host supplies an empty permission object. Module SDK identity types already model account and member as nullable.
 
-Only an explicitly public Action with `capabilities: { storage: true }` can expose an upload URL to an anonymous browser. Anonymous uploads always have `visibility: "tenant"` and an empty `ownerId`, overriding requested owner and visibility values. They are tenant files, not publicly readable objects. `GONVEX_PUBLIC_URL` must be set so the URL uses the runtime proxy; direct S3 upload URLs cannot enforce this path's byte ceiling. The existing proxy rejects bodies larger than 128 MiB. Applications should check a smaller PDF size limit and content type themselves.
+Only an explicitly public Action with `capabilities: { storage: true }` can expose an upload URL to an anonymous browser. Anonymous uploads always have `visibility: "tenant"` and an empty `ownerId`, overriding requested owner and visibility values. They are tenant files, not publicly readable objects. `GONVEX_PUBLIC_URL` must be set so the URL uses the runtime proxy; direct S3 upload URLs cannot enforce this path's byte ceiling. Proxy upload URLs are single-use for both anonymous and member uploads. A successful PUT consumes the object key durably in the Control Plane, and an atomic S3 `If-None-Match: *` write prevents concurrent replacement or overwriting an existing finalized object. Reuse returns HTTP 409, including after object deletion. Failed writes may be retried if no object was stored. Direct member presigned uploads retain their existing behavior. The Whagons member upload helper obtains a fresh URL for each upload.
+
+The existing proxy rejects bodies larger than 128 MiB. Applications should check a smaller PDF size limit and content type themselves.
 
 Server-only Reducers expose optional `ctx.storage`, with only `getMetadata(fileId)`. This reads authoritative metadata in the reducer's own transaction and finalizes a pending upload through object-store HEAD when needed. It is absent during local reducer execution. An application reducer can require this capability and verify `tenantId`, `status === "uploaded"`, `contentType`, `size`, and ownership before linking a file. The metadata lookup binds both file ID and session tenant. It never trusts client-supplied metadata. Storage tables must already exist, normally created by the upload Action.
 
@@ -117,8 +121,11 @@ Budgets use 60-second fixed windows, count auth attempts and each call in a batc
 | `GONVEX_PUBLIC_MAX_PAYLOAD_BYTES` | 65536 bytes |
 | `GONVEX_PUBLIC_CONNECTIONS_PER_IP` | 20 connections |
 | `GONVEX_PUBLIC_TRUSTED_PROXY_IPS` | Empty, socket peer IP only |
+| `GONVEX_PENDING_CONNECTIONS_PER_IP` | 100 unauthenticated sockets across both transports |
+| `GONVEX_AUTH_TIMEOUT_SECONDS` | 10 seconds to authenticate |
+| `GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS` | 60 seconds |
 
-Rate limits return correlated call errors containing `public call rate limit exceeded`. Connection exhaustion returns `auth.error` with `public connection limit exceeded` and closes the socket. Oversized anonymous or unscoped frames close with WebSocket code 1009. Authenticated member frames retain their existing transport limits.
+Rate limits return correlated call errors containing `public call rate limit exceeded`. Connection slots are reserved at HTTP upgrade, so silent public sockets count toward the public cap. Both transports also share the pending-socket cap until successful authentication. Exhaustion rejects the upgrade with HTTP 429. Unauthenticated sockets close with WebSocket code 1008 after the auth deadline. Oversized public frames or fragmented messages fail during transport ingestion and close with code 1009. Authenticated member frames retain their existing transport limits.
 
 Behind a proxy, configure its exact IP in the comma-separated trusted proxy list. The proxy must replace `X-Real-IP` with the real client address. Untrusted peers cannot override their IP with forwarding headers. Custom Axum servers must use `into_make_service_with_connect_info::<SocketAddr>()`; without connection info, requests share one conservative unknown-peer budget.
 

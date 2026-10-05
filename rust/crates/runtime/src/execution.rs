@@ -546,6 +546,17 @@ impl Runtime {
         );
         if definition.action_profile != "agent" || session.is_anonymous() {
             install_execution_deadline(self, &mut provenance, true);
+            if session.is_anonymous() {
+                let limit = unix_millis(SystemTime::now()).saturating_add(
+                    self.inner
+                        .config
+                        .public_functions
+                        .action_timeout
+                        .as_millis() as u64,
+                );
+                provenance.deadline_unix_ms =
+                    Some(provenance.deadline_unix_ms.unwrap_or(limit).min(limit));
+            }
         }
         if !provenance.action_stack.iter().any(|item| item == path) {
             provenance.action_stack.push(path.to_owned());
@@ -580,12 +591,25 @@ impl Runtime {
         invocation.context.capabilities.functions = handler.functions();
         invocation.context.environment = environment;
         invocation.context.action_tools = handler.tools();
-        let value = self
-            .inner
-            .module_host
-            .invoke(invocation, &mut handler)
-            .await
-            .map_err(ExecutionError::from)?;
+        let deadline = invocation.context.deadline_unix_ms;
+        let call = self.inner.module_host.invoke(invocation, &mut handler);
+        let value = if session.is_anonymous() {
+            // The host's engine watchdog has transport slack. Do not let that
+            // grace period keep an anonymous connection's serial loop occupied.
+            let remaining = std::time::Duration::from_millis(
+                deadline
+                    .unwrap_or_default()
+                    .saturating_sub(unix_millis(SystemTime::now())),
+            );
+            tokio::time::timeout(remaining, call)
+                .await
+                .map_err(|_| {
+                    ExecutionError::HostCall("public Action execution deadline exceeded".into())
+                })?
+                .map_err(ExecutionError::from)?
+        } else {
+            call.await.map_err(ExecutionError::from)?
+        };
         Ok(ActionExecution {
             value,
             committed_revision: committed_revisions.maximum(),
@@ -950,7 +974,7 @@ fn require_public_access(
     allow_internal: bool,
 ) -> Result<(), ExecutionError> {
     if session.is_anonymous()
-        && (!function.public && !(allow_internal && function.internal)
+        && (!(function.public || allow_internal && function.internal)
             || function.replica.is_some()
             || matches!(function.delivery.as_str(), "live" | "replica"))
     {

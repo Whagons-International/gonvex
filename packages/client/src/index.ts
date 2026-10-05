@@ -1655,7 +1655,13 @@ export class GonvexClient {
     const isReconnect = this.socket !== undefined;
     this.manuallyClosed = false;
     const generation = ++this.socketGeneration;
-    const socket = new WebSocket(this.url);
+    let transportUrl = this.url;
+    if (this.publicTenant) {
+      const publicUrl = new URL(this.url);
+      publicUrl.searchParams.set("public", "1");
+      transportUrl = publicUrl.toString();
+    }
+    const socket = new WebSocket(transportUrl);
     this.socket = socket;
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;

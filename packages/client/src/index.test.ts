@@ -3391,6 +3391,7 @@ describe("public tenant connections", () => {
     const read = client.query({ kind: "query", path: "jobs.list" });
     const socket = latestSocket();
     socket.open();
+    expect(new URL(socket.url).searchParams.get("public")).toBe("1");
     const auth = sentMessages().find(message => message.type === "auth");
     expect(auth).toMatchObject({ public: true, project: "project", tenant: "careers", controlOnly: false, clientContract: 7 });
     expect(auth.token).toBeUndefined();
@@ -3415,6 +3416,17 @@ describe("public tenant connections", () => {
     client.close();
   });
 
+  it("selects the bounded transport while preserving paths, queries and member URLs", () => {
+    const publicClient = new GonvexClient("wss://runtime.test/proxy/ws?custom=value", { project: "p", public: { tenant: "t" } });
+    publicClient.connect();
+    expect(latestSocket().url).toBe("wss://runtime.test/proxy/ws?custom=value&public=1");
+    publicClient.close();
+    const memberClient = new GonvexClient("wss://runtime.test/proxy/ws?custom=value");
+    memberClient.connect();
+    expect(latestSocket().url).toBe("wss://runtime.test/proxy/ws?custom=value");
+    memberClient.close();
+  });
+
   it("rejects credentials, tenant switching and offline queueing", async () => {
     expect(() => new GonvexClient("ws://public.test", { public: { tenant: "t" } })).toThrow(/project/);
     expect(() => new GonvexClient("ws://public.test", { project: "p", public: { tenant: "t" }, token: "token" })).toThrow(/credentials/);
@@ -3437,6 +3449,7 @@ describe("public tenant connections", () => {
     await vi.advanceTimersByTimeAsync(2000);
     const next = latestSocket();
     expect(next).not.toBe(first);
+    expect(new URL(next.url).searchParams.get("public")).toBe("1");
     next.open();
     expect(sentMessages(next)[0]).toMatchObject({ type: "auth", public: true, tenant: "t" });
     client.close();

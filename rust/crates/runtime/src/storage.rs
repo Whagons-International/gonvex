@@ -183,6 +183,16 @@ impl StorageManager {
                     .commit()
                     .await
                     .map_err(|error| error.to_string())?;
+                if !self.config.public_base_url.is_empty() {
+                    let mut registration = control
+                        .begin_control_transaction(false)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query("INSERT INTO gonvex_storage_uploads(object_key,project_id,tenant_id,file_id) VALUES($1,$2,$3,$4)")
+                        .bind(&key).bind(&session.route.project_id).bind(&session.route.tenant_id).bind(&file_id)
+                        .execute(&mut **registration.transaction()).await.map_err(|e| e.to_string())?;
+                    registration.commit().await.map_err(|e| e.to_string())?;
+                }
                 let expires = millis_or_default(request.expires_ms, DEFAULT_UPLOAD_SECONDS);
                 let (url, method) = if self.config.public_base_url.is_empty() {
                     (self.presign(Method::PUT, &key, expires)?, "PUT")
@@ -365,12 +375,85 @@ impl StorageManager {
 
     pub async fn proxy_put(
         &self,
+        runtime: &Runtime,
         key: &str,
         body: Vec<u8>,
         content_type: &str,
     ) -> Result<(), String> {
-        self.object_request(Method::PUT, key, body, content_type)
+        let control = runtime
+            .inner
+            .control_plane
+            .read()
             .await
+            .clone()
+            .ok_or_else(|| "Control Plane is unavailable".to_owned())?;
+        let mut lookup = control
+            .begin_control_transaction(true)
+            .await
+            .map_err(|e| e.to_string())?;
+        let ticket = sqlx::query("SELECT project_id,tenant_id,file_id,consumed_at FROM gonvex_storage_uploads WHERE object_key=$1")
+            .bind(key).fetch_optional(&mut **lookup.transaction()).await.map_err(|e| e.to_string())?;
+        lookup.commit().await.map_err(|e| e.to_string())?;
+        if let Some(ticket) = ticket {
+            if ticket
+                .get::<Option<DateTime<Utc>>, _>("consumed_at")
+                .is_some()
+            {
+                return Err("upload already consumed".into());
+            }
+            let project: String = ticket.get("project_id");
+            let tenant: String = ticket.get("tenant_id");
+            let file_id: String = ticket.get("file_id");
+            if !project.is_empty() {
+                let route = control
+                    .resolve_tenant(&project, &tenant)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut metadata = control
+                    .begin_tenant_transaction(&route, true)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let status: Option<String> = sqlx::query_scalar("SELECT status FROM _gonvex_files WHERE id=$1 AND tenant_id=$2 AND object_key=$3")
+                    .bind(file_id).bind(tenant).bind(key).fetch_optional(&mut **metadata.transaction()).await.map_err(|e| e.to_string())?;
+                metadata.commit().await.map_err(|e| e.to_string())?;
+                if status.as_deref() != Some("pending") {
+                    return Err("upload already consumed".into());
+                }
+            }
+        }
+        let mut transaction = control
+            .begin_control_transaction(false)
+            .await
+            .map_err(|e| e.to_string())?;
+        // The unique row serializes concurrent uses of this bearer URL across
+        // instances. Failed PUTs roll back; successful writes consume it durably.
+        let claimed = sqlx::query("INSERT INTO gonvex_storage_uploads(object_key,consumed_at) VALUES($1,now()) ON CONFLICT(object_key) DO UPDATE SET consumed_at=now() WHERE gonvex_storage_uploads.consumed_at IS NULL")
+            .bind(key).execute(&mut **transaction.transaction()).await.map_err(|e| e.to_string())?;
+        if claimed.rows_affected() == 0 {
+            return Err("upload already consumed".into());
+        }
+        self.put_once(key, body, content_type).await?;
+        transaction.commit().await.map_err(|e| e.to_string())
+    }
+
+    async fn put_once(&self, key: &str, body: Vec<u8>, content_type: &str) -> Result<(), String> {
+        // S3 evaluates this at the store, atomically with the write. A HEAD
+        // check alone would allow replacement between validation and PUT.
+        let response = self
+            .signed_request(Method::PUT, key, body, content_type)?
+            .header("if-none-match", "*")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else if response.status() == reqwest::StatusCode::PRECONDITION_FAILED
+            || response.status() == reqwest::StatusCode::CONFLICT
+        {
+            Err("upload already consumed".into())
+        } else {
+            Err(format!("object storage returned {}", response.status()))
+        }
     }
 
     pub async fn list_project_files(
@@ -915,6 +998,260 @@ mod tests {
         let put = manager.proxy_signature("p/t/f", 100, true);
         assert_ne!(get, put);
         assert!(constant_time(get.as_bytes(), get.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn proxy_uploads_are_single_use_and_metadata_binds_immutable_bytes() {
+        use gonvex_postgres::{ControlPlane, TenantRoute};
+        let (Ok(base), Ok(endpoint)) = (
+            std::env::var("GONVEX_TEST_POSTGRES_URL"),
+            std::env::var("GONVEX_TEST_STORAGE_ENDPOINT"),
+        ) else {
+            return;
+        };
+        let schema = format!("immutable_upload_{}", Uuid::new_v4().simple());
+        let admin = sqlx::PgPool::connect(&base).await.unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut config = crate::config::Config::from_env().unwrap();
+        config.storage = StorageConfig {
+            endpoint,
+            region: "us-east-1".into(),
+            bucket: format!("uploads-{}", Uuid::new_v4().simple()),
+            access_key_id: "public-review".into(),
+            secret_access_key: "public-review-test".into(),
+            force_path_style: true,
+            public_base_url: format!("http://{address}"),
+        };
+        let runtime = Runtime::new(config);
+        let control = ControlPlane::connect(&url, runtime.inner.pools.clone(), BTreeMap::new())
+            .await
+            .unwrap();
+        let fixture = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('project','Project','multiTenant','active')").execute(&fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status) VALUES('route','project','tenant','Tenant',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        let route = TenantRoute {
+            project_id: "project".into(),
+            tenant_id: "tenant".into(),
+            database_url: url,
+        };
+        control
+            .clone()
+            .provision_tenant_database(route.clone(), Vec::new())
+            .await
+            .unwrap();
+        *runtime.inner.control_plane.write().await = Some(control);
+        let manager = runtime.inner.storage.clone();
+        // MinIO implements the same conditional PUT used by production S3/R2.
+        manager
+            .object_request(Method::PUT, "", Vec::new(), "")
+            .await
+            .unwrap();
+        let app = runtime.router();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let session = TenantSession::anonymous(route);
+        let generated = manager
+            .clone()
+            .call(
+                runtime.clone(),
+                session.clone(),
+                "generateUploadUrl".into(),
+                serde_json::json!({"contentType":"application/pdf"}),
+            )
+            .await
+            .unwrap();
+        let upload_url = generated["url"].as_str().unwrap();
+        let file_id = generated["fileId"].as_str().unwrap();
+        let client = reqwest::Client::new();
+        let (one, two) = tokio::join!(
+            client
+                .post(upload_url)
+                .header("content-type", "application/pdf")
+                .body("PDF")
+                .send(),
+            client
+                .post(upload_url)
+                .header("content-type", "application/pdf")
+                .body("PDF")
+                .send()
+        );
+        let mut statuses = [
+            one.unwrap().status().as_u16(),
+            two.unwrap().status().as_u16(),
+        ];
+        statuses.sort();
+        assert_eq!(statuses, [200, 409]);
+        let metadata = manager
+            .clone()
+            .call(
+                runtime.clone(),
+                session.clone(),
+                "getMetadata".into(),
+                serde_json::json!({"fileId":file_id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata["status"], "uploaded");
+        assert_eq!(metadata["size"], 3);
+        assert_eq!(
+            client
+                .post(upload_url)
+                .body("replacement bytes")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::CONFLICT
+        );
+        let key = manager.object_key(&session, file_id);
+        assert_eq!(
+            manager
+                .proxy_get(&key, None)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            b"PDF"
+        );
+        // The conditional write protects pre-existing objects even if there is
+        // no consumption row, as with uploads completed before this release.
+        sqlx::query("DELETE FROM gonvex_storage_uploads WHERE object_key=$1")
+            .bind(&key)
+            .execute(&fixture)
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .post(upload_url)
+                .body("replacement")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::CONFLICT
+        );
+        assert_eq!(
+            manager
+                .proxy_get(&key, None)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            b"PDF"
+        );
+        // Restore the successful consumption record, then delete the object.
+        sqlx::query("INSERT INTO gonvex_storage_uploads(object_key,consumed_at) VALUES($1,now())")
+            .bind(&key)
+            .execute(&fixture)
+            .await
+            .unwrap();
+        manager
+            .object_request(Method::DELETE, &key, Vec::new(), "")
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .post(upload_url)
+                .body("replacement")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::CONFLICT
+        );
+        sqlx::query("UPDATE gonvex_storage_uploads SET consumed_at=NULL,project_id='project',tenant_id='tenant',file_id=$2 WHERE object_key=$1")
+            .bind(&key).bind(file_id).execute(&fixture).await.unwrap();
+        assert_eq!(
+            client
+                .post(upload_url)
+                .body("replacement")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::CONFLICT
+        );
+        // Member proxy uploads keep their ordinary ownership and visibility.
+        let mut member = session.clone();
+        member.identity.account.id = "account".into();
+        member.member.id = "member".into();
+        let generated = manager
+            .clone()
+            .call(
+                runtime.clone(),
+                member.clone(),
+                "generateUploadUrl".into(),
+                serde_json::json!({"visibility":"private"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .post(generated["url"].as_str().unwrap())
+                .body("member")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        let metadata = manager
+            .clone()
+            .call(
+                runtime.clone(),
+                member,
+                "getMetadata".into(),
+                serde_json::json!({"fileId":generated["fileId"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata["ownerId"], "account");
+        assert_eq!(metadata["visibility"], "private");
+        let mut direct = manager.clone();
+        direct.config.public_base_url.clear();
+        let mut member = session.clone();
+        member.identity.account.id = "account".into();
+        member.member.id = "member".into();
+        let generated = direct
+            .call(
+                runtime.clone(),
+                member,
+                "generateUploadUrl".into(),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(generated["method"], "PUT");
+        assert_eq!(
+            client
+                .put(generated["url"].as_str().unwrap())
+                .body("direct member")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        server.abort();
+        runtime.shutdown().await;
+        fixture.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
     }
 
     #[tokio::test]

@@ -374,6 +374,21 @@ impl Config {
                 public_base_url: non_empty(lookup("GONVEX_PUBLIC_URL")).unwrap_or_default(),
             },
             public_functions: crate::public_functions::PublicLimits {
+                pending_per_ip: integer(
+                    "GONVEX_PENDING_CONNECTIONS_PER_IP",
+                    lookup("GONVEX_PENDING_CONNECTIONS_PER_IP"),
+                    100,
+                )?,
+                auth_timeout: Duration::from_secs(integer(
+                    "GONVEX_AUTH_TIMEOUT_SECONDS",
+                    lookup("GONVEX_AUTH_TIMEOUT_SECONDS"),
+                    10,
+                )? as u64),
+                action_timeout: Duration::from_secs(integer(
+                    "GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS",
+                    lookup("GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS"),
+                    60,
+                )? as u64),
                 connection_calls: integer(
                     "GONVEX_PUBLIC_CALLS_PER_CONNECTION",
                     lookup("GONVEX_PUBLIC_CALLS_PER_CONNECTION"),

@@ -520,7 +520,7 @@ async fn storage_upload_inner(
     match runtime
         .inner
         .storage
-        .proxy_put(&key, bytes, &content_type)
+        .proxy_put(&runtime, &key, bytes, &content_type)
         .await
     {
         Ok(()) => (
@@ -531,7 +531,11 @@ async fn storage_upload_inner(
         )
             .into_response(),
         Err(error) => (
-            StatusCode::BAD_GATEWAY,
+            if error == "upload already consumed" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
             Json(serde_json::json!({"error":error})),
         )
             .into_response(),
@@ -1245,18 +1249,78 @@ async fn health(State(runtime): State<Runtime>) -> Response {
 async fn websocket_upgrade(
     State(runtime): State<Runtime>,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
-) -> impl IntoResponse {
+) -> Response {
     let peer = peer
         .map(|peer| peer.0 .0.ip())
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-    let ip = public_functions::client_ip(peer, &headers, &runtime.inner.config.public_functions);
-    upgrade.on_upgrade(move |socket| websocket(socket, runtime, ip))
+    let limits = &runtime.inner.config.public_functions;
+    let ip = public_functions::client_ip(peer, &headers, limits);
+    let public_transport = params.get("public").is_some_and(|v| v == "1");
+    let Some(pending) = runtime
+        .inner
+        .public_limiter
+        .admit_pending(ip, limits.pending_per_ip)
+    else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "pending connection limit exceeded",
+        )
+            .into_response();
+    };
+    let public_connection = if public_transport {
+        let Some(slot) = runtime
+            .inner
+            .public_limiter
+            .admit(ip, limits.connections_per_ip)
+        else {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "public connection limit exceeded",
+            )
+                .into_response();
+        };
+        Some(slot)
+    } else {
+        None
+    };
+    let upgrade = if public_transport {
+        upgrade
+            .max_frame_size(limits.payload_bytes)
+            .max_message_size(limits.payload_bytes)
+    } else {
+        upgrade
+    };
+    upgrade
+        .on_upgrade(move |socket| {
+            websocket(
+                socket,
+                runtime,
+                ip,
+                public_transport,
+                public_connection,
+                pending,
+            )
+        })
+        .into_response()
 }
 
-async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr) {
-    let mut public_connection = None;
+async fn websocket(
+    mut socket: WebSocket,
+    runtime: Runtime,
+    ip: std::net::IpAddr,
+    public_transport: bool,
+    _public_connection: Option<public_functions::PublicConnection>,
+    pending: public_functions::PublicConnection,
+) {
+    let mut pending_connection = Some(pending);
+    let auth_deadline =
+        tokio::time::Instant::now() + runtime.inner.config.public_functions.auth_timeout;
+    let mut public_scope: Option<(String, String)> = None;
+    let mut public_admission: Option<Arc<public_functions::PublicAdmission>> = None;
+    let mut _public_monitor: Option<public_functions::AdmissionMonitor> = None;
     let mut public_window = public_functions::Window::default();
     let mut tenant_session: Option<TenantSession> = None;
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
@@ -1325,7 +1389,17 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
 
     loop {
         let message = tokio::select! {
-            _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() || tenant_session.as_ref().is_some_and(TenantSession::is_anonymous) => {
+            _ = tokio::time::sleep_until(auth_deadline), if pending_connection.is_some() => {
+                let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1008, reason: "authentication deadline exceeded".into(),
+                }))).await;
+                break;
+            }
+            _ = async { if let Some(admission) = &public_admission { admission.changed.notified().await; } else { std::future::pending::<()>().await; } } => {
+                let _ = send_json(&mut socket, &ServerMessage::AuthError { id: "session-expired".into(), error: "public tenant session is unavailable".into() }).await;
+                break;
+            }
+            _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
                 if !revalidate_connection(&runtime, &control_connection).await {
                     replicas.clear();
                     live_queries.clear();
@@ -1524,6 +1598,14 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
             }
         };
         let Ok(message) = message else {
+            if public_transport {
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1009,
+                        reason: "public transport limit exceeded".into(),
+                    })))
+                    .await;
+            }
             break;
         };
         if tenant_session.is_some() {
@@ -1610,6 +1692,32 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
             }
             if let Ok(frame) = serde_json::from_str::<ClientMessage>(text) {
                 let public_auth = matches!(&frame, ClientMessage::Auth { public: true, .. });
+                if let ClientMessage::Auth { id, public, .. } = &frame {
+                    if *public != public_transport {
+                        let _ = send_json(
+                            &mut socket,
+                            &ServerMessage::AuthError {
+                                id: id.clone(),
+                                error:
+                                    "public authentication requires the public WebSocket transport"
+                                        .into(),
+                            },
+                        )
+                        .await;
+                        break;
+                    }
+                }
+                if public_admission.as_ref().is_some_and(|a| a.revoked()) {
+                    let _ = send_json(
+                        &mut socket,
+                        &ServerMessage::AuthError {
+                            id: "session-expired".into(),
+                            error: "public tenant session is unavailable".into(),
+                        },
+                    )
+                    .await;
+                    break;
+                }
                 if public_auth && text.len() > runtime.inner.config.public_functions.payload_bytes {
                     let _ = socket
                         .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -1619,28 +1727,7 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
                         .await;
                     break;
                 }
-                if public_auth || anonymous {
-                    if public_auth && public_connection.is_none() {
-                        public_connection = runtime
-                            .inner
-                            .public_limiter
-                            .admit(ip, runtime.inner.config.public_functions.connections_per_ip);
-                        if public_connection.is_none() {
-                            let id = match &frame {
-                                ClientMessage::Auth { id, .. } => id.clone(),
-                                _ => String::new(),
-                            };
-                            let _ = send_json(
-                                &mut socket,
-                                &ServerMessage::AuthError {
-                                    id,
-                                    error: "public connection limit exceeded".into(),
-                                },
-                            )
-                            .await;
-                            break;
-                        }
-                    }
+                if public_transport {
                     let cost = match &frame {
                         ClientMessage::ReducerCallMany { calls } => calls.len().max(1),
                         ClientMessage::QuerySubscribeMany { subscribes } => subscribes.len().max(1),
@@ -1663,6 +1750,20 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
                 }
             }
         }
+        if let (Some(admission), Some(scope), Message::Text(text)) =
+            (&public_admission, &public_scope, &message)
+        {
+            if let Ok(frame) = serde_json::from_str::<ClientMessage>(text) {
+                if !matches!(&frame, ClientMessage::Auth { .. })
+                    && !check_public_admission(&runtime, admission, scope).await
+                {
+                    for response in public_admission_errors(frame) {
+                        let _ = send_json(&mut socket, &response).await;
+                    }
+                    break;
+                }
+            }
+        }
         match message {
             Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
                 Ok(ClientMessage::Auth {
@@ -1673,14 +1774,24 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
                     tenant,
                     ..
                 }) if token.trim().starts_with(service_principal::TOKEN_PREFIX) => {
-                    let (response, grant) = runtime
-                        .authenticate_service_principal(
+                    let service_auth = tokio::time::timeout_at(
+                        if pending_connection.is_some() {
+                            auth_deadline
+                        } else {
+                            tokio::time::Instant::now()
+                                + runtime.inner.config.public_functions.auth_timeout
+                        },
+                        runtime.authenticate_service_principal(
                             id,
                             &token,
                             project.as_deref(),
                             tenant.as_deref(),
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
+                    let Ok((response, grant)) = service_auth else {
+                        break;
+                    };
                     replicas.clear();
                     live_queries.clear();
                     control_queries.clear();
@@ -1698,6 +1809,9 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
                         ..control::ControlConnection::default()
                     };
                     service_grant = grant;
+                    if service_grant.is_some() {
+                        pending_connection.take();
+                    }
                     if send_json(&mut socket, &response).await.is_err() {
                         break;
                     }
@@ -1714,17 +1828,81 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
                     ..
                 }) => {
                     service_grant = None;
-                    let (response, authenticated_control) = authenticate(
-                        &runtime,
-                        id,
-                        token.as_deref(),
-                        project.as_deref(),
-                        tenant.as_deref(),
-                        control_only,
-                        public,
-                        &connection_id,
+                    let auth_result = tokio::time::timeout_at(
+                        if pending_connection.is_some() {
+                            auth_deadline
+                        } else {
+                            tokio::time::Instant::now()
+                                + runtime.inner.config.public_functions.auth_timeout
+                        },
+                        authenticate(
+                            &runtime,
+                            id,
+                            token.as_deref(),
+                            project.as_deref(),
+                            tenant.as_deref(),
+                            AuthMode {
+                                control_only,
+                                public,
+                            },
+                            &connection_id,
+                        ),
                     )
                     .await;
+                    let Ok((response, authenticated_control)) = auth_result else {
+                        break;
+                    };
+                    if let Some(session) = authenticated_control
+                        .tenant
+                        .as_ref()
+                        .filter(|s| s.is_anonymous())
+                    {
+                        let scope = (
+                            authenticated_control.project_id.clone(),
+                            session.route.tenant_id.clone(),
+                        );
+                        if public_scope.as_ref().is_some_and(|pinned| {
+                            !public_functions::same_scope(pinned, &scope.0, &scope.1)
+                        }) {
+                            let _ = send_json(
+                                &mut socket,
+                                &ServerMessage::AuthError {
+                                    id: match &response {
+                                        ServerMessage::AuthResult { id, .. } => id.clone(),
+                                        _ => String::new(),
+                                    },
+                                    error: "public connection scope is fixed".into(),
+                                },
+                            )
+                            .await;
+                            let _ = socket
+                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                    code: 1008,
+                                    reason: "public connection scope is fixed".into(),
+                                })))
+                                .await;
+                            break;
+                        }
+                        if public_scope.is_none() {
+                            public_scope = Some(scope.clone());
+                            let admission = public_functions::PublicAdmission::new();
+                            public_admission = Some(admission.clone());
+                            let monitor_runtime = runtime.clone();
+                            _public_monitor = Some(admission.monitor(
+                                std::time::Duration::from_secs(30),
+                                move || {
+                                    let runtime = monitor_runtime.clone();
+                                    let scope = scope.clone();
+                                    async move { validate_public_scope(&runtime, &scope).await }
+                                },
+                            ));
+                        }
+                    }
+                    if authenticated_control.identity.is_some()
+                        || authenticated_control.tenant.is_some()
+                    {
+                        pending_connection.take();
+                    }
                     connected_client_contract = client_contract;
                     if let Some(module) = runtime
                         .inner
@@ -2070,6 +2248,20 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
                         continue;
                     }
                     for call in calls {
+                        if let (Some(admission), Some(scope)) = (&public_admission, &public_scope) {
+                            if !check_public_admission(&runtime, admission, scope).await {
+                                let response = ReducerErrorClass::Rejected.reducer_error(
+                                    call.id,
+                                    Some(call.path),
+                                    "public tenant session is unavailable".into(),
+                                    None,
+                                );
+                                if send_json(&mut socket, &response).await.is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
                         runtime
                             .inner
                             .metrics
@@ -2419,6 +2611,49 @@ async fn websocket(mut socket: WebSocket, runtime: Runtime, ip: std::net::IpAddr
             _ => {}
         }
     }
+}
+
+async fn validate_public_scope(runtime: &Runtime, scope: &(String, String)) -> bool {
+    match runtime.inner.control_plane.read().await.clone() {
+        Some(control) => tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            control.resolve_public_tenant(&scope.0, &scope.1),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok()),
+        None => false,
+    }
+}
+
+async fn check_public_admission(
+    runtime: &Runtime,
+    admission: &public_functions::PublicAdmission,
+    scope: &(String, String),
+) -> bool {
+    admission
+        .check(std::time::Duration::from_secs(30), || {
+            validate_public_scope(runtime, scope)
+        })
+        .await
+}
+
+fn public_admission_errors(frame: ClientMessage) -> Vec<ServerMessage> {
+    public_limit_errors(frame)
+        .into_iter()
+        .map(|mut response| {
+            match &mut response {
+                ServerMessage::AuthError { error, .. }
+                | ServerMessage::QueryError { error, .. }
+                | ServerMessage::ActionError { error, .. }
+                | ServerMessage::ReducerError { error, .. }
+                | ServerMessage::ReplicaError { error, .. } => {
+                    *error = "public tenant session is unavailable".into()
+                }
+                _ => {}
+            }
+            response
+        })
+        .collect()
 }
 
 async fn revalidate_connection(runtime: &Runtime, connection: &control::ControlConnection) -> bool {
@@ -2838,16 +3073,25 @@ fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AuthMode {
+    control_only: bool,
+    public: bool,
+}
+
 async fn authenticate(
     runtime: &Runtime,
     id: String,
     token: Option<&str>,
     project: Option<&str>,
     tenant: Option<&str>,
-    control_only: bool,
-    public: bool,
+    mode: AuthMode,
     connection_id: &str,
 ) -> (ServerMessage, control::ControlConnection) {
+    let AuthMode {
+        control_only,
+        public,
+    } = mode;
     let control = runtime.inner.control_plane.read().await.clone();
     let Some(control) = control else {
         return (
@@ -3410,6 +3654,7 @@ mod tests {
     #[tokio::test]
     async fn public_tenant_auth_and_execution_contract() {
         use base64::Engine as _;
+        use futures_util::SinkExt;
         use gonvex_postgres::{RuntimeManifestRecord, TenantRoute};
         use sha2::{Digest, Sha256};
         use sqlx::Row;
@@ -3430,6 +3675,8 @@ mod tests {
         let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
         let mut cfg = config(true);
         cfg.module_host.binary = Some(binary.into());
+        cfg.module_host.execution_timeout = Duration::from_secs(45);
+        cfg.public_functions.action_timeout = Duration::from_secs(2);
         cfg.storage = crate::config::StorageConfig {
             endpoint: "http://127.0.0.1:1".into(),
             region: "us-east-1".into(),
@@ -3471,10 +3718,14 @@ export async function tool(ctx) { return ctx.tools.save({}); }
 export async function internal(ctx) { return identity(ctx); }
 export async function upload(ctx) { return ctx.storage.generateUploadUrl({ visibility: "public", ownerId: "spoofed", size: 3, contentType: "application/pdf" }); }
 export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.fileId); }
+export async function slow(ctx, args) { await ctx.db.query("SELECT 1 FROM pg_sleep(31)", []); return apply(ctx, args); }
+export async function slowAction(ctx) { await new Promise(resolve => setTimeout(resolve, 5000)); return identity(ctx); }
 "#;
         let mut functions = serde_json::json!({});
         for (path, kind, public, internal) in [
             ("preview", "query", true, false),
+            ("slow", "reducer", true, false),
+            ("slowAction", "action", true, false),
             ("apply", "reducer", true, false),
             ("action", "action", true, false),
             ("private", "action", false, false),
@@ -3517,8 +3768,10 @@ export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.
                 None,
                 Some("project"),
                 Some(tenant),
-                false,
-                true,
+                AuthMode {
+                    control_only: false,
+                    public: true,
+                },
                 "connection",
             )
             .await;
@@ -3543,8 +3796,10 @@ export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.
                 None,
                 Some(project),
                 Some(tenant),
-                false,
-                true,
+                AuthMode {
+                    control_only: false,
+                    public: true,
+                },
                 "connection",
             )
             .await;
@@ -3675,6 +3930,91 @@ export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.
             .execute_tenant_action(&member_session, "private", serde_json::json!({}))
             .await
             .unwrap();
+        // Public Actions cannot inherit the member's 15-minute budget.
+        let started = std::time::Instant::now();
+        assert!(runtime
+            .execute_tenant_action(&session, "slowAction", serde_json::json!({}))
+            .await
+            .is_err());
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(runtime
+            .execute_tenant_action(&member_session, "slowAction", serde_json::json!({}))
+            .await
+            .is_ok());
+
+        use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+        async fn read_socket(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        ) -> serde_json::Value {
+            let frame = tokio::time::timeout(Duration::from_secs(40), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            serde_json::from_str(frame.to_text().unwrap()).unwrap()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_runtime = runtime.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                server_runtime
+                    .router()
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let socket_url = format!("ws://{address}/ws?public=1");
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('other','Other','multiTenant','active')").execute(&fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('other-route','other','tenant-id','Other','other-careers',$1,'active'),('other-tenant','project','tenant-other','Other','other',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        for (project, tenant) in [("project", "tenant-other"), ("other", "tenant-id")] {
+            let (mut socket, _) = connect_async(&socket_url).await.unwrap();
+            read_socket(&mut socket).await;
+            socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"first","public":true,"project":"project","tenant":"careers"}).to_string().into())).await.unwrap();
+            assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
+            // Domain and canonical ID denote the same pinned scope.
+            socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"same","public":true,"project":"project","tenant":"tenant-id"}).to_string().into())).await.unwrap();
+            assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
+            socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"switch","public":true,"project":project,"tenant":tenant}).to_string().into())).await.unwrap();
+            assert_eq!(
+                read_socket(&mut socket).await["error"],
+                "public connection scope is fixed"
+            );
+            assert!(matches!(socket.next().await, Some(Ok(WsMessage::Close(_)))));
+        }
+        let (mut socket, _) = connect_async(&socket_url).await.unwrap();
+        read_socket(&mut socket).await;
+        socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"batch-auth","public":true,"project":"project","tenant":"careers"}).to_string().into())).await.unwrap();
+        assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
+        socket.send(WsMessage::Text(serde_json::json!({"type":"reducer.callMany","calls":[{"id":"slow-first","path":"slow","args":{"id":"before-revocation"}},{"id":"after","path":"apply","args":{"id":"after-revocation"}}]}).to_string().into())).await.unwrap();
+        // Wait until the first call is running before revoking its tenant.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let running: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE state='active' AND query = 'SELECT 1 FROM pg_sleep(31)')").fetch_one(&fixture).await.unwrap();
+                if running { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&fixture).await.unwrap();
+        let first = read_socket(&mut socket).await;
+        assert_eq!(first["type"], "reducer.result");
+        assert_eq!(first["id"], "slow-first");
+        assert_eq!(read_socket(&mut socket).await["type"], "replica.watermark");
+        let rejected = read_socket(&mut socket).await;
+        assert_eq!(rejected["id"], "after");
+        assert_eq!(rejected["error"], "public tenant session is unavailable");
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM applications WHERE id='after-revocation'")
+                .fetch_one(&fixture)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+        socket.close(None).await.ok();
+        server.abort();
         sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled'")
             .execute(&fixture)
             .await
@@ -3685,8 +4025,10 @@ export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.
             None,
             Some("project"),
             Some("careers"),
-            false,
-            true,
+            AuthMode {
+                control_only: false,
+                public: true,
+            },
             "connection",
         )
         .await;
