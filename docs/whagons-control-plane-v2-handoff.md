@@ -39,10 +39,14 @@ attribution.
 `GonvexAuthProvider` owns developer mode. Applications call
 `enterDeveloperMode(tenantId)` and `exitDeveloperMode()` and read the safe
 `developerMode` state. The one-time activation credential and each rotating
-reconnect credential remain inside the provider/client process and are never
-written to storage or a URL. Account refresh continues underneath developer
-mode without replacing it. Expiry, revocation, reload, or an authentication
-error restores the normal account session and its original tenant.
+reconnect credential stay inside the provider/client and are never exposed or
+put in a URL. The provider keeps the grant and its newest reconnect credential
+in tab-scoped `sessionStorage`, keyed by project and account, so a reload of
+the same tab resumes developer mode until the grant expires. Account refresh
+continues underneath developer mode without replacing it. Exit, expiry,
+sign-out, an account switch, revocation, or an authentication error forgets
+the stored grant and restores the normal account session and its original
+tenant.
 
 A session grant contains access and refresh credentials, the global account,
 the active tenant ID, and tenant rows with `id`, `name`, `role`, `permissions`,

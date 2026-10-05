@@ -165,13 +165,18 @@ native password session through the same path. Access tokens are short-lived,
 refresh tokens rotate across tabs, and the provider persists the active tenant.
 The host verifies tenant membership before switching with `setActiveTenant`.
 
-Developer mode is provider-owned. Its activation and rotating reconnect
-credentials stay in memory and are never returned by these methods, persisted,
-or added to a URL. The provider preserves and refreshes the normal account
-session underneath the grant, then restores it on exit, expiry, reload, or an
-authentication rejection. Developer mode switches the existing Gonvex
-connection; it does not navigate to a tenant subdomain or require a browser
-handoff.
+Developer mode is provider-owned. Its credentials are never returned by these
+methods, written to localStorage, or added to a URL. The runtime rotates a
+single-use reconnect credential on every connection; the provider keeps the
+newest one with the grant in `sessionStorage`, keyed by project and account,
+so reloading the same tab resumes developer mode until the grant expires.
+Other tabs and new browser sessions never see it. The provider preserves and
+refreshes the normal account session underneath the grant, then restores it
+and forgets the grant on exit, expiry, sign-out, an account switch, or an
+authentication rejection. A stored grant the runtime no longer accepts after a
+reload falls back to the account session without an error. Developer mode
+switches the existing Gonvex connection; it does not navigate to a tenant
+subdomain or require a browser handoff.
 
 Use `useCurrentTenantProfile()` for subscribed domain, timezone, description,
 and public profile fields. Use `useControlQuery(reference, args)` for an

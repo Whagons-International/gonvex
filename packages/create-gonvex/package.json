@@ -1,6 +1,6 @@
 {
   "name": "create-gonvex",
-  "version": "0.5.2-staging.18",
+  "version": "0.5.2-staging.19",
   "type": "module",
   "bin": {
     "create-gonvex": "./dist/index.js"
