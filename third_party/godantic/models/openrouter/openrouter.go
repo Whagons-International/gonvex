@@ -49,6 +49,7 @@ type OpenRouter_Model struct {
 	BaseURL         string                                 // Optional: Custom API base URL (defaults to OpenRouter)
 	APIKeyEnv       string                                 // Optional: Environment variable name for API key (defaults to OPENROUTER_API_KEY)
 	SupportsVision  bool                                   // Whether the model supports image/vision input
+	Provider        map[string]any                         // Optional: OpenRouter provider preferences; nil means zero data retention on openrouter.ai
 	WarningCallback func(warnings []models.HistoryWarning) `json:"-"` // Called when history is adapted with warnings
 }
 
@@ -559,6 +560,7 @@ func (o *OpenRouter_Model) createOpenRouterRequest(model string, message models.
 		Model:    model,
 		Messages: messages,
 		Stream:   stream,
+		Provider: o.providerPreferences(),
 	}
 
 	// Add tools if provided
@@ -852,4 +854,18 @@ func isImageMimeType(mimeType string) bool {
 func (o *OpenRouter_Model) buildContentFromUserParts(parts []models.User_Part) interface{} {
 	content, _ := o.buildContentFromUserPartsWithWarnings(parts, false)
 	return content
+}
+
+// providerPreferences returns the caller's provider preferences, or enforces
+// zero data retention (https://openrouter.ai/docs/guides/features/zdr) when none
+// are set and the request goes to openrouter.ai. Custom OpenRouter-compatible
+// base URLs get no default because they may reject the field.
+func (o *OpenRouter_Model) providerPreferences() map[string]any {
+	if o.Provider != nil {
+		return o.Provider
+	}
+	if o.BaseURL != "" {
+		return nil
+	}
+	return map[string]any{"zdr": true}
 }
