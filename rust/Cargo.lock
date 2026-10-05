@@ -1558,6 +1558,7 @@ dependencies = [
  "gonvex-postgres",
  "gonvex-protocol",
  "hmac",
+ "ipnet",
  "jsonwebtoken",
  "pbkdf2",
  "rand 0.8.7",

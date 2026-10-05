@@ -11,7 +11,8 @@ pub struct PublicLimits {
     pub ip_calls: usize,
     pub payload_bytes: usize,
     pub connections_per_ip: usize,
-    pub trusted_proxies: Vec<IpAddr>,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    pub client_ip_header: axum::http::HeaderName,
     pub pending_per_ip: usize,
     pub auth_timeout: Duration,
     pub action_timeout: Duration,
@@ -25,6 +26,7 @@ impl Default for PublicLimits {
             payload_bytes: 64 << 10,
             connections_per_ip: 20,
             trusted_proxies: Vec::new(),
+            client_ip_header: axum::http::HeaderName::from_static("x-real-ip"),
             pending_per_ip: 100,
             auth_timeout: Duration::from_secs(10),
             action_timeout: Duration::from_secs(60),
@@ -56,6 +58,23 @@ impl Window {
         }
         self.count += count;
         true
+    }
+}
+
+// Active slots cannot be evicted without losing accounting for live sockets.
+const MAX_IP_BUCKETS: usize = 16_384;
+
+fn ip_bucket(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => {
+            // IPv4-mapped addresses share the corresponding IPv4 budget.
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                IpAddr::V4(ip)
+            } else {
+                IpAddr::V6((u128::from(ip) & (u128::MAX << 64)).into())
+            }
+        }
+        ip => ip,
     }
 }
 
@@ -93,6 +112,10 @@ impl Drop for PublicConnection {
 impl PublicLimiter {
     pub(crate) fn admit(self: &Arc<Self>, ip: IpAddr, limit: usize) -> Option<PublicConnection> {
         let mut connections = self.connections.lock().unwrap();
+        let ip = ip_bucket(ip);
+        if limit == 0 || (!connections.contains_key(&ip) && connections.len() >= MAX_IP_BUCKETS) {
+            return None;
+        }
         let count = connections.entry(ip).or_default();
         if *count >= limit {
             return None;
@@ -111,6 +134,10 @@ impl PublicLimiter {
         limit: usize,
     ) -> Option<PublicConnection> {
         let mut pending = self.pending.lock().unwrap();
+        let ip = ip_bucket(ip);
+        if limit == 0 || (!pending.contains_key(&ip) && pending.len() >= MAX_IP_BUCKETS) {
+            return None;
+        }
         let count = pending.entry(ip).or_default();
         if *count >= limit {
             return None;
@@ -132,6 +159,16 @@ impl PublicLimiter {
     ) -> bool {
         let mut windows = self.windows.lock().unwrap();
         windows.retain(|_, window| window.started.elapsed() < Duration::from_secs(120));
+        let ip = ip_bucket(ip);
+        if !windows.contains_key(&ip) && windows.len() >= MAX_IP_BUCKETS {
+            if let Some(oldest) = windows
+                .iter()
+                .min_by_key(|(_, window)| window.started)
+                .map(|(ip, _)| *ip)
+            {
+                windows.remove(&oldest);
+            }
+        }
         let ip_allowed = windows.entry(ip).or_default().allow(count, limits.ip_calls);
         let connection_allowed = connection.allow(count, limits.connection_calls);
         ip_allowed && connection_allowed
@@ -143,17 +180,35 @@ pub(crate) fn client_ip(
     headers: &axum::http::HeaderMap,
     limits: &PublicLimits,
 ) -> IpAddr {
-    if limits.trusted_proxies.contains(&peer) {
-        // Trusted proxies must replace this header, never append untrusted input.
-        if let Some(ip) = headers
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse().ok())
-        {
-            return ip;
-        }
+    let trusted = |ip: IpAddr| limits.trusted_proxies.iter().any(|net| net.contains(&ip));
+    if !trusted(peer) {
+        return peer;
     }
-    peer
+    // Multiple fields are ambiguous for single-IP headers. Require one field for
+    // XFF too, so malformed or duplicate input fails closed to the socket peer.
+    let mut values = headers.get_all(&limits.client_ip_header).iter();
+    let Some(value) = values.next().and_then(|value| value.to_str().ok()) else {
+        return peer;
+    };
+    if values.next().is_some() {
+        return peer;
+    }
+    if limits.client_ip_header == "x-forwarded-for" {
+        let Ok(addresses) = value
+            .split(',')
+            .map(|part| part.trim().parse::<IpAddr>())
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            return peer;
+        };
+        addresses
+            .into_iter()
+            .rev()
+            .find(|ip| !trusted(*ip))
+            .unwrap_or(peer)
+    } else {
+        value.trim().parse().unwrap_or(peer)
+    }
 }
 
 pub(crate) struct PublicAdmission {
@@ -231,6 +286,165 @@ pub(crate) fn same_scope(pinned: &(String, String), project: &str, tenant: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_headers_require_cidr_trust_and_valid_ips() {
+        let limits = PublicLimits {
+            trusted_proxies: vec![
+                "10.0.0.0/8".parse().unwrap(),
+                "2001:db8::/32".parse().unwrap(),
+            ],
+            client_ip_header: "cf-connecting-ip".parse().unwrap(),
+            ..Default::default()
+        };
+        let visitor = "198.51.100.23".parse::<IpAddr>().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("cf-connecting-ip", visitor.to_string().parse().unwrap());
+        headers.insert("x-real-ip", "192.0.2.99".parse().unwrap());
+        for peer in ["10.42.0.9", "2001:db8:abcd::1"] {
+            assert_eq!(client_ip(peer.parse().unwrap(), &headers, &limits), visitor);
+        }
+        let peer = "203.0.113.9".parse().unwrap();
+        assert_eq!(client_ip(peer, &headers, &limits), peer);
+        let peer = "10.42.0.9".parse().unwrap();
+        for invalid in [
+            "unknown",
+            "198.51.100.23, 192.0.2.1",
+            "198.51.100.23:80",
+            "",
+        ] {
+            headers.insert("cf-connecting-ip", invalid.parse().unwrap());
+            assert_eq!(client_ip(peer, &headers, &limits), peer);
+        }
+        headers.insert("cf-connecting-ip", "198.51.100.23".parse().unwrap());
+        headers.append("cf-connecting-ip", "192.0.2.1".parse().unwrap());
+        assert_eq!(client_ip(peer, &headers, &limits), peer);
+        headers.remove("cf-connecting-ip");
+        assert_eq!(client_ip(peer, &headers, &limits), peer);
+    }
+
+    #[test]
+    fn forwarded_for_selects_rightmost_untrusted_ip() {
+        let limits = PublicLimits {
+            trusted_proxies: vec![
+                "10.0.0.0/8".parse().unwrap(),
+                "2001:db8::/32".parse().unwrap(),
+            ],
+            client_ip_header: "x-forwarded-for".parse().unwrap(),
+            ..Default::default()
+        };
+        let peer = "10.0.0.9".parse().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "192.0.2.1, 198.51.100.23, 10.42.0.1, 2001:db8::1"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            client_ip(peer, &headers, &limits),
+            "198.51.100.23".parse::<IpAddr>().unwrap()
+        );
+        let untrusted = "203.0.113.1".parse().unwrap();
+        assert_eq!(client_ip(untrusted, &headers, &limits), untrusted);
+        for invalid in [
+            "garbage, 198.51.100.23",
+            "198.51.100.23, garbage",
+            "198.51.100.23,",
+            "10.0.0.1, 2001:db8::1",
+        ] {
+            headers.insert("x-forwarded-for", invalid.parse().unwrap());
+            assert_eq!(client_ip(peer, &headers, &limits), peer);
+        }
+    }
+
+    #[test]
+    fn ipv6_clients_share_all_budgets_within_a_64() {
+        let limiter = Arc::new(PublicLimiter::default());
+        let first = "2001:db8:1234:5678::1".parse().unwrap();
+        let rotated = "2001:db8:1234:5678:ffff::abcd".parse().unwrap();
+        let other = "2001:db8:1234:5679::1".parse().unwrap();
+        assert_eq!(ip_bucket(first), ip_bucket(rotated));
+        assert_ne!(ip_bucket(first), ip_bucket(other));
+        assert_eq!(
+            ip_bucket("::ffff:192.0.2.1".parse().unwrap()),
+            "192.0.2.1".parse::<IpAddr>().unwrap()
+        );
+        let limits = PublicLimits {
+            ip_calls: 1,
+            ..Default::default()
+        };
+        assert!(limiter.allow(first, &mut Window::default(), 1, &limits));
+        assert!(!limiter.allow(rotated, &mut Window::default(), 1, &limits));
+        assert!(limiter.allow(other, &mut Window::default(), 1, &limits));
+        let slot = limiter.admit(first, 1).unwrap();
+        let pending = limiter.admit_pending(first, 1).unwrap();
+        assert!(limiter.admit(rotated, 1).is_none());
+        assert!(limiter.admit_pending(rotated, 1).is_none());
+        drop(slot);
+        drop(pending);
+        assert!(limiter.admit(rotated, 1).is_some());
+        assert!(limiter.admit_pending(rotated, 1).is_some());
+    }
+
+    #[test]
+    fn limiter_maps_are_bounded_and_release_or_evict_buckets() {
+        let limiter = Arc::new(PublicLimiter::default());
+        let oldest = IpAddr::V4(1.into());
+        let expired = IpAddr::V4(2.into());
+        for n in 1..=MAX_IP_BUCKETS as u32 {
+            let ip = IpAddr::V4(n.into());
+            limiter
+                .windows
+                .lock()
+                .unwrap()
+                .insert(ip, Window::default());
+            limiter.connections.lock().unwrap().insert(ip, 1);
+            limiter.pending.lock().unwrap().insert(ip, 1);
+        }
+        limiter
+            .windows
+            .lock()
+            .unwrap()
+            .get_mut(&oldest)
+            .unwrap()
+            .started -= Duration::from_secs(30);
+        let next = IpAddr::V4((MAX_IP_BUCKETS as u32 + 1).into());
+        assert!(limiter.allow(next, &mut Window::default(), 1, &PublicLimits::default()));
+        assert_eq!(limiter.windows.lock().unwrap().len(), MAX_IP_BUCKETS);
+        assert!(!limiter.windows.lock().unwrap().contains_key(&oldest));
+        limiter
+            .windows
+            .lock()
+            .unwrap()
+            .get_mut(&expired)
+            .unwrap()
+            .started -= Duration::from_secs(121);
+        assert!(limiter.allow(oldest, &mut Window::default(), 1, &PublicLimits::default()));
+        assert!(!limiter.windows.lock().unwrap().contains_key(&expired));
+        assert!(limiter.admit(next, 1).is_none());
+        assert!(limiter.admit_pending(next, 1).is_none());
+        // Existing buckets still work at capacity. Drop releases exactly their slots.
+        drop(limiter.admit(oldest, 2).unwrap());
+        drop(limiter.admit_pending(oldest, 2).unwrap());
+        drop(PublicConnection {
+            limiter: limiter.clone(),
+            ip: oldest,
+            pending: false,
+        });
+        drop(PublicConnection {
+            limiter: limiter.clone(),
+            ip: oldest,
+            pending: true,
+        });
+        assert!(limiter.admit(next, 1).is_some());
+        assert!(limiter.admit_pending(next, 1).is_some());
+        assert_eq!(
+            limiter.connections.lock().unwrap().len(),
+            MAX_IP_BUCKETS - 1
+        );
+        assert_eq!(limiter.pending.lock().unwrap().len(), MAX_IP_BUCKETS - 1);
+    }
 
     #[test]
     fn budgets_count_calls_and_release_connection_slots() {
@@ -523,7 +737,7 @@ mod tests {
         headers.insert("x-real-ip", "192.0.2.1".parse().unwrap());
         assert_eq!(client_ip(peer, &headers, &PublicLimits::default()), peer);
         let limits = PublicLimits {
-            trusted_proxies: vec![peer],
+            trusted_proxies: vec![peer.into()],
             ..Default::default()
         };
         assert_eq!(

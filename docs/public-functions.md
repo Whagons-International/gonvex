@@ -120,14 +120,31 @@ Budgets use 60-second fixed windows, count auth attempts and each call in a batc
 | `GONVEX_PUBLIC_CALLS_PER_IP` | 120 calls per minute |
 | `GONVEX_PUBLIC_MAX_PAYLOAD_BYTES` | 65536 bytes |
 | `GONVEX_PUBLIC_CONNECTIONS_PER_IP` | 20 connections |
-| `GONVEX_PUBLIC_TRUSTED_PROXY_IPS` | Empty, socket peer IP only |
+| `GONVEX_TRUSTED_PROXY_CIDRS` | Empty, socket peer IP only |
+| `GONVEX_PUBLIC_TRUSTED_PROXY_IPS` | Empty, merged with the CIDR list |
+| `GONVEX_CLIENT_IP_HEADER` | `x-real-ip` |
 | `GONVEX_PENDING_CONNECTIONS_PER_IP` | 100 unauthenticated sockets across both transports |
 | `GONVEX_AUTH_TIMEOUT_SECONDS` | 10 seconds to authenticate |
 | `GONVEX_PUBLIC_ACTION_TIMEOUT_SECONDS` | 60 seconds |
 
 Rate limits return correlated call errors containing `public call rate limit exceeded`. Connection slots are reserved at HTTP upgrade, so silent public sockets count toward the public cap. Both transports also share the pending-socket cap until successful authentication. Exhaustion rejects the upgrade with HTTP 429. Unauthenticated sockets close with WebSocket code 1008 after the auth deadline. Oversized public frames or fragmented messages fail during transport ingestion and close with code 1009. Authenticated member frames retain their existing transport limits.
 
-Behind a proxy, configure its exact IP in the comma-separated trusted proxy list. The proxy must replace `X-Real-IP` with the real client address. Untrusted peers cannot override their IP with forwarding headers. Custom Axum servers must use `into_make_service_with_connect_info::<SocketAddr>()`; without connection info, requests share one conservative unknown-peer budget.
+Both trusted proxy variables accept comma-separated CIDRs or bare IPs, including IPv6, and their entries are merged. The runtime honors only the configured client-IP header and only when the socket peer belongs to a trusted network. Single-IP headers must contain one IP. For `x-forwarded-for`, the runtime walks the chain from the right, skips trusted addresses, and selects the right-most untrusted address. Missing, invalid, duplicate, or entirely trusted chains fall back to the socket peer. Untrusted peers cannot override their IP with forwarding headers. Custom Axum servers must use `into_make_service_with_connect_info::<SocketAddr>()`; without connection info, requests share one conservative unknown-peer budget.
+
+IPv6 clients share a /64 bucket for call, public-connection, and pending-connection limits. IPv4 clients keep individual address buckets, including IPv4-mapped IPv6 addresses. Each limiter map holds at most 16,384 buckets. Call windows expire after 120 seconds and evict the oldest window at capacity, which can grant a fresh budget under heavy address churn. Active and pending connection buckets are removed when their last socket releases its slot; at capacity, new buckets receive HTTP 429 rather than evicting live sockets.
+
+### Behind Cloudflare and Traefik
+
+For Cloudflare proxied traffic through Coolify Traefik on Docker private networks:
+
+```sh
+GONVEX_TRUSTED_PROXY_CIDRS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+GONVEX_CLIENT_IP_HEADER=cf-connecting-ip
+```
+
+Use the actual Docker network CIDRs where possible to narrow trust. CIDRs keep trust stable when the Traefik container changes IP. Traefik must preserve Cloudflare's `CF-Connecting-IP`; its `X-Real-IP` may identify the Cloudflare edge instead of the visitor.
+
+The origin must only be reachable through Cloudflare for `CF-Connecting-IP` to be trustworthy. Block direct origin access and prevent other workloads on trusted networks from reaching the runtime. Otherwise a caller can spoof this header to gain extra per-IP budget. Per-connection limits still apply.
 
 These budgets are process local. Multiple runtime instances need an edge rate limit for a deployment-wide budget. Function limits do not replace application controls for repeated file uploads, bot submissions, consent, token expiry, or retention.
 

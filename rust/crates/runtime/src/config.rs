@@ -155,8 +155,10 @@ pub enum ConfigError {
     StringMap { name: &'static str },
     #[error("GONVEX_SERVICE_PRINCIPALS is invalid: {0}")]
     ServicePrincipals(String),
-    #[error("GONVEX_PUBLIC_TRUSTED_PROXY_IPS must be comma-separated IP addresses")]
+    #[error("trusted proxy variables must be comma-separated CIDRs or IP addresses")]
     PublicProxies,
+    #[error("GONVEX_CLIENT_IP_HEADER must be a valid HTTP header name")]
+    ClientIpHeader,
 }
 
 impl Config {
@@ -409,19 +411,29 @@ impl Config {
                     lookup("GONVEX_PUBLIC_CONNECTIONS_PER_IP"),
                     20,
                 )?,
-                trusted_proxies: non_empty(lookup("GONVEX_PUBLIC_TRUSTED_PROXY_IPS"))
-                    .map(|value| {
-                        value
-                            .split(',')
-                            .map(|ip| {
-                                ip.trim()
-                                    .parse::<IpAddr>()
-                                    .map_err(|_| ConfigError::PublicProxies)
-                            })
-                            .collect()
-                    })
-                    .transpose()?
-                    .unwrap_or_default(),
+                trusted_proxies: [
+                    lookup("GONVEX_TRUSTED_PROXY_CIDRS"),
+                    lookup("GONVEX_PUBLIC_TRUSTED_PROXY_IPS"),
+                ]
+                .into_iter()
+                .filter_map(non_empty)
+                .flat_map(|value| {
+                    value
+                        .split(',')
+                        .map(|entry| {
+                            let entry = entry.trim();
+                            entry
+                                .parse::<ipnet::IpNet>()
+                                .or_else(|_| entry.parse::<IpAddr>().map(ipnet::IpNet::from))
+                                .map_err(|_| ConfigError::PublicProxies)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+                client_ip_header: non_empty(lookup("GONVEX_CLIENT_IP_HEADER"))
+                    .unwrap_or_else(|| "x-real-ip".to_owned())
+                    .parse()
+                    .map_err(|_| ConfigError::ClientIpHeader)?,
             },
             service_principals: service_principals(lookup("GONVEX_SERVICE_PRINCIPALS"))?,
         })
@@ -626,6 +638,61 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_owned()))
         })
+    }
+
+    #[test]
+    fn public_proxy_config_merges_cidrs_and_legacy_ips() {
+        let limits = config(&[
+            (
+                "GONVEX_TRUSTED_PROXY_CIDRS",
+                "10.0.0.0/8, 2001:db8::/32, 192.0.2.1",
+            ),
+            (
+                "GONVEX_PUBLIC_TRUSTED_PROXY_IPS",
+                "127.0.0.1, 172.16.0.0/12",
+            ),
+            ("GONVEX_CLIENT_IP_HEADER", "CF-Connecting-IP"),
+        ])
+        .unwrap()
+        .public_functions;
+        assert_eq!(limits.trusted_proxies.len(), 5);
+        for ip in [
+            "10.123.4.5",
+            "2001:db8:1::1",
+            "192.0.2.1",
+            "127.0.0.1",
+            "172.31.1.1",
+        ] {
+            assert!(limits
+                .trusted_proxies
+                .iter()
+                .any(|net| net.contains(&ip.parse::<IpAddr>().unwrap())));
+        }
+        assert_eq!(limits.client_ip_header, "cf-connecting-ip");
+        let legacy = config(&[("GONVEX_PUBLIC_TRUSTED_PROXY_IPS", "127.0.0.1")]).unwrap();
+        assert_eq!(
+            legacy.public_functions.trusted_proxies,
+            vec!["127.0.0.1/32".parse::<ipnet::IpNet>().unwrap()]
+        );
+        assert_eq!(
+            config(&[]).unwrap().public_functions.client_ip_header,
+            "x-real-ip"
+        );
+        for name in [
+            "GONVEX_TRUSTED_PROXY_CIDRS",
+            "GONVEX_PUBLIC_TRUSTED_PROXY_IPS",
+        ] {
+            for value in ["10.0.0.0/33", "garbage", "127.0.0.1,"] {
+                assert_eq!(
+                    config(&[(name, value)]).unwrap_err(),
+                    ConfigError::PublicProxies
+                );
+            }
+        }
+        assert_eq!(
+            config(&[("GONVEX_CLIENT_IP_HEADER", "bad header")]).unwrap_err(),
+            ConfigError::ClientIpHeader
+        );
     }
 
     #[test]
