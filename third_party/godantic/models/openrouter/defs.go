@@ -15,6 +15,8 @@ type OpenRouterRequest struct {
 	MaxTokens   *int        `json:"max_tokens,omitempty"`
 	Temperature *float64    `json:"temperature,omitempty"`
 	TopP        *float64    `json:"top_p,omitempty"`
+	// Provider carries OpenRouter provider routing preferences, e.g. {"zdr": true}.
+	Provider map[string]any `json:"provider,omitempty"`
 }
 
 type Message struct {
