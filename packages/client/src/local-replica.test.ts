@@ -855,7 +855,7 @@ describe("optimistic membership allocation", () => {
   });
 });
 
-it('watch snapshots clone only the changed row through prediction, rejection, and server delta', async () => {
+it('watch snapshots share frozen rows through prediction, rejection, and server delta', async () => {
   const replica = new LocalReplica();
   await replica.replaceWindow({ signature: 'rows', kind: 'replica', entity: 'tasks', key: 'id', rows: Array.from({ length: 100 }, (_, i) => ({ id: String(i), order: i })), completeness: 'complete', source: 'server' });
   replica.registerReplicaCollection('rows', { table: 'tasks', key: 'id', orderBy: 'order', orderDirection: 'asc' });
@@ -867,7 +867,7 @@ it('watch snapshots clone only the changed row through prediction, rejection, an
   const predicted = replica.watchRows('rows', cache);
   expect(predicted[0]).toMatchObject({ id: '50', order: -1 });
   expect(predicted[1]).toBe(initial[0]);
-  expect(read).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(0);
   read.mockClear();
   replica.rejectCommand('edit');
   expect(replica.watchRows('rows', cache)[50]).toMatchObject({ id: '50', order: 50 });
@@ -878,7 +878,7 @@ it('watch snapshots clone only the changed row through prediction, rejection, an
   const committed = replica.watchRows('rows', cache);
   expect(committed[0]).toBe(initial[0]);
   expect(committed[50]).toMatchObject({ name: 'changed' });
-  expect(read).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(0);
   await replica.applyWindowDelta({ signature: 'rows', entity: 'tasks', key: 'id', upserts: [], deleted: ['50'] });
   expect(replica.watchRows('rows', cache)).toHaveLength(99);
   expect(cache.has('50')).toBe(false);
@@ -949,7 +949,7 @@ it('keeps mounted window snapshots stable beyond the cold-cache budget', async (
   releases.forEach(release => release());
 });
 
-it('shares immutable visible rows across windows without exposing the stored row', async () => {
+it('shares frozen stored rows across windows and direct reads', async () => {
   const replica = new LocalReplica();
   for (const signature of ['grid', 'calendar']) {
     await replica.materializeWindow({signature,kind:'replica',entity:'tasks',key:'_id',rows:[{_id:'t',name:'original'}],completeness:'complete',source:'server'});
@@ -961,7 +961,8 @@ it('shares immutable visible rows across windows without exposing the stored row
   expect(first.name).toBe('original');
   replica.rejectCommand('edit');
   expect(replica.liveQuerySnapshot('calendar').rows[0]!.name).toBe('original');
-  first.name = 'outside mutation';
+  expect(first).toBe(replica.entity('tasks', 't'));
+  expect(() => { first.name = 'outside mutation'; }).toThrow(TypeError);
   expect(replica.entity('tasks', 't')!.name).toBe('original');
 });
 

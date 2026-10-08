@@ -1,0 +1,33 @@
+{
+  "node": "v22.19.0",
+  "samples": [
+    {
+      "count": 10000,
+      "heapMB": 16.590972900390625,
+      "upsertMs": 1.0204600000000001,
+      "wakesPerUpsert": 50,
+      "entityReadNs": 185.22561999999994,
+      "checksum": 500452030,
+      "visible": 250,
+      "reads": 250,
+      "cold": {
+        "workingSetMs": 767.184463000005,
+        "activateMs": 867.61348
+      }
+    },
+    {
+      "count": 50000,
+      "heapMB": 80.09837341308594,
+      "upsertMs": 4.288853505,
+      "wakesPerUpsert": 50,
+      "entityReadNs": 182.13247000000138,
+      "checksum": 2500450190,
+      "visible": 250,
+      "reads": 250,
+      "cold": {
+        "workingSetMs": 5015.049405000027,
+        "activateMs": 4480.345497000031
+      }
+    }
+  ]
+}

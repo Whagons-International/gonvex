@@ -46,6 +46,7 @@ async function visitRecords<T, Key>(collection: Collection<T, Key>, visit: (reco
 
 /** Atomic normalized web persistence for the Gonvex Local Replica. */
 export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
+  readonly supportsResidentLookup = true;
   private readonly database: ReplicaDatabase;
   private initialized?: Promise<void>;
   private readonly channel?:BroadcastChannel;
@@ -250,7 +251,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     for(const id of ids)if(!retained.has(id))await this.writeEntity(scope,window.entity,id,null,cursor,sequence);
   }
 
-  async readChanges(scope:string,afterSequence:number,interest?:{rows:Record<string,string[]>;windows:string[];availableRows:number;availableBytes:number;maxRows:number;maxBytes:number}):Promise<ReplicaStorageChanges> {
+  async readChanges(scope:string,afterSequence:number,interest?:{rows:Record<string,string[]>;hasRow?:(entity:string,id:string)=>boolean;windows:string[];availableRows:number;availableBytes:number;maxRows:number;maxBytes:number}):Promise<ReplicaStorageChanges> {
     await this.initialize();
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
       const sequence=Number((await this.database.meta.get([scope,'sequence']))?.value ?? 0);
@@ -271,7 +272,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       });
       const rows=reset ? this.database.entities.where('scope').equals(scope) : this.database.entities.where('[scope+sequence]').between([scope,afterSequence],[scope,sequence],false,true);
       await visitRecords(rows,record=>{
-        if(wanted && !wanted.get(record.entity)?.has(record.id)){
+        if(wanted && !wanted.get(record.entity)?.has(record.id) && !interest?.hasRow?.(record.entity,record.id)){
           const size=record.value.length*2+256;
           if(record.deleted || availableRows<=0 || availableBytes<size)return;
           availableRows--;availableBytes-=size;

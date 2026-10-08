@@ -1,0 +1,194 @@
+{
+  "baselineRevision": "f21f03d3c1fd60be201f70ae83f53eefd4674c19",
+  "node": "v22.19.0",
+  "medians": {
+    "before": [
+      {
+        "count": 10000,
+        "heapMB": 17.314895629882812,
+        "upsertMs": 1.3197202049999999,
+        "wakesPerUpsert": 1000,
+        "entityReadNs": 6601.010650000001
+      },
+      {
+        "count": 50000,
+        "heapMB": 80.65755462646484,
+        "upsertMs": 9.759394245000001,
+        "wakesPerUpsert": 1000,
+        "entityReadNs": 6675.28902
+      }
+    ],
+    "after": [
+      {
+        "count": 10000,
+        "heapMB": 16.591842651367188,
+        "upsertMs": 1.118946565,
+        "wakesPerUpsert": 50,
+        "entityReadNs": 161.93176999999991
+      },
+      {
+        "count": 50000,
+        "heapMB": 80.05986022949219,
+        "upsertMs": 5.479565255,
+        "wakesPerUpsert": 50,
+        "entityReadNs": 239.16663999999855
+      }
+    ]
+  },
+  "runs": {
+    "before": [
+      {
+        "node": "v22.19.0",
+        "samples": [
+          {
+            "count": 10000,
+            "heapMB": 17.314895629882812,
+            "upsertMs": 1.3197202049999999,
+            "wakesPerUpsert": 1000,
+            "entityReadNs": 7099.67456,
+            "checksum": 500452030,
+            "visible": 250,
+            "reads": 250
+          },
+          {
+            "count": 50000,
+            "heapMB": 80.65755462646484,
+            "upsertMs": 10.336141100000003,
+            "wakesPerUpsert": 1000,
+            "entityReadNs": 6675.28902,
+            "checksum": 2500450190,
+            "visible": 250,
+            "reads": 250
+          }
+        ]
+      },
+      {
+        "node": "v22.19.0",
+        "samples": [
+          {
+            "count": 10000,
+            "heapMB": 17.314895629882812,
+            "upsertMs": 1.18756312,
+            "wakesPerUpsert": 1000,
+            "entityReadNs": 6601.010650000001,
+            "checksum": 500452030,
+            "visible": 250,
+            "reads": 250
+          },
+          {
+            "count": 50000,
+            "heapMB": 80.6571273803711,
+            "upsertMs": 9.041631725,
+            "wakesPerUpsert": 1000,
+            "entityReadNs": 6515.425079999995,
+            "checksum": 2500450190,
+            "visible": 250,
+            "reads": 250
+          }
+        ]
+      },
+      {
+        "node": "v22.19.0",
+        "samples": [
+          {
+            "count": 10000,
+            "heapMB": 17.314895629882812,
+            "upsertMs": 1.4356962800000002,
+            "wakesPerUpsert": 1000,
+            "entityReadNs": 6473.435230000001,
+            "checksum": 500452030,
+            "visible": 250,
+            "reads": 250
+          },
+          {
+            "count": 50000,
+            "heapMB": 80.65755462646484,
+            "upsertMs": 9.759394245000001,
+            "wakesPerUpsert": 1000,
+            "entityReadNs": 7995.847750000003,
+            "checksum": 2500450190,
+            "visible": 250,
+            "reads": 250
+          }
+        ]
+      }
+    ],
+    "after": [
+      {
+        "node": "v22.19.0",
+        "samples": [
+          {
+            "count": 10000,
+            "heapMB": 16.591087341308594,
+            "upsertMs": 1.038243575,
+            "wakesPerUpsert": 50,
+            "entityReadNs": 157.17174999999997,
+            "checksum": 500452030,
+            "visible": 250,
+            "reads": 250
+          },
+          {
+            "count": 50000,
+            "heapMB": 80.05970764160156,
+            "upsertMs": 5.495328725000002,
+            "wakesPerUpsert": 50,
+            "entityReadNs": 239.16663999999855,
+            "checksum": 2500450190,
+            "visible": 250,
+            "reads": 250
+          }
+        ]
+      },
+      {
+        "node": "v22.19.0",
+        "samples": [
+          {
+            "count": 10000,
+            "heapMB": 16.591842651367188,
+            "upsertMs": 1.118946565,
+            "wakesPerUpsert": 50,
+            "entityReadNs": 161.93176999999991,
+            "checksum": 500452030,
+            "visible": 250,
+            "reads": 250
+          },
+          {
+            "count": 50000,
+            "heapMB": 80.09837341308594,
+            "upsertMs": 5.479565255,
+            "wakesPerUpsert": 50,
+            "entityReadNs": 242.60541999999984,
+            "checksum": 2500450190,
+            "visible": 250,
+            "reads": 250
+          }
+        ]
+      },
+      {
+        "node": "v22.19.0",
+        "samples": [
+          {
+            "count": 10000,
+            "heapMB": 16.59344482421875,
+            "upsertMs": 1.4467348450000004,
+            "wakesPerUpsert": 50,
+            "entityReadNs": 273.4021599999994,
+            "checksum": 500452030,
+            "visible": 250,
+            "reads": 250
+          },
+          {
+            "count": 50000,
+            "heapMB": 80.05986022949219,
+            "upsertMs": 5.336796745000002,
+            "wakesPerUpsert": 50,
+            "entityReadNs": 181.12170999999762,
+            "checksum": 2500450190,
+            "visible": 250,
+            "reads": 250
+          }
+        ]
+      }
+    ]
+  }
+}
