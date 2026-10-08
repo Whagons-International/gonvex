@@ -4,6 +4,48 @@ import { Dexie } from "dexie";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica";
 import { LocalReplica } from "./local-replica";
 
+it('checkpoints small windows together while bounding UTF-8 memberships and preserving an oversized window', async () => {
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalKeyRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const storage = new IndexedDBLocalReplicaStorage(`metadata-budget-${Math.random()}`);
+  const cursor = { epoch: 'test', revision: 1 };
+  const small = Array.from({ length: 135 }, (_, index) => ({ signature: `small-${index}`, entity: 'tasks', key: '_id',
+    kind: 'replica' as const, ids: [], completeness: 'complete' as const, source: 'server' as const, cursor }));
+  const wide = Array.from({ length: 3 }, (_, index) => ({ ...small[0]!, signature: `wide-${index}`,
+    ids: Array.from({ length: 400 }, (_, id) => `任务-${id}-${'界'.repeat(6)}`) }));
+  const oversized = { ...small[0]!, signature: 'oversized', ids: Array.from({ length: 1000 }, (_, id) => `task-${id}-${'x'.repeat(40)}`) };
+  const windows = [...small, ...wide, oversized];
+  try {
+    await storage.replaceSnapshot({ cursor, entities: {}, liveQueries: Object.fromEntries(windows.map(window => [window.signature, window])) }, 'tenant');
+    const table = (storage as any).database.windows;
+    const original = table.bulkPut.bind(table);
+    const batches: any[][] = [];
+    vi.spyOn(table, 'bulkPut').mockImplementation((records: any[]) => { batches.push(records); return original(records); });
+    const nextCursor = { epoch: 'test', revision: 2 };
+    const next = windows.map(window => ({ ...window, cursor: nextCursor }));
+    await storage.advanceWatermark(next, nextCursor, 'tenant');
+    // The 135 tiny memberships must not require the previous 17 round trips.
+    expect(batches.filter(batch => batch.every(record => record.signature.startsWith('small-'))).length).toBeLessThanOrEqual(3);
+    for (const batch of batches) {
+      expect(batch.length).toBeLessThanOrEqual(64);
+      const bytes = batch.reduce((sum, record) => sum + new TextEncoder().encode(record.value).byteLength, 0);
+      if (bytes > 16 * 1024) expect(batch).toHaveLength(1);
+    }
+    const after = await storage.load('tenant');
+    expect(after?.cursor).toEqual(nextCursor);
+    for (const window of next) expect(after?.liveQueries[window.signature]).toEqual(window);
+    expect(Object.keys(after?.liveQueries ?? {})).toHaveLength(windows.length);
+  } finally {
+    vi.restoreAllMocks(); storage.close();
+    Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
+    Dexie.dependencies.indexedDB = originalIndexedDB;
+    Dexie.dependencies.IDBKeyRange = originalKeyRange;
+  }
+}, 30_000);
+
 it('rolls back a late multi-window checkpoint failure without losing memberships or newer cursors', async () => {
   const originalIndexedDB = globalThis.indexedDB;
   const originalKeyRange = globalThis.IDBKeyRange;

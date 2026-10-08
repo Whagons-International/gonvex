@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/protocol",
-  "version": "0.5.2-staging.25",
+  "version": "0.5.2-staging.26",
   "type": "module",
   "publishConfig": {
     "access": "public"
