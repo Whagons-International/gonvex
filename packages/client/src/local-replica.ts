@@ -1196,6 +1196,12 @@ export class LocalReplica implements LocalReplicaView {
     return this.scopeLoaded && window?.completeness === "complete" && window.truncated !== true;
   }
 
+  /** A watermark reads only cursor/integrity presence, never copied IDs or hashes. */
+  windowCanAdvance(signature: string, revision: number): boolean {
+    const window = this.liveQueries.get(signature);
+    return Boolean(window?.cursor && window.cursor.revision < revision && window.hashes);
+  }
+
   /** SDK watch snapshots: unchanged rows are not cloned again on every notification. */
   watchRows<T extends ReplicaRow>(signature: string, cache: Map<string, { version: number; row: T | undefined }>): T[] {
     const window = this.scopeLoaded ? this.liveQueries.get(signature) : undefined;

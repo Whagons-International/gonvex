@@ -2016,6 +2016,53 @@ describe("GonvexClient", () => {
     client.close();
   });
 
+  it('coalesces adjacent queued watermarks without advancing across an entity transaction', async () => {
+    const client = new GonvexClient('ws://runtime.test/ws', { localReplica: { storage: new MemoryLocalReplicaStorage() } });
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: 'session.ready', capabilities: { replicaWatermark: 1 }, replica: testReplicaDirective });
+    await (client as any).replicaReady;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    (client as any).enqueueReplicaFrame(() => gate);
+    const advance = vi.spyOn((client as any).replica, 'advanceWatermark');
+    try {
+      socket.receive({ type: 'replica.watermark', revision: 19 });
+      socket.receive({ type: 'replica.watermark', revision: 20 });
+      socket.receive({ type: 'replica.transaction', cursor: { epoch: 'epoch:test', revision: 21 }, changes: [{
+        entity: 'statuses', id: 'status-2', operation: 'insert', newValue: { id: 'status-2', name: 'Blocked' },
+      }] });
+      socket.receive({ type: 'replica.watermark', revision: 21 });
+      socket.receive({ type: 'replica.watermark', revision: 22 });
+      expect(advance).not.toHaveBeenCalled();
+      release();
+      await (client as any).replicaFrames;
+      expect(advance.mock.calls.map(call => call[0])).toEqual([20, 22]);
+      expect(client.localReplica.entity('statuses', 'status-2')).toEqual({ id: 'status-2', name: 'Blocked' });
+    } finally { release(); client.close(); }
+  });
+
+  it('drops a queued watermark after its replica scope changes', async () => {
+    const client = new GonvexClient('ws://runtime.test/ws', { localReplica: { storage: new MemoryLocalReplicaStorage() } });
+    client.connect();
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: 'session.ready', capabilities: { replicaWatermark: 1 }, replica: testReplicaDirective });
+    await (client as any).replicaReady;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    (client as any).enqueueReplicaFrame(() => gate);
+    const advance = vi.spyOn((client as any).replica, 'advanceWatermark');
+    try {
+      socket.receive({ type: 'replica.watermark', revision: 20 });
+      (client as any).replicaScope = 'new-identity-scope';
+      release();
+      await (client as any).replicaFrames;
+      expect(advance).not.toHaveBeenCalled();
+    } finally { release(); client.close(); }
+  });
+
   it("settles a tenant Reducer only after its collection membership delta is durable", async () => {
     const collectionRef: FunctionReference = {
       kind: "query",
@@ -2505,6 +2552,44 @@ describe("GonvexClient", () => {
     });
     expect(sentMessages(socket).filter((message) => message.type === "replica.open")).toHaveLength(2);
     client.close();
+  });
+
+  it('does not acknowledge or lose a transaction when its watermark arrives during auth renewal', async () => {
+    const collectionRef: FunctionReference = { kind: 'query', path: 'tasks.recent', delivery: 'replica', replica: { table: 'tasks', key: 'id', columns: ['id', 'title'], maxRows: 100 } };
+    const client = new GonvexClient('ws://runtime.test/ws', { project: 'shop', tenant: 'tenant-a', token: 'first-token', identity: { sub: 'account-a', iss: 'shop' } });
+    const tasks = client.watchReplica(collectionRef, {});
+    const socket = latestSocket();
+    socket.open();
+    socket.receive({ type: 'session.ready', capabilities: { replicaWatermark: 1 }, replica: testReplicaDirective });
+    const firstAuth = sentMessages(socket).find(message => message.type === 'auth');
+    socket.receive({ type: 'auth.result', id: firstAuth.id, result: authenticatedResult({ accountId: 'account-a' }) });
+    await vi.waitFor(() => expect(sentMessages(socket).some(message => message.type === 'replica.open')).toBe(true));
+    const open = sentMessages(socket).findLast(message => message.type === 'replica.open')!;
+    const rows = [{ id: 'task-1', title: 'Pending' }];
+    const hashes = await replicaRowsHashes(rows, 'id');
+    const digest = await replicaHashesDigest(hashes);
+    socket.receive({ type: 'replica.snapshot', id: open.id, path: collectionRef.path, result: rows, cursor: { epoch: 'epoch:test', revision: 1 }, key: 'id', maxRows: 100, hashes, digest, truncated: false });
+    socket.receive({ type: 'replica.ready', id: open.id, path: collectionRef.path, cursor: { epoch: 'epoch:test', revision: 1 }, digest, truncated: false });
+    await vi.waitFor(() => expect(tasks.localReplicaState()).toMatchObject({ computedRevision: 1, isUpToDate: true }));
+    const update = client.reducer({ kind: 'reducer', path: 'tasks.update' }, { id: 'task-1', title: 'Working' });
+    let settled = false;
+    void update.then(() => { settled = true; }).catch(() => undefined);
+    await vi.waitFor(() => expect(sentMessages(socket).some(message => message.type === 'reducer.call')).toBe(true));
+    const call = sentMessages(socket).findLast(message => message.type === 'reducer.call')!;
+    try {
+      client.setAuth({ token: 'second-token', identity: { sub: 'account-a', iss: 'shop' } });
+      socket.receive({ type: 'reducer.result', id: call.id, path: call.path, result: 'updated', committedRevision: 2 });
+      socket.receive({ type: 'replica.transaction', cursor: { epoch: 'epoch:test', revision: 2 }, changes: [{ entity: 'tasks', id: 'task-1', operation: 'update', newValue: { id: 'task-1', title: 'Working' } }] });
+      socket.receive({ type: 'replica.watermark', revision: 2 });
+      await (client as any).replicaFrames;
+      await flushMicrotasks();
+      expect(settled).toBe(false);
+      expect(tasks.localReplicaState()).toMatchObject({ computedRevision: 1 });
+      const secondAuth = sentMessages(socket).findLast(message => message.type === 'auth')!;
+      socket.receive({ type: 'auth.result', id: secondAuth.id, result: authenticatedResult({ accountId: 'account-a' }) });
+      await expect(update).resolves.toBe('updated');
+      expect(client.localReplica.entity('tasks', 'task-1')).toEqual({ id: 'task-1', title: 'Working' });
+    } finally { client.close(); }
   });
 
   it("validates each Replica Collection against its own table projection", async () => {

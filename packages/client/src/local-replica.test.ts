@@ -4,6 +4,22 @@ import { replicaRowsHashes } from "./replica-integrity";
 import { MissingReducerDataError } from "@gonvex/local-runtime/portable";
 
 describe("LocalReplica", () => {
+  it('checks watermark eligibility without iterating a window membership or integrity map', async () => {
+    const replica = new LocalReplica(new MemoryLocalReplicaStorage());
+    await replica.replaceWindow({ signature: 'statuses', kind: 'replica', entity: 'statuses', key: 'id', rows: [{ id: 'one' }], hashes: { one: 'hash' }, cursor: { epoch: 'test', revision: 1 }, completeness: 'complete', source: 'server' });
+    const window = (replica as any).liveQueries.get('statuses');
+    window.hashes = new Proxy(window.hashes, { ownKeys: () => { throw new Error('must not copy hashes'); } });
+    window.ids = new Proxy(window.ids, { get: (target, key, receiver) => {
+      if (key === Symbol.iterator) throw new Error('must not copy membership');
+      return Reflect.get(target, key, receiver);
+    } });
+    expect(replica.windowCanAdvance('statuses', 2)).toBe(true);
+    expect(replica.windowCanAdvance('statuses', 1)).toBe(false);
+    expect(replica.windowCanAdvance('missing', 2)).toBe(false);
+    window.hashes = undefined;
+    expect(replica.windowCanAdvance('statuses', 2)).toBe(false);
+  });
+
   it('admits a user read after the current atomic write without waiting for the hydration backlog', async () => {
     const order: string[] = [];
     let release!: () => void;
