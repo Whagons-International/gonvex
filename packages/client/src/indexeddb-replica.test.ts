@@ -4,6 +4,101 @@ import { Dexie } from "dexie";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica";
 import { LocalReplica } from "./local-replica";
 
+it('rolls back a late multi-window checkpoint failure without losing memberships or newer cursors', async () => {
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalKeyRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const storage = new IndexedDBLocalReplicaStorage(`window-checkpoint-${Math.random()}`);
+  const ids = Array.from({ length: 128 }, (_, i) => `task-${i}`);
+  const cursor = { epoch: 'test', revision: 1 };
+  const windows = Array.from({ length: 40 }, (_, i) => ({ signature: `window-${i}`, entity: 'tasks', key: '_id',
+    kind: 'live' as const, ids, completeness: 'partial' as const, source: 'server' as const, cursor,
+    hashes: Object.fromEntries(ids.map(id => [id, '0123456789abcdef'.repeat(4)])) }));
+  try {
+    await storage.replaceSnapshot({ cursor, entities: { tasks: Object.fromEntries(ids.map(_id => [_id, { _id }])) },
+      liveQueries: Object.fromEntries(windows.map(window => [window.signature, window])) }, 'tenant');
+    await expect(storage.advanceWatermark([], cursor, 'tenant')).resolves.toBeUndefined();
+    const table = (storage as any).database.windows;
+    const original = table.bulkPut.bind(table);
+    const write = vi.spyOn(table, 'bulkPut').mockImplementation((records: any[]) => {
+      if (records.some(record => record.signature === 'window-33')) throw new Error('Late checkpoint failed');
+      return original(records);
+    });
+    const nextCursor = { epoch: 'test', revision: 3 };
+    const next = windows.map(window => ({ ...window, cursor: nextCursor }));
+    await expect(storage.advanceWatermark(next, nextCursor, 'tenant')).rejects.toThrow('Late checkpoint failed');
+    const rolledBack = await storage.load('tenant');
+    expect(rolledBack?.cursor).toEqual(cursor);
+    for (const window of windows) expect(rolledBack?.liveQueries[window.signature]).toEqual(window);
+    write.mockRestore();
+    const newer = { epoch: 'test', revision: 7 };
+    await storage.advanceWatermark([{ ...windows[39]!, cursor: newer }], newer, 'tenant');
+    await storage.advanceWatermark(next, nextCursor, 'tenant');
+    const after = await storage.load('tenant');
+    expect(after?.cursor).toEqual(newer);
+    for (const window of next) expect(after?.liveQueries[window.signature]).toEqual({ ...window, cursor: window.signature === 'window-39' ? newer : nextCursor });
+    expect(new Set(Object.keys(after?.entities.tasks ?? {}))).toEqual(new Set(ids));
+  } finally {
+    vi.restoreAllMocks(); storage.close();
+    Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
+    Dexie.dependencies.indexedDB = originalIndexedDB;
+    Dexie.dependencies.IDBKeyRange = originalKeyRange;
+  }
+}, 30_000);
+
+it('keeps a wide multi-batch transaction atomic and preserves newer projected fields after retry', async () => {
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalKeyRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const name = `wide-transaction-${Math.random()}`;
+  let storage = new IndexedDBLocalReplicaStorage(name);
+  const rows = Array.from({ length: 96 }, (_, index) => ({
+    _id: `task-${index}`, ...Object.fromEntries(Array.from({ length: 48 }, (_, column) => [`field${column}`, `before-${index}-${column}`])),
+  }));
+  const window = { signature: 'tasks', entity: 'tasks', key: '_id', kind: 'replica' as const,
+    ids: rows.map(row => row._id), completeness: 'complete' as const, source: 'server' as const,
+    cursor: { epoch: 'test', revision: 1 } };
+  const snapshot = { entities: {}, liveQueries: {}, cursor: window.cursor };
+  const changes = rows.map(row => ({ entity: 'tasks', id: row._id, operation: 'update' as const, newValue: { _id: row._id, field0: 'newer' } }));
+  try {
+    await storage.replaceWindow(window, snapshot, 'tenant', rows);
+    await expect(storage.applyTransaction({ cursor: window.cursor, changes: [
+      { entity: 'tasks', id: 'ignored', operation: 'update' },
+    ] }, snapshot, 'tenant')).resolves.toBeUndefined();
+    await storage.replaceWindow({ ...window, signature: 'other', ids: ['unrelated'] }, snapshot, 'other', [{ _id: 'unrelated', field0: 'untouched' }]);
+    const table = (storage as any).database.entities;
+    const original = table.bulkPut.bind(table);
+    const write = vi.spyOn(table, 'bulkPut').mockImplementation((records: any[]) => {
+      if (records.some(record => record.id === 'task-80')) throw new Error('Late wide write failed');
+      return original(records);
+    });
+    const transaction = { cursor: { epoch: 'test', revision: 3 }, changes };
+    await expect(storage.applyTransaction(transaction, snapshot, 'tenant')).rejects.toThrow('Late wide write failed');
+    const rolledBack = await storage.load('tenant');
+    expect(rolledBack?.cursor?.revision).toBe(1);
+    for (const row of rows) expect(rolledBack?.entities.tasks?.[row._id]).toEqual(row);
+    write.mockRestore();
+    await storage.applyTransaction(transaction, snapshot, 'tenant');
+    // An older reconnect projection cannot erase fields learned from the newer
+    // transaction, or unrelated columns not included in either projection.
+    await storage.replaceWindow({ ...window, cursor: { epoch: 'test', revision: 2 } }, snapshot, 'tenant', rows.map(row => ({ _id: row._id, field0: 'stale', field1: 'projected' })));
+    storage.close(); storage = new IndexedDBLocalReplicaStorage(name);
+    const after = await storage.load('tenant');
+    expect(after?.cursor?.revision).toBe(3);
+    for (const row of rows) expect(after?.entities.tasks?.[row._id]).toEqual({ ...row, field0: 'newer', field1: 'projected' });
+    expect((await storage.load('other'))?.entities.tasks?.unrelated).toEqual({ _id: 'unrelated', field0: 'untouched' });
+  } finally {
+    vi.restoreAllMocks(); storage.close();
+    Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
+    Dexie.dependencies.indexedDB = originalIndexedDB;
+    Dexie.dependencies.IDBKeyRange = originalKeyRange;
+  }
+}, 30_000);
+
 it('rolls back a late native write failure in a medium snapshot and can retry it intact', async () => {
   const originalIndexedDB = globalThis.indexedDB;
   const originalKeyRange = globalThis.IDBKeyRange;

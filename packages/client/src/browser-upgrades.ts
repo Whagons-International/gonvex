@@ -22,10 +22,17 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   storage: LocalReplicaStorage; store: OutboxStore; ready: Promise<void>; close(): void;
 } {
   const replica = new IndexedDBLocalReplicaStorage(options.replicaName);
-  const queue = new Dexie(options.outboxName) as Dexie & { entries: Table<ReducerOutboxEntry, number> };
+  const queue = new Dexie(options.outboxName, { cache: 'disabled' }) as Dexie & { entries: Table<ReducerOutboxEntry, number> };
+  // SDK fences and peer notifications own journal delivery. These stores are
+  // never used by Dexie.liveQuery; its mutation ranges and cache transaction
+  // observers add unused allocations and callbacks to durable admission.
+  queue.unuse({ stack: 'dbcore', name: 'Cache' });
+  queue.unuse({ stack: 'dbcore', name: 'Observability' });
   queue.version(1).stores({ entries: "++id, state, nextAttemptAt" });
   queue.version(2).stores({ entries: "++id, scope, state, nextAttemptAt, [scope+state], [scope+nextAttemptAt]" });
-  const meta = new Dexie(`${options.replicaName}-upgrades`) as Dexie & { state: Table<UpgradeRecord, string> };
+  const meta = new Dexie(`${options.replicaName}-upgrades`, { cache: 'disabled' }) as Dexie & { state: Table<UpgradeRecord, string> };
+  meta.unuse({ stack: 'dbcore', name: 'Cache' });
+  meta.unuse({ stack: 'dbcore', name: 'Observability' });
   meta.version(1).stores({ state: "&key" });
   const lockName = `gonvex-upgrade:${options.replicaName}:${options.outboxName}`;
   const locks = globalThis.navigator?.locks;

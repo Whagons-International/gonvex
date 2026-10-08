@@ -29,6 +29,8 @@ const replicaSchemaVersion = 5;
 // can run between batches. Four-row batches made medium snapshots spend most
 // of their time on native request round trips. Keep one atomic transaction.
 const writeBatchSize = 32;
+const writeIndexBudget = 64;
+const windowBatchSize = 8;
 
 // Small replica checkpoints usually change only a few rows. IndexedDB getAll
 // avoids a JS/Dexie continuation per row. The fallback remains streaming so a
@@ -137,6 +139,26 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return record;
   }
 
+  private async writeRecords(records: readonly EntityRecord[]) {
+    // A row may update dozens of multiEntry keys. Bound the native index work,
+    // rather than just the request count, so a wide snapshot cannot monopolize
+    // IndexedDB while another database admits a durable interactive intent.
+    // Await only IDB work and retain the enclosing atomic transaction.
+    let batch: EntityRecord[] = [];
+    let weight = 0;
+    for (const record of records) {
+      // Primary key, scope, entity and sequence indexes accompany lookupKeys.
+      // A single wider row remains indivisible; never split its native write.
+      const nextWeight = 4 + (record.lookupKeys?.length ?? 0);
+      if (batch.length && weight + nextWeight > writeIndexBudget) {
+        await this.database.entities.bulkPut(batch);
+        batch = []; weight = 0;
+      }
+      batch.push(record); weight += nextWeight;
+    }
+    if (batch.length) await this.database.entities.bulkPut(batch);
+  }
+
   private async writeRows(scope:string,entity:string,key:string,rows:readonly ReplicaRow[],cursor:ReplicaCursor|undefined,sequence:number) {
     return this.writeRowEntries(scope,entity,rows.map(row=>[String(row[key]),row]),cursor,sequence);
   }
@@ -147,21 +169,27 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       const batch=rows.slice(offset,offset+writeBatchSize);
       const prior=await this.database.entities.bulkGet(batch.map(([id])=>[scope,entity,id]) as [string,string,string][]);
       const records = batch.map(([id,row],index)=>this.versionedRecord(scope,entity,id,row,cursor,sequence,prior[index])).filter((record,index)=>record !== prior[index]);
-      if (records.length) await this.database.entities.bulkPut(records);
+      if (records.length) await this.writeRecords(records);
     }
   }
 
   private async writeWindows(scope:string,windows:readonly ReplicaWindow[],sequence:number) {
-    const prior=await this.database.windows.bulkGet(windows.map(window=>[scope,window.signature]) as [string,string][]);
-    await this.database.windows.bulkPut(windows.flatMap((window,index)=>{
-      const record=prior[index];
-      const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
-      if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision)))return [{...record!,sequence}];
-      // Serialization already isolates persisted values. Copying ordered IDs
-      // and large integrity maps before stringifying doubled temporary memory
-      // for every cursor-only checkpoint.
-      return [{scope,sequence,signature:window.signature,value:JSON.stringify({ ...window, kind: window.kind ?? 'live', key: window.key ?? 'id' })}];
-    }));
+    // Watermarks checkpoint many mounted windows at once. Their serialized
+    // memberships can be large, even though each window has few index keys.
+    // Bound both native reads and writes while retaining the same transaction.
+    for (let offset = 0; offset < windows.length; offset += windowBatchSize) {
+      const batch = windows.slice(offset, offset + windowBatchSize);
+      const prior=await this.database.windows.bulkGet(batch.map(window=>[scope,window.signature]) as [string,string][]);
+      await this.database.windows.bulkPut(batch.flatMap((window,index)=>{
+        const record=prior[index];
+        const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
+        if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision)))return [{...record!,sequence}];
+        // Serialization already isolates persisted values. Copying ordered IDs
+        // and large integrity maps before stringifying doubled temporary memory
+        // for every cursor-only checkpoint.
+        return [{scope,sequence,signature:window.signature,value:JSON.stringify({ ...window, kind: window.kind ?? 'live', key: window.key ?? 'id' })}];
+      }));
+    }
   }
 
   private async saveCursor(scope:string,cursor:ReplicaCursor|undefined) {
@@ -386,7 +414,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
             ids.add(entry.id);
           }
         }
-        await this.database.entities.bulkPut(records);
+        if (records.length) await this.writeRecords(records);
       }
       if (deleted.size) {
         const windows = await this.database.windows.where('scope').equals(normalizedScope).toArray();
@@ -401,7 +429,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
         }
         await this.database.windows.bulkPut(changed);
       }
-      await this.writeWindows(normalizedScope,transaction.memberships ?? [],sequence);
+      if (transaction.memberships?.length) await this.writeWindows(normalizedScope,transaction.memberships,sequence);
       await this.saveCursor(normalizedScope,transaction.cursor);
     });
     this.channel?.postMessage({scope:normalizedScope});
@@ -419,7 +447,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     // never rewritten once per retained collection.
     await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
-      await this.writeWindows(normalizedScope,windows,sequence);
+      if (windows.length) await this.writeWindows(normalizedScope,windows,sequence);
       await this.saveCursor(normalizedScope,cursor);
     });
     this.channel?.postMessage({scope:normalizedScope});
@@ -493,7 +521,8 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
         // before the next populated table is written (Dexie.PrematureCommitError).
         if (entries.length) await this.writeRowEntries(normalizedScope,entity,entries,snapshot.cursor,sequence);
       }
-      await this.writeWindows(normalizedScope,Object.values(snapshot.liveQueries),sequence);
+      const windows = Object.values(snapshot.liveQueries);
+      if (windows.length) await this.writeWindows(normalizedScope,windows,sequence);
       await this.saveCursor(normalizedScope,snapshot.cursor);
     });
     this.channel?.postMessage({scope:normalizedScope});
