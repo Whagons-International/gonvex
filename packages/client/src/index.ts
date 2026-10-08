@@ -41,6 +41,7 @@ import {
   LocalReplica,
   MemoryLocalReplicaStorage,
   type LocalReplicaStorage,
+  type ReplicaMetadataCommit,
   type LocalReplicaSession,
   type LocalReplicaView,
   type ReplicaChange,

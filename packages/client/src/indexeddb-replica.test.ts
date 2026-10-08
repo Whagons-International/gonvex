@@ -4,6 +4,97 @@ import { Dexie } from "dexie";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica";
 import { LocalReplica } from "./local-replica";
 
+it('does not reread its own metadata commits, but catches every intervening peer row and membership', async () => {
+  const oldIDB = globalThis.indexedDB;
+  const oldRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const name = `metadata-receipt-${Math.random()}`;
+  const storage = new IndexedDBLocalReplicaStorage(name);
+  const peer = new IndexedDBLocalReplicaStorage(name);
+  const replica = new LocalReplica(storage);
+  const scope = 'tenant-a';
+  const window = { signature: 'tasks', kind: 'replica' as const, entity: 'tasks', key: 'id',
+    rows: [{ id: 'one', title: 'Original' }], completeness: 'complete' as const, source: 'server' as const,
+    cursor: { epoch: 'test', revision: 1 }, hashes: { one: 'verified' } };
+  try {
+    await replica.activateScope(scope);
+    await replica.replaceWindow(window);
+    const read = vi.spyOn(storage, 'readChanges');
+    for (let revision = 2; revision <= 10; revision += 2) {
+      await replica.applyWindowDelta({ ...window, upserts: [], deleted: [], cursor: { epoch: 'test', revision } });
+      await replica.advanceWatermark(revision + 1, ['tasks'], scope);
+    }
+    expect(read, 'own metadata is already published; do not reload every retained window').not.toHaveBeenCalled();
+    expect(replica.entity('tasks', 'one')).toEqual({ id: 'one', title: 'Original' });
+    const prior = await peer.load(scope);
+    await peer.applyTransaction({ cursor: { epoch: 'test', revision: 20 }, changes: [
+      { entity: 'tasks', id: 'peer-row', operation: 'insert', newValue: { id: 'peer-row', title: 'Peer only' } },
+    ], memberships: [{ ...prior!.liveQueries.tasks!, signature: 'peer-window', ids: ['peer-row'], cursor: { epoch: 'test', revision: 20 } }] }, prior!, scope);
+    await replica.applyWindowDelta({ ...window, upserts: [], deleted: [], cursor: { epoch: 'test', revision: 21 } });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(replica.entity('tasks', 'peer-row')).toEqual({ id: 'peer-row', title: 'Peer only' });
+    expect(replica.getWindow('peer-window')?.ids).toEqual(['peer-row']);
+    await peer.applyTransaction({ cursor: { epoch: 'test', revision: 22 }, changes: [
+      { entity: 'tasks', id: 'peer-row', operation: 'update', newValue: { id: 'peer-row', title: 'Peer changed' } },
+    ] }, (await peer.load(scope))!, scope);
+    // A watermark receipt also must not hide a peer commit before it.
+    await replica.advanceWatermark(23, ['tasks'], scope);
+    await replica.applyWindowDelta({ ...window, upserts: [], deleted: [], cursor: { epoch: 'test', revision: 24 } });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(replica.entity('tasks', 'peer-row')).toEqual({ id: 'peer-row', title: 'Peer changed' });
+    const stored = await storage.load(scope);
+    expect(stored?.liveQueries.tasks?.cursor?.revision).toBe(24);
+    expect(stored?.liveQueries['peer-window']?.ids).toEqual(['peer-row']);
+    expect(stored?.entities.tasks?.['peer-row']).toEqual({ id: 'peer-row', title: 'Peer changed' });
+    expect((await storage.load('tenant-b'))).toBeUndefined();
+  } finally {
+    vi.restoreAllMocks(); storage.close(); peer.close(); replica.dispose();
+    Object.assign(globalThis, { indexedDB: oldIDB, IDBKeyRange: oldRange });
+    Dexie.dependencies.indexedDB = oldIDB;
+    Dexie.dependencies.IDBKeyRange = oldRange;
+  }
+}, 30_000);
+
+it('issues metadata receipts only for exact, non-resetting, committed windows', async () => {
+  const oldIDB = globalThis.indexedDB;
+  const oldRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const storage = new IndexedDBLocalReplicaStorage(`metadata-guards-${Math.random()}`);
+  const scope = 'tenant';
+  const window = { signature: 'tasks', kind: 'replica' as const, entity: 'tasks', key: 'id', ids: ['one'],
+    completeness: 'complete' as const, source: 'server' as const, cursor: { epoch: 'first', revision: 1 } };
+  const snapshot = { cursor: window.cursor, entities: { tasks: { one: { id: 'one', title: 'Original' } } }, liveQueries: { tasks: window } };
+  try {
+    await storage.replaceSnapshot(snapshot, scope);
+    const advanced = { ...window, cursor: { epoch: 'first', revision: 2 } };
+    expect(await storage.applyWindowDelta(advanced, { upserts: [], deleted: [] }, { ...snapshot, cursor: advanced.cursor }, scope))
+      .toEqual({ scope, previousSequence: 1, sequence: 2 });
+    const changed = { ...window, cursor: { epoch: 'first', revision: 3 } };
+    expect(await storage.applyWindowDelta(changed, { upserts: [{ id: 'one', title: 'Changed' }], deleted: [] }, { ...snapshot, cursor: changed.cursor }, scope)).toBeUndefined();
+    expect(await storage.applyWindowDelta(advanced, { upserts: [], deleted: [] }, snapshot, scope)).toBeUndefined();
+    expect((await storage.load(scope))?.liveQueries.tasks?.cursor).toEqual(changed.cursor);
+    expect(await storage.advanceWatermark([advanced], advanced.cursor, scope)).toBeUndefined();
+    const table = (storage as any).database.windows;
+    const failure = vi.spyOn(table, 'bulkPut').mockRejectedValueOnce(new Error('quota'));
+    const before = await storage.load(scope);
+    await expect(storage.advanceWatermark([{ ...changed, cursor: { epoch: 'first', revision: 4 } }], { epoch: 'first', revision: 4 }, scope)).rejects.toThrow('quota');
+    failure.mockRestore();
+    expect(await storage.load(scope)).toEqual(before);
+    const reset = { ...window, ids: [], cursor: { epoch: 'second', revision: 1 } };
+    expect(await storage.applyWindowDelta(reset, { upserts: [], deleted: [] }, { cursor: reset.cursor, entities: {}, liveQueries: { tasks: reset } }, scope)).toBeUndefined();
+    expect((await storage.load(scope))?.entities).toEqual({});
+  } finally {
+    vi.restoreAllMocks(); storage.close();
+    Object.assign(globalThis, { indexedDB: oldIDB, IDBKeyRange: oldRange });
+    Dexie.dependencies.indexedDB = oldIDB;
+    Dexie.dependencies.IDBKeyRange = oldRange;
+  }
+}, 30_000);
+
 it('checkpoints small windows together while bounding UTF-8 memberships and preserving an oversized window', async () => {
   const originalIndexedDB = globalThis.indexedDB;
   const originalKeyRange = globalThis.IDBKeyRange;

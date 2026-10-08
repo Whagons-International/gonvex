@@ -11,6 +11,7 @@ import type {
   ReplicaWindow,
   ReplicaRow,
   ReplicaStorageChanges,
+  ReplicaMetadataCommit,
 } from "./local-replica.js";
 
 type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean };
@@ -181,13 +182,17 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     // flush still belongs to the caller's original atomic transaction.
     let batch: Array<{ window: ReplicaWindow; value: string }> = [];
     let bytes = 0;
+    let accepted = true;
     const flush = async () => {
       if (!batch.length) return;
       const prior=await this.database.windows.bulkGet(batch.map(({window})=>[scope,window.signature]) as [string,string][]);
       await this.database.windows.bulkPut(batch.flatMap(({window,value},index)=>{
         const record=prior[index];
         const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
-        if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision)))return [{...record!,sequence}];
+        if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision))) {
+          accepted = false;
+          return [{...record!,sequence}];
+        }
         // Serialization already isolates persisted values. Copying ordered IDs
         // and large integrity maps before stringifying doubled temporary memory
         // for every cursor-only checkpoint.
@@ -202,6 +207,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       batch.push({ window, value }); bytes += size;
     }
     await flush();
+    return accepted;
   }
 
   private async saveCursor(scope:string,cursor:ReplicaCursor|undefined) {
@@ -215,13 +221,13 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   }
 
   private async acceptEpoch(scope:string,cursor:ReplicaCursor|undefined,sequence:number) {
-    if(!cursor)return;
+    if(!cursor)return false;
     const prior=await this.database.meta.get([scope,'epoch']);
     const legacyCursor=prior ? undefined : await this.database.meta.get([scope,'cursor']);
     const state=prior ? JSON.parse(prior.value) as {current:string;retired:string[]} : legacyCursor ? {current:(JSON.parse(legacyCursor.value) as ReplicaCursor).epoch,retired:[]} : undefined;
     if(state?.current===cursor.epoch) {
       if(!prior)await this.database.meta.put({scope,key:'epoch',value:JSON.stringify(state)});
-      return;
+      return false;
     }
     if(state?.retired.includes(cursor.epoch))throw new Error('This tab has an obsolete replica epoch. Reconnect before continuing.');
     if(state) {
@@ -230,6 +236,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       await this.database.meta.put({scope,key:'resetSequence',value:String(sequence)});
     }
     await this.database.meta.put({scope,key:'epoch',value:JSON.stringify({current:cursor.epoch,retired:state ? [...state.retired,state.current] : []})});
+    return Boolean(state);
   }
 
   private async pruneRows(scope:string,window:ReplicaWindow,ids:readonly string[],cursor:ReplicaCursor|undefined,sequence:number) {
@@ -451,18 +458,20 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     windows: readonly ReplicaWindow[],
     cursor: ReplicaSnapshot["cursor"],
     scope: ReplicaScope = defaultReplicaScope,
-  ): Promise<void> {
+  ): Promise<void | ReplicaMetadataCommit> {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
     // A watermark contains no entity changes. Keep this transaction limited to
     // window metadata and the shared cursor so large normalized replicas are
     // never rewritten once per retained collection.
-    await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
+    const receipt = await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
-      if (windows.length) await this.writeWindows(normalizedScope,windows,sequence);
+      const accepted = await this.writeWindows(normalizedScope,windows,sequence);
       await this.saveCursor(normalizedScope,cursor);
+      if (accepted && windows.length) return { scope: normalizedScope, previousSequence: sequence - 1, sequence };
     });
     this.channel?.postMessage({scope:normalizedScope});
+    return receipt;
   }
 
   async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[]): Promise<void> {
@@ -490,19 +499,23 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     this.channel?.postMessage({scope:normalizedScope});
   }
 
-  async applyWindowDelta(window: ReplicaWindow, delta: { upserts: ReplicaRow[]; deleted: string[] }, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
+  async applyWindowDelta(window: ReplicaWindow, delta: { upserts: ReplicaRow[]; deleted: string[] }, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void | ReplicaMetadataCommit> {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
-    await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
+    const receipt = await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
-      await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
+      const reset = await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
       const rows = delta.deleted.length ? snapshot.entities[window.entity] ?? {} : {};
       await this.pruneRows(normalizedScope,window,delta.deleted.filter(id=>rows[id]===undefined),window.cursor ?? snapshot.cursor,sequence);
       await this.writeRows(normalizedScope,window.entity,window.key,delta.upserts,window.cursor ?? snapshot.cursor,sequence);
-      await this.writeWindows(normalizedScope,[window],sequence);
+      const accepted = await this.writeWindows(normalizedScope,[window],sequence);
       await this.saveCursor(normalizedScope,snapshot.cursor);
+      if (accepted && !reset && delta.upserts.length === 0 && delta.deleted.length === 0) {
+        return { scope: normalizedScope, previousSequence: sequence - 1, sequence };
+      }
     });
     this.channel?.postMessage({scope:normalizedScope});
+    return receipt;
   }
 
   async removeWindow(signature: string, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
