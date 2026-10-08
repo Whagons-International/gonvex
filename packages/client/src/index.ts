@@ -658,8 +658,9 @@ export class GonvexClient {
   private hasAuthoritativeReplicaScope = false;
   private replicaReady: Promise<void> = Promise.resolve();
   private replicaFrames: Promise<void> = Promise.resolve();
+  private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope };
   private processedReplicaWatermarkRevision = 0;
-  private readonly pendingReplicaTransactions: Array<Extract<ServerMessage, { type: "replica.transaction" }>> = [];
+  private readonly pendingReplicaFrames: Array<Extract<ServerMessage, { type: "replica.transaction" | "replica.watermark" }>> = [];
   private readonly unsubscribeOutbox: () => void;
   private readonly sharedOutboxStore?: OutboxStore;
   private readonly unsubscribePeerOutbox?: () => void;
@@ -947,7 +948,7 @@ export class GonvexClient {
       for (const subscription of this.querySubscriptions.values()) {
         if (subscription.socketGeneration !== undefined) this.send({ type: "query.unsubscribe", id: subscription.id });
       }
-      this.pendingReplicaTransactions.length = 0;
+      this.pendingReplicaFrames.length = 0;
       await this.replica.clear(replicaScope);
       this.resetReplicaScopeState();
       this.rotateSubscriptionScopes();
@@ -1330,17 +1331,18 @@ export class GonvexClient {
       // A fully resident prediction reads the already published atomic replica.
       // Unrelated snapshots may still be persisting; waiting for those here
       // makes a small edit inherit their disk latency. The shared intent lock
-      // and journal still order every edit, and known peer changes must be
-      // reconciled before a resident prediction can be reused.
-      const reuseResident = preparedResult
-        && preparedResult.base === this.replica.executionVersion()
-        && preparedResult.pending === JSON.stringify(sharedPatches)
+      // and journal still order every edit. Preparation proves resident
+      // coverage, even when a published commit invalidates its result while
+      // acquiring the lock. Re-execute against the latest atomic resident
+      // snapshot below; only known peer changes or committed shared intents
+      // require synchronizing storage first.
+      const canExecuteResident = preparedResult
         && !this.peerRefreshDirty && !this.peerRefreshScheduled
         && !sharedEntries.some(entry => entry.state === "committed");
       const uncoveredRead = this.isUncoveredLocalRead(preparedFailure)
         && !this.peerRefreshDirty && !this.peerRefreshScheduled
         && !sharedEntries.some(entry => entry.state === "committed");
-      if (!reuseResident && !uncoveredRead) await this.replica.synchronizeStorage();
+      if (!canExecuteResident && !uncoveredRead) await this.replica.synchronizeStorage();
       if (sharedEntries) this.replaceLocalPredictions(sharedEntries.filter(entry => entry.state !== "committed").map(entry => ({commandId: entry.idempotencyKey, patches: entry.patches ?? []})));
       const executionBaseVersion = this.replica.executionVersion();
       let transaction: LocalTransactionResult | undefined;
@@ -1633,7 +1635,7 @@ export class GonvexClient {
       || (hasOwn(auth, "identity") && !sameAuthTokenIdentity(this.auth, nextAuth));
     if (scopeMayChange) {
       this.pendingMessages.length = 0;
-      this.pendingReplicaTransactions.length = 0;
+      this.pendingReplicaFrames.length = 0;
       this.rejectPendingCalls((call) => new GonvexClientError(
         `Authentication scope changed while waiting for ${call.kind} ${call.path}`,
         { code: "superseded", path: call.path, operation: call.kind },
@@ -1714,7 +1716,7 @@ export class GonvexClient {
       // drop them too — flushing them after reconnect would fire writes whose
       // callers already saw a rejection.
       this.pendingMessages.length = 0;
-      this.pendingReplicaTransactions.length = 0;
+      this.pendingReplicaFrames.length = 0;
       // Reducers/actions must fail closed on transport loss: silently
       // replaying a non-idempotent write after reconnect is unsafe, and
       // leaving the promise pending hangs the caller forever.
@@ -1778,7 +1780,7 @@ export class GonvexClient {
           // subscription. Rotate their routing IDs immediately so delayed
           // Replica errors from that discarded scope cannot reach current
           // React listeners.
-          this.pendingReplicaTransactions.length = 0;
+          this.pendingReplicaFrames.length = 0;
           this.quarantineReplicaScope();
           this.activeAuthFrameId = undefined;
 
@@ -1885,7 +1887,7 @@ export class GonvexClient {
               // Replica partition has been activated locally. Only now may
               // tenant calls and subscriptions leave the client.
               this.authInFlight = false;
-              this.drainPendingReplicaTransactions();
+              this.drainPendingReplicaFrames();
               // Authentication is replaced in-place on the same socket during
               // normal token rotation. The runtime clears its subscription
               // maps for every accepted auth frame, so same-generation Live
@@ -1900,7 +1902,7 @@ export class GonvexClient {
             })
             .catch((error) => {
               this.authInFlight = false;
-              this.pendingReplicaTransactions.length = 0;
+              this.pendingReplicaFrames.length = 0;
               this.settleManagedAuthAttempt(message.id, error instanceof Error ? error.message : "Runtime returned an invalid Local Replica scope");
               this.rejectReplicaDirective(error);
               this.flushPendingMessages();
@@ -1908,7 +1910,7 @@ export class GonvexClient {
           return;
         } else {
           this.authInFlight = false;
-          this.pendingReplicaTransactions.length = 0;
+          this.pendingReplicaFrames.length = 0;
           const fetcher = this.auth.fetchToken;
           if (fetcher && !this.authRetriedAfterError) {
             // The installed token was rejected — typically expired while the
@@ -1938,7 +1940,7 @@ export class GonvexClient {
         // Replica frames carry no tenant/scope field. During auth renewal we
         // cannot safely attribute a late frame to either side of the switch.
         if (this.authInFlight) {
-          this.pendingReplicaTransactions.push(message);
+          this.pendingReplicaFrames.push(message);
           return;
         }
         this.enqueueReplicaTransaction(message);
@@ -1950,7 +1952,11 @@ export class GonvexClient {
           // stream. Keep both on the same client queue so a watermark cannot
           // advance the cursor past a transaction that was received first but
           // has not finished applying to durable Local Replica storage yet.
-          this.enqueueReplicaFrame(() => this.handleReplicaWatermark(message.revision));
+          if (this.authInFlight) {
+            this.pendingReplicaFrames.push(message);
+            return;
+          }
+          this.enqueueReplicaWatermark(message.revision);
         }
         return;
       }
@@ -2821,11 +2827,30 @@ export class GonvexClient {
     this.emitReplicaMessage(subscription, message, scope);
   }
 
-  private enqueueReplicaFrame(operation: () => Promise<void>) {
+  private enqueueReplicaFrame(operation: () => Promise<void>, watermark = false) {
+    // Any entity/window frame seals the adjacent watermark batch. Advancing
+    // across that barrier could make an unapplied transaction look stale.
+    if (!watermark) this.queuedReplicaWatermark = undefined;
     const processing = this.replicaFrames.then(operation);
     this.replicaFrames = processing.catch(() => {
       this.replica.setFreshness("verifying");
     });
+  }
+
+  private enqueueReplicaWatermark(revision: number) {
+    if (!Number.isSafeInteger(revision) || revision < 0) return;
+    const pending = this.queuedReplicaWatermark;
+    if (pending && pending.scope === this.replicaScope) {
+      pending.revision = Math.max(pending.revision, revision);
+      return;
+    }
+    const batch = { revision, scope: this.replicaScope };
+    this.queuedReplicaWatermark = batch;
+    this.enqueueReplicaFrame(async () => {
+      if (this.queuedReplicaWatermark === batch) this.queuedReplicaWatermark = undefined;
+      if (batch.scope !== this.replicaScope) return;
+      await this.handleReplicaWatermark(batch.revision);
+    }, true);
   }
 
   private enqueueReplicaTransaction(message: Extract<ServerMessage, { type: "replica.transaction" }>) {
@@ -2847,9 +2872,12 @@ export class GonvexClient {
     });
   }
 
-  private drainPendingReplicaTransactions() {
-    const pending = this.pendingReplicaTransactions.splice(0);
-    for (const message of pending) this.enqueueReplicaTransaction(message);
+  private drainPendingReplicaFrames() {
+    const pending = this.pendingReplicaFrames.splice(0);
+    for (const message of pending) {
+      if (message.type === "replica.transaction") this.enqueueReplicaTransaction(message);
+      else this.enqueueReplicaWatermark(message.revision);
+    }
   }
 
   private async acceptReplicaReady(
@@ -2901,13 +2929,10 @@ export class GonvexClient {
     if (!Number.isSafeInteger(revision) || revision < 0) return;
     const eligibleSignatures: string[] = [];
     for (const subscription of this.replicaSubscriptions.values()) {
-      const cursor = this.replica.getWindow(subscription.key)?.cursor;
       if (
-        !cursor
-        || cursor.revision >= revision
-        || !subscription.isUpToDate
+        !subscription.isUpToDate
         || subscription.opening
-        || !this.replica.getWindow(subscription.key)?.hashes
+        || !this.replica.windowCanAdvance(subscription.key, revision)
       ) continue;
       eligibleSignatures.push(subscription.key);
     }

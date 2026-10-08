@@ -156,7 +156,10 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       const record=prior[index];
       const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
       if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision)))return [{...record!,sequence}];
-      return [{scope,sequence,signature:window.signature,value:JSON.stringify(normalizeWindow(window))}];
+      // Serialization already isolates persisted values. Copying ordered IDs
+      // and large integrity maps before stringifying doubled temporary memory
+      // for every cursor-only checkpoint.
+      return [{scope,sequence,signature:window.signature,value:JSON.stringify({ ...window, kind: window.kind ?? 'live', key: window.key ?? 'id' })}];
     }));
   }
 
@@ -521,15 +524,4 @@ export function indexedDBLocalReplica(name?: string): LocalReplicaStorage {
 
 function normalizeScope(scope: ReplicaScope): ReplicaScope {
   return typeof scope === "string" && scope.trim() ? scope : defaultReplicaScope;
-}
-
-function normalizeWindow(value: ReplicaWindow | (Omit<ReplicaWindow, "kind"> & { kind?: ReplicaWindow["kind"] })): ReplicaWindow {
-  return {
-    ...value,
-    kind: value.kind ?? "live",
-    key: value.key ?? "id",
-    ids: [...value.ids],
-    resultPath: value.resultPath ? [...value.resultPath] : undefined,
-    hashes: value.hashes ? { ...value.hashes } : undefined,
-  };
 }

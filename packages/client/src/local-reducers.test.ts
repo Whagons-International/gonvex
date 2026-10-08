@@ -648,6 +648,42 @@ it('retries a resident prediction after its preparation becomes stale without jo
   } finally { release(); await background; synchronize.mockRestore(); }
 });
 
+it('re-executes a preparation invalidated during admission without waiting for unrelated hydration', async () => {
+  const { create, kv } = await fixture();
+  const store = createKvOutboxStore(kv);
+  const client = create(store);
+  await client.reducer(ref, {});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const replica = (client as any).replica;
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  let background: Promise<void> | undefined;
+  const outbox = (client as any).reducerOutbox;
+  const originalList = outbox.list.bind(outbox);
+  let invalidatePreparation = true;
+  const list = vi.spyOn(outbox, 'list').mockImplementationOnce(async (...args: any[]) => {
+    const entries = await originalList(...args);
+    await (client as any).preparationLane;
+    if (invalidatePreparation) {
+      invalidatePreparation = false;
+      // This published commit arrives after preparation but before admission.
+      await replica.replaceWindow({ signature: 'other', entity: 'other', key: 'id', rows: [{ id: 'one' }], source: 'server', completeness: 'complete' });
+      background = replica.enqueueApplication(() => blocked);
+    }
+    return entries;
+  });
+  const synchronize = vi.spyOn(replica, 'synchronizeStorage').mockImplementation(() => blocked);
+  const edit = client.reducer(ref, {});
+  try {
+    expect(await Promise.race([edit, new Promise(resolve => setTimeout(() => resolve('blocked'), 100))])).toBe(2);
+    expect(invalidatePreparation).toBe(false);
+    expect(client.localReplica.entity('tasks', 't1')?.count).toBe(2);
+    expect((await createKvOutboxStore(kv).load()).map(entry => entry.patches?.[0]?.fields?.count)).toEqual([1, 2]);
+  } finally {
+    release(); await background; await edit; synchronize.mockRestore(); list.mockRestore();
+  }
+});
+
 it('does not open replay storage work for incoming collections when there are no local intents', async () => {
   const { create } = await fixture(); const client = create();
   await connect(client);
