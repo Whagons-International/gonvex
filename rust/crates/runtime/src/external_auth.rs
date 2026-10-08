@@ -80,6 +80,28 @@ pub async fn verify_external_token(
     if token.trim().is_empty() {
         return Err(ExternalAuthError::InvalidToken);
     }
+    let claims = external_token_claims(configuration, token).await?;
+    identity_from_claims(configuration, claims).await
+}
+
+async fn external_token_claims(
+    configuration: &ExternalAuthConfiguration,
+    token: &str,
+) -> Result<Value, ExternalAuthError> {
+    #[cfg(all(feature = "test-firebase-auth-emulator", debug_assertions))]
+    if std::env::var("GONVEX_TEST_AUTH_EMULATOR").as_deref() == Ok("true") {
+        if !emulator_allowed(
+            configuration,
+            std::env::var("GONVEX_ENV").as_deref().unwrap_or(""),
+            std::env::var("GONVEX_ADDR").as_deref().unwrap_or(""),
+            std::env::var("FIREBASE_AUTH_EMULATOR_HOST")
+                .as_deref()
+                .unwrap_or(""),
+        ) {
+            return Err(ExternalAuthError::InvalidToken);
+        }
+        return emulator_claims(configuration, token);
+    }
     let header = decode_header(token).map_err(|_| ExternalAuthError::InvalidToken)?;
     if header.alg != Algorithm::RS256 {
         return Err(ExternalAuthError::InvalidToken);
@@ -105,7 +127,13 @@ pub async fn verify_external_token(
             _ => ExternalAuthError::InvalidToken,
         }
     })?;
-    let claims = claims.claims;
+    Ok(claims.claims)
+}
+
+async fn identity_from_claims(
+    configuration: &ExternalAuthConfiguration,
+    claims: Value,
+) -> Result<VerifiedExternalIdentity, ExternalAuthError> {
     let subject = claims
         .get("sub")
         .and_then(Value::as_str)
@@ -183,6 +211,63 @@ pub async fn verify_external_token(
         verify_firebase_account(configuration, credentials, &identity).await?;
     }
     Ok(identity)
+}
+
+// Three independent gates: opt-in debug-only Cargo feature, explicit test
+// environment, and a loopback-only process accepting only demo projects.
+// Production/release builds do not contain the unsigned-token decoder.
+#[cfg(all(feature = "test-firebase-auth-emulator", debug_assertions))]
+fn emulator_allowed(
+    c: &ExternalAuthConfiguration,
+    environment: &str,
+    address: &str,
+    host: &str,
+) -> bool {
+    environment == "test"
+        && address
+            .parse::<SocketAddr>()
+            .is_ok_and(|a| a.ip().is_loopback())
+        && host
+            .parse::<SocketAddr>()
+            .is_ok_and(|a| a.ip().is_loopback())
+        && c.provider == "firebase"
+        && c.firebase_project_id.starts_with("demo-")
+        && c.audience == c.firebase_project_id
+        && c.issuer == format!("https://securetoken.google.com/{}", c.firebase_project_id)
+        && c.firebase_admin_credentials.is_none()
+}
+
+#[cfg(all(feature = "test-firebase-auth-emulator", debug_assertions))]
+fn emulator_claims(c: &ExternalAuthConfiguration, token: &str) -> Result<Value, ExternalAuthError> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let parts: Vec<_> = token.split('.').collect();
+    if parts.len() != 3 || !parts[2].is_empty() {
+        return Err(ExternalAuthError::InvalidToken);
+    }
+    let parse = |part: &str| -> Result<Value, ExternalAuthError> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(part)
+            .map_err(|_| ExternalAuthError::InvalidToken)?;
+        serde_json::from_slice(&bytes).map_err(|_| ExternalAuthError::InvalidToken)
+    };
+    if parse(parts[0])?.get("alg").and_then(Value::as_str) != Some("none") {
+        return Err(ExternalAuthError::InvalidToken);
+    }
+    let claims = parse(parts[1])?;
+    if claims.get("iss").and_then(Value::as_str) != Some(c.issuer.as_str()) {
+        return Err(ExternalAuthError::WrongIssuer);
+    }
+    if claims.get("aud").and_then(Value::as_str) != Some(c.audience.as_str()) {
+        return Err(ExternalAuthError::WrongAudience);
+    }
+    let exp = claims
+        .get("exp")
+        .and_then(Value::as_i64)
+        .ok_or(ExternalAuthError::InvalidToken)?;
+    if exp <= chrono::Utc::now().timestamp() {
+        return Err(ExternalAuthError::Expired);
+    }
+    Ok(claims)
 }
 
 async fn jwks(url: &str, force: bool) -> Result<Arc<JwkSet>, ExternalAuthError> {
@@ -418,6 +503,111 @@ fn public_ip(address: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn emulator_configuration() -> ExternalAuthConfiguration {
+        ExternalAuthConfiguration {
+            provider: "firebase".into(),
+            issuer: "https://securetoken.google.com/demo-test".into(),
+            audience: "demo-test".into(),
+            jwks_url: "https://unused.example.test/keys".into(),
+            firebase_project_id: "demo-test".into(),
+            firebase_tenant_id: String::new(),
+            signup_mode: "personal".into(),
+            firebase_admin_credentials: None,
+        }
+    }
+
+    fn unsigned_token(claims: Value) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        format!(
+            "{}.{}.",
+            URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#),
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        )
+    }
+
+    #[tokio::test]
+    async fn unsigned_firebase_tokens_rejected_by_default() {
+        let token = unsigned_token(serde_json::json!({"sub": "test"}));
+        assert!(matches!(
+            verify_external_token(&emulator_configuration(), &token).await,
+            Err(ExternalAuthError::InvalidToken)
+        ));
+    }
+
+    #[cfg(all(feature = "test-firebase-auth-emulator", debug_assertions))]
+    #[test]
+    fn emulator_requires_test_loopback_and_demo_project() {
+        let c = emulator_configuration();
+        assert!(emulator_allowed(
+            &c,
+            "test",
+            "127.0.0.1:8080",
+            "127.0.0.1:9099"
+        ));
+        for env in ["", "production", "staging"] {
+            assert!(!emulator_allowed(
+                &c,
+                env,
+                "127.0.0.1:8080",
+                "127.0.0.1:9099"
+            ));
+        }
+        assert!(!emulator_allowed(
+            &c,
+            "test",
+            "0.0.0.0:8080",
+            "127.0.0.1:9099"
+        ));
+        assert!(!emulator_allowed(
+            &c,
+            "test",
+            "127.0.0.1:8080",
+            "10.0.0.1:9099"
+        ));
+        let mut real = c.clone();
+        real.firebase_project_id = "real-project".into();
+        assert!(!emulator_allowed(
+            &real,
+            "test",
+            "127.0.0.1:8080",
+            "127.0.0.1:9099"
+        ));
+    }
+
+    #[cfg(all(feature = "test-firebase-auth-emulator", debug_assertions))]
+    #[tokio::test]
+    async fn emulator_validates_claims_and_uses_normal_identity_admission() {
+        let c = emulator_configuration();
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({"iss": c.issuer, "aud": c.audience, "sub": "actor", "iat": now, "auth_time": now, "exp": now + 3600, "firebase": {"sign_in_provider": "password"}});
+        let parsed = emulator_claims(&c, &unsigned_token(claims.clone())).unwrap();
+        assert_eq!(
+            identity_from_claims(&c, parsed).await.unwrap().subject,
+            "actor"
+        );
+        for field in ["iss", "aud", "exp", "iat", "sub", "auth_time"] {
+            let mut bad = claims.clone();
+            bad.as_object_mut().unwrap().remove(field);
+            let result = match emulator_claims(&c, &unsigned_token(bad)) {
+                Ok(parsed) => identity_from_claims(&c, parsed).await,
+                Err(error) => Err(error),
+            };
+            assert!(result.is_err(), "missing {field} must fail");
+        }
+        let mut bad = claims.clone();
+        bad["exp"] = (now - 1).into();
+        assert!(matches!(
+            emulator_claims(&c, &unsigned_token(bad)),
+            Err(ExternalAuthError::Expired)
+        ));
+        let mut bad = claims.clone();
+        bad["firebase"]["tenant"] = "different".into();
+        assert!(matches!(
+            identity_from_claims(&c, emulator_claims(&c, &unsigned_token(bad)).unwrap()).await,
+            Err(ExternalAuthError::FirebaseTenantMismatch)
+        ));
+    }
 
     #[test]
     fn private_addresses_are_rejected() {
