@@ -2063,6 +2063,76 @@ describe("GonvexClient", () => {
     } finally { release(); client.close(); }
   });
 
+  it.each([{ negotiated: true, syncing: false }, { negotiated: true, syncing: true }, { negotiated: false, syncing: false }])("checkpoints unchanged collections at the durable watermark only when negotiated (%j)", async ({ negotiated, syncing }) => {
+    const storage = new MemoryLocalReplicaStorage();
+    const client = new GonvexClient("ws://runtime.test/ws", { localReplica: { storage } });
+    const ref: FunctionReference = { kind: "query", path: "statuses.all", delivery: "replica",
+      replica: { table: "statuses", key: "id", columns: ["id", "name"], maxRows: 100 } };
+    const watch = client.watchReplica(ref, {});
+    const socket = latestSocket(); socket.open();
+    socket.receive({ type: "session.ready", capabilities: { replicaWatermark: negotiated ? 1 : 0 }, replica: testReplicaDirective });
+    await vi.waitFor(() => expect(sentMessages(socket).filter(m => m.type === "replica.open")).toHaveLength(1));
+    const open = sentMessages(socket).find(m => m.type === "replica.open")!;
+    const rows = [{ id: "status-1", name: "Working" }];
+    const hashes = await replicaRowsHashes(rows, "id"); const digest = await replicaHashesDigest(hashes);
+    socket.receive({ type: "replica.snapshot", id: open.id, path: ref.path, result: rows,
+      cursor: { epoch: "epoch:test", revision: 18 }, key: "id", maxRows: 100, hashes, digest, truncated: false });
+    socket.receive({ type: "replica.ready", id: open.id, path: ref.path,
+      cursor: { epoch: "epoch:test", revision: 18 }, digest, truncated: false });
+    await vi.waitFor(() => expect(watch.localReplicaState()).toMatchObject({ computedRevision: 18, isUpToDate: true }));
+    const before = watch.localReplicaResult();
+    if (syncing) {
+      socket.receive({ type: "replica.syncing", id: open.id, path: ref.path });
+      await (client as any).replicaFrames;
+      expect(watch.localReplicaState()).toMatchObject({ isUpToDate: false });
+    }
+    const applyDelta = vi.spyOn(storage, "applyWindowDelta");
+    const replace = vi.spyOn(storage, "replaceWindow");
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const persist = storage.advanceWatermark.bind(storage);
+    let failOnce = true;
+    const advance = vi.spyOn(storage, "advanceWatermark").mockImplementation(async (...args) => {
+      await gate;
+      if (failOnce) { failOnce = false; throw new Error("Checkpoint write failed"); }
+      await persist(...args);
+    });
+    try {
+      for (const revision of [19, 20, 21]) {
+        socket.receive({ type: "replica.delta", id: open.id, path: ref.path,
+          cursor: { epoch: "epoch:test", revision }, upserts: [], deleted: [], hashes });
+        socket.receive({ type: "replica.ready", id: open.id, path: ref.path,
+          cursor: { epoch: "epoch:test", revision }, digest, truncated: false });
+      }
+      await (client as any).replicaFrames;
+      expect(watch.localReplicaResult()).toBe(before);
+      expect(watch.localReplicaState()).toMatchObject({ computedRevision: negotiated ? 18 : 21 });
+      expect(applyDelta).toHaveBeenCalledTimes(negotiated ? 0 : 3);
+      expect(replace).not.toHaveBeenCalled();
+      if (negotiated) {
+        const result = client.reducer({ kind: "reducer", path: "statuses.noop" }, {});
+        await vi.advanceTimersByTimeAsync(0);
+        const call = sentMessages(socket).findLast(m => m.type === "reducer.call")!;
+        let settled = false; void result.then(() => { settled = true; });
+        socket.receive({ type: "reducer.result", id: call.id, path: call.path, result: null, committedRevision: 21 });
+        socket.receive({ type: "replica.watermark", revision: 21 });
+        await flushMicrotasks();
+        expect(advance).toHaveBeenCalledTimes(1);
+        expect(settled).toBe(false);
+        expect(watch.localReplicaState()).toMatchObject({ computedRevision: 18 });
+        release(); await (client as any).replicaFrames;
+        expect(settled).toBe(false);
+        expect(watch.localReplicaState()).toMatchObject({ computedRevision: 18 });
+        socket.receive({ type: "replica.watermark", revision: 21 });
+        await expect(result).resolves.toBeNull();
+        expect(advance).toHaveBeenCalledTimes(2);
+        expect(watch.localReplicaState()).toMatchObject({ computedRevision: 21 });
+        expect(watch.localReplicaResult()).toBe(before);
+        expect(settled).toBe(true);
+      }
+    } finally { release(); client.close(); }
+  });
+
   it("settles a tenant Reducer only after its collection membership delta is durable", async () => {
     const collectionRef: FunctionReference = {
       kind: "query",
