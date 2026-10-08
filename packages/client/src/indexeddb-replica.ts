@@ -25,9 +25,10 @@ type ReplicaDatabase = Dexie & {
 
 const defaultReplicaScope: ReplicaScope = "default";
 const replicaSchemaVersion = 5;
-// Keep native IDB request bursts short so another database's durable intent
-// journal can run between batches. All batches remain in one atomic transaction.
-const writeBatchSize = 4;
+// Bound native IDB request bursts so another database's durable intent journal
+// can run between batches. Four-row batches made medium snapshots spend most
+// of their time on native request round trips. Keep one atomic transaction.
+const writeBatchSize = 32;
 
 // Small replica checkpoints usually change only a few rows. IndexedDB getAll
 // avoids a JS/Dexie continuation per row. The fallback remains streaming so a
