@@ -79,22 +79,30 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   })().catch(error => { throw requireUpgrade(error instanceof Error ? error : new Error(String(error))); });
   // The SDK may initialize storage before React subscribes; retain the rejected ready promise.
   void ready.catch(() => undefined);
-  const guarded = async <T>(run: () => Promise<T>): Promise<T> => {
+  const checkContract = (record: UpgradeRecord | undefined) => {
+    if (record?.version !== options.contract.version || record.journal) {
+      throw requireUpgrade(new Error("Application storage changed. Reload before continuing."));
+    }
+  };
+  const fenced = async <T>(run: () => Promise<T>): Promise<T> => {
     await ready;
     if (closed) throw new Error("Application storage is closed");
-    return locks!.request(lockName, { mode: "shared" }, async () => {
-      const record = await meta.state.get("contract");
-      if (record?.version !== options.contract.version || record.journal) {
-        throw requireUpgrade(new Error("Application storage changed. Reload before continuing."));
-      }
-      return run();
-    });
+    return locks!.request(lockName, { mode: "shared" }, run);
   };
+  const guarded = <T>(run: () => Promise<T>): Promise<T> => fenced(async () => {
+    checkContract(await meta.state.get("contract"));
+    return run();
+  });
   const reserveId = async () => {
-    const last = await queue.entries.orderBy('id').last();
+    // Only the key establishes the floor. Hydrating the preceding intent can
+    // clone a large prediction or argument payload on every interactive edit.
+    const [lastId] = await queue.entries.orderBy('id').reverse().limit(1).primaryKeys();
     return meta.transaction('rw', meta.state, async () => {
-      const counter = await meta.state.get('sequence');
-      const version = Math.max(counter?.version ?? 0, last?.id ?? 0) + 1;
+      // Check the upgrade contract in the same serialized transaction that
+      // reserves the ID. Older tabs use this counter too; never cache or skip it.
+      const [record, counter] = await meta.state.bulkGet(['contract', 'sequence']);
+      checkContract(record);
+      const version = Math.max(counter?.version ?? 0, lastId ?? 0) + 1;
       await meta.state.put({ key: 'sequence', version });
       return version;
     });
@@ -116,7 +124,7 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
         return locks!.request(`${lockName}:${lane}:${scope}`,{mode:'exclusive'},run);
       },
       subscribePeer:listener=>{peers.add(listener);return()=>{peers.delete(listener);};},
-      append: draft => guarded(async () => {
+      append: draft => fenced(async () => {
         // Keep the established shared counter so already-open SDK versions
         // cannot reuse a deleted entry's ID. One upgrade fence covers both
         // reservation and insertion; only the complete durable entry is exposed.
@@ -126,8 +134,16 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
         channel?.postMessage({type:'outbox'});
         return entry;
       }),
-      allocateId: () => guarded(reserveId),
-      load: scope => guarded(() => scope ? queue.entries.where('scope').equals(scope).toArray() : queue.entries.toArray()),
+      allocateId: () => fenced(reserveId),
+      load: scope => fenced(async () => {
+        // The upgrade fence prevents contract changes during these reads.
+        // Check it alongside the journal read, before exposing any entries.
+        const [, entries] = await Promise.all([
+          meta.state.get('contract').then(checkContract),
+          scope ? queue.entries.where('scope').equals(scope).toArray() : queue.entries.toArray(),
+        ]);
+        return entries;
+      }),
       put: entry => guarded(async () => { await queue.entries.put(entry);channel?.postMessage({type:'outbox'}); }),
       update: (id,change) => guarded(async () => {
         let changed = false;
