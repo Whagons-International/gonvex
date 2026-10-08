@@ -74,6 +74,7 @@ export {
   type LocalReplicaStorage,
   type LocalReplicaSession,
   type LocalReplicaView,
+  type ReplicaSubscription,
   type ReplicaChange,
   type ReplicaFreshness,
   type ReplicaRow,
@@ -122,7 +123,7 @@ function createLocalReplicaView(replica: LocalReplica): LocalReplicaView {
     freshness: () => replica.freshness(),
     version: () => replica.version(),
     entityVersion: (entity, id) => replica.entityVersion(entity, id),
-    subscribe: (listener) => replica.subscribe(listener),
+    subscribe: (listener, selection) => replica.subscribe(listener, selection),
     hasPendingCommand: (commandId) => replica.hasPendingCommand(commandId),
     getWindow: (signature) => replica.getWindow(signature),
     listWindows: () => replica.listWindows(),
@@ -2493,7 +2494,7 @@ export class GonvexClient {
           latestError = undefined;
         }
       }, true);
-      const unsubscribeReplica = this.replica.subscribe(notify);
+      const unsubscribeReplica = this.replica.subscribe(notify, { window: key });
       const unsubscribeScope = this.onSessionScopeChange(() => {
         latestError = undefined;
         snapshotVersion = -1;
@@ -2624,7 +2625,7 @@ export class GonvexClient {
       // normalized store.
       const unsubscribeReplica = this.replica.subscribe(() => {
         if (transportResult !== undefined || this.replica.hasLiveQuery(key)) notify();
-      });
+      }, { window: key, offlineGlobal: true });
       void this.replicaReady.then(() => notify());
       const unsubscribeScope = this.onSessionScopeChange(() => {
         transportResult = undefined;

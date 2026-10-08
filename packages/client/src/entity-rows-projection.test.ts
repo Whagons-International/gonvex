@@ -17,7 +17,7 @@ it('projects ordered inserts, overwrites, deletes, resurrection, and rollback wi
   ]);
   const projected = replica.entityRows('tasks');
   expect(projected).toEqual([{id:'a',nested:{value:3}},{id:'b',value:5},{id:'d',value:6}]);
-  (projected[0].nested as {value:number}).value = 500;
+  expect(() => { (projected[0].nested as {value:number}).value = 500; }).toThrow(TypeError);
   expect(replica.entityRows('tasks')[0].nested).toEqual({value:3});
   replica.rejectCommand('two');
   expect(replica.entityRows('tasks')).toEqual([{id:'a',nested:{value:3}},{id:'c',value:4}]);
@@ -41,7 +41,7 @@ it('matches individual row reads for mixed pending journals', async () => {
   journalScan.mockRestore();
 });
 
-it('projects an ID batch in one journal pass while preserving duplicates and detached nested values', async () => {
+it('projects an ID batch in one journal pass while preserving duplicates and frozen nested values', async () => {
   const replica = new LocalReplica();
   await replica.replaceWindow({signature:'tasks',kind:'replica',entity:'tasks',key:'id',rows:[{id:'a',value:1},{id:'b',value:2}],completeness:'complete',source:'server'});
   replica.applyOptimistic('one',[
@@ -56,7 +56,7 @@ it('projects an ID batch in one journal pass while preserving duplicates and det
   const result = replica.entityBatch('tasks',ids);
   expect(result).toEqual(expected);
   expect(scan).toHaveBeenCalledTimes(1);
-  (result[1]!.nested as {value:number}).value=500;
+  expect(() => { (result[1]!.nested as {value:number}).value=500; }).toThrow(TypeError);
   expect(result[4]!.nested).toEqual({value:3});
   expect(replica.entity('tasks','a')!.nested).toEqual({value:3});
   scan.mockRestore();

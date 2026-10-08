@@ -1835,7 +1835,7 @@ export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id:
   const client = useGonvexClient();
   useEffect(()=>client.retainReplicaEntities(entity,[id]),[client,entity,id]);
   const version = useSyncExternalStore(
-    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback((notify) => client.localReplica.subscribe(notify, { entity, ids: [id] }), [client, entity, id]),
     useCallback(() => client.localReplica.entityVersion(entity, id), [client, entity, id]),
     () => 0,
   );
@@ -1845,35 +1845,54 @@ export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id:
 /** Resolve an ordered entity batch with one Local Replica subscription. */
 export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
   const client = useGonvexClient();
-  const idsKey = JSON.stringify(ids);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(()=>client.retainReplicaEntities(entity,ids),[client,entity,idsKey]);
+  // Inline arrays are common. Cache by ordered contents without serializing
+  // strings, allocating version strings, or relying on array identity.
+  const stable = useRef<readonly string[]>([]);
+  if (stable.current.length !== ids.length || ids.some((id, index) => id !== stable.current[index])) stable.current = [...ids];
+  const selectedIDs = stable.current;
+  useEffect(()=>client.retainReplicaEntities(entity,selectedIDs),[client,entity,selectedIDs]);
   const cache = useMemo(() => new Map<string, { version: number; row: T | undefined }>(), [client, entity]);
-  const getVersion = useMemo(() => {
+  const store = useMemo(() => {
     let tableVersion: number | undefined;
-    let snapshot = "";
-    return () => {
+    let snapshot = 0;
+    const versions = new Map<string, number>();
+    const refresh = (touched?: ReadonlySet<string>) => {
       const next = client.localReplica.entityVersion(entity);
-      // Metadata, presence and other tables publish through this subscription
-      // too. They cannot change this batch, so avoid scanning its IDs again.
-      if (next !== tableVersion) {
-        tableVersion = next;
-        snapshot = ids.map(id => client.localReplica.entityVersion(entity, id)).join(",");
+      // Reentrant writes can deliver a newer table revision before an older
+      // notification. Its touched IDs still need their own version checks.
+      if (next === tableVersion && !touched) return false;
+      tableVersion = next;
+      let changed = false;
+      for (const id of touched ?? selectedIDs) {
+        if (touched && !versions.has(id)) continue;
+        const version = client.localReplica.entityVersion(entity, id);
+        if (versions.get(id) !== version) { versions.set(id, version); changed = true; }
       }
-      return snapshot;
+      if (changed) snapshot++;
+      return changed;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, entity, idsKey]);
-  const version = useSyncExternalStore(
-    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
-    getVersion,
-    () => "",
-  );
+    refresh();
+    let active = false;
+    return {
+      rowVersion: (id: string) => versions.get(id),
+      getSnapshot: () => { if (!active) refresh(); return snapshot; },
+      subscribe: (notify: () => void) => {
+        const release = client.localReplica.subscribe(touched => {
+          if (refresh(touched)) notify();
+        }, { entity, ids: selectedIDs });
+        active = true;
+        // Capture changes between render and subscribing.
+        if (refresh()) notify();
+        return () => { active = false; release(); };
+      },
+    };
+  }, [client, entity, selectedIDs]);
+  const version = useSyncExternalStore(store.subscribe, store.getSnapshot, () => 0);
   return useMemo(() => {
     const retained = new Set(ids);
     for (const id of cache.keys()) if (!retained.has(id)) cache.delete(id);
     return ids.map(id => {
-      const rowVersion = client.localReplica.entityVersion(entity, id);
+      const rowVersion = store.rowVersion(id)!;
       const prior = cache.get(id);
       if (prior?.version === rowVersion) return prior.row;
       const row = client.localReplica.entity<T>(entity, id);
@@ -1881,7 +1900,7 @@ export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: st
       return row;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, entity, idsKey, version, cache]);
+  }, [client, entity, selectedIDs, version, cache, store]);
 }
 
 /** Read a persisted Live Query window without opening another server subscription. */
@@ -1896,7 +1915,7 @@ export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
     : client.replicaSignature(signatureOrReference, args);
   useEffect(()=>client.retainReplicaWindow(signature),[client,signature]);
   return useSyncExternalStore(
-    useCallback((notify) => client.localReplica.subscribe(notify), [client]),
+    useCallback((notify) => client.localReplica.subscribe(notify, { window: signature }), [client, signature]),
     useCallback(() => client.localReplica.liveQuerySnapshot<T>(signature), [client, signature, argsKey]),
     () => emptyLiveQuery as LiveQueryResult<T>,
   );
@@ -1946,7 +1965,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, ref.kind, ref.path, signature, argsKey]);
   return useSyncExternalStore(
-    useCallback(notify => signature ? client.localReplica.subscribe(notify) : () => undefined, [client, signature]),
+    useCallback(notify => signature ? client.localReplica.subscribe(notify, { window: signature, offlineGlobal: true }) : () => undefined, [client, signature]),
     getSnapshot,
     () => emptyLiveQuery as LiveQueryResult<T>,
   );

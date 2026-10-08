@@ -1,3 +1,4 @@
+import { LocalReplica } from "../../client/src/local-replica";
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { Component, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -2339,4 +2340,51 @@ describe("GonvexAuthProvider developer mode across reloads", () => {
     expect(auth!.error).toBe("grant revoked");
     expect(sessionStorage.getItem(grantKey("acct-1"))).toBeNull();
   });
+});
+
+
+it("batch subscriptions check only touched IDs and reuse inline ID lists", async () => {
+  const client = new FakeGonvexClient();
+  const replica = new LocalReplica();
+  await replica.materializeWindow({signature:'tasks',entity:'tasks',key:'id',rows:[{id:'a',title:'A'},{id:'b',title:'B'},{id:'c',title:'C'}],completeness:'complete',source:'server'});
+  Object.defineProperty(client,'localReplica',{value:replica});
+  const version = vi.spyOn(replica,'entityVersion');
+  const stringify = vi.spyOn(JSON,'stringify');
+  const { result, rerender, unmount } = renderHook(() => useReplicaEntities('tasks',['b','a','b']), {wrapper:wrapperFor(client)});
+  const initial = result.current;
+  version.mockClear(); stringify.mockClear();
+  await act(async () => { await replica.applyTransaction({cursor:{epoch:'e',revision:1},changes:[{entity:'tasks',id:'c',operation:'update',newValue:{title:'changed'}}]}); });
+  expect(version.mock.calls.filter(([,id])=>id!==undefined)).toHaveLength(0);
+  expect(result.current).toBe(initial);
+  version.mockClear(); stringify.mockClear();
+  rerender();
+  expect(stringify).not.toHaveBeenCalled();
+  expect(version.mock.calls.filter(([,id])=>id!==undefined)).toHaveLength(0);
+  expect(client.retainReplicaEntities).toHaveBeenCalledTimes(1);
+  await act(async () => { await replica.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'tasks',id:'b',operation:'update',newValue:{title:'updated'}}]}); });
+  // Drain the retained per-frame external-store notification.
+  actAtPaint(() => {});
+  expect(version.mock.calls.filter(([,id])=>id!==undefined).map(([,id])=>id)).toEqual(['b']);
+  expect(result.current[1]).toBe(initial[1]);
+  expect(result.current[0]).toBe(result.current[2]);
+  expect(result.current[0]!.title).toBe('updated');
+  unmount(); stringify.mockRestore();
+});
+
+
+it('batch selectors retain both changes when a subscriber writes reentrantly', async () => {
+  const client = new FakeGonvexClient();
+  const replica = new LocalReplica();
+  await replica.materializeWindow({signature:'tasks',entity:'tasks',key:'id',rows:[{id:'a',title:'A'},{id:'b',title:'B'}],completeness:'complete',source:'server'});
+  Object.defineProperty(client,'localReplica',{value:replica});
+  let nested = false;
+  const release = replica.subscribe(() => {
+    if (nested) return;
+    nested = true;
+    replica.applyOptimistic('nested',[{entity:'tasks',rowId:'b',op:'patch',fields:{title:'nested'}}]);
+  });
+  const {result,unmount} = renderHook(() => useReplicaEntities('tasks',['a','b']),{wrapper:wrapperFor(client)});
+  actAtPaint(() => replica.applyOptimistic('outer',[{entity:'tasks',rowId:'a',op:'patch',fields:{title:'outer'}}]));
+  expect(result.current.map(row=>row!.title)).toEqual(['outer','nested']);
+  release(); unmount();
 });

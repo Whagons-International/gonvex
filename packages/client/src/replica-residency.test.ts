@@ -1,4 +1,4 @@
-import {afterEach,beforeEach,expect,it} from 'vitest';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import {IDBFactory,IDBKeyRange} from 'fake-indexeddb';
 import {Dexie} from 'dexie';
 import {IndexedDBLocalReplicaStorage} from './indexeddb-replica';
@@ -119,4 +119,17 @@ it('restores bounded pages across table boundaries without leaking another scope
   expect(bounded!.entities.items!.foreign).toBeUndefined();
   const complete = await storage.loadWorkingSet('scope', {maxRows: 1000, maxBytes: 1024 * 1024});
   expect(Object.keys(complete!.entities.items!)).toHaveLength(600);
+});
+
+
+it('peer catch-up checks resident membership without enumerating resident IDs', async () => {
+  await seed(); const replica = new LocalReplica(storage,{maxResidentRows:3}); await replica.activateScope('scope');
+  const table = replica['entities'].get('items')!;
+  const keys = vi.spyOn(table,'keys').mockImplementation(()=>{throw new Error('must not enumerate resident IDs');});
+  const hot = [...table][0]![0];
+  await storage.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'items',id:hot,operation:'update',newValue:{status:'done'}}]},{entities:{},liveQueries:{}},'scope');
+  await replica.synchronizeStorage();
+  expect(replica.entity('items',hot)!.status).toBe('done');
+  expect(keys).not.toHaveBeenCalled(); keys.mockRestore();
+  expect(replica.entityRows('items')).toHaveLength(3);
 });
