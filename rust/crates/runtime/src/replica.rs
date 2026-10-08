@@ -277,7 +277,9 @@ impl Runtime {
             if revision <= subscription.cursor.revision {
                 continue;
             }
-            let dependencies = subscription.visibility.dependency_columns();
+            let dependencies = subscription
+                .visibility
+                .resolved_dependency_columns(&subscription.resolved);
             let (source_changed, dependency_changed) = table_change_relevance(
                 &subscription.definition.table,
                 &dependencies,

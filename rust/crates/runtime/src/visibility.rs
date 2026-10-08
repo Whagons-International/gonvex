@@ -139,6 +139,24 @@ impl VisibilityPlan {
     }
 
     pub fn dependency_columns(&self) -> VisibilityDependencies {
+        self.dependency_columns_for_sets(None)
+    }
+
+    /// Role-only branches can make row/set branches irrelevant for this member.
+    /// Member admission and role changes remain dependencies in every case.
+    pub fn resolved_dependency_columns(
+        &self,
+        resolved: &ResolvedVisibility,
+    ) -> VisibilityDependencies {
+        let mut sets = BTreeSet::new();
+        active_visibility_sets(&self.predicate, &resolved.role, &mut sets);
+        self.dependency_columns_for_sets(Some(&sets))
+    }
+
+    fn dependency_columns_for_sets(
+        &self,
+        active: Option<&BTreeSet<String>>,
+    ) -> VisibilityDependencies {
         let mut columns = BTreeMap::<String, BTreeSet<String>>::new();
         columns.insert(
             "members".to_owned(),
@@ -150,7 +168,10 @@ impl VisibilityPlan {
                 "permissions".to_owned(),
             ]),
         );
-        for set in self.sets.values() {
+        for (name, set) in &self.sets {
+            if active.is_some_and(|names| !names.contains(name)) {
+                continue;
+            }
             let base_alias = if set.alias.is_empty() {
                 set.table.as_str()
             } else {
@@ -208,6 +229,56 @@ impl VisibilityPlan {
             }
         }
         VisibilityDependencies { columns }
+    }
+}
+
+// Only constants and the already admitted role are evaluated here. Row values,
+// set contents and permissions stay unknown; their dependencies are retained.
+// This never changes the SQL predicate or the row visibility decision.
+fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool> {
+    match expression.operator.as_str() {
+        "public" => Some(true),
+        "role" => expression
+            .value
+            .as_ref()?
+            .as_str()
+            .map(|expected| expected == role),
+        "and" | "or" if !expression.children.is_empty() => {
+            let is_and = expression.operator == "and";
+            let mut unknown = false;
+            for child in &expression.children {
+                match role_only_value(child, role) {
+                    Some(value) if value != is_and => return Some(value),
+                    None => unknown = true,
+                    _ => {}
+                }
+            }
+            if unknown {
+                None
+            } else {
+                Some(is_and)
+            }
+        }
+        "not" if expression.children.len() == 1 => {
+            role_only_value(&expression.children[0], role).map(|value| !value)
+        }
+        _ => None,
+    }
+}
+
+fn active_visibility_sets(
+    expression: &VisibilityExpression,
+    role: &str,
+    sets: &mut BTreeSet<String>,
+) {
+    if role_only_value(expression, role).is_some() {
+        return;
+    }
+    if expression.operator == "inSet" {
+        sets.insert(expression.set.clone());
+    }
+    for child in &expression.children {
+        active_visibility_sets(child, role, sets);
     }
 }
 
@@ -749,6 +820,100 @@ fn quote(value: &str) -> Result<String, VisibilityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dependency_plan(predicate: Value) -> VisibilityPlan {
+        serde_json::from_value(serde_json::json!({
+            "table": "tasks", "key": "id",
+            "sets": {
+                "assigned": {"table": "taskUsers", "select": "taskId", "where": [{"column": "userId", "context": "member.id"}]},
+                "shared": {"table": "taskShares", "select": "taskId", "where": [{"column": "memberId", "context": "member.id"}]}
+            },
+            "where": predicate
+        })).unwrap()
+    }
+
+    fn dependency_member(role: &str) -> ResolvedVisibility {
+        ResolvedVisibility {
+            revision: 1,
+            direct: BTreeMap::from([("member.id".to_owned(), "member-1".to_owned())]),
+            role: role.to_owned(),
+            permissions: Value::Null,
+            sets: BTreeMap::new(),
+            fingerprint: String::new(),
+        }
+    }
+
+    #[test]
+    fn admitted_role_skips_irrelevant_sets_but_never_member_revocation() {
+        let plan = dependency_plan(serde_json::json!({"operator":"or","children":[
+            {"operator":"role","value":"admin"},
+            {"operator":"inSet","column":"id","set":"assigned"}
+        ]}));
+        plan.validate().unwrap();
+        let mut admin = dependency_member("admin");
+        let dependencies = plan.resolved_dependency_columns(&admin);
+        assert!(!dependencies.change_affects("taskUsers", "insert", &[]));
+        for column in ["status", "role", "permissions", "account_id"] {
+            assert!(dependencies.change_affects("members", "update", &[column.to_owned()]));
+        }
+        let task = serde_json::json!({"id":"task-1"});
+        assert!(row_matches(&plan, &admin, &task));
+        admin
+            .sets
+            .insert("assigned".to_owned(), BTreeSet::from(["task-1".to_owned()]));
+        assert!(row_matches(&plan, &admin, &task));
+        // After the admitted role changes, the previously inactive dependency
+        // is necessary again and revoking the assignment hides the row.
+        admin.role = "member".to_owned();
+        assert!(plan.resolved_dependency_columns(&admin).change_affects(
+            "taskUsers",
+            "delete",
+            &[]
+        ));
+        admin.sets.clear();
+        assert!(!row_matches(&plan, &admin, &task));
+        assert!(!plan.resolved_dependency_columns(&admin).change_affects(
+            "taskShares",
+            "insert",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn nested_role_branches_prune_only_irrelevant_dependencies() {
+        let plan = dependency_plan(serde_json::json!({"operator":"or","children":[
+            {"operator":"and","children":[{"operator":"role","value":"reviewer"},{"operator":"inSet","column":"id","set":"assigned"}]},
+            {"operator":"and","children":[{"operator":"not","children":[{"operator":"role","value":"admin"}]},{"operator":"inSet","column":"id","set":"shared"}]}
+        ]}));
+        plan.validate().unwrap();
+        let admin = plan.resolved_dependency_columns(&dependency_member("admin"));
+        assert_eq!(admin.tables(), BTreeSet::from(["members".to_owned()]));
+        let member = plan.resolved_dependency_columns(&dependency_member("member"));
+        assert!(!member.change_affects("taskUsers", "insert", &[]));
+        assert!(member.change_affects("taskShares", "insert", &[]));
+        let reviewer = plan.resolved_dependency_columns(&dependency_member("reviewer"));
+        assert!(reviewer.change_affects("taskUsers", "insert", &[]));
+        assert!(reviewer.change_affects("taskShares", "delete", &[]));
+    }
+
+    #[test]
+    fn permission_and_row_predicates_keep_their_set_dependencies() {
+        for predicate in [
+            serde_json::json!({"operator":"permission","value":"view-all"}),
+            serde_json::json!({"operator":"eq","column":"public","value":{"literal":true}}),
+            serde_json::json!({"operator":"eqContext","column":"owner","context":"member.id"}),
+        ] {
+            let plan = dependency_plan(serde_json::json!({"operator":"or","children":[predicate,
+                {"operator":"inSet","column":"id","set":"assigned"}
+            ]}));
+            plan.validate().unwrap();
+            for role in ["admin", "member"] {
+                assert!(plan
+                    .resolved_dependency_columns(&dependency_member(role))
+                    .change_affects("taskUsers", "insert", &[]));
+            }
+        }
+    }
 
     #[test]
     fn self_join_requires_aliases_and_compiles_both_occurrences() {
