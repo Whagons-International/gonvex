@@ -17,7 +17,10 @@ for (const count of (process.env.ROWS ?? '10000,50000').split(',').map(Number)) 
   // Observe the benchmark's actual reducer read on an empty replica before
   // ingesting rows. This compares steady-state storage with a known workload,
   // without hiding backfill cost inside a snapshot or equality measurement.
-  if (!process.env.LEARN_AFTER_SNAPSHOT && !process.env.NO_READS) await query();
+  if (!process.env.LEARN_AFTER_SNAPSHOT && !process.env.NO_READS) {
+    await query();
+    await storage.waitForIndexBackfills?.();
+  }
   const startHeap = heap();
   let tasks = Object.fromEntries(Array.from({ length: count }, (_, i) => {
     const row = { _id: `t${String(i).padStart(6, '0')}`, statusId: `s${i % 20}`, workspaceId: `w${i % 100}` };
@@ -28,6 +31,9 @@ for (const count of (process.env.ROWS ?? '10000,50000').split(',').map(Number)) 
   tasks = undefined;
   const first = process.env.NO_READS ? { ms: null, value: null } : await measure(query);
   if (first.value && first.value.rows.length !== Math.max(0, Math.ceil((count - 42) / 100))) throw new Error('Equality lookup lost rows');
+  const backfillStart = performance.now();
+  await storage.waitForIndexBackfills?.();
+  const backfillAfterReadMs = performance.now() - backfillStart;
   const times = [];
   for (let i = 0; !process.env.NO_READS && i < 5; i++) times.push((await measure(query)).ms);
   storage.close(); storage = new IndexedDBLocalReplicaStorage(name);
@@ -42,6 +48,6 @@ for (const count of (process.env.ROWS ?? '10000,50000').split(',').map(Number)) 
   const db = new Dexie(name); await db.open();
   const entries = await db.table('entities').toCollection().primaryKeys();
   const indexCount = await new Promise((resolve, reject) => { const tx = db.backendDB().transaction('entities'); const req = tx.objectStore('entities').index('lookupKeys').count(); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
-  console.log(JSON.stringify({ rows: count, columns: 50, workloadKnownBeforeSnapshot: !process.env.LEARN_AFTER_SNAPSHOT && !process.env.NO_READS, observers: observers.length, writeMs: write.ms, firstEqualityMs: first.ms, equalityMedianMs: times.sort((a,b)=>a-b)[2] ?? null, coldOpenLoadMs: cold.ms, lookupEntries: indexCount, retainedHeapMiB: retainedHeap, entityRecords: entries.length }));
+  console.log(JSON.stringify({ rows: count, columns: 50, workloadKnownBeforeSnapshot: !process.env.LEARN_AFTER_SNAPSHOT && !process.env.NO_READS, observers: observers.length, writeMs: write.ms, firstEqualityMs: first.ms, backfillAfterReadMs, equalityMedianMs: times.sort((a,b)=>a-b)[2] ?? null, coldOpenLoadMs: cold.ms, lookupEntries: indexCount, retainedHeapMiB: retainedHeap, entityRecords: entries.length }));
   observers.forEach(stop => stop()); storage.close(); db.close(); await Dexie.delete(name);
 }

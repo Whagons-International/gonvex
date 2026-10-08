@@ -66,28 +66,110 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return columns;
   }
 
-  private async learnColumns(scope: string, demands: Map<string, Set<string>>): Promise<void> {
-    if (!demands.size) return;
-    await this.database.transaction('rw', this.database.entities, this.database.meta, async () => {
-      for (const [entity, requested] of demands) {
-        const previous = await this.indexedColumns(scope, entity);
-        const added = [...requested].filter(column => !previous.includes(column));
-        if (!added.length) continue;
-        const columns = [...previous, ...added];
-        // Publish coverage and keys atomically. A concurrent peer either sees
-        // the old policy and scans, or sees all newly indexed records.
-        let after: [string, string, string] | undefined;
-        for (;;) {
-          const records = await this.database.entities.where('[scope+entity+id]')
-            .between(after ?? [scope, entity], [scope, entity, []], !after, false).limit(256).toArray();
-          if (!records.length) break;
-          for (const record of records) record.lookupKeys = record.deleted ? [] : entityLookupKeys(scope, entity, JSON.parse(record.value), columns);
-          await this.writeRecords(records);
-          after = [scope, entity, records.at(-1)!.id];
-        }
-        await this.database.meta.put({ scope, key: lookupPolicyKey(entity), value: JSON.stringify(columns) });
-      }
+  private readonly jobs = new Map<string, Promise<void>>();
+  private closed = false;
+  private backgroundQueue: Promise<void> = Promise.resolve();
+  private readonly generations = new Map<string, number>();
+  private readonly writePolicies = new WeakMap<Transaction, Map<string, Promise<readonly string[]>>>();
+  private seeds: Readonly<Record<string, readonly string[]>> = {};
+
+  configureLookupColumns(columns: Readonly<Record<string, readonly string[]>>) {
+    this.seeds = columns;
+  }
+
+  /** Wait for derived work, for diagnostics only. Reducer reads never call this. */
+  async waitForIndexBackfills(): Promise<void> {
+    while (this.jobs.size) await Promise.all(this.jobs.values());
+  }
+
+  private async backgroundTurn(): Promise<void> {
+    await new Promise<void>(resolve => {
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(() => resolve(), { timeout: 100 });
+      else setTimeout(resolve, 0);
     });
+  }
+
+  private scheduleColumns(scope: string, demands: Map<string, Set<string>>) {
+    for (const [entity, columns] of demands) for (const column of columns) {
+      const key = JSON.stringify([scope, entity, column]);
+      if (this.closed || this.jobs.has(key)) continue;
+      const generation = this.generations.get(scope) ?? 0;
+      // One builder per instance avoids enqueuing a burst of overlapping write
+      // transactions when a Reducer demands several new columns at once.
+      const job = this.backgroundQueue.then(() => Dexie.ignoreTransaction(() => this.learnColumn(scope, entity, column, generation))).catch(() => {
+        // Partial keys stay invisible. A later scoped scan retries the build.
+      }).finally(() => { this.jobs.delete(key); });
+      this.jobs.set(key, job);
+      this.backgroundQueue = job;
+    }
+  }
+
+  private writeColumns(scope: string, entity: string): Promise<readonly string[]> {
+    const transaction = Dexie.currentTransaction!;
+    let policies = this.writePolicies.get(transaction);
+    if (!policies) { policies = new Map(); this.writePolicies.set(transaction, policies); }
+    const key = JSON.stringify([scope, entity]);
+    let columns = policies.get(key);
+    if (!columns) { columns = this.loadWriteColumns(scope, entity); policies.set(key, columns); }
+    return columns;
+  }
+
+  private async loadWriteColumns(scope: string, entity: string): Promise<readonly string[]> {
+    const ready = await this.indexedColumns(scope, entity);
+    const pendingKey = `lookupPending:${entity}`;
+    const record = await this.database.meta.get([scope, pendingKey]);
+    const pending: Record<string, string> = Object.assign(Object.create(null), record ? JSON.parse(record.value) : {});
+    const added = (this.seeds[entity] ?? []).filter(column => !ready.includes(column) && !pending[column]);
+    if (added.length) {
+      if (!await this.database.entities.where('[scope+entity]').equals([scope, entity]).count()) {
+        const columns = [...new Set([...ready, ...added])];
+        await this.database.meta.put({ scope, key: lookupPolicyKey(entity), value: JSON.stringify(columns) });
+        this.lookupPolicies.get(Dexie.currentTransaction!)?.delete(JSON.stringify([scope, entity]));
+        return [...new Set([...columns, ...Object.keys(pending)])];
+      }
+      this.scheduleColumns(scope, new Map([[entity, new Set(added)]]));
+      for (const column of added) pending[column] = crypto.randomUUID();
+      await this.database.meta.put({ scope, key: pendingKey, value: JSON.stringify(pending) });
+    }
+    return [...new Set([...ready, ...Object.keys(pending)])];
+  }
+
+  private async learnColumn(scope: string, entity: string, column: string, generation: number): Promise<void> {
+    if (this.closed || (this.generations.get(scope) ?? 0) !== generation) return;
+    await this.backgroundTurn();
+    if (this.closed || (this.generations.get(scope) ?? 0) !== generation) return;
+    const key = `lookupPending:${entity}`;
+    const token = await this.database.transaction('rw', this.database.entities, this.database.meta, async () => {
+      if ((await this.indexedColumns(scope, entity)).includes(column)) return undefined;
+      const record = await this.database.meta.get([scope, key]);
+      const pending: Record<string, string> = Object.assign(Object.create(null), record ? JSON.parse(record.value) : {});
+      if (this.closed || (this.generations.get(scope) ?? 0) !== generation) return undefined;
+      pending[column] ??= crypto.randomUUID();
+      await this.database.meta.put({ scope, key, value: JSON.stringify(pending) });
+      return pending[column];
+    });
+    if (!token) return;
+    let after: [string, string, string] | undefined;
+    for (;;) {
+      await this.backgroundTurn();
+      if (this.closed || (this.generations.get(scope) ?? 0) !== generation) return;
+      const done = await this.database.transaction('rw', this.database.entities, this.database.meta, async () => {
+        const record = await this.database.meta.get([scope, key]);
+        const pending: Record<string, string> = Object.assign(Object.create(null), record ? JSON.parse(record.value) : {});
+        if (pending[column] !== token) return true; // scope cleared or another build finished
+        const ready = await this.indexedColumns(scope, entity);
+        const records = await this.database.entities.where('[scope+entity+id]')
+          .between(after ?? [scope, entity], [scope, entity, []], !after, false).limit(32).toArray();
+        for (const row of records) row.lookupKeys = row.deleted ? [] : entityLookupKeys(scope, entity, JSON.parse(row.value), [...new Set([...ready, ...Object.keys(pending)])]);
+        await this.writeRecords(records);
+        if (records.length) { after = [scope, entity, records.at(-1)!.id]; return false; }
+        await this.database.meta.put({ scope, key: lookupPolicyKey(entity), value: JSON.stringify([...new Set([...ready, column])]) });
+        delete pending[column];
+        await this.database.meta.put({ scope, key, value: JSON.stringify(pending) });
+        return true;
+      });
+      if (done) return;
+    }
   }
   private readonly channel?:BroadcastChannel;
   private readonly peers=new Set<(scope:string)=>void>();
@@ -179,7 +261,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     // its serialized value and secondary keys while updating authority.
     if (previous && merged === before) return previous;
     if (previous && before && merged.row === before.row) return {...previous, authority:merged.authority, sequence};
-    const record=merged.row ? entityRecord(scope,entity,id,merged.row,await this.indexedColumns(scope,entity)) : {scope,entity,id,value:'null',lookupKeys:[],deleted:true};
+    const record=merged.row ? entityRecord(scope,entity,id,merged.row,await this.writeColumns(scope,entity)) : {scope,entity,id,value:'null',lookupKeys:[],deleted:true};
     return {...record,authority:merged.authority,sequence};
   }
 
@@ -215,6 +297,9 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   }
 
   private async writeRowEntries(scope:string,entity:string,rows:readonly (readonly [string,ReplicaRow])[],cursor:ReplicaCursor|undefined,sequence:number) {
+    // Repeated reconnect projections can be no-ops, but new metadata seeds
+    // still need policy registration before those rows bypass key construction.
+    if (rows.length && this.seeds[entity]?.length) await this.writeColumns(scope, entity);
     // Bounded batches retain only the incoming rows and their previous values.
     for(let offset=0;offset<rows.length;offset+=writeBatchSize) {
       const batch=rows.slice(offset,offset+writeBatchSize);
@@ -353,8 +438,8 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       });
     } finally {
       // An incomplete reducer also teaches us its read columns, often before
-      // hydration. Index failure rolls back and must not replace its result/error.
-      try { await this.learnColumns(scope, demands); } catch { /* retry on the next scoped scan */ }
+      // hydration. Derived work never delays or replaces its result/error.
+      this.scheduleColumns(scope, demands);
     }
   }
 
@@ -366,7 +451,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       // Derived index policy alone is not application data. In particular,
       // browser upgrade fencing must not treat an empty learned scope as a
       // legacy snapshot that needs application migrations.
-      this.database.meta.orderBy('scope').filter(record => !record.key.startsWith('lookupColumns:')).keys(),
+      this.database.meta.orderBy('scope').filter(record => !record.key.startsWith('lookupColumns:') && !record.key.startsWith('lookupPending:')).keys(),
     ]);
     return [...new Set([...entities, ...windows, ...meta].map(String))];
   }
@@ -619,6 +704,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   async clear(scope: ReplicaScope = defaultReplicaScope): Promise<void> {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
+    this.generations.set(normalizedScope, (this.generations.get(normalizedScope) ?? 0) + 1);
     await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
       await this.database.entities.where("scope").equals(normalizedScope).delete();
@@ -626,10 +712,13 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       await this.database.meta.where("scope").equals(normalizedScope).and(record=>record.key!=='sequence' && record.key!=='epoch').delete();
       await this.database.meta.put({scope:normalizedScope,key:'resetSequence',value:String(sequence)});
     });
+    // Also cancel jobs scheduled by writes that were ahead of clear in IDB.
+    this.generations.set(normalizedScope, (this.generations.get(normalizedScope) ?? 0) + 1);
     this.channel?.postMessage({scope:normalizedScope});
   }
 
   close() {
+    this.closed = true;
     this.channel?.close();
     this.peers.clear();
     this.database.close();

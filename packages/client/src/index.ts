@@ -508,6 +508,8 @@ export type GonvexClientOptions = GonvexClientAuth & {
   /** Supplied by generated client bindings, once for the entire application. */
   localRuntime?: LocalRuntimeBinding & {
     clientContract?: import("./client-upgrades.js").ClientContract;
+    localSchema?: Readonly<Record<string, { key: string; columns: Readonly<Record<string, { type?: string; nullable?: boolean; default?: string; references?: unknown; foreignKey?: unknown }>> }>>;
+    localReadHints?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
     collections?: readonly FunctionReference[];
     /** Per locally executing Reducer, the tables its body reads locally (from codegen). */
     localDependencies?: Readonly<Record<string, readonly string[]>>;
@@ -720,6 +722,7 @@ export class GonvexClient {
     this.residentDependencyTables = residentLocalDependencyTables(options.localRuntime, options.localDependencyResidency);
     if (options.onLocalExecutionFallback) this.localFallbackHandlers.add(options.onLocalExecutionFallback);
     this.localStorage = options.localReplica?.storage;
+    this.localStorage?.configureLookupColumns?.(replicaLookupColumns(options.localRuntime));
     this.auth = authFromOptions(options);
     this.telemetryEnabled = options.telemetry === true;
     this.querySubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
@@ -5070,4 +5073,23 @@ function deferredLocalExecutor(create: () => LocalExecutor): LocalExecutor {
     replay: async (...args) => start().replay(...args),
     close: () => { closed = true; executor?.close(); },
   };
+}
+
+/** Derive only explicit lookup columns. Table-only dependencies imply no column. */
+export function replicaLookupColumns(binding: GonvexClientOptions['localRuntime']): Record<string, string[]> {
+  const columns = new Map<string, Set<string>>();
+  const add = (table: string, column: string) => {
+    if (column === binding?.localSchema?.[table]?.key) return;
+    let set = columns.get(table);
+    if (!set) { set = new Set(); columns.set(table, set); }
+    set.add(column);
+  };
+  for (const [table, schema] of Object.entries(binding?.localSchema ?? {}))
+    for (const [column, definition] of Object.entries(schema.columns))
+      if (definition.references || definition.foreignKey) add(table, column);
+  for (const collection of binding?.collections ?? [])
+    if (collection.replica) for (const column of Object.values(collection.replica.equalFilters ?? {})) if (column !== collection.replica.key) add(collection.replica.table, column);
+  for (const hints of Object.values(binding?.localReadHints ?? {}))
+    for (const [table, hintsColumns] of Object.entries(hints)) for (const column of hintsColumns) add(table, column);
+  return Object.fromEntries([...columns].map(([table, set]) => [table, [...set].sort()]));
 }

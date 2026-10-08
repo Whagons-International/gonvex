@@ -1,26 +1,124 @@
-# F2 IndexedDB replica format report
+# F2 IndexedDB replica format, round 2
 
-## Design
+## Outcome
 
-The previous format serialized each row as JSON and indexed every finite number, boolean and string of at most 256 characters, including the primary key. A fully populated 50-column task wrote 50 multi-entry lookup keys in addition to its primary, scope, entity and sequence keys.
+Reducer reads no longer await index construction. An equality demand on an unindexed column returns its correct scoped scan result and schedules derived work after the read transaction. Reads continue scanning until the index is complete. Metadata seeds common lookup columns during ingestion, and the committed Playwright harness measures the built package in native Chrome IndexedDB.
 
-The available generated metadata cannot provide an exact list of Reducer equality columns. `packages/gonvex/src/local-bindings.ts` passes table names, replica collection definitions and table-level `localDependencies` to the client. `local-schema.ts` stays inside the portable runtime factory. `packages/gonvex/src/local-schema.ts` emits primary keys, column types, nullable flags and defaults. It does not emit secondary SQL indexes or foreign keys. Collection `equalFilters` name subscription filters, not every predicate a Reducer can submit. The dependency analyzer in `packages/gonvex/src/local-dependencies.ts` resolves tables, not predicate columns.
+This round starts at `c4e54d3`. The original `f21f03d` comparison and JSON-versus-object experiment remain below as historical measurements. No row encoding, authority merge, subscription delivery, durable outbox, application migration journal or resident-row budget changed.
 
-A Reducer can pass any structured `DataRead` predicate at runtime. The IndexedDB planner can narrow candidates using string primary-key equality or IN, and one untransformed scalar equality or IN term within a conjunction. OR, transformed comparisons, NULL tests, large strings and other operators need residual evaluation. Declared SQL indexes and foreign keys do not restrict these runtime reads. `paged-read-view.ts` delegates candidate paging to its adapter and evaluates predicates through `memoryReadView`; it has no IndexedDB lookup-key dependency and needs no format change.
+## Design and concurrency
 
-Version six indexes columns observed in actual Reducer reads, independently for each scope and entity. New snapshots start with no blanket scalar indexes. String primary-key reads go directly to the existing compound primary key, without loading index policy. If a conjunction has a usable learned column, the planner chooses that term, even if an earlier term is unindexed. Otherwise it scans only `[scope+entity]`, applies the entire predicate, preserves ordering, limits, exclusions and coverage rules, and records the chosen equality-column demand.
+The planner still uses string primary-key equality and IN directly, chooses a usable indexed equality inside a conjunction, and applies the complete residual predicate. OR, transformations, NULL tests and unusable scalar values retain their scoped fallback. The read's `finally` block queues demanded columns without awaiting them, including when a Reducer reports incomplete coverage or throws.
 
-After the read transaction finishes, a separate atomic write transaction builds the demanded keys and publishes their policy under `lookupColumns:<entity>` in the scope's existing metadata store. It pages at most 256 records and uses the existing index-work write budget. It never exposes a partially built index. Requests from concurrent peers merge inside that write transaction. Writes reload policy once per entity per native transaction, so a peer cannot use a stale process-wide policy cache. Revisions and no-op records keep the existing merge behavior. Metadata-only commits still avoid entity reads and writes.
+A build yields through `requestIdleCallback` with a 100 ms timeout, or a zero-delay timer where idle callbacks are unavailable. It registers a token under `lookupPending:<entity>`, processes at most 32 records per write transaction, then yields again. The existing index-work request budget applies within each batch. `Dexie.ignoreTransaction` keeps scheduled work outside the initiating transaction, including when seeds are discovered during writes.
 
-Incomplete Reducers also teach their requested columns, which can happen before hydration. An index-build failure rolls back its keys and policy, preserves the original read result or error, and retries after a later scan. Index construction does not change replica authority, sequence, memberships or delivery. Policy-only empty scopes are excluded from `listScopes`, so browser upgrade fencing does not mistake derived metadata for legacy application data.
+Ready columns and pending columns serve different purposes. The read planner sees only the ready `lookupColumns:<entity>` policy. Writes load both policies once per entity per native transaction and maintain pending keys as well as ready keys. This preserves inserts behind the build cursor and updates to records already processed. Each build rereads peer policies before its next batch. Final publication merges the newly completed column with peer-ready columns and removes only that column's pending token in one transaction.
+
+This avoids holding a write lock for a whole-entity build. Native IDB still serializes overlapping transactions, so a read or write can wait for an already active 32-row batch. No foreground operation waits for the background job as a whole. Large fallback scans retain their existing CPU and latency cost.
+
+The storage instance deduplicates each scope/entity/column job and runs one builder at a time, avoiding a burst of background write transactions when several columns are demanded. `clear` invalidates its scope generation and deletes pending tokens; `close` cancels scheduled work. Builds stop between transactions. A peer also stops when its durable token disappears. Interrupted or failed builds leave partial derived keys invisible to the planner. Writes continue maintaining pending columns; the next demand retries from the beginning. Row authority, sequence and memberships are untouched by index work.
+
+`waitForIndexBackfills()` is a diagnostic drain for tests and benchmarks. No application read calls it. Derived ready and pending metadata alone do not make an empty scope application data for browser upgrade fencing.
+
+## Metadata policy
+
+`GonvexClient` configures capable storage adapters from its generated local runtime binding. The policy unions foreign-key/reference columns from `localSchema`, row columns named by collection `equalFilters`, and optional per-Reducer `localReadHints`. Primary-key columns use the existing compound primary index. Unrequested scalar columns remain unindexed; learned demands complement these seeds.
+
+Inspection found that the original `LocalColumn` carried only type, nullability and default. The old generator kept `localSchema` inside the runtime factory. This round adds optional `{ table, column }` references from PostgreSQL's `pg_constraint`, maps composite foreign keys by their matching attribute positions, exposes `localSchema` on the generated runtime binding, and increments the schema cache digest to v2. Existing generated clients still seed collection filters; regeneration adds foreign-key seeds.
+
+Current `localDependencies` contains only table-name arrays, with no predicate-column hints. The implementation does not infer columns from those table names. Optional `localReadHints` provides an explicit reducer-to-table-to-columns companion for bindings that have that information; this round does not add a static predicate analyzer.
+
+For an empty entity, the write transaction publishes seed policy before writing its rows. Snapshot replacement therefore writes seeded keys during ingestion without a preceding demand. For an already populated entity, newly introduced seeds become pending and use the same background construction mechanism. Unchanged reconnect projections still register new seeds before bypassing row-key construction.
 
 ## Upgrade and durability
 
-The Dexie schema advances from version five to six. Its atomic upgrade clears only `lookupKeys` on existing entity records. Values, IDs, authority, sequence, tombstones, windows, cursors and sessions remain intact. The version-four upgrade no longer builds blanket keys that version six would immediately discard.
+The version-six Dexie upgrade from round 1 remains unchanged. It clears blanket `lookupKeys` while preserving values, IDs, authority, sequences, tombstones, windows, cursors and sessions. Older upgrades avoid constructing blanket keys that version six would immediately discard. Durable outbox and application migration journals remain in separate databases. The existing version-three and version-five durability tests still pass.
 
-The durable outbox and application upgrade journal live in separate databases. The version-five upgrade test seeds those databases and checks that their queued intent and staged journal survive unchanged, alongside the replica's rows and metadata. Existing version-three upgrade coverage also passes through the new format.
+The Chrome upgrade fixture creates a version-five database containing 50,000 rows and 2,500,000 lookup keys, then times construction/open through `listScopes`. It verifies all 50,000 records remain and the upgraded keys are empty. This is an atomic one-time version change, distinct from the new cancellable demand backfill.
 
-## Row value experiment
+## Native Chrome measurements
+
+The benchmark uses `/opt/google/chrome/chrome`, Playwright already declared in the root package, and esbuild resolved through the existing client Vitest/Vite dependencies. It bundles the built client into a tiny HTTP page and uses native IndexedDB. Both builds run on this Linux workstation with Ryzen 7 5800X and Chrome 153.0.8010.36, using 10k/50k rows with 50 scalar columns and 1,000 `LocalReplica` subscribers. The complete working-set budget is 200 MiB and unlimited rows.
+
+The Chrome baseline is round 1, `c4e54d3`. Its `workspaceId` workload is learned on an empty replica before ingestion. Round 2 seeds that same column before ingestion. `statusId` is first demanded after ingestion. Scoped OR scans measure the same workspace predicate without an index. Indexed equality and scan numbers are five-read medians; snapshot, cold load, demand and upgrade numbers are single samples. The paired builds run sequentially. The CLI's own compiler is paused for this pair and the Node measurements. Other workstation activity is not controlled, so timing differences are not a stable throughput estimate.
+
+| Metric | 10k round 1 | 10k round 2 | 50k round 1 | 50k round 2 |
+| --- | ---: | ---: | ---: | ---: |
+| Snapshot write ms | 1,036.3 | 1,029.4 | 4,689.6 | 7,457.2 |
+| Indexed equality median ms | 4.6 | 5.9 | 20.9 | 28.5 |
+| Scoped scan median ms | 229.0 | 276.9 | 1,249.3 | 1,448.6 |
+| Cold open + complete load ms | 245.8 | 604.6 | 1,147.5 | 1,398.5 |
+| First-demand read ms | 1,160.3 | 276.4 | 6,593.8 | 1,423.3 |
+| Next/pending read ms | 25.2 | 290.6 | 92.2 | 1,328.2 |
+| Backfill duration ms | 945.3 | 2,482.8 | 5,420.5 | 11,845.6 |
+| Lookup entries after demand | 20,000 | 20,000 | 100,000 | 100,000 |
+
+The 50k version-five to six upgrade took 13,562.3 ms in round 1 and 12,887.3 ms in round 2. The migration code is unchanged.
+
+Backfill duration wraps the adapter's actual build method. In round 1 it is awaited by the first-demand read. In round 2 it starts as queued derived work after the scoped read and includes idle turns, batch transactions and any time spent behind foreground transactions. The baseline's next read is already indexed because its first read waited; the round-2 pending read still scans. These timings deliberately show the longer background wall time instead of hiding it inside lookup latency.
+
+The 50k first-demand read fell from 6,593.8 ms to 1,423.3 ms, a 4.6x improvement. Background construction took 11,845.6 ms independently. Snapshot, steady equality and cold load were slower in this pair. This round does not claim a native snapshot throughput improvement over round 1. Exploratory passes varied substantially with other workstation activity. The measured read no longer includes construction, and the suspended-build test proves that independence without relying on timing.
+
+Chrome's native database is outside Node's JS heap. These runs do not measure physical index bytes, renderer retained heap, React hook overhead or compaction. The Node measurements below retain the required `--expose-gc` and `process.memoryUsage().heapUsed` accounting.
+
+## Round-2 Node measurements
+
+The original Node harness now drains derived work explicitly outside measured reads. Known-workload runs learn the policy on an empty entity and drain before ingestion, so their snapshot and steady lookup costs stay comparable with round 1. The same 50-column rows and 1,000 subscribers are retained.
+
+| Metric | 10k round 1 | 10k round 2 | 50k round 1 | 50k round 2 |
+| --- | ---: | ---: | ---: | ---: |
+| Snapshot write ms | 3,948.8 | 3,526.5 | 22,766.5 | 35,526.5 |
+| Indexed equality median ms | 55.9 | 72.0 | 1,218.6 | 1,895.6 |
+| Cold open + complete load ms | 218.5 | 256.5 | 1,050.1 | 3,784.0 |
+| Retained heap after GC, MiB | 78.84 | 78.85 | 311.53 | 311.52 |
+| Lookup entries | 10,000 | 10,000 | 50,000 | 50,000 |
+
+The separate 1,000-row first-demand run has no preceding learned or seeded policy. Its snapshot took 831.9 ms. The first read returned in 4,666.0 ms, compared with the historical round-1 14,802.7 ms. After that read, a diagnostic drain measured 20,147.2 ms of remaining background work. Subsequent equality reads took 1.98 ms median. Fake-IDB timing is noisy here and its replacement implementation is quadratic. The round-2 50k Node write and load timings also regressed in this sample; retained heap and key counts stayed at round-1 levels. No steady-state timing improvement is claimed from these Node results.
+
+Raw results are committed in `packages/client/bench/results/replica-idb-f2-chrome-before.json`, `replica-idb-f2-chrome-after.json`, `replica-idb-f2-round2-node.jsonl` and `replica-idb-f2-round2-demand-node.jsonl`. Round-1 raw results remain in `replica-idb-f2.json`.
+
+## Files changed in round 2
+
+- `packages/client/src/indexeddb-replica.ts`: background jobs, bounded transactions, pending/ready policy separation, peer-safe writes, cancellation and diagnostics.
+- `packages/client/src/index.ts` and `local-replica.ts`: metadata policy derivation and optional storage configuration during client construction.
+- `packages/client/src/indexeddb-read-view.test.ts`: pending-read and write independence, concurrent builds, cursor races, failure/retry, seed ingestion and cancellation coverage.
+- `packages/client/src/local-reducers.test.ts`: metadata union, primary-key exclusion, table-only dependency handling and client-to-storage wiring.
+- `packages/local-runtime/src/schema.ts`: optional reference metadata without changing execution semantics.
+- `packages/gonvex/src/local-schema.ts` and `local-bindings.ts`: foreign-key metadata, schema cache invalidation and exposed generated runtime schema.
+- `packages/gonvex/test/local-bindings.test.mjs`: single/composite reference extraction and generated binding exposure.
+- `packages/client/bench/replica-idb-browser.mjs` and `replica-idb-browser-entry.mjs`: reproducible built-package/native Chrome workload and upgrade measurements, including result and complete-policy guards.
+- `packages/client/bench/replica-idb.mjs`, `README.md` and results: asynchronous diagnostic draining, reproduction instructions and recorded measurements.
+- `docs/performance/replica-idb-f2.md`: this full report.
+
+## Validation
+
+- `nice -n 10 pnpm --dir packages/client test`: passed, 21 files and 386 tests, including the client build. Final duration was 21.50 seconds.
+- `nice -n 10 pnpm --dir packages/client typecheck`: passed.
+- `nice -n 10 pnpm --dir packages/local-runtime test`: passed, 8 files and 72 tests. Duration was 28.21 seconds.
+- `nice -n 10 pnpm --dir packages/local-runtime typecheck`: passed.
+- `nice -n 10 env CARGO_BUILD_JOBS=2 pnpm --dir packages/gonvex test`: passed, all 47 tests, with no skips. Duration was 1,146.98 seconds including the runtime helper's cold native dependency build and pauses during measurement.
+- `nice -n 10 pnpm --dir packages/gonvex typecheck`: passed.
+- Native Chrome 10k/50k runs against both `c4e54d3` and the final implementation: completed with equality, completed-policy, key-count, working-set and 50k upgrade preservation guards passing.
+- Node 10k/50k known-workload and 1k first-demand runs: completed with equality and complete-working-set guards passing and explicit post-GC heap measurements.
+- Both browser benchmark files passed `node --check`; `git diff --check` passed.
+
+Initial CLI setup failed because the React dependency had not been built and Playwright's cached headless shell was absent. Building that dependency and installing the test browser resolved both. The earlier unbounded native helper build was restarted with two workers; the complete final suite passed. No Rust source changed and no Rust test suite ran. The unchanged CLI artifact test invokes `cargo run` for its real artifact verifier, which required compiling bundled DuckDB. No other package test suite is claimed.
+
+Existing tests changed only where they previously relied on a completed index immediately after a Reducer read. They now drain background work before inspecting keys/policy or measuring indexed deserialization. The failure test's title now describes rollback of the failed batch; a new test proves earlier committed batches stay invisible and retry safely. No application-result assertion was removed. The reference-extraction and generated-schema assertions are additions.
+
+A deliberately suspended background turn proves the first demand and a second read return correct rows without waiting. A write also completes while the gate stays closed, and the next read observes that write. Other tests exercise inserts behind an advanced cursor, peer policy merges, a failed second batch, incomplete Reducers, clear and close cancellation, serialized queued builders, seeded snapshots and unchanged reconnect projections.
+
+## Risks and work left for later
+
+- An unseeded equality still scans the full scoped entity until its index is ready. On 50k rows this remains visible latency. Seed coverage matters for interactive Reducers. No static reducer-column inference is added because current dependencies identify only tables.
+- Background building takes longer in wall time than an uninterrupted atomic build. Active batches still hold ordinary IDB locks briefly, and a hot foreground workload can postpone idle work. There is no promise that native operations have zero scheduling delay.
+- A closed tab or failed build can leave unpublished derived keys and pending policy. Later writes maintain them and the next demand restarts the build. The build does not persist its cursor, so a retry can redo completed rows.
+- A newly requested column remains indexed until its scope is cleared. Policy pruning and removal of obsolete derived keys remain future work.
+- Version-five to six migration still rewrites all records under an atomic version-change transaction. Its measured open cost is material and may require temporary disk headroom. Moving demand construction off reads does not change that upgrade.
+- Foreign-key seeding can add multiple real lookup columns to a task entity, increasing keys relative to the one-seed benchmark. It still avoids blanket indexing of all 50 scalars. Existing clients gain reference seeds only after regenerating bindings.
+- Benchmarks use actual native IDB latency and fake-IDB heap separately. Neither establishes production tab memory, physical database size or Whagons React edit latency. The row-value experiment still favors keeping JSON for this phase.
+
+## Retained round-1 row value experiment
 
 JSON values remain unchanged. `packages/client/bench/replica-values.mjs` compares JSON strings with native structured-cloned objects using identical 50-column rows, a primary-key-only Dexie schema, batches of 32 and read pages of 256. Numbers below are medians of three trials on this workstation with Node and fake-indexeddb, using `--expose-gc`.
 
@@ -33,7 +131,7 @@ JSON values remain unchanged. `packages/client/bench/replica-values.mjs` compare
 
 Objects did not improve both read and write time. They increased retained fake-IDB heap by about 9%, made writes 12% to 33% slower, and changed reads by between a 9% improvement and a 2% regression. These measurements do not justify changing the row encoding or byte-budget accounting in this phase.
 
-## Replica benchmark
+## Retained round-1 fake-IDB benchmark
 
 Measurements were collected on this Linux workstation with an AMD Ryzen 7 5800X, Node 22.19.0, Dexie 4.4.4 and fake-indexeddb 6.2.5. The baseline client was built from `f21f03d`, the original worktree HEAD. Both builds used the same workspace dependencies and benchmark data. Heavy commands ran with `nice -n 10`.
 
@@ -55,7 +153,7 @@ The four fixed keys are the primary record key plus the `scope`, `[scope+entity]
 
 With no preceding Reducer reads, the new format creates zero lookup keys. Default snapshot writes measured 3,124.4 ms at 10k and 19,068.1 ms at 50k; cold open/load measured 166.7 ms and 972.0 ms; retained heap was 74.49 MiB and 293.47 MiB. Those runs intentionally omit equality reads, to avoid folding a new index's construction into the write/load measurement.
 
-The separate first-demand run uses 1,000 existing 50-column rows, no previously learned workload, and 1,000 observers. Its snapshot took 288.9 ms. The first equality read, including the scoped scan and atomic backfill, took **14,802.7 ms** in fake-indexeddb. Subsequent equality reads took 1.81 ms median, and the store had 1,000 lookup entries. This is a material one-time cost; the main known-workload table does not include it. The existing fake-indexeddb update implementation scans each whole index to remove a record's old keys, creating an artificial quadratic component. Native browser backfill still requires measurement; do not assume this 14.8-second result predicts Chrome.
+The separate first-demand run uses 1,000 existing 50-column rows, no previously learned workload, and 1,000 observers. Its snapshot took 288.9 ms. The first equality read, including the scoped scan and atomic backfill, took **14,802.7 ms** in fake-indexeddb. Subsequent equality reads took 1.81 ms median, and the store had 1,000 lookup entries. This is a material one-time cost; the main known-workload table does not include it. The existing fake-indexeddb update implementation scans each whole index to remove a record's old keys, creating an artificial quadratic component. This is the historical round-1 measurement. The native Chrome and asynchronous round-2 results above replace the earlier open measurement item.
 
 Raw measurements are committed under `packages/client/bench/results/replica-idb-f2.json`.
 
@@ -68,35 +166,3 @@ nice -n 10 node --expose-gc packages/client/bench/replica-values.mjs
 ```
 
 See `packages/client/bench/README.md` for dependency builds, baseline setup and separate first-demand/default-write commands.
-
-## Files changed
-
-- `packages/client/src/indexeddb-read-view.ts`: explicit indexed-column key construction; learned-column query planning; scoped fallback scans.
-- `packages/client/src/indexeddb-replica.ts`: version-six upgrade; persistent per-scope/entity policy; bounded atomic backfill; transaction-local policy cache; write maintenance.
-- `packages/client/src/indexeddb-read-view.test.ts`: scoped fallback, selected-column demand, updates, peers, reopen, concurrent demands, failed backfill, incomplete Reducers and version-five durability fixtures.
-- `packages/client/bench/replica-idb.mjs`: reproducible snapshot, lookup, open/load, heap and index-count benchmark with 10k and 50k rows and 1,000 observers.
-- `packages/client/bench/replica-values.mjs`: isolated JSON versus object measurement.
-- `packages/client/bench/README.md`: build and reproduction instructions.
-- `packages/client/bench/results/replica-idb-f2.json`: recorded machine, baseline, optimized and row-value measurements.
-- `docs/performance/replica-idb-f2.md`: this report.
-
-## Validation
-
-- `cd packages/client && nice -n 10 pnpm test`: passed, 21 test files and all 378 tests, including the package build. The final run took 16.91 seconds.
-- `cd packages/client && nice -n 10 pnpm typecheck`: passed.
-- Targeted native-request-count test: passed after changing the instrumentation to `IDBObjectStore.prototype.get`.
-- Both 10k/50k main benchmark builds, default no-read snapshots, the 1k first-demand case and the three-trial value-encoding benchmark completed successfully.
-- A 100-row smoke run passed the benchmark's equality-count and complete-working-set guards.
-- `git diff --check`: passed.
-
-No Rust files changed and no Rust tests were run. Only the client package changed, so no other package test suite is claimed. An accidental workspace-wide JavaScript test invocation was stopped; the completed validation above is the client package suite.
-
-The existing parent-lookup test now observes its workload before measuring indexed reads. Its JSON.parse assertion counts row objects, excluding the newly persisted column-policy array. Its timeout accommodates one-time fake-indexeddb backfill. The scalar-key helper test now explicitly requests `statusId`, `active` and `deletedAt`, expecting two keys because NULL remains unindexed and the primary key no longer gets a blanket secondary key. The older version-three test's title describes the new upgrade behavior. No application-behavior assertions were removed.
-
-## Risks and work left for later
-
-- A newly observed column on an already large entity requires one scoped scan and an atomic rewrite of its derived keys. It delays that first read and briefly occupies the replica database's write lock. Snapshot writes after the workload is known avoid this cost. See the separate first-demand measurement above. Fake-indexeddb 6.2.5's `RecordStore.deleteByValue` scans an entire index when replacing an existing record, so full-entity backfill has an artificial quadratic component absent from an ordinary native B-tree update.
-- Policies accumulate observed columns within each scope. There is no artifact-based pruning of columns that later Reducer versions stop using. A column actually queried at least once remains indexed until the scope is cleared.
-- The upgrade rewrites existing records once, under Dexie's atomic version-change transaction. Physical browser disk compaction and actual open-time reduction need a real browser measurement. Database migration may require temporary disk headroom.
-- The heap figures include fake-indexeddb's JavaScript database representation and one complete resident LocalReplica with 1,000 listener registrations. They are not measurements of Chrome's native IDB storage, React hook overhead, renderer memory or physical database bytes.
-- No Rust, code generator, SQLite adapter, React API or consumer app changes are needed. Static column analysis or generated read hints could avoid first-demand backfill on more workloads, but the existing metadata is insufficient to make that analysis exact.

@@ -42,6 +42,7 @@ describe('IndexedDB reducer reads',()=>{
     await storage.replaceSnapshot({entities:{assignments},liveQueries:{}},'tenant');
     await storage.replaceSnapshot({entities:{assignments:{secret:{_id:'secret',taskId:'t42',active:true}}},liveQueries:{}},'other');
     await storage.withReadView('tenant',coverage,view=>view.select({table:'assignments',where:{column:'taskId',op:'eq',value:'t42'}}));
+    await storage.waitForIndexBackfills();
     const parse=vi.spyOn(JSON,'parse');
     const result=await storage.withReadView('tenant',coverage,view=>view.select({table:'assignments',where:{and:[{column:'taskId',op:'eq',value:'t42'},{column:'active',op:'eq',value:true}]}}));
     expect(result.rows).toHaveLength(10);
@@ -156,9 +157,11 @@ it('scans an unindexed equality within its entity/scope, then learns only the ch
   await storage.replaceSnapshot({ entities: { tasks, assignments: { a: tasks.a } }, liveQueries: {} }, 'tenant');
   await storage.replaceSnapshot({ entities: { tasks: { secret: { _id: 'secret', status: 'new' } } }, liveQueries: {} }, 'other');
   const db = (storage as any).database as Dexie;
+  await storage.waitForIndexBackfills();
   expect((await db.table('entities').get(['tenant', 'tasks', 'a'])).lookupKeys).toEqual([]);
   const read = () => storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { and: [{ column: 'status', op: 'eq', value: 'new' }, { column: 'unused', op: 'eq', value: 'x' }] } }));
   expect(await read()).toEqual({ rows: [tasks.a], complete: true });
+  await storage.waitForIndexBackfills();
   expect((await db.table('entities').get(['tenant', 'tasks', 'a'])).lookupKeys).toEqual([['tenant', 'tasks', 'status', 3, 'new']]);
   expect((await db.table('entities').get(['tenant', 'assignments', 'a'])).lookupKeys).toEqual([]);
   expect((await db.table('entities').get(['other', 'tasks', 'secret'])).lookupKeys).toEqual([]);
@@ -174,6 +177,7 @@ it('shares learned policy across reopen and peer writes, including newly learned
     await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', status: 'new', parent: 'p' } } }, liveQueries: {} }, 'tenant');
     const read = () => storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'in', values: ['new', 'done'] } }));
     await read();
+    await storage.waitForIndexBackfills();
     await peer.applyTransaction({ cursor: { epoch: 'e', revision: 1 }, changes: [{ entity: 'tasks', id: 'b', operation: 'insert', newValue: { _id: 'b', status: 'done', parent: 'p' } }] }, { entities: {}, liveQueries: {} }, 'tenant');
     storage.close(); storage = new IndexedDBLocalReplicaStorage(name);
     expect((await read()).rows.map(row => row._id)).toEqual(['a', 'b']);
@@ -221,6 +225,7 @@ it('upgrades version-five records in place without changing authority, tombstone
 it('prefers a learned conjunct and avoids learning columns for primary-key and zero-limit reads', async () => {
   await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', status: 'new', note: 'x' } } }, liveQueries: {} }, 'tenant');
   await storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } }));
+  await storage.waitForIndexBackfills();
   await storage.withReadView('tenant', coverage, async view => {
     expect((await view.select({ table: 'tasks', where: { and: [{ column: 'note', op: 'eq', value: 'x' }, { column: 'status', op: 'eq', value: 'new' }] } })).rows).toHaveLength(1);
     expect((await view.select({ table: 'tasks', where: { and: [{ column: 'note', op: 'eq', value: 'x' }, { column: '_id', op: 'eq', value: 'a' }] } })).rows).toHaveLength(1);
@@ -229,7 +234,7 @@ it('prefers a learned conjunct and avoids learning columns for primary-key and z
   expect((await (storage as any).database.table('meta').get(['tenant', 'lookupColumns:tasks'])).value).toBe('["status"]');
 });
 
-it('rolls back learned keys and policy together when backfill fails', async () => {
+it('rolls back a failed batch and keeps its policy unpublished', async () => {
   await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', status: 'new' } } }, liveQueries: {} }, 'tenant');
   const original = (storage as any).writeRecords.bind(storage);
   const write = vi.spyOn(storage as any, 'writeRecords').mockImplementationOnce(async records => {
@@ -238,8 +243,10 @@ it('rolls back learned keys and policy together when backfill fails', async () =
   });
   const read = () => storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } }));
   expect((await read()).rows).toEqual([{ _id: 'a', status: 'new' }]);
+  await storage.waitForIndexBackfills();
   const db = (storage as any).database as Dexie;
   expect(await db.table('meta').get(['tenant', 'lookupColumns:tasks'])).toBeUndefined();
+  await storage.waitForIndexBackfills();
   expect((await db.table('entities').get(['tenant', 'tasks', 'a'])).lookupKeys).toEqual([]);
   write.mockRestore();
   expect(await read()).toEqual({ rows: [{ _id: 'a', status: 'new' }], complete: true });
@@ -255,6 +262,7 @@ it('merges concurrent column demands without losing either peer policy', async (
       storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } })),
       peer.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'parent', op: 'eq', value: 'p' } })),
     ]);
+    await Promise.all([storage.waitForIndexBackfills(), peer.waitForIndexBackfills()]);
     const record = await (storage as any).database.table('entities').get(['tenant', 'tasks', 'a']);
     expect(record.lookupKeys).toHaveLength(2);
     expect(record.lookupKeys.map((key: any[]) => key[2]).sort()).toEqual(['parent', 'status']);
@@ -267,6 +275,7 @@ it('learns demands even when an incomplete reducer throws before hydration', asy
     expect((await view.select({ table: 'tasks', where: { column: 'parent', op: 'eq', value: 'p' } })).complete).toBe(false);
     throw unavailable;
   })).rejects.toBe(unavailable);
+  await storage.waitForIndexBackfills();
   expect(await storage.listScopes()).toEqual([]);
   await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', parent: 'p', unused: 'x' } } }, liveQueries: {} }, 'tenant');
   expect((await (storage as any).database.table('entities').get(['tenant', 'tasks', 'a'])).lookupKeys).toEqual([['tenant', 'tasks', 'parent', 3, 'p']]);
@@ -287,9 +296,128 @@ it('keeps long-string equality and OR predicates on scoped scans without learnin
   const note = 'x'.repeat(257);
   await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', status: 'new', note }, b: { _id: 'b', status: 'done', note: 'short' } } }, liveQueries: {} }, 'tenant');
   await storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } }));
+  await storage.waitForIndexBackfills();
   await storage.withReadView('tenant', coverage, async view => {
     expect((await view.select({ table: 'tasks', where: { column: 'note', op: 'eq', value: note } })).rows.map(row => row._id)).toEqual(['a']);
     expect((await view.select({ table: 'tasks', where: { or: [{ column: 'status', op: 'eq', value: 'new' }, { column: 'note', op: 'eq', value: 'short' }] } })).rows.map(row => row._id)).toEqual(['a', 'b']);
   });
   expect((await (storage as any).database.table('meta').get(['tenant', 'lookupColumns:tasks'])).value).toBe('["status"]');
+});
+
+
+it('returns correct reads and allows writes while background backfill is suspended', async () => {
+  const rows = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [String(i), { _id: String(i), status: 'new' }]));
+  await storage.replaceSnapshot({ entities: { tasks: rows }, liveQueries: {} }, 'tenant');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const turn = vi.spyOn(storage as any, 'backgroundTurn').mockImplementation(() => gate);
+  const read = () => storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } }));
+  try {
+    expect((await read()).rows).toHaveLength(100);
+    expect((await read()).rows).toHaveLength(100);
+    await storage.applyTransaction({ cursor: { epoch: 'e', revision: 1 }, changes: [{ entity: 'tasks', id: '0', operation: 'update', newValue: { _id: '0', status: 'done' } }] }, { entities: {}, liveQueries: {} }, 'tenant');
+    expect((await read()).rows).toHaveLength(99);
+    expect(await (storage as any).database.table('meta').get(['tenant', 'lookupColumns:tasks'])).toBeUndefined();
+  } finally { turn.mockRestore(); release(); }
+  await storage.waitForIndexBackfills();
+  expect((await read()).rows).toHaveLength(99);
+});
+
+it('maintains inserts behind the backfill cursor and updates during bounded batches', async () => {
+  const rows = Object.fromEntries(Array.from({ length: 70 }, (_, i) => [`t${String(i).padStart(3, '0')}`, { _id: `t${String(i).padStart(3, '0')}`, status: 'new' }]));
+  await storage.replaceSnapshot({ entities: { tasks: rows }, liveQueries: {} }, 'tenant');
+  const original = (storage as any).backgroundTurn.bind(storage);
+  let turns = 0;
+  const pause = vi.spyOn(storage as any, 'backgroundTurn').mockImplementation(async () => {
+    await original();
+    if (++turns === 3) await storage.applyTransaction({ cursor: { epoch: 'e', revision: 1 }, changes: [
+      { entity: 'tasks', id: 'a', operation: 'insert', newValue: { _id: 'a', status: 'new' } },
+      { entity: 'tasks', id: 't000', operation: 'update', newValue: { _id: 't000', status: 'done' } },
+    ] }, { entities: {}, liveQueries: {} }, 'tenant');
+  });
+  const read = () => storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } }));
+  await read(); await storage.waitForIndexBackfills(); pause.mockRestore();
+  const result = await read();
+  expect(result.rows).toHaveLength(70);
+  expect(result.rows.some(row => row._id === 'a')).toBe(true);
+  expect(result.rows.some(row => row._id === 't000')).toBe(false);
+});
+
+it('seeds snapshot lookup keys without a preceding demand and cancels on clear', async () => {
+  storage.configureLookupColumns({ tasks: ['status'] });
+  await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', status: 'new', unused: 'x' } } }, liveQueries: {} }, 'tenant');
+  expect((await (storage as any).database.table('entities').get(['tenant', 'tasks', 'a'])).lookupKeys).toEqual([['tenant', 'tasks', 'status', 3, 'new']]);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const turn = vi.spyOn(storage as any, 'backgroundTurn').mockImplementation(() => gate);
+  await storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'unused', op: 'eq', value: 'x' } }));
+  await storage.clear('tenant');
+  turn.mockRestore(); release(); await storage.waitForIndexBackfills();
+  expect(await (storage as any).database.table('meta').get(['tenant', 'lookupPending:tasks'])).toBeUndefined();
+});
+
+it('keeps committed partial keys invisible after a later batch fails and retries on demand', async () => {
+  const rows = Object.fromEntries(Array.from({ length: 70 }, (_, i) => [String(i).padStart(3, '0'), { _id: String(i).padStart(3, '0'), status: 'new' }]));
+  await storage.replaceSnapshot({ entities: { tasks: rows }, liveQueries: {} }, 'tenant');
+  const original = (storage as any).writeRecords.bind(storage);
+  let batches = 0;
+  const write = vi.spyOn(storage as any, 'writeRecords').mockImplementation(async records => {
+    expect((records as any[]).length).toBeLessThanOrEqual(32);
+    if (++batches === 2) throw Error('second batch failure');
+    await original(records);
+  });
+  const read = () => storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } }));
+  await read(); await storage.waitForIndexBackfills();
+  const db = (storage as any).database as Dexie;
+  expect(await db.table('meta').get(['tenant', 'lookupColumns:tasks'])).toBeUndefined();
+  expect((await db.table('entities').get(['tenant', 'tasks', '000'])).lookupKeys).toHaveLength(1);
+  write.mockRestore();
+  expect((await read()).rows).toHaveLength(70);
+  await storage.waitForIndexBackfills();
+  expect((await read()).rows).toHaveLength(70);
+});
+
+it('cancels a scheduled build when storage closes', async () => {
+  await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', status: 'new' } } }, liveQueries: {} }, 'tenant');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const turn = vi.spyOn(storage as any, 'backgroundTurn').mockImplementation(() => gate);
+  await storage.withReadView('tenant', coverage, view => view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } }));
+  storage.close(); turn.mockRestore(); release(); await storage.waitForIndexBackfills();
+  const db = new Dexie((storage as any).database.name); await db.open();
+  expect(await db.table('meta').get(['tenant', 'lookupColumns:tasks'])).toBeUndefined();
+  db.close();
+});
+
+it('serializes builders and cancels queued columns when a scope clears', async () => {
+  await storage.replaceSnapshot({ entities: { tasks: { a: { _id: 'a', status: 'new', parent: 'p' } } }, liveQueries: {} }, 'tenant');
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const original = (storage as any).learnColumn.bind(storage);
+  const builder = vi.spyOn(storage as any, 'learnColumn').mockImplementation(async (...args) => {
+    await gate;
+    return original(...args);
+  });
+  await storage.withReadView('tenant', coverage, async view => {
+    expect((await view.select({ table: 'tasks', where: { column: 'status', op: 'eq', value: 'new' } })).rows).toHaveLength(1);
+    expect((await view.select({ table: 'tasks', where: { column: 'parent', op: 'eq', value: 'p' } })).rows).toHaveLength(1);
+  });
+  await vi.waitFor(() => expect(builder).toHaveBeenCalledTimes(1));
+  await storage.clear('tenant'); release(); await storage.waitForIndexBackfills();
+  expect(builder).toHaveBeenCalledTimes(2);
+  expect(await (storage as any).database.table('meta').get(['tenant', 'lookupPending:tasks'])).toBeUndefined();
+  expect(await (storage as any).database.table('meta').get(['tenant', 'lookupColumns:tasks'])).toBeUndefined();
+});
+
+it('starts metadata seed construction for unchanged reconnect projections without a read demand', async () => {
+  const row = { _id: 'a', status: 'new' };
+  const snapshot = { entities: { tasks: { a: row } }, liveQueries: {} };
+  await storage.replaceSnapshot(snapshot, 'tenant');
+  storage.configureLookupColumns({ tasks: ['status'] });
+  const window = { signature: 'tasks', entity: 'tasks', key: '_id', ids: ['a'], kind: 'replica' as const, completeness: 'complete' as const, source: 'server' as const };
+  await storage.replaceWindow(window, snapshot, 'tenant', [row]);
+  await storage.waitForIndexBackfills();
+  const db = (storage as any).database as Dexie;
+  expect(JSON.parse((await db.table('meta').get(['tenant', 'lookupColumns:tasks'])).value)).toEqual(['status']);
+  expect((await db.table('entities').get(['tenant', 'tasks', 'a'])).lookupKeys).toEqual([['tenant', 'tasks', 'status', 3, 'new']]);
 });

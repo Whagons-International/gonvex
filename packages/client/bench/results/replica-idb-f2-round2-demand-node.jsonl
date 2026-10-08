@@ -1,0 +1,1 @@
+{"rows":1000,"columns":50,"workloadKnownBeforeSnapshot":false,"observers":1000,"writeMs":831.878702,"firstEqualityMs":4666.012022999999,"backfillAfterReadMs":20147.168292,"equalityMedianMs":1.9787759999999253,"coldOpenLoadMs":17.22058300000208,"lookupEntries":1000,"retainedHeapMiB":11.794692993164062,"entityRecords":1000}

@@ -7,6 +7,7 @@ import test from 'node:test';
 import { build } from 'rolldown';
 import { chromium } from '@playwright/test';
 import { buildModuleArtifact, moduleManifestFunctions } from '../dist/module-artifact.js';
+import { compileLocalSchema } from '../dist/local-schema.js';
 import { localBindings } from '../dist/local-bindings.js';
 
 test('codegen owns local execution and never replicates unexposed columns', async t => {
@@ -39,6 +40,7 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   assert.equal(functions.external.localExecution, undefined);
   const generated = await localBindings(root, {module,functions});
   assert.match(generated['local-executor.ts'], /createPortableReducer/);
+  assert.match(generated['local-executor.ts'], /localSchema, clientContract/);
   assert.match(generated['local-runtime.native.tsx'], /installNativeRuntimeGlobals/);
   assert.equal(generated['local-worker.ts'], undefined);
   assert.deepEqual(JSON.parse(generated['local-native-host.json']), {});
@@ -70,4 +72,18 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   const response=await page.evaluate(async hash=>SharedExecutor.localRuntime.create().execute('rename',{id:'t',title:'changed'},{scope:'scope',tables:{tasks:{complete:true,rows:[{_id:'t',title:'old'}]}}},{scope:'scope',commandId:'intent',now:1,artifactHash:hash,identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}}}),module.hash);
   assert.equal(response.patches[0].fields.title,'changed');
   assert.deepEqual(requests,[], 'shared execution must not download an engine or contact a server');
+});
+
+
+test('local schema carries single and composite foreign-key references for lookup seeding', async () => {
+  const schema = await compileLocalSchema([{ name: 'foreign-keys.sql', sql: `
+    CREATE TABLE workspaces (id text PRIMARY KEY);
+    CREATE TABLE statuses (workspace_id text REFERENCES workspaces(id), id text, PRIMARY KEY (workspace_id, id));
+    CREATE TABLE tasks (id text PRIMARY KEY, workspace_id text, status_id text, title text,
+      FOREIGN KEY (workspace_id, status_id) REFERENCES statuses(workspace_id, id));
+  ` }]);
+  assert.deepEqual(schema.statuses.columns.workspace_id.references, { table: 'workspaces', column: 'id' });
+  assert.deepEqual(schema.tasks.columns.workspace_id.references, { table: 'statuses', column: 'workspace_id' });
+  assert.deepEqual(schema.tasks.columns.status_id.references, { table: 'statuses', column: 'id' });
+  assert.equal(schema.tasks.columns.title.references, undefined);
 });

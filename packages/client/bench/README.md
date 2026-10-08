@@ -12,7 +12,7 @@ nice -n 10 node --expose-gc packages/client/bench/replica-values.mjs
 
 The default run observes the actual equality request on an empty replica before the snapshot. This measures storage and reads with a known workload. Only `tasks.workspaceId` is needed for that request. The old client still creates all 50 scalar keys. No workload hints are needed in app code; normal Reducer reads learn their demands automatically, including incomplete Reducers before hydration.
 
-Run a separate first-demand case to include the scoped scan and atomic backfill of an already populated entity:
+Run a separate first-demand case to measure the scoped read and remaining background backfill separately on an already populated entity:
 
 ```sh
 nice -n 10 env ROWS=1000 LEARN_AFTER_SNAPSHOT=1 node --expose-gc packages/client/bench/replica-idb.mjs
@@ -35,3 +35,37 @@ For the F2 report, that baseline was built from commit `f21f03d` using the same 
 `replica-values.mjs` isolates row encoding with a primary-key-only schema, batches of 32, pages of 256 and medians of three trials. Both encodings use the same task shape.
 
 These scripts measure JavaScript work and fake-indexeddb's retained JS database, not native disk size, browser IDB open latency, actual React hook overhead or Chrome renderer memory. Snapshot/open/heap results are single runs; lookup results are medians of five reads. Use a quiet machine and compare identical builds and benchmark scripts.
+
+## Native Chrome, round 2
+
+The repository root already depends on `@playwright/test`. The harness resolves
+esbuild through the existing client Vitest/Vite installation, bundles the built
+client, serves it over loopback HTTP and launches `/opt/google/chrome/chrome`.
+No benchmark dependencies are added.
+
+```sh
+nice -n 10 node packages/client/bench/replica-idb-browser.mjs
+nice -n 10 env CLIENT_DIST=/tmp/gx-f2-round1/dist node packages/client/bench/replica-idb-browser.mjs
+```
+
+Prepare the round-1 client using the temporary-copy procedure above, replacing
+client source files from `c4e54d3`. `CLIENT_DIST` is a filesystem directory in the
+browser harness; it remains a file URL in the Node harness. `ROWS` controls task
+workloads, but the upgrade fixture always contains 50k rows with 50 lookup keys
+per row. Chrome runs sequentially when comparing builds.
+
+The native entry checks result counts for indexed equality, scoped OR scans,
+first-demand and pending reads, complete cold loads, and preserved upgrade rows.
+It seeds `workspaceId` before ingestion in round 2, and learns it on an empty
+replica in the baseline. `statusId` is first requested after ingestion. The
+benchmark wraps the adapter's build method to time background construction
+separately from the scoped scan; the total also includes both demand reads.
+In the baseline the first read awaits construction, so its second read occurs
+only after completion. These are single workload samples with five-read medians
+for steady equality and scan latency. They measure native IDB latency, not
+physical disk size or retained renderer heap.
+
+The Node harness now waits for derived work explicitly outside measured reads.
+For the first-demand case it reports `firstEqualityMs` and
+`backfillAfterReadMs` separately. Reads in application code never wait for this
+benchmark-only drain.

@@ -1,0 +1,36 @@
+{
+  "measuredAt": "2026-10-08T22:33:32.393Z",
+  "chrome": "153.0.8010.36",
+  "workloads": [
+    {
+      "rows": 10000,
+      "columns": 50,
+      "observers": 1000,
+      "snapshotWriteMs": 1036.2999999523163,
+      "indexedEqualityMs": 4.600000023841858,
+      "scanEqualityMs": 229,
+      "coldOpenLoadMs": 245.79999995231628,
+      "firstDemandReadMs": 1160.3000000715256,
+      "pendingReadMs": 25.199999928474426,
+      "backfillTotalMs": 1185.6000000238419,
+      "backfillDurationMs": 945.3000000715256,
+      "lookupEntries": 20000
+    },
+    {
+      "rows": 50000,
+      "columns": 50,
+      "observers": 1000,
+      "snapshotWriteMs": 4689.600000023842,
+      "indexedEqualityMs": 20.899999976158142,
+      "scanEqualityMs": 1249.3000000715256,
+      "coldOpenLoadMs": 1147.5,
+      "firstDemandReadMs": 6593.799999952316,
+      "pendingReadMs": 92.20000004768372,
+      "backfillTotalMs": 6686,
+      "backfillDurationMs": 5420.5,
+      "lookupEntries": 100000
+    }
+  ],
+  "v5ToV6Upgrade50kMs": 13562.299999952316,
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36"
+}

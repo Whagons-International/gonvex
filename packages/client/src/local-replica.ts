@@ -102,6 +102,7 @@ export type ReplicaMetadataCommit = {
  * implementations use one readwrite transaction over the same stores.
  */
 export interface LocalReplicaStorage {
+  configureLookupColumns?(columns: Readonly<Record<string, readonly string[]>>): void;
   loadWorkingSet?(scope:string,budget:{maxRows:number;maxBytes:number}):Promise<ReplicaSnapshot | undefined>;
   loadWindowRows?(scope:string,signature:string):Promise<{window:ReplicaWindow;rows:ReplicaRow[]} | undefined>;
   loadEntityRows?(scope:string,entity:string,ids:readonly string[]):Promise<Array<{id:string;row:ReplicaRow}>>;

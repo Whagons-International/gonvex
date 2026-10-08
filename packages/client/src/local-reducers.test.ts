@@ -3,7 +3,7 @@ import { reducer, schema, selectRows } from "@gonvex/module-sdk";
 import { createPortableReducer } from "@gonvex/local-runtime/portable-client";
 import { MissingReducerDataError } from "@gonvex/local-runtime/portable";
 import { LocalReducerRuntime } from "@gonvex/local-runtime";
-import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, residentLocalDependencyTables, type FunctionReference, type LocalExecutionFallbackEvent, type OutboxRetryOptions, type OutboxStore } from "./index.js";
+import { GonvexClient, MemoryLocalReplicaStorage, createKvOutboxStore, createMemoryGonvexKv, residentLocalDependencyTables, replicaLookupColumns, type FunctionReference, type LocalExecutionFallbackEvent, type OutboxRetryOptions, type OutboxStore } from "./index.js";
 
 class Socket {
   static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -1096,4 +1096,20 @@ describe("local dependency residency", () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(subscribe.mock.calls.map(call => (call[0] as FunctionReference).path).sort()).toEqual(expected);
   });
+});
+
+
+it('seeds explicit schema references, collection equality filters and reducer read hints', () => {
+  const configureLookupColumns = vi.fn();
+  const binding = {
+    mode: 'portable' as const, artifactHash: 'test', tables: ['tasks'], create: () => ({ ready: Promise.resolve(), execute: vi.fn(), replay: vi.fn(), close: vi.fn() }),
+    localSchema: { tasks: { key: '_id', columns: { _id: { type: 'text' }, statusId: { type: 'text', references: { table: 'statuses' } }, ownerId: { foreignKey: 'users.id' }, unused: { type: 'text' } } } },
+    collections: [{ kind: 'query' as const, path: '__local.tasks', replica: { table: 'tasks', key: '_id', equalFilters: { workspace: 'workspaceId', id: '_id' } } }],
+    localDependencies: { edit: ['tasks'] }, localReadHints: { edit: { tasks: ['statusId', 'parentId'] } },
+  };
+  expect(replicaLookupColumns(binding)).toEqual({ tasks: ['ownerId', 'parentId', 'statusId', 'workspaceId'] });
+  expect(replicaLookupColumns({ ...binding, localSchema: undefined, collections: [], localReadHints: undefined })).toEqual({});
+  const client = new GonvexClient('ws://test', { localRuntime: binding, localReplica: { storage: Object.assign(new MemoryLocalReplicaStorage(), { configureLookupColumns }) } });
+  expect(configureLookupColumns).toHaveBeenCalledWith({ tasks: ['ownerId', 'parentId', 'statusId', 'workspaceId'] });
+  client.close();
 });

@@ -27,11 +27,17 @@ export async function compileLocalSchema(migrations: readonly { name: string; sq
     }
     const { rows } = await db.query<{
       table_name: string; column_name: string; type: string; nullable: boolean;
-      column_default: string | null; primary_key: boolean;
+      column_default: string | null; primary_key: boolean; references: { table: string; column: string } | null;
     }>(`SELECT c.relname AS table_name, a.attname AS column_name,
       format_type(a.atttypid, a.atttypmod) AS type, NOT a.attnotnull AS nullable,
       pg_get_expr(d.adbin, d.adrelid) AS column_default,
-      EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=c.oid AND i.indisprimary AND a.attnum=ANY(i.indkey)) AS primary_key
+      EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=c.oid AND i.indisprimary AND a.attnum=ANY(i.indkey)) AS primary_key,
+      (SELECT json_build_object('table', target.relname, 'column', target_column.attname)
+       FROM pg_constraint fk JOIN pg_class target ON target.oid=fk.confrelid
+       JOIN pg_attribute target_column ON target_column.attrelid=target.oid
+         AND target_column.attnum=fk.confkey[array_position(fk.conkey, a.attnum)]
+       WHERE fk.conrelid=c.oid AND fk.contype='f' AND a.attnum=ANY(fk.conkey)
+       LIMIT 1) AS references
       FROM pg_class c JOIN pg_namespace n ON c.relnamespace=n.oid
       JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
       LEFT JOIN pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
@@ -44,6 +50,7 @@ export async function compileLocalSchema(migrations: readonly { name: string; sq
       if (row.primary_key) table.key = row.column_name;
       table.columns[row.column_name] = {
         type: row.type, nullable: row.nullable,
+        ...(row.references ? { references: row.references } : {}),
         ...(row.column_default ? { default: row.column_default } : {}),
       };
     }
