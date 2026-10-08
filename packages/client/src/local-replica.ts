@@ -86,6 +86,16 @@ export type ReplicaScope = string;
 
 const defaultReplicaScope: ReplicaScope = "default";
 
+/** Returned only after an atomic metadata-only commit accepts the exact supplied
+ * windows without changing rows or resetting their epoch. The adjacent sequence
+ * pair comes from that transaction; consumers must compare it with their own
+ * reconciled sequence before skipping peer catch-up. Older adapters return void. */
+export type ReplicaMetadataCommit = {
+  scope: ReplicaScope;
+  previousSequence: number;
+  sequence: number;
+};
+
 /**
  * Storage implementations must persist the complete transaction atomically.
  * The SQLite adapter maps this call to BEGIN/apply/cursor/COMMIT; IndexedDB
@@ -104,7 +114,7 @@ export interface LocalReplicaStorage {
   load(scope?: ReplicaScope): Promise<ReplicaSnapshot | undefined>;
   applyTransaction(transaction: ReplicaTransaction, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
   /** Advance ready Replica Collection cursors without rewriting normalized rows. */
-  advanceWatermark?(windows: readonly ReplicaWindow[], cursor: ReplicaCursor | undefined, scope?: ReplicaScope): Promise<void>;
+  advanceWatermark?(windows: readonly ReplicaWindow[], cursor: ReplicaCursor | undefined, scope?: ReplicaScope): Promise<void | ReplicaMetadataCommit>;
   /** Persist a normalized Query/Collection materialization atomically. */
   replaceSnapshot?(snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
   replaceWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope?: ReplicaScope, projection?:readonly ReplicaRow[]): Promise<void>;
@@ -113,7 +123,7 @@ export interface LocalReplicaStorage {
     delta: { upserts: ReplicaRow[]; deleted: string[] },
     snapshot: ReplicaSnapshot,
     scope?: ReplicaScope,
-  ): Promise<void>;
+  ): Promise<void | ReplicaMetadataCommit>;
   removeWindow?(signature: string, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
   clear?(scope?: ReplicaScope): Promise<void>;
 }
@@ -743,7 +753,8 @@ export class LocalReplica implements LocalReplicaView {
       const nextCursor = replicaTransactionFloor(this.cursorValue, nextQueries);
       const writeScope = this.scopeValue;
       if (this.storage?.advanceWatermark) {
-        await this.persist(() => this.storage!.advanceWatermark!(changedWindows, nextCursor, writeScope));
+        const receipt = await this.persist(() => this.storage!.advanceWatermark!(changedWindows, nextCursor, writeScope));
+        this.acceptMetadataCommit(receipt, writeScope);
       } else if (this.storage?.replaceSnapshot) {
         // Compatibility for older/custom storage adapters. Current IndexedDB
         // and SQLite adapters implement the metadata-only operation above.
@@ -934,16 +945,22 @@ export class LocalReplica implements LocalReplicaView {
     const membershipChanged = !sameWindowRowDefinition(previous, window);
     const rowsChanged = membershipChanged || changedRowIDs.size > 0;
     const writeScope = this.scopeValue;
+    let metadataCommit: void | ReplicaMetadataCommit = undefined;
     if (!epochChanged && this.storage?.applyWindowDelta && (delta || !rowsChanged)) {
       const writeDelta = delta ? { upserts: delta.upserts.filter(row => changedRowIDs.has(String(row[input.key]))), deleted: delta.deleted } : { upserts: [], deleted: [] };
-      await this.persist(() => this.storage!.applyWindowDelta!(window, writeDelta, snapshot, writeScope));
+      metadataCommit = await this.persist(() => this.storage!.applyWindowDelta!(window, writeDelta, snapshot, writeScope));
     } else if (this.storage?.replaceWindow) {
       await this.persist(() => this.storage!.replaceWindow!(window, snapshot, writeScope,input.rows));
     } else if (this.storage?.replaceSnapshot) {
       await this.persist(() => this.storage!.replaceSnapshot!(snapshot, writeScope));
     }
     if (epochChanged) this.invalidateEntityVersions();
-    if (this.storage?.readChanges) await this.mergeStoredChanges(nextEntities, nextQueries);
+    // The adapter can prove that this metadata commit immediately follows our
+    // last reconciled sequence. Our next maps already contain that exact write.
+    // A peer write in between breaks the proof and retains normal catch-up.
+    if (!this.acceptMetadataCommit(metadataCommit, writeScope) && this.storage?.readChanges) {
+      await this.mergeStoredChanges(nextEntities, nextQueries);
+    }
     this.entities = nextEntities;
     this.liveQueries = nextQueries;
     if(window.kind==='replica' && window.completeness==='complete' && !window.truncated && window.ids.every(id=>nextEntities.get(window.entity)?.has(id)))this.residentPartialTables.delete(window.entity);
@@ -1339,9 +1356,18 @@ export class LocalReplica implements LocalReplicaView {
     if (changed && notify) this.notify();
   }
 
-  private persist(operation: () => Promise<void> | undefined) {
-    const attempt = this.persistence.then(async () => { await operation(); });
-    this.persistence = attempt.catch(() => undefined);
+  private acceptMetadataCommit(receipt: void | ReplicaMetadataCommit, scope: ReplicaScope): boolean {
+    if (!receipt || receipt.scope !== scope || scope !== this.scopeValue
+      || !Number.isSafeInteger(receipt.previousSequence) || receipt.previousSequence < 0
+      || !Number.isSafeInteger(receipt.sequence) || receipt.sequence !== receipt.previousSequence + 1
+      || receipt.previousSequence !== this.storageSequence) return false;
+    this.storageSequence = receipt.sequence;
+    return true;
+  }
+
+  private persist<T>(operation: () => Promise<T> | undefined) {
+    const attempt = this.persistence.then(async () => await operation());
+    this.persistence = attempt.then(() => undefined, () => undefined);
     return attempt;
   }
 
