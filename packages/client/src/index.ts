@@ -2740,6 +2740,25 @@ export class GonvexClient {
       this.clearReplicaRetry(subscription, true);
       raiseReplicaCursorFloor(subscription, message.cursor);
       const upserts = (message.upserts ?? []).filter((row): row is ReplicaRow => asReplicaRow(row) !== undefined).map(row => asReplicaRow(row)!);
+      const cursorOnly = this.serverCapabilities.replicaWatermark === 1
+        && prior?.source === "server" && prior.completeness === "complete"
+        && prior.cursor?.epoch === message.cursor.epoch && prior.hashes !== undefined
+        && (message.upserts?.length ?? 0) === 0 && (message.deleted?.length ?? 0) === 0
+        && (!message.hashes || (Object.keys(message.hashes).length === Object.keys(prior.hashes).length
+          && Object.entries(message.hashes).every(([id, hash]) => prior.hashes![id] === hash)));
+      if (cursorOnly) {
+        // No entity, membership or integrity value changed. The negotiated
+        // ordered watermark checkpoints these ready windows together, rather
+        // than making one IndexedDB transaction for every unchanged collection.
+        // Keep the durable window cursor old until that checkpoint succeeds.
+        const snapshot: ReplicaMessage = { type: "replica.snapshot", id: subscription.id, path: subscription.path,
+          result: [], cursor: message.cursor, key: prior.key, mode: prior.mode,
+          orderBy: prior.orderBy, orderDirection: prior.orderDirection, maxRows: prior.maxRows, maxBytes: prior.maxBytes };
+        subscription.lastMessage = snapshot;
+        this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
+        this.emitReplicaMessage(subscription, snapshot, scope);
+        return;
+      }
       // Incremental integrity is safe only for full projected row images. Older
       // partial-row protocols keep the full normalized rehash on replica.ready.
       const canCarryHashes = prior?.hashes && subscription.columns?.length
@@ -2903,7 +2922,15 @@ export class GonvexClient {
         && window.completeness === completeness
         && window.mode === mode
         && window.truncated === truncated;
-      if (readyAlreadyPersisted) {
+      const cursorOnlyCheckpoint = this.serverCapabilities.replicaWatermark === 1
+        && hashesWereStored && window.source === "server"
+        && window.cursor?.epoch === message.cursor.epoch
+        && window.cursor.revision < message.cursor.revision
+        && window.completeness === completeness && window.mode === mode && window.truncated === truncated;
+      if (readyAlreadyPersisted || cursorOnlyCheckpoint) {
+        // Integrity was checked against this exact committed membership above.
+        // A cursor-only ready frame shares the subsequent durable watermark;
+        // reducer confirmations still wait for that barrier, including failure.
         // Connection-wide freshness remains a separate summary. Collection
         // state combines it with this subscription's isUpToDate bit, so one
         // ready window cannot make another hydrated cache authoritative.
