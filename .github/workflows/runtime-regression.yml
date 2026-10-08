@@ -69,6 +69,9 @@ jobs:
         run: cargo test --locked --workspace --all-targets -- --test-threads=1
         env:
           GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+      - name: Test opt-in debug Firebase Auth Emulator verification
+        working-directory: rust
+        run: cargo test --locked -p gonvex-runtime --lib external_auth::tests --features test-firebase-auth-emulator
       - name: Lint Rust runtime
         working-directory: rust
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
