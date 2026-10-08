@@ -4,6 +4,48 @@ import { Dexie } from "dexie";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica";
 import { LocalReplica } from "./local-replica";
 
+it('rolls back a late native write failure in a medium snapshot and can retry it intact', async () => {
+  const originalIndexedDB = globalThis.indexedDB;
+  const originalKeyRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const storage = new IndexedDBLocalReplicaStorage(`snapshot-retry-${Math.random()}`);
+  const rows = Array.from({ length: 1056 }, (_, index) => ({
+    _id: `context-${index}`, taskId: `task-${index}`, workspaceId: 'workspace', kind: 'approval',
+  }));
+  const window = { signature: 'contexts', entity: 'taskWorkspaceContexts', key: '_id',
+    kind: 'replica' as const, ids: rows.map(row => row._id), completeness: 'complete' as const,
+    source: 'server' as const, cursor: { epoch: 'test', revision: 2 } };
+  const snapshot = { entities: {}, liveQueries: {}, cursor: window.cursor };
+  try {
+    await storage.replaceWindow({ ...window, ids: ['before'], cursor: { epoch: 'test', revision: 1 } },
+      { ...snapshot, cursor: { epoch: 'test', revision: 1 } }, 'tenant', [{ _id: 'before', taskId: 'original' }]);
+    const table = (storage as any).database.entities;
+    const original = table.bulkPut.bind(table);
+    const write = vi.spyOn(table, 'bulkPut').mockImplementation((records: any[]) => {
+      if (records.some(row => row.id === 'context-1000')) throw new Error('Native write failed');
+      return original(records);
+    });
+    await expect(storage.replaceWindow(window, snapshot, 'tenant', rows)).rejects.toThrow('Native write failed');
+    const before = await storage.load('tenant');
+    expect(before?.liveQueries.contexts.ids).toEqual(['before']);
+    expect(before?.cursor?.revision).toBe(1);
+    expect(Object.keys(before?.entities.taskWorkspaceContexts ?? {})).toEqual(['before']);
+    write.mockRestore();
+    await storage.replaceWindow(window, snapshot, 'tenant', rows);
+    const after = await storage.load('tenant');
+    expect(after?.liveQueries.contexts.ids).toEqual(rows.map(row => row._id));
+    expect(after?.cursor?.revision).toBe(2);
+    for (const row of rows) expect(after?.entities.taskWorkspaceContexts?.[row._id]).toEqual(row);
+  } finally {
+    vi.restoreAllMocks(); storage.close();
+    Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
+    Dexie.dependencies.indexedDB = originalIndexedDB;
+    Dexie.dependencies.IDBKeyRange = originalKeyRange;
+  }
+}, 30_000);
+
 describe("IndexedDBLocalReplicaStorage", () => {
   it("stores normalized entities and window metadata in one scope", async () => {
     // Dexie resolves globals lazily; the adapter accepts the browser globals in
