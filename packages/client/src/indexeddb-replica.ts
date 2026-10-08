@@ -30,7 +30,9 @@ const replicaSchemaVersion = 5;
 // of their time on native request round trips. Keep one atomic transaction.
 const writeBatchSize = 32;
 const writeIndexBudget = 64;
-const windowBatchSize = 8;
+const windowBatchSize = 64;
+const windowBatchBytes = 16 * 1024;
+const windowEncoder = new TextEncoder();
 
 // Small replica checkpoints usually change only a few rows. IndexedDB getAll
 // avoids a JS/Dexie continuation per row. The fallback remains streaming so a
@@ -174,22 +176,32 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   }
 
   private async writeWindows(scope:string,windows:readonly ReplicaWindow[],sequence:number) {
-    // Watermarks checkpoint many mounted windows at once. Their serialized
-    // memberships can be large, even though each window has few index keys.
-    // Bound both native reads and writes while retaining the same transaction.
-    for (let offset = 0; offset < windows.length; offset += windowBatchSize) {
-      const batch = windows.slice(offset, offset + windowBatchSize);
-      const prior=await this.database.windows.bulkGet(batch.map(window=>[scope,window.signature]) as [string,string][]);
-      await this.database.windows.bulkPut(batch.flatMap((window,index)=>{
+    // Small/empty windows need few native round trips; large memberships must
+    // not share an unbounded burst. A single window remains indivisible. Every
+    // flush still belongs to the caller's original atomic transaction.
+    let batch: Array<{ window: ReplicaWindow; value: string }> = [];
+    let bytes = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      const prior=await this.database.windows.bulkGet(batch.map(({window})=>[scope,window.signature]) as [string,string][]);
+      await this.database.windows.bulkPut(batch.flatMap(({window,value},index)=>{
         const record=prior[index];
         const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
         if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision)))return [{...record!,sequence}];
         // Serialization already isolates persisted values. Copying ordered IDs
         // and large integrity maps before stringifying doubled temporary memory
         // for every cursor-only checkpoint.
-        return [{scope,sequence,signature:window.signature,value:JSON.stringify({ ...window, kind: window.kind ?? 'live', key: window.key ?? 'id' })}];
+        return [{scope,sequence,signature:window.signature,value}];
       }));
+      batch = []; bytes = 0;
+    };
+    for (const window of windows) {
+      const value = JSON.stringify({ ...window, kind: window.kind ?? 'live', key: window.key ?? 'id' });
+      const size = windowEncoder.encode(value).byteLength;
+      if (batch.length && (batch.length >= windowBatchSize || bytes + size > windowBatchBytes)) await flush();
+      batch.push({ window, value }); bytes += size;
     }
+    await flush();
   }
 
   private async saveCursor(scope:string,cursor:ReplicaCursor|undefined) {
