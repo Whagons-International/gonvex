@@ -115,3 +115,53 @@ it('keeps the existing journal and shared sequence compatible with older readers
     expect((await metadata.table('state').get('sequence')).version).toBe(51);
   } finally { legacy.close(); metadata.close(); }
 });
+
+it('reserves above a legacy journal key even when the shared counter is behind', async () => {
+  const current = open(1); await current.ready;
+  const legacy = new Dexie(`${prefix}-queue`);
+  legacy.version(2).stores({ entries: '++id, scope, state, nextAttemptAt, [scope+state], [scope+nextAttemptAt]' });
+  try {
+    await legacy.table('entries').put({ id: 900, scope: 'other-member', state: 'pending', nextAttemptAt: 0 });
+    expect(await current.store.allocateId!()).toBe(901);
+    await legacy.table('entries').delete(900);
+    expect(await current.store.allocateId!()).toBe(902);
+  } finally { legacy.close(); }
+});
+
+it('does not expose data or advance the counter through a stale upgrade fence', async () => {
+  const old = await seed();
+  const current = open(2, migrations); await current.ready;
+  const metadata = new Dexie(`${prefix}-upgrades`);
+  metadata.version(1).stores({ state: '&key' });
+  try {
+    const prior = await metadata.table('state').get('sequence');
+    await expect(old.store.load()).rejects.toThrow('Reload');
+    await expect(old.store.allocateId!()).rejects.toThrow('Reload');
+    expect(await metadata.table('state').get('sequence')).toEqual(prior);
+    expect(await current.store.load()).toHaveLength(1);
+  } finally { metadata.close(); }
+});
+
+it('burns a reserved ID after failed insertion and never exposes a partial intent', async () => {
+  const current = open(1); await current.ready;
+  const journal = Dexie.connections.find(db => db.name === `${prefix}-queue`)!;
+  const fail = () => { throw new Error('disk write failed'); };
+  journal.table('entries').hook('creating', fail);
+  const draft = { scope: 'tenant', path: 'increment', args: {}, idempotencyKey: 'a', entityKeys: [], createdAt: 1, attempts: 0, nextAttemptAt: 1, state: 'pending' as const };
+  await expect(current.store.append!(draft)).rejects.toThrow('disk write failed');
+  expect(await current.store.load()).toEqual([]);
+  journal.table('entries').hook('creating').unsubscribe(fail);
+  expect((await current.store.append!({ ...draft, idempotencyKey: 'b' })).id).toBe(2);
+});
+
+it('rejects reads and reservations while an upgrade journal is incomplete', async () => {
+  const current = open(1); await current.ready;
+  const metadata = new Dexie(`${prefix}-upgrades`);
+  metadata.version(1).stores({ state: '&key' });
+  try {
+    await metadata.table('state').put({ key: 'contract', version: 1, journal: { snapshots: {}, entries: [] } });
+    await expect(current.store.load()).rejects.toThrow('Reload');
+    await expect(current.store.allocateId!()).rejects.toThrow('Reload');
+    expect(await metadata.table('state').get('sequence')).toBeUndefined();
+  } finally { metadata.close(); }
+});
