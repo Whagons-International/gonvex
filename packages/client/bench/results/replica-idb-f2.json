@@ -1,0 +1,145 @@
+{
+  "date": "2026-10-08",
+  "machine": {
+    "cpu": "AMD Ryzen 7 5800X",
+    "architecture": "x86_64",
+    "node": "22.19.0",
+    "dexie": "4.4.4",
+    "fakeIndexedDB": "6.2.5",
+    "nice": 10
+  },
+  "baselineCommit": "f21f03d",
+  "caveats": [
+    "fake-indexeddb measures JS database heap and runtime, not native browser disk or renderer memory",
+    "known-workload comparison observes the actual equality request on an empty entity before ingestion",
+    "snapshot, cold-load and heap measurements are single samples; equality is median of five reads",
+    "1000 LocalReplica subscribers share a complete resident task table; actual React hooks are not instantiated"
+  ],
+  "beforeKnownWorkload": [
+    {
+      "rows": 10000,
+      "columns": 50,
+      "observers": 1000,
+      "writeMs": 30926.615315000003,
+      "firstEqualityMs": 66.21208599999954,
+      "equalityMedianMs": 59.284671999997954,
+      "coldOpenLoadMs": 694.4321359999994,
+      "lookupEntries": 500000,
+      "retainedHeapMiB": 254.68965911865234,
+      "entityRecords": 10000
+    },
+    {
+      "rows": 50000,
+      "columns": 50,
+      "observers": 1000,
+      "writeMs": 265892.71780600003,
+      "firstEqualityMs": 1521.7742039999575,
+      "equalityMedianMs": 1421.178860999993,
+      "coldOpenLoadMs": 5442.773859000008,
+      "lookupEntries": 2500000,
+      "retainedHeapMiB": 874.5935745239258,
+      "entityRecords": 50000
+    }
+  ],
+  "afterKnownWorkload": [
+    {
+      "rows": 10000,
+      "columns": 50,
+      "workloadKnownBeforeSnapshot": true,
+      "observers": 1000,
+      "writeMs": 3948.7682429999995,
+      "firstEqualityMs": 68.65639800000008,
+      "equalityMedianMs": 55.87753100000009,
+      "coldOpenLoadMs": 218.4663559999999,
+      "lookupEntries": 10000,
+      "retainedHeapMiB": 78.84049224853516,
+      "entityRecords": 10000
+    },
+    {
+      "rows": 50000,
+      "columns": 50,
+      "workloadKnownBeforeSnapshot": true,
+      "observers": 1000,
+      "writeMs": 22766.464128,
+      "firstEqualityMs": 1169.1115129999998,
+      "equalityMedianMs": 1218.598337000003,
+      "coldOpenLoadMs": 1050.078594999999,
+      "lookupEntries": 50000,
+      "retainedHeapMiB": 311.5303192138672,
+      "entityRecords": 50000
+    }
+  ],
+  "afterBeforeAnyReads": [
+    {
+      "rows": 10000,
+      "columns": 50,
+      "workloadKnownBeforeSnapshot": false,
+      "observers": 1000,
+      "writeMs": 3124.3623239999997,
+      "firstEqualityMs": null,
+      "equalityMedianMs": null,
+      "coldOpenLoadMs": 166.7330609999999,
+      "lookupEntries": 0,
+      "retainedHeapMiB": 74.48906707763672,
+      "entityRecords": 10000
+    },
+    {
+      "rows": 50000,
+      "columns": 50,
+      "workloadKnownBeforeSnapshot": false,
+      "observers": 1000,
+      "writeMs": 19068.142602,
+      "firstEqualityMs": null,
+      "equalityMedianMs": null,
+      "coldOpenLoadMs": 971.9822229999991,
+      "lookupEntries": 0,
+      "retainedHeapMiB": 293.4650192260742,
+      "entityRecords": 50000
+    }
+  ],
+  "afterFirstDemandOnExistingRows": [
+    {
+      "rows": 1000,
+      "columns": 50,
+      "workloadKnownBeforeSnapshot": false,
+      "observers": 1000,
+      "writeMs": 288.932229,
+      "firstEqualityMs": 14802.686705,
+      "equalityMedianMs": 1.8087930000001506,
+      "coldOpenLoadMs": 16.351526999998896,
+      "lookupEntries": 1000,
+      "retainedHeapMiB": 11.335227966308594,
+      "entityRecords": 1000
+    }
+  ],
+  "rowValueEncodingMedianOfThree": [
+    {
+      "rows": 10000,
+      "encoding": "json",
+      "writeMs": 197.304571,
+      "readMs": 127.00915399999997,
+      "storedHeapMiB": 11.910293579101562
+    },
+    {
+      "rows": 10000,
+      "encoding": "object",
+      "writeMs": 261.918578,
+      "readMs": 115.01818800000001,
+      "storedHeapMiB": 13.072395324707031
+    },
+    {
+      "rows": 50000,
+      "encoding": "json",
+      "writeMs": 1070.4914659999995,
+      "readMs": 613.9720619999998,
+      "storedHeapMiB": 59.737335205078125
+    },
+    {
+      "rows": 50000,
+      "encoding": "object",
+      "writeMs": 1201.6788709999983,
+      "readMs": 626.809236000001,
+      "storedHeapMiB": 64.9670181274414
+    }
+  ]
+}

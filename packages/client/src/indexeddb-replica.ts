@@ -1,5 +1,5 @@
-import { Dexie, type Table, type Collection } from "dexie";
-import { entityRecord, indexedDBReadView, type EntityRecord, type ReadCoverage } from './indexeddb-read-view.js';
+import { Dexie, type Table, type Collection, type Transaction } from "dexie";
+import { entityLookupKeys, entityRecord, indexedDBReadView, type EntityRecord, type ReadCoverage } from './indexeddb-read-view.js';
 import type { ReducerReadView } from '@gonvex/local-runtime/portable';
 import {mergeReplicaRecord} from './replica-record.js';
 import type {ReplicaCursor} from '@gonvex/protocol';
@@ -25,7 +25,8 @@ type ReplicaDatabase = Dexie & {
 };
 
 const defaultReplicaScope: ReplicaScope = "default";
-const replicaSchemaVersion = 5;
+const replicaSchemaVersion = 6;
+const lookupPolicyKey = (entity: string) => `lookupColumns:${entity}`;
 // Bound native IDB request bursts so another database's durable intent journal
 // can run between batches. Four-row batches made medium snapshots spend most
 // of their time on native request round trips. Keep one atomic transaction.
@@ -48,6 +49,46 @@ async function visitRecords<T, Key>(collection: Collection<T, Key>, visit: (reco
 export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   private readonly database: ReplicaDatabase;
   private initialized?: Promise<void>;
+  // Cache policy only within the native transaction. Peers can learn columns
+  // between transactions; a process-wide cache would silently miss their rows.
+  private readonly lookupPolicies = new WeakMap<Transaction, Map<string, Promise<readonly string[]>>>();
+
+  private indexedColumns(scope: string, entity: string): Promise<readonly string[]> {
+    const transaction = Dexie.currentTransaction!;
+    let policies = this.lookupPolicies.get(transaction);
+    if (!policies) { policies = new Map(); this.lookupPolicies.set(transaction, policies); }
+    const key = JSON.stringify([scope, entity]);
+    let columns = policies.get(key);
+    if (!columns) {
+      columns = this.database.meta.get([scope, lookupPolicyKey(entity)]).then(record => record ? JSON.parse(record.value) as string[] : []);
+      policies.set(key, columns);
+    }
+    return columns;
+  }
+
+  private async learnColumns(scope: string, demands: Map<string, Set<string>>): Promise<void> {
+    if (!demands.size) return;
+    await this.database.transaction('rw', this.database.entities, this.database.meta, async () => {
+      for (const [entity, requested] of demands) {
+        const previous = await this.indexedColumns(scope, entity);
+        const added = [...requested].filter(column => !previous.includes(column));
+        if (!added.length) continue;
+        const columns = [...previous, ...added];
+        // Publish coverage and keys atomically. A concurrent peer either sees
+        // the old policy and scans, or sees all newly indexed records.
+        let after: [string, string, string] | undefined;
+        for (;;) {
+          const records = await this.database.entities.where('[scope+entity+id]')
+            .between(after ?? [scope, entity], [scope, entity, []], !after, false).limit(256).toArray();
+          if (!records.length) break;
+          for (const record of records) record.lookupKeys = record.deleted ? [] : entityLookupKeys(scope, entity, JSON.parse(record.value), columns);
+          await this.writeRecords(records);
+          after = [scope, entity, records.at(-1)!.id];
+        }
+        await this.database.meta.put({ scope, key: lookupPolicyKey(entity), value: JSON.stringify(columns) });
+      }
+    });
+  }
   private readonly channel?:BroadcastChannel;
   private readonly peers=new Set<(scope:string)=>void>();
 
@@ -104,12 +145,19 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       entities: '[scope+entity+id], scope, [scope+entity], *lookupKeys',
     }).upgrade(async transaction => {
       await transaction.table('entities').toCollection().modify((record: EntityRecord) => {
-        record.lookupKeys = entityRecord(record.scope, record.entity, record.id, JSON.parse(record.value)).lookupKeys;
+        // Version six removes blanket keys. Do not build throwaway indexes
+        // when upgrading an older normalized database through version four.
+        record.lookupKeys = [];
       });
     });
-    this.database.version(replicaSchemaVersion).stores({
+    this.database.version(5).stores({
       entities:'[scope+entity+id], scope, [scope+entity], *lookupKeys, [scope+sequence]',
       windows:'[scope+signature], scope, [scope+sequence]',
+    });
+    this.database.version(replicaSchemaVersion).stores({}).upgrade(async transaction => {
+      // Row values, authority, tombstones, windows and session/cursor metadata
+      // survive. Durable outbox and application upgrade journals use other DBs.
+      await transaction.table('entities').toCollection().modify((record: EntityRecord) => { record.lookupKeys = []; });
     });
   }
 
@@ -122,7 +170,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return sequence;
   }
 
-  private versionedRecord(scope:string,entity:string,id:string,row:ReplicaRow|null,cursor:ReplicaCursor|undefined,sequence:number,previous:EntityRecord|undefined):EntityRecord {
+  private async versionedRecord(scope:string,entity:string,id:string,row:ReplicaRow|null,cursor:ReplicaCursor|undefined,sequence:number,previous:EntityRecord|undefined):Promise<EntityRecord> {
     const resolved=cursor ?? {epoch:previous?.authority?.epoch ?? '',revision:0};
     const before=previous ? {row:previous.deleted ? null : JSON.parse(previous.value),authority:previous.authority ?? {epoch:resolved.epoch,fields:{}}} : undefined;
     const merged=mergeReplicaRecord(before,row,resolved);
@@ -131,13 +179,13 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     // its serialized value and secondary keys while updating authority.
     if (previous && merged === before) return previous;
     if (previous && before && merged.row === before.row) return {...previous, authority:merged.authority, sequence};
-    const record=merged.row ? entityRecord(scope,entity,id,merged.row) : {scope,entity,id,value:'null',lookupKeys:[],deleted:true};
+    const record=merged.row ? entityRecord(scope,entity,id,merged.row,await this.indexedColumns(scope,entity)) : {scope,entity,id,value:'null',lookupKeys:[],deleted:true};
     return {...record,authority:merged.authority,sequence};
   }
 
   private async writeEntity(scope:string,entity:string,id:string,row:ReplicaRow|null,cursor:ReplicaCursor|undefined,sequence:number) {
     const previous=await this.database.entities.get([scope,entity,id]);
-    const record=this.versionedRecord(scope,entity,id,row,cursor,sequence,previous);
+    const record=await this.versionedRecord(scope,entity,id,row,cursor,sequence,previous);
     if (record !== previous) await this.database.entities.put(record);
     return record;
   }
@@ -171,7 +219,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     for(let offset=0;offset<rows.length;offset+=writeBatchSize) {
       const batch=rows.slice(offset,offset+writeBatchSize);
       const prior=await this.database.entities.bulkGet(batch.map(([id])=>[scope,entity,id]) as [string,string,string][]);
-      const records = batch.map(([id,row],index)=>this.versionedRecord(scope,entity,id,row,cursor,sequence,prior[index])).filter((record,index)=>record !== prior[index]);
+      const records = (await Promise.all(batch.map(([id,row],index)=>this.versionedRecord(scope,entity,id,row,cursor,sequence,prior[index])))).filter((record,index)=>record !== prior[index]);
       if (records.length) await this.writeRecords(records);
     }
   }
@@ -288,14 +336,26 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
 
   async withReadView<T>(scope: string, coverage: ReadCoverage, run: (view: ReducerReadView) => Promise<T>): Promise<T> {
     await this.initialize();
-    return this.database.transaction('r', this.database.entities, async () => {
-      // Database reads run normally in this transaction. Dexie.waitFor must
-      // never surround work that also uses this transaction; keep it limited
-      // to the deterministic crypto promise supplied by the ID allocator.
-      return run({ ...indexedDBReadView(this.database.entities, normalizeScope(scope), coverage),
-        keepAliveFor: promise => Dexie.waitFor(promise),
+    scope = normalizeScope(scope);
+    const demands = new Map<string, Set<string>>();
+    try {
+      return await this.database.transaction('r', this.database.entities, this.database.meta, async () => {
+        // Database reads run normally in this transaction. Dexie.waitFor must
+        // never surround work that also uses this transaction; keep it limited
+        // to the deterministic crypto promise supplied by the ID allocator.
+        return run({ ...indexedDBReadView(this.database.entities, scope, coverage, entity => this.indexedColumns(scope, entity), (entity, column) => {
+          let columns = demands.get(entity);
+          if (!columns) { columns = new Set(); demands.set(entity, columns); }
+          columns.add(column);
+        }),
+          keepAliveFor: promise => Dexie.waitFor(promise),
+        });
       });
-    });
+    } finally {
+      // An incomplete reducer also teaches us its read columns, often before
+      // hydration. Index failure rolls back and must not replace its result/error.
+      try { await this.learnColumns(scope, demands); } catch { /* retry on the next scoped scan */ }
+    }
   }
 
   async listScopes(): Promise<string[]> {
@@ -303,7 +363,10 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     const [entities, windows, meta] = await Promise.all([
       this.database.entities.orderBy("scope").uniqueKeys(),
       this.database.windows.orderBy("scope").uniqueKeys(),
-      this.database.meta.orderBy("scope").uniqueKeys(),
+      // Derived index policy alone is not application data. In particular,
+      // browser upgrade fencing must not treat an empty learned scope as a
+      // legacy snapshot that needs application migrations.
+      this.database.meta.orderBy('scope').filter(record => !record.key.startsWith('lookupColumns:')).keys(),
     ]);
     return [...new Set([...entities, ...windows, ...meta].map(String))];
   }
@@ -423,7 +486,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
           let record = previous[index];
           for (const change of entry.changes) {
             if (change.operation !== 'delete' && !change.newValue) continue;
-            record = this.versionedRecord(normalizedScope, entry.entity, entry.id, change.operation === 'delete' ? null : change.newValue!, transaction.cursor, sequence, record);
+            record = await this.versionedRecord(normalizedScope, entry.entity, entry.id, change.operation === 'delete' ? null : change.newValue!, transaction.cursor, sequence, record);
           }
           if (!record) continue;
           records.push(record);

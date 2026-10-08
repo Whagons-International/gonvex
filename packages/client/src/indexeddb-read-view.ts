@@ -13,14 +13,13 @@ export const encodeReadKey = (value: DataScalar): [number, string | number] => {
   return [3, value];
 };
 
-/** Secondary keys live on disk alongside the record, not in another row cache.
- * Large text/JSON stays unindexed; a residual predicate can still examine it.
- */
-export function entityRecord(scope: string, entity: string, id: string, row: JsonObject): EntityRecord {
+/** Only observed equality columns get secondary keys. Large text/JSON stays
+ * unindexed; a scoped residual scan can still examine it. */
+export function entityLookupKeys(scope: string, entity: string, row: JsonObject, columns: readonly string[]): IndexableType[] {
   const lookupKeys: IndexableType[] = [];
   // Avoid temporary entry, flatMap and spread arrays for every column of each
   // persisted row. Keep the same on-disk index encoding and residual reads.
-  for (const column of Object.keys(row)) {
+  for (const column of columns) {
     const value = row[column];
     let type: number;
     let key: string | number;
@@ -32,15 +31,19 @@ export function entityRecord(scope: string, entity: string, id: string, row: Jso
     else continue;
     lookupKeys.push([scope, entity, column, type, key]);
   }
-  return { scope, entity, id, value: JSON.stringify(row), lookupKeys };
+  return lookupKeys;
+}
+
+export function entityRecord(scope: string, entity: string, id: string, row: JsonObject, columns: readonly string[] = []): EntityRecord {
+  return { scope, entity, id, value: JSON.stringify(row), lookupKeys: entityLookupKeys(scope, entity, row, columns) };
 }
 
 type IndexedEquality = {column: string; op: 'eq'; value: DataScalar} | {column: string; op: 'in'; values: readonly DataScalar[]};
-function equality(predicate: DataPredicate | undefined): IndexedEquality | undefined {
+function equality(predicate: DataPredicate | undefined, columns?: ReadonlySet<string>): IndexedEquality | undefined {
   if (!predicate) return;
-  if ('and' in predicate) return predicate.and.map(equality).find(Boolean);
+  if ('and' in predicate) return predicate.and.map(part => equality(part, columns)).find(Boolean);
   if ('or' in predicate) return;
-  if(predicate.transform) return;
+  if(predicate.transform || columns && !columns.has(predicate.column)) return;
   if (predicate.op === 'eq' && (typeof predicate.value !== 'string' || predicate.value.length <= 256)) return { column: predicate.column, op: 'eq', value: predicate.value };
   if (predicate.op === 'in' && predicate.values.every(value => typeof value !== 'string' || value.length <= 256)) return predicate;
 }
@@ -69,7 +72,7 @@ function compare(read: DataRead, a: JsonObject, b: JsonObject): number {
 /** Must be used inside the storage adapter's transaction. Cursor iteration keeps
  * unrelated records off the JS heap; bounded reads retain at most limit rows.
  */
-export function indexedDBReadView(entities: Table<EntityRecord, [string, string, string]>, scope: string, coverage: ReadCoverage): ReducerReadView {
+export function indexedDBReadView(entities: Table<EntityRecord, [string, string, string]>, scope: string, coverage: ReadCoverage, indexedColumns: (entity: string) => Promise<readonly string[]> = async () => [], demand?: (entity: string, column: string) => void): ReducerReadView {
   return {
     async select(read, excludedRowIds = []) {
       read=orderedDataRead({...read,key:read.key ?? coverage[read.table]?.key});
@@ -77,13 +80,16 @@ export function indexedDBReadView(entities: Table<EntityRecord, [string, string,
       const known = coverage[read.table];
       const excluded = new Set(excludedRowIds);
       const key = known?.key ?? '_id';
-      const restriction = equality(read.where);
-      let candidates: Collection<EntityRecord, [string, string, string]>;
       const primaryKeys = primaryReadKeys(read, key);
-      const exactKey = restriction?.op === 'eq' && restriction.column === key && typeof restriction.value === 'string';
-      if (exactKey) {
-        candidates = entities.where('[scope+entity+id]').equals([scope, read.table, String(restriction.value)]);
-      } else if (primaryKeys) {
+      const requested = equality(read.where);
+      let restriction: IndexedEquality | undefined;
+      if (!primaryKeys && requested && read.limit !== 0) {
+        restriction = equality(read.where, new Set(await indexedColumns(read.table)));
+        // Unknown columns must scan, never treat an absent index as an empty result.
+        if (!restriction) demand?.(read.table, requested.column);
+      }
+      let candidates: Collection<EntityRecord, [string, string, string]>;
+      if (primaryKeys) {
         candidates = entities.where('[scope+entity+id]').anyOf(primaryKeys.map(id => [scope, read.table, id]));
       } else if (restriction) {
         const values = restriction.op === 'eq' ? [restriction.value] : restriction.values;
