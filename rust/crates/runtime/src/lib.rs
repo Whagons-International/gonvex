@@ -3241,6 +3241,20 @@ async fn authenticate(
                             "impersonationId":impersonation.grant_id,
                             "impersonatorId":impersonation.actor_account_id,
                             "developerSessionToken":impersonation.reconnect_token,
+                            "localIdentity": {
+                                "auth": { "account": {
+                                    "id": session.identity.account.id,
+                                    "email": session.identity.account.email,
+                                    "name": session.identity.account.name,
+                                    "avatarUrl": session.identity.account.avatar_url,
+                                }, "developerSession": session.developer_session },
+                                "tenant": { "id": session.route.tenant_id },
+                                "member": {
+                                    "id": session.member.id, "accountId": session.member.account_id,
+                                    "status": session.member.status, "role": session.member.role,
+                                    "displayName": session.member.display_name, "permissions": session.member.permissions,
+                                },
+                            },
                             "artifactHash":artifact_hash,
                             "replica":replica,
                         }),
@@ -4621,6 +4635,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             },
             admission_revision: 5,
             delegation: None,
+            developer_session: None,
         };
         let event = |revision, changed_columns: Vec<&str>| change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),

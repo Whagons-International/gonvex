@@ -111,6 +111,7 @@ impl From<&Capabilities> for CapabilityFlags {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct IdentityView<'a> {
+    developer_session: Option<&'a serde_json::Value>,
     account: Option<&'a AccountIdentity>,
     member: Option<&'a MemberIdentity>,
     tenant: Option<&'a TenantIdentity>,
@@ -121,6 +122,7 @@ impl<'a> From<&'a InvocationContext> for IdentityView<'a> {
     fn from(context: &'a InvocationContext) -> Self {
         Self {
             account: context.identity.account.as_ref(),
+            developer_session: context.identity.developer_session.as_ref(),
             member: context.identity.member.as_ref(),
             tenant: context.tenant.as_ref(),
             permissions: &context.identity.permissions,

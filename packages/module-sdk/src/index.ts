@@ -151,9 +151,17 @@ export type Member = {
   readonly permissions: Readonly<Record<string, JsonValue>> | null;
 };
 
+/** Metadata from a server-verified self developer grant. No credential is exposed. */
+export type DeveloperSession = {
+  readonly grantId: string;
+  readonly accountId: string;
+  readonly tenantId: string;
+  readonly expiresAt: number;
+};
+
 /** Authentication identity exposed to a module. */
 export type AuthContext = {
-  readonly auth: { readonly account: Account | null };
+  readonly auth: { readonly account: Account | null; readonly developerSession?: DeveloperSession | null };
 };
 
 /** Public tenant calls have a tenant and null member. Control calls may have neither. */

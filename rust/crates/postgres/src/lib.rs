@@ -265,6 +265,9 @@ pub struct TenantSession {
     /// Set only for a member session a service principal drives through a
     /// delegation grant. Developer and support impersonation leave it empty.
     pub delegation: Option<SessionDelegation>,
+    /// Only a redeemed, unexpired self developer grant supplies this metadata.
+    /// Ordinary sessions, support impersonation and service delegation omit it.
+    pub developer_session: Option<Value>,
 }
 
 impl TenantSession {
@@ -295,6 +298,7 @@ impl TenantSession {
             },
             admission_revision: 0,
             delegation: None,
+            developer_session: None,
         }
     }
 
@@ -360,6 +364,21 @@ pub struct ControlPlane {
     pool: PgPool,
     pools: PoolRegistry,
     configured_tenants: Arc<BTreeMap<String, String>>,
+}
+
+/// Grant IDs are host-generated. A support caller's free-form reason cannot
+/// turn its `imp_` grant into the `devmode_` grant issued by developer.enter.
+fn developer_session_metadata(
+    grant_id: &str,
+    reason: &str,
+    actor: &str,
+    account: &str,
+    tenant: &str,
+    expires_at: i64,
+) -> Option<Value> {
+    (grant_id.starts_with("devmode_") && reason == "developer mode" && !actor.is_empty()
+        && actor == account && !tenant.is_empty() && expires_at > chrono::Utc::now().timestamp_millis())
+        .then(|| serde_json::json!({ "grantId": grant_id, "accountId": account, "tenantId": tenant, "expiresAt": expires_at }))
 }
 
 impl ControlPlane {
@@ -516,6 +535,7 @@ impl ControlPlane {
             member,
             admission_revision,
             delegation: None,
+            developer_session: None,
         })
     }
 
@@ -539,13 +559,13 @@ impl ControlPlane {
             r#"UPDATE gonvex_impersonation_grants SET
                  used_at=now(),used_connection_id=$2,reconnect_token_hash=$3
                WHERE token_hash=$1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>now()
-               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor"#
+               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor,reason,expires_at"#
         } else {
             r#"UPDATE gonvex_impersonation_grants SET
                  used_connection_id=$2,reconnect_token_hash=$3
                WHERE reconnect_token_hash=$1 AND used_at IS NOT NULL
                  AND revoked_at IS NULL AND expires_at>now()
-               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor"#
+               RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor,reason,expires_at"#
         };
         let row = sqlx::query(statement)
             .bind(token_hash(token))
@@ -559,6 +579,15 @@ impl ControlPlane {
         let actor_account_id: String = row.get("actor_account_id");
         let account_id: String = row.get("target_account_id");
         let tenant_id: String = row.get("tenant_id");
+        let developer_session = developer_session_metadata(
+            &grant_id,
+            &row.get::<String, _>("reason"),
+            &actor_account_id,
+            &account_id,
+            &tenant_id,
+            row.get::<chrono::DateTime<chrono::Utc>, _>("expires_at")
+                .timestamp_millis(),
+        );
         // Returning early drops the transaction, so a grant whose delegation
         // cannot be read is not consumed.
         let delegation = session_delegation(
@@ -616,6 +645,7 @@ impl ControlPlane {
                 member,
                 admission_revision,
                 delegation,
+                developer_session,
             },
             grant_id,
             actor_account_id,
@@ -709,6 +739,7 @@ impl ControlPlane {
             member,
             admission_revision,
             delegation: None,
+            developer_session: None,
         })
     }
 
@@ -1444,6 +1475,59 @@ fn session_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_verified_self_developer_grants_expose_developer_metadata() {
+        let expiry = chrono::Utc::now().timestamp_millis() + 60_000;
+        let accepted = developer_session_metadata(
+            "devmode_test",
+            "developer mode",
+            "acct_self",
+            "acct_self",
+            "tenant_a",
+            expiry,
+        )
+        .unwrap();
+        assert_eq!(accepted["accountId"], "acct_self");
+        assert_eq!(accepted["tenantId"], "tenant_a");
+        assert_eq!(accepted["expiresAt"], expiry);
+        assert!(developer_session_metadata(
+            "imp_test",
+            "developer mode",
+            "acct_self",
+            "acct_self",
+            "tenant_a",
+            expiry
+        )
+        .is_none());
+        assert!(developer_session_metadata(
+            "devmode_test",
+            "developer mode",
+            "acct_actor",
+            "acct_target",
+            "tenant_a",
+            expiry
+        )
+        .is_none());
+        assert!(developer_session_metadata(
+            "devmode_test",
+            "support",
+            "acct_self",
+            "acct_self",
+            "tenant_a",
+            expiry
+        )
+        .is_none());
+        assert!(developer_session_metadata(
+            "devmode_test",
+            "developer mode",
+            "acct_self",
+            "acct_self",
+            "tenant_a",
+            0
+        )
+        .is_none());
+    }
 
     #[test]
     fn only_service_principal_grants_produce_delegated_sessions() {

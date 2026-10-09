@@ -20,6 +20,14 @@ function source(data: Record<string, JsonObject[]>): ReducerReadView {
 }
 
 describe('portable reducer executor',()=>{
+  it('delivers host-authenticated developer metadata to the same local reducer without accepting an argument flag', async () => {
+    const runtime = make(async ctx => ctx.auth.developerSession ?? null);
+    const developerSession = { grantId: 'devmode_verified', accountId: 'account-1', tenantId: 'tenant-1', expiresAt: 2000 };
+    const trusted = { ...execution, identity: { ...execution.identity, auth: { ...execution.identity.auth, developerSession } } };
+    expect((await runtime.execute('edit', {}, source({}), trusted)).result).toEqual(developerSession);
+    expect((await runtime.execute('edit', { developerSession }, source({}), execution)).result).toBeNull();
+  });
+
   it('loads only the requested reducer, shares preload with execution, and retries failed downloads', async () => {
     const definition = reducer({ args: schema.any(), result: schema.any(), run: async () => 'done' });
     const used = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(definition);

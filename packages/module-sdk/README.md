@@ -263,3 +263,19 @@ normalizes the request, then invokes an Action; webhooks are not a fourth module
 function kind.
 
 [Declare anonymous tenant functions with `public: true`; public reducers require `interactive: false`](../../docs/public-functions.md).
+
+## Authenticated developer sessions
+
+`ctx.auth.developerSession` is optional, host-owned metadata for an unexpired
+self session admitted by `control.developer.enter`: `grantId`, `accountId`,
+`tenantId`, and `expiresAt` (Unix milliseconds). It carries no credential and
+is absent for ordinary authentication, support impersonation, service delegation,
+and newly admitted nested or scheduled invocations. The runtime revalidates the
+grant before executing application calls. Reducer arguments and editable member
+permissions cannot create this metadata.
+
+The authentication result also supplies it in `localIdentity.auth`, so the local
+Reducer receives the same identity contract. Local evaluation remains provisional;
+authoritative replay verifies the live session. Applications own any policy that
+uses this metadata; Gonvex does not change the member's stored role or grant
+application-specific privileges.

@@ -483,7 +483,7 @@
       kind: request.kind,
       function: request.function,
       now: request.now,
-      auth: Object.freeze({ account }),
+      auth: Object.freeze({ account, developerSession: identity.developerSession ? Object.freeze({ ...identity.developerSession }) : null }),
       tenant: identity.tenant ?? null,
       member: identity.member ?? null,
       invocation: Object.freeze({ ...(request.invocation ?? {}) }),
