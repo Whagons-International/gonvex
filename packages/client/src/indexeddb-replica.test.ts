@@ -512,3 +512,62 @@ it('persists metadata and explicit projections without materializing snapshot en
     Object.assign(globalThis, { indexedDB: originalIndexedDB, IDBKeyRange: originalKeyRange });
   }
 });
+
+
+it('does not rewrite transaction rows already covered by newer snapshots, but persists new fields atomically', async () => {
+  const oldIDB = globalThis.indexedDB;
+  const oldRange = globalThis.IDBKeyRange;
+  Object.assign(globalThis, { indexedDB: new IDBFactory(), IDBKeyRange });
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+  const name = `transaction-overlap-${Math.random()}`;
+  let storage = new IndexedDBLocalReplicaStorage(name);
+  const scope = 'tenant-a';
+  const rows = Array.from({ length: 134 }, (_, index) => ({ _id: `task-${index}`, name: 'Current', statusId: 'review' }));
+  const window = { signature: 'tasks', entity: 'tasks', key: '_id', kind: 'replica' as const,
+    ids: rows.map(row => row._id), completeness: 'complete' as const, source: 'server' as const,
+    cursor: { epoch: 'test', revision: 10 } };
+  const snapshot = { entities: {}, liveQueries: {}, cursor: window.cursor };
+  try {
+    await storage.replaceWindow(window, snapshot, scope, rows);
+    const table = (storage as any).database.entities;
+    const put = vi.spyOn(table, 'bulkPut');
+    await storage.applyTransaction({ cursor: { epoch: 'test', revision: 9 }, changes: rows.map(row => ({
+      entity: 'tasks', id: row._id, operation: 'update' as const, newValue: { ...row, name: 'Stale' },
+    })) }, snapshot, scope);
+    expect(put, 'older duplicate delivery must not rewrite indexed entity rows').not.toHaveBeenCalled();
+    await storage.applyTransaction({ cursor: window.cursor, changes: rows.map(row => ({
+      entity: 'tasks', id: row._id, operation: 'update' as const, newValue: row,
+    })) }, snapshot, scope);
+    expect(put, 'identical same-revision delivery must not rewrite indexed entity rows').not.toHaveBeenCalled();
+    const projected = { cursor: { epoch: 'test', revision: 9 }, changes: [
+      { entity: 'tasks', id: 'task-0', operation: 'update' as const, newValue: { _id: 'task-0', name: 'Stale', description: 'New projected field' } },
+    ] };
+    put.mockRejectedValueOnce(new Error('quota'));
+    await expect(storage.applyTransaction(projected, snapshot, scope)).rejects.toThrow('quota');
+    expect((await storage.load(scope))?.entities.tasks?.['task-0']).toEqual(rows[0]);
+    await storage.applyTransaction(projected, snapshot, scope);
+    expect(put).toHaveBeenCalledTimes(2);
+    // Equal values at a newer revision still advance field authority. A later
+    // stale value must not win just because its visible value differs.
+    await storage.applyTransaction({ cursor: { epoch: 'test', revision: 11 }, changes: [
+      { entity: 'tasks', id: 'task-0', operation: 'update', newValue: { name: 'Current' } },
+    ] }, snapshot, scope);
+    expect(put).toHaveBeenCalledTimes(3);
+    await storage.applyTransaction({ cursor: window.cursor, changes: [
+      { entity: 'tasks', id: 'task-0', operation: 'update', newValue: { name: 'Late stale value' } },
+    ] }, snapshot, scope);
+    expect(put).toHaveBeenCalledTimes(3);
+    put.mockRestore();
+    storage.close(); storage = new IndexedDBLocalReplicaStorage(name);
+    const after = await storage.load(scope);
+    expect(after?.cursor?.revision).toBe(11);
+    expect(after?.entities.tasks?.['task-0']).toEqual({ ...rows[0], description: 'New projected field' });
+    expect(after?.entities.tasks?.['task-133']).toEqual(rows[133]);
+    expect((await storage.load('tenant-b'))).toBeUndefined();
+  } finally {
+    vi.restoreAllMocks(); storage.close();
+    Object.assign(globalThis, { indexedDB: oldIDB, IDBKeyRange: oldRange });
+    Dexie.dependencies.indexedDB = oldIDB; Dexie.dependencies.IDBKeyRange = oldRange;
+  }
+}, 30_000);
