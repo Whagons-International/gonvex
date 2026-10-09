@@ -427,7 +427,10 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
             record = this.versionedRecord(normalizedScope, entry.entity, entry.id, change.operation === 'delete' ? null : change.newValue!, transaction.cursor, sequence, record);
           }
           if (!record) continue;
-          records.push(record);
+          // Snapshots can already cover a delayed or repeated transaction.
+          // Preserve per-field authority, but do not rewrite an unchanged row
+          // and all its indexes while another database admits a user intent.
+          if (record !== previous[index]) records.push(record);
           if (record.deleted) {
             let ids = deleted.get(entry.entity);
             if (!ids) { ids = new Set(); deleted.set(entry.entity, ids); }
