@@ -227,6 +227,8 @@ impl From<CapabilitiesWire> for Capabilities {
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContextWire {
     #[serde(default)]
+    pub developer_session: Option<serde_json::Value>,
+    #[serde(default)]
     pub invitation_inviter: Option<MemberIdentity>,
     #[serde(default)]
     pub intent_entropy: Option<String>,
@@ -278,6 +280,7 @@ impl InvocationContextWire {
             tenant: self.tenant,
             identity: IdentityContext {
                 account: self.account,
+                developer_session: self.developer_session,
                 member: self.member,
                 permissions: self.permissions,
             },

@@ -1846,6 +1846,7 @@ impl Runtime {
                     member,
                     admission_revision: 0,
                     delegation: None,
+                    developer_session: None,
                 };
                 let mut handler = DatabaseHostCalls::new(tenant_tx, DatabaseCapability::Reducer)
                     .with_actor(&identity.account.id, &identity.account.email);

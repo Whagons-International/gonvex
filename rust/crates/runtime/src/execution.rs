@@ -965,6 +965,7 @@ pub(crate) fn system_tenant_session(project: &str, route: TenantRoute) -> Tenant
         },
         admission_revision: 0,
         delegation: None,
+        developer_session: None,
     }
 }
 
@@ -1027,6 +1028,7 @@ pub(crate) fn invocation(
         kind: kind.to_owned(),
         args: serde_json::to_string(&args).unwrap_or_else(|_| "null".to_owned()),
         context: InvocationContextWire {
+            developer_session: session.developer_session.clone(),
             invitation_inviter: None,
             intent_entropy: None,
             project_id: session.identity.project_id.clone(),
@@ -1359,6 +1361,7 @@ mod tests {
             },
             admission_revision: 7,
             delegation: None,
+            developer_session: None,
         }
     }
 

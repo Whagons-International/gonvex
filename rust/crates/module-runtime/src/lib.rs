@@ -116,6 +116,9 @@ pub struct TenantIdentity {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityContext {
+    /// Metadata from the host-authenticated developer grant, never client args.
+    #[serde(default)]
+    pub developer_session: Option<serde_json::Value>,
     #[serde(default)]
     pub account: Option<AccountIdentity>,
     #[serde(default)]

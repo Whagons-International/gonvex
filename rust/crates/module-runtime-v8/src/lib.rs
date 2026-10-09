@@ -470,6 +470,56 @@ mod host_call_tests {
     }
 
     #[test]
+    fn developer_session_is_host_owned_and_does_not_leak_between_calls() {
+        run_v8_test(async {
+            let engine = V8ModuleEngine::from_artifact(
+                ModuleArtifact {
+                    manifest: ModuleManifest {
+                        module_id: "developer-context".into(), generation: 1,
+                        language: ModuleLanguage::TypeScript, artifact_hash: "test".into(),
+                        functions: vec![FunctionContract {
+                            path: "accept".into(), kind: FunctionKind::Reducer, internal: true,
+                            delivery: None, args_schema: Some(json!({"kind":"any"})),
+                            result_schema: Some(json!({"kind":"any"})),
+                            metadata: Map::from_iter([("export".into(), json!("accept"))]),
+                        }], metadata: Map::new(),
+                    },
+                    payload: br#"export function accept(ctx, args) {
+                        return {grant: ctx.auth.developerSession?.grantId ?? null, frozen: Object.isFrozen(ctx),
+                          immutable: !ctx.auth.developerSession || Object.isFrozen(ctx.auth.developerSession)};
+                    }"#.to_vec(),
+                }, V8Config::default(),
+            ).unwrap();
+            let host = CountingHost(AtomicUsize::new(0));
+            for (trusted, expected) in [
+                (Some("devmode_verified"), json!("devmode_verified")),
+                (None, json!(null)),
+            ] {
+                let result = engine
+                    .invoke(
+                        &host,
+                        Invocation {
+                            function: "accept".into(),
+                            kind: FunctionKind::Reducer,
+                            args: br#"{"developerSession":{"grantId":"devmode_spoofed"}}"#.to_vec(),
+                            context: InvocationContext {
+                                identity: gonvex_module_runtime::IdentityContext { developer_session: trusted.map(|id| json!({ "grantId": id, "accountId": "account", "tenantId": "tenant", "expiresAt": 2000 })), ..Default::default() },
+                                generation: 1,
+                                ..Default::default()
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&result.value).unwrap();
+                assert_eq!(result["grant"], expected);
+                assert_eq!(result["frozen"], true);
+                assert_eq!(result["immutable"], true);
+            }
+        });
+    }
+
+    #[test]
     fn invocation_can_complete_more_than_one_hundred_host_calls() {
         run_v8_test(async {
             let engine = V8ModuleEngine::from_artifact(
