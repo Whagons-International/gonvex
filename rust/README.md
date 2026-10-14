@@ -65,3 +65,11 @@ gonvex-admin migrate identity-v2 --verify --plan-file identity-v2-plan.json
 ```
 
 [Public tenant function admission and abuse limits](../docs/public-functions.md).
+
+## WebSocket compression
+
+The runtime's `/ws` endpoint negotiates RFC 7692 permessage-deflate when the client offers it. `GONVEX_WS_COMPRESSION` defaults to `true`; set it to `false` to disable negotiation and retain the axum transport. Clients that do not offer compression always retain that transport.
+
+Both directions negotiate no context takeover. The server uses at most a 12-bit compressor window and level 1. `GONVEX_WS_COMPRESSION_THRESHOLD` defaults to 1024 bytes and must be a positive integer. Smaller messages and messages whose compressed representation would grow are sent uncompressed. Existing frame/message limits and public payload limits still apply, including the expanded payload limit inside the inflater.
+
+JSON messages, auth capabilities, replay, visibility checks, and SDK APIs do not change. Browsers decompress natively before JavaScript receives text. No Whagons app change or client-contract version bump is needed. See [the measurements and reproduction steps](../bench/ws-deflate/README.md).

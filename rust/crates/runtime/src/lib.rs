@@ -28,7 +28,7 @@ pub mod visibility;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::Message;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware;
@@ -42,6 +42,7 @@ use gonvex_protocol::{
     ClientMessage, ExecutionScope, ReducerCallRequest, ReducerErrorClass, ReplicaOpenRequest,
     ServerCapabilities, ServerMessage, PROTOCOL_VERSION,
 };
+use gonvex_websocket::{self as websocket_transport, WebSocket};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -1251,7 +1252,7 @@ async fn websocket_upgrade(
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
-    upgrade: WebSocketUpgrade,
+    request: axum::extract::Request,
 ) -> Response {
     let peer = peer
         .map(|peer| peer.0 .0.ip())
@@ -1286,15 +1287,23 @@ async fn websocket_upgrade(
     } else {
         None
     };
-    let upgrade = if public_transport {
-        upgrade
-            .max_frame_size(limits.payload_bytes)
-            .max_message_size(limits.payload_bytes)
+    let max_message = if public_transport {
+        limits.payload_bytes
     } else {
-        upgrade
+        64 << 20
     };
-    upgrade
-        .on_upgrade(move |socket| {
+    let max_frame = if public_transport {
+        limits.payload_bytes
+    } else {
+        16 << 20
+    };
+    websocket_transport::upgrade(
+        request,
+        runtime.inner.config.websocket_compression,
+        runtime.inner.config.websocket_compression_threshold,
+        max_message,
+        max_frame,
+        move |socket| {
             websocket(
                 socket,
                 runtime,
@@ -1303,8 +1312,9 @@ async fn websocket_upgrade(
                 public_connection,
                 pending,
             )
-        })
-        .into_response()
+        },
+    )
+    .await
 }
 
 async fn websocket(
@@ -3909,6 +3919,8 @@ mod tests {
             tenant_database_urls: BTreeMap::new(),
             project_database_urls: BTreeMap::new(),
             require_auth: true,
+            websocket_compression: false,
+            websocket_compression_threshold: 1024,
             control_secret: Some("test-control-secret".to_owned()),
             auth_public_url: Some("http://localhost:8080".to_owned()),
             admin_key: Some("test-admin-key".to_owned()),

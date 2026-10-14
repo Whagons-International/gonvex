@@ -5,6 +5,7 @@ members = [
   "crates/protocol",
   "crates/postgres",
   "crates/runtime",
+  "crates/websocket",
   "crates/module-runtime",
   "crates/module-runtime-v8",
   "crates/module-host",

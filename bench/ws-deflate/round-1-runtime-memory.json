@@ -1,0 +1,92 @@
+{
+  "timestamp": "2026-10-14T05:29:01.091Z",
+  "trials": 5,
+  "socketsPerTrial": 1000,
+  "plain": [
+    {
+      "baselineRss": 32038912,
+      "idleRss": 207568896,
+      "deltaRss": 175529984,
+      "bytesPerSocket": 175529.984
+    },
+    {
+      "baselineRss": 32219136,
+      "idleRss": 207454208,
+      "deltaRss": 175235072,
+      "bytesPerSocket": 175235.072
+    },
+    {
+      "baselineRss": 32051200,
+      "idleRss": 207581184,
+      "deltaRss": 175529984,
+      "bytesPerSocket": 175529.984
+    },
+    {
+      "baselineRss": 32174080,
+      "idleRss": 207577088,
+      "deltaRss": 175403008,
+      "bytesPerSocket": 175403.008
+    },
+    {
+      "baselineRss": 31739904,
+      "idleRss": 206962688,
+      "deltaRss": 175222784,
+      "bytesPerSocket": 175222.784
+    }
+  ],
+  "compressed": [
+    {
+      "baselineRss": 32256000,
+      "idleRss": 303984640,
+      "deltaRss": 271728640,
+      "bytesPerSocket": 271728.64
+    },
+    {
+      "baselineRss": 32026624,
+      "idleRss": 303550464,
+      "deltaRss": 271523840,
+      "bytesPerSocket": 271523.84
+    },
+    {
+      "baselineRss": 31772672,
+      "idleRss": 302743552,
+      "deltaRss": 270970880,
+      "bytesPerSocket": 270970.88
+    },
+    {
+      "baselineRss": 32227328,
+      "idleRss": 303104000,
+      "deltaRss": 270876672,
+      "bytesPerSocket": 270876.672
+    },
+    {
+      "baselineRss": 32182272,
+      "idleRss": 303280128,
+      "deltaRss": 271097856,
+      "bytesPerSocket": 271097.856
+    }
+  ],
+  "summary": {
+    "plainBytesPerSocket": {
+      "mean": 175384.16640000002,
+      "ci95": [
+        175196.72623711676,
+        175571.60656288327
+      ]
+    },
+    "compressedBytesPerSocket": {
+      "mean": 271239.5776000001,
+      "ci95": [
+        270781.68592820416,
+        271697.469271796
+      ]
+    },
+    "additionalBytesPerSocket": {
+      "mean": 95855.41120000002,
+      "ci95": [
+        95365.1670812669,
+        96345.65531873313
+      ]
+    }
+  }
+}
