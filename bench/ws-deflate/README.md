@@ -58,7 +58,7 @@ Level 1 remains the choice for server CPU. Level 2 saves another 1.84 MB per sna
 
 The active-memory script uses five fresh release transport processes per mode and 32 concurrent snapshot clients. It samples `/proc/<pid>/status` approximately every 1 ms during transfers and again 100 ms after completion, while keeping all sockets open. It checks 20,000 received rows per client and records the binary hash and sample counts. This measures server process RSS above the already-open idle connections, excluding the fixture baseline, kernel buffers and client memory. Sampling can miss brief peaks. The example is single-threaded, so 32 concurrent transfers do not mean 32 compressors run simultaneously. Retained allocator memory and transport buffers remain visible even after codecs are freed. This is a measured workload, not a universal active-socket ceiling.
 
-## Final level 1 results
+## Round two level 1 results
 
 The repeat run passes the snapshot gate, including its conservative upper-CI check. A failed browser gate sets a nonzero benchmark exit status. The 1 KiB threshold and negotiated windows are unchanged. Raw samples, binary hash and platform metadata are in `results.json`.
 
@@ -83,7 +83,7 @@ Round-one snapshot compressed CPU was 1.228 ms per JSON MB. The repeat run is 1.
 
 All five active trials in each mode observed the same above-idle values, so their sampled mean CIs collapse to those values. Sampling uncertainty and allocator behavior still apply; these are not exact peaks or a hard memory bound. The compressed path adds 1.769 MB to the sampled peak for this workload and retains 6.746 MB less after transfer. No round-one active measurement was recorded.
 
-## Full runtime idle memory
+## Round two full runtime idle memory
 
 Five fresh runtime processes per mode opened 1,000 sockets each and verified HTTP upgrades, negotiated extension presence and `session.ready`. Decimal MB below are incremental process RSS per 1,000 sockets; numerical KB per socket are identical. The script now records the runtime binary hash as well as raw trials.
 
@@ -96,3 +96,24 @@ Five fresh runtime processes per mode opened 1,000 sockets each and verified HTT
 There is no positive idle RSS overhead relative to the plain transport in this measurement. The negotiated path now uses less memory because its framing/reader buffers differ from axum, and codecs no longer dominate that comparison. This is not a promise of zero total socket memory or immediate allocator return to the OS after every active message. The active-transfer samples above show both transient memory and retained allocator/buffer memory. Server CPU remains higher than uncompressed transport. Old clients retain the same uncompressed axum path, so none of their behavior or allocation changes.
 
 No Whagons code change is needed. After runtime deployment, run `node bench/ws-deflate/probe.mjs` again to confirm the staging route negotiates the extension. No infrastructure writes, SDK protocol changes, client-contract bump, package publication or merge are included.
+
+
+## Round three supply-chain removal
+
+`ws-pmd` has been removed from the manifest and lockfile. The websocket crate now owns RFC extension parsing, offer selection and bounded raw inflation. Codec allocation remains per message. The outgoing compressor, level, threshold and no-context-takeover policy are unchanged. See [transport compatibility](transport.md) for the axum/tungstenite-to-Ratchet change, the reasons for it, paired transport tests and known wire differences.
+
+Round-two raw data is preserved in `round-2-results.json` and `round-2-runtime-memory.json`. `results.json` and `runtime-memory.json` contain the round-three rerun with binary hashes. Chromium is still 149.0.7827.55, with three warmups and 30 paired samples per workload. Full-runtime memory still uses five fresh processes per mode and 1,000 verified upgrades/session.ready frames per trial.
+
+| Measurement | Round two | Round three |
+| --- | ---: | ---: |
+| Snapshot plain / compressed wire bytes | 32,833,978 / 4,892,096 | 32,833,978 / 4,892,096 |
+| Transaction plain / compressed wire bytes | 1,718,757 / 253,319 | 1,718,757 / 253,319 |
+| Delta plain / compressed wire bytes | 1,753 / 524 | 1,753 / 524 |
+| Chromium snapshot plain / compressed mean ms | 1597.200 / 1562.103 | 1553.040 / 1503.807 |
+| Chromium snapshot relative time, 95% CI | -2.197%, -3.517 to -0.818 | -3.170%, -5.411 to -0.767 |
+| Compressed snapshot CPU ms / JSON MB, 95% CI | 1.315, 1.265 to 1.365 | 1.208, 1.198 to 1.218 |
+| Plain idle RSS MB / 1,000 sockets, 95% CI | 175.631, 175.208 to 176.054 | 175.634, 175.359 to 175.909 |
+| Negotiated idle RSS MB / 1,000 sockets, 95% CI | 48.104, 47.807 to 48.402 | 47.900, 47.581 to 48.219 |
+| Negotiated minus plain idle RSS MB / 1,000, 95% CI | -127.527, -127.904 to -127.149 | -127.734, -128.174 to -127.293 |
+
+Wire bytes are identical and the Chromium snapshot gate passes. Full-runtime idle RSS shows no regression. CPU and browser timing vary on this shared workstation; these samples do not establish that the parser replacement itself improves outgoing CPU. The benchmark's ordinary small requests do not exercise compressed incoming inflation, so it does not quantify the removal of per-message negotiation and the unused encoder on that path. Active-transfer RSS and compression-level sweeps were not repeated because the outgoing codec policy is unchanged; their round-two data remains above.

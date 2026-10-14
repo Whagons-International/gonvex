@@ -1622,7 +1622,6 @@ dependencies = [
  "ratchet_ext",
  "serde_json",
  "tokio",
- "ws-pmd",
 ]
 
 [[package]]
@@ -5336,17 +5335,6 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
-
-[[package]]
-name = "ws-pmd"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c5ba7a073061f7797f894f29bc4a6d15c40052656dcf9491297ef5195ee7f08"
-dependencies = [
- "flate2",
- "http",
- "thiserror 2.0.20",
-]
 
 [[package]]
 name = "wyz"

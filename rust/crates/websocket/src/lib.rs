@@ -1,5 +1,6 @@
 //! Optional RFC 7692 transport. JSON and the application protocol are unchanged.
 mod frame_limits;
+mod negotiation;
 use frame_limits::FrameLimits;
 use futures_util::Stream;
 use std::{
@@ -22,7 +23,8 @@ use ratchet_ext::{
     SplittableExtension,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
-use ws_pmd::{DecompressedLimit, EncoderConfig, PmdComposition, ServerConfig, ServerHandshake};
+mod inflate;
+use inflate::inflate_message;
 
 pub async fn upgrade<F, Fut>(
     mut request: Request,
@@ -37,14 +39,9 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let selection = if enabled {
-        let config = ServerConfig::new()
-            .server_no_context_takeover(true)
-            .client_no_context_takeover(true)
-            .server_max_window_bits(12)
-            .expect("valid window");
-        match ServerHandshake::accept(config, request.headers()) {
+        match negotiation::negotiate(request.headers()) {
             Ok(selection) => selection,
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+            Err(()) => return StatusCode::BAD_REQUEST.into_response(),
         }
     } else {
         None
@@ -70,25 +67,17 @@ where
     };
     response
         .headers_mut()
-        .insert(SEC_WEBSOCKET_EXTENSIONS, selection.value().clone());
-    let agreement = match selection.finish(response.headers(), PmdComposition::Compatible) {
-        Ok(Some(agreement))
-            if agreement.local_no_context_takeover() && agreement.peer_no_context_takeover() =>
-        {
-            agreement
-        }
-        _ => return StatusCode::BAD_REQUEST.into_response(),
-    };
+        .insert(SEC_WEBSOCKET_EXTENSIONS, selection.response.clone());
     let upgraded = hyper::upgrade::on(&mut request);
     tokio::spawn(async move {
         if let Ok(stream) = upgraded.await {
             let extension = Deflate {
                 encoder: Encode {
-                    window_bits: agreement.local_max_window_bits(),
+                    window_bits: selection.server_window,
                     threshold,
                 },
                 decoder: Decode {
-                    window_bits: agreement.peer_max_window_bits(),
+                    window_bits: selection.client_window,
                     max_message,
                     compressed: false,
                 },
@@ -310,44 +299,12 @@ impl ExtensionDecoder for Decode {
         // Ratchet passes the accumulated payload. Inflate once, at FIN, with a
         // limit applied inside the inflater before it allocates expanded output.
         if self.compressed && header.fin {
-            let mut codec = message_decoder(self.window_bits)?;
-            let decoded = codec
-                .decompress(payload, true, DecompressedLimit::bytes(self.max_message))
-                .map_err(io::Error::other)?;
+            let decoded = inflate_message(payload, self.window_bits, self.max_message)?;
             *payload = decoded.as_slice().into();
             self.compressed = false;
         }
         Ok(())
     }
-}
-// ws-pmd only constructs codecs by consuming a negotiation. Recreate the
-// already-validated peer settings for each compressed incoming message, keeping
-// its RFC handling and expansion guard without retaining codecs between frames.
-fn message_decoder(window_bits: u8) -> io::Result<ws_pmd::Decoder> {
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        SEC_WEBSOCKET_EXTENSIONS,
-        format!("permessage-deflate; client_max_window_bits={window_bits}")
-            .parse()
-            .map_err(io::Error::other)?,
-    );
-    let config = ServerConfig::new()
-        .server_no_context_takeover(true)
-        .client_no_context_takeover(true);
-    let selected = ServerHandshake::accept(config, &headers)
-        .map_err(io::Error::other)?
-        .ok_or_else(|| io::Error::other("invalid saved deflate settings"))?;
-    headers.insert(SEC_WEBSOCKET_EXTENSIONS, selected.value().clone());
-    let agreed = selected
-        .finish(&headers, PmdComposition::Compatible)
-        .map_err(io::Error::other)?
-        .ok_or_else(|| io::Error::other("missing saved deflate agreement"))?;
-    let (_, decoder) = agreed.into_codecs(
-        EncoderConfig::new()
-            .compression_level(COMPRESSION_LEVEL)
-            .map_err(io::Error::other)?,
-    );
-    Ok(decoder)
 }
 
 impl ExtensionEncoder for Deflate {
@@ -422,6 +379,16 @@ mod tests {
                             ] {
                                 socket.send(frame).await.unwrap();
                             }
+                            return;
+                        }
+                        ws::Message::Text(ref text) if text.as_str().starts_with("close-code:") => {
+                            let code = text.as_str()[11..].parse().unwrap();
+                            let _ = socket
+                                .send(ws::Message::Close(Some(ws::CloseFrame {
+                                    code,
+                                    reason: "reason".into(),
+                                })))
+                                .await;
                             return;
                         }
                         ws::Message::Text(ref text) if text.as_str() == "close-policy" => {
@@ -514,27 +481,33 @@ mod tests {
         (opcode, payload)
     }
 
-    fn codecs() -> (ws_pmd::Encoder, ws_pmd::Decoder) {
-        let mut offer = axum::http::HeaderMap::new();
-        offer.insert(
-            SEC_WEBSOCKET_EXTENSIONS,
-            "permessage-deflate; client_max_window_bits"
-                .parse()
-                .unwrap(),
-        );
-        let config = ServerConfig::new()
-            .server_no_context_takeover(true)
-            .client_no_context_takeover(true)
-            .server_max_window_bits(12)
-            .unwrap();
-        let selected = ServerHandshake::accept(config, &offer).unwrap().unwrap();
-        let mut response = axum::http::HeaderMap::new();
-        response.insert(SEC_WEBSOCKET_EXTENSIONS, selected.value().clone());
-        selected
-            .finish(&response, PmdComposition::Compatible)
-            .unwrap()
-            .unwrap()
-            .into_codecs(EncoderConfig::new().compression_level(1).unwrap())
+    struct TestEncoder;
+    impl TestEncoder {
+        fn prepare_message(&mut self, data: &[u8]) -> io::Result<TestEncoded> {
+            let mut codec = Compress::new_with_window_bits(Compression::new(1), false, 12);
+            let mut out = vec![0; data.len() * 2 + 128];
+            codec
+                .compress(data, &mut out, FlushCompress::Sync)
+                .map_err(io::Error::other)?;
+            assert_eq!(codec.total_in() as usize, data.len());
+            out.truncate(codec.total_out() as usize - 4);
+            Ok(TestEncoded(out))
+        }
+    }
+    struct TestEncoded(Vec<u8>);
+    impl TestEncoded {
+        fn commit(self) -> Vec<u8> {
+            self.0
+        }
+    }
+    struct TestDecoder;
+    impl TestDecoder {
+        fn decompress(&mut self, data: &[u8], _: bool, limit: usize) -> io::Result<Vec<u8>> {
+            inflate_message(data, 15, limit)
+        }
+    }
+    fn codecs() -> (TestEncoder, TestDecoder) {
+        (TestEncoder, TestDecoder)
     }
 
     #[tokio::test]
@@ -586,12 +559,7 @@ mod tests {
             } else {
                 assert_eq!(opcode, 0xc1);
                 assert!(data.len() < payload.len() / 2);
-                assert_eq!(
-                    decoder
-                        .decompress(&data, true, DecompressedLimit::bytes(4096))
-                        .unwrap(),
-                    payload
-                );
+                assert_eq!(decoder.decompress(&data, true, 4096).unwrap(), payload);
             }
         }
         // Preserve policy close codes and reasons across the transport adapter.
@@ -651,12 +619,7 @@ mod tests {
                 stream.write_all(&masked(opcode, &payload)).await.unwrap();
                 let (header, data) = read(&mut stream).await;
                 assert_eq!(header, opcode | 0x40);
-                assert_eq!(
-                    decoder
-                        .decompress(&data, true, DecompressedLimit::bytes(4096))
-                        .unwrap(),
-                    payload
-                );
+                assert_eq!(decoder.decompress(&data, true, 4096).unwrap(), payload);
             }
             stream
                 .write_all(&masked(0x81, b"send-controls"))
@@ -675,6 +638,204 @@ mod tests {
             }
             server.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn plain_and_negotiated_transport_parity() {
+        for offer in [None, Some("permessage-deflate")] {
+            let (mut stream, _, server) = connect(true, offer).await;
+            // UTF-8 is validated after reassembly, including a split code point.
+            stream
+                .write_all(&masked(0x01, &[b'a', 0xe2]))
+                .await
+                .unwrap();
+            stream.write_all(&masked(0x89, b"ping")).await.unwrap();
+            assert_eq!(read(&mut stream).await, (0x8a, b"ping".to_vec()));
+            stream
+                .write_all(&masked(0x8a, b"unsolicited pong"))
+                .await
+                .unwrap();
+            stream
+                .write_all(&masked(0x80, &[0x82, 0xac, b'z']))
+                .await
+                .unwrap();
+            assert_eq!(read(&mut stream).await, (0x81, "a€z".as_bytes().to_vec()));
+            stream.write_all(&masked(0x02, &[1, 2])).await.unwrap();
+            stream.write_all(&masked(0x80, &[3, 4])).await.unwrap();
+            assert_eq!(read(&mut stream).await, (0x82, vec![1, 2, 3, 4]));
+            // Exactly the limit is accepted for an accumulated message.
+            stream
+                .write_all(&masked(0x02, &vec![b'x'; 2048]))
+                .await
+                .unwrap();
+            stream
+                .write_all(&masked(0x80, &vec![b'x'; 2048]))
+                .await
+                .unwrap();
+            let (opcode, data) = read(&mut stream).await;
+            if opcode & 0x40 != 0 {
+                assert_eq!(inflate_message(&data, 12, 4096).unwrap(), vec![b'x'; 4096]);
+            } else {
+                assert_eq!(data, vec![b'x'; 4096]);
+            }
+            stream
+                .write_all(&masked(0x81, b"close-policy"))
+                .await
+                .unwrap();
+            assert_eq!(read(&mut stream).await, (0x88, b"\x03\xf0policy".to_vec()));
+            server.abort();
+        }
+    }
+
+    // Both transports reject invalid data without delivering a message. Their
+    // wire shutdown differs: tungstenite yields an error; Ratchet sends 1002,
+    // and our text adapter sends 1007. Record those differences explicitly.
+    #[tokio::test]
+    async fn plain_and_negotiated_reject_oversize_and_invalid_text() {
+        for offer in [None, Some("permessage-deflate")] {
+            for kind in 0..3 {
+                let (mut stream, _, server) = connect(true, offer).await;
+                match kind {
+                    0 => stream
+                        .write_all(&masked(0x82, &vec![b'x'; 4097]))
+                        .await
+                        .unwrap(),
+                    1 => {
+                        stream
+                            .write_all(&masked(0x02, &vec![b'x'; 2048]))
+                            .await
+                            .unwrap();
+                        stream
+                            .write_all(&masked(0x80, &vec![b'x'; 2049]))
+                            .await
+                            .unwrap();
+                    }
+                    _ => stream.write_all(&masked(0x81, &[0xff])).await.unwrap(),
+                }
+                let mut received = Vec::new();
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    stream.read_to_end(&mut received),
+                )
+                .await
+                .unwrap();
+                if offer.is_none() {
+                    assert!(
+                        received.is_empty(),
+                        "legacy error does not send a data message"
+                    );
+                } else {
+                    assert_eq!(received[0], 0x88);
+                    let code = if kind == 2 { 1007u16 } else { 1002u16 };
+                    assert_eq!(&received[2..4], &code.to_be_bytes());
+                }
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bursts_preserve_order_with_slow_consumers() {
+        for offer in [None, Some("permessage-deflate")] {
+            let (mut stream, _, server) = connect(true, offer).await;
+            for index in 0..128u16 {
+                stream
+                    .write_all(&masked(0x82, &index.to_be_bytes()))
+                    .await
+                    .unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            for index in 0..128u16 {
+                assert_eq!(
+                    read(&mut stream).await,
+                    (0x82, index.to_be_bytes().to_vec())
+                );
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_close_response_documents_transport_difference() {
+        for offer in [None, Some("permessage-deflate")] {
+            let (mut stream, _, server) = connect(true, offer).await;
+            stream
+                .write_all(&masked(0x88, b"\x0f\xa1bye"))
+                .await
+                .unwrap();
+            let mut received = Vec::new();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read_to_end(&mut received),
+            )
+            .await
+            .unwrap();
+            if offer.is_none() {
+                // The callback drops immediately, without flushing tungstenite's queued reply.
+                assert!(received.is_empty());
+            } else {
+                // Ratchet immediately acknowledges the code, without the peer's reason.
+                assert_eq!(received, b"\x88\x02\x0f\xa1");
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn application_close_codes_match_legacy_transport() {
+        for code in [
+            1000u16, 1001, 1008, 1009, 1011, 1012, 1013, 3001, 4001, 4999,
+        ] {
+            for offer in [None, Some("permessage-deflate")] {
+                let (mut stream, _, server) = connect(true, offer).await;
+                stream
+                    .write_all(&masked(0x81, format!("close-code:{code}").as_bytes()))
+                    .await
+                    .unwrap();
+                let (opcode, payload) = read(&mut stream).await;
+                assert_eq!(opcode, 0x88);
+                assert_eq!(&payload[..2], &code.to_be_bytes());
+                assert_eq!(&payload[2..], b"reason");
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compressed_expansion_and_invalid_utf8_are_rejected_on_wire() {
+        for (input, code) in [(vec![b'x'; 4097], 1002u16), (vec![255; 10], 1007u16)] {
+            let (mut stream, _, server) = connect(true, Some("permessage-deflate")).await;
+            let (mut encoder, _) = codecs();
+            let data = encoder.prepare_message(&input).unwrap().commit();
+            stream.write_all(&masked(0xc1, &data)).await.unwrap();
+            let (opcode, payload) = read(&mut stream).await;
+            assert_eq!(opcode, 0x88);
+            assert_eq!(&payload[..2], &code.to_be_bytes());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_negotiation_and_offer_fallback_on_wire() {
+        let (_, headers, server) = connect(true, Some("permessage-deflate; client_max_window_bits=16, permessage-deflate; server_max_window_bits=9")).await;
+        assert!(headers.starts_with("http/1.1 101"));
+        assert!(headers.contains("server_max_window_bits=9"));
+        server.abort();
+        let (_, headers, server) = connect(
+            true,
+            Some("permessage-deflate; server_no_context_takeover=1"),
+        )
+        .await;
+        assert!(headers.starts_with("http/1.1 101"));
+        assert!(!headers.contains("sec-websocket-extensions:"));
+        server.abort();
+        let (_, headers, server) = connect(
+            true,
+            Some("permessage-deflate; client_max_window_bits=\"12"),
+        )
+        .await;
+        assert!(headers.starts_with("http/1.1 400"));
+        server.abort();
     }
 
     #[test]
@@ -732,12 +893,7 @@ mod tests {
             encoder.encode(&mut payload, &mut header).unwrap();
             assert!(header.rsv1);
             let (_, mut decoder) = codecs();
-            assert_eq!(
-                decoder
-                    .decompress(&payload, true, DecompressedLimit::bytes(size))
-                    .unwrap(),
-                data
-            );
+            assert_eq!(decoder.decompress(&payload, true, size).unwrap(), data);
         }
     }
 
@@ -745,7 +901,7 @@ mod tests {
     fn idle_extensions_hold_only_settings_and_receive_messages_independently() {
         assert!(std::mem::size_of::<Deflate>() <= 48);
         for bits in [8, 9, 12, 15] {
-            assert!(message_decoder(bits).is_ok());
+            assert_eq!(inflate_message(&[0], bits, 0).unwrap(), b"");
         }
         let mut decoder = Decode {
             window_bits: 15,
@@ -802,9 +958,7 @@ mod tests {
             let data = encoder.prepare_message(&vec![b'x'; 2048]).unwrap().commit();
             let (_, mut fresh) = codecs();
             assert_eq!(
-                fresh
-                    .decompress(&data, true, DecompressedLimit::bytes(2048))
-                    .unwrap(),
+                fresh.decompress(&data, true, 2048).unwrap(),
                 vec![b'x'; 2048]
             );
         }

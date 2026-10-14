@@ -1,0 +1,93 @@
+{
+  "timestamp": "2026-10-14T07:11:26.699Z",
+  "trials": 5,
+  "socketsPerTrial": 1000,
+  "binarySha256": "9d2a66d7a005104c8f181ed00a403282eec869976fcd9413f8c038739133948f",
+  "plain": [
+    {
+      "baselineRss": 34013184,
+      "idleRss": 209104896,
+      "deltaRss": 175091712,
+      "bytesPerSocket": 175091.712
+    },
+    {
+      "baselineRss": 33746944,
+      "idleRss": 209440768,
+      "deltaRss": 175693824,
+      "bytesPerSocket": 175693.824
+    },
+    {
+      "baselineRss": 33910784,
+      "idleRss": 209948672,
+      "deltaRss": 176037888,
+      "bytesPerSocket": 176037.888
+    },
+    {
+      "baselineRss": 33722368,
+      "idleRss": 209358848,
+      "deltaRss": 175636480,
+      "bytesPerSocket": 175636.48
+    },
+    {
+      "baselineRss": 33718272,
+      "idleRss": 209412096,
+      "deltaRss": 175693824,
+      "bytesPerSocket": 175693.824
+    }
+  ],
+  "compressed": [
+    {
+      "baselineRss": 34091008,
+      "idleRss": 81960960,
+      "deltaRss": 47869952,
+      "bytesPerSocket": 47869.952
+    },
+    {
+      "baselineRss": 33972224,
+      "idleRss": 82108416,
+      "deltaRss": 48136192,
+      "bytesPerSocket": 48136.192
+    },
+    {
+      "baselineRss": 34136064,
+      "idleRss": 82268160,
+      "deltaRss": 48132096,
+      "bytesPerSocket": 48132.096
+    },
+    {
+      "baselineRss": 33669120,
+      "idleRss": 81580032,
+      "deltaRss": 47910912,
+      "bytesPerSocket": 47910.912
+    },
+    {
+      "baselineRss": 33607680,
+      "idleRss": 82079744,
+      "deltaRss": 48472064,
+      "bytesPerSocket": 48472.064
+    }
+  ],
+  "summary": {
+    "plainBytesPerSocket": {
+      "mean": 175630.7456,
+      "ci95": [
+        175207.70681025845,
+        176053.78438974154
+      ]
+    },
+    "compressedBytesPerSocket": {
+      "mean": 48104.243200000004,
+      "ci95": [
+        47806.917964292814,
+        48401.568435707195
+      ]
+    },
+    "additionalBytesPerSocket": {
+      "mean": -127526.5024,
+      "ci95": [
+        -127904.23871661544,
+        -127148.76608338456
+      ]
+    }
+  }
+}
