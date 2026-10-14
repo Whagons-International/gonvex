@@ -330,11 +330,11 @@ mod tests {
         net::TcpStream,
     };
 
-    async fn echo(State(enabled): State<bool>, request: Request) -> Response {
+    async fn echo(State((enabled, threshold)): State<(bool, usize)>, request: Request) -> Response {
         upgrade(
             request,
             enabled,
-            1024,
+            threshold,
             4096,
             4096,
             |mut socket| async move {
@@ -353,6 +353,19 @@ mod tests {
                     match frame {
                         ws::Message::Ping(_) | ws::Message::Pong(_) => continue,
                         ws::Message::Close(_) => return,
+                        ws::Message::Text(ref text) if text.as_str() == "send-controls" => {
+                            for frame in [
+                                ws::Message::Ping(vec![b'x'; 125].into()),
+                                ws::Message::Pong(vec![b'x'; 125].into()),
+                                ws::Message::Close(Some(ws::CloseFrame {
+                                    code: 1008,
+                                    reason: "x".repeat(123).into(),
+                                })),
+                            ] {
+                                socket.send(frame).await.unwrap();
+                            }
+                            return;
+                        }
                         ws::Message::Text(ref text) if text.as_str() == "close-policy" => {
                             let _ = socket
                                 .send(ws::Message::Close(Some(ws::CloseFrame {
@@ -375,12 +388,22 @@ mod tests {
     }
 
     async fn connect(enabled: bool, offer: Option<&str>) -> (TcpStream, String, JoinHandle<()>) {
+        connect_with_threshold(enabled, offer, 1024).await
+    }
+
+    async fn connect_with_threshold(
+        enabled: bool,
+        offer: Option<&str>,
+        threshold: usize,
+    ) -> (TcpStream, String, JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().route("/ws", get(echo)).with_state(enabled),
+                Router::new()
+                    .route("/ws", get(echo))
+                    .with_state((enabled, threshold)),
             )
             .await
             .unwrap();
@@ -557,6 +580,43 @@ mod tests {
         assert_eq!(opcode, 0x88);
         assert_eq!(&payload[..2], &1007u16.to_be_bytes());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn low_threshold_sends_uncompressed_control_frames() {
+        for threshold in [1, 125] {
+            let (mut stream, _, server) =
+                connect_with_threshold(true, Some("permessage-deflate"), threshold).await;
+            let (_, mut decoder) = codecs();
+            let payload = vec![b'x'; 125];
+            for opcode in [0x81, 0x82] {
+                stream.write_all(&masked(opcode, &payload)).await.unwrap();
+                let (header, data) = read(&mut stream).await;
+                assert_eq!(header, opcode | 0x40);
+                assert_eq!(
+                    decoder
+                        .decompress(&data, true, DecompressedLimit::bytes(4096))
+                        .unwrap(),
+                    payload
+                );
+            }
+            stream
+                .write_all(&masked(0x81, b"send-controls"))
+                .await
+                .unwrap();
+            for opcode in [0x89, 0x8a, 0x88] {
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), read(&mut stream))
+                        .await
+                        .unwrap();
+                let mut payload = vec![b'x'; 125];
+                if opcode == 0x88 {
+                    payload[..2].copy_from_slice(&1008u16.to_be_bytes());
+                }
+                assert_eq!(frame, (opcode, payload));
+            }
+            server.abort();
+        }
     }
 
     #[test]

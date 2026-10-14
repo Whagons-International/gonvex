@@ -44,7 +44,9 @@ for (let trial = 0; trial < trials; trial++) {
       console.log(JSON.stringify({ trial, compression, ...measurement }));
     } finally {
       for (const ws of sockets) ws.terminate();
-      proc.kill(); await once(proc, 'exit');
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill(); await once(proc, 'exit');
+      }
     }
   }
 }
