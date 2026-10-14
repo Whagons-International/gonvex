@@ -1,0 +1,133 @@
+{
+  "timestamp": "2026-10-14T07:08:01.631Z",
+  "connections": 32,
+  "trials": 5,
+  "sampleIntervalMs": 1,
+  "binarySha256": "6ee8ce8a4a9d5714c84ca4af848548334e93326aecb51bdf464ecb08bf4ac76c",
+  "plain": [
+    {
+      "idleRss": 43560960,
+      "peakRss": 51077120,
+      "settledRss": 51077120,
+      "peakAboveIdle": 7516160,
+      "retainedAboveIdle": 7516160,
+      "samples": 48
+    },
+    {
+      "idleRss": 43532288,
+      "peakRss": 51048448,
+      "settledRss": 51048448,
+      "peakAboveIdle": 7516160,
+      "retainedAboveIdle": 7516160,
+      "samples": 49
+    },
+    {
+      "idleRss": 43569152,
+      "peakRss": 51085312,
+      "settledRss": 51085312,
+      "peakAboveIdle": 7516160,
+      "retainedAboveIdle": 7516160,
+      "samples": 54
+    },
+    {
+      "idleRss": 43483136,
+      "peakRss": 50999296,
+      "settledRss": 50999296,
+      "peakAboveIdle": 7516160,
+      "retainedAboveIdle": 7516160,
+      "samples": 45
+    },
+    {
+      "idleRss": 43528192,
+      "peakRss": 51044352,
+      "settledRss": 51044352,
+      "peakAboveIdle": 7516160,
+      "retainedAboveIdle": 7516160,
+      "samples": 43
+    }
+  ],
+  "compressed": [
+    {
+      "idleRss": 39620608,
+      "peakRss": 48906240,
+      "settledRss": 40390656,
+      "peakAboveIdle": 9285632,
+      "retainedAboveIdle": 770048,
+      "samples": 2856
+    },
+    {
+      "idleRss": 39682048,
+      "peakRss": 48902144,
+      "settledRss": 40386560,
+      "peakAboveIdle": 9220096,
+      "retainedAboveIdle": 704512,
+      "samples": 2845
+    },
+    {
+      "idleRss": 39559168,
+      "peakRss": 48844800,
+      "settledRss": 40329216,
+      "peakAboveIdle": 9285632,
+      "retainedAboveIdle": 770048,
+      "samples": 2873
+    },
+    {
+      "idleRss": 39632896,
+      "peakRss": 48918528,
+      "settledRss": 40402944,
+      "peakAboveIdle": 9285632,
+      "retainedAboveIdle": 770048,
+      "samples": 2937
+    },
+    {
+      "idleRss": 39620608,
+      "peakRss": 48906240,
+      "settledRss": 40390656,
+      "peakAboveIdle": 9285632,
+      "retainedAboveIdle": 770048,
+      "samples": 2901
+    }
+  ],
+  "summary": {
+    "plain": {
+      "peakAboveIdle": {
+        "n": 5,
+        "mean": 7516160,
+        "ci95": [
+          7516160,
+          7516160
+        ],
+        "sd": 0
+      },
+      "retainedAboveIdle": {
+        "n": 5,
+        "mean": 7516160,
+        "ci95": [
+          7516160,
+          7516160
+        ],
+        "sd": 0
+      }
+    },
+    "compressed": {
+      "peakAboveIdle": {
+        "n": 5,
+        "mean": 9272524.8,
+        "ci95": [
+          9236133.31456,
+          9308916.285440002
+        ],
+        "sd": 29308.590194685246
+      },
+      "retainedAboveIdle": {
+        "n": 5,
+        "mean": 756940.8,
+        "ci95": [
+          720549.3145600001,
+          793332.28544
+        ],
+        "sd": 29308.590194685243
+      }
+    }
+  }
+}

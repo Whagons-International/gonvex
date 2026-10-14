@@ -16,6 +16,7 @@ CARGO_TARGET_DIR=rust/target-websocket cargo build --manifest-path rust/Cargo.to
 node bench/ws-deflate/run.mjs
 cargo build --manifest-path rust/Cargo.toml -p gonvex-runtime --bin gonvex-runtime
 node bench/ws-deflate/memory.mjs
+node bench/ws-deflate/active-memory.mjs
 node bench/ws-deflate/probe.mjs
 ```
 
@@ -39,28 +40,59 @@ Read-only Cloudflare DNS inspection found `proxied=false` for both runtime A rec
 
 No infrastructure change was made. No proxy change is indicated by the current configuration. After deploying the runtime, repeat the staging probe to verify the negotiated extension end to end. Traefik's ordinary HTTP gzip middleware is separate from permessage-deflate. If DNS proxying changes later, repeat the same handshake check through that new path.
 
-The RFC negotiation is implemented by [ws-pmd](https://github.com/odedlaz/ws-pmd-rs), with [Ratchet](https://github.com/swimos/ratchet) handling WebSocket framing. Compression is negotiated by the optional standard HTTP extension header before auth, not by a new Gonvex message or SDK capability. The application protocol and client contract remain unchanged.
+The RFC negotiation and bounded incoming-message decoding are implemented by [ws-pmd](https://github.com/odedlaz/ws-pmd-rs), with [Ratchet](https://github.com/swimos/ratchet) handling WebSocket framing. Outgoing messages use flate2 with the same zlib-rs backend. Both codecs are allocated only while processing a compressed message and dropped before returning. Messages below 1 KiB never allocate a compressor; uncompressed client frames never allocate an inflater. The transport rejects an agreement unless both directions disable context takeover. Compression is negotiated by the optional standard HTTP extension header before auth, not by a new Gonvex message or SDK capability. The application protocol and client contract remain unchanged.
 
-## Recorded results
+## Round two measurements
 
-The snapshot gate passed, including its conservative upper-CI check. Runtime compression defaults to enabled when offered. `GONVEX_WS_COMPRESSION=false` disables it; `GONVEX_WS_COMPRESSION_THRESHOLD=1024` is the default minimum message size.
+Round-one raw measurements are preserved in `round-1-results.json` and `round-1-runtime-memory.json`. They showed an extra 95.86 MB RSS per 1,000 negotiated idle sockets, which blocked merge. Those codecs reset their histories but retained backend allocations. The new connection extension holds only numeric settings and a fragmentation flag, at most 48 bytes on the tested architecture. Deflate/inflate state lives only for the message being processed.
 
-| Workload | Plain wire bytes | Compressed wire bytes | Fewer bytes | Chromium plain mean, 95% CI | Chromium compressed mean, 95% CI | Relative latency, 95% CI |
+The existing backend already used zlib-rs, and round one already used compression level 1. `level-1.json`, `level-2.json` and `level-3.json` record a release transport sweep with 30 paired samples per workload. To reproduce a level, change `COMPRESSION_LEVEL` in `rust/crates/websocket/src/lib.rs`, rebuild the release example, then run `BENCH_CPU_ONLY=1 BENCH_LEVEL=<compiled level> BENCH_OUTPUT=bench/ws-deflate/level-<compiled level>.json node bench/ws-deflate/run.mjs`. `BENCH_LEVEL` labels the result; it does not change the compiled compressor. Restore level 1 and rebuild before the full browser and memory runs.
+
+| Level | Snapshot compressed wire bytes | Savings | Server CPU ms / original JSON MB |
+| --- | ---: | ---: | ---: |
+| 1 | 4,892,096 | 85.10% | 1.295 |
+| 2 | 3,050,843 | 90.71% | 1.722 |
+| 3 | 2,948,552 | 91.02% | 2.940 |
+
+Level 1 remains the choice for server CPU. Level 2 saves another 1.84 MB per snapshot but costs about 33% more CPU. Level 3 saves only another 102 KB while costing about 71% more CPU than level 2. No new compression backend or shared pool is introduced. Allocation on each message has a CPU cost, which is measured rather than assumed away.
+
+The active-memory script uses five fresh release transport processes per mode and 32 concurrent snapshot clients. It samples `/proc/<pid>/status` approximately every 1 ms during transfers and again 100 ms after completion, while keeping all sockets open. It checks 20,000 received rows per client and records the binary hash and sample counts. This measures server process RSS above the already-open idle connections, excluding the fixture baseline, kernel buffers and client memory. Sampling can miss brief peaks. The example is single-threaded, so 32 concurrent transfers do not mean 32 compressors run simultaneously. Retained allocator memory and transport buffers remain visible even after codecs are freed. This is a measured workload, not a universal active-socket ceiling.
+
+## Final level 1 results
+
+The repeat run passes the snapshot gate, including its conservative upper-CI check. A failed browser gate sets a nonzero benchmark exit status. The 1 KiB threshold and negotiated windows are unchanged. Raw samples, binary hash and platform metadata are in `results.json`.
+
+| Workload | Plain wire bytes | Compressed wire bytes | Savings | Chromium plain mean ms, 95% CI | Chromium compressed mean ms, 95% CI | Relative latency %, 95% CI |
 | --- | ---: | ---: | ---: | --- | --- | --- |
-| 20k-row paged snapshot | 32,833,978 | 4,892,096 | 85.10% | 1581.35 ms, 1548.98 to 1613.71 | 1523.59 ms, 1496.28 to 1550.90 | -3.65%, -5.35% to -1.82% |
-| 1,000-row transaction | 1,718,757 | 253,319 | 85.26% | 102.05 ms, 91.63 to 112.47 | 92.22 ms, 84.58 to 99.86 | -9.64%, -22.15% to +5.50% |
-| Single-row delta | 1,753 | 524 | 70.11% | 20.59 ms, 12.89 to 28.29 | 20.56 ms, 12.89 to 28.24 | -0.13%, -49.53% to +98.07% |
+| snapshot | 32,833,978 | 4,892,096 | 85.10% | 1597.200, 1573.940 to 1620.460 | 1562.103, 1541.634 to 1582.573 | -2.197, -3.517 to -0.818 |
+| transaction | 1,718,757 | 253,319 | 85.26% | 104.087, 96.404 to 111.769 | 103.657, 94.613 to 112.701 | -0.413, -12.104 to 13.368 |
+| delta | 1,753 | 524 | 70.11% | 20.553, 12.901 to 28.205 | 20.620, 12.983 to 28.257 | 0.324, -49.078 to 97.973 |
 
-The delta is too noisy to support a latency claim. Small-message completion-marker and TCP delayed-ACK costs dominate this loopback measurement. No delta CPU or latency gate is claimed.
-
-| Workload | Plain server CPU ms / JSON MB, 95% CI | Compressed server CPU ms / JSON MB, 95% CI |
+| Workload | Plain server CPU ms / original JSON MB, 95% CI | Compressed server CPU ms / original JSON MB, 95% CI |
 | --- | --- | --- |
-| Snapshot | 0.256, 0.250 to 0.262 | 1.228, 1.219 to 1.237 |
-| Transaction | 0.370, 0.342 to 0.399 | 1.447, 1.393 to 1.502 |
-| Delta | 18.470, 15.960 to 20.979 | 26.962, 23.024 to 30.900 |
+| snapshot | 0.313, 0.303 to 0.323 | 1.315, 1.265 to 1.365 |
+| transaction | 0.484, 0.450 to 0.519 | 1.647, 1.582 to 1.711 |
+| delta | 26.705, 21.173 to 32.237 | 41.661, 32.897 to 50.425 |
 
-For an output-byte denominator, snapshot compression uses 8.24 ms of server CPU per compressed wire MB, with a 95% CI of 8.18 to 8.30. The benchmark shifts CPU work to the server; it does not claim reduced server CPU.
+Round-one snapshot compressed CPU was 1.228 ms per JSON MB. The repeat run is 1.315 ms, with a 95% CI of 1.265 to 1.365. The measured increase is about 7%, so this is a memory improvement with a CPU tradeoff. Both measurements include transport work and were made on a shared workstation. Incoming compressed messages temporarily reconstruct ws-pmd codecs because its public API only builds encoder/decoder pairs from a consumed negotiation. The unused encoder is dropped immediately, and the decoder is dropped after bounded inflation. This adds work only for compressed incoming messages; typical small uncompressed requests bypass it.
 
-The complete runtime, across five fresh-process trials of 1,000 idle sockets each, uses an additional 175.38 KB per plain connection, with a 95% CI of 175.20 to 175.57, versus 271.24 KB per compressed connection, with a 95% CI of 270.78 to 271.70. The paired increase is 95.86 KB per connection, with a 95% CI of 95.37 to 96.35, or about 95.9 MB per 1,000 sockets. These are decimal KB/MB and incremental process RSS after receiving `session.ready`. Kernel buffers are excluded.
+| 32 concurrent snapshot clients | Sampled peak RSS above idle, MB | Retained RSS above idle 100 ms later, MB |
+| --- | ---: | ---: |
+| plain | 7.516 | 7.516 |
+| compressed | 9.273 | 0.757 |
 
-The memory overhead remains finite with fixed codec windows and no context takeover, but it is real. Capacity planning must include it before enabling compression on very large fleets. Active-message buffers are separately bounded by the existing frame and expanded-message limits; this idle test does not measure their peak.
+All five active trials in each mode observed the same above-idle values, so their sampled mean CIs collapse to those values. Sampling uncertainty and allocator behavior still apply; these are not exact peaks or a hard memory bound. The compressed path adds 1.769 MB to the sampled peak for this workload and retains 6.746 MB less after transfer. No round-one active measurement was recorded.
+
+## Full runtime idle memory
+
+Five fresh runtime processes per mode opened 1,000 sockets each and verified HTTP upgrades, negotiated extension presence and `session.ready`. Decimal MB below are incremental process RSS per 1,000 sockets; numerical KB per socket are identical. The script now records the runtime binary hash as well as raw trials.
+
+| Mode | Round one MB / 1,000 idle sockets, 95% CI | Round two MB / 1,000 idle sockets, 95% CI |
+| --- | --- | --- |
+| plain | 175.384, 175.197 to 175.572 | 175.631, 175.208 to 176.054 |
+| compressed | 271.240, 270.782 to 271.697 | 48.104, 47.807 to 48.402 |
+| compressed minus plain | 95.855, 95.365 to 96.346 | -127.527, -127.904 to -127.149 |
+
+There is no positive idle RSS overhead relative to the plain transport in this measurement. The negotiated path now uses less memory because its framing/reader buffers differ from axum, and codecs no longer dominate that comparison. This is not a promise of zero total socket memory or immediate allocator return to the OS after every active message. The active-transfer samples above show both transient memory and retained allocator/buffer memory. Server CPU remains higher than uncompressed transport. Old clients retain the same uncompressed axum path, so none of their behavior or allocation changes.
+
+No Whagons code change is needed. After runtime deployment, run `node bench/ws-deflate/probe.mjs` again to confirm the staging route negotiates the extension. No infrastructure writes, SDK protocol changes, client-contract bump, package publication or merge are included.

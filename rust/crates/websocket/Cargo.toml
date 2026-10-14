@@ -8,6 +8,7 @@ license.workspace = true
 axum.workspace = true
 bytes = "1"
 futures-util.workspace = true
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 ratchet_core = { version = "1.2.1", features = ["split"] }

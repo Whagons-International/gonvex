@@ -1,91 +1,92 @@
 {
-  "timestamp": "2026-10-14T05:29:01.091Z",
+  "timestamp": "2026-10-14T07:11:26.699Z",
   "trials": 5,
   "socketsPerTrial": 1000,
+  "binarySha256": "9d2a66d7a005104c8f181ed00a403282eec869976fcd9413f8c038739133948f",
   "plain": [
     {
-      "baselineRss": 32038912,
-      "idleRss": 207568896,
-      "deltaRss": 175529984,
-      "bytesPerSocket": 175529.984
+      "baselineRss": 34013184,
+      "idleRss": 209104896,
+      "deltaRss": 175091712,
+      "bytesPerSocket": 175091.712
     },
     {
-      "baselineRss": 32219136,
-      "idleRss": 207454208,
-      "deltaRss": 175235072,
-      "bytesPerSocket": 175235.072
+      "baselineRss": 33746944,
+      "idleRss": 209440768,
+      "deltaRss": 175693824,
+      "bytesPerSocket": 175693.824
     },
     {
-      "baselineRss": 32051200,
-      "idleRss": 207581184,
-      "deltaRss": 175529984,
-      "bytesPerSocket": 175529.984
+      "baselineRss": 33910784,
+      "idleRss": 209948672,
+      "deltaRss": 176037888,
+      "bytesPerSocket": 176037.888
     },
     {
-      "baselineRss": 32174080,
-      "idleRss": 207577088,
-      "deltaRss": 175403008,
-      "bytesPerSocket": 175403.008
+      "baselineRss": 33722368,
+      "idleRss": 209358848,
+      "deltaRss": 175636480,
+      "bytesPerSocket": 175636.48
     },
     {
-      "baselineRss": 31739904,
-      "idleRss": 206962688,
-      "deltaRss": 175222784,
-      "bytesPerSocket": 175222.784
+      "baselineRss": 33718272,
+      "idleRss": 209412096,
+      "deltaRss": 175693824,
+      "bytesPerSocket": 175693.824
     }
   ],
   "compressed": [
     {
-      "baselineRss": 32256000,
-      "idleRss": 303984640,
-      "deltaRss": 271728640,
-      "bytesPerSocket": 271728.64
+      "baselineRss": 34091008,
+      "idleRss": 81960960,
+      "deltaRss": 47869952,
+      "bytesPerSocket": 47869.952
     },
     {
-      "baselineRss": 32026624,
-      "idleRss": 303550464,
-      "deltaRss": 271523840,
-      "bytesPerSocket": 271523.84
+      "baselineRss": 33972224,
+      "idleRss": 82108416,
+      "deltaRss": 48136192,
+      "bytesPerSocket": 48136.192
     },
     {
-      "baselineRss": 31772672,
-      "idleRss": 302743552,
-      "deltaRss": 270970880,
-      "bytesPerSocket": 270970.88
+      "baselineRss": 34136064,
+      "idleRss": 82268160,
+      "deltaRss": 48132096,
+      "bytesPerSocket": 48132.096
     },
     {
-      "baselineRss": 32227328,
-      "idleRss": 303104000,
-      "deltaRss": 270876672,
-      "bytesPerSocket": 270876.672
+      "baselineRss": 33669120,
+      "idleRss": 81580032,
+      "deltaRss": 47910912,
+      "bytesPerSocket": 47910.912
     },
     {
-      "baselineRss": 32182272,
-      "idleRss": 303280128,
-      "deltaRss": 271097856,
-      "bytesPerSocket": 271097.856
+      "baselineRss": 33607680,
+      "idleRss": 82079744,
+      "deltaRss": 48472064,
+      "bytesPerSocket": 48472.064
     }
   ],
   "summary": {
     "plainBytesPerSocket": {
-      "mean": 175384.16640000002,
+      "mean": 175630.7456,
       "ci95": [
-        175196.72623711676,
-        175571.60656288327
+        175207.70681025845,
+        176053.78438974154
       ]
     },
     "compressedBytesPerSocket": {
-      "mean": 271239.5776000001,
+      "mean": 48104.243200000004,
       "ci95": [
-        270781.68592820416,
-        271697.469271796
+        47806.917964292814,
+        48401.568435707195
       ]
     },
     "additionalBytesPerSocket": {
-      "mean": 95855.41120000002,
+      "mean": -127526.5024,
       "ci95": [
-        95365.1670812669,
-        96345.65531873313
+        -127904.23871661544,
+        -127148.76608338456
       ]
     }
   }

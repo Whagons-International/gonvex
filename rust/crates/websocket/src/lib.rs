@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::BytesMut;
+use flate2::{Compress, Compression, FlushCompress};
 use hyper_util::rt::TokioIo;
 use ratchet_ext::{
     Extension, ExtensionDecoder, ExtensionEncoder, FrameHeader, OpCode, RsvBits,
@@ -71,24 +72,23 @@ where
         .headers_mut()
         .insert(SEC_WEBSOCKET_EXTENSIONS, selection.value().clone());
     let agreement = match selection.finish(response.headers(), PmdComposition::Compatible) {
-        Ok(Some(agreement)) => agreement,
+        Ok(Some(agreement))
+            if agreement.local_no_context_takeover() && agreement.peer_no_context_takeover() =>
+        {
+            agreement
+        }
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
     let upgraded = hyper::upgrade::on(&mut request);
     tokio::spawn(async move {
         if let Ok(stream) = upgraded.await {
-            let (encoder, decoder) = agreement.into_codecs(
-                EncoderConfig::new()
-                    .compression_level(1)
-                    .expect("valid level"),
-            );
             let extension = Deflate {
                 encoder: Encode {
-                    codec: encoder,
+                    window_bits: agreement.local_max_window_bits(),
                     threshold,
                 },
                 decoder: Decode {
-                    codec: decoder,
+                    window_bits: agreement.peer_max_window_bits(),
                     max_message,
                     compressed: false,
                 },
@@ -228,6 +228,8 @@ impl WebSocket {
     }
 }
 
+const COMPRESSION_LEVEL: u32 = 1;
+
 #[derive(Debug)]
 struct Deflate {
     encoder: Encode,
@@ -235,12 +237,12 @@ struct Deflate {
 }
 #[derive(Debug)]
 struct Encode {
-    codec: ws_pmd::Encoder,
+    window_bits: u8,
     threshold: usize,
 }
 #[derive(Debug)]
 struct Decode {
-    codec: ws_pmd::Decoder,
+    window_bits: u8,
     max_message: usize,
     compressed: bool,
 }
@@ -256,14 +258,40 @@ impl ExtensionEncoder for Encode {
                 "outgoing compression requires a complete message",
             ));
         }
-        let candidate = self
-            .codec
-            .prepare_message(payload)
-            .map_err(io::Error::other)?;
-        if candidate.as_bytes().len() >= payload.len() {
-            candidate.reset_to_plain();
-        } else {
-            *payload = candidate.commit().as_slice().into();
+        // Both directions negotiate no context takeover. Allocate codec state for
+        // this call rather than retaining an allocation on idle sockets.
+        let mut codec = Compress::new_with_window_bits(
+            Compression::new(COMPRESSION_LEVEL),
+            false,
+            self.window_bits,
+        );
+        let mut encoded = Vec::with_capacity(payload.len() / 4);
+        let mut scratch = [0; 8192];
+        loop {
+            let before_in = codec.total_in();
+            let before_out = codec.total_out();
+            codec
+                .compress(
+                    &payload[before_in as usize..],
+                    &mut scratch,
+                    FlushCompress::Sync,
+                )
+                .map_err(io::Error::other)?;
+            let written = (codec.total_out() - before_out) as usize;
+            encoded.extend_from_slice(&scratch[..written]);
+            if codec.total_in() as usize == payload.len() && written < scratch.len() {
+                break;
+            }
+            if codec.total_in() == before_in && written == 0 {
+                return Err(io::Error::other("compressor stalled"));
+            }
+        }
+        if !encoded.ends_with(&[0, 0, 255, 255]) {
+            return Err(io::Error::other("missing deflate trailer"));
+        }
+        encoded.truncate(encoded.len() - 4);
+        if encoded.len() < payload.len() {
+            *payload = encoded.as_slice().into();
             header.rsv1 = true;
         }
         Ok(())
@@ -282,8 +310,8 @@ impl ExtensionDecoder for Decode {
         // Ratchet passes the accumulated payload. Inflate once, at FIN, with a
         // limit applied inside the inflater before it allocates expanded output.
         if self.compressed && header.fin {
-            let decoded = self
-                .codec
+            let mut codec = message_decoder(self.window_bits)?;
+            let decoded = codec
                 .decompress(payload, true, DecompressedLimit::bytes(self.max_message))
                 .map_err(io::Error::other)?;
             *payload = decoded.as_slice().into();
@@ -292,6 +320,36 @@ impl ExtensionDecoder for Decode {
         Ok(())
     }
 }
+// ws-pmd only constructs codecs by consuming a negotiation. Recreate the
+// already-validated peer settings for each compressed incoming message, keeping
+// its RFC handling and expansion guard without retaining codecs between frames.
+fn message_decoder(window_bits: u8) -> io::Result<ws_pmd::Decoder> {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        SEC_WEBSOCKET_EXTENSIONS,
+        format!("permessage-deflate; client_max_window_bits={window_bits}")
+            .parse()
+            .map_err(io::Error::other)?,
+    );
+    let config = ServerConfig::new()
+        .server_no_context_takeover(true)
+        .client_no_context_takeover(true);
+    let selected = ServerHandshake::accept(config, &headers)
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other("invalid saved deflate settings"))?;
+    headers.insert(SEC_WEBSOCKET_EXTENSIONS, selected.value().clone());
+    let agreed = selected
+        .finish(&headers, PmdComposition::Compatible)
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other("missing saved deflate agreement"))?;
+    let (_, decoder) = agreed.into_codecs(
+        EncoderConfig::new()
+            .compression_level(COMPRESSION_LEVEL)
+            .map_err(io::Error::other)?,
+    );
+    Ok(decoder)
+}
+
 impl ExtensionEncoder for Deflate {
     type Error = io::Error;
     fn encode(&mut self, p: &mut BytesMut, h: &mut FrameHeader) -> io::Result<()> {
@@ -621,9 +679,8 @@ mod tests {
 
     #[test]
     fn incompressible_messages_stay_plain() {
-        let (codec, _) = codecs();
         let mut encoder = Encode {
-            codec,
+            window_bits: 12,
             threshold: 1024,
         };
         let mut seed = 42u32;
@@ -649,10 +706,83 @@ mod tests {
     }
 
     #[test]
-    fn expanded_payload_is_bounded_and_repeated_messages_reset() {
-        let (mut encoder, decoder) = codecs();
+    fn large_messages_round_trip_across_compressor_output_chunks() {
+        let mut encoder = Encode {
+            window_bits: 12,
+            threshold: 1024,
+        };
+        let mut seed = 42u32;
+        for size in [1024, 8192, 131072] {
+            let data: Vec<u8> = (0..size)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    (seed % 16) as u8
+                })
+                .collect();
+            let mut payload = BytesMut::from(data.as_slice());
+            let mut header = FrameHeader {
+                fin: true,
+                rsv1: false,
+                rsv2: false,
+                rsv3: false,
+                opcode: OpCode::Binary,
+            };
+            encoder.encode(&mut payload, &mut header).unwrap();
+            assert!(header.rsv1);
+            let (_, mut decoder) = codecs();
+            assert_eq!(
+                decoder
+                    .decompress(&payload, true, DecompressedLimit::bytes(size))
+                    .unwrap(),
+                data
+            );
+        }
+    }
+
+    #[test]
+    fn idle_extensions_hold_only_settings_and_receive_messages_independently() {
+        assert!(std::mem::size_of::<Deflate>() <= 48);
+        for bits in [8, 9, 12, 15] {
+            assert!(message_decoder(bits).is_ok());
+        }
         let mut decoder = Decode {
-            codec: decoder,
+            window_bits: 15,
+            max_message: 4096,
+            compressed: false,
+        };
+        let mut header = FrameHeader {
+            fin: true,
+            rsv1: true,
+            rsv2: false,
+            rsv3: false,
+            opcode: OpCode::Text,
+        };
+        for size in [4096, 1024, 4096] {
+            let (mut encoder, _) = codecs();
+            let original = vec![b'x'; size];
+            let encoded = encoder.prepare_message(&original).unwrap().commit();
+            let mut payload = BytesMut::from(encoded.as_slice());
+            decoder.decode(&mut payload, &mut header).unwrap();
+            assert_eq!(payload.as_ref(), original);
+        }
+        // RFC 7692 permits BFINAL streams followed by the stripped empty block.
+        let mut payload = BytesMut::from(&[0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00][..]);
+        decoder.decode(&mut payload, &mut header).unwrap();
+        assert_eq!(payload.as_ref(), b"Hello");
+        // An ordinary client auth/request frame never creates an inflater.
+        header.rsv1 = false;
+        let mut payload = BytesMut::from(&b"small client request"[..]);
+        decoder.decode(&mut payload, &mut header).unwrap();
+        assert_eq!(payload.as_ref(), b"small client request");
+    }
+
+    #[test]
+    fn expanded_payload_is_bounded_and_repeated_messages_reset() {
+        let (mut encoder, _) = codecs();
+        let mut decoder = Decode {
+            window_bits: 15,
             max_message: 4096,
             compressed: false,
         };

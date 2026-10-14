@@ -3,11 +3,12 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
+import { createHash } from 'node:crypto';
 const binary = process.env.RUNTIME_BINARY ?? 'rust/target/debug/gonvex-runtime';
 const trials = 5;
 const count = 1000;
 const rss = async pid => Number((await readFile(`/proc/${pid}/status`, 'utf8')).match(/VmRSS:\s+(\d+)/)[1]) * 1024;
-const output = { timestamp: new Date().toISOString(), trials, socketsPerTrial: count, plain: [], compressed: [] };
+const output = { timestamp: new Date().toISOString(), trials, socketsPerTrial: count, binarySha256: createHash('sha256').update(await readFile(binary)).digest('hex'), plain: [], compressed: [] };
 for (let trial = 0; trial < trials; trial++) {
   for (const compression of trial % 2 === 0 ? [false, true] : [true, false]) {
     const portServer = createServer();
