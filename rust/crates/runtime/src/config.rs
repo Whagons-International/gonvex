@@ -16,6 +16,8 @@ pub struct Config {
     pub tenant_database_urls: BTreeMap<String, String>,
     pub project_database_urls: BTreeMap<String, String>,
     pub require_auth: bool,
+    pub websocket_compression: bool,
+    pub websocket_compression_threshold: usize,
     pub control_secret: Option<String>,
     pub auth_public_url: Option<String>,
     pub admin_key: Option<String>,
@@ -188,6 +190,16 @@ impl Config {
             project_database_urls: string_map(
                 "GONVEX_PROJECT_DATABASE_URLS",
                 lookup("GONVEX_PROJECT_DATABASE_URLS"),
+            )?,
+            websocket_compression: boolean(
+                "GONVEX_WS_COMPRESSION",
+                lookup("GONVEX_WS_COMPRESSION"),
+                true,
+            )?,
+            websocket_compression_threshold: integer(
+                "GONVEX_WS_COMPRESSION_THRESHOLD",
+                lookup("GONVEX_WS_COMPRESSION_THRESHOLD"),
+                1024,
             )?,
             require_auth: boolean("GONVEX_REQUIRE_AUTH", lookup("GONVEX_REQUIRE_AUTH"), false)?,
             control_secret: non_empty(lookup("GONVEX_DASHBOARD_SESSION_SECRET")),
@@ -638,6 +650,33 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_owned()))
         })
+    }
+
+    #[test]
+    fn websocket_compression_config() {
+        let defaults = config(&[]).unwrap();
+        assert!(defaults.websocket_compression);
+        assert!(
+            !config(&[("GONVEX_WS_COMPRESSION", "false")])
+                .unwrap()
+                .websocket_compression
+        );
+        assert_eq!(defaults.websocket_compression_threshold, 1024);
+        let enabled = config(&[
+            ("GONVEX_WS_COMPRESSION", "true"),
+            ("GONVEX_WS_COMPRESSION_THRESHOLD", "2048"),
+        ])
+        .unwrap();
+        assert!(enabled.websocket_compression);
+        assert_eq!(enabled.websocket_compression_threshold, 2048);
+        assert!(matches!(
+            config(&[("GONVEX_WS_COMPRESSION", "maybe")]),
+            Err(ConfigError::Boolean { .. })
+        ));
+        assert!(matches!(
+            config(&[("GONVEX_WS_COMPRESSION_THRESHOLD", "0")]),
+            Err(ConfigError::Integer { .. })
+        ));
     }
 
     #[test]

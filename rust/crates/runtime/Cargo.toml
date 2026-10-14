@@ -43,6 +43,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 url.workspace = true
 duckdb.workspace = true
+gonvex-websocket = { path = "../websocket" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

@@ -30,6 +30,8 @@ fn test_config(database_url: String) -> Config {
         tenant_database_urls: BTreeMap::new(),
         project_database_urls: BTreeMap::new(),
         require_auth: true,
+        websocket_compression: false,
+        websocket_compression_threshold: 1024,
         control_secret: Some("test-control-secret-that-is-long-enough".to_owned()),
         auth_public_url: Some("http://localhost:8080".to_owned()),
         admin_key: Some("test-admin-key".to_owned()),

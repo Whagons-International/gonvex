@@ -1,0 +1,19 @@
+[package]
+name = "gonvex-websocket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+bytes = "1"
+futures-util.workspace = true
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+ratchet_core = { version = "1.2.1", features = ["split"] }
+ratchet_ext = "1.2.1"
+tokio.workspace = true
+ws-pmd = "=0.1.0"
+
+[dev-dependencies]
+serde_json.workspace = true

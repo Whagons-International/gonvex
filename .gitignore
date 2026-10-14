@@ -22,3 +22,5 @@ test-results/
 .ralph/
 .recovery/
 rust/target/
+
+rust/target-websocket/
