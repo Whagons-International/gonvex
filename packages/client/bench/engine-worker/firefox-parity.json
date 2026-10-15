@@ -1,0 +1,8 @@
+{
+  "browser": "firefox",
+  "version": "151.0",
+  "playwright": "1.61.0",
+  "status": "NOT VALIDATED",
+  "seedRows": 1000,
+  "error": "Playwright internal assertion in FFPage._onWebSocketOpened (coreBundle.js:44287) during the first dedicated-worker connection; process exited before parity or measured samples. No SDK assertion was reported."
+}

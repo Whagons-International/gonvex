@@ -9,6 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./engine": {
+      "types": "./dist/engine/client.d.ts",
+      "default": "./dist/engine/client.js"
+    },
+    "./engine-worker": {
+      "types": "./dist/engine/worker.d.ts",
+      "default": "./dist/engine/worker.js"
     }
   },
   "types": "./dist/index.d.ts",

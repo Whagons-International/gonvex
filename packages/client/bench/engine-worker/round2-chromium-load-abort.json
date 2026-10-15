@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "browser": "chromium",
+    "version": "149.0.7827.55",
+    "sdkCommit": "14d8cf2a8bfda6ca5542b30974fa20016c3fa0a1",
+    "fixture": "engine-worker-fixture-v1",
+    "admission": "sequential",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "cores": 16,
+    "ram": 33537105920,
+    "os": "linux 7.2.4-arch1-2",
+    "network": "local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate",
+    "load": [
+      2.39,
+      2.89,
+      2.92
+    ],
+    "production": true,
+    "engineRevision": "checkout",
+    "profileIO": false,
+    "loadChecks": [
+      {
+        "index": -2,
+        "mode": "legacy",
+        "load": [
+          4.15,
+          3.31,
+          3.06
+        ]
+      },
+      {
+        "index": -2,
+        "mode": "worker",
+        "load": [
+          2.54,
+          3.03,
+          2.98
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          2.9,
+          2.96,
+          2.95
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "load": [
+          3.58,
+          3.06,
+          2.98
+        ]
+      }
+    ],
+    "fixtureIsolation": "edits-accumulate-across-modes",
+    "firefoxWorkerWebSocketWorkaround": false,
+    "seed": {
+      "rows": 50000,
+      "rowBytes": 2554
+    },
+    "correctness": {
+      "deniedApis": 3,
+      "retryResult": 1,
+      "durableCrashRecovery": true,
+      "reconnect": true
+    },
+    "failure": "Load gate stopped after two warmup pairs, before measured samples. See execution log; subsequent workstation load observation was 11.02 / 16 cores.",
+    "coldSamplingAligned": false
+  },
+  "samples": []
+}

@@ -41,6 +41,8 @@ export type OutboxStore = {
   append?(entry: Omit<ReducerOutboxEntry, "id">): Promise<ReducerOutboxEntry>;
   /** Every persisted entry across all scopes; called once to hydrate. */
   load(scope?: string): Promise<ReducerOutboxEntry[]>;
+  /** Optional fenced point reads for durable engine receipts. */
+  getMany?(ids: readonly number[]): Promise<Array<ReducerOutboxEntry | undefined>>;
   /** Insert or replace the entry with this id. */
   put(entry: ReducerOutboxEntry): Promise<void>;
   delete(id: number): Promise<void>;
@@ -50,8 +52,13 @@ export type OutboxStore = {
 };
 
 export type ReducerOutboxEntry = {
+  /** Optional flat recovery result; presence distinguishes an undefined result. */
+  engineResult?: unknown;
+  engineCommandNow?: number;
   /** Original receipt namespace survives operation renames across client upgrades. */
   receiptPath?: string;
+  /** Optional durable local RPC receipt, written with admission before prediction. */
+  engineOutcome?: { result: unknown; commandNow?: number; fresh?: boolean };
   /** Auto-incremented sequence number. Lower ids always happened first. */
   id: number;
   /** Authenticated project/tenant/user identity that owns this reducer. */
@@ -128,6 +135,7 @@ export function outboxEntryIsQueued(entry: Pick<ReducerOutboxEntry, "state">): b
 }
 
 export type EnqueueReducer = {
+  engineOutcome?: { result: unknown; commandNow?: number; fresh?: boolean };
   scope: string;
   path: string;
   args: unknown;

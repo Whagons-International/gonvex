@@ -1,0 +1,56 @@
+2026-10-14T12:00:26-0700 before chromium
+ 12:00:26 up 15 days, 18:51,  5 users,  load average: 12.74, 18.52, 27.68
+top - 12:00:27 up 15 days, 18:51,  5 users,  load average: 12.74, 18.52, 27.68
+Tasks: 693 total, 2 running, 689 sleep, 0 d-sleep, 0 stopped, 2 zombie
+%Cpu(s):  4.5 us,  3.7 sy,  0.0 ni, 90.7 id,  0.3 wa,  0.5 hi,  0.3 si,  0.0 st 
+MiB Mem :  31983.5 total,   4159.5 free,  16628.2 used,  12263.4 buff/cache     
+MiB Swap:  36864.0 total,  26874.8 free,   9989.1 used.  15355.3 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+     19 root      20   0       0      0      0 S   4.6   0.0   6:08.66 rcu_exp+
+   2508 root      20   0 4387896 175948  23728 S   4.6   0.5 142:44.55 dockerd
+   3742 root      20   0 1268848   9988   4176 S   4.6   0.0  14:34.18 contain+
+ 456040 gabriel   20   0  307884   4196   3872 S   4.6   0.0  29:17.90 flatpak+
+3878606 gabriel   20   0  809860  90284  39828 S   4.6   0.3  20:48.93 hyprlock
+3951704 gabriel   20   0 1722088 307156  85940 S   4.6   0.9   0:11.48 codex
+3953467 gabriel   20   0 5629796 267440  82228 S   4.6   0.8   0:07.67 claude
+3960148 gabriel   20   0 1297420  25068  10836 S   4.6   0.1   0:00.38 cloudfl+
+3982555 gabriel   20   0 1451.9g 357760 113876 S   4.6   1.1   0:28.44 chrome-+
+3992687 gabriel   20   0 1255272 294240 143484 S   4.6   0.9   0:02.55 codex
+4001844 gabriel   20   0 1450.2g 640588 129768 S   4.6   2.0   0:08.29 chrome-+
+4008410 gabriel   20   0   11616   6064   3820 R   4.6   0.0   0:00.02 top
+4008475 gabriel   20   0    8572   4544   3700 S   4.6   0.0   0:00.01 hyprloc+
+      1 root      20   0   22304  12224   7980 S   0.0   0.0   4:20.43 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:01.97 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+      4 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+      5 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+2026-10-14T12:03:27-0700 before chromium
+ 12:03:27 up 15 days, 18:54,  5 users,  load average: 4.46, 12.30, 23.66
+2026-10-14T14:06:08-07:00
+ 14:06:08 up 15 days, 20:57,  5 users,  load average: 25.88, 17.85, 12.24
+top - 14:06:08 up 15 days, 20:57,  5 users,  load average: 25.88, 17.85, 12.24
+Tasks: 751 total, 11 running, 738 sleep, 0 d-sleep, 0 stopped, 2 zombie
+%Cpu(s): 85.3 us, 12.5 sy,  0.0 ni,  0.4 id,  0.2 wa,  1.3 hi,  0.2 si,  0.0 st 
+MiB Mem :  31983.5 total,    806.1 free,  24734.1 used,   8269.0 buff/cache     
+MiB Swap:  36864.0 total,  21316.7 free,  15547.3 used.   7249.3 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+1287898 gabriel   20   0   31.3g 618024  51196 R 441.2   1.9   0:04.32 node
+1281220 gabriel   20   0 2298056   1.0g  22740 R 163.9   3.1   1:47.18 compile
+ 517923 gabriel   20   0   53.4g 459784 194328 R 105.0   1.4  40:55.22 chrome
+1288508 gabriel   20   0   11.1g 193184  52496 S 100.8   0.6   0:01.72 node
+1288754 gabriel   20   0 1091088 159252  51636 R 100.8   0.5   0:01.09 node
+1285967 gabriel   20   0   21.4g 838360  53944 R  92.4   2.6   0:17.11 node
+1287072 gabriel   20   0 1732000 152736  35524 S  88.2   0.5   0:04.90 ffmpeg
+1287017 gabriel   20   0 1455.9g 477144 147964 R  84.0   1.5   0:06.67 chrome
+1289025 gabriel   20   0 1288496 100468  44968 R  84.0   0.3   0:00.25 node
+3964122 gabriel   20   0   52.9g 298972 228408 S  79.8   0.9  64:19.52 chrome-+
+1286629 gabriel   20   0   31.7g 287608  52008 R  75.6   0.9   0:09.18 node
+ 518131 gabriel   20   0   53.4g 165276 110224 S  12.6   0.5  25:27.06 chrome
+ 571484 root      20   0       0      0      0 I  12.6   0.0   0:15.75 kworker+
+1257758 gabriel   20   0   44.2g 822532  74100 S  12.6   2.5   0:42.91 node
+1289026 gabriel   20   0   11616   6144   3892 R  12.6   0.0   0:00.05 top
+   1078 gabriel   20   0 1044548 104504  94688 R   8.4   0.3 285:08.59 Hyprland
+ 518133 gabriel   20   0   52.5g  75908  49672 S   8.4   0.2   6:08.69 chrome
+ 723563 gabriel   20   0 1472.8g 489512 154324 S   8.4   1.5   6:02.53 chrome-+

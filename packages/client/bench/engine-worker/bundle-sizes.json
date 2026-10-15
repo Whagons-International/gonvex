@@ -1,0 +1,66 @@
+{
+  "base": "11820f669782589c9d3af66bc7dfbeda2351be27",
+  "staging": "1f2a64956a0f76869e58dd514e14c168a6b4a407",
+  "defaultByteIdentical": true,
+  "defaultSha256": "f31f43b017247a5a6977f244267dccf315e2df32b365b8a85e51de2f6680df0b",
+  "stagingBefore": [
+    {
+      "file": "default-staging.js",
+      "bytes": 377362,
+      "gzip": 103651
+    }
+  ],
+  "method": "esbuild production ESM library entries, minified and gzip; identical dependency builds",
+  "before": [
+    {
+      "file": "default-before.js",
+      "bytes": 350383,
+      "gzip": 98587
+    }
+  ],
+  "after": [
+    {
+      "file": "default-after.js",
+      "bytes": 350383,
+      "gzip": 98587
+    }
+  ],
+  "engine": [
+    {
+      "file": "engine.js",
+      "bytes": 16101,
+      "gzip": 5312
+    },
+    {
+      "file": "worker.js",
+      "bytes": 2933,
+      "gzip": 1376
+    },
+    {
+      "file": "import-wrapper-RUY2XTU7.js",
+      "bytes": 260,
+      "gzip": 205
+    },
+    {
+      "file": "host-67UFZND3.js",
+      "bytes": 121,
+      "gzip": 106
+    },
+    {
+      "file": "chunk-FXU2UMBN.js",
+      "bytes": 34165,
+      "gzip": 10817
+    },
+    {
+      "file": "chunk-3RLCFRCZ.js",
+      "bytes": 264137,
+      "gzip": 69994
+    },
+    {
+      "file": "chunk-2W5BNO7R.js",
+      "bytes": 100268,
+      "gzip": 32805
+    }
+  ],
+  "legacyImportsWorker": false
+}

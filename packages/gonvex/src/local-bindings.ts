@@ -86,6 +86,11 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
   });
   return {
     ...native,
+    "local-engine-reducers.js": header + localCode,
+    "local-engine-reducers.d.ts": `${header}import type { ReducerDefinition } from "@gonvex/module-sdk";\nexport declare const localReducers: Readonly<Record<string, ReducerDefinition<any, any>>>;\n`,
+    "local-engine-runtime.ts": `${header}import { createPortableReducer } from "@gonvex/local-runtime/portable-client";\nimport { localSchema } from "./local-schema.js";\nimport { localReducers } from "./local-engine-reducers.js";\nexport const localRuntime = { ...${JSON.stringify({mode:"portable",clientContract,artifactHash:manifest.module.hash,tables:Object.keys(schema),collections:Object.entries(manifest.functions).filter(([path]) => path.startsWith("__local.")).map(([path,entry]) => ({kind:"query",path,delivery:"replica",replica:entry.replica})),localDependencies})} as const, create: () => createPortableReducer({schema: localSchema, reducers: localReducers, artifactHash: ${JSON.stringify(manifest.module.hash)}}) };\n`,
+    "gonvex-engine-worker.ts": `${header}import { serveEngineWorker } from "@gonvex/client/engine-worker";\nimport { localRuntime } from "./local-engine-runtime.js";\nserveEngineWorker({ localRuntime });\n`,
+    "gonvex-engine.ts": `${header}export const engineManifest = { protocolVersion: 1, artifactHash: ${JSON.stringify(manifest.module.hash)} } as const;\nexport const engineWorkerUrl = new URL("./gonvex-engine-worker.ts", import.meta.url);\nexport const createEngineWorker = () => new Worker(new URL("./gonvex-engine-worker.ts", import.meta.url), { type: "module", name: "gonvex-sync-engine" });\n`,
     "local-schema.ts": `${header}export const localSchema = ${JSON.stringify(schema)} as const;\n`,
     ...Object.fromEntries(Object.entries(webChunks).map(([name, code]) => [name, header + code])),
     "local-reducers.d.ts": `${header}import type { ReducerDefinition } from "@gonvex/module-sdk";\nexport declare const localReducers: Readonly<Record<string, () => Promise<ReducerDefinition<any, any>>>>;\n`,

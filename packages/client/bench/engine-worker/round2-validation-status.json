@@ -1,0 +1,56 @@
+{
+  "sdkCommit": "3e5c3d27dec689ae588c80df4c17fe70ed8c70cd",
+  "configuration": {
+    "warmupPairs": 5,
+    "measuredPairs": 20,
+    "admission": "sequential",
+    "startLoadLimit": 0.35,
+    "loadLimit": 0.5,
+    "browserOrder": [
+      "chromium",
+      "firefox",
+      "webkit"
+    ],
+    "TMPDIR": "/home/gabriel/.cache/sdk-wave1/tmp"
+  },
+  "loadWaitBudgetSeconds": 10800,
+  "loadWaitBudgetExhausted": true,
+  "waitAccounting": "Initial 180-second pre-browser wait plus completed 30-second guarded-runner waits; stopped at first minute check after budget exhaustion. Approximately 180.5 minutes completed.",
+  "observedPeakOneMinuteLoad": 29.38,
+  "preChromiumOneMinuteLoad": 4.46,
+  "browsers": {
+    "chromium": {
+      "verdict": "NOISY",
+      "measuredPairs": 10,
+      "discardedPairs": 14,
+      "acceptedNumericGates": {
+        "coldScript": "PASS",
+        "burst": "PASS",
+        "drain": "PASS"
+      },
+      "correctness": {
+        "deniedApis": 3,
+        "retryResult": 1,
+        "durableCrashRecovery": true,
+        "batchCrashRecovery": {
+          "durablePrefix": 1,
+          "commands": 32,
+          "sameIds": true
+        },
+        "reconnect": true
+      },
+      "multiTab": "NOT_RUN"
+    },
+    "firefox": {
+      "verdict": "NOISY",
+      "measuredPairs": 0,
+      "reason": "Not started; serial queue stopped after load-wait budget exhaustion"
+    },
+    "webkit": {
+      "verdict": "NOISY",
+      "measuredPairs": 0,
+      "reason": "Not started; serial queue stopped after load-wait budget exhaustion"
+    }
+  },
+  "mergeReadyByFinalGates": false
+}

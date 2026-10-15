@@ -39,6 +39,11 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   assert.equal(functions.external.localExecution, undefined);
   const generated = await localBindings(root, {module,functions});
   assert.match(generated['local-executor.ts'], /createPortableReducer/);
+  assert.match(generated['gonvex-engine-worker.ts'], /serveEngineWorker/);
+  assert.match(generated['gonvex-engine.ts'], /new Worker\(new URL/);
+  assert.match(generated['local-engine-runtime.ts'], /local-engine-reducers/);
+  assert.doesNotMatch(generated['local-engine-reducers.js'], /import\(/);
+  assert.match(generated['local-engine-reducers.js'], /ctx\.db\.update/);
   assert.match(generated['local-runtime.native.tsx'], /installNativeRuntimeGlobals/);
   assert.equal(generated['local-worker.ts'], undefined);
   assert.deepEqual(JSON.parse(generated['local-native-host.json']), {});
@@ -57,6 +62,9 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   // worker, hidden WebView or WebAssembly engine in its dependency graph.
   await symlink(fileURLToPath(new URL('../../local-runtime', import.meta.url)), join(root, 'node_modules', '@gonvex', 'local-runtime'));
   for (const [name, source] of Object.entries(generated)) await writeFile(join(root, 'gonvex', name), source);
+  await symlink(fileURLToPath(new URL('../../client', import.meta.url)), join(root, 'node_modules', '@gonvex', 'client'));
+  const engineOutput = await build({input:join(root,'gonvex','gonvex-engine-worker.ts'),platform:'browser',write:false,output:{format:'iife',codeSplitting:false}});
+  assert.match(engineOutput.output.find(chunk => chunk.type === 'chunk').code, /External I\/O is unavailable in a local Reducer/);
   const output = await build({input:join(root,'gonvex','local-executor.ts'),platform:'browser',write:false,output:{format:'iife',name:'SharedExecutor',codeSplitting:false}});
   const code = output.output.find(chunk=>chunk.type==='chunk').code;
   assert.doesNotMatch(code,/PGlite|new Worker|WebAssembly\.instantiate/);
