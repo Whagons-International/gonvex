@@ -28,9 +28,10 @@ const (
 )
 
 type App struct {
-	mu        sync.RWMutex
-	functions map[string]Function
-	crons     []CronSpec
+	mu                 sync.RWMutex
+	functions          map[string]Function
+	crons              []CronSpec
+	mutationMiddleware MutationMiddleware
 }
 
 type Function struct {
@@ -418,6 +419,7 @@ type RuntimeContext struct {
 
 	ProjectID   string
 	TenantID    string
+	RequestID   string
 	User        *User
 	Permissions map[string]any
 	DatabaseURL string
@@ -697,10 +699,9 @@ func (a *App) ExecuteSync(ctx *QueryCtx, path string, rawArgs json.RawMessage) (
 }
 
 func (a *App) ExecuteMutation(ctx *MutationCtx, path string, rawArgs json.RawMessage) (any, error) {
-	if ctx == nil {
-		ctx = &MutationCtx{}
-	}
-	return a.execute(path, rawArgs, ctx, FunctionKindMutation)
+	return a.RunMutation(ctx, path, rawArgs, func(ctx *MutationCtx, args json.RawMessage) (any, error) {
+		return a.execute(path, args, ctx, FunctionKindMutation)
+	})
 }
 
 func (a *App) ExecuteInternalMutation(ctx *MutationCtx, path string, rawArgs json.RawMessage) (any, error) {

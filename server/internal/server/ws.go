@@ -647,6 +647,7 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		c.closeSync(message.ID)
 	case "mutation.call":
 		if !c.requireAuth(ctx, "mutation.error", message.ID) {
+			c.observeRejectedMutation(ctx, mutationCallRequest{ID: message.ID, Path: message.Path, Args: message.Args})
 			return
 		}
 		c.callMutation(ctx, receivedAt, mutationCallRequest{
@@ -659,6 +660,9 @@ func (c *wsConn) handle(ctx context.Context, message clientMessage) {
 		// frame so the client settles them individually, and one failure does
 		// not abandon the writes queued after it.
 		if !c.requireAuth(ctx, "mutation.error", "") {
+			for _, call := range message.Calls[:min(len(message.Calls), maxBatchedClientRequests)] {
+				c.observeRejectedMutation(ctx, call)
+			}
 			return
 		}
 		if len(message.Calls) > maxBatchedClientRequests {
@@ -2316,6 +2320,29 @@ func (s *Server) executeTenantMutation(ctx context.Context, projectID string, te
 }
 
 func (s *Server) executeTenantMutationForCaller(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
+	app := s.appForProject(ctx, projectID)
+	return app.RunMutation(mutationRequestContext(ctx, projectID, tenantID, caller), path, rawArgs,
+		func(request *gonvex.MutationCtx, clean json.RawMessage) (any, error) {
+			return s.executeTenantMutationObserved(request.Context, projectID, tenantID, caller, path, clean)
+		})
+}
+
+func mutationRequestContext(ctx context.Context, projectID, tenantID string, caller callerContext) *gonvex.MutationCtx {
+	return &gonvex.MutationCtx{RuntimeContext: gonvex.RuntimeContext{
+		Context: ctx, ProjectID: projectID, TenantID: tenantIDFromRequest(projectID, tenantID),
+		RequestID: mutationIDFromContext(ctx), User: caller.user, Logger: slog.Default(),
+	}}
+}
+
+func (c *wsConn) observeRejectedMutation(ctx context.Context, request mutationCallRequest) {
+	app := c.server.appForProject(ctx, c.project)
+	_, _ = app.RunMutation(mutationRequestContext(withMutationID(ctx, request.ID), c.project, c.tenant, c.caller()), request.Path, request.Args,
+		func(*gonvex.MutationCtx, json.RawMessage) (any, error) {
+			return nil, &gonvex.DispatchError{Code: "unauthenticated", Message: "authentication is required"}
+		})
+}
+
+func (s *Server) executeTenantMutationObserved(ctx context.Context, projectID string, tenantID string, caller callerContext, path string, rawArgs json.RawMessage) (result any, err error) {
 	kind := s.functionKind(projectID, path, "mutation")
 	s.metrics.recordFunctionStart(kind)
 	execution := newRuntimeFunctionLog(projectID, tenantID, path, kind, caller, rawArgs)
@@ -2410,6 +2437,7 @@ func (s *Server) runMutationInTx(mutationCtx *gonvex.MutationCtx, path string, r
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback() // Also release the transaction if middleware recovers a handler panic.
 	mutationCtx.Tx = tx
 	if hasClaim {
 		claimed, err := claimMutationIdempotency(mutationCtx.Context, tx, claim, path)
@@ -2590,6 +2618,7 @@ func (s *Server) runtimeContext(ctx context.Context, projectID string, tenantID 
 		Context:          ctx,
 		ProjectID:        projectID,
 		TenantID:         activeTenant,
+		RequestID:        mutationIDFromContext(ctx),
 		DatabaseURL:      store.DatabaseURL,
 		DB:               store.DB,
 		LandlordDB:       landlordStore.DB,
