@@ -582,6 +582,7 @@ export class LocalReplica implements LocalReplicaView {
       this.liveQueries = new Map(this.liveQueries).set(signature,normalizeWindow(loaded.window));
       if(loaded.window.kind==='replica' && loaded.window.completeness==='complete' && !loaded.window.truncated && loaded.rows.length===loaded.window.ids.length)this.residentPartialTables.delete(loaded.window.entity);
       this.markEntityChanged(loaded.window.entity,loaded.window.ids);
+      this.markWindowsForRows(loaded.window.entity, new Set(loaded.window.ids), signature);
       this.markWindowChanged(signature);
       this.notify(true);
     }, true);
@@ -617,9 +618,15 @@ export class LocalReplica implements LocalReplicaView {
       const rows=await this.storage.loadEntityRows(this.scopeValue,entity,missing);
       if(scopeGeneration!==this.scopeActivationGeneration)return;
       const next=residentRows(this.entities.get(entity));
-      for(const {id,row} of rows)if(this.retainedRows.get(entity)?.has(id))setResidentRow(next,id,cloneRow(row));
+      const loadedIDs = new Set<string>();
+      for (const { id, row } of rows) if (this.retainedRows.get(entity)?.has(id)) {
+        setResidentRow(next, id, cloneRow(row));
+        loadedIDs.add(id);
+      }
       this.entities=new Map(this.entities).set(entity,next);
-      this.markEntityChanged(entity,missing);this.notify(true);
+      this.markEntityChanged(entity,missing);
+      this.markWindowsForRows(entity, loadedIDs);
+      this.notify(true);
     }, true);
 
     let released=false;
@@ -1852,6 +1859,17 @@ export class LocalReplica implements LocalReplicaView {
     // Clear before callbacks so reentrant optimistic writes get their own batch.
     this.changedEntities.clear(); this.changedWindows.clear(); this.invalidateSubscriptions = false;
     for (const [callback, ids] of callbacks) callback(ids);
+  }
+
+  /** Residency changes must wake every overlapping window, not only the lease
+   * that loaded the rows. Otherwise a cached empty projection can outlive them. */
+  private markWindowsForRows(entity: string, ids: ReadonlySet<string>, except?: string) {
+    if (!ids.size) return;
+    for (const window of this.liveQueries.values()) {
+      if (window.signature !== except && window.entity === entity && window.ids.some(id => ids.has(id))) {
+        this.markWindowChanged(window.signature);
+      }
+    }
   }
 
   private markEntityChanged(entity: string, ids?: Iterable<string>) {
