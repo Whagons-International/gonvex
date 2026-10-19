@@ -72,13 +72,15 @@ async function fixture() {
   await storage.replaceSnapshot({ entities: { tasks: { t1: { _id: "t1", count: 0, statusId: "todo" } } },
     liveQueries: { [collectionKey]: { signature: collectionKey, kind: "replica", entity: "tasks", key: "_id", ids: ["t1"], completeness: "complete", source: "server" } },
   }, "visible");
-  const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }, retry?: OutboxRetryOptions) => {
+  const create = (store = createKvOutboxStore(kv), clientContract?: { version: number; offlineMaxAgeMs: number | null }, retry?: OutboxRetryOptions, executionError?: Error) => {
     const host = createPortableReducer({schema: {tasks: {key: "_id",columns: {_id: {type: "text", nullable: false},count: {type: "bigint",nullable: true},statusId: {type: "text",nullable: true}}}}, reducers: {increment, createTask, setCount, conditionalIncrement},artifactHash: "artifact"});
     const client = new GonvexClient(url, {
       clientContract,
       project: "project", tenant: "tenant", identity: { sub: "account", iss: "issuer" },
       localReplica: { storage }, outbox: { store, retry },
-      localRuntime: { mode: "portable", artifactHash: "artifact", tables: ["tasks"], collections: [collection], create: () => host },
+      localRuntime: { mode: "portable", artifactHash: "artifact", tables: ["tasks"], collections: [collection], create: () => executionError
+        ? { ...host, executeRead: async () => { throw executionError; } }
+        : host },
     });
     clients.push(client);
     return client;
@@ -320,6 +322,50 @@ describe("SDK-owned local reducer lifecycle", () => {
     const restarted = create();
     await vi.waitFor(() => expect(restarted.localReplica.entity("tasks", "t1")?.count).toBe(2), { timeout: 10000 });
     expect(await restarted.reducer(ref, {})).toBe(3);
+  });
+
+  it.each([
+    new MissingReducerDataError({ table: 'memberTeams', where: { column: 'memberId', op: 'eq', value: 'member' } }),
+    new TypeError('Failed to fetch dynamically imported module'),
+  ])('preserves a durable prediction across two offline restarts when execution is unavailable: %s', async error => {
+    const { create, kv } = await fixture();
+    const first = create();
+    expect(await first.reducer(ref, { amount: 2 })).toBe(2);
+    const [intent] = await first.listIntents();
+    const store = createKvOutboxStore(kv);
+    const savedPatches = structuredClone((await store.load())[0]!.patches);
+    first.close();
+
+    for (let restart = 0; restart < 2; restart++) {
+      const restored = create(undefined, undefined, undefined, error);
+      await expect(restored.localSessionReady).resolves.toBe(true);
+      expect(await restored.listIntents()).toEqual([expect.objectContaining({ id: intent!.id, state: 'pending' })]);
+      expect(restored.connectionState().isWebSocketConnected).toBe(false);
+      expect(restored.localReplica.entity('tasks', 't1')?.count).toBe(2);
+      expect((await store.load())[0]!.patches).toEqual(savedPatches);
+      restored.close();
+    }
+
+    const reconnected = create();
+    const socket = await connect(reconnected);
+    await vi.waitFor(() => expect(socket.sent.filter(message => message.type === 'reducer.call')).toHaveLength(1));
+    const call = socket.sent.find(message => message.type === 'reducer.call');
+    expect(call.id).toBe(intent!.id);
+    socket.receive({ type: 'reducer.result', id: call.id, originCommandId: call.id, result: 2 });
+    await vi.waitFor(async () => expect(await reconnected.outboxCount()).toBe(0));
+    expect(socket.sent.filter(message => message.type === 'reducer.call')).toHaveLength(1);
+  });
+
+  it('still removes a prediction when replay encounters a local validation error', async () => {
+    const { create, kv } = await fixture();
+    const first = create();
+    await first.reducer(ref, {});
+    first.close();
+    const restored = create(undefined, undefined, undefined, new Error('Invalid integer for tasks.count'));
+    await restored.listIntents();
+    expect(restored.localReplica.entity('tasks', 't1')?.count).toBe(0);
+    expect((await createKvOutboxStore(kv).load())[0]!.patches).toEqual([]);
+    expect(await restored.outboxCount()).toBe(1);
   });
 
   it("rolls back a server rejection and re-executes the later dependent intent", async () => {

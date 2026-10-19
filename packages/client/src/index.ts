@@ -1325,8 +1325,14 @@ export class GonvexClient {
           // Re-execution is a prediction. Only an authoritative server rejection
           // removes a durable intent; missing data or local validation can make
           // its predicted transaction unavailable without rejecting the intent.
-          if (patches.length && scope === this.outboxScope && replicaScope === this.replicaScope) this.reportLocalFallback(entry.path, entry.idempotencyKey, "replay", error);
-          patches = [];
+          // Restore must not erase an already durable prediction just because
+          // offline coverage or the reducer's lazy chunk is unavailable. A
+          // rejected dependency still invalidates its old predicted effects.
+          const keepPrediction = !afterRejection && !this.isWebSocketConnected && localExecutionUnavailable(error);
+          if (!keepPrediction) {
+            if (patches.length && scope === this.outboxScope && replicaScope === this.replicaScope) this.reportLocalFallback(entry.path, entry.idempotencyKey, "replay", error);
+            patches = [];
+          }
         }
         if (scope !== this.outboxScope || replicaScope !== this.replicaScope) return;
         // Storage failures must abort rebasing, never masquerade as rejection.
@@ -5131,6 +5137,12 @@ export function entityStatusFromIntents(intents: readonly OutboxIntent[], entity
     else if (intent.state !== "committed" && status === undefined) status = "syncing";
   }
   return status;
+}
+
+function localExecutionUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "IncompleteReplicaError"
+    || /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|Loading chunk [\w-]+ failed/i.test(error.message);
 }
 
 function reducerErrorMessage(error: unknown) {
