@@ -18,9 +18,11 @@ mod operations;
 mod operator_data;
 pub mod public_functions;
 pub mod replica;
+mod replica_open_queue;
 pub mod sandbox;
 pub mod scheduler;
 mod service_principal;
+mod snapshot_delivery;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
@@ -1336,6 +1338,10 @@ async fn websocket(
     let mut telemetry_device = None;
     let mut telemetry_batch_enabled = false;
     let mut replica_snapshot_pages_enabled = false;
+    let mut replica_sum_digest_enabled = false;
+    let mut replica_native_rows_enabled = false;
+    let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
+    let mut legacy_snapshot_delivery = snapshot_delivery::LegacySnapshotDelivery::default();
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
@@ -1347,7 +1353,9 @@ async fn websocket(
     let mut feed = None;
     let mut feed_scheduler = FeedFirstScheduler::default();
     let mut sent_replica_revision = 0u64;
+    let mut sent_zero_bootstrap_watermark = false;
     let mut replicas = BTreeMap::new();
+    let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     let mut live_queries = BTreeMap::new();
     let mut control_queries = BTreeMap::new();
     let mut runtime_events = runtime.inner.runtime_events.subscribe();
@@ -1360,6 +1368,8 @@ async fn websocket(
         replica: None,
         capabilities: Some(ServerCapabilities {
             replica_snapshot_pages: Some(1),
+            replica_set_digest: Some(1),
+            replica_native_rows: Some(1),
             replica_resume: Some(1),
             query_resume: Some(1),
             preserve_subscriptions: Some(1),
@@ -1375,7 +1385,10 @@ async fn websocket(
             control_watermark: Some(1),
         }),
     };
-    if send_json(&mut socket, &ready).await.is_err() {
+    if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -1384,12 +1397,16 @@ async fn websocket(
     macro_rules! discard_tenant_session {
         () => {{
             replicas.clear();
+            replica_opens.clear();
+            snapshot_delivery.clear();
+            legacy_snapshot_delivery.clear();
             live_queries.clear();
             control_queries.clear();
             tenant_session = None;
             feed = None;
             feed_scheduler.reset();
             sent_replica_revision = 0;
+            sent_zero_bootstrap_watermark = false;
             runtime.inner.metrics.authenticated(
                 &connection_id,
                 &control::ControlConnection {
@@ -1406,7 +1423,27 @@ async fn websocket(
     }
 
     loop {
+        let preparing_replicas = !replica_opens.is_empty();
+        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
         let message = tokio::select! {
+            opened = replica_opens.next(), if preparing_replicas => {
+                if let Some(outcome) = opened {
+                    for response in install_replica_open_outcomes(&mut replicas, vec![outcome]) {
+                        let response = if replica_snapshot_pages_enabled && !replica_native_rows_enabled {
+                            let Some(response)=legacy_snapshot_delivery.admit(response) else {continue}; response
+                        } else {response};
+                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled, replica_native_rows_enabled, &mut snapshot_delivery).await.is_err() { return; }
+                    }
+                    record_connection_subscriptions(&runtime, &connection_id, &replicas, &live_queries, &control_queries);
+                }
+                continue;
+            }
+            _ = tokio::task::yield_now(), if !legacy_snapshot_delivery.is_empty() => {
+                for page in legacy_snapshot_delivery.next() {
+                    if send_json(&mut socket,&page).await.is_err() {return;}
+                }
+                continue;
+            }
             _ = tokio::time::sleep_until(auth_deadline), if pending_connection.is_some() => {
                 let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 1008, reason: "authentication deadline exceeded".into(),
@@ -1414,18 +1451,22 @@ async fn websocket(
                 break;
             }
             _ = async { if let Some(admission) = &public_admission { admission.changed.notified().await; } else { std::future::pending::<()>().await; } } => {
-                let _ = send_json(&mut socket, &ServerMessage::AuthError { code: Some("transient".into()), id: "session-expired".into(), error: "public tenant session is unavailable".into() }).await;
+                let _ = send_connection_json(&mut snapshot_delivery, &mut socket, &ServerMessage::AuthError { code: Some("transient".into()), id: "session-expired".into(), error: "public tenant session is unavailable".into() }).await;
                 break;
             }
             _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
                 if !revalidate_connection(&runtime, &control_connection).await {
                     replicas.clear();
+                    replica_opens.clear();
+                    snapshot_delivery.clear();
+                    legacy_snapshot_delivery.clear();
                     live_queries.clear();
                     control_queries.clear();
                     tenant_session = None;
                     feed = None;
                     feed_scheduler.reset();
                     sent_replica_revision = 0;
+                    sent_zero_bootstrap_watermark = false;
                     control_connection = control::ControlConnection {
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
@@ -1444,11 +1485,18 @@ async fn websocket(
                         id: "session-expired".to_owned(),
                         error: "authentication expired or was revoked".to_owned(),
                     };
-                    if send_json(&mut socket, &response).await.is_err() { break; }
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { break; }
                 }
                 continue;
             }
-            transport = next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler) => {
+            // Retain feed events in the bounded broadcast receiver until every
+            // newly prepared snapshot is installed. Each subscription skips
+            // events at/before its own snapshot cursor; receiver lag produces
+            // the existing reset, never a silently missed transaction.
+            transport = async {
+                if defer_feed { ScheduledTransport::Socket(socket.next().await) }
+                else { next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler).await }
+            } => {
                 match transport {
                     ScheduledTransport::Socket(message) => {
                         let Some(message) = message else { break; };
@@ -1474,7 +1522,7 @@ async fn websocket(
                             if membership_affects(session, &event) {
                                 discard_tenant_session!();
                                 for message in membership_changed_frames(transaction_watermark) {
-                                    if send_json(&mut socket, &message).await.is_err() { return; }
+                                    if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                                 }
                                 continue;
                             }
@@ -1482,12 +1530,12 @@ async fn websocket(
                                 .apply_live_query_feed_event(session, &mut live_queries, &event)
                                 .await
                             {
-                                if send_json(&mut socket, &message).await.is_err() { return; }
+                                if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
                             match runtime.apply_feed_event(session, &mut replicas, event).await {
                                 Ok(messages) => {
                                     for message in messages {
-                                        if send_json(&mut socket, &message).await.is_err() { return; }
+                                        if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                                     }
                                     // This is the connection-level commit
                                     // boundary. A transaction frame updates
@@ -1499,13 +1547,16 @@ async fn websocket(
                                     // where this connection has no visible
                                     // subscription changes.
                                     if let Some(watermark) = transaction_watermark {
-                                        if send_json(&mut socket, &watermark).await.is_err() { return; }
+                                        if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark).await.is_err() { return; }
                                         if let ServerMessage::ReplicaWatermark { revision } = watermark {
                                             sent_replica_revision = sent_replica_revision.max(revision);
                                         }
                                     }
                                     if reset {
                                         replicas.clear();
+                                        replica_opens.clear();
+                                        snapshot_delivery.clear();
+                                        legacy_snapshot_delivery.clear();
                                     }
                                 }
                                 Err(error) => {
@@ -1515,9 +1566,12 @@ async fn websocket(
                                             path: Some(subscription.path.clone()),
                                             error: error.to_string(),
                                         };
-                                        if send_json(&mut socket, &response).await.is_err() { return; }
+                                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
                                     }
                                     replicas.clear();
+                                    replica_opens.clear();
+                                    snapshot_delivery.clear();
+                                    legacy_snapshot_delivery.clear();
                                 }
                             }
                         }
@@ -1538,9 +1592,12 @@ async fn websocket(
                                 path: Some(subscription.path.clone()),
                                 reason: "change-feed-lagged".to_owned(),
                             };
-                            if send_json(&mut socket, &response).await.is_err() { return; }
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
                         }
                         replicas.clear();
+                        replica_opens.clear();
+                        snapshot_delivery.clear();
+                        legacy_snapshot_delivery.clear();
                         live_queries.clear();
                         continue;
                     }
@@ -1548,6 +1605,7 @@ async fn websocket(
                         feed = None;
                         feed_scheduler.reset();
                         sent_replica_revision = 0;
+                        sent_zero_bootstrap_watermark = false;
                         continue;
                     }
                     },
@@ -1566,7 +1624,7 @@ async fn websocket(
                             )
                             .await
                         {
-                            if send_json(&mut socket, &message).await.is_err() { return; }
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                         }
                     }
                     Ok(RuntimeEvent::PresenceChanged { project_id })
@@ -1575,18 +1633,21 @@ async fn websocket(
                         for message in runtime.refresh_control_queries(
                             &control_connection, &mut control_queries, "presence-change",
                         ).await {
-                            if send_json(&mut socket, &message).await.is_err() { return; }
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                         }
                     }
                     Ok(RuntimeEvent::ModuleReloaded { project_id })
                         if project_id == control_connection.project_id =>
                     {
                         replicas.clear();
+                        replica_opens.clear();
+                        snapshot_delivery.clear();
+                        legacy_snapshot_delivery.clear();
                         live_queries.clear();
                         if let Some(module) = runtime.inner.modules.project(&project_id).await {
                             if let Some(required) = module.client_contract {
                                 if tenant_session.is_some() && connected_client_contract != Some(required) {
-                                    let _ = send_json(&mut socket, &ServerMessage::ClientUpdateRequired { reason: "CLIENT_UPDATE_REQUIRED".into(), contract: required }).await;
+                                    let _ = send_connection_json(&mut snapshot_delivery, &mut socket, &ServerMessage::ClientUpdateRequired { reason: "CLIENT_UPDATE_REQUIRED".into(), contract: required }).await;
                                     break;
                                 }
                             }
@@ -1601,14 +1662,14 @@ async fn websocket(
                             reason: "module generation changed".to_owned(),
                             artifact_hash,
                         };
-                        if send_json(&mut socket, &response).await.is_err() { return; }
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
                     }
                     Ok(RuntimeEvent::SupportCommand { project_id, connection_id: target, command })
                         if project_id == control_connection.project_id && target == connection_id =>
                     {
                         let id = command.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
                         let response = ServerMessage::SupportCommand { id, result: command };
-                        if send_json(&mut socket, &response).await.is_err() { return; }
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
                     }
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -1636,7 +1697,8 @@ async fn websocket(
             {
                 if let Some(required) = module.client_contract {
                     if connected_client_contract != Some(required) {
-                        let _ = send_json(
+                        let _ = send_connection_json(
+                            &mut snapshot_delivery,
                             &mut socket,
                             &ServerMessage::ClientUpdateRequired {
                                 reason: "CLIENT_UPDATE_REQUIRED".into(),
@@ -1655,7 +1717,10 @@ async fn websocket(
             match runtime.handle_service_frame(grant, text).await {
                 service_principal::ServiceFrame::PassThrough => {}
                 service_principal::ServiceFrame::Reply(response) => {
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -1713,7 +1778,8 @@ async fn websocket(
                 let public_auth = matches!(&frame, ClientMessage::Auth { public: true, .. });
                 if let ClientMessage::Auth { id, public, .. } = &frame {
                     if *public != public_transport {
-                        let _ = send_json(
+                        let _ = send_connection_json(
+                            &mut snapshot_delivery,
                             &mut socket,
                             &ServerMessage::AuthError {
                                 code: Some("transient".into()),
@@ -1728,7 +1794,8 @@ async fn websocket(
                     }
                 }
                 if public_admission.as_ref().is_some_and(|a| a.revoked()) {
-                    let _ = send_json(
+                    let _ = send_connection_json(
+                        &mut snapshot_delivery,
                         &mut socket,
                         &ServerMessage::AuthError {
                             code: Some("transient".into()),
@@ -1753,6 +1820,9 @@ async fn websocket(
                         ClientMessage::ReducerCallMany { calls } => calls.len().max(1),
                         ClientMessage::QuerySubscribeMany { subscribes } => subscribes.len().max(1),
                         ClientMessage::ReplicaOpenMany { opens } => opens.len().max(1),
+                        ClientMessage::ReplicaSnapshotAck { .. } if replica_native_rows_enabled => {
+                            0
+                        }
                         _ => 1,
                     };
                     if !runtime.inner.public_limiter.allow(
@@ -1762,7 +1832,10 @@ async fn websocket(
                         &runtime.inner.config.public_functions,
                     ) {
                         for response in public_limit_errors(frame) {
-                            if send_json(&mut socket, &response).await.is_err() {
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -1779,7 +1852,9 @@ async fn websocket(
                     && !check_public_admission(&runtime, admission, scope).await
                 {
                     for response in public_admission_errors(frame) {
-                        let _ = send_json(&mut socket, &response).await;
+                        let _ =
+                            send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                                .await;
                     }
                     break;
                 }
@@ -1814,11 +1889,15 @@ async fn websocket(
                         break;
                     };
                     replicas.clear();
+                    replica_opens.clear();
+                    snapshot_delivery.clear();
+                    legacy_snapshot_delivery.clear();
                     live_queries.clear();
                     control_queries.clear();
                     feed = None;
                     feed_scheduler.reset();
                     sent_replica_revision = 0;
+                    sent_zero_bootstrap_watermark = false;
                     tenant_session = None;
                     connected_client_contract = None;
                     control_connection = control::ControlConnection {
@@ -1833,7 +1912,10 @@ async fn websocket(
                     if service_grant.is_some() {
                         pending_connection.take();
                     }
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1886,7 +1968,8 @@ async fn websocket(
                         if public_scope.as_ref().is_some_and(|pinned| {
                             !public_functions::same_scope(pinned, &scope.0, &scope.1)
                         }) {
-                            let _ = send_json(
+                            let _ = send_connection_json(
+                                &mut snapshot_delivery,
                                 &mut socket,
                                 &ServerMessage::AuthError {
                                     code: Some("transient".into()),
@@ -1938,7 +2021,8 @@ async fn websocket(
                                 && authenticated_control.tenant.is_some()
                                 && client_contract != Some(required)
                             {
-                                let _ = send_json(
+                                let _ = send_connection_json(
+                                    &mut snapshot_delivery,
                                     &mut socket,
                                     &ServerMessage::ClientUpdateRequired {
                                         reason: "CLIENT_UPDATE_REQUIRED".into(),
@@ -1955,12 +2039,25 @@ async fn websocket(
                     }
                     replica_snapshot_pages_enabled =
                         snapshot_pages_negotiated(capabilities.as_ref());
+                    replica_native_rows_enabled =
+                        snapshot_delivery::negotiated(capabilities.as_ref());
+                    snapshot_delivery.set_native(replica_native_rows_enabled);
+                    replica_sum_digest_enabled =
+                        capabilities.as_ref().and_then(|c| c.replica_set_digest) == Some(1);
+                    if !replica_sum_digest_enabled {
+                        for subscription in replicas.values_mut() {
+                            subscription.require_legacy_digest();
+                        }
+                    }
                     telemetry_device = device.clone();
                     telemetry_batch_enabled =
                         capabilities.as_ref().and_then(|c| c.telemetry_batch) == Some(1);
                     let next_tenant_session =
                         tenant_data_session(control_only, &authenticated_control);
-                    let preserved = !control_only
+                    let preserved = replica_opens.is_empty()
+                        && legacy_snapshot_delivery.is_empty()
+                        && (replica_native_rows_enabled || snapshot_delivery.is_empty())
+                        && !control_only
                         && tenant_session.is_some()
                         && preserve_subscription_scope(
                             &control_connection,
@@ -1980,6 +2077,9 @@ async fn websocket(
                         }
                     } else {
                         replicas.clear();
+                        replica_opens.clear();
+                        snapshot_delivery.clear();
+                        legacy_snapshot_delivery.clear();
                         live_queries.clear();
                         control_queries.clear();
                         if let Some(session) =
@@ -1991,6 +2091,7 @@ async fn websocket(
                         }
                         feed_scheduler.reset();
                         sent_replica_revision = 0;
+                        sent_zero_bootstrap_watermark = false;
                     }
                     tenant_session = next_tenant_session;
                     control_connection = authenticated_control;
@@ -2006,7 +2107,10 @@ async fn websocket(
                         &live_queries,
                         &control_queries,
                     );
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2049,7 +2153,10 @@ async fn websocket(
                                 .to_owned(),
                         }
                     };
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2115,6 +2222,7 @@ async fn websocket(
                         )
                     };
                     if let Some(subscription) = subscription {
+                        sent_zero_bootstrap_watermark = false;
                         live_queries.insert(subscription.id.clone(), subscription);
                     }
                     record_connection_subscriptions(
@@ -2124,7 +2232,10 @@ async fn websocket(
                         &live_queries,
                         &control_queries,
                     );
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2135,7 +2246,10 @@ async fn websocket(
                             path: None,
                             error: "query batch cannot contain more than 256 subscribes".to_owned(),
                         };
-                        if send_json(&mut socket, &response).await.is_err() {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                         continue;
@@ -2203,9 +2317,13 @@ async fn websocket(
                             )
                         };
                         if let Some(subscription) = subscription {
+                            sent_zero_bootstrap_watermark = false;
                             live_queries.insert(subscription.id.clone(), subscription);
                         }
-                        if send_json(&mut socket, &response).await.is_err() {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -2273,7 +2391,10 @@ async fn websocket(
                     for message in
                         ordered_control_completion(response, control_updates, control_succeeded)
                     {
-                        if send_json(&mut socket, &message).await.is_err() {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &message)
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -2285,7 +2406,10 @@ async fn websocket(
                             } else {
                                 vec![watermark]
                             };
-                        if send_all(&mut socket, &frames).await.is_err() {
+                        if send_connection_all(&mut snapshot_delivery, &mut socket, &frames)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -2309,7 +2433,10 @@ async fn websocket(
                             "reducer batch cannot contain more than 256 calls".to_owned(),
                             None,
                         );
-                        if send_json(&mut socket, &response).await.is_err() {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                         continue;
@@ -2323,7 +2450,14 @@ async fn websocket(
                                     "public tenant session is unavailable".into(),
                                     None,
                                 );
-                                if send_json(&mut socket, &response).await.is_err() {
+                                if send_connection_json(
+                                    &mut snapshot_delivery,
+                                    &mut socket,
+                                    &response,
+                                )
+                                .await
+                                .is_err()
+                                {
                                     return;
                                 }
                                 continue;
@@ -2367,7 +2501,10 @@ async fn websocket(
                         for message in
                             ordered_control_completion(response, control_updates, control_succeeded)
                         {
-                            if send_json(&mut socket, &message).await.is_err() {
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &message)
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -2383,7 +2520,10 @@ async fn websocket(
                             } else {
                                 vec![watermark]
                             };
-                            if send_all(&mut socket, &frames).await.is_err() {
+                            if send_connection_all(&mut snapshot_delivery, &mut socket, &frames)
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -2479,7 +2619,10 @@ async fn websocket(
                     for message in
                         ordered_control_completion(response, control_updates, control_succeeded)
                     {
-                        if send_json(&mut socket, &message).await.is_err() {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &message)
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -2491,7 +2634,10 @@ async fn websocket(
                             } else {
                                 vec![watermark]
                             };
-                        if send_all(&mut socket, &frames).await.is_err() {
+                        if send_connection_all(&mut snapshot_delivery, &mut socket, &frames)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -2500,103 +2646,139 @@ async fn websocket(
                     }
                 }
                 Ok(ClientMessage::ReplicaOpen(request)) => {
+                    sent_zero_bootstrap_watermark = false;
+                    snapshot_delivery.remove(&request.id);
+                    legacy_snapshot_delivery.remove(&request.id);
+                    replicas.remove(&request.id);
                     runtime.inner.metrics.activity(
                         &connection_id,
                         "Replica Collection opened",
                         Some(&request.path),
                     );
-                    let messages = if let Some(session) = tenant_session.as_ref() {
-                        match runtime.open_replica(session, request.clone()).await {
-                            Ok(opened) => {
-                                if let Some(subscription) = opened.subscription {
-                                    replicas.insert(subscription.id.clone(), subscription);
-                                }
-                                opened.messages
-                            }
-                            Err(error) => vec![ServerMessage::ReplicaError {
-                                id: request.id,
-                                path: Some(request.path),
-                                error: error.to_string(),
-                            }],
-                        }
-                    } else {
-                        vec![ServerMessage::ReplicaError {
-                            id: request.id,
-                            path: Some(request.path),
-                            error: "authenticate with an active tenant before opening a Replica Collection".to_owned(),
-                        }]
-                    };
-                    for response in messages {
-                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled)
+                    if let Some(response) = enqueue_replica_open(
+                        &runtime,
+                        tenant_session.as_ref(),
+                        request,
+                        replica_sum_digest_enabled,
+                        &mut replica_opens,
+                    )
+                    .await
+                    {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                             .await
                             .is_err()
                         {
                             return;
                         }
                     }
-                    record_connection_subscriptions(
-                        &runtime,
-                        &connection_id,
-                        &replicas,
-                        &live_queries,
-                        &control_queries,
-                    );
                 }
                 Ok(ClientMessage::ReplicaOpenMany { opens }) => {
                     if opens.len() > REPLICA_OPEN_BATCH_LIMIT {
-                        let response = ServerMessage::ReplicaError {
-                            id: String::new(),
-                            path: None,
-                            error: format!(
-                                "replica batch cannot contain more than {REPLICA_OPEN_BATCH_LIMIT} opens"
-                            ),
-                        };
-                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled)
+                        let response = ServerMessage::ReplicaError {id:String::new(),path:None,error:format!("replica batch cannot contain more than {REPLICA_OPEN_BATCH_LIMIT} opens")};
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                             .await
                             .is_err()
                         {
-                            break;
+                            return;
                         }
                         continue;
                     }
-                    for request in &opens {
+                    sent_zero_bootstrap_watermark = false;
+                    for request in opens {
+                        snapshot_delivery.remove(&request.id);
+                        legacy_snapshot_delivery.remove(&request.id);
+                        replicas.remove(&request.id);
                         runtime.inner.metrics.activity(
                             &connection_id,
                             "Replica Collection opened",
                             Some(&request.path),
                         );
+                        if let Some(response) = enqueue_replica_open(
+                            &runtime,
+                            tenant_session.as_ref(),
+                            request,
+                            replica_sum_digest_enabled,
+                            &mut replica_opens,
+                        )
+                        .await
+                        {
+                            if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
                     }
-                    let messages = if let Some(session) = tenant_session.as_ref() {
-                        let outcomes = open_replica_batch(&runtime, session, opens).await;
-                        install_replica_open_outcomes(&mut replicas, outcomes)
+                }
+                Ok(ClientMessage::ReplicaSnapshotAck {
+                    id,
+                    snapshot_id,
+                    sequence,
+                }) => {
+                    let outcome = if replica_native_rows_enabled && tenant_session.is_some() {
+                        snapshot_delivery.acknowledge(&id, &snapshot_id, sequence)
                     } else {
-                        opens
-                            .into_iter()
-                            .map(|request| ServerMessage::ReplicaError {
-                                id: request.id,
-                                path: Some(request.path),
-                                error: "authenticate with an active tenant before opening a Replica Collection".to_owned(),
-                            })
-                            .collect()
+                        Err("native snapshot acknowledgements were not negotiated")
                     };
-                    for response in messages {
-                        if send_replica_open(&mut socket, response, replica_snapshot_pages_enabled)
+                    match outcome {
+                        Ok(ready) => {
+                            if let Some(ready) = ready {
+                                if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            if send_snapshot_frames(&mut socket, &mut snapshot_delivery)
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            snapshot_delivery.remove(&id);
+                            replicas.remove(&id);
+                            if send_snapshot_frames(&mut socket, &mut snapshot_delivery)
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            if send_json(
+                                &mut socket,
+                                &ServerMessage::ReplicaError {
+                                    id,
+                                    path: None,
+                                    error: error.into(),
+                                },
+                            )
                             .await
                             .is_err()
-                        {
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Ok(ClientMessage::ReplicaClose { id }) => {
+                    replica_opens.remove(&id);
+                    legacy_snapshot_delivery.remove(&id);
+                    replicas.remove(&id);
+                    // Confirmation precedes pumping any later binary frames.
+                    if let Some(closed) = snapshot_delivery.close_subscription(&id) {
+                        if send_json(&mut socket, &closed).await.is_err() {
                             return;
                         }
                     }
-                    record_connection_subscriptions(
-                        &runtime,
-                        &connection_id,
-                        &replicas,
-                        &live_queries,
-                        &control_queries,
-                    );
-                }
-                Ok(ClientMessage::ReplicaClose { id }) => {
-                    replicas.remove(&id);
+                    if send_snapshot_frames(&mut socket, &mut snapshot_delivery)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                     record_connection_subscriptions(
                         &runtime,
                         &connection_id,
@@ -2618,7 +2800,10 @@ async fn websocket(
                             environment.as_deref(),
                         )
                         .await;
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2626,7 +2811,10 @@ async fn websocket(
                     let response = runtime
                         .register_error_session(&control_connection, id, None, None)
                         .await;
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2634,7 +2822,10 @@ async fn websocket(
                     let response = runtime
                         .capture_error_envelope(&control_connection, id, events)
                         .await;
-                    if send_json(&mut socket, &response).await.is_err() {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -2707,6 +2898,30 @@ async fn websocket(
             }
             Message::Close(_) => break,
             _ => {}
+        }
+        if replica_native_rows_enabled && tenant_session.is_some() {
+            if let Some(watermark) = bootstrap_watermark_after_sent_snapshots(
+                snapshot_delivery.is_empty(),
+                replicas
+                    .values()
+                    .map(|s| s.cursor.revision)
+                    .chain(live_queries.values().map(|s| s.computed_revision)),
+                sent_replica_revision,
+                sent_zero_bootstrap_watermark,
+            ) {
+                if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if let ServerMessage::ReplicaWatermark { revision } = watermark {
+                    sent_replica_revision = sent_replica_revision.max(revision);
+                    if revision == 0 {
+                        sent_zero_bootstrap_watermark = true;
+                    }
+                }
+            }
         }
     }
 }
@@ -2965,6 +3180,24 @@ async fn next_feed_event(
     }
 }
 
+/// A quiet tenant may never emit a change-feed event after authentication.
+/// Close its initial cohort once all native snapshots have been durably ACKed.
+/// The oldest subscribed snapshot is the only safe boundary: a newer snapshot
+/// cannot certify changes still queued for an older subscription.
+fn bootstrap_watermark_after_sent_snapshots(
+    snapshots_complete: bool,
+    revisions: impl Iterator<Item = u64>,
+    sent_revision: u64,
+    zero_already_sent: bool,
+) -> Option<ServerMessage> {
+    if !snapshots_complete {
+        return None;
+    }
+    let revision = revisions.min()?;
+    (revision > sent_revision || revision == 0 && sent_revision == 0 && !zero_already_sent)
+        .then_some(ServerMessage::ReplicaWatermark { revision })
+}
+
 fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
     match event {
         change_feed::FeedEvent::Transaction { revision, .. } => {
@@ -3103,15 +3336,6 @@ fn member_access_changed(
         || admitted.role != current.role
         || admitted.permissions != current.permissions
         || admitted.membership_revision != current.membership_revision
-}
-
-async fn send_all(socket: &mut WebSocket, messages: &[ServerMessage]) -> Result<(), ()> {
-    for message in messages {
-        if send_json(socket, message).await.is_err() {
-            return Err(());
-        }
-    }
-    Ok(())
 }
 
 fn public_limit_errors(frame: ClientMessage) -> Vec<ServerMessage> {
@@ -3687,15 +3911,45 @@ where
         .await
 }
 
-async fn open_replica_batch(
+async fn enqueue_replica_open(
     runtime: &Runtime,
-    session: &TenantSession,
-    opens: Vec<ReplicaOpenRequest>,
-) -> Vec<ReplicaOpenOutcome<replica::ReplicaSubscription, replica::ReplicaError>> {
-    collect_bounded_ordered(opens, REPLICA_OPEN_CONCURRENCY, |request| async move {
-        let request_for_open = request.clone();
-        let opened = runtime
-            .open_replica(session, request_for_open)
+    session: Option<&TenantSession>,
+    request: ReplicaOpenRequest,
+    sum_enabled: bool,
+    queue: &mut replica_open_queue::ReplicaOpenQueue<
+        ReplicaOpenOutcome<replica::ReplicaSubscription, replica::ReplicaError>,
+    >,
+) -> Option<ServerMessage> {
+    let reject = |error: &str| ServerMessage::ReplicaError {
+        id: request.id.clone(),
+        path: Some(request.path.clone()),
+        error: error.to_owned(),
+    };
+    let Some(session) = session else {
+        return Some(reject(
+            "authenticate with an active tenant before opening a Replica Collection",
+        ));
+    };
+    let bytes = serde_json::to_vec(&request).map_or(usize::MAX, |value| {
+        value.len().saturating_mul(2).saturating_add(1024)
+    });
+    let module = runtime
+        .inner
+        .modules
+        .project(&session.identity.project_id)
+        .await;
+    let bulk = module
+        .as_ref()
+        .and_then(|module| module.functions.get(&request.path))
+        .and_then(|function| function.replica.as_ref())
+        .is_none_or(|definition| definition.max_rows == 0 || definition.max_rows > 512);
+    let owned_runtime = runtime.clone();
+    let owned_session = session.clone();
+    let owned_request = request.clone();
+    use futures_util::FutureExt;
+    let future = async move {
+        let opened = owned_runtime
+            .open_replica_negotiated(&owned_session, owned_request.clone(), sum_enabled)
             .await
             .map(|opened| {
                 let subscription = opened
@@ -3703,9 +3957,13 @@ async fn open_replica_batch(
                     .map(|subscription| (subscription.id.clone(), subscription));
                 (opened.messages, subscription)
             });
-        (request, opened)
-    })
-    .await
+        (owned_request, opened)
+    }
+    .boxed();
+    queue
+        .push(request.id.clone(), bytes, bulk, future)
+        .err()
+        .map(reject)
 }
 
 fn install_replica_open_outcomes<S, E>(
@@ -3789,7 +4047,28 @@ async fn send_replica_open(
     socket: &mut WebSocket,
     message: ServerMessage,
     paged: bool,
+    native: bool,
+    delivery: &mut snapshot_delivery::SnapshotDelivery,
 ) -> Result<(), ()> {
+    if native && matches!(message, ServerMessage::ReplicaSnapshot { .. }) {
+        let id = if let ServerMessage::ReplicaSnapshot { id, .. } = &message {
+            id.clone()
+        } else {
+            unreachable!()
+        };
+        if let Err(error) = delivery.begin(message) {
+            return send_json(
+                socket,
+                &ServerMessage::ReplicaError {
+                    id,
+                    path: None,
+                    error: error.into(),
+                },
+            )
+            .await;
+        }
+        return send_snapshot_frames(socket, delivery).await;
+    }
     if paged && matches!(message, ServerMessage::ReplicaSnapshot { .. }) {
         // Feed events stay queued while these pages are sent. The installed
         // subscription resumes from the materialized repeatable-read cursor.
@@ -3798,8 +4077,67 @@ async fn send_replica_open(
         }
         Ok(())
     } else {
-        send_json(socket, &replica::legacy_snapshot_frame(message)).await
+        send_connection_json(delivery, socket, &replica::legacy_snapshot_frame(message)).await
     }
+}
+
+async fn send_snapshot_frames(
+    socket: &mut WebSocket,
+    delivery: &mut snapshot_delivery::SnapshotDelivery,
+) -> Result<(), ()> {
+    let batch = delivery.pump();
+    for start in batch.starts {
+        send_json(socket, &start).await?;
+    }
+    for frame in batch.frames {
+        socket
+            .send(Message::Binary(frame.into()))
+            .await
+            .map_err(|_| ())?;
+    }
+    for error in batch.errors {
+        send_json(socket, &error).await?;
+    }
+    Ok(())
+}
+
+async fn send_connection_json(
+    delivery: &mut snapshot_delivery::SnapshotDelivery,
+    socket: &mut WebSocket,
+    message: &ServerMessage,
+) -> Result<(), ()> {
+    if matches!(
+        message,
+        ServerMessage::ReplicaReady { .. }
+            | ServerMessage::ReplicaReadyMany { .. }
+            | ServerMessage::ReplicaError { .. }
+    ) {
+        if let Some(message) = delivery.gate(message) {
+            send_json(socket, &message).await?;
+        }
+        if matches!(message, ServerMessage::ReplicaError { .. }) {
+            send_snapshot_frames(socket, delivery).await?;
+        }
+        Ok(())
+    } else {
+        if delivery.native() {
+            if let Some(encoded) = replica::native_control_message(message).map_err(|_| ())? {
+                return send_json(socket, &encoded).await;
+            }
+        }
+        send_json(socket, message).await
+    }
+}
+
+async fn send_connection_all(
+    delivery: &mut snapshot_delivery::SnapshotDelivery,
+    socket: &mut WebSocket,
+    messages: &[ServerMessage],
+) -> Result<(), ()> {
+    for message in messages {
+        send_connection_json(delivery, socket, message).await?;
+    }
+    Ok(())
 }
 
 async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
@@ -3812,6 +4150,131 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_snapshot_socket_backpressures_until_durable_ack() {
+        use futures_util::{SinkExt, StreamExt};
+        use gonvex_protocol::{ClientMessage, ReplicaCursor, ServerMessage};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        assert!(address.port() >= 5185);
+        let app = axum::Router::new().route(
+            "/proof",
+            axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async {
+                upgrade.on_upgrade(|socket| async move {
+                    let mut socket = super::WebSocket::Plain(Box::new(socket));
+                    let mut delivery = super::snapshot_delivery::SnapshotDelivery::default();
+                    let cursor = ReplicaCursor {
+                        epoch: "e".into(),
+                        revision: 1,
+                    };
+                    let snapshot = ServerMessage::ReplicaSnapshot {
+                        id: "wire".into(),
+                        key: "id".into(),
+                        cursor: cursor.clone(),
+                        result: (0..1000)
+                            .map(|id| serde_json::json!({"id":id,"body":"x".repeat(1000)}))
+                            .collect(),
+                        metadata: std::collections::BTreeMap::from([(
+                            "pageDigest".into(),
+                            serde_json::json!("sum128-v1:00000000000000000000000000000000"),
+                        )]),
+                    };
+                    super::send_replica_open(&mut socket, snapshot, true, true, &mut delivery)
+                        .await
+                        .unwrap();
+                    let ready = ServerMessage::ReplicaReady {
+                        id: "wire".into(),
+                        cursor,
+                        digest: "certificate".into(),
+                        metadata: Default::default(),
+                    };
+                    super::send_connection_json(&mut delivery, &mut socket, &ready)
+                        .await
+                        .unwrap();
+                    while let Some(Ok(axum::extract::ws::Message::Text(text))) = socket.next().await
+                    {
+                        let ClientMessage::ReplicaSnapshotAck {
+                            id,
+                            snapshot_id,
+                            sequence,
+                        } = serde_json::from_str(&text).unwrap()
+                        else {
+                            panic!("ack");
+                        };
+                        if let Some(ready) =
+                            delivery.acknowledge(&id, &snapshot_id, sequence).unwrap()
+                        {
+                            super::send_json(&mut socket, &ready).await.unwrap();
+                            break;
+                        }
+                        super::send_snapshot_frames(&mut socket, &mut delivery)
+                            .await
+                            .unwrap();
+                    }
+                })
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/proof"))
+            .await
+            .unwrap();
+        let mut pages = Vec::new();
+        let mut start = None;
+        while let Ok(Some(message)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), socket.next()).await
+        {
+            let message = message.unwrap();
+            if message.is_text() {
+                let header: serde_json::Value =
+                    serde_json::from_slice(&message.into_data()).unwrap();
+                assert_eq!(header["type"], "replica.snapshotStart");
+                assert!(pages.is_empty());
+                assert!(start.is_none());
+                start = Some(header);
+                continue;
+            }
+            assert!(message.is_binary());
+            let page = serde_json::from_slice::<serde_json::Value>(&message.into_data()).unwrap();
+            assert_eq!(
+                Some(&page["snapshotId"]),
+                start.as_ref().map(|header| &header["snapshotId"])
+            );
+            pages.push(page);
+        }
+        assert!(!pages.is_empty() && pages.len() <= 8);
+        assert!(!pages.last().unwrap()["last"].as_bool().unwrap());
+        let acknowledge = |page: &serde_json::Value| {
+            tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"replica.snapshotAck","id":"wire","snapshotId":page["snapshotId"],"sequence":page["sequence"]}).to_string().into())
+        };
+        socket
+            .send(acknowledge(pages.last().unwrap()))
+            .await
+            .unwrap();
+        let mut rows: usize = pages
+            .iter()
+            .map(|page| page["canonicalRows"].as_array().unwrap().len())
+            .sum();
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame: serde_json::Value = serde_json::from_slice(&message.into_data()).unwrap();
+            if frame["type"] == "replica.ready" {
+                assert_eq!(rows, 1000);
+                break;
+            }
+            assert_eq!(frame["type"], "replica.snapshotEncodedPage");
+            rows += frame["canonicalRows"].as_array().unwrap().len();
+            socket.send(acknowledge(&frame)).await.unwrap();
+        }
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
+
     #[test]
     fn snapshot_pages_negotiation_preserves_old_clients() {
         assert!(!super::snapshot_pages_negotiated(None));
@@ -4811,6 +5274,35 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn quiet_bootstrap_closes_only_after_acks_and_through_the_oldest_snapshot() {
+        assert!(
+            bootstrap_watermark_after_sent_snapshots(false, [100].into_iter(), 0, false).is_none()
+        );
+        assert!(bootstrap_watermark_after_sent_snapshots(true, [].into_iter(), 0, false).is_none());
+        assert!(matches!(
+            bootstrap_watermark_after_sent_snapshots(true, [100].into_iter(), 0, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 100 })
+        ));
+        assert!(matches!(
+            bootstrap_watermark_after_sent_snapshots(true, [105, 100, 103].into_iter(), 0, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 100 })
+        ));
+        assert!(
+            bootstrap_watermark_after_sent_snapshots(true, [105, 100].into_iter(), 100, false)
+                .is_none()
+        );
+        assert!(
+            bootstrap_watermark_after_sent_snapshots(true, [105, 100].into_iter(), 102, false)
+                .is_none()
+        );
+        assert!(matches!(
+            bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, false),
+            Some(ServerMessage::ReplicaWatermark { revision: 0 })
+        ));
+        assert!(bootstrap_watermark_after_sent_snapshots(true, [0].into_iter(), 0, true).is_none());
     }
 
     #[test]

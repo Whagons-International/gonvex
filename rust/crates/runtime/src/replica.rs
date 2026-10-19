@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use futures_util::{Stream, StreamExt};
 use gonvex_postgres::{TenantSession, TenantTransaction};
+use gonvex_protocol::replica_digest::ReplicaSetDigest;
 use gonvex_protocol::{
     PublicInvocationProvenance, ReplicaChange, ReplicaCursor, ReplicaOpenRequest, ServerMessage,
 };
@@ -27,6 +29,8 @@ pub enum ReplicaError {
     FunctionMissing(String),
     #[error("visibility plan required for table {0:?}")]
     VisibilityMissing(String),
+    #[error("sum128-v1 replica integrity was not negotiated")]
+    DigestNotNegotiated,
     #[error("replica arguments must be an object")]
     InvalidArguments,
     #[error("replica row is missing key {0:?}")]
@@ -58,9 +62,55 @@ pub struct ReplicaSubscription {
     pub cursor: ReplicaCursor,
     pub rows: BTreeMap<String, Value>,
     pub hashes: BTreeMap<String, String>,
-    pub aggregate: Option<[u8; 32]>,
+    pub aggregate: Option<ReplicaAggregate>,
     pub truncated: bool,
     pub resolved: ResolvedVisibility,
+}
+
+impl ReplicaSubscription {
+    pub(crate) fn require_legacy_digest(&mut self) {
+        if matches!(self.aggregate, Some(ReplicaAggregate::Sum(_))) {
+            self.aggregate = Some(ReplicaAggregate::Legacy(aggregate_bytes(&self.hashes)));
+        }
+    }
+}
+
+pub enum ReplicaAggregate {
+    Legacy([u8; 32]),
+    Sum(Box<ReplicaSetDigest>),
+}
+impl ReplicaAggregate {
+    fn from_hashes(hashes: &BTreeMap<String, String>, sum: bool) -> Self {
+        if sum {
+            let mut state = Box::<ReplicaSetDigest>::default();
+            for hash in hashes.values() {
+                state.add(hash).expect("server-generated SHA-256");
+            }
+            Self::Sum(state)
+        } else {
+            Self::Legacy(aggregate_bytes(hashes))
+        }
+    }
+    fn change(&mut self, hash: &str, remove: bool) {
+        match self {
+            Self::Legacy(bytes) => xor_hash(bytes, hash),
+            Self::Sum(state) => if remove {
+                state.remove(hash)
+            } else {
+                state.add(hash)
+            }
+            .expect("server-generated row hash and membership"),
+        }
+    }
+    fn digest(&self) -> String {
+        match self {
+            Self::Legacy(bytes) => format_aggregate(bytes),
+            Self::Sum(state) => state.digest(),
+        }
+    }
+    fn is_sum(&self) -> bool {
+        matches!(self, Self::Sum(_))
+    }
 }
 
 struct Snapshot {
@@ -98,6 +148,16 @@ impl Runtime {
         session: &TenantSession,
         request: ReplicaOpenRequest,
     ) -> Result<ReplicaOpenResult, ReplicaError> {
+        self.open_replica_negotiated(session, request, false).await
+    }
+
+    pub(crate) async fn open_replica_negotiated(
+        &self,
+        session: &TenantSession,
+        request: ReplicaOpenRequest,
+        sum_enabled: bool,
+    ) -> Result<ReplicaOpenResult, ReplicaError> {
+        let sum = requested_sum_digest(&request, sum_enabled)?;
         if session.is_anonymous() {
             return Err(ReplicaError::PublicSession(
                 "authenticate with an active tenant before opening a Replica Collection".to_owned(),
@@ -132,7 +192,7 @@ impl Runtime {
         let aggregate = request
             .digest
             .as_deref()
-            .is_some_and(|digest| digest.starts_with("xor1:"));
+            .is_some_and(|digest| digest.starts_with("xor1:") || sum);
         let mut snapshot = self
             .replica_snapshot_for_resume(
                 session,
@@ -147,9 +207,10 @@ impl Runtime {
             )
             .await?;
         let cursor = cursor_for(&snapshot.clock, &definition, &directive.visibility_scope);
-        let resume_aggregate = aggregate.then(|| aggregate_bytes(&snapshot.hashes));
+        let resume_aggregate =
+            aggregate.then(|| ReplicaAggregate::from_hashes(&snapshot.hashes, sum));
         let digest = if let Some(aggregate) = &resume_aggregate {
-            format_aggregate(aggregate)
+            aggregate.digest()
         } else {
             hashes_digest(&snapshot.hashes)
         };
@@ -294,9 +355,14 @@ impl Runtime {
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
-        let resolved = visibility::resolve(&mut transaction, session, plan).await?;
         let clock = clock_in_transaction(&mut transaction).await?;
-        let rows = query_rows(&mut transaction, definition, plan, &resolved, args).await?;
+        let resolved = if definition.max_rows > 0 || definition.max_bytes > 0 {
+            visibility::resolve_for_query(&mut transaction, session, plan, clock.revision).await?
+        } else {
+            visibility::resolve(&mut transaction, session, plan, clock.revision).await?
+        };
+        let (rows, truncated) =
+            query_rows(&mut transaction, definition, plan, &resolved, args).await?;
         let resume_changes = if let Some(after) =
             after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
         {
@@ -307,10 +373,12 @@ impl Runtime {
             Vec::new()
         };
         transaction.commit().await?;
-        let (rows, truncated) = apply_budgets(rows, definition)?;
         let mut by_key = BTreeMap::new();
         let mut hashes = BTreeMap::new();
-        for row in &rows {
+        for (index, row) in rows.iter().enumerate() {
+            if index % 32 == 0 {
+                tokio::task::yield_now().await;
+            }
             let key = row_key(row, &definition.key)?;
             if by_key.insert(key.clone(), row.clone()).is_some() {
                 return Err(ReplicaError::DuplicateKey(key));
@@ -384,6 +452,11 @@ impl Runtime {
                 .filter(|change| change.table == subscription.definition.table)
                 .collect::<Vec<_>>();
             if dependency_changed
+                || bounded_sql_visibility(
+                    &subscription.definition,
+                    &subscription.visibility,
+                    &subscription.resolved,
+                )
                 || source_update_requires_snapshot(
                     &subscription.rows,
                     subscription.truncated,
@@ -439,7 +512,9 @@ impl Runtime {
                 subscription.rows = snapshot.by_key;
                 subscription.hashes = snapshot.hashes;
                 if subscription.aggregate.is_some() {
-                    subscription.aggregate = Some(aggregate_bytes(&subscription.hashes));
+                    let sum = subscription.aggregate.as_ref().unwrap().is_sum();
+                    subscription.aggregate =
+                        Some(ReplicaAggregate::from_hashes(&subscription.hashes, sum));
                 }
                 subscription.truncated = snapshot.truncated;
                 subscription.resolved = snapshot.resolved;
@@ -491,10 +566,10 @@ impl Runtime {
                     let new_hash = new_projection.as_ref().map(row_hash);
                     if let Some(aggregate) = &mut subscription.aggregate {
                         if let Some(previous) = subscription.hashes.get(&change.row_id) {
-                            xor_hash(aggregate, previous);
+                            aggregate.change(previous, true);
                         }
                         if let Some(hash) = &new_hash {
-                            xor_hash(aggregate, hash);
+                            aggregate.change(hash, false);
                         }
                     }
                     if new_visible {
@@ -675,7 +750,7 @@ async fn query_rows(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
     args: &Value,
-) -> Result<Vec<Value>, ReplicaError> {
+) -> Result<(Vec<Value>, bool), ReplicaError> {
     let args = args.as_object().ok_or(ReplicaError::InvalidArguments)?;
     let mut parameters = Vec::new();
     let visibility = visibility::compile_predicate(plan, resolved, "r", &mut parameters)?;
@@ -729,24 +804,30 @@ async fn query_rows(
     for parameter in &parameters {
         query = bind_value(query, parameter).map_err(ReplicaError::InvalidIdentifier)?;
     }
-    let rows = query.fetch_all(&mut **transaction.transaction()).await?;
-    rows.into_iter()
-        .map(|row| {
-            let raw: String = row.get(0);
-            serde_json::from_str(&raw)
-                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
-        })
-        .collect()
+    // Decode and admit one row at a time. SQL still uses maxRows + 1;
+    // a byte-limited source must not first allocate its entire SQL result.
+    let rows = query.fetch(&mut **transaction.transaction()).map(|row| {
+        let row = row?;
+        let raw: String = row.get(0);
+        serde_json::from_str(&raw)
+            .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
+    });
+    collect_snapshot_rows(rows, definition).await
 }
 
-fn apply_budgets(
-    rows: Vec<Value>,
+async fn collect_snapshot_rows(
+    rows: impl Stream<Item = Result<Value, ReplicaError>>,
     definition: &ReplicaCollectionDefinition,
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
+    futures_util::pin_mut!(rows);
     let mut kept = Vec::new();
     let mut bytes = 0i64;
     let mut seen = BTreeSet::new();
-    for row in rows {
+    while let Some(row) = rows.next().await {
+        if kept.len() % 32 == 0 {
+            tokio::task::yield_now().await;
+        }
+        let row = row?;
         let key = row_key(&row, &definition.key)?;
         if !seen.insert(key.clone()) {
             return Err(ReplicaError::DuplicateKey(key));
@@ -796,6 +877,14 @@ fn row_in_collection(
 /// projected post-transaction rows fit its budgets, including for progressive
 /// delivery. Once a collection is truncated, its missing rows are unknown and
 /// the next source change must rebuild the window from PostgreSQL.
+fn bounded_sql_visibility(
+    definition: &ReplicaCollectionDefinition,
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+) -> bool {
+    (definition.max_rows > 0 || definition.max_bytes > 0) && plan.needs_materialized_sets(resolved)
+}
+
 fn source_update_requires_snapshot<'a>(
     rows: &BTreeMap<String, Value>,
     truncated: bool,
@@ -871,6 +960,20 @@ fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
     }
 }
 
+fn requested_sum_digest(
+    request: &ReplicaOpenRequest,
+    negotiated: bool,
+) -> Result<bool, ReplicaError> {
+    let sum = request
+        .digest
+        .as_deref()
+        .is_some_and(|digest| digest.starts_with("sum128-v1:"));
+    if sum && !negotiated {
+        return Err(ReplicaError::DigestNotNegotiated);
+    }
+    Ok(sum)
+}
+
 fn row_hash(row: &Value) -> String {
     hex_digest(stable_json(row).as_bytes())
 }
@@ -896,7 +999,15 @@ fn verify_resume_hashes(
         request.digest.as_deref()
             == Some(
                 if aggregate {
-                    aggregate_digest(hashes)
+                    if request
+                        .digest
+                        .as_deref()
+                        .is_some_and(|digest| digest.starts_with("sum128-v1:"))
+                    {
+                        ReplicaAggregate::from_hashes(hashes, true).digest()
+                    } else {
+                        aggregate_digest(hashes)
+                    }
                 } else {
                     hashes_digest(hashes)
                 }
@@ -942,7 +1053,7 @@ fn format_aggregate(aggregate: &[u8; 32]) -> String {
 
 fn subscription_digest(subscription: &ReplicaSubscription) -> String {
     if let Some(aggregate) = &subscription.aggregate {
-        format_aggregate(aggregate)
+        aggregate.digest()
     } else {
         hashes_digest(&subscription.hashes)
     }
@@ -958,6 +1069,11 @@ fn resume_hashes(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> Result<Option<BTreeMap<String, String>>, ReplicaError> {
+    if bounded_sql_visibility(definition, plan, resolved) {
+        // Retained before-images cannot evaluate an unmaterialized SQL set.
+        // Reconcile the bounded snapshot instead of trusting missing IDs.
+        return Ok(None);
+    }
     let dependencies = plan.resolved_dependency_columns(resolved);
     if table_change_relevance(&definition.table, &dependencies, changes.iter()).1 {
         return Ok(None);
@@ -1165,6 +1281,7 @@ pub(crate) struct SnapshotPages {
     rows: std::iter::Peekable<std::vec::IntoIter<Value>>,
     sequence: u64,
     finished: bool,
+    native_rows: bool,
 }
 
 impl SnapshotPages {
@@ -1195,6 +1312,43 @@ impl SnapshotPages {
             rows: result.into_iter().peekable(),
             sequence: 0,
             finished: false,
+            native_rows: false,
+        }
+    }
+
+    pub(crate) fn native(message: ServerMessage) -> Self {
+        let mut pages = Self::new(message);
+        pages.native_rows = true;
+        pages
+    }
+
+    pub(crate) fn identity(&self) -> (&str, &str) {
+        (&self.id, &self.snapshot_id)
+    }
+
+    pub(crate) fn start(&self) -> ServerMessage {
+        let mut metadata = self.metadata.clone();
+        metadata.retain(|name, _| {
+            matches!(
+                name.as_str(),
+                "path"
+                    | "scope"
+                    | "visibilityScope"
+                    | "orderBy"
+                    | "orderDirection"
+                    | "mode"
+                    | "maxRows"
+                    | "maxBytes"
+                    | "truncated"
+            )
+        });
+        metadata.insert("digest".to_owned(), self.digest.clone());
+        ServerMessage::ReplicaSnapshotStart {
+            snapshot_id: self.snapshot_id.clone(),
+            id: self.id.clone(),
+            cursor: self.cursor.clone(),
+            key: self.key.clone(),
+            metadata,
         }
     }
 
@@ -1202,6 +1356,18 @@ impl SnapshotPages {
         let mut metadata = self.metadata.clone();
         if last {
             metadata.insert("digest".to_owned(), self.digest.clone());
+        }
+        if self.native_rows {
+            return ServerMessage::ReplicaSnapshotEncodedPage {
+                id: self.id.clone(),
+                snapshot_id: self.snapshot_id.clone(),
+                cursor: self.cursor.clone(),
+                key: self.key.clone(),
+                sequence: self.sequence,
+                last,
+                canonical_rows: result.iter().map(stable_json).collect(),
+                metadata,
+            };
         }
         ServerMessage::ReplicaSnapshotPage {
             id: self.id.clone(),
@@ -1263,9 +1429,19 @@ impl Iterator for SnapshotPages {
             + 1;
         let mut rows = Vec::new();
         while let Some(row) = self.rows.peek() {
-            let row_bytes = json_byte_len(row) + usize::from(!rows.is_empty());
+            let row_bytes = (if self.native_rows {
+                json_string_byte_len(&stable_json(row))
+            } else {
+                json_byte_len(row)
+            }) + usize::from(!rows.is_empty());
             if !rows.is_empty()
-                && (bytes + row_bytes > SNAPSHOT_PAGE_BYTES || rows.len() == SNAPSHOT_PAGE_ROWS)
+                && (bytes + row_bytes
+                    > if self.native_rows {
+                        64 * 1024
+                    } else {
+                        SNAPSHOT_PAGE_BYTES
+                    }
+                    || rows.len() == SNAPSHOT_PAGE_ROWS)
             {
                 break;
             }
@@ -1277,6 +1453,71 @@ impl Iterator for SnapshotPages {
         let page = self.page(rows, self.finished);
         self.sequence += 1;
         Some(page)
+    }
+}
+
+/// Native control rows stay canonical strings through JS envelope decoding.
+/// In particular int64 values and source hashes must not pass through f64 JSON.
+pub(crate) fn native_control_message(
+    message: &ServerMessage,
+) -> Result<Option<ServerMessage>, &'static str> {
+    match message {
+        ServerMessage::ReplicaDelta {
+            id,
+            cursor,
+            payload,
+        } => {
+            let rows = match payload.get("upserts") {
+                Some(Value::Array(rows)) => rows.as_slice(),
+                None => &[],
+                _ => return Err("invalid native delta rows"),
+            };
+            let mut encoded: BTreeMap<String, Value> = payload
+                .iter()
+                .filter(|(key, _)| key.as_str() != "upserts")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            encoded.insert(
+                "canonicalUpserts".into(),
+                Value::Array(
+                    rows.iter()
+                        .map(|row| Value::String(stable_json(row)))
+                        .collect(),
+                ),
+            );
+            Ok(Some(ServerMessage::ReplicaDelta {
+                id: id.clone(),
+                cursor: cursor.clone(),
+                payload: encoded,
+            }))
+        }
+        ServerMessage::ReplicaTransaction {
+            cursor,
+            origin_command_id,
+            provenance,
+            changes,
+        } => {
+            let canonical_changes = changes
+                .iter()
+                .map(|change| {
+                    let mut value = serde_json::to_value(change)
+                        .map_err(|_| "native transaction encoding failed")?;
+                    // Canonical storage merges against its own prior row. The old
+                    // projection is unnecessary and could double every wire row.
+                    if let Value::Object(object) = &mut value {
+                        object.remove("oldValue");
+                    }
+                    Ok(stable_json(&value))
+                })
+                .collect::<Result<Vec<_>, &'static str>>()?;
+            Ok(Some(ServerMessage::ReplicaTransactionEncoded {
+                cursor: cursor.clone(),
+                origin_command_id: origin_command_id.clone(),
+                provenance: provenance.clone(),
+                canonical_changes,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -1367,6 +1608,61 @@ fn hex_digest(value: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn snapshot_stream_stops_after_row_or_byte_budget_lookahead() {
+        let rows = vec![
+            serde_json::json!({"id":"a"}),
+            serde_json::json!({"id":"b"}),
+            serde_json::json!({"id":"c"}),
+        ];
+        for (max_rows, max_bytes) in [
+            (2, 0),
+            (0, serde_json::to_vec(&rows[0]).unwrap().len() as i64 * 2),
+        ] {
+            let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+                "table":"tasks", "key":"id", "columns":["id"], "maxRows":max_rows, "maxBytes":max_bytes
+            })).unwrap();
+            let source = futures_util::stream::iter(rows.clone().into_iter().map(Ok)).chain(
+                futures_util::stream::once(async { panic!("read beyond budget lookahead") }),
+            );
+            let (kept, truncated) = collect_snapshot_rows(source, &definition).await.unwrap();
+            assert_eq!(kept, rows[..2]);
+            assert!(truncated);
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_stream_distinguishes_exact_boundary_from_truncation_and_errors() {
+        let row = serde_json::json!({"id":"a", "text":"café 東京"});
+        let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+            "table":"tasks", "key":"id", "columns":["id","text"], "maxRows":1,
+            "maxBytes":serde_json::to_vec(&row).unwrap().len()
+        }))
+        .unwrap();
+        let (kept, truncated) =
+            collect_snapshot_rows(futures_util::stream::iter([Ok(row.clone())]), &definition)
+                .await
+                .unwrap();
+        assert_eq!(kept, vec![row.clone()]);
+        assert!(!truncated);
+        assert!(matches!(
+            collect_snapshot_rows(
+                futures_util::stream::iter([Ok(row.clone()), Ok(row)]),
+                &definition
+            )
+            .await,
+            Err(ReplicaError::DuplicateKey(_))
+        ));
+        assert!(matches!(
+            collect_snapshot_rows(
+                futures_util::stream::iter([Err(ReplicaError::InvalidArguments)]),
+                &definition
+            )
+            .await,
+            Err(ReplicaError::InvalidArguments)
+        ));
+    }
+
     fn paged_fixture(rows: Vec<Value>) -> ServerMessage {
         let hashes = rows
             .iter()
@@ -1392,6 +1688,125 @@ mod tests {
                 ("maxBytes".into(), Value::from(100_000_000)),
                 ("truncated".into(), Value::Bool(false)),
             ]),
+        }
+    }
+
+    #[test]
+    fn native_control_rows_preserve_exact_wire_values_and_omit_old_projection() {
+        let row = serde_json::json!({"id":"a","n":9007199254740993u64,"text":"café 東京 😀\u{2028}","nested":{"null":null}});
+        let cursor = ReplicaCursor {
+            epoch: "epoch".into(),
+            revision: 17,
+        };
+        let delta = ServerMessage::ReplicaDelta {
+            id: "open".into(),
+            cursor: cursor.clone(),
+            payload: BTreeMap::from([
+                ("upserts".into(), Value::Array(vec![row.clone()])),
+                ("deleted".into(), serde_json::json!(["gone"])),
+                ("digest".into(), Value::String("receipt".into())),
+            ]),
+        };
+        let Some(ServerMessage::ReplicaDelta { payload, .. }) =
+            native_control_message(&delta).unwrap()
+        else {
+            panic!("encoded delta")
+        };
+        assert!(!payload.contains_key("upserts"));
+        assert_eq!(
+            payload["canonicalUpserts"],
+            serde_json::json!([stable_json(&row)])
+        );
+        assert_eq!(payload["deleted"], serde_json::json!(["gone"]));
+        assert!(
+            matches!(delta, ServerMessage::ReplicaDelta {ref payload,..} if payload.contains_key("upserts"))
+        );
+        let transaction:ServerMessage=serde_json::from_value(serde_json::json!({
+            "type":"replica.transaction","cursor":cursor,"originCommandId":"command",
+            "changes":[{"entity":"tasks","id":"a","operation":"update","changedColumns":["n","text"],"oldValue":{"n":1},"newValue":row}]
+        })).unwrap();
+        let Some(ServerMessage::ReplicaTransactionEncoded {
+            canonical_changes,
+            origin_command_id,
+            cursor,
+            ..
+        }) = native_control_message(&transaction).unwrap()
+        else {
+            panic!("encoded transaction")
+        };
+        assert_eq!(origin_command_id.as_deref(), Some("command"));
+        assert_eq!(cursor.revision, 17);
+        let encoded = &canonical_changes[0];
+        assert!(encoded.contains("9007199254740993"));
+        let change: Value = serde_json::from_str(encoded).unwrap();
+        assert_eq!(change["newValue"]["n"].as_u64(), Some(9007199254740993));
+        assert!(change.get("oldValue").is_none());
+        assert_eq!(change["changedColumns"], serde_json::json!(["n", "text"]));
+        assert!(
+            native_control_message(&ServerMessage::ReplicaWatermark { revision: 17 })
+                .unwrap()
+                .is_none()
+        );
+        let invalid = ServerMessage::ReplicaDelta {
+            id: "bad".into(),
+            cursor,
+            payload: BTreeMap::from([("upserts".into(), Value::Null)]),
+        };
+        assert!(native_control_message(&invalid).is_err());
+    }
+
+    #[test]
+    fn native_snapshot_wire_fixture_matches_canonical_hashes() {
+        let count = std::env::var("GONVEX_NATIVE_FRAME_ROWS")
+            .ok()
+            .map(|value| value.parse::<usize>().unwrap())
+            .unwrap_or(1200);
+        assert!((1200..=100000).contains(&count));
+        let mut rows:Vec<Value>=(0..count).map(|id|serde_json::json!({"id":format!("row-{id:04}"),"text":"café 東京 😀".repeat(20),"nested":{"é":"nfc","é":"nfd"}})).collect();
+        rows.push(serde_json::json!({"id":"controls","text":"\u{2028}\u{2029}\0\n\t\r\u{1f}","value":9007199254740993u64}));
+        let mut sum = gonvex_protocol::replica_digest::ReplicaSetDigest::default();
+        let hashes: Vec<_> = rows.iter().map(row_hash).collect();
+        for hash in &hashes {
+            sum.add(hash).unwrap();
+        }
+        let mut snapshot = paged_fixture(rows.clone());
+        if let ServerMessage::ReplicaSnapshot { metadata, .. } = &mut snapshot {
+            metadata.insert("pageDigest".into(), Value::String(sum.digest()));
+            metadata.insert("maxRows".into(), Value::from(rows.len() as u64));
+        }
+        let pages: Vec<_> = SnapshotPages::native(snapshot).collect();
+        assert!(pages.len() > 1);
+        let mut observed = Vec::new();
+        for (sequence, page) in pages.iter().enumerate() {
+            assert!(serde_json::to_vec(page).unwrap().len() <= 64 * 1024);
+            let ServerMessage::ReplicaSnapshotEncodedPage {
+                canonical_rows,
+                sequence: actual,
+                last,
+                metadata,
+                ..
+            } = page
+            else {
+                panic!("native frame");
+            };
+            assert_eq!(*actual, sequence as u64);
+            assert_eq!(*last, sequence == pages.len() - 1);
+            assert_eq!(metadata.contains_key("digest"), *last);
+            observed.extend(canonical_rows.iter().map(|row| hex_digest(row.as_bytes())));
+        }
+        assert_eq!(observed, hashes);
+        if let Ok(path) = std::env::var("GONVEX_NATIVE_FRAME_LINES") {
+            use std::io::Write;
+            let mut output = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+            for page in &pages {
+                serde_json::to_writer(&mut output, page).unwrap();
+                output.write_all(b"\n").unwrap();
+            }
+            output.flush().unwrap();
+            std::fs::write(format!("{path}.manifest.json"),serde_json::to_vec(&serde_json::json!({"rows":rows.len(),"frames":pages.len(),"digest":sum.digest()})).unwrap()).unwrap();
+        }
+        if let Ok(path) = std::env::var("GONVEX_NATIVE_FRAME_FIXTURE") {
+            std::fs::write(path,serde_json::to_vec(&serde_json::json!({"frames":pages,"rows":rows,"hashes":hashes,"digest":sum.digest()})).unwrap()).unwrap();
         }
     }
 
@@ -1486,7 +1901,9 @@ mod tests {
         }
         assert_eq!(rows, 20_000);
         assert!(maximum < before / 50);
-        println!("20k JSON wire: monolithic={before} bytes, max_page={maximum} bytes, total_pages={total} bytes, pages={count}; peak single encoded String capacity: before={before_buffer} bytes, after={maximum_buffer} bytes; resident/staged rows and transport queues excluded");
+        println!(
+            "20k JSON wire: monolithic={before} bytes, max_page={maximum} bytes, total_pages={total} bytes, pages={count}; peak single encoded String capacity: before={before_buffer} bytes, after={maximum_buffer} bytes; resident/staged rows and transport queues excluded"
+        );
     }
 
     #[test]
@@ -1686,6 +2103,46 @@ mod tests {
         )?
         .is_none());
         Ok(())
+    }
+
+    #[test]
+    fn negotiated_sum_digest_resume_and_incremental_changes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../packages/protocol/fixtures/replica-set-digest.json"
+        ))
+        .unwrap();
+        let mut hashes = BTreeMap::new();
+        let mut aggregate = ReplicaAggregate::from_hashes(&hashes, true);
+        for (i, mutation) in fixture["mutations"].as_array().unwrap().iter().enumerate() {
+            let hash = mutation["hash"].as_str().unwrap();
+            let remove = mutation["op"] == "remove";
+            aggregate.change(hash, remove);
+            if remove {
+                hashes.retain(|_, value| value != hash);
+            } else {
+                hashes.insert(i.to_string(), hash.to_owned());
+            }
+            assert_eq!(
+                aggregate.digest(),
+                ReplicaAggregate::from_hashes(&hashes, true).digest()
+            );
+        }
+        assert_eq!(aggregate.digest(), fixture["digest"].as_str().unwrap());
+        let mut request:ReplicaOpenRequest=serde_json::from_value(serde_json::json!({"id":"sum","path":"tasks.all","args":{},"digest":aggregate.digest()})).unwrap();
+        assert!(matches!(
+            requested_sum_digest(&request, false),
+            Err(ReplicaError::DigestNotNegotiated)
+        ));
+        assert!(requested_sum_digest(&request, true).unwrap());
+        assert!(verify_resume_hashes(&request, Some(&hashes), true).is_none());
+        request.digest = Some(format!("sum128-v1:{}", "00".repeat(16)));
+        assert!(matches!(
+            verify_resume_hashes(&request, Some(&hashes), true),
+            Some(ServerMessage::ReplicaNeedHashes { .. })
+        ));
+        request.digest = Some(aggregate_digest(&hashes));
+        assert!(!requested_sum_digest(&request, false).unwrap());
+        assert!(verify_resume_hashes(&request, Some(&hashes), true).is_none());
     }
 
     #[test]

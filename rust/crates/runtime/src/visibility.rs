@@ -144,6 +144,14 @@ impl VisibilityPlan {
 
     /// Role-only branches can make row/set branches irrelevant for this member.
     /// Member admission and role changes remain dependencies in every case.
+    /// Row decisions need membership values only for branches not settled by
+    /// the admitted role. SQL-only snapshots leave these values on the server.
+    pub fn needs_materialized_sets(&self, resolved: &ResolvedVisibility) -> bool {
+        let mut sets = BTreeSet::new();
+        active_visibility_sets(&self.predicate, &resolved.role, &mut sets);
+        !sets.is_empty()
+    }
+
     pub fn resolved_dependency_columns(
         &self,
         resolved: &ResolvedVisibility,
@@ -286,6 +294,46 @@ pub async fn resolve(
     transaction: &mut TenantTransaction,
     session: &TenantSession,
     plan: &VisibilityPlan,
+    revision: u64,
+) -> Result<ResolvedVisibility, VisibilityError> {
+    resolve_member(transaction, session, plan, revision, true).await
+}
+
+/// SQL windows enforce set membership in their SQL predicate. Never fetch the
+/// entire tenant membership into Rust before executing a bounded query.
+pub async fn resolve_for_query(
+    transaction: &mut TenantTransaction,
+    session: &TenantSession,
+    plan: &VisibilityPlan,
+    revision: u64,
+) -> Result<ResolvedVisibility, VisibilityError> {
+    resolve_member(transaction, session, plan, revision, false).await
+}
+
+/// Related SQL predicates share the same admitted member and database snapshot.
+pub fn resolve_related_query(
+    plan: &VisibilityPlan,
+    member: &ResolvedVisibility,
+) -> Result<ResolvedVisibility, VisibilityError> {
+    plan.validate()?;
+    let mut resolved = member.clone();
+    resolved.sets.clear();
+    resolved.fingerprint = visibility_fingerprint(
+        plan,
+        &resolved.direct,
+        &resolved.role,
+        &resolved.permissions,
+        &resolved.sets,
+    );
+    Ok(resolved)
+}
+
+async fn resolve_member(
+    transaction: &mut TenantTransaction,
+    session: &TenantSession,
+    plan: &VisibilityPlan,
+    revision: u64,
+    materialize: bool,
 ) -> Result<ResolvedVisibility, VisibilityError> {
     plan.validate()?;
     let row = sqlx::query(
@@ -299,17 +347,20 @@ pub async fn resolve(
     let member_id: String = row.get("id");
     let role: String = row.get("role");
     let permissions = row.try_get::<Json<Value>, _>("permissions")?.0;
-    let revision: i64 =
-        sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton = true")
-            .fetch_one(&mut **transaction.transaction())
-            .await?;
     let direct = BTreeMap::from([
         ("account.id".to_owned(), session.identity.account.id.clone()),
         ("member.id".to_owned(), member_id),
         ("tenant.id".to_owned(), session.route.tenant_id.clone()),
     ]);
     let mut sets = BTreeMap::new();
+    let mut active = BTreeSet::new();
+    if materialize {
+        active_visibility_sets(&plan.predicate, &role, &mut active);
+    }
     for (name, set) in &plan.sets {
+        if !active.contains(name) {
+            continue;
+        }
         let (statement, parameters) = compile_set(set, &direct)?;
         let mut query = sqlx::query(&statement);
         for parameter in &parameters {
@@ -324,7 +375,7 @@ pub async fn resolve(
     }
     let fingerprint = visibility_fingerprint(plan, &direct, &role, &permissions, &sets);
     Ok(ResolvedVisibility {
-        revision: revision.max(0) as u64,
+        revision,
         direct,
         role,
         permissions,
@@ -339,7 +390,14 @@ pub fn compile_predicate(
     row_alias: &str,
     parameters: &mut Vec<Value>,
 ) -> Result<String, VisibilityError> {
-    compile_expression(&plan.predicate, plan, resolved, row_alias, parameters)
+    compile_expression(
+        &plan.predicate,
+        plan,
+        resolved,
+        row_alias,
+        parameters,
+        &mut None,
+    )
 }
 
 pub fn row_matches(plan: &VisibilityPlan, resolved: &ResolvedVisibility, row: &Value) -> bool {
@@ -483,7 +541,15 @@ fn compile_expression(
     resolved: &ResolvedVisibility,
     row_alias: &str,
     parameters: &mut Vec<Value>,
+    account_parameter: &mut Option<usize>,
 ) -> Result<String, VisibilityError> {
+    let account_argument = |parameters: &mut Vec<Value>, slot: &mut Option<usize>| {
+        let index = *slot.get_or_insert_with(|| {
+            parameters.push(Value::String(resolved.direct["account.id"].clone()));
+            parameters.len()
+        });
+        format!("${index}")
+    };
     let argument = |parameters: &mut Vec<Value>, value: Value| {
         parameters.push(value);
         format!("${}", parameters.len())
@@ -491,10 +557,7 @@ fn compile_expression(
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
         "permission" => {
-            let account = argument(
-                parameters,
-                Value::String(resolved.direct["account.id"].clone()),
-            );
+            let account = account_argument(parameters, account_parameter);
             let permission = argument(
                 parameters,
                 Value::String(
@@ -511,10 +574,7 @@ fn compile_expression(
             )
         }
         "role" => {
-            let account = argument(
-                parameters,
-                Value::String(resolved.direct["account.id"].clone()),
-            );
+            let account = account_argument(parameters, account_parameter);
             let role = argument(
                 parameters,
                 Value::String(
@@ -557,7 +617,14 @@ fn compile_expression(
             for child in &expression.children {
                 children.push(format!(
                     "({})",
-                    compile_expression(child, plan, resolved, row_alias, parameters)?
+                    compile_expression(
+                        child,
+                        plan,
+                        resolved,
+                        row_alias,
+                        parameters,
+                        account_parameter
+                    )?
                 ));
             }
             let joined = children.join(if expression.operator == "and" {
@@ -574,7 +641,8 @@ fn compile_expression(
                 plan,
                 resolved,
                 row_alias,
-                parameters
+                parameters,
+                account_parameter
             )?
         ),
         _ => "FALSE".to_owned(),
@@ -916,6 +984,29 @@ mod tests {
     }
 
     #[test]
+    fn bounded_sql_visibility_keeps_membership_in_sql_without_materialized_ids() {
+        let plan =
+            dependency_plan(serde_json::json!({"operator":"inSet","column":"id","set":"assigned"}));
+        let member = dependency_member("member");
+        let related = resolve_related_query(&plan, &member).unwrap();
+        assert!(related.sets.is_empty());
+        assert_eq!(related.revision, member.revision);
+        let mut parameters = Vec::new();
+        let sql = compile_predicate(&plan, &related, "r", &mut parameters).unwrap();
+        assert!(sql.contains("r.\"id\" IN (SELECT DISTINCT"));
+        assert!(sql.contains("\"taskUsers\" AS v0"));
+        assert_eq!(parameters, vec![Value::String("member-1".to_owned())]);
+        // Set changes still invalidate the exact server window. An empty Rust
+        // set must never imply public access or suppress a dependency.
+        assert!(plan.resolved_dependency_columns(&related).change_affects(
+            "taskUsers",
+            "delete",
+            &[]
+        ));
+        assert_ne!(related.fingerprint, member.fingerprint);
+    }
+
+    #[test]
     fn self_join_requires_aliases_and_compiles_both_occurrences() {
         let set = VisibilitySet {
             table: "memberTeams".to_owned(),
@@ -1120,5 +1211,32 @@ mod tests {
             "update",
             &["displayName".to_owned()],
         ));
+    }
+    #[test]
+    fn nested_member_checks_share_only_the_account_context_binding() {
+        let plan = dependency_plan(serde_json::json!({"operator":"or","children":[
+            {"operator":"role","value":"admin"},
+            {"operator":"not","children":[{"operator":"role","value":"owner"}]},
+            {"operator":"and","children":[{"operator":"permission","value":"read"},{"operator":"permission","value":"write"}]}
+        ]}));
+        let mut member = dependency_member("admin");
+        member.direct.insert("account.id".into(), "admin".into());
+        let mut parameters = vec![serde_json::json!("prefix")];
+        let sql = compile_predicate(&plan, &member, "r", &mut parameters).unwrap();
+        assert_eq!(
+            parameters,
+            vec![
+                serde_json::json!("prefix"),
+                serde_json::json!("admin"),
+                serde_json::json!("admin"),
+                serde_json::json!("owner"),
+                serde_json::json!("read"),
+                serde_json::json!("write")
+            ]
+        );
+        assert_eq!(sql.matches("_gonvex_member.account_id = $2").count(), 4);
+        assert_eq!(sql.matches("_gonvex_member.status = 'active'").count(), 4);
+        assert!(sql.contains("_gonvex_member.role = $3"));
+        assert!(sql.contains("permissions ->> $5::text"));
     }
 }

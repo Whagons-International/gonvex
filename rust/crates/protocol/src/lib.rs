@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod replica_digest;
+
 pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +163,12 @@ pub struct BrowserTelemetryInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
+    /// Client understands sum128-v1 Replica Collection integrity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_set_digest: Option<u8>,
+    /// Canonical row strings in credit-limited binary snapshot frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_native_rows: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_snapshot_pages: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -316,6 +324,14 @@ pub enum ClientMessage {
     ReplicaOpenMany { opens: Vec<ReplicaOpenRequest> },
     #[serde(rename = "replica.close")]
     ReplicaClose { id: String },
+    /// Cumulative durable staging acknowledgement for this snapshot only.
+    #[serde(rename = "replica.snapshotAck")]
+    ReplicaSnapshotAck {
+        id: String,
+        #[serde(rename = "snapshotId")]
+        snapshot_id: String,
+        sequence: u64,
+    },
     #[serde(rename = "reducer.call")]
     ReducerCall(ReducerCallRequest),
     #[serde(rename = "reducer.callMany")]
@@ -417,6 +433,12 @@ pub struct PerformanceTelemetryEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
+    /// sum128-v1 is selected only when both peers advertise version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_set_digest: Option<u8>,
+    /// Canonical row strings in credit-limited binary snapshot frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_native_rows: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_snapshot_pages: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -615,12 +637,38 @@ pub enum ServerMessage {
         provenance: Option<PublicInvocationProvenance>,
         changes: Vec<ReplicaChange>,
     },
+    #[serde(rename = "replica.transactionEncoded")]
+    ReplicaTransactionEncoded {
+        cursor: ReplicaCursor,
+        #[serde(
+            default,
+            rename = "originCommandId",
+            skip_serializing_if = "Option::is_none"
+        )]
+        origin_command_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<PublicInvocationProvenance>,
+        #[serde(rename = "canonicalChanges")]
+        canonical_changes: Vec<String>,
+    },
     #[serde(rename = "replica.watermark")]
     ReplicaWatermark { revision: u64 },
     #[serde(rename = "replica.snapshot")]
     ReplicaSnapshot {
         id: String,
         result: Vec<Value>,
+        cursor: ReplicaCursor,
+        key: String,
+        #[serde(flatten)]
+        metadata: BTreeMap<String, Value>,
+    },
+    /// Native capability only: bind the generated typed destination before
+    /// the first credited binary frame, without parsing its row strings in JS.
+    #[serde(rename = "replica.snapshotStart")]
+    ReplicaSnapshotStart {
+        #[serde(rename = "snapshotId")]
+        snapshot_id: String,
+        id: String,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]
@@ -634,6 +682,20 @@ pub enum ServerMessage {
         last: bool,
         id: String,
         result: Vec<Value>,
+        cursor: ReplicaCursor,
+        key: String,
+        #[serde(flatten)]
+        metadata: BTreeMap<String, Value>,
+    },
+    #[serde(rename = "replica.snapshotEncodedPage")]
+    ReplicaSnapshotEncodedPage {
+        #[serde(rename = "snapshotId")]
+        snapshot_id: String,
+        sequence: u64,
+        last: bool,
+        id: String,
+        #[serde(rename = "canonicalRows")]
+        canonical_rows: Vec<String>,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]
@@ -654,6 +716,8 @@ pub enum ServerMessage {
         #[serde(flatten)]
         metadata: BTreeMap<String, Value>,
     },
+    #[serde(rename = "replica.closed")]
+    ReplicaClosed { id: String },
     #[serde(rename = "replica.readyMany")]
     ReplicaReadyMany { ready: Vec<Value> },
     #[serde(rename = "replica.needHashes")]
@@ -720,6 +784,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn native_snapshot_capabilities_frames_and_ack_round_trip() {
+        round_trip_client(
+            r#"{"type":"auth","id":"a","capabilities":{"replicaNativeRows":1,"replicaSetDigest":1,"replicaSnapshotPages":1}}"#,
+        );
+        round_trip_server(r#"{"type":"session.ready","capabilities":{"replicaNativeRows":1}}"#);
+        round_trip_client(
+            r#"{"type":"replica.snapshotAck","id":"a","snapshotId":"s","sequence":3}"#,
+        );
+        round_trip_server(
+            r#"{"type":"replica.snapshotStart","id":"a","snapshotId":"s","key":"id","cursor":{"epoch":"e","revision":1},"scope":"tenant","visibilityScope":"visible","digest":"sum128-v1:00000000000000000000000000000000"}"#,
+        );
+        round_trip_server(
+            r#"{"type":"replica.snapshotEncodedPage","id":"a","snapshotId":"s","sequence":0,"last":true,"canonicalRows":["{\"id\":\"a\"}"],"key":"id","cursor":{"epoch":"e","revision":1},"digest":"final"}"#,
+        );
+    }
 
     #[test]
     fn snapshot_pages_capabilities_and_frames_round_trip() {
@@ -840,6 +921,14 @@ mod tests {
         ] {
             round_trip_server(frame);
         }
+    }
+
+    #[test]
+    fn canonical_transaction_controls_round_trip_without_decoding_rows() {
+        round_trip_server(r#"{"type":"replica.closed","id":"source"}"#);
+        round_trip_server(
+            r#"{"type":"replica.transactionEncoded","cursor":{"epoch":"e","revision":7},"originCommandId":"intent","canonicalChanges":["{\"entity\":\"tasks\",\"id\":\"a\",\"operation\":\"insert\",\"newValue\":{\"n\":9007199254740993}}"]}"#,
+        );
     }
 
     #[test]

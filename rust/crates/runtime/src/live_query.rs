@@ -569,7 +569,15 @@ impl Runtime {
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
-        let resolved = visibility::resolve(&mut transaction, session, visibility_plan).await?;
+        let clock =
+            sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = true")
+                .fetch_one(&mut **transaction.transaction())
+                .await?;
+        let epoch: String = clock.get("epoch");
+        let revision = clock.get::<i64, _>("revision").max(0) as u64;
+        let resolved =
+            visibility::resolve_for_query(&mut transaction, session, visibility_plan, revision)
+                .await?;
         let mut related = BTreeMap::new();
         let tables = relation_tables(plan.predicate.as_ref());
         if !tables.is_empty() {
@@ -586,8 +594,7 @@ impl Runtime {
                     .visibility
                     .get(&table)
                     .ok_or_else(|| LiveQueryError::VisibilityMissing(table.clone()))?;
-                let related_resolved =
-                    visibility::resolve(&mut transaction, session, related_plan).await?;
+                let related_resolved = visibility::resolve_related_query(related_plan, &resolved)?;
                 related.insert(table, (related_plan.clone(), related_resolved));
             }
         }
@@ -596,12 +603,6 @@ impl Runtime {
             .collect::<Vec<_>>()
             .join(":");
 
-        let clock =
-            sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = true")
-                .fetch_one(&mut **transaction.transaction())
-                .await?;
-        let epoch: String = clock.get("epoch");
-        let revision = clock.get::<i64, _>("revision").max(0) as u64;
         let key = canonical_group_key(session, plan, args, &fingerprint, &epoch, revision);
         let singleflight = self.inner.live_query_cache.lock(&key).await;
         let _guard = singleflight.lock().await;
