@@ -342,11 +342,30 @@ async fn resolve_member(
     )
     .bind(&session.identity.account.id)
     .fetch_optional(&mut **transaction.transaction())
-    .await?
-    .ok_or(VisibilityError::MemberRequired)?;
-    let member_id: String = row.get("id");
-    let role: String = row.get("role");
-    let permissions = row.try_get::<Json<Value>, _>("permissions")?.0;
+    .await?;
+    let (member_id, role, permissions) = match row {
+        Some(row) => (
+            row.get::<String, _>("id"),
+            row.get::<String, _>("role"),
+            row.try_get::<Json<Value>, _>("permissions")?.0,
+        ),
+        // Admission already verified this self developer grant and project
+        // authority. Use its ephemeral principal without creating a Member.
+        // Persisted active members above retain their real role/permissions.
+        None if session.developer_session.is_some()
+            && !session.is_anonymous()
+            && session.member.id == format!("developer:{}", session.identity.account.id)
+            && session.member.account_id == session.identity.account.id
+            && session.member.status == "active" =>
+        {
+            (
+                session.member.id.clone(),
+                session.member.role.clone(),
+                session.member.permissions.clone(),
+            )
+        }
+        None => return Err(VisibilityError::MemberRequired),
+    };
     let direct = BTreeMap::from([
         ("account.id".to_owned(), session.identity.account.id.clone()),
         ("member.id".to_owned(), member_id),
@@ -888,6 +907,155 @@ fn quote(value: &str) -> Result<String, VisibilityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn developer_visibility_without_membership_preserves_admission() {
+        use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let Some(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL").ok() else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping visibility contract test");
+            return;
+        };
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("gonvex_developer_visibility_{nonce}");
+        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+        let pools = PoolRegistry::new(PoolLimits::default());
+        let control = ControlPlane::connect(&scoped_url, pools.clone(), BTreeMap::new())
+            .await
+            .unwrap();
+        let fixture = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&scoped_url)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE members(id text PRIMARY KEY, account_id text, status text,
+                                 role text, permissions jsonb);
+            INSERT INTO members VALUES('revoked-member','developer-account','revoked','owner','{}');
+        "#,
+        )
+        .execute(&fixture)
+        .await
+        .unwrap();
+        let before: Value =
+            sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM members m")
+                .fetch_one(&fixture)
+                .await
+                .unwrap();
+
+        // Host-owned result of verified grant admission; token/authority checks
+        // are covered by postgres tenant_isolation and runtime auth_contract.
+        let route = TenantRoute {
+            project_id: "project".to_owned(),
+            tenant_id: "tenant".to_owned(),
+            database_url: scoped_url,
+        };
+        let mut session = TenantSession::anonymous(route.clone());
+        session.identity.account.id = "developer-account".to_owned();
+        session.member.id = "developer:developer-account".to_owned();
+        session.member.account_id = "developer-account".to_owned();
+        session.member.status = "active".to_owned();
+        session.member.role = "admin".to_owned();
+        session.member.permissions = serde_json::json!({"developer":true});
+        session.developer_session = Some(serde_json::json!({"grantId":"devmode_verified"}));
+        let plan: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "where":{"operator":"role","value":"admin"}
+        }))
+        .unwrap();
+
+        for materialize in [true, false] {
+            let mut tx = control
+                .begin_tenant_transaction(&route, true)
+                .await
+                .unwrap();
+            let resolved = if materialize {
+                resolve(&mut tx, &session, &plan, 7).await
+            } else {
+                resolve_for_query(&mut tx, &session, &plan, 7).await
+            }
+            .expect("verified nonmember developer must resolve replica and query visibility");
+            assert_eq!(resolved.direct["member.id"], "developer:developer-account");
+            assert_eq!(resolved.role, "admin");
+            assert!(row_matches(
+                &plan,
+                &resolved,
+                &serde_json::json!({"id":"revoked-member"})
+            ));
+            let mut parameters = Vec::new();
+            compile_predicate(&plan, &resolved, "r", &mut parameters).unwrap();
+            tx.rollback().await.unwrap();
+        }
+
+        // A synthetic-looking member ID alone never authorizes ordinary or
+        // support-impersonation sessions. Nor does metadata replace admission.
+        for invalid in [0, 1, 2] {
+            let mut denied = session.clone();
+            match invalid {
+                0 => denied.developer_session = None,
+                1 => denied.member.id = "revoked-member".to_owned(),
+                _ => denied.member.account_id = "other-account".to_owned(),
+            }
+            let mut tx = control
+                .begin_tenant_transaction(&route, true)
+                .await
+                .unwrap();
+            assert!(matches!(
+                resolve(&mut tx, &denied, &plan, 7).await,
+                Err(VisibilityError::MemberRequired)
+            ));
+            tx.rollback().await.unwrap();
+        }
+        let after: Value =
+            sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM members m")
+                .fetch_one(&fixture)
+                .await
+                .unwrap();
+        assert_eq!(
+            before, after,
+            "visibility must not create or reactivate members"
+        );
+
+        sqlx::query("UPDATE members SET status='active',role='member',permissions='{}'")
+            .execute(&fixture)
+            .await
+            .unwrap();
+        let mut tx = control
+            .begin_tenant_transaction(&route, true)
+            .await
+            .unwrap();
+        let resolved = resolve(&mut tx, &session, &plan, 8).await.unwrap();
+        assert_eq!(resolved.direct["member.id"], "revoked-member");
+        assert_eq!(resolved.role, "member");
+        assert!(!row_matches(
+            &plan,
+            &resolved,
+            &serde_json::json!({"id":"revoked-member"})
+        ));
+        tx.rollback().await.unwrap();
+        fixture.close().await;
+        pools.close().await;
+        sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+    }
 
     fn dependency_plan(predicate: Value) -> VisibilityPlan {
         serde_json::from_value(serde_json::json!({
