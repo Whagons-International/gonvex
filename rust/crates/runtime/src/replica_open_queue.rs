@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, VecDeque};
 /// Per-socket bound on pending preparations. Large tenants (El Rey) open far more
 /// than 256 windows on a fresh replica; hitting the bound failed the page render.
 const MAX_ENTRIES: usize = 8192;
-const MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 type Completion<T> = (String, u64, bool, T);
 struct Entry {
@@ -60,6 +60,13 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
         }
         self.waiting.retain(|(key, _)| key != id);
     }
+    /// Includes replacements without cancelling the old job until admission.
+    pub fn has_capacity(&self, id: &str, bytes: usize) -> bool {
+        let replaced = self.entries.get(id);
+        let count = self.entries.len() - usize::from(replaced.is_some());
+        let retained_bytes = self.bytes - replaced.map_or(0, |entry| entry.bytes);
+        count < MAX_ENTRIES && bytes <= MAX_BYTES - retained_bytes
+    }
     pub fn push(
         &mut self,
         id: String,
@@ -67,10 +74,10 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
         bulk: bool,
         future: BoxFuture<'static, T>,
     ) -> Result<(), &'static str> {
-        self.remove(&id);
-        if self.entries.len() >= MAX_ENTRIES || bytes > MAX_BYTES - self.bytes {
+        if !self.has_capacity(&id, bytes) {
             return Err("pending replica preparation allowance exceeded");
         }
+        self.remove(&id);
         self.ticket = self.ticket.wrapping_add(1);
         let ticket = self.ticket;
         let (abort, registration) = AbortHandle::new_pair();
@@ -224,6 +231,51 @@ mod tests {
         queue.remove("closed");
         assert_eq!(queue.next().await, None);
         assert!(queue.is_empty());
+    }
+    async fn stream_above_allowance(count: usize, bytes: usize) {
+        let mut queue = ReplicaOpenQueue::default();
+        let mut completed = std::collections::BTreeSet::new();
+        let mut backpressured = 0;
+        for n in 0..count {
+            let id = n.to_string();
+            while !queue.has_capacity(&id, bytes) {
+                backpressured += 1;
+                assert!(
+                    completed.insert(queue.next().await.expect("queued preparation must drain")),
+                    "a preparation published twice"
+                );
+            }
+            queue
+                .push(id, bytes, n % 2 == 0, async move { n }.boxed())
+                .unwrap();
+            assert!(queue.entries.len() <= MAX_ENTRIES);
+            assert!(queue.bytes <= MAX_BYTES);
+        }
+        while let Some(n) = queue.next().await {
+            assert!(completed.insert(n), "a preparation published twice");
+        }
+        assert!(backpressured > 0);
+        assert_eq!(completed, (0..count).collect());
+        assert_eq!(queue.bytes, 0);
+    }
+    #[tokio::test]
+    async fn streams_more_sources_than_the_count_allowance_without_an_error() {
+        stream_above_allowance(MAX_ENTRIES + 257, 64).await;
+    }
+    #[tokio::test]
+    async fn streams_more_request_bytes_than_the_allowance_without_an_error() {
+        stream_above_allowance(300, MAX_BYTES / 8).await;
+    }
+    #[tokio::test]
+    async fn rejected_replacement_keeps_the_previous_preparation() {
+        let mut queue = ReplicaOpenQueue::default();
+        queue
+            .push("same".into(), MAX_BYTES, false, async { 42 }.boxed())
+            .unwrap();
+        assert!(queue
+            .push("same".into(), MAX_BYTES + 1, false, async { 99 }.boxed())
+            .is_err());
+        assert_eq!(queue.next().await, Some(42));
     }
     #[tokio::test]
     async fn enforces_bytes_and_count_for_both_queued_and_active_work() {
