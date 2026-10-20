@@ -27,7 +27,7 @@ pub mod storage;
 pub mod telemetry;
 pub mod visibility;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use axum::extract::ws::Message;
@@ -1356,6 +1356,10 @@ async fn websocket(
     let mut sent_zero_bootstrap_watermark = false;
     let mut replicas = BTreeMap::new();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
+    // Retain at most one decoded, transport-size-bounded frame. While it waits
+    // for preparation capacity, stop reading further frames (TCP backpressure).
+    // SQL preparations do not depend on socket input; auth timers remain live.
+    let mut pending_replica_opens = VecDeque::<ReplicaOpenRequest>::new();
     let mut live_queries = BTreeMap::new();
     let mut control_queries = BTreeMap::new();
     let mut runtime_events = runtime.inner.runtime_events.subscribe();
@@ -1398,6 +1402,7 @@ async fn websocket(
         () => {{
             replicas.clear();
             replica_opens.clear();
+            pending_replica_opens.clear();
             snapshot_delivery.clear();
             legacy_snapshot_delivery.clear();
             live_queries.clear();
@@ -1424,8 +1429,30 @@ async fn websocket(
 
     loop {
         let preparing_replicas = !replica_opens.is_empty();
+        let admit_replica = pending_replica_opens.front().is_some_and(|request| {
+            let bytes = replica_open_request_bytes(request);
+            // Oversized individual requests must reach validation, not wait
+            // forever for capacity that can never exist.
+            bytes > replica_open_queue::MAX_BYTES || replica_opens.has_capacity(&request.id, bytes)
+        });
         let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
         let message = tokio::select! {
+            _ = std::future::ready(()), if admit_replica => {
+                let request = pending_replica_opens.pop_front().unwrap();
+                snapshot_delivery.remove(&request.id);
+                legacy_snapshot_delivery.remove(&request.id);
+                replicas.remove(&request.id);
+                runtime.inner.metrics.activity(
+                    &connection_id, "Replica Collection opened", Some(&request.path),
+                );
+                if let Some(response) = enqueue_replica_open(
+                    &runtime, tenant_session.as_ref(), request,
+                    replica_sum_digest_enabled, &mut replica_opens,
+                ).await {
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
+                }
+                continue;
+            }
             opened = replica_opens.next(), if preparing_replicas => {
                 if let Some(outcome) = opened {
                     for response in install_replica_open_outcomes(&mut replicas, vec![outcome]) {
@@ -1458,6 +1485,7 @@ async fn websocket(
                 if !revalidate_connection(&runtime, &control_connection).await {
                     replicas.clear();
                     replica_opens.clear();
+                    pending_replica_opens.clear();
                     snapshot_delivery.clear();
                     legacy_snapshot_delivery.clear();
                     live_queries.clear();
@@ -1496,7 +1524,7 @@ async fn websocket(
             transport = async {
                 if defer_feed { ScheduledTransport::Socket(socket.next().await) }
                 else { next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler).await }
-            } => {
+            }, if pending_replica_opens.is_empty() => {
                 match transport {
                     ScheduledTransport::Socket(message) => {
                         let Some(message) = message else { break; };
@@ -1555,6 +1583,7 @@ async fn websocket(
                                     if reset {
                                         replicas.clear();
                                         replica_opens.clear();
+                                        pending_replica_opens.clear();
                                         snapshot_delivery.clear();
                                         legacy_snapshot_delivery.clear();
                                     }
@@ -1570,6 +1599,7 @@ async fn websocket(
                                     }
                                     replicas.clear();
                                     replica_opens.clear();
+                                    pending_replica_opens.clear();
                                     snapshot_delivery.clear();
                                     legacy_snapshot_delivery.clear();
                                 }
@@ -1596,6 +1626,7 @@ async fn websocket(
                         }
                         replicas.clear();
                         replica_opens.clear();
+                        pending_replica_opens.clear();
                         snapshot_delivery.clear();
                         legacy_snapshot_delivery.clear();
                         live_queries.clear();
@@ -1641,6 +1672,7 @@ async fn websocket(
                     {
                         replicas.clear();
                         replica_opens.clear();
+                        pending_replica_opens.clear();
                         snapshot_delivery.clear();
                         legacy_snapshot_delivery.clear();
                         live_queries.clear();
@@ -1890,6 +1922,7 @@ async fn websocket(
                     };
                     replicas.clear();
                     replica_opens.clear();
+                    pending_replica_opens.clear();
                     snapshot_delivery.clear();
                     legacy_snapshot_delivery.clear();
                     live_queries.clear();
@@ -2055,6 +2088,7 @@ async fn websocket(
                     let next_tenant_session =
                         tenant_data_session(control_only, &authenticated_control);
                     let preserved = replica_opens.is_empty()
+                        && pending_replica_opens.is_empty()
                         && legacy_snapshot_delivery.is_empty()
                         && (replica_native_rows_enabled || snapshot_delivery.is_empty())
                         && !control_only
@@ -2078,6 +2112,7 @@ async fn websocket(
                     } else {
                         replicas.clear();
                         replica_opens.clear();
+                        pending_replica_opens.clear();
                         snapshot_delivery.clear();
                         legacy_snapshot_delivery.clear();
                         live_queries.clear();
@@ -2647,30 +2682,11 @@ async fn websocket(
                 }
                 Ok(ClientMessage::ReplicaOpen(request)) => {
                     sent_zero_bootstrap_watermark = false;
+                    replica_opens.remove(&request.id);
                     snapshot_delivery.remove(&request.id);
                     legacy_snapshot_delivery.remove(&request.id);
                     replicas.remove(&request.id);
-                    runtime.inner.metrics.activity(
-                        &connection_id,
-                        "Replica Collection opened",
-                        Some(&request.path),
-                    );
-                    if let Some(response) = enqueue_replica_open(
-                        &runtime,
-                        tenant_session.as_ref(),
-                        request,
-                        replica_sum_digest_enabled,
-                        &mut replica_opens,
-                    )
-                    .await
-                    {
-                        if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
+                    pending_replica_opens.push_back(request);
                 }
                 Ok(ClientMessage::ReplicaOpenMany { opens }) => {
                     if opens.len() > REPLICA_OPEN_BATCH_LIMIT {
@@ -2685,30 +2701,13 @@ async fn websocket(
                     }
                     sent_zero_bootstrap_watermark = false;
                     for request in opens {
+                        replica_opens.remove(&request.id);
                         snapshot_delivery.remove(&request.id);
                         legacy_snapshot_delivery.remove(&request.id);
                         replicas.remove(&request.id);
-                        runtime.inner.metrics.activity(
-                            &connection_id,
-                            "Replica Collection opened",
-                            Some(&request.path),
-                        );
-                        if let Some(response) = enqueue_replica_open(
-                            &runtime,
-                            tenant_session.as_ref(),
-                            request,
-                            replica_sum_digest_enabled,
-                            &mut replica_opens,
-                        )
-                        .await
-                        {
-                            if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
+                        // Only the last open for an ID in this frame can publish.
+                        pending_replica_opens.retain(|pending| pending.id != request.id);
+                        pending_replica_opens.push_back(request);
                     }
                 }
                 Ok(ClientMessage::ReplicaSnapshotAck {
@@ -3911,6 +3910,12 @@ where
         .await
 }
 
+fn replica_open_request_bytes(request: &ReplicaOpenRequest) -> usize {
+    serde_json::to_vec(request).map_or(usize::MAX, |value| {
+        value.len().saturating_mul(2).saturating_add(1024)
+    })
+}
+
 async fn enqueue_replica_open(
     runtime: &Runtime,
     session: Option<&TenantSession>,
@@ -3930,9 +3935,10 @@ async fn enqueue_replica_open(
             "authenticate with an active tenant before opening a Replica Collection",
         ));
     };
-    let bytes = serde_json::to_vec(&request).map_or(usize::MAX, |value| {
-        value.len().saturating_mul(2).saturating_add(1024)
-    });
+    let bytes = replica_open_request_bytes(&request);
+    if bytes > replica_open_queue::MAX_BYTES {
+        return Some(reject("individual replica open request is too large"));
+    }
     let module = runtime
         .inner
         .modules
@@ -3960,10 +3966,12 @@ async fn enqueue_replica_open(
         (owned_request, opened)
     }
     .boxed();
+    // The socket loop reserved admission before constructing this future.
+    // Queue ownership is exclusive across the await above.
     queue
         .push(request.id.clone(), bytes, bulk, future)
-        .err()
-        .map(reject)
+        .expect("replica preparation admission must have capacity");
+    None
 }
 
 fn install_replica_open_outcomes<S, E>(
