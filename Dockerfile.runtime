@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # The Rust runtime owns HTTP, authentication, tenant routing, Postgres
 # transactions, the change feed, visibility, and the replica protocol. The
 # separately bounded V8 process owns TypeScript application execution only.
@@ -5,11 +6,20 @@ FROM rust:1.94-bookworm AS rust-build
 WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/crates ./crates
-RUN cargo build --locked --release \
+# Cache Cargo artifacts independently of Docker layers: Coolify build arguments
+# and network host mappings can invalidate RUN layers even on an unchanged tree.
+# Keep the outputs outside the mounts so a cached RUN still supplies the image.
+RUN --mount=type=cache,id=gonvex-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=gonvex-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=gonvex-runtime-rust-1.94,target=/src/rust/target,sharing=locked \
+    CARGO_INCREMENTAL=1 cargo build --locked --release \
     -p gonvex-admin \
     -p gonvex-runtime \
     -p gonvex-module-host \
-    -p gonvex-sandbox-worker
+    -p gonvex-sandbox-worker \
+    && mkdir -p /out \
+    && cp target/release/gonvex-runtime target/release/gonvex-admin \
+          target/release/gonvex-module-host target/release/gonvex-sandbox-worker /out/
 
 FROM debian:bookworm-slim
 WORKDIR /app
@@ -17,10 +27,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/gonvex/data /var/lib/gonvex/tmp
-COPY --from=rust-build /src/rust/target/release/gonvex-runtime /usr/local/bin/gonvex-runtime
-COPY --from=rust-build /src/rust/target/release/gonvex-admin /usr/local/bin/gonvex-admin
-COPY --from=rust-build /src/rust/target/release/gonvex-module-host /usr/local/bin/gonvex-module-host
-COPY --from=rust-build /src/rust/target/release/gonvex-sandbox-worker /usr/local/bin/gonvex-sandbox-worker
+COPY --from=rust-build /out/gonvex-runtime /usr/local/bin/gonvex-runtime
+COPY --from=rust-build /out/gonvex-admin /usr/local/bin/gonvex-admin
+COPY --from=rust-build /out/gonvex-module-host /usr/local/bin/gonvex-module-host
+COPY --from=rust-build /out/gonvex-sandbox-worker /usr/local/bin/gonvex-sandbox-worker
 # Data-file artifacts (DuckDB databases for assistant-uploaded CSV/XLSX/XLS)
 # live here; mount a volume to keep them across deploys. Artifacts re-ingest
 # from object storage on miss, so an ephemeral dir also works (just slower on
@@ -35,6 +45,6 @@ ENV GONVEX_ADDR=0.0.0.0:8080 \
 WORKDIR /var/lib/gonvex
 USER 0:0
 EXPOSE 8080
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=30 \
+HEALTHCHECK --interval=5s --timeout=5s --start-period=5s --retries=30 \
   CMD curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8080/healthz >/dev/null
 CMD ["gonvex-runtime"]

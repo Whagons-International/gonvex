@@ -26,7 +26,7 @@ test("runtime image contains no application compiler or Go plugin state", () => 
   assert.doesNotMatch(runtime, /GOCACHE|GOMODCACHE|GOPATH|GONVEX_PLUGIN_CACHE_DIR|GONVEX_MODULE_ROOT/);
   assert.doesNotMatch(dockerfile, /^FROM golang:/m);
   assert.doesNotMatch(dockerfile, /buildmode=plugin|plugin\.Open|project bundle|synced project bundles/i);
-  assert.match(runtime, /COPY --from=rust-build \/src\/rust\/target\/release\/gonvex-admin \/usr\/local\/bin\/gonvex-admin/);
+  assert.match(runtime, /COPY --from=rust-build \/out\/gonvex-admin \/usr\/local\/bin\/gonvex-admin/);
   assert.match(runtime, /WORKDIR \/var\/lib\/gonvex\nUSER 0:0/);
   assert.doesNotMatch(runtime, /useradd|groupadd|chown/);
 });
@@ -54,11 +54,11 @@ test("runtime image always contains and supervises the Rust TypeScript module ho
   assert.match(rustBuild, /-p gonvex-module-host/);
   assert.match(
     runtime,
-    /COPY --from=rust-build \/src\/rust\/target\/release\/gonvex-module-host \/usr\/local\/bin\/gonvex-module-host/,
+    /COPY --from=rust-build \/out\/gonvex-module-host \/usr\/local\/bin\/gonvex-module-host/,
   );
   assert.match(runtime, /GONVEX_MODULE_HOST_ENABLED=true/);
   assert.match(runtime, /GONVEX_MODULE_HOST_BINARY=\/usr\/local\/bin\/gonvex-module-host/);
-  assert.match(runtime, /COPY --from=rust-build \/src\/rust\/target\/release\/gonvex-sandbox-worker \/usr\/local\/bin\/gonvex-sandbox-worker/);
+  assert.match(runtime, /COPY --from=rust-build \/out\/gonvex-sandbox-worker \/usr\/local\/bin\/gonvex-sandbox-worker/);
   assert.match(runtime, /GONVEX_SANDBOX_WORKER_BINARY=\/usr\/local\/bin\/gonvex-sandbox-worker/);
 });
 
