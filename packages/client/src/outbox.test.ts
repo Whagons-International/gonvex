@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { IDBKeyRange, indexedDB } from "fake-indexeddb";
+import { IDBFactory, IDBIndex, IDBObjectStore, IDBKeyRange, indexedDB } from "fake-indexeddb";
 import { DexieMutationOutbox, createMutationOutbox } from "./outbox";
 
 const scope = "project-a\u0000tenant-a\u0000user-a";
@@ -244,5 +244,36 @@ describe("DexieMutationOutbox", () => {
     await outbox.ack(first.id);
     await expect(outbox.nextReady(scope, Date.now())).resolves.toMatchObject({ id: second.id });
     await expect(outbox.loadAll(scope)).resolves.toHaveLength(1);
+  });
+});
+
+describe("durable enqueue failures", () => {
+  it("rejects quota failure without claiming acceptance and persists a same-key retry", async () => {
+    const options = {databaseName:"quota-"+crypto.randomUUID(), indexedDB:new IDBFactory(), IDBKeyRange};
+    const writer=createMutationOutbox(options);
+    const first=await writer.enqueue({scope,path:"tasks.update",args:{value:1},idempotencyKey:"first"});
+    const original=IDBObjectStore.prototype.add;
+    const failure=vi.spyOn(IDBObjectStore.prototype,"add").mockImplementation(function(this:IDBObjectStore,...args:Parameters<typeof original>){
+      if(this.name==="entries")throw new DOMException("Disk full","QuotaExceededError");
+      return original.apply(this,args);
+    });
+    try {
+      await expect(writer.enqueue({scope,path:"tasks.update",args:{value:2},idempotencyKey:"retry"})).rejects.toThrow("no intent was accepted");
+    } finally {failure.mockRestore();}
+    expect(await writer.count(scope)).toBe(1);
+    const reopened=createMutationOutbox(options);
+    expect(await reopened.loadAll(scope)).toMatchObject([{id:first.id,idempotencyKey:"first"}]);
+    await writer.enqueue({scope,path:"tasks.update",args:{value:2},idempotencyKey:"retry"});
+    expect(await reopened.loadAll(scope)).toMatchObject([{idempotencyKey:"first"},{idempotencyKey:"retry"}]);
+  });
+
+  it("rejects subsequent acceptance after an IDB failure degraded this instance", async () => {
+    const options={databaseName:"degraded-"+crypto.randomUUID(),indexedDB:new IDBFactory(),IDBKeyRange};
+    const writer=createMutationOutbox(options);
+    const first=await writer.enqueue({scope,path:"tasks.update",args:{value:1}});
+    const failure=vi.spyOn(IDBIndex.prototype,"count").mockImplementation(()=>{throw new DOMException("Cannot read","UnknownError");});
+    try {await writer.count(scope);expect(failure).toHaveBeenCalled();} finally {failure.mockRestore();}
+    await expect(writer.enqueue({scope,path:"tasks.update",args:{value:2}})).rejects.toThrow("no intent was accepted");
+    expect(await createMutationOutbox(options).loadAll(scope)).toMatchObject([{id:first.id}]);
   });
 });

@@ -1,3 +1,4 @@
+import { IDBFactory, IDBKeyRange, IDBObjectStore } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConvexReactClient, GonvexClient, GonvexClientError, type FunctionReference } from "./index";
 
@@ -165,7 +166,8 @@ describe("GonvexClient", () => {
 	});
 
 	it("sends the outbox idempotency key on replayable mutations and omits it on one-shots", async () => {
-		const client = new GonvexClient("ws://runtime.test/ws");
+		// This transport-only fixture deliberately has no IndexedDB.
+		const client = new GonvexClient("ws://runtime.test/ws", { outbox: { enabled: false } });
 		client.connect();
 		const socket = latestSocket();
 		socket.open();
@@ -1387,4 +1389,32 @@ describe("GonvexClient", () => {
     expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
     expect(handler).not.toHaveBeenCalled();
   });
+});
+
+it("rejects a replayable mutation when IndexedDB cannot persist it", async () => {
+  vi.useRealTimers();
+  vi.stubGlobal("indexedDB", new IDBFactory());
+  vi.stubGlobal("IDBKeyRange", IDBKeyRange);
+  const client = new GonvexClient("ws://runtime.test/ws", {
+    outbox: { databaseName: "client-quota-" + crypto.randomUUID() },
+  });
+  const original = IDBObjectStore.prototype.add;
+  let failure: ReturnType<typeof vi.spyOn> | undefined;
+  try {
+    await client.outboxCount();
+    failure = vi.spyOn(IDBObjectStore.prototype, "add").mockImplementation(function(this: IDBObjectStore, ...args: Parameters<typeof original>) {
+      if (this.name === "entries") throw new DOMException("Disk full", "QuotaExceededError");
+      return original.apply(this, args);
+    });
+    await expect(client.mutation(
+      { kind: "mutation", path: "tasks.update" },
+      { id: "a", title: "Not saved" },
+      { optimistic: [{ collection: "tasks.list", rowId: "a", op: "patch", fields: { title: "Not saved" } }] },
+    )).rejects.toThrow("no intent was accepted");
+    expect(failure).toHaveBeenCalled();
+    expect(await client.outboxCount()).toBe(0);
+  } finally {
+    failure?.mockRestore();
+    client.close();
+  }
 });

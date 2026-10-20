@@ -87,9 +87,9 @@ type MutationOutboxDatabase = DexieDatabase & {
  * barrier until it is acknowledged, and `loadAll` recovers abandoned inflight
  * work after a crash by returning it to pending.
  *
- * IndexedDB is an optimization for durability, not a prerequisite for the
- * optimistic mutation path. Disabled or failed storage permanently degrades
- * this instance to the same queue semantics in memory for the current session.
+ * Accepted intents require durable storage. A storage failure must reject
+ * enqueue rather than acknowledge a session-only write. Callers can explicitly
+ * opt into session-only queue semantics with enabled: false.
  */
 export class DexieMutationOutbox implements MutationOutbox {
   private readonly databaseName: string;
@@ -101,8 +101,10 @@ export class DexieMutationOutbox implements MutationOutbox {
   private databasePromise?: Promise<MutationOutboxDatabase>;
   private memoryOnly: boolean;
   private nextMemoryId = 1;
+  private readonly persistenceRequired: boolean;
 
   constructor(options: MutationOutboxOptions = {}) {
+    this.persistenceRequired = options.enabled !== false;
     this.databaseName = options.databaseName ?? "gonvex-outbox";
     this.indexedDB = options.indexedDB;
     this.keyRange = options.IDBKeyRange;
@@ -126,7 +128,10 @@ export class DexieMutationOutbox implements MutationOutbox {
       state: mutation.state ?? "pending",
     };
 
-    if (this.memoryOnly) return this.enqueueInMemory(entry);
+    if (this.memoryOnly) {
+      if (this.persistenceRequired) throw new Error("Durable storage is required to queue a mutation; no intent was accepted");
+      return this.enqueueInMemory(entry);
+    }
     try {
       const database = await this.open();
       const id = await database.entries.add(entry);
@@ -134,9 +139,8 @@ export class DexieMutationOutbox implements MutationOutbox {
       this.remember(stored);
       this.notify();
       return cloneEntry(stored);
-    } catch {
-      this.degradeToMemory();
-      return this.enqueueInMemory(entry);
+    } catch (error) {
+      throw new Error("Could not persist queued mutation; no intent was accepted", { cause: error });
     }
   }
 
