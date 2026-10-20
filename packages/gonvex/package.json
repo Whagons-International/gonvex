@@ -37,10 +37,11 @@
     "rolldown": "^1.2.3",
     "@gonvex/local-runtime": "workspace:*",
     "@electric-sql/pglite": "0.5.8",
-    "typescript": "^6.0.3"
+    "typescript-api": "npm:typescript@6.0.3"
   },
   "devDependencies": {
-    "@types/node": "^24.12.4"
+    "@types/node": "^24.12.4",
+    "typescript": "7.0.2"
   },
   "main": "./dist/index.js"
 }

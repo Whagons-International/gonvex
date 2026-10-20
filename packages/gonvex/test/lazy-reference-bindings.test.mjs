@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
-import ts from 'typescript';
+import ts from 'typescript-api';
 import { lazyReferenceRuntime, renderLazyReferences } from '../dist/lazy-reference-bindings.js';
 
 test('generated references allocate on access, preserve identity, and serialize the same contract', () => {

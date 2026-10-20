@@ -41,7 +41,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import type * as TS from "typescript";
+import type * as TS from "typescript-api";
 
 export type LocalTableAccess = {
   table: string;
@@ -845,7 +845,7 @@ export async function analyzeLocalReducerDependencies(input: {
   tsconfig?: string;
 }): Promise<LocalReducerAnalysis[]> {
   if (!input.reducers.length) return [];
-  ts ??= createRequire(import.meta.url)("typescript") as typeof TS;
+  ts ??= createRequire(import.meta.url)("typescript-api") as typeof TS;
   const options = compilerOptions(input.root, input.backendDir, input.tsconfig);
   const program = ts.createProgram({ rootNames: [...input.files], options });
   const analyzer = new LocalReducerDependencyAnalyzer(program, input.root, sdkRoots(input.backendDir, options));
