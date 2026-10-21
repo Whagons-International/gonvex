@@ -1,0 +1,305 @@
+{
+  "capturedAt": "2026-10-21 01:34:11 UTC",
+  "base": "5cf0c8c28404dcbf9c2c4d4d791f8d486d5d7e7b",
+  "compiledModulesSHA256": "e0aca9ec9b65c2f85abb6ed3b0e21d599ec990ff0e824756ca75622888fb1a07",
+  "sqliteSourceCommit": "24cdc5e22bc6fabda3e1557358f3e37a927e8640",
+  "sqliteVersion": "3.54.1",
+  "sqliteMjsSHA256": "d3e5161c7880d91594528a95a5e95d5d07c8e595a74c240336c295b306c26891",
+  "sqliteWasmSHA256": "ac1926cbebc762e448858d57b79a506ef6c66fcc201bd796d90a7a599fb93a49",
+  "artifactBytes": {
+    "typescriptRaw": 73174,
+    "typescriptPerModuleGzip": 20537,
+    "sqliteRaw": 2170717,
+    "sqliteGzip": 784158
+  },
+  "workerRecovery": {
+    "acknowledgedIntentRecovered": true,
+    "after": {
+      "bytes": 8706,
+      "entries": 3,
+      "sequence": 2
+    },
+    "before": {
+      "bytes": 8706,
+      "entries": 3,
+      "sequence": 2
+    },
+    "concurrentRefused": true,
+    "idempotentRetry": true,
+    "receipt": {
+      "duplicate": false,
+      "sequence": 3
+    },
+    "retry": {
+      "duplicate": true,
+      "sequence": 3
+    },
+    "uncommittedSnapshotHidden": true
+  },
+  "samples": [
+    {
+      "repetition": 0,
+      "arm": "typescript",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 33204835,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 31012,
+      "scratchBytes": 13825600,
+      "timings": {
+        "combinedP50Ms": 2,
+        "combinedP95Ms": 4.099999904632568,
+        "ingestAndIndexMs": 1897.5,
+        "openMs": 8,
+        "reopenAndQueryMs": 8.099999904632568,
+        "scanFilterSortMs": 49.19999980926514
+      },
+      "wasmBytes": 0
+    },
+    {
+      "repetition": 0,
+      "arm": "sqlite",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 22863872,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 31012,
+      "scratchBytes": 0,
+      "timings": {
+        "combinedP50Ms": 0.40000009536743164,
+        "combinedP95Ms": 3.299999713897705,
+        "ingestAndIndexMs": 551.4000000953674,
+        "moduleMs": 16,
+        "openMs": 2,
+        "poolMs": 7.899999618530273,
+        "reopenAndQueryMs": 1.5,
+        "scanFilterSortMs": 0.2999997138977051
+      },
+      "wasmBytes": 4194304
+    },
+    {
+      "repetition": 1,
+      "arm": "sqlite",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 22863872,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 31012,
+      "scratchBytes": 0,
+      "timings": {
+        "combinedP50Ms": 0.40000009536743164,
+        "combinedP95Ms": 3.1999998092651367,
+        "ingestAndIndexMs": 550.0999999046326,
+        "moduleMs": 11.799999713897705,
+        "openMs": 2.1999998092651367,
+        "poolMs": 8.200000286102295,
+        "reopenAndQueryMs": 1.5,
+        "scanFilterSortMs": 0.19999980926513672
+      },
+      "wasmBytes": 4194304
+    },
+    {
+      "repetition": 1,
+      "arm": "typescript",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 33204835,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 31012,
+      "scratchBytes": 13825600,
+      "timings": {
+        "combinedP50Ms": 2.0999999046325684,
+        "combinedP95Ms": 4,
+        "ingestAndIndexMs": 1906.1999998092651,
+        "openMs": 4.100000381469727,
+        "reopenAndQueryMs": 8,
+        "scanFilterSortMs": 49.90000009536743
+      },
+      "wasmBytes": 0
+    },
+    {
+      "repetition": 2,
+      "arm": "typescript",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 33204835,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 31012,
+      "scratchBytes": 13825600,
+      "timings": {
+        "combinedP50Ms": 2.0999999046325684,
+        "combinedP95Ms": 4.299999713897705,
+        "ingestAndIndexMs": 1901,
+        "openMs": 4.5,
+        "reopenAndQueryMs": 6.200000286102295,
+        "scanFilterSortMs": 49.30000019073486
+      },
+      "wasmBytes": 0
+    },
+    {
+      "repetition": 2,
+      "arm": "sqlite",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 22863872,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 31012,
+      "scratchBytes": 0,
+      "timings": {
+        "combinedP50Ms": 0.40000009536743164,
+        "combinedP95Ms": 3.1999998092651367,
+        "ingestAndIndexMs": 550.8000001907349,
+        "moduleMs": 12.199999809265137,
+        "openMs": 2.1999998092651367,
+        "poolMs": 8,
+        "reopenAndQueryMs": 1.3999996185302734,
+        "scanFilterSortMs": 0.19999980926513672
+      },
+      "wasmBytes": 4194304
+    },
+    {
+      "repetition": 0,
+      "arm": "typescript",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 107152233,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 100000,
+      "scratchBytes": 44764829,
+      "timings": {
+        "combinedP50Ms": 6.099999904632568,
+        "combinedP95Ms": 11.600000381469727,
+        "ingestAndIndexMs": 6245.199999809265,
+        "openMs": 4.400000095367432,
+        "reopenAndQueryMs": 14.800000190734863,
+        "scanFilterSortMs": 147.39999961853027
+      },
+      "wasmBytes": 0
+    },
+    {
+      "repetition": 0,
+      "arm": "sqlite",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 75587584,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 100000,
+      "scratchBytes": 0,
+      "timings": {
+        "combinedP50Ms": 1,
+        "combinedP95Ms": 4,
+        "ingestAndIndexMs": 1834.5999999046326,
+        "moduleMs": 13.099999904632568,
+        "openMs": 2.4000000953674316,
+        "poolMs": 6.700000286102295,
+        "reopenAndQueryMs": 2.299999713897705,
+        "scanFilterSortMs": 0.40000009536743164
+      },
+      "wasmBytes": 6225920
+    },
+    {
+      "repetition": 1,
+      "arm": "sqlite",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 75587584,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 100000,
+      "scratchBytes": 0,
+      "timings": {
+        "combinedP50Ms": 1,
+        "combinedP95Ms": 4,
+        "ingestAndIndexMs": 1820.7999997138977,
+        "moduleMs": 13.400000095367432,
+        "openMs": 2.3000001907348633,
+        "poolMs": 8.699999809265137,
+        "reopenAndQueryMs": 2.299999713897705,
+        "scanFilterSortMs": 0.40000009536743164
+      },
+      "wasmBytes": 6225920
+    },
+    {
+      "repetition": 1,
+      "arm": "typescript",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 107152233,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 100000,
+      "scratchBytes": 44764829,
+      "timings": {
+        "combinedP50Ms": 6.099999904632568,
+        "combinedP95Ms": 11.800000190734863,
+        "ingestAndIndexMs": 6331.300000190735,
+        "openMs": 3.9000000953674316,
+        "reopenAndQueryMs": 21.899999618530273,
+        "scanFilterSortMs": 147.19999980926514
+      },
+      "wasmBytes": 0
+    },
+    {
+      "repetition": 2,
+      "arm": "typescript",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 107152233,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 100000,
+      "scratchBytes": 44764829,
+      "timings": {
+        "combinedP50Ms": 6.799999713897705,
+        "combinedP95Ms": 12.100000381469727,
+        "ingestAndIndexMs": 6379.700000286102,
+        "openMs": 5.599999904632568,
+        "reopenAndQueryMs": 14.699999809265137,
+        "scanFilterSortMs": 145.69999980926514
+      },
+      "wasmBytes": 0
+    },
+    {
+      "repetition": 2,
+      "arm": "sqlite",
+      "correct": true,
+      "environment": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) T3CodeNightly/0.1.1-nightly.20261020.3411 Chrome/152.0.7977.130 Electron/44.4.5 Safari/537.36"
+      },
+      "fileBytes": 75587584,
+      "limits": "Synthetic dedicated-worker OPFS component test. No application/network/real-tenant timings or whole-browser memory claim.",
+      "rows": 100000,
+      "scratchBytes": 0,
+      "timings": {
+        "combinedP50Ms": 1,
+        "combinedP95Ms": 4.099999904632568,
+        "ingestAndIndexMs": 1810.8000001907349,
+        "moduleMs": 12.800000190734863,
+        "openMs": 2.3999996185302734,
+        "poolMs": 7.400000095367432,
+        "reopenAndQueryMs": 2.200000286102295,
+        "scanFilterSortMs": 0.40000009536743164
+      },
+      "wasmBytes": 6225920
+    }
+  ]
+}

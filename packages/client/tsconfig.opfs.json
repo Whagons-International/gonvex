@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src/experimental-opfs",
+    "outDir": "bench/opfs/build"
+  },
+  "include": ["src/experimental-opfs/**/*.ts"]
+}
