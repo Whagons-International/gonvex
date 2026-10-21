@@ -5,7 +5,7 @@ import { SQLiteReplicaBroker } from './sqlite-broker.js';
 // replaced at its boundary; real multi-tab tests cover the actual transports.
 function client() {
   const broker = Object.assign(Object.create(SQLiteReplicaBroker.prototype), {
-    closed: false, failed: false,cooldown:0,handoffTimeline:{},options:{},broadcast:vi.fn(),tenantAdmission:false,admittedPeers:new Set(), changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
+    closed: false, failed: false,cooldown:0, changeListeners:new Set(),lastChanges:new Map(),lastChangeBytes:0, pending: new Map(), inflight: new Map(), inflightBytes: 0, pendingBytes: 0, serial: 0, tabID: 'test',
     send: vi.fn((call: any) => {
       clearTimeout(call.timer); broker.pending.delete(call.id); broker.pendingBytes -= call.bytes;
       call.resolve({ accepted: call.op, args: call.args });
@@ -265,45 +265,4 @@ it('forwards follower entity reads with their tab ownership and returns the comp
 
 it('reports whether a follower reaches the dedicated owner directly or through its page',()=>{
  const broker=client() as any;expect(broker.stats().route).toBe('broadcast-page');broker.port={};expect(broker.stats().route).toBe('shared-router-page');broker.direct={ready:false};expect(broker.stats().directPending).toBe(true);broker.direct.ready=true;expect(broker.stats().route).toBe('direct-worker');broker.generation={};expect(broker.stats().route).toBe('owner-local');
-});
-
-it('does not race a shared-host handshake or elect a page owner after host confirmation',()=>{
- const broker=client() as any,lock=vi.fn(()=>new Promise(()=>{}));vi.stubGlobal('navigator',{locks:{request:lock}});broker.port={};broker.hubOwns=undefined;
- try{broker.elect();expect(lock).not.toHaveBeenCalled();broker.hubOwns=true;broker.elect();expect(lock).not.toHaveBeenCalled();broker.hubOwns=false;broker.elect();expect(lock).toHaveBeenCalledOnce();}finally{broker.closed=true;broker.election?.abort();vi.unstubAllGlobals();}
-});
-it('supports broker election in a SharedWorker without a document',()=>{
- class Channel{onmessage?:Function;postMessage(){}close(){}}const locks=vi.fn(()=>new Promise(()=>{}));vi.stubGlobal('BroadcastChannel',Channel);vi.stubGlobal('document',undefined);vi.stubGlobal('navigator',{locks:{request:locks}});vi.stubGlobal('addEventListener',()=>{});vi.stubGlobal('removeEventListener',()=>{});
- const broker=new SQLiteReplicaBroker({schemaVersion:'a'.repeat(64),createWorker:()=>{throw Error('Not entered before lock grant');}});try{expect(locks).toHaveBeenCalledOnce();}finally{broker.close();vi.unstubAllGlobals();}
-});
-
-it('hands a hidden owner to a visible claimant only after the actor drains accepted reads and writes',async()=>{
- vi.stubGlobal('document',{visibilityState:'hidden'});
- const broker=client() as any,posts:any[]=[];const g={ready:true,token:'old',worker:{postMessage:(m:any)=>posts.push(m)},release:vi.fn()};
- broker.tenantAdmission=true;broker.generation=g;broker.owner={id:'test',token:'old'};broker.setState=vi.fn();broker.broadcast=vi.fn();broker.workerCalls=new Map();
- broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'foreground'});
- expect(posts).toEqual([{type:'drain-owner',token:'old'}]);expect(g.release).not.toHaveBeenCalled();
- expect(broker.generation).toBe(g);expect(g).toMatchObject({draining:true});
- broker.reply=vi.fn();await broker.serve({protocol:2,from:'follower',token:'old',id:'intent',op:'canonicalCall',args:{}});
- expect(broker.reply).not.toHaveBeenCalled();expect(broker.inflight.size).toBe(0);
- broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'foreground'});expect(posts).toHaveLength(1);
- vi.unstubAllGlobals();
-});
-it('a visible owner keeps ownership and a hidden boot can elect without a visible claimant',()=>{
- vi.stubGlobal('document',{visibilityState:'visible'});const broker=client() as any;broker.generation={ready:true};broker.drainForVisibleOwner=vi.fn();
- broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'other'});expect(broker.drainForVisibleOwner).not.toHaveBeenCalled();
- vi.unstubAllGlobals();
-});
-
-it('visibility and foreground claims do not drain a signed-out authentication owner',()=>{
- vi.stubGlobal('document',{visibilityState:'hidden'});const broker=client() as any;broker.generation={ready:true};broker.announce=vi.fn();broker.drainForVisibleOwner=vi.fn();broker.claimVisible=vi.fn();
- broker.visibilityChanged();broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'other'});
- expect(broker.drainForVisibleOwner).not.toHaveBeenCalled();expect(broker.announce).not.toHaveBeenCalled();
- broker.broadcast=vi.fn();broker.setVisibilityAdmission(true);broker.visibilityChanged();expect(broker.drainForVisibleOwner).toHaveBeenCalledOnce();
- vi.unstubAllGlobals();
-});
-
-it('yields a visible but unfocused owner to an admitted focused tab',()=>{
- vi.stubGlobal('document',{visibilityState:'visible',hasFocus:()=>false});const broker=client() as any;broker.tenantAdmission=true;broker.generation={ready:true};broker.drainForVisibleOwner=vi.fn();
- broker.receiveControl({protocol:2,type:'visible-owner-request',tab:'focused',focused:true});expect(broker.drainForVisibleOwner).toHaveBeenCalledOnce();
- vi.unstubAllGlobals();
 });

@@ -178,11 +178,9 @@ function reportFailure(id:string,e:unknown,peer?:{port:MessagePort;token:string}
         globalThis.postMessage({ type: 'storage-fault' });
       } else reply(id, undefined, e, peer, tab);
 }
-let draining=false;const activeRequests=new Set<Promise<unknown>>();
 function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: string) {
   let size: number;
   try {
-    if(draining)throw Object.assign(Error('Storage ownership is moving; retry the same request'),{code:'BUSY'});
     if (typeof data?.id !== 'string' || data.id.length > 256 || typeof data.op !== 'string') throw new TypeError('Invalid worker request');
     if(data.requestID!==undefined&&(typeof data.requestID!=='string'||!data.requestID||data.requestID.length>256||peer&&data.requestID!==data.id))throw new TypeError('Invalid durable worker request ID');
     size = sqliteRequestBytes(data.op,data.args,data.op === 'open' ? 1048576 : 262144);
@@ -217,14 +215,11 @@ function admit(data: any, peer?: { port: MessagePort; token: string }, tab?: str
       if(engine)await engine.verifyOwner();const value=await program.call(data.args,{tabID:caller,requestID:data.requestID??data.id,signal:tabs.register(caller)});if(engine)await engine.verifyOwner();reply(data.id,value,undefined,peer,tab);
     }).catch(error=>reportFailure(data.id,error,peer,tab))
     : schedule(size,run).catch(error=>reportFailure(data.id,error,peer,tab));
-  activeRequests.add(work);
-  void work.then(()=>{activeRequests.delete(work);operations--;bytes-=size;},()=>{activeRequests.delete(work);operations--;bytes-=size;});
+  void work.then(()=>{operations--;bytes-=size;},()=>{operations--;bytes-=size;});
 };
 
 function heartbeat(tab:string){tabs.register(tab);const message={type:'tab-pong',protocol,to:tab,token:ownerToken,sentAt:Date.now()};const peer=ports.get(tab);if(peer)peer.port.postMessage(message);else globalThis.postMessage(message);}
 globalThis.onmessage = ({ data }) => {
-  if(data?.type==='drain-owner'&&data.token===ownerToken){if(!draining){draining=true;void (async()=>{await Promise.allSettled([...activeRequests]);await dispose();globalThis.postMessage({type:'drained'});})();}return;}
-
   if(['tab-heartbeat','tab-bye','change-ack'].includes(data?.type)){
     if(data.protocol!==protocol||data.token!==ownerToken||typeof data.tab!=='string'||!data.tab||data.tab.length>128)return;
     if(data.type==='tab-bye'){tabs.drop(data.tab);return;}
@@ -250,11 +245,10 @@ globalThis.onmessage = ({ data }) => {
 };
 
 let disposal:Promise<void>|undefined;
-const dispose=()=>disposal??=(async()=>{
+return ()=>disposal??=(async()=>{
  closed=true;for(const resume of capacityWaiters.splice(0))resume();workerLease.cancelPending();clearInterval(timer);globalThis.onmessage=null;
  tabs.close();for(const peer of ports.values())peer.port.close();ports.clear();
- try{await program?.close?.();await lane;try{await host?.database.execAsync('PRAGMA wal_checkpoint(PASSIVE)');}catch{/* Closing the database still preserves committed WAL. */}}finally{pendingReader?.close();host?.close();await workerLease.close();installed=false;}
+ try{await program?.close?.();await lane;}finally{pendingReader?.close();host?.close();await workerLease.close();installed=false;}
 })();
-return dispose;
 
 }

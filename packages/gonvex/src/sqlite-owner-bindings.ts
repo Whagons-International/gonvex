@@ -36,7 +36,7 @@ import {sqliteBrowserOptions} from "./sqlite-browser.js";
 export class GonvexClient extends SQLiteBrowserClient {constructor(url:string,options:GonvexClientOptions={}){super(url,sqliteBrowserOptions({errorReporting:options.errorReporting,onUpdateRequired:options.onUpdateRequired,onLocalExecutionFallback:options.onLocalExecutionFallback,role:options.role,public:options.public,auth:{project:options.project,tenant:options.tenant,identity:options.identity,token:options.token},fetchToken:options.fetchToken}));}}
 export {createFirebaseAuthAdapter} from "@gonvex/client";
 `,
-  'sqlite-router-worker.ts':`${header}import {configureSQLiteRouterOwner} from "@gonvex/client/sqlite/router-worker";\nimport {sqliteSchemaVersion} from "./sqlite-schema-version.js";\nconfigureSQLiteRouterOwner({schemaVersion:sqliteSchemaVersion,createWorker:()=>new Worker(new URL("./sqlite-client-worker.ts",import.meta.url),{type:"module"})});\n`,
+  'sqlite-router-worker.ts':`${header}import "@gonvex/client/sqlite/router-worker";\n`,
   'sqlite-browser.ts':`${header}import {SQLiteBrowserClient,type SQLiteBrowserOptions} from "@gonvex/client/sqlite/browser";
 import {SQLiteReplicaBroker} from "@gonvex/client/sqlite/broker";
 import {sqliteSchemaVersion} from "./sqlite-schema-version.js";

@@ -19,9 +19,7 @@ it('routes restartable first-sync frames through the real owner queue and publis
   Object.assign(database,{ingressNativeHash:true});
   mocked.host = { database, memoryBytes: () => 0, close: async () => {} };
   const awaiting = new Map<string, (reply: any) => void>(), changes: any[] = [];
-  let finishDrain!:()=>void;const drained=new Promise<void>(resolve=>{finishDrain=resolve;});
   vi.stubGlobal('postMessage', (message: any) => {
-    if(message.type==='drained'){finishDrain();return;}
     if (message.type === 'change'){if(!message.reset)changes.push(message);queueMicrotask(()=>(globalThis as any).onmessage?.({data:{type:'change-ack',protocol:2,token:'one',tab:'owner-tab',notification:message.notification,epoch:message.epoch,sequence:message.sequence}}));}
     else { const resolve = awaiting.get(message.id); awaiting.delete(message.id); resolve?.(message); }
   });
@@ -96,18 +94,6 @@ it('routes restartable first-sync frames through the real owner queue and publis
     const newClock=(await request('canonicalGeneration',{scope:'identity'})).value;expect(newClock.sequence).toBe(oldClock.sequence+1);
     const beforeReplay=changes.length;await request('canonicalCall',session,'session-transport-two','session-stable');
     expect((await request('canonicalGeneration',{scope:'identity'})).value).toEqual(newClock);expect(changes.length).toBe(beforeReplay);
-
-
-    const handoffWrite=request('canonicalCall',session,'handoff-write','handoff-intent');
-    const duplicate=request('canonicalCall',session,'handoff-duplicate','handoff-intent');
-    const handoffRead=request('canonicalGeneration',{scope:'identity'});
-    (globalThis as any).onmessage({data:{type:'drain-owner',token:'one'}});
-    const rejected=await request('canonicalGeneration',{scope:'identity'});
-    expect(rejected.error.code).toBe('BUSY');
-    const [one,two,read]=await Promise.all([handoffWrite,duplicate,handoffRead]);
-    expect(one.error).toBeUndefined();expect(two.value).toEqual(one.value);
-    expect(read.value.sequence).toBe(newClock.sequence+1);
-    await drained;
 
   } finally {
     interval.mockRestore(); vi.unstubAllGlobals(); delete (globalThis as any).onmessage; db.close();

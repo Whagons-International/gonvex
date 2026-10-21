@@ -586,12 +586,3 @@ it('does not republish an unchanged empty page into a consumer read loop',async(
  f.change();expect(listener).toHaveBeenCalledTimes(1);await watch.page({limit:128});
  expect(watch.snapshot().stale).toBe(false);expect(listener).toHaveBeenCalledTimes(2);
 });
-
-it('finishes signed-out authentication before enabling tenant visibility handoff',async()=>{
- const f=fixture(),notify=vi.fn();(f.client as any).options.broker.setVisibilityAdmission=notify;
- f.handler=input=>input.method==='controls'?{tokens:[],status:{connected:true},authentication:'authenticated',session:'unavailable',admissionKey:null,failure:null}:undefined;
- await f.client.authenticate({identity:{sub:'a'},token:'token'});
- expect(notify.mock.calls.every(([admitted])=>admitted===false)).toBe(true);
- f.admit('tenant-admitted');f.handler=input=>input.method==='controls'?{tokens:[],status:{connected:true},authentication:'authenticated',session:'authenticated',admissionKey:'tenant-admitted',failure:null}:undefined;
- await f.client.pollControls();expect(notify).toHaveBeenLastCalledWith(true);
-});
