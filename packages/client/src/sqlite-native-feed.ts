@@ -24,6 +24,8 @@ type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;conn
  reserveSnapshot?(bytes:number):()=>void;
  acquire?(bytes:number):Promise<()=>void>;
  sourceReady?(id:string):void;
+ /** Durable Ready releases network opening credit, not authority. */
+ sourcePrepared?(id:string):void;
  previewStaging?(source:SQLiteFeedSource,snapshot:string):Promise<(()=>void)|undefined>;
  freshSnapshot?(id:string):Promise<void>;
  windowsPending?(scope:string,epoch:string,revision:number):Promise<boolean>;
@@ -184,7 +186,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
   await this.run(state,Math.max(262144,batch.bytes),async()=>{
    const saved=[...this.sources.values()].map(source=>({source,start:source.start,preparedStart:source.preparedStart,opening:source.opening,deferActivation:source.deferActivation})),startBytes=this.startBytes,watermark=state.watermark,cursorEpoch=state.cursorEpoch;
    const active={state,after:new Map<string|symbol,()=>void>()};this.activeControls=active;
-   try{for(const frame of batch.frames){this.check(state);await this.process(state,frame);}after=active.after;}
+   try{for(const frame of batch.frames){this.check(state);await this.process(state,frame);const ready=frame.type==='replica.ready'?[frame]:frame.type==='replica.readyMany'?frame.ready:[];for(const item of ready)this.committed('prepared:'+item.id,()=>this.options.sourcePrepared?.(item.id));}after=active.after;}
    catch(error){for(const entry of saved){entry.source.start=entry.start;entry.source.preparedStart=entry.preparedStart;entry.source.opening=entry.opening;entry.source.deferActivation=entry.deferActivation;}this.startBytes=startBytes;state.watermark=watermark;state.cursorEpoch=cursorEpoch;throw error;}
    finally{this.activeControls=undefined;}
   });this.check(state);for(const effect of after.values())effect();

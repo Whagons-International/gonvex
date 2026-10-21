@@ -489,3 +489,23 @@ it('bounds simultaneous snapshot opens and releases an admission after close ack
  await vi.waitFor(()=>expect(socket.sent.filter(m=>m.type==='replica.open').length-before).toBe(65));
  const state=await f.call({method:'controls'}) as any;expect(state.failure?.code).not.toBe('BUDGET');
 });
+
+it('drains more than the ingress wait capacity of initial source frames before the terminal watermark',async()=>{
+ const extra:FunctionReference[]=Array.from({length:110},(_,n)=>({kind:'query',path:'fixture.cold'+n,delivery:'replica',replica:{table:'roles',key:'id',columns:['id','n'],equalFilters:{slice:'n'},maxRows:10,maxBytes:10000}}));
+ const f=await fixture(true,false,extra),{socket}=await f.authenticate();
+ const empty=replicaSumDigest(await replicaRowsHashes([],'id'));let completed=0,running=false;const queue:any[]=[];let ack:undefined|(()=>void);
+ const original=socket.send.bind(socket);
+ const pump=async()=>{if(running)return;running=true;try{while(queue.length){const open=queue.shift(),snapshot='cold-'+completed;
+ socket.receive({type:'replica.snapshotStart',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:2},key:'id',digest:empty,path:open.path});
+ const committed=new Promise<void>(resolve=>{ack=resolve;});
+ socket.receive(new TextEncoder().encode(JSON.stringify({type:'replica.snapshotEncodedPage',id:open.id,snapshotId:snapshot,scope:'tenant',visibilityScope:'visible',cursor:{epoch:'e',revision:2},key:'id',sequence:0,last:true,canonicalRows:[],digest:empty,path:open.path})).buffer);
+ await committed;socket.receive({type:'replica.ready',id:open.id,cursor:{epoch:'e',revision:2},digest:empty});completed++;
+ }}finally{running=false;}};
+ const failures:unknown[]=[];socket.send=text=>{original(text);const message=JSON.parse(text);if(message.type==='replica.open'&&message.path.startsWith('fixture.cold')){queue.push(message);void pump().catch(error=>failures.push(error));}if(message.type==='replica.snapshotAck'){ack?.();ack=undefined;}};
+ const watches:any[]=[];for(let n=0;n<extra.length;n++)watches.push(await f.call({method:'watchReplica',path:extra[n].path,args:{slice:n}}));
+ await vi.waitFor(()=>{expect(failures).toEqual([]);expect(completed).toBe(110);},{timeout:4000,interval:5});
+ // All330 frames committed and returned page credit without terminal authority.
+ socket.receive({type:'replica.watermark',revision:2});
+ await vi.waitFor(async()=>{const page:any=await f.call({method:'replicaPage',signature:watches.at(-1).signature,limit:10});expect(page.window.header.completeness).toBe('complete');expect(page.rows).toEqual([]);},{timeout:4000,interval:5});
+ expect((await f.call({method:'controls'}) as any).failure).toBeNull();
+});
