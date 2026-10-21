@@ -745,7 +745,42 @@ async fn apply_migrations_locked(
 }
 
 async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
-    execute_script_pool(&pool, SYNC_INFRASTRUCTURE_SQL).await?;
+    // Share the migration lock so neither another bootstrap nor a migration can
+    // change the schema between catalog inspection and trigger installation.
+    // Keep DDL and its receipt atomic: a failed install must never become a cache hit.
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtext('gonvex_sql_migrations:' || current_database()))",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let metadata_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass(format('%I._gonvex_sync_bootstrap', current_schema())) IS NOT NULL",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if !metadata_exists {
+        sqlx::query(
+            "CREATE TABLE _gonvex_sync_bootstrap (name text PRIMARY KEY, digest text NOT NULL)",
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    let infrastructure_present: bool = sqlx::query_scalar(
+        r#"SELECT NOT EXISTS (
+            SELECT FROM unnest(ARRAY['_gonvex_sync_clock', '_gonvex_sync_changes',
+                '_gonvex_sync_transactions', '_gonvex_action_outbox',
+                'gonvex_sync_changes_revision', 'gonvex_sync_changes_created_at',
+                '_gonvex_action_outbox_pending']) AS required(name)
+            WHERE to_regclass(format('%I.%I', current_schema(), name)) IS NULL
+        ) AND to_regprocedure(format('%I.gonvex_sync_finalize_transaction()', current_schema())) IS NOT NULL"#,
+    ).fetch_one(&mut *tx).await?;
+    if !bootstrap_matches(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?
+        || !infrastructure_present
+    {
+        execute_script_transaction(&mut tx, SYNC_INFRASTRUCTURE_SQL).await?;
+        record_bootstrap(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?;
+    }
     let tables = sqlx::query(
         r#"SELECT table_name FROM information_schema.tables
            WHERE table_schema=current_schema() AND table_type='BASE TABLE'
@@ -753,7 +788,7 @@ async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
              AND table_name NOT LIKE 'gonvex\_%' ESCAPE '\'
            ORDER BY table_name"#,
     )
-    .fetch_all(&pool)
+    .fetch_all(&mut *tx)
     .await?;
     for table in tables {
         let table: String = table.get("table_name");
@@ -762,7 +797,7 @@ async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
                WHERE table_schema=current_schema() AND table_name=$1 ORDER BY ordinal_position"#,
         )
         .bind(&table)
-        .fetch_all(&pool)
+        .fetch_all(&mut *tx)
         .await?
         .into_iter()
         .map(|row| row.get::<String, _>("column_name"))
@@ -778,13 +813,14 @@ async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
                  AND index.indisprimary ORDER BY attribute.attnum LIMIT 1"#,
         )
         .bind(&table)
-        .fetch_optional(&pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
             sqlx::Error::Protocol(format!("change-feed table {table:?} has no primary key"))
         })?;
-        install_table_trigger(&pool, &table, &key, &columns).await?;
+        install_table_trigger(&mut tx, &table, &key, &columns).await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -793,7 +829,7 @@ async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
 const JSONB_BUILD_OBJECT_COLUMNS: usize = 50;
 
 async fn install_table_trigger(
-    pool: &sqlx::PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     table: &str,
     key: &str,
     columns: &[String],
@@ -881,7 +917,61 @@ CREATE CONSTRAINT TRIGGER {finalize_trigger} AFTER INSERT OR UPDATE OR DELETE ON
         new_projection = projection("NEW"),
         table_literal = literal(table),
     );
-    execute_script_pool(pool, &statement).await?;
+    let present: bool = sqlx::query_scalar(
+        r#"SELECT to_regprocedure(format('%I.%I()', current_schema(), $2)) IS NOT NULL
+          AND EXISTS (SELECT FROM pg_trigger
+            WHERE tgrelid=to_regclass(format('%I.%I',current_schema(),$1))
+              AND tgname=$3 AND tgenabled='O' AND tgtype=29
+              AND tgfoid=to_regprocedure(format('%I.%I()',current_schema(),$2)))
+          AND EXISTS (SELECT FROM pg_trigger
+            WHERE tgrelid=to_regclass(format('%I.%I',current_schema(),$1))
+              AND tgname=$4 AND tgenabled='O' AND tgtype=29
+              AND tgdeferrable AND tginitdeferred
+              AND tgfoid=to_regprocedure(format('%I.gonvex_sync_finalize_transaction()',current_schema())))"#,
+    ).bind(table).bind(artifact("stage")).bind(artifact("stage_trigger"))
+        .bind(artifact("finalize_trigger")).fetch_one(&mut **tx).await?;
+    let receipt = format!("table:{table}");
+    if !present || !bootstrap_matches(tx, &receipt, &statement).await? {
+        execute_script_transaction(tx, &statement).await?;
+        record_bootstrap(tx, &receipt, &statement).await?;
+    }
+    Ok(())
+}
+
+fn bootstrap_digest(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+
+async fn bootstrap_matches(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    name: &str,
+    source: &str,
+) -> Result<bool, DatabaseError> {
+    let recorded: Option<String> =
+        sqlx::query_scalar("SELECT digest FROM _gonvex_sync_bootstrap WHERE name=$1")
+            .bind(name)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(recorded.as_deref() == Some(bootstrap_digest(source).as_str()))
+}
+
+async fn record_bootstrap(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    name: &str,
+    source: &str,
+) -> Result<(), DatabaseError> {
+    sqlx::query("INSERT INTO _gonvex_sync_bootstrap(name,digest) VALUES($1,$2) ON CONFLICT(name) DO UPDATE SET digest=excluded.digest")
+        .bind(name).bind(bootstrap_digest(source)).execute(&mut **tx).await?;
+    Ok(())
+}
+
+async fn execute_script_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source: &str,
+) -> Result<(), DatabaseError> {
+    for statement in split_statements(source)? {
+        sqlx::query(&statement).execute(&mut **tx).await?;
+    }
     Ok(())
 }
 
@@ -1138,3 +1228,249 @@ BEGIN
   RETURN NULL;
 END; $$ LANGUAGE plpgsql;
 "#;
+
+#[cfg(test)]
+mod sync_bootstrap_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    // Use the same opt-in PostgreSQL harness as the crate's integration tests.
+    // ddl_command_end records actual executed DDL, including CREATE OR REPLACE
+    // on an existing function whose OID would otherwise remain unchanged.
+    #[tokio::test]
+    async fn sync_bootstrap_caches_repairs_and_commits_atomically() {
+        let Ok(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping PostgreSQL bootstrap test");
+            return;
+        };
+        let schema = format!("sync_boot_{}", uuid::Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&base_url)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let mut url = Url::parse(&base_url).unwrap();
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={schema}"));
+        let pool = PgPoolOptions::new()
+            .max_connections(3)
+            .connect(url.as_str())
+            .await
+            .unwrap();
+        execute_script_pool(
+            &pool,
+            &format!(
+                r#"
+            CREATE TABLE gonvex_ddl_audit (tag text, identity text);
+            CREATE FUNCTION {schema}.audit_ddl() RETURNS event_trigger AS $$
+            BEGIN
+                INSERT INTO {schema}.gonvex_ddl_audit
+                SELECT command_tag, object_identity FROM pg_event_trigger_ddl_commands() AS command
+                WHERE schema_name='{schema}' OR (
+                    command.classid='pg_trigger'::regclass AND EXISTS (
+                        SELECT FROM pg_trigger AS trigger
+                        JOIN pg_class AS relation ON relation.oid=trigger.tgrelid
+                        JOIN pg_namespace AS namespace ON namespace.oid=relation.relnamespace
+                        WHERE trigger.oid=command.objid AND namespace.nspname='{schema}'
+                    )
+                );
+            END; $$ LANGUAGE plpgsql;
+            CREATE EVENT TRIGGER {schema} ON ddl_command_end EXECUTE FUNCTION {schema}.audit_ddl();
+            CREATE TABLE tasks (id text PRIMARY KEY, title text);
+            CREATE TABLE notes (id text PRIMARY KEY, body text);
+            INSERT INTO tasks SELECT n::text, 'task ' || n FROM generate_series(1,31000) n;
+        "#
+            ),
+        )
+        .await
+        .unwrap();
+        clear_audit(&pool).await;
+        let started = Instant::now();
+        install_change_feed(pool.clone()).await.unwrap();
+        eprintln!(
+            "31k-row fixture cold sync bootstrap: {:?}",
+            started.elapsed()
+        );
+        let initial = audit(&pool).await;
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|(tag, _)| tag == "CREATE TRIGGER")
+                .count(),
+            4
+        );
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|(tag, _)| tag == "CREATE FUNCTION")
+                .count(),
+            3
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_sync_bootstrap")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            3
+        );
+        assert_change(&pool, "first", false).await;
+
+        clear_audit(&pool).await;
+        let started = Instant::now();
+        install_change_feed(pool.clone()).await.unwrap();
+        eprintln!(
+            "31k-row fixture warm sync bootstrap: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            audit(&pool).await.is_empty(),
+            "warm boot must execute zero DDL"
+        );
+        assert_change(&pool, "warm", false).await;
+
+        sqlx::query("ALTER TABLE tasks ADD COLUMN extra text")
+            .execute(&pool)
+            .await
+            .unwrap();
+        clear_audit(&pool).await;
+        install_change_feed(pool.clone()).await.unwrap();
+        let changed = audit(&pool).await;
+        assert_eq!(
+            changed.len(),
+            3,
+            "one function and two triggers: {changed:?}"
+        );
+        assert!(changed
+            .iter()
+            .all(|(_, name)| name.contains("gonvex_sync_tasks_")));
+        assert_change(&pool, "changed", true).await;
+
+        sqlx::query("DROP TRIGGER gonvex_sync_tasks_stage_trigger ON tasks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        clear_audit(&pool).await;
+        install_change_feed(pool.clone()).await.unwrap();
+        assert_eq!(audit(&pool).await.len(), 3);
+        assert_change(&pool, "repaired", true).await;
+
+        // Repair disabled triggers and missing functions too, even with matching receipts.
+        sqlx::query("ALTER TABLE tasks DISABLE TRIGGER gonvex_sync_tasks_finalize_trigger")
+            .execute(&pool)
+            .await
+            .unwrap();
+        install_change_feed(pool.clone()).await.unwrap();
+        assert_change(&pool, "enabled", true).await;
+        sqlx::query("DROP FUNCTION gonvex_sync_notes_stage() CASCADE")
+            .execute(&pool)
+            .await
+            .unwrap();
+        install_change_feed(pool.clone()).await.unwrap();
+        sqlx::query("INSERT INTO notes VALUES ('note', 'restored')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_sync_changes WHERE table_name='notes' AND revision IS NOT NULL").fetch_one(&pool).await.unwrap(), 1);
+
+        // A later invalid table rolls back earlier table repairs and their receipts.
+        let receipt: String = sqlx::query_scalar(
+            "SELECT digest FROM _gonvex_sync_bootstrap WHERE name='table:tasks'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ALTER TABLE tasks ADD COLUMN another text")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE z_invalid (value text)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        clear_audit(&pool).await;
+        assert!(install_change_feed(pool.clone()).await.is_err());
+        assert!(audit(&pool).await.is_empty());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT digest FROM _gonvex_sync_bootstrap WHERE name='table:tasks'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            receipt
+        );
+        sqlx::query("DROP TABLE z_invalid")
+            .execute(&pool)
+            .await
+            .unwrap();
+        install_change_feed(pool.clone()).await.unwrap();
+
+        // Concurrent cold installers must not race metadata creation or duplicate DDL.
+        sqlx::query("DROP TABLE _gonvex_sync_bootstrap")
+            .execute(&pool)
+            .await
+            .unwrap();
+        clear_audit(&pool).await;
+        let (a, b) = tokio::join!(
+            install_change_feed(pool.clone()),
+            install_change_feed(pool.clone())
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(
+            audit(&pool)
+                .await
+                .iter()
+                .filter(|(tag, _)| tag == "CREATE FUNCTION")
+                .count(),
+            3
+        );
+        assert_change(&pool, "concurrent", true).await;
+
+        sqlx::query(&format!("DROP EVENT TRIGGER {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+    }
+
+    async fn clear_audit(pool: &sqlx::PgPool) {
+        sqlx::query("DELETE FROM gonvex_ddl_audit")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn audit(pool: &sqlx::PgPool) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT tag, identity FROM gonvex_ddl_audit ORDER BY tag, identity")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn assert_change(pool: &sqlx::PgPool, id: &str, extra: bool) {
+        let sql = if extra {
+            "INSERT INTO tasks(id,title,extra) VALUES($1,'test','new column')"
+        } else {
+            "INSERT INTO tasks(id,title) VALUES($1,'test')"
+        };
+        sqlx::query(sql).bind(id).execute(pool).await.unwrap();
+        let row = sqlx::query("SELECT revision, new_value FROM _gonvex_sync_changes WHERE table_name='tasks' AND row_id=$1")
+            .bind(id).fetch_one(pool).await.unwrap();
+        assert!(row.get::<Option<i64>, _>("revision").is_some());
+        let value: serde_json::Value = row.get("new_value");
+        assert_eq!(value["title"], "test");
+        if extra {
+            assert_eq!(value["extra"], "new column");
+        }
+    }
+}
