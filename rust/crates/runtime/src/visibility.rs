@@ -80,6 +80,8 @@ pub struct VisibilityExpression {
 
 #[derive(Clone, Debug)]
 pub struct ResolvedVisibility {
+    // Set only by verified developer admission when no active Member exists.
+    pub(crate) ephemeral_member: bool,
     pub revision: u64,
     pub direct: BTreeMap<String, String>,
     pub role: String,
@@ -343,11 +345,12 @@ async fn resolve_member(
     .bind(&session.identity.account.id)
     .fetch_optional(&mut **transaction.transaction())
     .await?;
-    let (member_id, role, permissions) = match row {
+    let (member_id, role, permissions, ephemeral_member) = match row {
         Some(row) => (
             row.get::<String, _>("id"),
             row.get::<String, _>("role"),
             row.try_get::<Json<Value>, _>("permissions")?.0,
+            false,
         ),
         // Admission already verified this self developer grant and project
         // authority. Use its ephemeral principal without creating a Member.
@@ -362,6 +365,7 @@ async fn resolve_member(
                 session.member.id.clone(),
                 session.member.role.clone(),
                 session.member.permissions.clone(),
+                true,
             )
         }
         None => return Err(VisibilityError::MemberRequired),
@@ -394,6 +398,7 @@ async fn resolve_member(
     }
     let fingerprint = visibility_fingerprint(plan, &direct, &role, &permissions, &sets);
     Ok(ResolvedVisibility {
+        ephemeral_member,
         revision,
         direct,
         role,
@@ -575,6 +580,15 @@ fn compile_expression(
     };
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
+        // SQL snapshots and in-memory deltas must use the same admitted
+        // principal. Ordinary members keep their live database role checks.
+        "permission" | "role" if resolved.ephemeral_member => {
+            if match_expression(expression, resolved, &serde_json::Map::new()) {
+                "TRUE".to_owned()
+            } else {
+                "FALSE".to_owned()
+            }
+        }
         "permission" => {
             let account = account_argument(parameters, account_parameter);
             let permission = argument(
@@ -997,8 +1011,32 @@ mod tests {
                 &resolved,
                 &serde_json::json!({"id":"revoked-member"})
             ));
-            let mut parameters = Vec::new();
-            compile_predicate(&plan, &resolved, "r", &mut parameters).unwrap();
+            // Execute compiled SQL: accepting a plan alone missed the empty
+            // directory regression when role checks required a persisted row.
+            for predicate in [
+                serde_json::json!({"operator":"role","value":"admin"}),
+                serde_json::json!({"operator":"role","value":"owner"}),
+                serde_json::json!({"operator":"permission","value":"developer"}),
+                serde_json::json!({"operator":"permission","value":"view-users"}),
+                serde_json::json!({"operator":"eqContext","column":"id","context":"member.id"}),
+                serde_json::json!({"operator":"and","children":[
+                    {"operator":"role","value":"admin"},
+                    {"operator":"not","children":[{"operator":"role","value":"owner"}]},
+                    {"operator":"permission","value":"developer"}
+                ]}),
+            ] {
+                let check: VisibilityPlan = serde_json::from_value(serde_json::json!({
+                    "table":"members", "key":"id", "where":predicate
+                }))
+                .unwrap();
+                let related = resolve_related_query(&check, &resolved).unwrap();
+                let expected = row_matches(
+                    &check,
+                    &related,
+                    &serde_json::json!({"id":"revoked-member"}),
+                );
+                assert_sql_visibility(&mut tx, &check, &related, expected).await;
+            }
             tx.rollback().await.unwrap();
         }
 
@@ -1042,11 +1080,38 @@ mod tests {
         let resolved = resolve(&mut tx, &session, &plan, 8).await.unwrap();
         assert_eq!(resolved.direct["member.id"], "revoked-member");
         assert_eq!(resolved.role, "member");
+        assert!(!resolved.ephemeral_member);
+        assert_sql_visibility(&mut tx, &plan, &resolved, false).await;
+        let permission_plan: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "where":{"operator":"permission","value":"developer"}
+        }))
+        .unwrap();
+        assert_sql_visibility(&mut tx, &permission_plan, &resolved, false).await;
         assert!(!row_matches(
             &plan,
             &resolved,
             &serde_json::json!({"id":"revoked-member"})
         ));
+        tx.rollback().await.unwrap();
+
+        // Ordinary member reads still require a currently active row, even
+        // when the declared table visibility itself is public.
+        let public: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "where":{"operator":"public"}
+        }))
+        .unwrap();
+        let mut tx = control
+            .begin_tenant_transaction(&route, false)
+            .await
+            .unwrap();
+        let ordinary = resolve(&mut tx, &session, &public, 8).await.unwrap();
+        assert!(!ordinary.ephemeral_member);
+        assert_read_visibility(&mut tx, &public, &ordinary, true).await;
+        sqlx::query("UPDATE members SET status='revoked'")
+            .execute(&mut **tx.transaction())
+            .await
+            .unwrap();
+        assert_read_visibility(&mut tx, &public, &ordinary, false).await;
         tx.rollback().await.unwrap();
         fixture.close().await;
         pools.close().await;
@@ -1055,6 +1120,82 @@ mod tests {
             .await
             .unwrap();
         admin.close().await;
+    }
+
+    async fn assert_sql_visibility(
+        tx: &mut TenantTransaction,
+        plan: &VisibilityPlan,
+        resolved: &ResolvedVisibility,
+        expected: bool,
+    ) {
+        let mut parameters = Vec::new();
+        let predicate = compile_predicate(plan, resolved, "r", &mut parameters).unwrap();
+        let statement = format!("SELECT r.id FROM members AS r WHERE {predicate} ORDER BY r.id");
+        let mut query = sqlx::query(&statement);
+        for value in &parameters {
+            query = bind_value(query, value).unwrap();
+        }
+        let rows = query.fetch_all(&mut **tx.transaction()).await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.get::<String, _>("id"))
+                .collect::<Vec<_>>(),
+            if expected {
+                vec!["revoked-member".to_owned()]
+            } else {
+                vec![]
+            },
+            "compiled SQL visibility must match the admitted principal and row predicate"
+        );
+
+        assert_read_visibility(tx, plan, resolved, expected).await;
+    }
+
+    async fn assert_read_visibility(
+        tx: &mut TenantTransaction,
+        plan: &VisibilityPlan,
+        resolved: &ResolvedVisibility,
+        expected: bool,
+    ) {
+        let expected_rows = if expected {
+            vec![serde_json::json!({"id":"revoked-member"})]
+        } else {
+            vec![]
+        };
+        let replica = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "columns":["id"],
+            "orderBy":"id", "orderDirection":"asc", "maxRows":5000
+        }))
+        .unwrap();
+        let (snapshot, truncated) =
+            crate::replica::query_rows(tx, &replica, plan, resolved, &serde_json::json!({}))
+                .await
+                .unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            snapshot, expected_rows,
+            "replica snapshot must preserve verified support admission"
+        );
+
+        let query = serde_json::from_value(serde_json::json!({
+            "table":"members", "key":"id", "columns":["id"]
+        }))
+        .unwrap();
+        let result = crate::live_query::execute_in_transaction(
+            tx,
+            &query,
+            plan,
+            resolved,
+            &serde_json::Map::new(),
+            &BTreeMap::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Array(expected_rows),
+            "live query must preserve verified support admission"
+        );
     }
 
     fn dependency_plan(predicate: Value) -> VisibilityPlan {
@@ -1070,6 +1211,7 @@ mod tests {
 
     fn dependency_member(role: &str) -> ResolvedVisibility {
         ResolvedVisibility {
+            ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-1".to_owned())]),
             role: role.to_owned(),
@@ -1246,6 +1388,7 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
             role: String::new(),
@@ -1298,6 +1441,7 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([
                 ("account.id".to_owned(), "account-1".to_owned()),

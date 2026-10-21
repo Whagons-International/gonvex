@@ -718,7 +718,7 @@ fn query_message(
     }
 }
 
-async fn execute_in_transaction(
+pub(super) async fn execute_in_transaction(
     transaction: &mut TenantTransaction,
     plan: &LiveQueryPlan,
     visibility_plan: &VisibilityPlan,
@@ -729,14 +729,16 @@ async fn execute_in_transaction(
     let mut parameters = Vec::new();
     let visibility =
         visibility::compile_predicate(visibility_plan, resolved, "r", &mut parameters)?;
-    parameters.push(Value::String(resolved.direct["account.id"].clone()));
-    let mut predicates = vec![
-        visibility,
-        format!(
+    let mut predicates = vec![visibility];
+    // Verified support principals have no persisted Member. Keep the live
+    // membership check for ordinary sessions, including concurrent revocation.
+    if !resolved.ephemeral_member {
+        parameters.push(Value::String(resolved.direct["account.id"].clone()));
+        predicates.push(format!(
             "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = ${} AND _gonvex_member.status = 'active')",
             parameters.len()
-        ),
-    ];
+        ));
+    }
     if let Some(expression) = &plan.predicate {
         predicates.push(index_predicate(
             plan,
@@ -1724,6 +1726,7 @@ mod tests {
             "table":"routing", "key":"id", "where":{"operator":"eqContext","column":"owner","context":"member.id"}
         })).unwrap();
         let resolved = ResolvedVisibility {
+            ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]),
             role: "member".to_owned(),
@@ -2044,6 +2047,7 @@ mod tests {
                 }))
                 .unwrap();
                 let resolved = ResolvedVisibility {
+                    ephemeral_member: false,
                     revision: 1,
                     direct: context.clone(),
                     role: "member".into(),

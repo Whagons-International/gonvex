@@ -744,7 +744,7 @@ async fn clock_in_transaction(
     })
 }
 
-async fn query_rows(
+pub(super) async fn query_rows(
     transaction: &mut TenantTransaction,
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,
@@ -754,14 +754,16 @@ async fn query_rows(
     let args = args.as_object().ok_or(ReplicaError::InvalidArguments)?;
     let mut parameters = Vec::new();
     let visibility = visibility::compile_predicate(plan, resolved, "r", &mut parameters)?;
-    parameters.push(Value::String(resolved.direct["account.id"].clone()));
-    let mut predicates = vec![
-        visibility,
-        format!(
+    let mut predicates = vec![visibility];
+    // Verified support principals have no persisted Member. Keep the live
+    // membership check for ordinary sessions, including concurrent revocation.
+    if !resolved.ephemeral_member {
+        parameters.push(Value::String(resolved.direct["account.id"].clone()));
+        predicates.push(format!(
             "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = ${} AND _gonvex_member.status = 'active')",
             parameters.len()
-        ),
-    ];
+        ));
+    }
     for column in &definition.exclude_when_set {
         predicates.push(format!("r.{} IS NULL", quote(column)?));
     }
@@ -2327,6 +2329,7 @@ mod tests {
                 },
             },
             ResolvedVisibility {
+                ephemeral_member: false,
                 revision: 1,
                 direct: BTreeMap::new(),
                 role: String::new(),
@@ -2536,6 +2539,7 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
             role: String::new(),
