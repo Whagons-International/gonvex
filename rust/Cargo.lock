@@ -1508,13 +1508,17 @@ dependencies = [
 name = "gonvex-module-runtime-v8"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "deno_core",
  "futures-util",
  "gonvex-module-runtime",
+ "pkcs1",
  "rand 0.8.7",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
+ "spki",
  "tokio",
  "url",
 ]

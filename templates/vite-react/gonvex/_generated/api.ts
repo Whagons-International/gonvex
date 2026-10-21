@@ -15,7 +15,9 @@ export type FunctionReference<Kind extends FunctionKind = FunctionKind, Args = J
   readonly kind: Kind;
   readonly path: string;
   readonly delivery?: "oneShot" | "live" | "replica";
+  readonly replica?: { readonly table: string; readonly key: string; readonly columns?: readonly string[] };
   readonly offline?: { readonly mode: "forbidden" | "allowed" | "onlineOnly"; readonly conflict?: "reject" | "expectedVersion" | "merge"; readonly reason?: string };
+  readonly localExecution?: 1;
   readonly args?: Args;
   readonly result?: Result;
   readonly live?: { readonly entity: string; readonly key: string; readonly resultPath?: readonly string[]; readonly plan: LiveQueryPlan };
@@ -60,91 +62,36 @@ export type MessagesSendResult = {
   created_at: string;
 };
 
-export const api = {
-  messages: {
-    agentInvoke: {
-      args: {
-        fields: {
-          args: {
-            kind: "any",
-          },
-          artifactHash: {
-            kind: "string",
-          },
-          path: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
+function lazyReferences<T extends Record<string, () => unknown>>(factories: T): { readonly [Key in keyof T]: ReturnType<T[Key]> } {
+  const references = {} as { readonly [Key in keyof T]: ReturnType<T[Key]> };
+  for (const key of Object.keys(factories)) {
+    const factory = factories[key]!;
+    let initialized = false;
+    let value: unknown;
+    Object.defineProperty(references, key, { enumerable: true, get() {
+      if (!initialized) { value = factory(); initialized = true; }
+      return value;
+    } });
+  }
+  return references;
+}
+
+export const api = /* @__PURE__ */ lazyReferences({
+  "messages": () => (/* @__PURE__ */ lazyReferences({
+    "agentInvoke": () => ({
       kind: "action",
       path: "messages.agentInvoke",
-      result: {
-        kind: "any",
-      },
-    } as unknown as FunctionReference<"action", MessagesAgentInvokeArgs, MessagesAgentInvokeResult>,
-    echo: {
-      args: {
-        fields: {
-          message: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"action", MessagesAgentInvokeArgs, MessagesAgentInvokeResult>),
+    "echo": () => ({
       kind: "action",
       path: "messages.echo",
-      result: {
-        fields: {
-          message: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"action", MessagesEchoArgs, MessagesEchoResult>,
-    get: {
-      args: {
-        fields: {
-          id: {
-            entity: "messages",
-            kind: "id",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"action", MessagesEchoArgs, MessagesEchoResult>),
+    "get": () => ({
       delivery: "oneShot",
       kind: "query",
       path: "messages.get",
-      result: {
-        items: {
-          fields: {
-            author: {
-              kind: "string",
-            },
-            body: {
-              kind: "string",
-            },
-            created_at: {
-              format: "datetime",
-              kind: "string",
-            },
-            id: {
-              entity: "messages",
-              kind: "id",
-            },
-          },
-          kind: "object",
-        },
-        kind: "array",
-      },
-    } as unknown as FunctionReference<"query", MessagesGetArgs, MessagesGetResult>,
-    list: {
-      args: {
-        fields: {
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"query", MessagesGetArgs, MessagesGetResult>),
+    "list": () => ({
       delivery: "live",
       kind: "query",
       live: {
@@ -165,71 +112,22 @@ export const api = {
         resultPath: [],
       },
       path: "messages.list",
-      result: {
-        items: {
-          fields: {
-            author: {
-              kind: "string",
-            },
-            body: {
-              kind: "string",
-            },
-            created_at: {
-              format: "datetime",
-              kind: "string",
-            },
-            id: {
-              entity: "messages",
-              kind: "id",
-            },
-          },
-          kind: "object",
-        },
-        kind: "array",
-      },
-    } as unknown as FunctionReference<"query", MessagesListArgs, MessagesListResult>,
-    send: {
-      args: {
-        fields: {
-          body: {
-            kind: "string",
-          },
-        },
-        kind: "object",
-      },
+    } as unknown as FunctionReference<"query", MessagesListArgs, MessagesListResult>),
+    "send": () => ({
       kind: "reducer",
       offline: {
         mode: "onlineOnly",
         reason: "server assigns the message id",
       },
       path: "messages.send",
-      result: {
-        fields: {
-          author: {
-            kind: "string",
-          },
-          body: {
-            kind: "string",
-          },
-          created_at: {
-            format: "datetime",
-            kind: "string",
-          },
-          id: {
-            entity: "messages",
-            kind: "id",
-          },
-        },
-        kind: "object",
-      },
-    } as unknown as FunctionReference<"reducer", MessagesSendArgs, MessagesSendResult>,
-  },
-} as const;
+    } as unknown as FunctionReference<"reducer", MessagesSendArgs, MessagesSendResult>),
+  })),
+});
 
 export const control = gonvexControl;
 
-export const internal = {
-} as const;
+export const internal = /* @__PURE__ */ lazyReferences({
+});
 export type Api = typeof api;
 
 export const optimisticTransactions: Record<string, OptimisticTransactionDefinition> = {

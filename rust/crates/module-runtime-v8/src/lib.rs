@@ -25,6 +25,9 @@
 mod dispatch;
 mod isolate;
 mod pool;
+#[cfg(test)]
+mod runtime_contract_tests;
+mod webcrypto;
 
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use std::collections::HashMap;
@@ -369,7 +372,7 @@ mod host_call_tests {
     use serde_json::{json, Map};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn run_v8_test(test: impl std::future::Future<Output = ()> + Send + 'static) {
+    pub(super) fn run_v8_test(test: impl std::future::Future<Output = ()> + Send + 'static) {
         // Match module-host: initialize V8 and start all isolate generations
         // from one persistent parent thread, rather than libtest's short-lived threads.
         type Job = Box<dyn FnOnce() + Send>;

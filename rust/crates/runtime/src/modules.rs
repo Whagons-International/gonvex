@@ -702,6 +702,7 @@ fn artifact_from_manifest(
             "classification",
             "description",
             "agent",
+            "actionCapabilities",
         ] {
             if let Some(value) = function.get(name) {
                 metadata.insert(name.to_owned(), value.clone());
@@ -1051,6 +1052,7 @@ mod tests {
                 },
                 "callbacks.receive":{
                     "kind":"action","handler":"receive","file":"gonvex/callbacks.ts","actionProfile":"agent",
+                    "actionCapabilities":{"networkOrigins":["https://example.com"]},
                     "classification":"system",
                     "args":{"kind":"object","fields":{}},"result":{"kind":"any"}
                 },
@@ -1075,6 +1077,15 @@ mod tests {
         };
         let (artifact, functions, _) = artifact_from_manifest(&record).unwrap();
         assert_eq!(functions["callbacks.receive"].action_profile, "agent");
+        assert_eq!(
+            artifact
+                .functions
+                .iter()
+                .find(|f| f.path == "callbacks.receive")
+                .unwrap()
+                .metadata["actionCapabilities"]["networkOrigins"],
+            serde_json::json!(["https://example.com"])
+        );
         assert_eq!(
             artifact
                 .functions

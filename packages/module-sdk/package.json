@@ -1,11 +1,21 @@
 {
   "name": "@gonvex/module-sdk",
-  "version": "0.5.2-staging.29",
+  "version": "0.5.2-staging.30",
   "type": "module",
   "publishConfig": {
     "access": "public"
   },
   "exports": {
+    "./runtime-contract": {
+      "types": "./dist/runtime-globals.d.ts",
+      "default": "./dist/runtime-globals.js"
+    },
+    "./runtime-contract/vectors.json": "./runtime-contract/vectors.json",
+    "./runtime-contract/runner.js": "./runtime-contract/runner.js",
+    "./runtime-contract/globals.js": {
+      "types": "./runtime-contract/globals.d.ts",
+      "default": "./runtime-contract/globals.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -15,6 +25,7 @@
   "main": "./dist/index.js",
   "files": [
     "dist",
+    "runtime-contract",
     "README.md"
   ],
   "scripts": {

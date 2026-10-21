@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/local-runtime",
-  "version": "0.5.2-staging.29",
+  "version": "0.5.2-staging.30",
   "type": "module",
   "exports": {
     "./portable": {

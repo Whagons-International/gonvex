@@ -4,13 +4,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareVersions, selectReleaseVersion } from "./release-version.mjs";
+import { RELEASE_PACKAGES } from "./release-packages.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const DEFAULT_MODEL = "moonshotai/kimi-k2.5";
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const NOTE_CONTEXT_LIMIT = 75_000;
-const RELEASE_PACKAGES = ["protocol", "client", "expo-sqlite", "react", "module-sdk", "local-runtime", "gonvex", "create-gonvex"];
 
 const args = new Set(process.argv.slice(2));
 const dryRun = args.has("--dry-run") || process.env.DRY_RUN === "1";

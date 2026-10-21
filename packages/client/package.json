@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/client",
-  "version": "0.5.2-staging.29",
+  "version": "0.5.2-staging.30",
   "type": "module",
   "publishConfig": {
     "access": "public"

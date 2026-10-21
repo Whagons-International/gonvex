@@ -5,6 +5,7 @@ import test from "node:test";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compareVersions, selectReleaseVersion } from "./release-version.mjs";
+import { RELEASE_PACKAGES } from "./release-packages.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -25,10 +26,9 @@ test("release validates the Rust workspace", () => {
 });
 
 test("release includes every public Gonvex SDK needed by TypeScript modules and mobile replicas", () => {
-  const source = readFileSync(resolve(ROOT, "scripts/release-cli.mjs"), "utf8");
-  assert.match(source, /"module-sdk"/);
-  assert.match(source, /"expo-sqlite"/);
-  assert.match(source, /"local-runtime"/);
+  for (const directory of ["module-sdk", "expo-sqlite", "local-runtime"]) {
+    assert.ok(RELEASE_PACKAGES.includes(directory));
+  }
 });
 
 test("selects a version above every package when the release tag is stale", () => {

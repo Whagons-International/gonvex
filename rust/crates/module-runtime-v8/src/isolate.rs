@@ -19,7 +19,7 @@ use deno_core::{
     extension, op2, v8, JsRuntime, ModuleSpecifier, OpState, PollEventLoopOptions, RuntimeOptions,
 };
 use gonvex_module_runtime::{
-    Capabilities, FunctionContract, HostCall, HostError, HostResponse, Invocation,
+    Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse, Invocation,
     InvocationResult, ModuleError,
 };
 use rand::RngCore;
@@ -30,9 +30,15 @@ use crate::dispatch::{
     decode_result, kind_name, CapabilityFlags, DispatchRequest, HostCallOutcome, HostCallRequest,
     IdentityView,
 };
+use crate::webcrypto::{
+    op_gonvex_base64, op_gonvex_crypto_digest, op_gonvex_crypto_import, op_gonvex_crypto_key_info,
+    op_gonvex_crypto_operation,
+};
 use crate::V8Config;
 
 const BOOTSTRAP: &str = include_str!("gonvex_bootstrap.js");
+const RUNTIME_GLOBALS: &str =
+    include_str!("../../../../packages/module-sdk/runtime-contract/globals.js");
 /// web-streams-polyfill 3.3.3 (MIT), the WHATWG streams the bootstrap installs.
 const WEB_STREAMS: &str = include_str!("vendor/web_streams_ponyfill.js");
 
@@ -194,6 +200,8 @@ struct InvocationSlot {
 }
 
 struct ActiveCall {
+    kind: FunctionKind,
+    network_origins: Option<BTreeSet<String>>,
     capabilities: Capabilities,
     action_tools: BTreeSet<String>,
     host: mpsc::UnboundedSender<HostRequest>,
@@ -243,6 +251,28 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 .get_or_insert(Violation::Denied(message.clone()));
             return HostCallOutcome::denied(message);
         }
+        if let (HostCall::Fetch { request }, Some(allowed)) = (&call, &active.network_origins) {
+            let origin = serde_json::from_slice::<serde_json::Value>(request)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|raw| url::Url::parse(raw).ok())
+                })
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .map(|url| url.origin().ascii_serialization());
+            if !origin
+                .as_ref()
+                .is_some_and(|origin| allowed.contains(origin))
+            {
+                let message = "fetch origin is not declared for this Action".to_owned();
+                active
+                    .violation
+                    .get_or_insert(Violation::Denied(message.clone()));
+                return HostCallOutcome::denied(message);
+            }
+        }
         if let HostCall::ToolInvoke { tool, .. } = &call {
             if !active.action_tools.contains(tool) {
                 let message = format!("Action tool {tool:?} is not declared for this invocation");
@@ -288,10 +318,23 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
 
 #[op2]
 #[string]
-fn op_gonvex_random_bytes(#[smi] length: u32) -> String {
+fn op_gonvex_random_bytes(
+    state: &mut OpState,
+    #[smi] length: u32,
+) -> Result<String, deno_core::anyhow::Error> {
+    if !matches!(
+        state
+            .borrow::<InvocationSlot>()
+            .active
+            .as_ref()
+            .map(|call| &call.kind),
+        Some(FunctionKind::Action)
+    ) {
+        return Err(deno_core::anyhow::anyhow!("InvalidAccessError: secure entropy is available only in Actions; use intentEntropy in Reducers"));
+    }
     let mut bytes = vec![0_u8; length.min(65_536) as usize];
     rand::thread_rng().fill_bytes(&mut bytes);
-    serde_json::to_string(&bytes).unwrap_or_else(|_| "[]".to_owned())
+    Ok(serde_json::to_string(&bytes)?)
 }
 
 #[op2]
@@ -343,6 +386,11 @@ extension!(
         op_gonvex_host_call,
         op_gonvex_random_bytes,
         op_gonvex_sha256,
+        op_gonvex_base64,
+        op_gonvex_crypto_digest,
+        op_gonvex_crypto_import,
+        op_gonvex_crypto_key_info,
+        op_gonvex_crypto_operation,
         op_gonvex_parse_url,
         op_gonvex_sleep
     ]
@@ -400,8 +448,12 @@ impl ModuleIsolate {
             .map_err(|err| {
                 ModuleError::Execution(format!("web streams bootstrap failed: {err}"))
             })?;
+        let factory = RUNTIME_GLOBALS.strip_prefix("export ").ok_or_else(|| {
+            ModuleError::Execution("runtime globals must export their factory".to_owned())
+        })?;
+        let bootstrap = format!("((createRuntimeGlobals) => {BOOTSTRAP})({factory})");
         let dispatch = runtime
-            .execute_script("gonvex:bootstrap.js", BOOTSTRAP)
+            .execute_script("gonvex:bootstrap.js", bootstrap)
             .map_err(|err| ModuleError::Execution(format!("module bootstrap failed: {err}")))?;
         let dispatch = {
             let scope = &mut runtime.handle_scope();
@@ -525,18 +577,35 @@ impl ModuleIsolate {
             .op_state()
             .borrow_mut()
             .borrow_mut::<InvocationSlot>()
-            .active = Some(ActiveCall {
-            capabilities: spec.capabilities,
-            action_tools: spec
-                .invocation
-                .context
-                .action_tools
-                .iter()
-                .cloned()
-                .collect(),
-            host: spec.host,
-            violation: None,
-        });
+            .active =
+            Some(ActiveCall {
+                kind: spec.contract.kind.clone(),
+                network_origins: spec.contract.metadata.get("actionCapabilities").map(
+                    |capabilities| {
+                        capabilities
+                            .get("networkOrigins")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|origins| {
+                                origins
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    },
+                ),
+                capabilities: spec.capabilities,
+                action_tools: spec
+                    .invocation
+                    .context
+                    .action_tools
+                    .iter()
+                    .cloned()
+                    .collect(),
+                host: spec.host,
+                violation: None,
+            });
         if let Some(timeout) = spec.timeout {
             self.watchdog.arm(Instant::now() + timeout);
         }

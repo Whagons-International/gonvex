@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -24,6 +24,8 @@ export const access = visibility({table:'tasks', key:'_id', sets:{}, where:{oper
 export const list = replicaCollection({args:schema.object({}),result:schema.any(),replica:{table:'tasks',key:'_id',columns:['_id','title'],mode:'eager',maxRows:100,maxBytes:10000}});
 export const get = replicaCollection({args:schema.object({id:schema.string()}),result:schema.any(),replica:{table:'tasks',key:'_id',columns:['_id','title'],equalFilters:{_id:'id'},mode:'eager',maxRows:1,maxBytes:1000}});
 export const rename = reducer({args:schema.object({id:schema.string(),title:schema.string()}),result:schema.any(),run:(ctx,args)=>ctx.db.update('tasks',args.id,{title:args.title})});
+const clockSample = () => ({now:Date.now(),constructed:+new Date(),globalNow:globalThis.Date.now(),random:Math.random()});
+export const clock = reducer({args:schema.object({}),result:schema.any(),run:async()=>{await Promise.resolve();return clockSample()}});
 export const external = action({args:schema.object({}),result:schema.any(),run:()=>{throw new Error('EXTERNAL_ACTION_MUST_NOT_SHIP')}});
 export const serverRead = internalQuery({description:'INTERNAL_QUERY_MUST_NOT_SHIP',args:schema.object({}),result:schema.any(),liveQueryPlan:{table:'tasks',key:'_id',columns:['_id','title']}});
 export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression:'*/5 * * * *',function:'external',args:{}});
@@ -69,5 +71,16 @@ export const scheduled = tenantCron({name:'SERVER_CRON_MUST_NOT_SHIP',expression
   await page.addScriptTag({content:code});
   const response=await page.evaluate(async hash=>SharedExecutor.localRuntime.create().execute('rename',{id:'t',title:'changed'},{scope:'scope',tables:{tasks:{complete:true,rows:[{_id:'t',title:'old'}]}}},{scope:'scope',commandId:'intent',now:1,artifactHash:hash,identity:{auth:{account:{id:'account'}},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}}}),module.hash);
   assert.equal(response.patches[0].fields.title,'changed');
+  const suite = JSON.parse(await readFile(new URL('../../module-sdk/runtime-contract/vectors.json', import.meta.url)));
+  const seed = suite.cases.find(vector=>vector.id==='reducer-seeded-random-ab');
+  const clocks = await page.evaluate(async ({hash,entropy})=>{
+    const browserDate=Date, browserRandom=Math.random;
+    const runtime=SharedExecutor.localRuntime.create();
+    const execute=(now=9000)=>runtime.execute('clock',{}, {scope:'scope',tables:{}}, {scope:'scope',commandId:'clock-intent',intentEntropy:entropy,now,artifactHash:hash,identity:{auth:{},tenant:{id:'tenant'},member:{id:'member',accountId:'account',permissions:{}}}});
+    const first=(await execute()).result, second=(await execute()).result;
+    const concurrent=(await Promise.all([execute(1111),execute(2222)])).map(outcome=>outcome.result);
+    return {first,second,concurrent,globalsUntouched:Date===browserDate&&Math.random===browserRandom};
+  },{hash:module.hash,entropy:seed.intentEntropy});
+  assert.deepEqual(clocks,{first:{now:9000,constructed:9000,globalNow:9000,random:seed.expected[0]},second:{now:9000,constructed:9000,globalNow:9000,random:seed.expected[0]},concurrent:[1111,2222].map(now=>({now,constructed:now,globalNow:now,random:seed.expected[0]})),globalsUntouched:true});
   assert.deepEqual(requests,[], 'shared execution must not download an engine or contact a server');
 });

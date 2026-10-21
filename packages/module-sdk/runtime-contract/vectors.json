@@ -1,0 +1,523 @@
+{
+  "version": 1,
+  "origin": "F2/F3, 2026-10-18",
+  "fixtures": "RFC 2202 case 1, RFC 4231 case 1, RFC 8032 test 1, NIST GCM zero block; disposable Node RSA fixture, Node AES legacy format",
+  "cases": [
+    {
+      "kind": "action",
+      "id": "digest-SHA-1",
+      "run": "digest",
+      "algorithm": "SHA-1",
+      "data": "616263",
+      "expected": "a9993e364706816aba3e25717850c26c9cd0d89d"
+    },
+    {
+      "kind": "action",
+      "id": "digest-SHA-256",
+      "run": "digest",
+      "algorithm": "SHA-256",
+      "data": "616263",
+      "expected": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "kind": "action",
+      "id": "digest-SHA-384",
+      "run": "digest",
+      "algorithm": "SHA-384",
+      "data": "616263",
+      "expected": "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+    },
+    {
+      "kind": "action",
+      "id": "digest-SHA-512",
+      "run": "digest",
+      "algorithm": "SHA-512",
+      "data": "616263",
+      "expected": "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+    },
+    {
+      "kind": "action",
+      "id": "hmac-SHA-1-rfc-2202",
+      "run": "signature",
+      "algorithm": {
+        "name": "HMAC",
+        "hash": "SHA-1"
+      },
+      "key": {
+        "format": "raw",
+        "hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "data": "4869205468657265",
+      "expected": {
+        "signature": "b617318655057264e28bc0b6fb378c8ef146be00",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "hmac-SHA-256-rfc-4231",
+      "run": "signature",
+      "algorithm": {
+        "name": "HMAC",
+        "hash": "SHA-256"
+      },
+      "key": {
+        "format": "raw",
+        "hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "data": "4869205468657265",
+      "expected": {
+        "signature": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "ed25519-rfc-8032-pkcs8-raw",
+      "run": "signature",
+      "algorithm": "Ed25519",
+      "key": {
+        "format": "pkcs8",
+        "hex": "302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+      },
+      "publicKey": {
+        "format": "raw",
+        "hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+      },
+      "data": "",
+      "expected": {
+        "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "ed25519-rfc-8032-jwk",
+      "run": "signature",
+      "algorithm": "Ed25519",
+      "key": {
+        "format": "jwk",
+        "jwk": {
+          "crv": "Ed25519",
+          "d": "nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A",
+          "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+          "kty": "OKP"
+        }
+      },
+      "publicKey": {
+        "format": "jwk",
+        "jwk": {
+          "kty": "OKP",
+          "crv": "Ed25519",
+          "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        }
+      },
+      "data": "",
+      "expected": {
+        "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "rsa-pkcs1-v1_5-pkcs8",
+      "run": "signature",
+      "algorithm": {
+        "name": "RSASSA-PKCS1-v1_5",
+        "hash": "SHA-256"
+      },
+      "key": {
+        "format": "pkcs8",
+        "hex": "308204bc020100300d06092a864886f70d0101010500048204a6308204a20201000282010100c29303b8a6b0ac07303cb0f6ca5e4a1d225d14883254327718695881209f09ada43dead3612c3909d6669dc027b11453740e7f789a90dff759d4648f7537b4920b33cd927d49b77d45b55c3de8ea1b67ac1695d1ae59806e1b3d447e9d0076ede4505fd946fa6db52dddfbd3ebf6ee24076f10a298090fe15359285c03db53c46b88d1b0d74ac6bb7be6d0ddd7176f32fea6464e3f145753c4789f8324cc9508a065cd6b5c1c71821fa79032a34d135bd5b509f9b7683a7211525aa70a098bfd3f0111f1652af461f8040139747716e335950e4c55d9c48327abb6c30b3ba819b1c289c082dac058d37b137611973d385ac182cbe26c876eca187be3512c347f02030100010282010017c731983a3eb2f739ece0cf7811a7cb01ad105a4894438a8c602b61b463db21ee4566d22838e84b8c7903e43cb5863f609a78f77b24234aae1ea79f647ac74565bb11ef4a025d3b20eeb5f416e7ad2bb13b1d59ff8d8e85662cc9971386c001f879de0cc680ca316f0686c4f23c3e0407288a86e43f8f4241164f39577b513424352baecc1eb83911c95a182bb52c0e15c5d73126a67d1de914491323476fb5669fc4f85c8db2acca1c441dd1cea315de82ab0b218c3ba8113722f5d78d30403bdc5a5a4dea241e6905625a6fe45e7ece8a786a703435392340ef47eb1b3f2c6db03342726e4780dc850cbe525c5054c1d25bfc5316e03732c473c88ee45c3102818100eae2c4e8c7fd0fa2e5cbd47b43eb35dc49de23adc49a0437804dbeae47f32fd359fffc08b21971845ea691e5f2bfa198b571499586ea9dbe3e6266ab87293e93b74e3e5f5c8af91f867f357aae23ddb52823274ab58c790c4ce554c54769c5b2fb64261e3779d4f0563343a073e522af9e6c371c1928654fa2328722b29421c902818100d41096ee5be7a4a0a82effc9db6688b27afe4062ba9bf550ae58849a099ccabb2966a1467caf4f90ec586862aef0917c7f98a15c56de2b40a131db777bbf4a33cb81ea25e40b3842e2ef084a7320fed703663ca4145fea89cb4522944d9c8f358e5c91a438e1523b632b32147c669d4bf7973e5e25cbaedb648364b0ae0908070281806f2ef4a273b81824b5bdec5084efdbc8f0b654113714e8961507b810eb41f40b8978a0a6c5174222b4630880de8d5342e3f04232a3707f46c464f3d091e43618da161174366c1a4c8fefbb32dd2761151570be72a0c963ab2ce3096370d062a2bc58c5aa5bfc318daa600dccefcf30c20cad90d09e1fff04d8f42dff80a499f1028180591412e25316adaf9296137a2e4016c1aa2a6ccf4c05c0f940130cb84bbb61e9568db6c70e0ef2043553399de250493c9bb878677a51dea74a4ed01a938f99d2c1f4736fb128095d0748531a3adc2c50132c79e28e706febabc801ab7c227c8189a856c13de7600c742eabddb117c59128928e6f2bbf305716149f521bf8cd370281802f89afc9e89152ae4b2dde6211a7e4395e154367c127493333539fedeffb89abf903972c01a5c925b1270bf2c42c46e1e640ebbb5a3c707cafb1243c91e6af512bed54ac4516eb574f47a6e39b47c1e218989bae190899fad21c2527db66277ade239608587b8f3cbcbb39bcdf221342bbc91b74fcf36c73032bca1797948e87"
+      },
+      "publicKey": {
+        "format": "spki",
+        "hex": "30820122300d06092a864886f70d01010105000382010f003082010a0282010100c29303b8a6b0ac07303cb0f6ca5e4a1d225d14883254327718695881209f09ada43dead3612c3909d6669dc027b11453740e7f789a90dff759d4648f7537b4920b33cd927d49b77d45b55c3de8ea1b67ac1695d1ae59806e1b3d447e9d0076ede4505fd946fa6db52dddfbd3ebf6ee24076f10a298090fe15359285c03db53c46b88d1b0d74ac6bb7be6d0ddd7176f32fea6464e3f145753c4789f8324cc9508a065cd6b5c1c71821fa79032a34d135bd5b509f9b7683a7211525aa70a098bfd3f0111f1652af461f8040139747716e335950e4c55d9c48327abb6c30b3ba819b1c289c082dac058d37b137611973d385ac182cbe26c876eca187be3512c347f0203010001"
+      },
+      "data": "473120646973706f7361626c6520525341206b6e6f776e2d616e737765722066697874757265",
+      "expected": {
+        "signature": "63c060a7d3a4ee9bbb7058f40abebc8adfacd84ca73477bc7b3e881ca79881c7e182968638da59eb29620507a6d19ccad4ff9b2eb5a103c136b92bfc2d24e655cc013a71a0a97727f0b1c12a10aaca7a742581e43e731ca42180ef2c9ca8d815a2222b57c13f3fa996861344131c16e1adf668c55553274ee5c73424d725754d33864bbbe66b45c1f3fc9f931921c8211d9ce170f690b2d7e63a55be0a4c3d7f69165f435abfa3e9e9923080966aa5f5b5c7c42ea35e7426c3b46481c0b288267487b48f4891614cea86ed6255fdde0f07783ce9cf528002479e1ea7046d258f918fcd752b07d614533c2df8c5c2485b10bac0b9ddac38cd3bad350bc363e020",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "rsa-pkcs1-v1_5-jwk",
+      "run": "signature",
+      "algorithm": {
+        "name": "RSASSA-PKCS1-v1_5",
+        "hash": "SHA-256"
+      },
+      "key": {
+        "format": "jwk",
+        "jwk": {
+          "kty": "RSA",
+          "n": "wpMDuKawrAcwPLD2yl5KHSJdFIgyVDJ3GGlYgSCfCa2kPerTYSw5CdZmncAnsRRTdA5_eJqQ3_dZ1GSPdTe0kgszzZJ9Sbd9RbVcPejqG2esFpXRrlmAbhs9RH6dAHbt5FBf2Ub6bbUt3fvT6_buJAdvEKKYCQ_hU1koXAPbU8RriNGw10rGu3vm0N3XF28y_qZGTj8UV1PEeJ-DJMyVCKBlzWtcHHGCH6eQMqNNE1vVtQn5t2g6chFSWqcKCYv9PwER8WUq9GH4BAE5dHcW4zWVDkxV2cSDJ6u2wws7qBmxwonAgtrAWNN7E3YRlz04WsGCy-Jsh27KGHvjUSw0fw",
+          "e": "AQAB",
+          "d": "F8cxmDo-svc57ODPeBGnywGtEFpIlEOKjGArYbRj2yHuRWbSKDjoS4x5A-Q8tYY_YJp493skI0quHqefZHrHRWW7Ee9KAl07IO619BbnrSuxOx1Z_42OhWYsyZcThsAB-HneDMaAyjFvBobE8jw-BAcoiobkP49CQRZPOVd7UTQkNSuuzB64ORHJWhgrtSwOFcXXMSamfR3pFEkTI0dvtWafxPhcjbKsyhxEHdHOoxXegqsLIYw7qBE3IvXXjTBAO9xaWk3qJB5pBWJab-Refs6KeGpwNDU5I0DvR-sbPyxtsDNCcm5HgNyFDL5SXFBUwdJb_FMW4DcyxHPIjuRcMQ",
+          "p": "6uLE6Mf9D6Lly9R7Q-s13EneI63EmgQ3gE2-rkfzL9NZ__wIshlxhF6mkeXyv6GYtXFJlYbqnb4-Ymarhyk-k7dOPl9civkfhn81eq4j3bUoIydKtYx5DEzlVMVHacWy-2QmHjd51PBWM0Ogc-Uir55sNxwZKGVPojKHIrKUIck",
+          "q": "1BCW7lvnpKCoLv_J22aIsnr-QGK6m_VQrliEmgmcyrspZqFGfK9PkOxYaGKu8JF8f5ihXFbeK0ChMdt3e79KM8uB6iXkCzhC4u8ISnMg_tcDZjykFF_qictFIpRNnI81jlyRpDjhUjtjKzIUfGadS_eXPl4ly67bZINksK4JCAc",
+          "dp": "by70onO4GCS1vexQhO_byPC2VBE3FOiWFQe4EOtB9AuJeKCmxRdCIrRjCIDejVNC4_BCMqNwf0bEZPPQkeQ2GNoWEXQ2bBpMj--7Mt0nYRUVcL5yoMljqyzjCWNw0GKivFjFqlv8MY2qYA3M788wwgytkNCeH_8E2PQt_4CkmfE",
+          "dq": "WRQS4lMWra-SlhN6LkAWwaoqbM9MBcD5QBMMuEu7YelWjbbHDg7yBDVTOZ3iUEk8m7h4Z3pR3qdKTtAak4-Z0sH0c2-xKAldB0hTGjrcLFATLHnijnBv66vIAat8InyBiahWwT3nYAx0LqvdsRfFkSiSjm8rvzBXFhSfUhv4zTc",
+          "qi": "L4mvyeiRUq5LLd5iEafkOV4VQ2fBJ0kzM1Of7e_7iav5A5csAaXJJbEnC_LELEbh5kDru1o8cHyvsSQ8keavUSvtVKxFFutXT0em45tHweIYmJuuGQiZ-tIcJSfbZid63iOWCFh7jzy8uzm83yITQrvJG3T882xzAyvKF5eUjoc"
+        }
+      },
+      "publicKey": {
+        "format": "jwk",
+        "jwk": {
+          "kty": "RSA",
+          "n": "wpMDuKawrAcwPLD2yl5KHSJdFIgyVDJ3GGlYgSCfCa2kPerTYSw5CdZmncAnsRRTdA5_eJqQ3_dZ1GSPdTe0kgszzZJ9Sbd9RbVcPejqG2esFpXRrlmAbhs9RH6dAHbt5FBf2Ub6bbUt3fvT6_buJAdvEKKYCQ_hU1koXAPbU8RriNGw10rGu3vm0N3XF28y_qZGTj8UV1PEeJ-DJMyVCKBlzWtcHHGCH6eQMqNNE1vVtQn5t2g6chFSWqcKCYv9PwER8WUq9GH4BAE5dHcW4zWVDkxV2cSDJ6u2wws7qBmxwonAgtrAWNN7E3YRlz04WsGCy-Jsh27KGHvjUSw0fw",
+          "e": "AQAB"
+        }
+      },
+      "data": "473120646973706f7361626c6520525341206b6e6f776e2d616e737765722066697874757265",
+      "expected": {
+        "signature": "63c060a7d3a4ee9bbb7058f40abebc8adfacd84ca73477bc7b3e881ca79881c7e182968638da59eb29620507a6d19ccad4ff9b2eb5a103c136b92bfc2d24e655cc013a71a0a97727f0b1c12a10aaca7a742581e43e731ca42180ef2c9ca8d815a2222b57c13f3fa996861344131c16e1adf668c55553274ee5c73424d725754d33864bbbe66b45c1f3fc9f931921c8211d9ce170f690b2d7e63a55be0a4c3d7f69165f435abfa3e9e9923080966aa5f5b5c7c42ea35e7426c3b46481c0b288267487b48f4891614cea86ed6255fdde0f07783ce9cf528002479e1ea7046d258f918fcd752b07d614533c2df8c5c2485b10bac0b9ddac38cd3bad350bc363e020",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "aes-128-nist-zero-block",
+      "run": "aes",
+      "key": {
+        "format": "raw",
+        "hex": "00000000000000000000000000000000"
+      },
+      "iv": "000000000000000000000000",
+      "plain": "00000000000000000000000000000000",
+      "sealed": "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf",
+      "expected": {
+        "sealed": "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf",
+        "plain": "00000000000000000000000000000000",
+        "rejected": true
+      }
+    },
+    {
+      "kind": "action",
+      "id": "aes-256-nist-zero-block",
+      "run": "aes",
+      "key": {
+        "format": "raw",
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "iv": "000000000000000000000000",
+      "plain": "00000000000000000000000000000000",
+      "sealed": "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919",
+      "expected": {
+        "sealed": "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919",
+        "plain": "00000000000000000000000000000000",
+        "rejected": true
+      }
+    },
+    {
+      "kind": "action",
+      "id": "legacy-sealed-secret-node-to-isolate",
+      "run": "aes",
+      "key": {
+        "format": "jwk",
+        "jwk": {
+          "kty": "oct",
+          "k": "DksSWs7-C1Q7j_mq2aPmLZ3zN5VHpV8UG1fIaLbxdlE",
+          "alg": "A256GCM"
+        }
+      },
+      "iv": "00112233445566778899aabb",
+      "plain": "6f6c64204769744875622f4d333635207365616c656420736563726574",
+      "sealed": "86a11b9a66aa8852a4cf4a12c3efa661f8eb60dcbab9b3703ac123028783a3f8a2a3aae6405cc42f99316c15aa",
+      "expected": {
+        "sealed": "86a11b9a66aa8852a4cf4a12c3efa661f8eb60dcbab9b3703ac123028783a3f8a2a3aae6405cc42f99316c15aa",
+        "plain": "6f6c64204769744875622f4d333635207365616c656420736563726574",
+        "rejected": true
+      }
+    },
+    {
+      "kind": "action",
+      "id": "crypto-key-access-errors",
+      "run": "crypto-errors",
+      "expected": {
+        "errors": [
+          "InvalidAccessError",
+          "InvalidAccessError",
+          "DataError",
+          "SyntaxError",
+          "DataError"
+        ],
+        "opaque": true,
+        "type": "secret",
+        "usages": [
+          "encrypt"
+        ],
+        "extractable": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "webhook-base64",
+      "run": "base64",
+      "expected": {
+        "encoded": "AH+A/w==",
+        "decoded": true,
+        "unpadded": true,
+        "bad": [
+          true,
+          true,
+          true,
+          true
+        ]
+      }
+    },
+    {
+      "kind": "query",
+      "id": "query-ctx-now",
+      "run": "clock",
+      "now": 1792324800123,
+      "expected": {
+        "now": 1792324800123,
+        "constructed": 1792324800123,
+        "called": true,
+        "explicit": 1234,
+        "utc": 0,
+        "parsed": 0,
+        "subclass": 1792324800123,
+        "instance": true,
+        "constructorNow": 1792324800123
+      }
+    },
+    {
+      "kind": "query",
+      "id": "query-random-no-entropy",
+      "run": "random-denied",
+      "expected": true
+    },
+    {
+      "kind": "query",
+      "id": "query-secure-entropy-denied",
+      "run": "entropy-denied",
+      "expected": true
+    },
+    {
+      "kind": "query",
+      "id": "query-seeded-random-ab",
+      "run": "random",
+      "now": 1792324800123,
+      "intentEntropy": "abababababababababababababababababababababababababababababababab",
+      "expected": [
+        0.02352941082790494,
+        0.7535156221129,
+        0.8780962645541877
+      ]
+    },
+    {
+      "kind": "query",
+      "id": "query-seeded-random-cd",
+      "run": "random",
+      "now": 1792324800123,
+      "intentEntropy": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "expected": [
+        0.8235294106416404,
+        0.6871706461533904,
+        0.5438285011332482
+      ]
+    },
+    {
+      "kind": "reducer",
+      "id": "reducer-ctx-now",
+      "run": "clock",
+      "now": 1792324800123,
+      "expected": {
+        "now": 1792324800123,
+        "constructed": 1792324800123,
+        "called": true,
+        "explicit": 1234,
+        "utc": 0,
+        "parsed": 0,
+        "subclass": 1792324800123,
+        "instance": true,
+        "constructorNow": 1792324800123
+      }
+    },
+    {
+      "kind": "reducer",
+      "id": "reducer-random-no-entropy",
+      "run": "random-denied",
+      "expected": true
+    },
+    {
+      "kind": "reducer",
+      "id": "reducer-secure-entropy-denied",
+      "run": "entropy-denied",
+      "expected": true
+    },
+    {
+      "kind": "reducer",
+      "id": "reducer-seeded-random-ab",
+      "run": "random",
+      "now": 1792324800123,
+      "intentEntropy": "abababababababababababababababababababababababababababababababab",
+      "expected": [
+        0.02352941082790494,
+        0.7535156221129,
+        0.8780962645541877
+      ]
+    },
+    {
+      "kind": "reducer",
+      "id": "reducer-seeded-random-cd",
+      "run": "random",
+      "now": 1792324800123,
+      "intentEntropy": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "expected": [
+        0.8235294106416404,
+        0.6871706461533904,
+        0.5438285011332482
+      ]
+    },
+    {
+      "kind": "action",
+      "id": "action-wall-time-secure-entropy",
+      "run": "action-globals",
+      "now": 1000,
+      "expectActionGlobals": true
+    },
+    {
+      "kind": "action",
+      "id": "undeclared-network-origin",
+      "run": "network",
+      "url": "https://blocked.invalid/resource",
+      "capabilities": {
+        "networkOrigins": [
+          "https://allowed.invalid"
+        ]
+      },
+      "expectedError": "origin"
+    },
+    {
+      "kind": "action",
+      "id": "json-serialization",
+      "run": "serialization",
+      "expected": {
+        "value": null,
+        "nested": [
+          1,
+          "two",
+          true
+        ]
+      }
+    },
+    {
+      "kind": "action",
+      "id": "cyclic-serialization-rejected",
+      "run": "cyclic",
+      "expectedError": "cannot be encoded as JSON"
+    },
+    {
+      "kind": "action",
+      "id": "schema-rejects-invalid-argument",
+      "run": "schema",
+      "argsSchema": {
+        "kind": "object",
+        "fields": {
+          "payload": {
+            "kind": "string"
+          }
+        },
+        "allowUnknown": false
+      },
+      "input": {
+        "payload": 123
+      },
+      "expectedError": "expected string"
+    },
+    {
+      "kind": "action",
+      "id": "cached-hmac-survives-invocation",
+      "run": "cached-key",
+      "algorithm": {
+        "name": "HMAC",
+        "hash": "SHA-256"
+      },
+      "key": {
+        "format": "raw",
+        "hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "data": "4869205468657265",
+      "expected": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    },
+    {
+      "kind": "action",
+      "id": "hmac-sha256-jwk",
+      "run": "signature",
+      "algorithm": {
+        "name": "HMAC",
+        "hash": "SHA-256"
+      },
+      "key": {
+        "format": "jwk",
+        "jwk": {
+          "kty": "oct",
+          "k": "CwsLCwsLCwsLCwsLCwsLCwsLCws",
+          "alg": "HS256"
+        }
+      },
+      "data": "4869205468657265",
+      "expected": {
+        "signature": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "ed25519-rfc-8032-spki",
+      "run": "signature",
+      "algorithm": "Ed25519",
+      "key": {
+        "format": "pkcs8",
+        "hex": "302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+      },
+      "publicKey": {
+        "format": "spki",
+        "hex": "302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+      },
+      "data": "",
+      "expected": {
+        "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        "valid": true,
+        "invalid": false,
+        "empty": false
+      }
+    },
+    {
+      "kind": "action",
+      "id": "aes-gcm-authenticated-data",
+      "run": "aes",
+      "key": {
+        "format": "raw",
+        "hex": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "iv": "000000000000000000000000",
+      "aad": "61757468656e7469636174656420776562686f6f6b2073656372657420636f6e74657874",
+      "plain": "7365616c65642064617461",
+      "sealed": "bdc2215128044b0a663aa4fac0ec6a075d849d6515e9e7df9ebe35",
+      "expected": {
+        "sealed": "bdc2215128044b0a663aa4fac0ec6a075d849d6515e9e7df9ebe35",
+        "plain": "7365616c65642064617461",
+        "rejected": true
+      }
+    }
+  ]
+}

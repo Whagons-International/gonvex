@@ -23,6 +23,10 @@
   "use strict";
 
   const ops = core.ops;
+  let activeRuntimeRequest;
+  const runtimeGlobals = createRuntimeGlobals(() => activeRuntimeRequest);
+  globalThis.Date = runtimeGlobals.Date;
+  globalThis.Math = runtimeGlobals.Math;
 
   const format = (value) => {
     if (typeof value === "string") return value;
@@ -341,15 +345,71 @@
   globalThis.Headers ??= GonvexHeaders;
   globalThis.Response ??= GonvexResponse;
 
+  class GonvexDOMException extends Error {
+    constructor(message = "", name = "Error") { super(message); this.name = name; }
+  }
+  globalThis.DOMException ??= GonvexDOMException;
+  const cryptoCall = (run) => {
+    try { return run(); } catch (cause) {
+      const message = String(cause?.message ?? cause);
+      const match = /^(DataError|SyntaxError|InvalidAccessError|OperationError|NotSupportedError|InvalidCharacterError): (.*)$/s.exec(message);
+      if (match) throw new DOMException(match[2], match[1]);
+      throw cause;
+    }
+  };
+  globalThis.atob ??= (input) => cryptoCall(() => ops.op_gonvex_base64(false, String(input)));
+  globalThis.btoa ??= (input) => cryptoCall(() => ops.op_gonvex_base64(true, String(input)));
+  const cryptoBytes = (data) => {
+    if (!(data instanceof ArrayBuffer) && !ArrayBuffer.isView(data)) throw new TypeError("expected a BufferSource");
+    return [...bytesFrom(data)];
+  };
+  const algorithmName = (algorithm) => {
+    const name = typeof algorithm === "string" ? algorithm : algorithm?.name;
+    if (typeof name !== "string") throw new TypeError("algorithm requires a name");
+    return name.toUpperCase();
+  };
+  const keyHandles = new WeakMap();
+  const keyToken = {};
+  class CryptoKey {
+    constructor(token, handle) {
+      if (token !== keyToken) throw new TypeError("Illegal constructor");
+      const info = JSON.parse(ops.op_gonvex_crypto_key_info(handle));
+      const algorithm = info.algorithm;
+      if (algorithm.hash) Object.freeze(algorithm.hash);
+      if (algorithm.publicExponent) algorithm.publicExponent = new Uint8Array(algorithm.publicExponent);
+      Object.freeze(algorithm);
+      Object.defineProperties(this, {
+        type: { value: info.type, enumerable: true }, extractable: { value: info.extractable, enumerable: true },
+        algorithm: { value: algorithm, enumerable: true }, usages: { value: Object.freeze(info.usages), enumerable: true },
+      });
+      keyHandles.set(this, handle);
+      Object.freeze(this);
+    }
+    get [Symbol.toStringTag]() { return "CryptoKey"; }
+  }
+  globalThis.CryptoKey ??= CryptoKey;
+  const cryptoOperation = (operation, algorithm, key, data, signature) => cryptoCall(() => {
+    const handle = keyHandles.get(key);
+    if (!handle) throw new DOMException("expected a CryptoKey from this isolate", "InvalidAccessError");
+    const request = { operation, algorithm: { name: algorithmName(algorithm) }, data: cryptoBytes(data) };
+    if (operation === "verify") request.signature = cryptoBytes(signature);
+    if (operation === "encrypt" || operation === "decrypt") {
+      request.iv = cryptoBytes(algorithm?.iv);
+      if (algorithm?.additionalData !== undefined) request.additionalData = cryptoBytes(algorithm.additionalData);
+      if (algorithm?.tagLength !== undefined) request.tagLength = algorithm.tagLength;
+    }
+    return JSON.parse(ops.op_gonvex_crypto_operation(handle, JSON.stringify(request)));
+  });
   const cryptoObject = {
     getRandomValues(target) {
-      if (!ArrayBuffer.isView(target) || target.byteLength > 65_536) throw new TypeError("getRandomValues requires a typed array of at most 65536 bytes");
-      const random = JSON.parse(ops.op_gonvex_random_bytes(target.byteLength));
+      if (!ArrayBuffer.isView(target) || !/^(?:\[object (?:Uint8|Uint8Clamped|Uint16|Uint32|Int8|Int16|Int32|BigInt64|BigUint64)Array\])$/.test(Object.prototype.toString.call(target))) throw new TypeError("getRandomValues requires an integer typed array");
+      if (target.byteLength > 65_536) throw new DOMException("getRandomValues exceeds 65536 bytes", "QuotaExceededError");
+      const random = cryptoCall(() => JSON.parse(ops.op_gonvex_random_bytes(target.byteLength)));
       new Uint8Array(target.buffer, target.byteOffset, target.byteLength).set(random);
       return target;
     },
     randomUUID() {
-      const bytes = this.getRandomValues(new Uint8Array(16));
+      const bytes = cryptoObject.getRandomValues(new Uint8Array(16));
       bytes[6] = (bytes[6] & 0x0f) | 0x40;
       bytes[8] = (bytes[8] & 0x3f) | 0x80;
       const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
@@ -357,11 +417,19 @@
     },
     subtle: Object.freeze({
       async digest(algorithm, data) {
-        const name = typeof algorithm === "string" ? algorithm : algorithm?.name;
-        if (String(name).toUpperCase().replace("-", "") !== "SHA256") throw new TypeError("only SHA-256 is supported");
-        const digest = new Uint8Array(JSON.parse(ops.op_gonvex_sha256(JSON.stringify([...bytesFrom(data)]))));
+        const digest = cryptoCall(() => new Uint8Array(JSON.parse(ops.op_gonvex_crypto_digest(algorithmName(algorithm), JSON.stringify(cryptoBytes(data))))));
         return digest.buffer;
       },
+      async importKey(format, keyData, algorithm, extractable, keyUsages) {
+        const normalized = { ...(typeof algorithm === "object" ? algorithm : {}), name: algorithmName(algorithm) };
+        if (normalized.hash !== undefined) normalized.hash = { name: algorithmName(normalized.hash) };
+        const data = format === "jwk" ? keyData : cryptoBytes(keyData);
+        return cryptoCall(() => new CryptoKey(keyToken, ops.op_gonvex_crypto_import(JSON.stringify({ format, data, algorithm: normalized, extractable: !!extractable, usages: keyUsages }))));
+      },
+      async sign(algorithm, key, data) { return new Uint8Array(cryptoOperation("sign", algorithm, key, data).bytes).buffer; },
+      async verify(algorithm, key, signature, data) { return cryptoOperation("verify", algorithm, key, data, signature).verified; },
+      async encrypt(algorithm, key, data) { return new Uint8Array(cryptoOperation("encrypt", algorithm, key, data).bytes).buffer; },
+      async decrypt(algorithm, key, data) { return new Uint8Array(cryptoOperation("decrypt", algorithm, key, data).bytes).buffer; },
     }),
   };
   globalThis.crypto ??= Object.freeze(cryptoObject);
@@ -667,6 +735,8 @@
 
   return async (binding, requestJson, argsJson) => {
     const request = JSON.parse(requestJson);
+    activeRuntimeRequest = request;
+    try {
 
     const handler = resolveHandler(binding, request.function);
     if (handler === null) {
@@ -702,5 +772,6 @@
       return failure("resultSize", `${request.function} returned more than the ${request.maxResultBytes} byte result limit`);
     }
     return JSON.stringify({ status: "ok", value: encoded });
+    } finally { activeRuntimeRequest = undefined; }
   };
 })(Deno.core)

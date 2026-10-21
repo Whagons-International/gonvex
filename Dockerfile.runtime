@@ -6,6 +6,7 @@ FROM rust:1.94-bookworm AS rust-build
 WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/crates ./crates
+COPY packages/module-sdk/runtime-contract /src/packages/module-sdk/runtime-contract
 # Cache Cargo artifacts independently of Docker layers: Coolify build arguments
 # and network host mappings can invalidate RUN layers even on an unchanged tree.
 # Keep the outputs outside the mounts so a cached RUN still supplies the image.

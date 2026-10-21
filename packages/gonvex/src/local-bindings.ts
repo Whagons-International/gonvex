@@ -7,6 +7,17 @@ import type { LocalSchema } from "@gonvex/local-runtime/schema";
 import { compileLocalSchema } from "./local-schema.js";
 import type { Manifest } from "./manifest-types.js";
 
+const runtimeGlobals = {
+  Date: ["@gonvex/module-sdk/runtime-contract", "runtimeDate"],
+  Math: ["@gonvex/module-sdk/runtime-contract", "runtimeMath"],
+  crypto: ["@gonvex/module-sdk/runtime-contract", "runtimeCrypto"],
+  "globalThis.Date": ["@gonvex/module-sdk/runtime-contract", "runtimeDate"],
+  "globalThis.Math": ["@gonvex/module-sdk/runtime-contract", "runtimeMath"],
+  "globalThis.crypto": ["@gonvex/module-sdk/runtime-contract", "runtimeCrypto"],
+} satisfies Record<string, [string, string]>;
+const runtimeWrapper = `import { withReducerRuntimeGlobals } from "@gonvex/module-sdk/runtime-contract";
+const bindRuntimeGlobals = definition => Object.freeze({ ...definition, handler: (context, args) => withReducerRuntimeGlobals(context, () => definition.handler(context, args)) });`;
+
 export async function projectLocalSchema(root: string): Promise<LocalSchema> {
   const migrationDirectory = join(root, "migrations");
   const names = (await readdir(migrationDirectory).catch(() => [] as string[])).filter((name) => name.endsWith(".sql")).sort();
@@ -36,9 +47,9 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
   });
   const entryFile = join(root, "gonvex", "_build", "local-entry.ts");
   await mkdir(dirname(entryFile), { recursive: true });
-  await writeFile(entryFile, `${imports.join("\n")}\nexport const localReducers = {${reducers.map(([path], index) => `${JSON.stringify(path)}: reducer${index}`).join(",")}};`);
+  await writeFile(entryFile, `${runtimeWrapper}\n${imports.join("\n")}\nexport const localReducers = {${reducers.map(([path], index) => `${JSON.stringify(path)}: bindRuntimeGlobals(reducer${index})`).join(",")}};`);
   const bundle = await rolldown({
-    input: entryFile, cwd: root, platform: "browser", tsconfig: false,
+    input: entryFile, cwd: root, platform: "browser", tsconfig: false, transform: { inject: runtimeGlobals },
     // These declarations describe server entry points. Their definitions and
     // schema construction are unnecessary when only Reducer exports are used.
     treeshake: { manualPureFunctions: ["action", "internalReducer", "query", "internalQuery", "liveQuery", "replicaCollection", "visibility", "cron", "tenantCron", "schema"] },
@@ -56,10 +67,10 @@ export async function localBindings(root: string, manifest: Manifest): Promise<R
     const loaders = reducers.map(([path, entry]) => {
       let file = relative(dirname(lazyEntry), resolve(root, entry.file)).replaceAll('\\', '/').replace(/\.(?:tsx?|mts|cts)$/, '.js');
       if (!file.startsWith('.')) file = `./${file}`;
-      return `${JSON.stringify(path)}: () => import(${JSON.stringify(file)}).then(module => module.${entry.handler})`;
+      return `${JSON.stringify(path)}: () => import(${JSON.stringify(file)}).then(module => bindRuntimeGlobals(module.${entry.handler}))`;
     });
-    await writeFile(lazyEntry, `export const localReducers = {${loaders.join(',')}};`);
-    const lazyBundle = await rolldown({ input: lazyEntry, cwd: root, platform: 'browser', tsconfig: false,
+    await writeFile(lazyEntry, `${runtimeWrapper}\nexport const localReducers = {${loaders.join(',')}};`);
+    const lazyBundle = await rolldown({ input: lazyEntry, cwd: root, platform: 'browser', tsconfig: false, transform: { inject: runtimeGlobals },
       treeshake: { manualPureFunctions: ['action', 'internalReducer', 'query', 'internalQuery', 'liveQuery', 'replicaCollection', 'visibility', 'cron', 'tenantCron', 'schema'] },
       resolve: { conditionNames: ['browser', 'import', 'default'], mainFields: ['browser', 'module', 'main'] },
     });

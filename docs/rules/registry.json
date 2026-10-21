@@ -1,0 +1,30 @@
+[
+  {
+    "id": "G1-runtime-contract",
+    "rule": "Run published behavioral runtime-contract vectors in the real V8 isolate and assert SDK parity",
+    "origin": "F2/F3, 2026-10-18; live relay webhook atob failure, 2026-10-20",
+    "why": "Node WebCrypto hid missing isolate capabilities; Query/Reducer native clocks and randomness diverged from the intent",
+    "cost": {
+      "seconds": 70.304112,
+      "contextTokens": 0
+    },
+    "falsePositives": 0,
+    "lastFired": "2026-10-20",
+    "measurement": "Measured warm cargo filtered real-isolate command plus Node SDK contract command: 70.304112s under shared-host load, including process/compile-slot startup; Rust case body 8.24s. Earlier measured warm combined command 0.34794s. 34 cases twice. No savings estimate.",
+    "retainedRules": "No existing rule removed. This is a regression outcome suite for observed runtime failures, not a style rule."
+  },
+  {
+    "id": "G1-staging-release",
+    "rule": "Publish staging SDKs only from the exact clean green staging SHA with coordinated prerelease versions",
+    "origin": "G1 release step 4; CORRECTIONS-1019 items 1/2, 2026-10-19",
+    "why": "The existing stable release script pushes main; staging needs a separate prerelease publisher",
+    "cost": {
+      "seconds": 0.154397,
+      "contextTokens": 0
+    },
+    "falsePositives": 0,
+    "lastFired": null,
+    "measurement": "Measured node --test scripts/release-staging.test.mjs including startup; rejects wrong SHA, stable versions, dirty state and failed/pending CI",
+    "retainedRules": "No existing rule removed; this guards the authorized release boundary."
+  }
+]

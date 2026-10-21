@@ -13,6 +13,7 @@
     "test:release": "node --test scripts/release-cli.test.mjs",
     "verify:package-tarballs": "node scripts/verify-package-tarballs.mjs",
     "release:cli": "node scripts/release-cli.mjs",
+    "release:staging": "node scripts/release-staging.mjs",
     "release:cli:dry-run": "node scripts/release-cli.mjs --dry-run",
     "release:notes": "node scripts/release-cli.mjs --notes-preview",
     "dev:docs": "pnpm --filter @gonvex/docs dev",

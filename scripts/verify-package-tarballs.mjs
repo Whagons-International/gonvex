@@ -6,17 +6,10 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RELEASE_PACKAGES } from "./release-packages.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const packageDirectories = [
-  "protocol",
-  "client",
-  "expo-sqlite",
-  "react",
-  "module-sdk", "local-runtime",
-  "gonvex",
-  "create-gonvex",
-];
+const packageDirectories = RELEASE_PACKAGES;
 const destination = mkdtempSync(join(tmpdir(), "gonvex-package-tarballs-"));
 
 try {
@@ -50,6 +43,11 @@ try {
       entries.some((entry) => entry.startsWith("package/dist/")),
       `${source.name} tarball lacks built dist files`,
     );
+    if (source.name === "@gonvex/module-sdk") {
+      for (const file of ["globals.js", "globals.d.ts", "vectors.json", "runner.js"]) {
+        assert(entries.includes(`package/runtime-contract/${file}`), `SDK tarball lacks runtime-contract/${file}`);
+      }
+    }
 
     const packed = JSON.parse(
       execFileSync("tar", ["-xOzf", tarball, "package/package.json"], {
