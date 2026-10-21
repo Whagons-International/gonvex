@@ -1,0 +1,76 @@
+---
+title: Declared reference integrity
+description: Enforce application references across SQL writers and soft deletion.
+---
+
+Tenant migrations can declare relationships with
+`SELECT gonvex_declare_references(catalog::jsonb)`. Gonvex installs the generic
+helpers before applying application migrations. Applications own table names,
+selection paths, lifecycle predicates and deletion policy; the runtime contains
+no application-specific relationship list.
+
+A version 1 declaration contains `tables` and `references`. Each table declares
+its single primary `key` and a JSONPath `live` predicate. Each reference declares
+its unique `name`, `source`, storage `column`, selection `path`, `target`, and
+target `state` (`live` or `exists`). For example:
+
+```sql
+SELECT gonvex_declare_references('{
+  "version": 1,
+  "tables": [
+    {"name":"teams","key":"_id","live":"$.deletedAt == null"},
+    {"name":"spaces","key":"_id","live":"$.deletedAt == null"}
+  ],
+  "references": [
+    {"name":"spaces.team","source":"spaces","column":"teamId",
+     "path":"$.teamId","target":"teams","state":"live","allowEmpty":true}
+  ]
+}'::jsonb);
+```
+
+New selected IDs must resolve. Deleting the final target, changing its key, or
+making it non-live fails if incoming references would remain. A transaction can
+explicitly remove or reassign all incoming references and then delete the
+target. There is no automatic cascade that could silently change access.
+Ordinary SQL, reducers and bulk row operations share this enforcement.
+`TRUNCATE` is rejected on declared tables.
+
+Enforcement uses transactionally maintained target tokens and reference edges
+with a native deferred PostgreSQL foreign key. This protects concurrent writers
+under READ COMMITTED and REPEATABLE READ, including stale snapshots. A failed
+transaction leaves the application state unchanged.
+
+Installation inventories existing references without repairing application
+rows. The FK is initially `NOT VALID`: existing violations remain visible,
+unchanged legacy edges survive unrelated edits, and new edges are enforced.
+`SELECT * FROM gonvex_reference_violations()` returns violations for an operator
+to review. Its results contain application identifiers and need the same access
+controls as application data. Repair and eventual constraint validation are
+separate operational decisions.
+
+Arrays and nested JSON use JSONPath, with `at` selecting individual containers.
+Polymorphic references declare a discriminator and a closed `targets` map.
+Alternate keys use `targetKeys`; a nonunique alias requires `multipleOwners`
+and a reason. Explicit sentinel, numeric, serialized-JSON and selector-decoder
+policies must document the existing consumer behavior they represent.
+
+When a value's domain depends on another row, declare a `bindings` projection
+and reference `lookup` steps. Each selected configuration version is itself a
+referenced token. A parent edit cannot silently reinterpret dependent values;
+remove/rewrite the dependents in the same transaction. Configuration lookups
+can chain through parents and use the selected container's local keys.
+
+Adding `exclusions` opts into strict storage coverage. Every text, JSON or array
+column needs a declared reference, target key, or reasoned boundary such as an
+external identity, local key, enum, content, snapshot or derived projection.
+Gonvex rechecks coverage in the tenant migration transaction, so an unclassified
+schema addition rolls back. Top-level coverage cannot prove the meanings of
+arbitrary nested JSON: applications must also review their nested consumers and
+keep the declaration and its coverage lint together.
+
+The internal `_gonvex_reference_*` tables are derived implementation state.
+Do not expose or write them through application APIs. Applications must not
+disable triggers or replace these constraints; privileged DDL is outside the
+ordinary-writer guarantee. Installation takes table locks and backfills the
+ledger, so measure its cost on a disposable representative snapshot before
+rolling out a large catalog.

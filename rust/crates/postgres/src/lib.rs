@@ -22,6 +22,8 @@ use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 mod provision;
+mod reference_integrity;
+mod sql_script;
 pub use provision::{MigrationScope, SqlMigration};
 
 const DEFAULT_MAX_TOTAL_CONNECTIONS: usize = 20;
