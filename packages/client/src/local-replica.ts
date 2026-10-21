@@ -130,6 +130,9 @@ export interface LocalReplicaStorage {
   readonly supportsMembershipDeltas?: boolean;
   /** Working-set rows are newly decoded and may be frozen by the replica. */
   readonly ownsWorkingSetRows?: boolean;
+  /** loadWindowRows/loadEntityRows return fresh rows exclusively owned by the
+   * caller. Adapters retaining aliases must leave this false. */
+  readonly ownsHydratedRows?: boolean;
   readChanges?(scope:string, afterSequence:number,interest?:{rows:Record<string,string[]>;hasRow?:(entity:string,id:string)=>boolean;windows:string[];availableRows:number;availableBytes:number;maxRows:number;maxBytes:number}):Promise<ReplicaStorageChanges>;
   subscribePeer?(listener:(scope:string)=>void):()=>void;
   withReadView?<T>(scope: string, coverage: ReadCoverage, run: (view: ReducerReadView) => Promise<T>): Promise<T>;
@@ -526,7 +529,13 @@ export class LocalReplica implements LocalReplicaView {
       // a same-scope activation cannot load a snapshot from before its commit.
       await this.persistence;
       const snapshot = !restoreFromStorage ? undefined : this.storage?.loadWorkingSet
-        ? await this.storage.loadWorkingSet(nextScope,{...this.residencyBudget,preferredWindows:[...this.retainedWindows.keys()]})
+        ? await this.storage.loadWorkingSet(nextScope,{
+          // Bootstrap only a bounded page plus references. Retained windows and
+          // entity leases recover additional rows through indexed reads later.
+          maxRows:Math.min(this.residencyBudget.maxRows,2048),
+          maxBytes:Math.min(this.residencyBudget.maxBytes,4*1024*1024),
+          preferredWindows:[...this.retainedWindows.keys()],
+        })
         : await this.storage?.load(nextScope);
       if (generation !== this.scopeActivationGeneration) return;
       this.scopeValue = nextScope;
@@ -577,7 +586,7 @@ export class LocalReplica implements LocalReplicaView {
       const loaded=await this.storage.loadWindowRows(this.scopeValue,signature);
       if(!loaded || !this.retainedWindows.has(signature) || scopeGeneration!==this.scopeActivationGeneration)return;
       const table=residentRows(this.entities.get(loaded.window.entity));
-      for(const row of loaded.rows)setResidentRow(table,String(row[loaded.window.key]),cloneRow(row));
+      for(const row of loaded.rows)setResidentRow(table,String(row[loaded.window.key]),this.storage?.ownsHydratedRows ? row : cloneRow(row));
       this.entities=new Map(this.entities).set(loaded.window.entity,table);
       this.liveQueries = new Map(this.liveQueries).set(signature,normalizeWindow(loaded.window));
       if(loaded.window.kind==='replica' && loaded.window.completeness==='complete' && !loaded.window.truncated && loaded.rows.length===loaded.window.ids.length)this.residentPartialTables.delete(loaded.window.entity);
@@ -620,7 +629,7 @@ export class LocalReplica implements LocalReplicaView {
       const next=residentRows(this.entities.get(entity));
       const loadedIDs = new Set<string>();
       for (const { id, row } of rows) if (this.retainedRows.get(entity)?.has(id)) {
-        setResidentRow(next, id, cloneRow(row));
+        setResidentRow(next, id, this.storage?.ownsHydratedRows ? row : cloneRow(row));
         loadedIDs.add(id);
       }
       this.entities=new Map(this.entities).set(entity,next);

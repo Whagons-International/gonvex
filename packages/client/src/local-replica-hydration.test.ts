@@ -72,3 +72,16 @@ it('invalidates a cached live projection when another retained window hydrates t
   releaseGrid();
   releaseCollection();
 });
+
+
+it('keeps shared-adapter hydration rows isolated unless ownership was explicitly transferred', async () => {
+  const row = { id: 'a', title: 'Original' };
+  const window: ReplicaWindow = {signature:'shared',entity:'tasks',kind:'replica',key:'id',ids:['a'],completeness:'complete',source:'cache'};
+  const replica = new LocalReplica({load:async()=>({entities:{},liveQueries:{shared:window}}),loadWindowRows:async()=>({window,rows:[row]}),applyTransaction:async()=>{}});
+  await replica.activateScope('shared-scope');
+  const release = replica.retainWindow('shared');
+  await replica.withReadView(()=>({}),false,async()=>undefined);
+  row.title='Adapter mutation';
+  expect(replica.entity('tasks','a')?.title).toBe('Original');
+  release();
+});

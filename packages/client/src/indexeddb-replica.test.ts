@@ -573,3 +573,24 @@ it('does not rewrite transaction rows already covered by newer snapshots, but pe
     Dexie.dependencies.indexedDB = oldIDB; Dexie.dependencies.IDBKeyRange = oldRange;
   }
 }, 30_000);
+
+it('restores a bounded exact live window before alphabetically earlier bulk rows', async () => {
+  const oldIDB=globalThis.indexedDB,oldRange=globalThis.IDBKeyRange;
+  Object.assign(globalThis,{indexedDB:new IDBFactory(),IDBKeyRange});
+  Dexie.dependencies.indexedDB=globalThis.indexedDB;Dexie.dependencies.IDBKeyRange=globalThis.IDBKeyRange;
+  const storage=new IndexedDBLocalReplicaStorage('bounded-live-first');
+  const bulk=Object.fromEntries(Array.from({length:3000},(_,n)=>['bulk-'+n,{id:'bulk-'+n}]));
+  const tasks=Object.fromEntries(Array.from({length:12},(_,n)=>['task-'+n,{id:'task-'+n,title:'Visible '+n}]));
+  try {
+    await storage.replaceSnapshot({entities:{a_bulk:bulk,tasks},liveQueries:{visible:{signature:'visible',kind:'live',entity:'tasks',key:'id',ids:Object.keys(tasks),completeness:'complete',source:'server',cursor:{epoch:'test',revision:2}}}},'tenant');
+    const restored=await storage.loadWorkingSet('tenant',{maxRows:12,maxBytes:1024*1024});
+    expect(Object.keys(restored!.entities.tasks!)).toHaveLength(12);
+    expect(restored!.entities.a_bulk).toBeUndefined();
+    expect(restored!.liveQueries.visible!.completeness).toBe('complete');
+    expect(restored!.residentPartialTables??[]).not.toContain('tasks');
+    expect(Object.values(restored!.entities).reduce((sum,rows)=>sum+Object.keys(rows).length,0)).toBe(12);
+  } finally {
+    await storage.close();globalThis.indexedDB=oldIDB;globalThis.IDBKeyRange=oldRange;
+    Dexie.dependencies.indexedDB=oldIDB;Dexie.dependencies.IDBKeyRange=oldRange;
+  }
+});

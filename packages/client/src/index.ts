@@ -412,6 +412,15 @@ export type LocalDependencyResidency = "bounded" | "off" | {
 /** Default row bound of `localDependencyResidency: "bounded"`. */
 export const DEFAULT_LOCAL_DEPENDENCY_RESIDENT_MAX_ROWS = 1000;
 
+/** Server accepted the current tenant identity. This does not certify cached
+ * rows, local recovery, reducer readiness, or task coverage. */
+export type TenantAdmission = Readonly<{
+  project: string;
+  accountId: string;
+  tenantId: string;
+  memberId: string;
+}>;
+
 export type OutboxScope = ReducerOutboxScopeSummary & {
   /** True for the identity this client is currently signed in as. */
   current: boolean;
@@ -671,6 +680,10 @@ export class GonvexClient {
   private readonly directOutboxReducerIds = new Set<string>();
   private readonly optimisticOutboxEntryIds = new Map<string, number>();
   private outboxReady: Promise<void>;
+  private outboxRecoveryPending = false;
+  /** Reading the durable journal is independent of loading row values. Local
+   * prediction/replay still waits for outboxReady below. */
+  private outboxJournalReady: Promise<void> = Promise.resolve();
   private outboxScope = "";
   private outboxScopeGeneration = 0;
   private readonly outboxEphemeralScope = randomID();
@@ -680,6 +693,8 @@ export class GonvexClient {
   private localSessionRestore: Promise<void> = Promise.resolve();
   private localSessionStateValue: "unavailable" | "restored" | "authenticated" = "unavailable";
   private readonly localSessionHandlers = new Set<() => void>();
+  private tenantAdmissionValue: TenantAdmission | undefined;
+  private readonly tenantAdmissionHandlers = new Set<() => void>();
   private replicaFrames: Promise<void> = Promise.resolve();
   private queuedReplicaWatermark?: { revision: number; scope: ReplicaScope; generation: number };
   private processedReplicaWatermarkRevision = 0;
@@ -835,7 +850,8 @@ export class GonvexClient {
       });
     }
     this.localSessionRestore = this.restoreLocalSession(initialScope, this.outboxScopeGeneration);
-    this.setOutboxReady(this.localSessionRestore);
+    if (this.localStorage && initialScope.startsWith("identity\u0000"))
+      this.setOutboxReady(this.localSessionRestore);
   }
 
   /**
@@ -1101,6 +1117,8 @@ export class GonvexClient {
     this.localIdentity = saved.identity;
     void this.localExecutor?.ready.catch(() => undefined);
     await this.activateReplicaDirective(saved.directive);
+    await this.replicaReady;
+    await this.outboxReady;
     if (generation !== this.outboxScopeGeneration || scope !== this.outboxScope) return;
     if (this.localSessionStateValue !== "authenticated") {
       this.replica.setFreshness("offline");
@@ -1777,7 +1795,25 @@ export class GonvexClient {
     };
   }
 
+  /** Read the accepted server identity independently of local recovery.
+   * Undefined on pending/replaced/rejected credentials, disconnect or close. */
+  tenantAdmission(): TenantAdmission | undefined { return this.tenantAdmissionValue; }
+
+  onTenantAdmissionChange(listener: () => void): () => void {
+    this.tenantAdmissionHandlers.add(listener);
+    return () => { this.tenantAdmissionHandlers.delete(listener); };
+  }
+
+  private publishTenantAdmission(value: TenantAdmission | undefined) {
+    if (this.tenantAdmissionValue === value) return;
+    this.tenantAdmissionValue = value;
+    for (const listener of this.tenantAdmissionHandlers) {
+      try { listener(); } catch { /* Display observers cannot interrupt admission. */ }
+    }
+  }
+
   private applyAuth(auth: GonvexClientAuth) {
+    this.publishTenantAdmission(undefined);
     this.flushTelemetry();
     if (this.publicTenant && (auth.token || auth.fetchToken || auth.identity || auth.tenant !== undefined && auth.tenant !== this.publicTenant || auth.project !== undefined && auth.project !== this.auth.project)) {
       throw new Error("Public connection scope is fixed; create another client to sign in or change tenants");
@@ -1867,6 +1903,7 @@ export class GonvexClient {
     socket.addEventListener("close", () => {
       if (this.socket !== socket || this.manuallyClosed) return;
       this.flushTelemetry();
+      this.publishTenantAdmission(undefined);
       this.isWebSocketConnected = false;
       this.replica.setFreshness("offline");
       if (this.localSessionStateValue === "authenticated") this.setLocalSessionState("restored");
@@ -2071,13 +2108,33 @@ export class GonvexClient {
           const authScopeGeneration = this.outboxScopeGeneration;
           const isCurrentAuth = () => this.socket === socket && this.activeAuthFrameId === message.id
             && this.latestAuthFrameId === undefined && authScopeGeneration === this.outboxScopeGeneration;
-          void this.activateReplicaDirective(directive)
+          // Rotate/clear a changed visibility scope synchronously before display
+          // observers run. Awaiting disk/outbox work is still deferred below.
+          const localActivation = this.activateReplicaDirective(directive);
+          // This accepted, latest-frame identity is separate from the durable
+          // local activation/recovery barrier below. No reducer is released here.
+          if (localIdentity?.auth?.account?.id && localIdentity.tenant?.id && localIdentity.member?.id
+            && this.auth.project && directive.protocolVersion === 1
+            && directive.visibilityScope.trim() && directive.epoch.trim()) {
+            this.publishTenantAdmission(Object.freeze({
+              project: this.auth.project,
+              accountId: localIdentity.auth.account.id,
+              tenantId: localIdentity.tenant.id,
+              memberId: localIdentity.member.id,
+            }));
+          }
+          if (!isCurrentAuth()) { void localActivation.catch(() => undefined); return; }
+          void localActivation
             .then(() => isCurrentAuth() ? this.activateOutboxScope() : undefined)
-            .then(async () => {
-              if (!isCurrentAuth()) return;
-              if (localIdentity) await this.localStorage?.saveSession?.(this.outboxScope, {
-                directive, identity: localIdentity, artifactHash: this.activeArtifactHashValue || this.localBinding?.artifactHash || "", lastOnlineAtMs: this.lastOnlineAtMs,
-              });
+            .then(() => {
+              if (!isCurrentAuth() || !localIdentity) return;
+              // Best-effort cache checkpoint follows full durable recovery, but
+              // is not server admission or reducer-send readiness.
+              void this.outboxReady.then(async () => {
+                if (isCurrentAuth()) await this.localStorage?.saveSession?.(this.outboxScope, {
+                  directive, identity: localIdentity, artifactHash: this.activeArtifactHashValue || this.localBinding?.artifactHash || "", lastOnlineAtMs: this.lastOnlineAtMs,
+                });
+              }).catch(() => undefined);
             })
             .then(() => {
               if (!isCurrentAuth()) return;
@@ -2091,7 +2148,13 @@ export class GonvexClient {
               else for (const subscription of this.replicaSubscriptions.values()) {
                 if (subscription.socketGeneration !== this.socketGeneration) this.sendReplicaOpen(subscription);
               }
-              this.setLocalSessionState("authenticated");
+              // Server calls may proceed after journal admission. Local ready,
+              // optimistic execution and reducer replay remain behind recovery.
+              void this.outboxReady.then(() => {
+                if (isCurrentAuth()) this.setLocalSessionState("authenticated");
+              }).catch((error) => {
+                if (isCurrentAuth()) this.rejectReplicaDirective(error);
+              });
               this.settleManagedAuthAttempt(message.id);
               // Same-scope reauthentication does not reload the outbox, so no
               // restore callback will wake a reducer queued during auth.
@@ -2129,6 +2192,7 @@ export class GonvexClient {
             || (message.code === "credential_rejected" && /^gvx_(dev|imp)_/.test(this.auth.token ?? ""));
           this.authRetriedAfterError = false;
           this.authRefreshedToken = undefined;
+          this.publishTenantAdmission(undefined);
           this.settleManagedAuthAttempt(message.id, message.error);
           if (definitive) {
             this.quarantineReplicaScope();
@@ -2211,6 +2275,7 @@ export class GonvexClient {
   }
 
   close() {
+    this.publishTenantAdmission(undefined);
     this.snapshotDeferredFrames = [];
     this.snapshotDeferredBytes = 0;
     for (const subscription of this.replicaSubscriptions.values()) {
@@ -3494,7 +3559,7 @@ export class GonvexClient {
   private activateOutboxScope(): Promise<void> {
     const scope = reducerOutboxScope(this.url, this.auth, this.outboxEphemeralScope);
     if (scope === this.outboxScope) {
-      return this.outboxReady ?? this.replicaReady;
+      return this.outboxJournalReady;
     }
 
     const previousScope = this.outboxScope;
@@ -3517,7 +3582,7 @@ export class GonvexClient {
     // Never show the previous identity's intents under the new one.
     this.publishIntents([]);
     this.refreshIntents();
-    return ready;
+    return this.hasAuthoritativeReplicaScope ? this.outboxJournalReady : ready;
   }
 
   private async activateReplicaDirective(directive: ReplicaDirective): Promise<void> {
@@ -3532,8 +3597,7 @@ export class GonvexClient {
     }
     const scope = directive.visibilityScope.trim();
     if (this.hasAuthoritativeReplicaScope && this.replicaScope === scope) {
-      await this.replicaReady;
-      await this.outboxReady;
+      await this.outboxJournalReady;
       return;
     }
     for (const reducerId of this.optimisticReducerIds) this.replica.rejectCommand(reducerId);
@@ -3555,7 +3619,7 @@ export class GonvexClient {
     // row which the concurrent recovery then mistakes for an abandoned call
     // and sends a second time with the same command ID.
     this.setOutboxReady(this.restoreOutbox(this.outboxScope, generation));
-    await this.outboxReady;
+    await this.outboxJournalReady;
   }
 
   // Scope activation rejects once the replica is disposed (for example when
@@ -3570,10 +3634,14 @@ export class GonvexClient {
   // Outbox restore awaits replicaReady, so it rejects the same way.
   private setOutboxReady(ready: Promise<void>) {
     this.outboxReady = ready;
-    ready.catch(() => undefined);
+    this.outboxRecoveryPending = true;
+    void ready.then(() => {
+      if (this.outboxReady === ready) this.outboxRecoveryPending = false;
+    }, () => undefined);
   }
 
   private quarantineReplicaScope() {
+    this.publishTenantAdmission(undefined);
     this.outboxScopeGeneration += 1;
     this.authenticatedSocketGeneration = 0;
     this.localIdentity = undefined;
@@ -3603,8 +3671,16 @@ export class GonvexClient {
   }
 
   private async restoreOutbox(scope: string, generation: number) {
+    const loaded = this.reducerOutbox.loadAll(scope);
+    this.outboxJournalReady = loaded.then(() => undefined);
+    void this.outboxJournalReady.catch(() => undefined);
+    // Do not acknowledge, predict or replay recovered intents until the matching
+    // replica base is durable and readable. Admission need only load the journal.
     await this.replicaReady;
     await this.replica.synchronizeStorage();
+    await loaded;
+    // A peer may have committed or changed journal state during hydration.
+    // Recover from a fresh journal read, never the earlier admission snapshot.
     const entries = await this.reducerOutbox.loadAll(scope);
     if (
       this.manuallyClosed
@@ -4157,6 +4233,12 @@ export class GonvexClient {
   ): Promise<Array<{ status: "ok"; result: T | QueuedReducerOutcome } | { status: "error"; error: GonvexClientError }>> {
     if (calls.length === 0) return [];
     this.connect();
+    if (this.outboxRecoveryPending && !this.publicTenant && calls.some(call => call.ref.scope !== "control")) {
+      const generation = this.outboxScopeGeneration;
+      await this.outboxReady;
+      if (this.manuallyClosed || generation !== this.outboxScopeGeneration)
+        throw new GonvexClientError("Reducer batch recovery scope changed before send", { code: "superseded", operation: "reducer" });
+    }
     const timeoutMs = options.timeoutMs ?? this.timeouts.reducerTimeoutMs;
     const settle = (promise: Promise<T | QueuedReducerOutcome>, path: string) => promise
       .then((result) => ({ status: "ok" as const, result }))
@@ -4195,7 +4277,7 @@ export class GonvexClient {
     return Promise.all(registered.map((entry) => settle(entry.promise, entry.path)));
   }
 
-  private call<T>(
+  private async call<T>(
     kind: "reducer" | "action",
     ref: FunctionReference,
     args: JsonValue,
@@ -4204,6 +4286,12 @@ export class GonvexClient {
     idempotencyKey?: string,
   ): Promise<T> {
     this.connect();
+    if (this.outboxRecoveryPending && kind === "reducer" && ref.scope !== "control" && !this.publicTenant) {
+      const generation = this.outboxScopeGeneration;
+      await this.outboxReady;
+      if (this.manuallyClosed || generation !== this.outboxScopeGeneration)
+        throw new GonvexClientError("Reducer recovery scope changed before send", { code: "superseded", path: ref.path, operation: "reducer" });
+    }
     const callId = id ?? randomID();
     const effectiveIdempotencyKey = ref.scope === "control"
       ? (idempotencyKey ?? callId)

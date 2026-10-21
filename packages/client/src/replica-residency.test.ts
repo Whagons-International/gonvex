@@ -262,3 +262,16 @@ it('drops old recency entries on an epoch replacement of the same table without 
   expect(replica['recency'].has('items\0z')).toBe(true);
   replica.dispose();expect(replica['recency'].size).toBe(0);
 });
+
+
+it('hydrates a large replica window with paged reads and exact ordered membership',async()=>{
+  const many=Array.from({length:2050},(_,i)=>({_id:`large-${String(i).padStart(5,'0')}`,name:`Task ${i}`}));
+  const large:ReplicaWindow={...window,signature:'large',ids:many.map(row=>row._id).reverse()};
+  await storage.replaceWindow(large,{entities:{items:Object.fromEntries(many.map(row=>[row._id,row]))},liveQueries:{large}},'scope',many);
+  await storage.applyTransaction({cursor:{epoch:'e',revision:2},changes:[{entity:'items',id:'not-a-member',operation:'insert',newValue:{_id:'not-a-member',name:'Must not leak'}}]},{entities:{},liveQueries:{}},'scope');
+  const perKey=vi.spyOn(storage,'loadEntityRows');
+  const loaded=await storage.loadWindowRows('scope','large');
+  expect(perKey).not.toHaveBeenCalled();
+  expect(loaded?.rows).toEqual([...many].reverse());
+  expect(loaded?.window.ids).toEqual(large.ids);
+});
