@@ -6,6 +6,10 @@
     "access": "public"
   },
   "exports": {
+    "./experimental-opfs": {
+      "types": "./dist/experimental-opfs/index.d.ts",
+      "default": "./dist/experimental-opfs/index.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
@@ -17,7 +21,10 @@
     "bench:sync-engine": "pnpm build && node bench/sync-engine/run.mjs",
     "bench:sync-engine:chromium": "pnpm build && node bench/sync-engine/chromium.mjs",
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
-    "test": "pnpm build && vitest run",
+    "test": "pnpm build && vitest run && pnpm test:opfs",
+    "test:opfs": "tsc -p tsconfig.opfs.json && node --test bench/opfs/engine.checks.mjs",
+    "bench:opfs": "tsc -p tsconfig.opfs.json && node bench/opfs/benchmark.mjs",
+    "bench:opfs:browser": "tsc -p tsconfig.opfs.json && node bench/opfs/prepare-browser.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs"
   },
