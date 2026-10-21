@@ -84,7 +84,11 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  unregister(id:string){if(this.state&&!this.state.closed)fail('FENCED','Close an online source through its protocol acknowledgement');this.removeSource(id);}
  closeSource(id:string):Promise<void>{
   const source=this.source(id);if(source.closing)return source.closing.promise;const state=this.state;if(!state||state.closed){this.removeSource(id);return Promise.resolve();}this.check(state);
-  if(this.sourceBytes+this.startBytes+this.closingBytes+512>262144)fail('BUDGET','Native source close metadata exceeded budget');
+  if(this.sourceBytes+this.startBytes+this.closingBytes+512>262144){
+   // Do not allocate another tombstone. Retiring the connection supersedes
+   // every old-session close; canonical rows and durable intents stay intact.
+   this.removeSource(id);this.reject(state,Object.assign(Error('Native close cohort requires recertification'),{code:'PAGE_CHANGED',resyncRequired:true}));return Promise.resolve();
+  }
   let resolve!:()=>void,reject!:(error:unknown)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});source.closing={promise,resolve,reject,timer:setTimeout(()=>this.reject(state,Object.assign(Error('Native source close acknowledgement timed out'),{code:'PAGE_CHANGED'})),30000)};this.closingBytes+=512;this.observeRegistry();
   try{this.options.send({type:'replica.close',id});}catch(error){this.removeSource(id);reject(error);}return promise;
  }

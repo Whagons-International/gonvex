@@ -553,3 +553,9 @@ it('never moves a later watermark ahead of an intervening transaction',async()=>
  f.feed.frame({type:'replica.watermark',revision:11},1);f.transaction(12);f.feed.frame({type:'replica.watermark',revision:12},1);
  await vi.waitFor(()=>expect(f.watermarks).toContain(12));expect((await f.canonical.loadEntityRows('visible','tasks',['a']))[0].row.n).toBe(12);expect(f.failures).toEqual([]);
 });
+
+it('retires an overflowing old-session close cohort without BUDGET or unbounded tombstones',async()=>{
+ const f=await fixture();let registered=0;for(let n=0;n<250;n++){try{f.feed.register({id:'closing-'+n,signature:'closing-'+n,entity:'tasks',key:'id',path:'tasks/'+String(n)+'x'.repeat(900)});registered++;}catch(error){expect(error).toMatchObject({code:'BUDGET'});break;}}expect(registered).toBeGreaterThan(10);
+ const closes:Promise<void>[]=[];for(let n=0;n<registered;n++){expect(()=>{closes.push(f.feed.closeSource('closing-'+n).catch(error=>{expect(error.code).toBe('FENCED');}));}).not.toThrow();}
+ await Promise.all(closes);expect(f.failures).toHaveLength(1);expect(f.failures[0]).toMatchObject({code:'PAGE_CHANGED',resyncRequired:true});expect(f.failures.some(error=>(error as any).code==='BUDGET')).toBe(false);
+});

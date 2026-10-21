@@ -27,3 +27,10 @@ it('keeps known control rows on read timeout and retries without throwing during
  f.controls.refresh();await vi.waitFor(()=>expect(watch.getSnapshot().status).toBe('refreshing'));expect(watch.getSnapshot().result).toBe(previous);
  await vi.waitFor(()=>expect(watch.getSnapshot().status).toBeUndefined());expect(watch.getSnapshot().result).toBe(previous);release();f.controls.close();
 });
+
+it('treats a superseded cold-session read as refreshing and resubscribes without throwing into render',async()=>{
+ const f=fixture(),watch=f.controls.watch({path:'tenants'},{}),release=watch.onUpdate(()=>{});await vi.waitFor(()=>expect(watch.getSnapshot().result).toBeDefined());const previous=watch.getSnapshot().result;let superseded=true;
+ f.handler=async input=>{if(input.method==='controlState'&&superseded){superseded=false;throw Object.assign(Error('Native browser session changed'),{code:'FENCED'});}};
+ f.controls.refresh();await vi.waitFor(()=>expect(watch.getSnapshot().status).toBe('refreshing'));expect(watch.getSnapshot().result).toBe(previous);expect(()=>watch.getSnapshot()).not.toThrow();
+ await vi.waitFor(()=>expect(watch.getSnapshot().status).toBeUndefined());expect(watch.getSnapshot().result).toBe(previous);release();f.controls.close();
+});

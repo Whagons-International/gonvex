@@ -22,7 +22,8 @@ export class SQLiteBrowserControls {
  private async read(watch:Watch){const revision=this.revision;try{this.check(revision,watch);await this.open(watch);this.check(revision,watch);const value=await this.rpc<{version:number;result?:JsonValue;error?:string}>({method:'controlState',signature:watch.signature,afterVersion:watch.serverVersion});this.check(revision,watch);if(value.version===watch.serverVersion){if(watch.state.status){watch.retries=0;watch.state={result:watch.state.result,version:watch.state.version+1};this.notify(watch);}return;}
   const bytes=sqlitePayloadBytes(value,131072);if(this.bytes-watch.resultBytes+bytes>655360)fail('BUDGET','Control watch results exceed their byte budget');this.bytes+=bytes-watch.resultBytes;watch.resultBytes=bytes;watch.serverVersion=value.version;watch.error=value.error?new GonvexClientError(value.error,{code:'server',path:watch.path,operation:'query'}):undefined;watch.retries=0;watch.state={result:value.result,version:watch.state.version+1};this.notify(watch);
  }catch(error){if(!this.closed&&revision===this.revision&&watch.refs){const failure=error instanceof Error?error:Error(String(error));
- if(['TIMEOUT','timeout'].includes(String((error as {code?:string})?.code))){
+ if(['TIMEOUT','timeout','FENCED','PAGE_CHANGED'].includes(String((error as {code?:string})?.code))){
+  if(['FENCED','PAGE_CHANGED'].includes(String((error as {code?:string})?.code))){watch.bound=-1;watch.signature=undefined;watch.serverVersion=undefined;}
   watch.error=undefined;watch.retries=(watch.retries??0)+1;watch.state={...watch.state,status:watch.retries<=3?'refreshing':'error',error:failure,version:watch.state.version+1};
   clearTimeout(watch.retry);if(watch.retries<=3)watch.retry=setTimeout(()=>{watch.retry=undefined;this.schedule(watch);},Math.min(1000,100*2**(watch.retries-1)));
  }else{watch.error=failure;watch.state={...watch.state,version:watch.state.version+1};}this.notify(watch);}}}
