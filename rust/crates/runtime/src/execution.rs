@@ -1136,6 +1136,9 @@ fn initial_action_provenance(
     let mut provenance = inherited.unwrap_or_else(|| {
         direct_provenance(session, InvocationChannel::Ui, command_id, artifact_hash)
     });
+    // Durable Actions may resume after a module deployment. Keep their actor
+    // and command ancestry, but expose the artifact actually executing now.
+    provenance.artifact_hash = artifact_hash.to_owned();
     if agent_profile && provenance.agent_execution_id.is_none() {
         if provenance.on_behalf_of_member_id.is_none() {
             provenance.on_behalf_of_member_id = nonempty(&session.member.id);
@@ -1496,6 +1499,18 @@ mod tests {
         tracker.clone().observe(None);
         tracker.clone().observe(Some(23));
         assert_eq!(tracker.maximum(), Some(23));
+    }
+
+    #[test]
+    fn resumed_action_uses_executing_artifact_and_preserves_ancestry() {
+        let parent = initial_action_provenance(&session(), None, "original-command", "old-hash", true);
+        let resumed = initial_action_provenance(&session(), Some(parent.clone()), "delivery-command", "current-hash", true);
+        assert_eq!(resumed.artifact_hash, "current-hash");
+        assert_eq!(resumed.root_command_id, parent.root_command_id);
+        assert_eq!(resumed.command_id, parent.command_id);
+        assert_eq!(resumed.actor_account_id, parent.actor_account_id);
+        assert_eq!(resumed.actor_member_id, parent.actor_member_id);
+        assert_eq!(resumed.agent_execution_id, parent.agent_execution_id);
     }
 
     #[test]
