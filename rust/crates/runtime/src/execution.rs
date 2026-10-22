@@ -1503,8 +1503,15 @@ mod tests {
 
     #[test]
     fn resumed_action_uses_executing_artifact_and_preserves_ancestry() {
-        let parent = initial_action_provenance(&session(), None, "original-command", "old-hash", true);
-        let resumed = initial_action_provenance(&session(), Some(parent.clone()), "delivery-command", "current-hash", true);
+        let parent =
+            initial_action_provenance(&session(), None, "original-command", "old-hash", true);
+        let resumed = initial_action_provenance(
+            &session(),
+            Some(parent.clone()),
+            "delivery-command",
+            "current-hash",
+            true,
+        );
         assert_eq!(resumed.artifact_hash, "current-hash");
         assert_eq!(resumed.root_command_id, parent.root_command_id);
         assert_eq!(resumed.command_id, parent.command_id);
