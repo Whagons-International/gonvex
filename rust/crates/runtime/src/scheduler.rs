@@ -83,12 +83,23 @@ impl Scheduler {
 
     async fn run(&self, runtime: Runtime) {
         let mut stop = self.inner.stop.subscribe();
-        let mut last_outbox_scan = std::time::Instant::now() - std::time::Duration::from_secs(10);
         if let Err(error) = self.sync_all_crons(&runtime).await {
             tracing::error!(error = %error, "synchronize scheduled crons");
         }
+        // An outbox sweep may spend minutes retrying external deliveries across
+        // tenants. Poll one sweep worker alongside the timer instead of awaiting
+        // it before claiming jobs. Keeping this future pinned also prevents
+        // overlapping sweeps, and drops it when the scheduler shuts down.
+        let outbox_scans = async {
+            loop {
+                runtime.drain_all_action_outboxes().await;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        };
+        tokio::pin!(outbox_scans);
         loop {
             tokio::select! {
+                _ = &mut outbox_scans => break,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
                 _ = self.inner.wake.notified() => {}
                 changed = stop.changed() => {
@@ -97,10 +108,6 @@ impl Scheduler {
             }
             if *stop.borrow() {
                 break;
-            }
-            if last_outbox_scan.elapsed() >= std::time::Duration::from_secs(5) {
-                runtime.drain_all_action_outboxes().await;
-                last_outbox_scan = std::time::Instant::now();
             }
             let jobs = match self.claim_due(&runtime, 16).await {
                 Ok(jobs) => jobs,
