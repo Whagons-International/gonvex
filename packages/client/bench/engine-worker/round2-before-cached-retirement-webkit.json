@@ -1,0 +1,357 @@
+{
+  "metadata": {
+    "browser": "webkit",
+    "version": "26.5",
+    "sdkCommit": "6e58ccc9873a233093afdb3271339fb993d5ea04",
+    "fixture": "engine-worker-fixture-v1",
+    "admission": "sequential",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "cores": 16,
+    "ram": 33537105920,
+    "os": "linux 7.2.4-arch1-2",
+    "network": "local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate",
+    "load": [
+      7.6,
+      6.25,
+      6.12
+    ],
+    "production": true,
+    "coldSamplingAligned": true,
+    "engineRevision": "checkout",
+    "profileIO": false,
+    "loadLimit": 0.5,
+    "startLoadLimit": 0.35,
+    "loadChecks": [
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          5.47,
+          5.97,
+          6.04
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          5.43,
+          5.95,
+          6.03
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          6.86,
+          6.24,
+          6.12
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          7.12,
+          6.31,
+          6.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.5,
+          6.2,
+          6.11
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.58,
+          6.23,
+          6.12
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.85,
+          6.3,
+          6.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.88,
+          6.32,
+          6.16
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.83,
+          6.33,
+          6.16
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.47,
+          6.27,
+          6.14
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.64,
+          6.31,
+          6.16
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.7,
+          6.33,
+          6.17
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          6.7,
+          6.33,
+          6.17
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          7.48,
+          6.51,
+          6.22
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          7.33,
+          6.51,
+          6.23
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          6.89,
+          6.44,
+          6.21
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          6.75,
+          6.42,
+          6.21
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          6.63,
+          6.41,
+          6.2
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          6.9,
+          6.47,
+          6.22
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "load": [
+          6.9,
+          6.47,
+          6.22
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          6.75,
+          6.44,
+          6.22
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          6.53,
+          6.4,
+          6.2
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          6.53,
+          6.41,
+          6.21
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          6.13,
+          6.33,
+          6.18
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          6.13,
+          6.33,
+          6.18
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          5.96,
+          6.28,
+          6.17
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          5.8,
+          6.24,
+          6.16
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          5.76,
+          6.21,
+          6.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          6.67,
+          6.39,
+          6.21
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          8.54,
+          6.78,
+          6.34
+        ]
+      }
+    ],
+    "fixtureIsolation": "edits-reset-before-each-mode",
+    "firefoxWorkerWebSocketWorkaround": false,
+    "seed": {
+      "rows": 50000,
+      "initialEdits": 0,
+      "rowBytes": 2554
+    },
+    "discardedPairs": [
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during legacy drain; entire pair excluded",
+        "load": [
+          8.54,
+          6.78,
+          6.34
+        ]
+      }
+    ],
+    "correctness": {
+      "deniedApis": 3,
+      "retryResult": 1,
+      "durableCrashRecovery": true,
+      "batchCrashRecovery": {
+        "durablePrefix": 2,
+        "commands": 32,
+        "sameIds": true
+      },
+      "reconnect": true
+    },
+    "failure": "Stopped with no measured pairs accepted to rerun after removing local retirement rereads.",
+    "sdkSourcePatchCommit": "3f91388 (text fallback compatibility patch was uncommitted at bundle time)"
+  },
+  "samples": []
+}

@@ -1,0 +1,943 @@
+Preparing 50000-row canonical IDB fixture...
+Seed 500/50000
+Seed 5500/50000
+Seed 10500/50000
+Seed 15500/50000
+Seed 20500/50000
+Seed 25500/50000
+Seed 30500/50000
+Seed 35500/50000
+Seed 40500/50000
+Seed 45500/50000
+Seed ready: 2554 bytes/row
+-5 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3045.4ms
+Engine authenticated
+-5 worker burst...
+burst: 1557.3ms
+-5 worker snapshot...
+snapshot: 55577.0ms
+-5 worker drain...
+drain: 26555.1ms
+-5 worker: cold 3045.4ms, burst script 10.7ms
+-5 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2878.2ms
+Engine authenticated
+-5 legacy burst...
+burst: 1545.5ms
+-5 legacy snapshot...
+snapshot: 22678.5ms
+-5 legacy drain...
+drain: 30134.7ms
+-5 legacy: cold 2878.2ms, burst script 82.5ms
+-4 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2424.6ms
+Engine authenticated
+-4 legacy burst...
+burst: 1538.0ms
+-4 legacy snapshot...
+snapshot: 22661.9ms
+-4 legacy drain...
+drain: 31169.3ms
+-4 legacy: cold 2424.6ms, burst script 75.0ms
+-4 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2900.6ms
+Engine authenticated
+-4 worker burst...
+burst: 1555.7ms
+-4 worker snapshot...
+snapshot: 22795.3ms
+-4 worker drain...
+drain: 25678.7ms
+-4 worker: cold 2900.6ms, burst script 29.1ms
+-3 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2470.6ms
+Engine authenticated
+-3 worker burst...
+burst: 1543.2ms
+-3 worker snapshot...
+snapshot: 22644.8ms
+-3 worker drain...
+drain: 25829.3ms
+-3 worker: cold 2470.6ms, burst script 26.2ms
+-3 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2431.3ms
+Engine authenticated
+-3 legacy burst...
+burst: 1538.5ms
+-3 legacy snapshot...
+snapshot: 22912.5ms
+-3 legacy drain...
+drain: 32997.7ms
+-3 legacy: cold 2431.3ms, burst script 74.7ms
+-2 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 3032.9ms
+Engine authenticated
+-2 legacy burst...
+burst: 1554.9ms
+-2 legacy snapshot...
+snapshot: 22878.5ms
+-2 legacy drain...
+drain: 33352.0ms
+-2 legacy: cold 3032.9ms, burst script 70.6ms
+-2 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2464.0ms
+Engine authenticated
+-2 worker burst...
+burst: 1540.2ms
+-2 worker snapshot...
+snapshot: 22747.6ms
+-2 worker drain...
+drain: 26210.1ms
+-2 worker: cold 2464.0ms, burst script 25.4ms
+-1 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2919.5ms
+Engine authenticated
+-1 worker burst...
+burst: 1552.8ms
+-1 worker snapshot...
+snapshot: 22945.4ms
+-1 worker drain...
+drain: 26545.3ms
+-1 worker: cold 2919.5ms, burst script 24.9ms
+-1 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2405.5ms
+Engine authenticated
+-1 legacy burst...
+burst: 1545.1ms
+-1 legacy snapshot...
+snapshot: 22791.4ms
+-1 legacy drain...
+drain: 35611.5ms
+-1 legacy: cold 2405.5ms, burst script 76.4ms
+0 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2766.0ms
+Engine authenticated
+0 legacy burst...
+burst: 1541.2ms
+0 legacy snapshot...
+snapshot: 23560.4ms
+0 legacy drain...
+drain: 38382.1ms
+0 legacy: cold 2766.0ms, burst script 74.5ms
+0 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3058.5ms
+Engine authenticated
+0 worker burst...
+burst: 1540.2ms
+0 worker snapshot...
+snapshot: 22710.8ms
+0 worker drain...
+drain: 29511.3ms
+0 worker: cold 3058.5ms, burst script 26.0ms
+Waiting for quiet machine: load 6.22 / 16 cores
+Waiting for quiet machine: load 9.47 / 16 cores
+Waiting for quiet machine: load 10.09 / 16 cores
+Waiting for quiet machine: load 11.46 / 16 cores
+Waiting for quiet machine: load 9.12 / 16 cores
+Waiting for quiet machine: load 10.22 / 16 cores
+Waiting for quiet machine: load 16.62 / 16 cores
+Waiting for quiet machine: load 15.44 / 16 cores
+Waiting for quiet machine: load 11.98 / 16 cores
+Waiting for quiet machine: load 11.67 / 16 cores
+Waiting for quiet machine: load 10.23 / 16 cores
+Waiting for quiet machine: load 13.16 / 16 cores
+Waiting for quiet machine: load 11.14 / 16 cores
+Waiting for quiet machine: load 17.45 / 16 cores
+Waiting for quiet machine: load 15.96 / 16 cores
+Waiting for quiet machine: load 14.98 / 16 cores
+Waiting for quiet machine: load 15.39 / 16 cores
+Waiting for quiet machine: load 13.46 / 16 cores
+Waiting for quiet machine: load 9.66 / 16 cores
+Waiting for quiet machine: load 8.61 / 16 cores
+Waiting for quiet machine: load 6.51 / 16 cores
+Waiting for quiet machine: load 5.94 / 16 cores
+Waiting for quiet machine: load 5.62 / 16 cores
+Waiting for quiet machine: load 6.65 / 16 cores
+Waiting for quiet machine: load 6.72 / 16 cores
+Waiting for quiet machine: load 6.05 / 16 cores
+Waiting for quiet machine: load 6.48 / 16 cores
+Waiting for quiet machine: load 6.06 / 16 cores
+1 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3634.4ms
+Engine authenticated
+1 worker burst...
+burst: 1695.4ms
+1 worker snapshot...
+snapshot: 24143.3ms
+1 worker drain...
+Discarding pair 1; will retry after load drops
+Waiting for quiet machine: load 11.16 / 16 cores
+Waiting for quiet machine: load 10.18 / 16 cores
+Waiting for quiet machine: load 10.81 / 16 cores
+Waiting for quiet machine: load 10.18 / 16 cores
+Waiting for quiet machine: load 11.29 / 16 cores
+Waiting for quiet machine: load 9.51 / 16 cores
+Waiting for quiet machine: load 7.21 / 16 cores
+Waiting for quiet machine: load 6.42 / 16 cores
+Waiting for quiet machine: load 5.82 / 16 cores
+Waiting for quiet machine: load 10.38 / 16 cores
+Waiting for quiet machine: load 11.21 / 16 cores
+Waiting for quiet machine: load 14.51 / 16 cores
+Waiting for quiet machine: load 19.05 / 16 cores
+Waiting for quiet machine: load 23.86 / 16 cores
+Waiting for quiet machine: load 19.91 / 16 cores
+Waiting for quiet machine: load 17.08 / 16 cores
+Waiting for quiet machine: load 13.20 / 16 cores
+Waiting for quiet machine: load 9.63 / 16 cores
+Waiting for quiet machine: load 8.06 / 16 cores
+Waiting for quiet machine: load 6.41 / 16 cores
+Waiting for quiet machine: load 7.65 / 16 cores
+Waiting for quiet machine: load 5.98 / 16 cores
+1 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3097.7ms
+Engine authenticated
+1 worker burst...
+burst: 1673.5ms
+1 worker snapshot...
+snapshot: 23027.4ms
+1 worker drain...
+drain: 26759.5ms
+1 worker: cold 3097.7ms, burst script 23.3ms
+1 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2785.4ms
+Engine authenticated
+1 legacy burst...
+burst: 1542.1ms
+1 legacy snapshot...
+snapshot: 22894.9ms
+1 legacy drain...
+Discarding pair 1; will retry after load drops
+Waiting for quiet machine: load 8.26 / 16 cores
+Waiting for quiet machine: load 7.90 / 16 cores
+Waiting for quiet machine: load 11.44 / 16 cores
+Waiting for quiet machine: load 8.73 / 16 cores
+Waiting for quiet machine: load 9.94 / 16 cores
+Waiting for quiet machine: load 11.79 / 16 cores
+Waiting for quiet machine: load 10.84 / 16 cores
+Waiting for quiet machine: load 10.72 / 16 cores
+Waiting for quiet machine: load 10.28 / 16 cores
+Waiting for quiet machine: load 7.19 / 16 cores
+Waiting for quiet machine: load 7.28 / 16 cores
+Waiting for quiet machine: load 6.93 / 16 cores
+Waiting for quiet machine: load 6.34 / 16 cores
+1 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2609.8ms
+Engine authenticated
+1 worker burst...
+burst: 1552.5ms
+1 worker snapshot...
+snapshot: 22808.1ms
+1 worker drain...
+Discarding pair 1; will retry after load drops
+Waiting for quiet machine: load 7.73 / 16 cores
+Waiting for quiet machine: load 6.59 / 16 cores
+Waiting for quiet machine: load 6.64 / 16 cores
+Waiting for quiet machine: load 6.52 / 16 cores
+1 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3544.3ms
+Engine authenticated
+1 worker burst...
+burst: 1552.9ms
+1 worker snapshot...
+snapshot: 24211.9ms
+1 worker drain...
+drain: 25758.3ms
+1 worker: cold 3544.3ms, burst script 22.3ms
+1 legacy cold...
+Engine started legacy
+Engine cached paint ready
+Discarding pair 1; will retry after load drops
+Waiting for quiet machine: load 8.13 / 16 cores
+Waiting for quiet machine: load 7.17 / 16 cores
+Waiting for quiet machine: load 7.98 / 16 cores
+Waiting for quiet machine: load 7.29 / 16 cores
+Waiting for quiet machine: load 8.22 / 16 cores
+Waiting for quiet machine: load 6.91 / 16 cores
+1 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2537.0ms
+Engine authenticated
+1 worker burst...
+burst: 1546.8ms
+1 worker snapshot...
+snapshot: 22845.3ms
+1 worker drain...
+drain: 27594.2ms
+1 worker: cold 2537.0ms, burst script 24.7ms
+1 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2493.6ms
+Engine authenticated
+1 legacy burst...
+burst: 1541.5ms
+1 legacy snapshot...
+snapshot: 22645.9ms
+1 legacy drain...
+drain: 40614.1ms
+1 legacy: cold 2493.6ms, burst script 75.0ms
+2 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2491.1ms
+Engine authenticated
+2 legacy burst...
+burst: 1547.3ms
+2 legacy snapshot...
+snapshot: 22778.2ms
+2 legacy drain...
+drain: 37951.0ms
+2 legacy: cold 2491.1ms, burst script 62.1ms
+2 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2580.8ms
+Engine authenticated
+2 worker burst...
+burst: 1538.0ms
+2 worker snapshot...
+snapshot: 22762.3ms
+2 worker drain...
+drain: 31428.9ms
+2 worker: cold 2580.8ms, burst script 20.3ms
+3 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3377.1ms
+Engine authenticated
+3 worker burst...
+burst: 1581.1ms
+3 worker snapshot...
+snapshot: 23079.7ms
+3 worker drain...
+Discarding pair 3; will retry after load drops
+Waiting for quiet machine: load 9.31 / 16 cores
+Waiting for quiet machine: load 7.15 / 16 cores
+Waiting for quiet machine: load 7.13 / 16 cores
+Waiting for quiet machine: load 5.69 / 16 cores
+3 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2796.9ms
+Engine authenticated
+3 worker burst...
+burst: 1545.4ms
+3 worker snapshot...
+snapshot: 22895.2ms
+3 worker drain...
+drain: 29815.8ms
+3 worker: cold 2796.9ms, burst script 28.5ms
+3 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2618.8ms
+Engine authenticated
+3 legacy burst...
+burst: 1534.3ms
+3 legacy snapshot...
+snapshot: 22745.5ms
+3 legacy drain...
+drain: 47629.1ms
+3 legacy: cold 2618.8ms, burst script 63.9ms
+Waiting for quiet machine: load 5.63 / 16 cores
+4 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2720.4ms
+Engine authenticated
+4 legacy burst...
+burst: 1537.9ms
+4 legacy snapshot...
+snapshot: 22711.5ms
+4 legacy drain...
+drain: 45043.2ms
+4 legacy: cold 2720.4ms, burst script 71.1ms
+4 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3220.0ms
+Engine authenticated
+4 worker burst...
+burst: 1711.3ms
+4 worker snapshot...
+snapshot: 23029.0ms
+4 worker drain...
+drain: 32873.6ms
+4 worker: cold 3220.0ms, burst script 20.0ms
+Waiting for quiet machine: load 6.61 / 16 cores
+Waiting for quiet machine: load 7.64 / 16 cores
+Waiting for quiet machine: load 6.74 / 16 cores
+Waiting for quiet machine: load 6.71 / 16 cores
+Waiting for quiet machine: load 10.33 / 16 cores
+Waiting for quiet machine: load 14.43 / 16 cores
+Waiting for quiet machine: load 12.13 / 16 cores
+Waiting for quiet machine: load 10.20 / 16 cores
+Waiting for quiet machine: load 9.05 / 16 cores
+Waiting for quiet machine: load 8.17 / 16 cores
+Waiting for quiet machine: load 7.60 / 16 cores
+Waiting for quiet machine: load 5.61 / 16 cores
+5 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3008.4ms
+Engine authenticated
+5 worker burst...
+burst: 1566.3ms
+5 worker snapshot...
+snapshot: 23227.9ms
+5 worker drain...
+Discarding pair 5; will retry after load drops
+Waiting for quiet machine: load 8.27 / 16 cores
+Waiting for quiet machine: load 7.21 / 16 cores
+Waiting for quiet machine: load 6.23 / 16 cores
+Waiting for quiet machine: load 6.51 / 16 cores
+5 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3309.3ms
+Engine authenticated
+5 worker burst...
+burst: 1551.6ms
+5 worker snapshot...
+snapshot: 23011.9ms
+5 worker drain...
+drain: 37726.1ms
+5 worker: cold 3309.3ms, burst script 30.2ms
+5 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2816.2ms
+Engine authenticated
+5 legacy burst...
+burst: 1549.0ms
+5 legacy snapshot...
+snapshot: 22911.7ms
+5 legacy drain...
+drain: 49001.5ms
+5 legacy: cold 2816.2ms, burst script 57.3ms
+Waiting for quiet machine: load 5.74 / 16 cores
+Waiting for quiet machine: load 6.67 / 16 cores
+Waiting for quiet machine: load 8.03 / 16 cores
+Waiting for quiet machine: load 13.33 / 16 cores
+Waiting for quiet machine: load 17.25 / 16 cores
+Waiting for quiet machine: load 12.47 / 16 cores
+Waiting for quiet machine: load 8.65 / 16 cores
+Waiting for quiet machine: load 6.27 / 16 cores
+Waiting for quiet machine: load 5.92 / 16 cores
+6 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 4371.2ms
+Engine authenticated
+6 legacy burst...
+burst: 1555.6ms
+6 legacy snapshot...
+snapshot: 23174.8ms
+6 legacy drain...
+drain: 47043.2ms
+6 legacy: cold 4371.2ms, burst script 97.1ms
+6 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2699.8ms
+Engine authenticated
+6 worker burst...
+burst: 1544.9ms
+6 worker snapshot...
+snapshot: 23026.8ms
+6 worker drain...
+Discarding pair 6; will retry after load drops
+Waiting for quiet machine: load 9.41 / 16 cores
+Waiting for quiet machine: load 7.35 / 16 cores
+6 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2649.0ms
+Engine authenticated
+6 legacy burst...
+burst: 1548.2ms
+6 legacy snapshot...
+snapshot: 22764.1ms
+6 legacy drain...
+drain: 48850.7ms
+6 legacy: cold 2649.0ms, burst script 81.5ms
+6 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2815.6ms
+Engine authenticated
+6 worker burst...
+burst: 1547.9ms
+6 worker snapshot...
+snapshot: 22795.0ms
+6 worker drain...
+drain: 40843.6ms
+6 worker: cold 2815.6ms, burst script 23.2ms
+7 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2915.8ms
+Engine authenticated
+7 worker burst...
+burst: 1553.9ms
+7 worker snapshot...
+snapshot: 22961.6ms
+7 worker drain...
+drain: 41232.6ms
+7 worker: cold 2915.8ms, burst script 24.2ms
+7 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2650.4ms
+Engine authenticated
+7 legacy burst...
+burst: 1541.1ms
+7 legacy snapshot...
+snapshot: 22695.4ms
+7 legacy drain...
+drain: 55011.0ms
+7 legacy: cold 2650.4ms, burst script 73.8ms
+Waiting for quiet machine: load 5.64 / 16 cores
+8 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2623.1ms
+Engine authenticated
+8 legacy burst...
+burst: 1540.4ms
+8 legacy snapshot...
+snapshot: 22744.3ms
+8 legacy drain...
+drain: 50728.9ms
+8 legacy: cold 2623.1ms, burst script 82.7ms
+8 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3206.2ms
+Engine authenticated
+8 worker burst...
+burst: 1556.1ms
+8 worker snapshot...
+snapshot: 23010.5ms
+8 worker drain...
+drain: 48578.4ms
+8 worker: cold 3206.2ms, burst script 22.1ms
+Waiting for quiet machine: load 5.65 / 16 cores
+Waiting for quiet machine: load 6.65 / 16 cores
+Waiting for quiet machine: load 5.62 / 16 cores
+9 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 2720.1ms
+Engine authenticated
+9 worker burst...
+burst: 1557.1ms
+9 worker snapshot...
+snapshot: 23293.4ms
+9 worker drain...
+Discarding pair 9; will retry after load drops
+Waiting for quiet machine: load 10.09 / 16 cores
+Waiting for quiet machine: load 11.02 / 16 cores
+Waiting for quiet machine: load 10.44 / 16 cores
+Waiting for quiet machine: load 8.95 / 16 cores
+Waiting for quiet machine: load 8.91 / 16 cores
+Waiting for quiet machine: load 7.21 / 16 cores
+Waiting for quiet machine: load 6.94 / 16 cores
+Waiting for quiet machine: load 6.81 / 16 cores
+Waiting for quiet machine: load 7.75 / 16 cores
+Waiting for quiet machine: load 8.59 / 16 cores
+Waiting for quiet machine: load 7.30 / 16 cores
+Waiting for quiet machine: load 7.29 / 16 cores
+Waiting for quiet machine: load 6.22 / 16 cores
+Waiting for quiet machine: load 5.82 / 16 cores
+Waiting for quiet machine: load 6.56 / 16 cores
+Waiting for quiet machine: load 6.77 / 16 cores
+Waiting for quiet machine: load 7.81 / 16 cores
+Waiting for quiet machine: load 10.50 / 16 cores
+Waiting for quiet machine: load 9.10 / 16 cores
+Waiting for quiet machine: load 8.29 / 16 cores
+Waiting for quiet machine: load 7.76 / 16 cores
+Waiting for quiet machine: load 8.73 / 16 cores
+Waiting for quiet machine: load 6.83 / 16 cores
+Waiting for quiet machine: load 7.57 / 16 cores
+Waiting for quiet machine: load 7.59 / 16 cores
+Waiting for quiet machine: load 9.05 / 16 cores
+Waiting for quiet machine: load 10.59 / 16 cores
+Waiting for quiet machine: load 16.18 / 16 cores
+Waiting for quiet machine: load 14.16 / 16 cores
+Waiting for quiet machine: load 13.24 / 16 cores
+Waiting for quiet machine: load 14.22 / 16 cores
+Waiting for quiet machine: load 13.36 / 16 cores
+Waiting for quiet machine: load 12.68 / 16 cores
+Waiting for quiet machine: load 9.88 / 16 cores
+Waiting for quiet machine: load 9.52 / 16 cores
+Waiting for quiet machine: load 9.76 / 16 cores
+Waiting for quiet machine: load 11.36 / 16 cores
+Waiting for quiet machine: load 9.81 / 16 cores
+Waiting for quiet machine: load 9.83 / 16 cores
+Waiting for quiet machine: load 9.53 / 16 cores
+Waiting for quiet machine: load 9.30 / 16 cores
+Waiting for quiet machine: load 9.82 / 16 cores
+Waiting for quiet machine: load 8.82 / 16 cores
+Waiting for quiet machine: load 14.33 / 16 cores
+Waiting for quiet machine: load 14.50 / 16 cores
+Waiting for quiet machine: load 16.00 / 16 cores
+Waiting for quiet machine: load 25.41 / 16 cores
+Waiting for quiet machine: load 24.14 / 16 cores
+Waiting for quiet machine: load 24.52 / 16 cores
+Waiting for quiet machine: load 23.91 / 16 cores
+Waiting for quiet machine: load 24.48 / 16 cores
+Waiting for quiet machine: load 19.47 / 16 cores
+Waiting for quiet machine: load 18.58 / 16 cores
+Waiting for quiet machine: load 15.67 / 16 cores
+Waiting for quiet machine: load 13.32 / 16 cores
+Waiting for quiet machine: load 16.27 / 16 cores
+Waiting for quiet machine: load 15.74 / 16 cores
+Waiting for quiet machine: load 16.51 / 16 cores
+Waiting for quiet machine: load 18.03 / 16 cores
+Waiting for quiet machine: load 14.56 / 16 cores
+Waiting for quiet machine: load 13.82 / 16 cores
+Waiting for quiet machine: load 12.06 / 16 cores
+Waiting for quiet machine: load 10.95 / 16 cores
+Waiting for quiet machine: load 9.56 / 16 cores
+Waiting for quiet machine: load 10.18 / 16 cores
+Waiting for quiet machine: load 7.61 / 16 cores
+Waiting for quiet machine: load 7.39 / 16 cores
+Waiting for quiet machine: load 6.73 / 16 cores
+Waiting for quiet machine: load 5.84 / 16 cores
+9 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 4175.1ms
+Engine authenticated
+9 worker burst...
+burst: 1613.1ms
+9 worker snapshot...
+snapshot: 23228.3ms
+9 worker drain...
+Discarding pair 9; will retry after load drops
+Waiting for quiet machine: load 9.52 / 16 cores
+Waiting for quiet machine: load 8.35 / 16 cores
+Waiting for quiet machine: load 6.69 / 16 cores
+Waiting for quiet machine: load 5.76 / 16 cores
+9 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3089.5ms
+Engine authenticated
+9 worker burst...
+burst: 1562.4ms
+9 worker snapshot...
+snapshot: 24310.4ms
+9 worker drain...
+drain: 57974.7ms
+9 worker: cold 3089.5ms, burst script 32.0ms
+9 legacy cold...
+Engine started legacy
+Engine cached paint ready
+Discarding pair 9; will retry after load drops
+Waiting for quiet machine: load 9.61 / 16 cores
+Waiting for quiet machine: load 11.30 / 16 cores
+Waiting for quiet machine: load 10.48 / 16 cores
+Waiting for quiet machine: load 15.38 / 16 cores
+Waiting for quiet machine: load 18.38 / 16 cores
+Waiting for quiet machine: load 23.98 / 16 cores
+Waiting for quiet machine: load 29.38 / 16 cores
+Waiting for quiet machine: load 23.95 / 16 cores
+Waiting for quiet machine: load 18.54 / 16 cores
+Waiting for quiet machine: load 20.09 / 16 cores
+Waiting for quiet machine: load 18.01 / 16 cores
+Waiting for quiet machine: load 15.30 / 16 cores
+Waiting for quiet machine: load 12.36 / 16 cores
+Waiting for quiet machine: load 11.42 / 16 cores
+Waiting for quiet machine: load 11.35 / 16 cores
+Waiting for quiet machine: load 8.99 / 16 cores
+Waiting for quiet machine: load 7.30 / 16 cores
+Waiting for quiet machine: load 7.25 / 16 cores
+Waiting for quiet machine: load 8.61 / 16 cores
+Waiting for quiet machine: load 15.11 / 16 cores
+Waiting for quiet machine: load 19.57 / 16 cores
+Waiting for quiet machine: load 15.44 / 16 cores
+Waiting for quiet machine: load 14.27 / 16 cores
+Waiting for quiet machine: load 12.15 / 16 cores
+Waiting for quiet machine: load 13.34 / 16 cores
+Waiting for quiet machine: load 11.72 / 16 cores
+Waiting for quiet machine: load 8.27 / 16 cores
+Waiting for quiet machine: load 9.40 / 16 cores
+Waiting for quiet machine: load 7.79 / 16 cores
+Waiting for quiet machine: load 6.69 / 16 cores
+9 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3236.6ms
+Engine authenticated
+9 worker burst...
+burst: 1685.3ms
+9 worker snapshot...
+snapshot: 23376.6ms
+9 worker drain...
+Discarding pair 9; will retry after load drops
+Waiting for quiet machine: load 8.03 / 16 cores
+Waiting for quiet machine: load 8.53 / 16 cores
+Waiting for quiet machine: load 7.18 / 16 cores
+Waiting for quiet machine: load 6.40 / 16 cores
+Waiting for quiet machine: load 9.61 / 16 cores
+Waiting for quiet machine: load 12.58 / 16 cores
+Waiting for quiet machine: load 13.06 / 16 cores
+Waiting for quiet machine: load 12.43 / 16 cores
+Waiting for quiet machine: load 9.60 / 16 cores
+Waiting for quiet machine: load 7.12 / 16 cores
+Waiting for quiet machine: load 6.73 / 16 cores
+Waiting for quiet machine: load 6.70 / 16 cores
+Waiting for quiet machine: load 7.34 / 16 cores
+Waiting for quiet machine: load 8.68 / 16 cores
+Waiting for quiet machine: load 7.62 / 16 cores
+Waiting for quiet machine: load 9.15 / 16 cores
+Waiting for quiet machine: load 9.89 / 16 cores
+Waiting for quiet machine: load 9.30 / 16 cores
+Waiting for quiet machine: load 8.82 / 16 cores
+Waiting for quiet machine: load 6.37 / 16 cores
+Waiting for quiet machine: load 7.00 / 16 cores
+Waiting for quiet machine: load 7.25 / 16 cores
+Waiting for quiet machine: load 7.03 / 16 cores
+9 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3561.7ms
+Engine authenticated
+9 worker burst...
+burst: 1570.2ms
+9 worker snapshot...
+snapshot: 23128.4ms
+9 worker drain...
+Discarding pair 9; will retry after load drops
+Waiting for quiet machine: load 8.02 / 16 cores
+Waiting for quiet machine: load 6.96 / 16 cores
+Waiting for quiet machine: load 7.13 / 16 cores
+Waiting for quiet machine: load 8.14 / 16 cores
+Waiting for quiet machine: load 9.64 / 16 cores
+Waiting for quiet machine: load 9.70 / 16 cores
+Waiting for quiet machine: load 9.68 / 16 cores
+Waiting for quiet machine: load 7.56 / 16 cores
+Waiting for quiet machine: load 6.95 / 16 cores
+Waiting for quiet machine: load 7.97 / 16 cores
+Waiting for quiet machine: load 7.11 / 16 cores
+Waiting for quiet machine: load 6.39 / 16 cores
+Waiting for quiet machine: load 5.66 / 16 cores
+9 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3317.0ms
+Engine authenticated
+9 worker burst...
+burst: 1549.4ms
+9 worker snapshot...
+snapshot: 22877.9ms
+9 worker drain...
+drain: 55593.7ms
+9 worker: cold 3317.0ms, burst script 23.4ms
+9 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 2638.6ms
+Engine authenticated
+9 legacy burst...
+burst: 1546.6ms
+9 legacy snapshot...
+snapshot: 23061.0ms
+9 legacy drain...
+drain: 57327.2ms
+9 legacy: cold 2638.6ms, burst script 81.2ms
+Waiting for quiet machine: load 5.81 / 16 cores
+Waiting for quiet machine: load 6.75 / 16 cores
+Waiting for quiet machine: load 8.45 / 16 cores
+Waiting for quiet machine: load 8.59 / 16 cores
+Waiting for quiet machine: load 7.75 / 16 cores
+Waiting for quiet machine: load 8.68 / 16 cores
+Waiting for quiet machine: load 10.65 / 16 cores
+Waiting for quiet machine: load 12.04 / 16 cores
+Waiting for quiet machine: load 11.95 / 16 cores
+Waiting for quiet machine: load 13.61 / 16 cores
+Waiting for quiet machine: load 13.69 / 16 cores
+Waiting for quiet machine: load 12.17 / 16 cores
+Waiting for quiet machine: load 9.48 / 16 cores
+Waiting for quiet machine: load 8.42 / 16 cores
+Waiting for quiet machine: load 9.68 / 16 cores
+Waiting for quiet machine: load 11.10 / 16 cores
+Waiting for quiet machine: load 11.69 / 16 cores
+Waiting for quiet machine: load 9.84 / 16 cores
+Waiting for quiet machine: load 9.94 / 16 cores
+Waiting for quiet machine: load 10.05 / 16 cores
+Waiting for quiet machine: load 8.27 / 16 cores
+Waiting for quiet machine: load 7.27 / 16 cores
+Waiting for quiet machine: load 7.68 / 16 cores
+Waiting for quiet machine: load 7.79 / 16 cores
+Waiting for quiet machine: load 8.73 / 16 cores
+Waiting for quiet machine: load 6.80 / 16 cores
+Waiting for quiet machine: load 6.95 / 16 cores
+Waiting for quiet machine: load 6.26 / 16 cores
+10 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 3322.2ms
+Engine authenticated
+10 legacy burst...
+burst: 1715.6ms
+10 legacy snapshot...
+snapshot: 23189.3ms
+10 legacy drain...
+drain: 69773.7ms
+10 legacy: cold 3322.2ms, burst script 103.1ms
+10 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3270.1ms
+Engine authenticated
+10 worker burst...
+burst: 1552.8ms
+10 worker snapshot...
+snapshot: 23161.2ms
+10 worker drain...
+Discarding pair 10; will retry after load drops
+Waiting for quiet machine: load 7.96 / 16 cores
+Waiting for quiet machine: load 6.17 / 16 cores
+Waiting for quiet machine: load 6.63 / 16 cores
+Waiting for quiet machine: load 5.90 / 16 cores
+10 legacy cold...
+Engine started legacy
+Engine cached paint ready
+cold: 3233.5ms
+Engine authenticated
+10 legacy burst...
+burst: 1558.3ms
+10 legacy snapshot...
+snapshot: 22995.5ms
+10 legacy drain...
+drain: 64460.7ms
+10 legacy: cold 3233.5ms, burst script 80.9ms
+10 worker cold...
+Engine started worker
+Engine cached paint ready
+cold: 3651.8ms
+Engine authenticated
+10 worker burst...
+burst: 1553.6ms
+10 worker snapshot...
+snapshot: 23212.4ms
+10 worker drain...
+Discarding pair 10; will retry after load drops
+Waiting for quiet machine: load 12.43 / 16 cores
+Waiting for quiet machine: load 17.34 / 16 cores
+Waiting for quiet machine: load 12.77 / 16 cores
+Waiting for quiet machine: load 10.49 / 16 cores
+Waiting for quiet machine: load 9.38 / 16 cores
+Waiting for quiet machine: load 10.04 / 16 cores
+Waiting for quiet machine: load 17.37 / 16 cores
+Waiting for quiet machine: load 19.02 / 16 cores
+Waiting for quiet machine: load 17.07 / 16 cores
+Waiting for quiet machine: load 15.36 / 16 cores
+Waiting for quiet machine: load 18.32 / 16 cores
+Waiting for quiet machine: load 22.25 / 16 cores
+Waiting for quiet machine: load 22.89 / 16 cores
+Waiting for quiet machine: load 18.43 / 16 cores
+Waiting for quiet machine: load 13.14 / 16 cores
+Waiting for quiet machine: load 10.97 / 16 cores
+Waiting for quiet machine: load 14.69 / 16 cores
+Waiting for quiet machine: load 13.04 / 16 cores
+Waiting for quiet machine: load 19.81 / 16 cores
+Waiting for quiet machine: load 15.70 / 16 cores
+Waiting for quiet machine: load 17.50 / 16 cores
+Waiting for quiet machine: load 12.67 / 16 cores
+Waiting for quiet machine: load 10.92 / 16 cores
+Waiting for quiet machine: load 8.55 / 16 cores
+Waiting for quiet machine: load 9.09 / 16 cores
+Waiting for quiet machine: load 8.95 / 16 cores
+Waiting for quiet machine: load 7.63 / 16 cores
+Waiting for quiet machine: load 8.50 / 16 cores
+Waiting for quiet machine: load 11.86 / 16 cores
+Waiting for quiet machine: load 10.79 / 16 cores
+Waiting for quiet machine: load 8.00 / 16 cores
+Waiting for quiet machine: load 8.10 / 16 cores
+Waiting for quiet machine: load 6.29 / 16 cores
+Waiting for quiet machine: load 8.21 / 16 cores
+Waiting for quiet machine: load 10.00 / 16 cores
+Waiting for quiet machine: load 10.25 / 16 cores
+Waiting for quiet machine: load 14.38 / 16 cores
+Waiting for quiet machine: load 13.74 / 16 cores
+Waiting for quiet machine: load 11.95 / 16 cores
+Waiting for quiet machine: load 11.33 / 16 cores
+Waiting for quiet machine: load 11.63 / 16 cores
+Waiting for quiet machine: load 9.96 / 16 cores
+Waiting for quiet machine: load 8.21 / 16 cores
+Waiting for quiet machine: load 7.56 / 16 cores
+Waiting for quiet machine: load 8.44 / 16 cores
+Waiting for quiet machine: load 8.61 / 16 cores
+Waiting for quiet machine: load 10.01 / 16 cores
+Waiting for quiet machine: load 8.84 / 16 cores
+Waiting for quiet machine: load 6.34 / 16 cores
+Waiting for quiet machine: load 7.26 / 16 cores
+Waiting for quiet machine: load 8.64 / 16 cores
+Waiting for quiet machine: load 11.27 / 16 cores
+Waiting for quiet machine: load 10.98 / 16 cores
+Waiting for quiet machine: load 11.84 / 16 cores
+Waiting for quiet machine: load 11.96 / 16 cores
+Waiting for quiet machine: load 14.82 / 16 cores
+Waiting for quiet machine: load 13.55 / 16 cores
+Waiting for quiet machine: load 14.81 / 16 cores
+Waiting for quiet machine: load 11.71 / 16 cores
+Waiting for quiet machine: load 10.97 / 16 cores
+Waiting for quiet machine: load 10.09 / 16 cores
+Waiting for quiet machine: load 21.95 / 16 cores
+Waiting for quiet machine: load 23.42 / 16 cores
+Waiting for quiet machine: load 25.17 / 16 cores
+Waiting for quiet machine: load 26.04 / 16 cores
+Waiting for quiet machine: load 23.18 / 16 cores
+Waiting for quiet machine: load 20.99 / 16 cores
+Waiting for quiet machine: load 19.23 / 16 cores
+Waiting for quiet machine: load 14.90 / 16 cores
+Waiting for quiet machine: load 12.66 / 16 cores
+Waiting for quiet machine: load 11.36 / 16 cores
+Waiting for quiet machine: load 11.06 / 16 cores
+Waiting for quiet machine: load 9.11 / 16 cores
+Waiting for quiet machine: load 8.97 / 16 cores
+Waiting for quiet machine: load 10.06 / 16 cores
+Waiting for quiet machine: load 8.34 / 16 cores
+Waiting for quiet machine: load 6.96 / 16 cores
+Waiting for quiet machine: load 6.02 / 16 cores
+Waiting for quiet machine: load 9.78 / 16 cores

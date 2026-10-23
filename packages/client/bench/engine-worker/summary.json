@@ -1,0 +1,165 @@
+{
+  "metadata": {
+    "coldSamplingAligned": false,
+    "browser": "chromium",
+    "version": "149.0.7827.55",
+    "sdkCommit": "6462f7e5c7c9e7fe158868411a70d0aafe6f88bf",
+    "fixture": "engine-worker-fixture-v1",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "cores": 16,
+    "ram": 33537105920,
+    "os": "linux 7.2.4-arch1-2",
+    "network": "local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate",
+    "load": [
+      1.72,
+      0.95,
+      0.9
+    ],
+    "production": true,
+    "seed": {
+      "rows": 50000,
+      "rowBytes": 2554
+    },
+    "correctness": {
+      "deniedApis": 3,
+      "retryResult": 1,
+      "durableCrashRecovery": true,
+      "reconnect": true
+    },
+    "multiTab": {
+      "first": "legacy",
+      "second": "legacy"
+    }
+  },
+  "samplesPerMode": 20,
+  "metrics": {
+    "cold": {
+      "legacy": {
+        "wallMedianMs": 2348.4000000953674,
+        "wallP95Ms": 2394,
+        "scriptMedianMs": null,
+        "longTasks": 20,
+        "maxLongTaskMs": 291,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "worker": {
+        "wallMedianMs": 2422.4000000953674,
+        "wallP95Ms": 2480.7000000476837,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "scriptTimingValid": false,
+      "scriptRatio": null
+    },
+    "burst": {
+      "legacy": {
+        "wallMedianMs": 1541.7000000476837,
+        "wallP95Ms": 1549.2999999523163,
+        "scriptMedianMs": 77.77700000000004,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": 33.5,
+        "frameP95Ms": 16.700000000000728
+      },
+      "worker": {
+        "wallMedianMs": 1544.2000000476837,
+        "wallP95Ms": 1549.6999998092651,
+        "scriptMedianMs": 25.173000000000002,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": 32.89999985694885,
+        "frameP95Ms": 16.700000000000728
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": {
+        "ratio": 0.323656093703794,
+        "ci95": [
+          0.31164057181756316,
+          0.33137638617090676
+        ]
+      }
+    },
+    "snapshot": {
+      "legacy": {
+        "wallMedianMs": 22546.700000047684,
+        "wallP95Ms": 22596.599999904633,
+        "scriptMedianMs": 575.1980000000001,
+        "longTasks": 40,
+        "maxLongTaskMs": 542,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "worker": {
+        "wallMedianMs": 22546.400000095367,
+        "wallP95Ms": 22646.299999952316,
+        "scriptMedianMs": 3.350000000000006,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": {
+        "ratio": 0.005824081446736611,
+        "ci95": [
+          0.004247505127039013,
+          0.006758252746153948
+        ]
+      }
+    },
+    "drain": {
+      "legacy": {
+        "wallMedianMs": 49469,
+        "wallP95Ms": 60718.200000047684,
+        "scriptMedianMs": 1172.927,
+        "longTasks": 4,
+        "maxLongTaskMs": 54,
+        "clickP95Ms": null,
+        "frameP95Ms": null,
+        "admissionMedianMs": 25432.10000014305,
+        "admissionP95Ms": 36832.799999952316,
+        "postAdmissionMedianMs": 23820.39999985695,
+        "averageAdmissionPerIntentMedianMs": 50.864200000286104
+      },
+      "worker": {
+        "wallMedianMs": 73842.60000014305,
+        "wallP95Ms": 92572.20000004768,
+        "scriptMedianMs": 840.142,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null,
+        "admissionMedianMs": 49931.799999952316,
+        "admissionP95Ms": 68747.40000009537,
+        "postAdmissionMedianMs": 23740.200000047684,
+        "averageAdmissionPerIntentMedianMs": 99.86359999990464
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": {
+        "ratio": 0.7162781656488427,
+        "ci95": [
+          0.6905199878953971,
+          0.7384045969039063
+        ]
+      }
+    }
+  },
+  "gate": {
+    "burst": "PASS",
+    "correctness": {
+      "deniedApis": 3,
+      "retryResult": 1,
+      "durableCrashRecovery": true,
+      "reconnect": true
+    },
+    "multiTab": {
+      "first": "legacy",
+      "second": "legacy"
+    },
+    "maxLoadFraction": 0.224375
+  }
+}

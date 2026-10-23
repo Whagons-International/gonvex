@@ -1,0 +1,35 @@
+import { createRequire } from 'node:module';
+import { realpath, writeFile, mkdir } from 'node:fs/promises';
+import { resolve, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
+const require = createRequire(await realpath(new URL('../../node_modules/vitest/package.json', import.meta.url)));
+const { build } = createRequire(require.resolve('vite/package.json'))('esbuild');
+const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+const base = '11820f669782589c9d3af66bc7dfbeda2351be27';
+const config = { bundle: true, minify: true, format: 'esm', platform: 'browser', target: 'es2022', write: false };
+const sizes = result => result.outputFiles.map(file => ({ file: file.path.split('/').pop(), bytes: file.contents.length, gzip: gzipSync(file.contents).length }));
+const baseline = revision => ({ name: 'settled-baseline', setup(build) {
+  const read = path => execFileSync('git', ['show', `${revision}:${path.slice(root.length + 1)}`], { encoding: 'utf8' });
+  build.onResolve({ filter: /^\.\.?\/.*\.js$/ }, args => {
+    if (!args.importer.includes('/packages/client/src/')) return;
+    const path = resolve(dirname(args.importer), args.path.replace(/\.js$/, '.ts'));
+    if (path.includes('/packages/client/src/')) return { path, namespace: 'baseline-client' };
+  });
+  const load = args => ({ contents: read(args.path), loader: 'ts', resolveDir: dirname(args.path) });
+  build.onLoad({ filter: /packages\/client\/src\/.*\.ts$/, namespace: 'file' }, load);
+  build.onLoad({ filter: /.*/, namespace: 'baseline-client' }, load);
+} });
+const entryPoints = [resolve(root, 'packages/client/src/index.ts')];
+const before = await build({ ...config, entryPoints, outfile: resolve(tmpdir(), 'default-before.js'), plugins: [baseline(base)] });
+const after = await build({ ...config, entryPoints, outfile: resolve(tmpdir(), 'default-after.js') });
+const engine = await build({ ...config, entryPoints: { engine: resolve(root, 'packages/client/src/engine/client.ts'), worker: resolve(root, 'packages/client/bench/engine-worker/bundle-worker.ts') }, splitting: true, outdir: resolve(tmpdir(), 'engine-chunks') });
+const staging = execFileSync('git', ['rev-parse', 'origin/staging'], { encoding: 'utf8' }).trim();
+const stagingBefore = await build({ ...config, entryPoints, outfile: resolve(tmpdir(), 'default-staging.js'), plugins: [baseline(staging)] });
+const hash = file => createHash('sha256').update(file.contents).digest('hex');
+const result = { base, staging, defaultByteIdentical: hash(before.outputFiles[0]) === hash(after.outputFiles[0]), defaultSha256: hash(after.outputFiles[0]), stagingBefore: sizes(stagingBefore), method: 'esbuild production ESM library entries, minified and gzip; identical dependency builds', before: sizes(before), after: sizes(after), engine: sizes(engine), legacyImportsWorker: after.outputFiles.some(file => /serveEngineWorker|class EngineRpc|gonvex-sync-engine/.test(file.text)) };
+await writeFile(new URL('bundle-sizes.json', import.meta.url), JSON.stringify(result, null, 2));
+process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+if (!result.defaultByteIdentical || result.after[0].gzip > result.stagingBefore[0].gzip) throw new Error('Default bundle growth');

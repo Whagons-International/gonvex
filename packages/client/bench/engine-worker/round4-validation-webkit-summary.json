@@ -1,0 +1,176 @@
+{
+  "metadata": {
+    "browser": "webkit",
+    "version": "26.5",
+    "sdkCommit": "0a85044d79879db371063bb7c4b7f7ab324f8660",
+    "fixture": "engine-worker-fixture-v1",
+    "admission": "sequential",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "cores": 16,
+    "ram": 33537110016,
+    "os": "linux 7.2.4-arch1-2",
+    "network": "local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate",
+    "load": [
+      4.47,
+      3.71,
+      3.62
+    ],
+    "production": true,
+    "coldSamplingAligned": true,
+    "engineRevision": "checkout",
+    "profileIO": false,
+    "loadLimit": 0.5,
+    "startLoadLimit": 0.35,
+    "loadChecks": [
+      {
+        "index": -5,
+        "mode": "worker",
+        "load": [
+          3.35,
+          3.62,
+          3.6
+        ]
+      },
+      {
+        "index": -5,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          3.48,
+          3.64,
+          3.61
+        ]
+      }
+    ],
+    "fixtureIsolation": "edits-reset-before-each-mode",
+    "firefoxWorkerWebSocketWorkaround": false,
+    "seed": {
+      "rows": 50000,
+      "initialEdits": 0,
+      "rowBytes": 2554
+    },
+    "discardedPairs": [],
+    "failure": "Error: page.evaluate: GonvexClientError: Account or visibility changed while awaiting engine RPC"
+  },
+  "samplesPerMode": 0,
+  "metrics": {
+    "cold": {
+      "legacy": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "worker": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": null,
+      "pairedWallRatio": null,
+      "pairedScriptRatio": null,
+      "wallRatio": null
+    },
+    "burst": {
+      "legacy": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "worker": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": null,
+      "pairedWallRatio": null,
+      "pairedScriptRatio": null,
+      "wallRatio": null
+    },
+    "snapshot": {
+      "legacy": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "worker": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": null,
+      "pairedWallRatio": null,
+      "pairedScriptRatio": null,
+      "wallRatio": null
+    },
+    "drain": {
+      "legacy": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null,
+        "intentLatencyMedianMs": null,
+        "intentLatencyP95Ms": null,
+        "admissionMedianMs": null,
+        "admissionP95Ms": null,
+        "postAdmissionMedianMs": null,
+        "averageAdmissionPerIntentMedianMs": null
+      },
+      "worker": {
+        "wallMedianMs": null,
+        "wallP95Ms": null,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null,
+        "intentLatencyMedianMs": null,
+        "intentLatencyP95Ms": null,
+        "admissionMedianMs": null,
+        "admissionP95Ms": null,
+        "postAdmissionMedianMs": null,
+        "averageAdmissionPerIntentMedianMs": null
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": null,
+      "pairedWallRatio": null,
+      "pairedScriptRatio": null,
+      "wallRatio": null
+    }
+  },
+  "gate": {
+    "drain": "FAIL",
+    "coldScript": "UNAVAILABLE",
+    "burst": "PASS",
+    "maxLoadFraction": null
+  }
+}

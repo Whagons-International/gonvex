@@ -1,16 +1,34 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore as useReactSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
 import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
+import type { EngineClient, EngineEntitiesState } from "@gonvex/client/engine";
 import type { JsonValue } from "@gonvex/protocol";
 
 export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
 
+const EngineContext = createContext<EngineClient | null>(null);
 const GonvexContext = createContext<GonvexClient | null>(null);
 const GonvexAuthContext = createContext<AuthState>({ isLoading: false, isAuthenticated: true });
 
-export function GonvexProvider(props: { client: GonvexClient; children: ReactNode }) {
-  return <GonvexContext.Provider value={props.client}>{props.children}</GonvexContext.Provider>;
+export function GonvexProvider(props: { client: GonvexClient | EngineClient; children: ReactNode }) {
+  return "engineMode" in props.client
+    ? <GonvexContext.Provider value={null}><EngineContext.Provider value={props.client}>{props.children}</EngineContext.Provider></GonvexContext.Provider>
+    : <EngineContext.Provider value={null}><GonvexContext.Provider value={props.client}>{props.children}</GonvexContext.Provider></EngineContext.Provider>;
+}
+
+function useWatchClient(): GonvexClient | EngineClient {
+  const engine = useContext(EngineContext);
+  const legacy = useContext(GonvexContext);
+  if (!engine && !legacy) throw new Error("GonvexProvider is required");
+  return engine ?? legacy!;
+}
+
+/** Worker access stays typed separately from legacy synchronous replica methods. */
+export function useGonvexEngineClient(): EngineClient {
+  const client = useContext(EngineContext);
+  if (!client) throw new Error("An engine client is required");
+  return client;
 }
 
 export type AuthState = {
@@ -173,7 +191,7 @@ function handoffNonce(): string {
 const ManagedAuthContext = createContext<GonvexAuthValue | null>(null);
 
 export function GonvexProviderWithAuth(props: {
-  client: GonvexClient;
+  client: GonvexClient | EngineClient;
   children: ReactNode;
   useAuth: () => AuthState;
 }) {
@@ -254,7 +272,7 @@ const authBootstrapPromises = new Map<string, Promise<GonvexAuthSession | null>>
 // made onboarding report a failure for a tenant that was still being created.
 const TENANT_CREATE_TIMEOUT_MS = 120_000;
 
-export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient; children: ReactNode }) {
+export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexClient | EngineClient; children: ReactNode }) {
   const runtimeUrl = props.runtimeUrl.replace(/\/+$/, "");
   const hasExplicitInitialTenant = props.initialTenantId !== undefined;
   const initialTenantId = props.initialTenantId?.trim() || undefined;
@@ -812,7 +830,7 @@ export function GonvexAuthProvider(props: GonvexAuthConfig & { client: GonvexCli
     if (installedClientScopeRef.current !== sessionScope) return;
     const watch = props.client.watchControlQuery<ControlTenant[]>(control.tenants.mine, {});
     return watch.onUpdate(() => {
-      const tenants = watch.getSnapshot().result as GonvexAuthTenant[] | undefined;
+      const tenants = watch.getSnapshot()?.result as GonvexAuthTenant[] | undefined;
       const current = sessionRef.current;
       if (!current || !tenants) return;
       // A live directory update is not a tenant-selection intent. In
@@ -1199,7 +1217,7 @@ export function GonvexGoogleAuthButton(props: ButtonHTMLAttributes<HTMLButtonEle
 }
 
 export function createGonvexAuth(config: GonvexAuthConfig) {
-  function ConfiguredGonvexAuthProvider(props: { client: GonvexClient; children: ReactNode }) {
+  function ConfiguredGonvexAuthProvider(props: { client: GonvexClient | EngineClient; children: ReactNode }) {
     return <GonvexAuthProvider {...config} {...props} />;
   }
   return {
@@ -1222,7 +1240,7 @@ function GoogleMark() {
 
 async function bootstrapGonvexAuth(options: {
   callbackPath: string;
-  client: GonvexClient;
+  client: GonvexClient | EngineClient;
   pkceStorageKey: string;
   projectId: string;
   runtimeUrl: string;
@@ -1509,7 +1527,7 @@ function clearDeveloperGrants(storageKey: string, keepAccountId?: string) {
 }
 
 function installDeveloperClientAuth(
-  client: GonvexClient,
+  client: GonvexClient | EngineClient,
   projectId: string,
   developer: ActiveDeveloperMode,
   token: string,
@@ -1524,7 +1542,7 @@ function installDeveloperClientAuth(
 }
 
 function installClientSession(
-  client: GonvexClient,
+  client: GonvexClient | EngineClient,
   projectId: string,
   session: GonvexAuthSession,
 ) {
@@ -1699,7 +1717,7 @@ type QueryResultState<T> = {
   isStale: boolean;
 };
 
-function useSessionScopeGeneration(client: GonvexClient): number {
+function useSessionScopeGeneration(client: GonvexClient | EngineClient): number {
   const [generation, setGeneration] = useState(0);
   useEffect(() => {
     const unsubscribe = client.onSessionScopeChange(() => {
@@ -1720,7 +1738,7 @@ export function useQueryResult<T extends JsonValue = JsonValue>(
   args: JsonValue | "skip" = {},
   options: UseQueryResultOptions = {},
 ): UseQueryResult<T> {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const sessionScopeGeneration = useSessionScopeGeneration(client);
   const path = ref.path;
   const kind = ref.kind;
@@ -1817,7 +1835,7 @@ export function useQueryResult<T extends JsonValue = JsonValue>(
 }
 
 export function useLiveQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   if (ref.delivery !== "live" || !ref.live?.plan) {
     throw new Error(`useLiveQuery requires a structured Live Query reference: ${ref.path}`);
   }
@@ -1842,7 +1860,7 @@ export function useLiveQuery<T extends JsonValue = JsonValue>(ref: FunctionRefer
 
 /** Subscribe to a host-owned Control Plane Query on the existing Gonvex connection. */
 export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
     () => args === "skip" ? undefined : client.watchControlQuery<T>(ref, args),
@@ -1860,36 +1878,23 @@ export function useControlQuery<T extends JsonValue = JsonValue>(ref: FunctionRe
   return snapshot?.result;
 }
 
-/** Read one normalized entity from the single Gonvex Local Replica. */
-export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined {
-  const client = useGonvexClient();
-  useEffect(()=>client.retainReplicaEntities(entity,[id]),[client,entity,id]);
-  const version = useSyncExternalStore(
-    useCallback((notify) => client.localReplica.subscribe(notify, { entity, ids: [id] }), [client, entity, id]),
-    useCallback(() => client.localReplica.entityVersion(entity, id), [client, entity, id]),
-    () => 0,
-  );
-  return useMemo(() => client.localReplica.entity<T>(entity, id), [client, entity, id, version]);
-}
-
-/** Resolve an ordered entity batch with one Local Replica subscription. */
-export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
-  const client = useGonvexClient();
-  // Inline arrays are common. Cache by ordered contents without serializing
-  // strings, allocating version strings, or relying on array identity.
+function useEntityBatchState<T extends ReplicaRow>(entity: string, ids: readonly string[]): EngineEntitiesState<T> {
+  const client = useWatchClient();
   const stable = useRef<readonly string[]>([]);
   if (stable.current.length !== ids.length || ids.some((id, index) => id !== stable.current[index])) stable.current = [...ids];
   const selectedIDs = stable.current;
-  useEffect(()=>client.retainReplicaEntities(entity,selectedIDs),[client,entity,selectedIDs]);
   const cache = useMemo(() => new Map<string, { version: number; row: T | undefined }>(), [client, entity]);
-  const store = useMemo(() => {
+  const watch = useMemo(() => {
+    if ("engineMode" in client) return client.watchEntities<T>(entity, selectedIDs);
+    const retained = new Set(selectedIDs);
+    for (const id of cache.keys()) if (!retained.has(id)) cache.delete(id);
+    let snapshot: EngineEntitiesState<T> = { status: "ready", rows: [] };
     let tableVersion: number | undefined;
-    let snapshot = 0;
     const versions = new Map<string, number>();
     const refresh = (touched?: ReadonlySet<string>) => {
       const next = client.localReplica.entityVersion(entity);
-      // Reentrant writes can deliver a newer table revision before an older
-      // notification. Its touched IDs still need their own version checks.
+      // Reentrant writes can deliver an older notification after a newer one.
+      // Its touched IDs still need their own version checks.
       if (next === tableVersion && !touched) return false;
       tableVersion = next;
       let changed = false;
@@ -1898,58 +1903,63 @@ export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: st
         const version = client.localReplica.entityVersion(entity, id);
         if (versions.get(id) !== version) { versions.set(id, version); changed = true; }
       }
-      if (changed) snapshot++;
+      if (changed) snapshot = { status: "ready", rows: selectedIDs.map(id => {
+        const version = versions.get(id)!;
+        const prior = cache.get(id);
+        if (prior?.version === version) return prior.row;
+        const row = client.localReplica.entity<T>(entity, id);
+        cache.set(id, { version, row });
+        return row;
+      }) };
       return changed;
     };
     refresh();
     let active = false;
-    return {
-      rowVersion: (id: string) => versions.get(id),
-      getSnapshot: () => { if (!active) refresh(); return snapshot; },
-      subscribe: (notify: () => void) => {
-        const release = client.localReplica.subscribe(touched => {
-          if (refresh(touched)) notify();
-        }, { entity, ids: selectedIDs });
-        active = true;
-        // Capture changes between render and subscribing.
-        if (refresh()) notify();
-        return () => { active = false; release(); };
-      },
-    };
-  }, [client, entity, selectedIDs]);
-  const version = useSyncExternalStore(store.subscribe, store.getSnapshot, () => 0);
-  return useMemo(() => {
-    const retained = new Set(ids);
-    for (const id of cache.keys()) if (!retained.has(id)) cache.delete(id);
-    return ids.map(id => {
-      const rowVersion = store.rowVersion(id)!;
-      const prior = cache.get(id);
-      if (prior?.version === rowVersion) return prior.row;
-      const row = client.localReplica.entity<T>(entity, id);
-      cache.set(id, { version: rowVersion, row });
-      return row;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, entity, selectedIDs, version, cache, store]);
+    return { getSnapshot: () => { if (!active) refresh(); return snapshot; }, onUpdate: (notify: () => void) => {
+      const release = client.retainReplicaEntities(entity, selectedIDs);
+      const stop = client.localReplica.subscribe(touched => { if (refresh(touched)) notify(); }, { entity, ids: selectedIDs });
+      active = true;
+      if (refresh()) notify();
+      return () => { active = false; stop(); release(); };
+    } };
+  }, [client, entity, selectedIDs, cache]);
+  return useSyncExternalStore(watch.onUpdate, watch.getSnapshot, () => pendingEntityState);
+}
+
+export function useEntityState<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): { status: "pending" } | { status: "ready"; row: T | undefined } {
+  const state = useEntityBatchState<T>(entity, [id]);
+  return state.status === "pending" ? state : { status: "ready", row: state.rows[0] };
+}
+const pendingEntityState = Object.freeze({ status: "pending" as const });
+
+export function useEntity<T extends ReplicaRow = ReplicaRow>(entity: string, id: string): T | undefined {
+  const state = useEntityState<T>(entity, id);
+  return state.status === "ready" ? state.row : undefined;
+}
+
+export function useReplicaEntities<T extends ReplicaRow = ReplicaRow>(entity: string, ids: readonly string[]): Array<T | undefined> {
+  const state = useEntityBatchState<T>(entity, ids);
+  return useMemo(() => state.status === "ready" ? state.rows : ids.map(() => undefined), [state, ids.length]);
 }
 
 /** Read a persisted Live Query window without opening another server subscription. */
-export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(
-  signatureOrReference: string | FunctionReference,
-  args: JsonValue = {},
-): LiveQueryResult<T> {
-  const client = useGonvexClient();
+export function useRetainedLiveQuery<T extends ReplicaRow = ReplicaRow>(signatureOrReference: string | FunctionReference, args: JsonValue = {}): LiveQueryResult<T> & { pending?: boolean } {
+  const client = useWatchClient();
   const argsKey = JSON.stringify(args);
-  const signature = typeof signatureOrReference === "string"
-    ? signatureOrReference
-    : client.replicaSignature(signatureOrReference, args);
-  useEffect(()=>client.retainReplicaWindow(signature),[client,signature]);
-  return useSyncExternalStore(
-    useCallback((notify) => client.localReplica.subscribe(notify, { window: signature }), [client, signature]),
-    useCallback(() => client.localReplica.liveQuerySnapshot<T>(signature), [client, signature, argsKey]),
-    () => emptyLiveQuery as LiveQueryResult<T>,
-  );
+  const referenceKey = typeof signatureOrReference === "string" ? JSON.stringify(signatureOrReference)
+    : JSON.stringify([signatureOrReference.kind, signatureOrReference.path, signatureOrReference.scope, signatureOrReference.delivery, signatureOrReference.live]);
+  const watch = useMemo(() => {
+    if ("engineMode" in client) return client.watchRetained<T>(signatureOrReference, args);
+    const signature = typeof signatureOrReference === "string" ? signatureOrReference : client.replicaSignature(signatureOrReference, args);
+    return { getSnapshot: () => client.localReplica.liveQuerySnapshot<T>(signature), onUpdate: (notify: () => void) => {
+      const release = client.retainReplicaWindow(signature); const stop = client.localReplica.subscribe(notify, { window: signature }); return () => { stop(); release(); };
+    } };
+    // Equivalent generated references can be reconstructed on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, referenceKey, argsKey]);
+  return useSyncExternalStore(watch.onUpdate, watch.getSnapshot, () => emptyLiveQuery as LiveQueryResult<T>) ?? pendingLiveQuery as LiveQueryResult<T> & { pending?: boolean };
 }
+const pendingLiveQuery = { rows: [], ids: [], source: "cache" as const, completeness: "partial" as const, freshness: "verifying" as const, pending: true };
 
 const emptyLiveQuery: LiveQueryResult = {rows:[],ids:[],source:'cache',completeness:'partial',freshness:'verifying'};
 
@@ -1957,12 +1967,18 @@ const emptyLiveQuery: LiveQueryResult = {rows:[],ids:[],source:'cache',completen
 export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
   ref: FunctionReference,
   args: JsonValue | "skip" = {},
-): LiveQueryResult<T> {
-  const client = useGonvexClient();
+): LiveQueryResult<T> & { pending?: boolean } {
+  const client = useWatchClient();
   const argsKey = JSON.stringify(args);
-  const signature = args === "skip" ? "" : client.replicaSignature(ref, args);
+  const referenceKey = JSON.stringify([ref.kind, ref.path, ref.scope, ref.delivery, ref.live]);
+  const engineWatch = useMemo(
+    () => "engineMode" in client && args !== "skip" ? client.watchRetained<T>(ref, args, true) : undefined,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client, referenceKey, argsKey],
+  );
+  const signature = args === "skip" || "engineMode" in client ? "" : client.replicaSignature(ref, args);
   useEffect(() => {
-    if (args === "skip") return;
+    if (args === "skip" || "engineMode" in client) return;
     const release=client.retainReplicaWindow(signature);
     const unsubscribe=client.subscribeLiveQuery(ref, args, () => undefined);
     return ()=>{unsubscribe();release();};
@@ -1973,6 +1989,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
     let offlineResult: LiveQueryResult<T> | undefined;
     return () => {
       if (args === 'skip') return emptyLiveQuery as LiveQueryResult<T>;
+      if ("engineMode" in client) return engineWatch?.getSnapshot() ?? pendingLiveQuery as LiveQueryResult<T> & { pending?: boolean };
       if (client.localReplica.freshness() !== 'offline') return client.localReplica.liveQuerySnapshot<T>(signature);
       const version = client.offlineLiveQueryToken(ref);
       if (offlineVersion === version && offlineResult) return offlineResult;
@@ -1993,9 +2010,9 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
       return offlineResult;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, ref.kind, ref.path, signature, argsKey]);
+  }, [client, engineWatch, ref.kind, ref.path, signature, argsKey]);
   return useSyncExternalStore(
-    useCallback(notify => signature ? client.localReplica.subscribe(notify, { window: signature, offlineGlobal: true }) : () => undefined, [client, signature]),
+    useCallback(notify => "engineMode" in client ? engineWatch?.onUpdate(notify) ?? (() => undefined) : signature ? client.localReplica.subscribe(notify, { window: signature, offlineGlobal: true }) : () => undefined, [client, engineWatch, signature]),
     getSnapshot,
     () => emptyLiveQuery as LiveQueryResult<T>,
   );
@@ -2003,7 +2020,7 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
 export function useQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const sessionScopeGeneration = useSessionScopeGeneration(client);
   const [result, setResult] = useState<T>();
   const [error, setError] = useState<Error | null>(null);
@@ -2038,7 +2055,7 @@ export function useReplicaCollection<T extends JsonValue = JsonValue>(
   ref: FunctionReference,
   args: JsonValue | "skip" = {},
 ): T[] | undefined {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const path = ref.path;
   const kind = ref.kind;
   const optimisticKey = useMemo(() => JSON.stringify(ref.optimistic ?? null), [ref.optimistic]);
@@ -2060,7 +2077,7 @@ export function useReplicaCollectionState<T extends ReplicaRow = ReplicaRow>(
   ref: FunctionReference,
   args: JsonValue | "skip" = {},
 ): ReplicaCollectionSubscriptionState<T> | undefined {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const path = ref.path;
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
@@ -2083,7 +2100,7 @@ export function useReplicaCollectionStates<T extends ReplicaRow = ReplicaRow>(
   ref: FunctionReference,
   args: readonly JsonValue[],
 ): ReadonlyArray<ReplicaCollectionSubscriptionState<T> | undefined> {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const argsKey = JSON.stringify(args);
   const watches = useMemo(
     () => args.map(value => client.watchReplica<T>(ref, value, { deferStart: true })),
@@ -2116,7 +2133,7 @@ export function useReplicaCollectionStateSelector<T extends ReplicaRow, Selected
   selector: (state: ReplicaCollectionSubscriptionState<T>) => Selected,
   isEqual: (left: Selected, right: Selected) => boolean = Object.is,
 ): Selected | undefined {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const argsKey = JSON.stringify(args);
   const watch = useMemo(
     () => args === "skip" ? undefined : client.watchReplica<T>(ref, args, { deferStart: true }),
@@ -2154,7 +2171,7 @@ export function useReplicaSelector<T extends JsonValue = JsonValue, Selected = u
   selector: (rows: T[]) => Selected,
   isEqual: (left: Selected, right: Selected) => boolean = Object.is,
 ): Selected | undefined {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const path = ref.path;
   const kind = ref.kind;
   const optimisticKey = useMemo(() => JSON.stringify(ref.optimistic ?? null), [ref.optimistic]);
@@ -2223,7 +2240,7 @@ export type UseReducerOptions = {
 };
 
 export function useReducer(ref: FunctionReference, options: UseReducerOptions = {}) {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   useEffect(() => { void client.prepareReducer?.(ref)?.catch(() => undefined); }, [client, ref]);
   const refRef = useRef(ref);
   refRef.current = ref;
@@ -2235,7 +2252,7 @@ export function useReducer(ref: FunctionReference, options: UseReducerOptions = 
 }
 
 export function useAction(ref: FunctionReference, options: UseReducerOptions = {}) {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const refRef = useRef(ref);
   refRef.current = ref;
   const timeoutMs = options.timeoutMs;
@@ -2257,7 +2274,7 @@ const FALLBACK_CONNECTION_STATE: ConnectionState = {
 };
 
 export function useGonvexConnectionState(): ConnectionState {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const [state, setState] = useState<ConnectionState>(() => (
     typeof client.connectionState === "function" ? client.connectionState() : FALLBACK_CONNECTION_STATE
   ));
@@ -2281,7 +2298,7 @@ const NO_SUBSCRIPTION = () => () => undefined;
  * Use `client.retryIntent(id)` / `client.discardIntent(id)` to act on them.
  */
 export function useOutboxIntents(): readonly OutboxIntent[] {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const subscribe = useMemo(
     () => (typeof client.subscribeIntents === "function" ? client.subscribeIntents.bind(client) : NO_SUBSCRIPTION),
     [client],
@@ -2309,7 +2326,7 @@ export function useEntityIntentStatus(entity: string, id: string | null | undefi
  * does not need to be memoized.
  */
 export function useLocalExecutionFallback(listener: (event: LocalExecutionFallbackEvent) => void): void {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const latest = useRef(listener);
   useEffect(() => { latest.current = listener; });
   useEffect(() => {
@@ -2330,7 +2347,7 @@ export type LocalReplicaReset = {
  * rehydrates it from the server, keeping queued intents unless asked.
  */
 export function useResetLocalReplica(): LocalReplicaReset {
-  const client = useGonvexClient();
+  const client = useWatchClient();
   const [isResetting, setResetting] = useState(false);
   const [error, setError] = useState<Error | undefined>();
   const reset = useCallback(async (options?: ResetLocalReplicaOptions) => {

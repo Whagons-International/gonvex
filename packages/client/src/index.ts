@@ -481,7 +481,11 @@ export const DEFAULT_QUERY_TIMEOUT_MS = 20_000;
 export const DEFAULT_REDUCER_TIMEOUT_MS = 20_000;
 export const DEFAULT_ACTION_TIMEOUT_MS = 60_000;
 
+export type EngineCommand = { id: string; now: number; entropy: string; artifactHash?: string; scope?: string };
+
 export type CallOptions = {
+  /** Stable worker RPC execution identity. Reuse the entire object after timeout. */
+  engineCommand?: EngineCommand;
   /** Per-call override of the operation timeout. `0` disables. */
   timeoutMs?: number;
   /** Ordered row changes to expose until the reducer settles. */

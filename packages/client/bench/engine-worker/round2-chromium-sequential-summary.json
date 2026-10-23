@@ -1,0 +1,2140 @@
+{
+  "metadata": {
+    "browser": "chromium",
+    "version": "149.0.7827.55",
+    "sdkCommit": "23c3eef1392c1d45edbdda40fad02a235a60f893",
+    "fixture": "engine-worker-fixture-v1",
+    "admission": "sequential",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "cores": 16,
+    "ram": 33537105920,
+    "os": "linux 7.2.4-arch1-2",
+    "network": "local websocket fixture; auth/reducer 50ms modeled RTT, pages paced at 20Mbit/s; storage separate",
+    "load": [
+      6.17,
+      5.77,
+      5.27
+    ],
+    "production": true,
+    "engineRevision": "checkout",
+    "profileIO": false,
+    "loadLimit": 0.35,
+    "loadChecks": [
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          4.44,
+          5.39,
+          5.16
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          4.64,
+          5.42,
+          5.17
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          4.76,
+          5.42,
+          5.18
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.49,
+          5.34,
+          5.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.34,
+          5.28,
+          5.13
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.99,
+          5.17,
+          5.1
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.32,
+          5.2,
+          5.11
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.42,
+          5.19,
+          5.11
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.36,
+          5.15,
+          5.1
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.3,
+          5.12,
+          5.08
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.25,
+          5.08,
+          5.07
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.36,
+          5.08,
+          5.07
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          5.15,
+          5.22,
+          5.12
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          5.36,
+          5.26,
+          5.13
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "load": [
+          5.36,
+          5.26,
+          5.13
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          5.36,
+          5.26,
+          5.13
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          5.58,
+          5.31,
+          5.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          5.56,
+          5.32,
+          5.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          5.48,
+          5.31,
+          5.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          5.48,
+          5.31,
+          5.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          5.65,
+          5.35,
+          5.17
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          5.63,
+          5.35,
+          5.17
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          5.85,
+          5.41,
+          5.19
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          6.11,
+          5.48,
+          5.21
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          6.31,
+          5.54,
+          5.24
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "load": [
+          4.9,
+          5.72,
+          5.41
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          5.22,
+          5.78,
+          5.43
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          5.22,
+          5.78,
+          5.43
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.73,
+          5.65,
+          5.39
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.23,
+          5.51,
+          5.35
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.23,
+          5.51,
+          5.35
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.96,
+          5.41,
+          5.32
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.81,
+          5.33,
+          5.29
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.53,
+          5.22,
+          5.25
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.77,
+          5.22,
+          5.25
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.73,
+          5.16,
+          5.23
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "load": [
+          3.73,
+          5.16,
+          5.23
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          4.15,
+          5.22,
+          5.25
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          4.15,
+          5.22,
+          5.25
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.9,
+          5.13,
+          5.22
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.76,
+          5.06,
+          5.2
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.54,
+          5,
+          5.18
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.46,
+          4.93,
+          5.15
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.77,
+          4.95,
+          5.16
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.97,
+          4.95,
+          5.16
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.67,
+          4.85,
+          5.12
+        ]
+      },
+      {
+        "index": -1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.54,
+          4.81,
+          5.1
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "load": [
+          3.54,
+          4.81,
+          5.1
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          3.57,
+          4.79,
+          5.1
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          3.57,
+          4.79,
+          5.1
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.55,
+          4.75,
+          5.08
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.39,
+          4.67,
+          5.05
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.2,
+          4.61,
+          5.03
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.01,
+          4.53,
+          5
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.23,
+          4.53,
+          4.99
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.19,
+          4.47,
+          4.97
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.61,
+          4.52,
+          4.98
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.58,
+          4.49,
+          4.97
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "load": [
+          3.58,
+          4.49,
+          4.97
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          3.58,
+          4.49,
+          4.97
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          3.69,
+          4.5,
+          4.97
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.51,
+          4.43,
+          4.94
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.88,
+          4.48,
+          4.95
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.88,
+          4.48,
+          4.95
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.88,
+          4.47,
+          4.94
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.74,
+          4.42,
+          4.92
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.55,
+          4.35,
+          4.89
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.42,
+          4.51,
+          4.94
+        ]
+      },
+      {
+        "index": 0,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.49,
+          4.52,
+          4.94
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "load": [
+          4.49,
+          4.52,
+          4.94
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          4.69,
+          4.57,
+          4.95
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          4.69,
+          4.57,
+          4.95
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.58,
+          4.55,
+          4.94
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.34,
+          4.5,
+          4.92
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.34,
+          4.5,
+          4.92
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.36,
+          4.5,
+          4.91
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.22,
+          4.46,
+          4.9
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.12,
+          4.43,
+          4.88
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.4,
+          4.48,
+          4.89
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.18,
+          4.43,
+          4.87
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "load": [
+          4.18,
+          4.43,
+          4.87
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          4.17,
+          4.43,
+          4.87
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          4.17,
+          4.43,
+          4.87
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          4.21,
+          4.43,
+          4.87
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.95,
+          4.36,
+          4.84
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.72,
+          4.31,
+          4.82
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.69,
+          4.28,
+          4.8
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.65,
+          4.26,
+          4.79
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.54,
+          4.21,
+          4.77
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.53,
+          4.19,
+          4.76
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.51,
+          4.17,
+          4.74
+        ]
+      },
+      {
+        "index": 1,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.87,
+          4.23,
+          4.76
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "load": [
+          3.87,
+          4.23,
+          4.76
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          3.87,
+          4.23,
+          4.76
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          3.8,
+          4.21,
+          4.75
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.52,
+          4.14,
+          4.72
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.59,
+          4.13,
+          4.71
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.59,
+          4.13,
+          4.71
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.32,
+          4.27,
+          4.75
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.27,
+          4.27,
+          4.75
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.31,
+          4.27,
+          4.74
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.04,
+          4.21,
+          4.72
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.02,
+          4.21,
+          4.71
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "load": [
+          4.02,
+          4.21,
+          4.71
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          3.86,
+          4.17,
+          4.7
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          3.86,
+          4.17,
+          4.7
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.87,
+          4.16,
+          4.69
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.89,
+          4.16,
+          4.68
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.74,
+          4.12,
+          4.67
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.85,
+          4.13,
+          4.66
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.95,
+          4.15,
+          4.66
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.03,
+          4.16,
+          4.66
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.54,
+          4.27,
+          4.69
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.53,
+          4.27,
+          4.69
+        ]
+      },
+      {
+        "index": 2,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.53,
+          4.27,
+          4.69
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "load": [
+          4.53,
+          4.27,
+          4.69
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          4.49,
+          4.27,
+          4.68
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          4.49,
+          4.27,
+          4.68
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.62,
+          4.31,
+          4.69
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.22,
+          4.23,
+          4.66
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.04,
+          4.19,
+          4.65
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.11,
+          4.2,
+          4.65
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.09,
+          4.2,
+          4.64
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.63,
+          4.31,
+          4.67
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.77,
+          4.35,
+          4.68
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.57,
+          4.32,
+          4.67
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.36,
+          4.28,
+          4.65
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "load": [
+          4.36,
+          4.28,
+          4.65
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          4.09,
+          4.23,
+          4.63
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          4.09,
+          4.23,
+          4.63
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          4.42,
+          4.3,
+          4.65
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.74,
+          4.16,
+          4.6
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.52,
+          4.1,
+          4.58
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.73,
+          4.13,
+          4.59
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.46,
+          4.06,
+          4.56
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.08,
+          3.96,
+          4.52
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.13,
+          3.94,
+          4.51
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.11,
+          3.91,
+          4.49
+        ]
+      },
+      {
+        "index": 3,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.34,
+          3.95,
+          4.5
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "load": [
+          3.34,
+          3.95,
+          4.5
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          3.34,
+          3.95,
+          4.5
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          3.48,
+          3.97,
+          4.5
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.88,
+          4.03,
+          4.52
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.59,
+          3.97,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.59,
+          3.97,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.74,
+          3.98,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.31,
+          4.1,
+          4.53
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.18,
+          4.08,
+          4.51
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.08,
+          4.06,
+          4.5
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.91,
+          4.02,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          4.08,
+          4.06,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "load": [
+          4.08,
+          4.06,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          3.99,
+          4.04,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          3.99,
+          4.04,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.07,
+          4.06,
+          4.49
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.07,
+          4.05,
+          4.48
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.82,
+          4,
+          4.46
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.7,
+          3.97,
+          4.45
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.66,
+          3.95,
+          4.44
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.72,
+          3.96,
+          4.43
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.62,
+          3.92,
+          4.42
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.57,
+          4.11,
+          4.47
+        ]
+      },
+      {
+        "index": 4,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.57,
+          4.11,
+          4.47
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "load": [
+          4.57,
+          4.11,
+          4.47
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "cold",
+        "load": [
+          4.6,
+          4.12,
+          4.47
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "burst",
+        "load": [
+          4.6,
+          4.12,
+          4.47
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          4.2,
+          4.05,
+          4.45
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.95,
+          4,
+          4.43
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "snapshot",
+        "load": [
+          3.87,
+          3.99,
+          4.42
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.82,
+          3.97,
+          4.41
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.77,
+          3.95,
+          4.4
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          3.57,
+          3.91,
+          4.38
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.02,
+          3.99,
+          4.4
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.44,
+          4.08,
+          4.42
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "worker",
+        "workload": "drain",
+        "load": [
+          4.17,
+          4.03,
+          4.4
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "load": [
+          4.17,
+          4.03,
+          4.4
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "cold",
+        "load": [
+          3.91,
+          3.98,
+          4.38
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "burst",
+        "load": [
+          3.91,
+          3.98,
+          4.38
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.54,
+          3.89,
+          4.35
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.23,
+          3.81,
+          4.32
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "snapshot",
+        "load": [
+          3.23,
+          3.81,
+          4.32
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.19,
+          3.79,
+          4.31
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.16,
+          3.76,
+          4.29
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.22,
+          3.75,
+          4.28
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.27,
+          3.74,
+          4.27
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.87,
+          3.85,
+          4.3
+        ]
+      },
+      {
+        "index": 5,
+        "mode": "legacy",
+        "workload": "drain",
+        "load": [
+          3.59,
+          3.79,
+          4.28
+        ]
+      }
+    ],
+    "fixtureIsolation": "edits-reset-before-each-mode",
+    "firefoxWorkerWebSocketWorkaround": false,
+    "seed": {
+      "rows": 50000,
+      "initialEdits": 0,
+      "rowBytes": 2554
+    },
+    "discardedPairs": [
+      {
+        "index": -1,
+        "reason": "Error: Load check failed during legacy drain; entire pair excluded",
+        "load": [
+          6.31,
+          5.54,
+          5.24
+        ]
+      }
+    ],
+    "correctness": {
+      "deniedApis": 3,
+      "retryResult": 1,
+      "durableCrashRecovery": true,
+      "batchCrashRecovery": {
+        "durablePrefix": 1,
+        "commands": 32,
+        "sameIds": true
+      },
+      "reconnect": true
+    },
+    "multiTab": {
+      "first": "legacy",
+      "second": "legacy"
+    },
+    "coldSamplingAligned": false
+  },
+  "samplesPerMode": 6,
+  "metrics": {
+    "cold": {
+      "legacy": {
+        "wallMedianMs": 2510.0999999046326,
+        "wallP95Ms": 2847.5999999046326,
+        "scriptMedianMs": null,
+        "longTasks": 6,
+        "maxLongTaskMs": 315,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "worker": {
+        "wallMedianMs": 2645.7999999523163,
+        "wallP95Ms": 3504.7000000476837,
+        "scriptMedianMs": null,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "scriptTimingValid": false,
+      "scriptRatio": null,
+      "pairedWallRatio": {
+        "ratio": 1.0371605334082474,
+        "ci95": [
+          0.9071498806483341,
+          1.3026667199140847
+        ],
+        "pairs": 6
+      },
+      "pairedScriptRatio": null,
+      "wallRatio": {
+        "ratio": 1.0540615911927171,
+        "ci95": [
+          0.9702888480238706,
+          1.3026667199140847
+        ]
+      }
+    },
+    "burst": {
+      "legacy": {
+        "wallMedianMs": 1546.7000000476837,
+        "wallP95Ms": 1555.2999999523163,
+        "scriptMedianMs": 70.121,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": 31.799999952316284,
+        "frameP95Ms": 16.700000000000728
+      },
+      "worker": {
+        "wallMedianMs": 1547.2000000476837,
+        "wallP95Ms": 1601.1000001430511,
+        "scriptMedianMs": 22.07,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": 32.299999952316284,
+        "frameP95Ms": 16.799999999999727
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": {
+        "ratio": 0.3147416608433993,
+        "ci95": [
+          0.29765016628118657,
+          0.444100128783001
+        ]
+      },
+      "pairedWallRatio": {
+        "ratio": 1.0004526350130512,
+        "ci95": [
+          0.9977371177346014,
+          1.0087634511913117
+        ],
+        "pairs": 6
+      },
+      "pairedScriptRatio": {
+        "ratio": 0.3169370100027035,
+        "ci95": [
+          0.30557179732177253,
+          0.37429521675207345
+        ],
+        "pairs": 6
+      },
+      "wallRatio": {
+        "ratio": 1.000323268895057,
+        "ci95": [
+          0.9969070170820028,
+          1.0122858066602005
+        ]
+      }
+    },
+    "snapshot": {
+      "legacy": {
+        "wallMedianMs": 22693.799999952316,
+        "wallP95Ms": 22744.900000095367,
+        "scriptMedianMs": 635.571,
+        "longTasks": 14,
+        "maxLongTaskMs": 532,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "worker": {
+        "wallMedianMs": 22629.299999952316,
+        "wallP95Ms": 23311.900000095367,
+        "scriptMedianMs": 6.7259999999999955,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": {
+        "ratio": 0.010582609968044476,
+        "ci95": [
+          0.006565749538603864,
+          0.012655805124960449
+        ]
+      },
+      "pairedWallRatio": {
+        "ratio": 0.9963835066765433,
+        "ci95": [
+          0.994917541948192,
+          1.00008372331189
+        ],
+        "pairs": 6
+      },
+      "pairedScriptRatio": {
+        "ratio": 0.009713182403052295,
+        "ci95": [
+          0.0065214129884417936,
+          0.012894086705118466
+        ],
+        "pairs": 6
+      },
+      "wallRatio": {
+        "ratio": 0.9971578140284952,
+        "ci95": [
+          0.9955167801728546,
+          1.0029298169722198
+        ]
+      }
+    },
+    "drain": {
+      "legacy": {
+        "wallMedianMs": 52717.10000014305,
+        "wallP95Ms": 57067.799999952316,
+        "scriptMedianMs": 1249.738,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null,
+        "intentLatencyMedianMs": 56.80000019073486,
+        "intentLatencyP95Ms": 71.40000009536743,
+        "admissionMedianMs": 28611.60000014305,
+        "admissionP95Ms": 33142.39999985695,
+        "postAdmissionMedianMs": 23819.200000047684,
+        "averageAdmissionPerIntentMedianMs": 57.223200000286106
+      },
+      "worker": {
+        "wallMedianMs": 52439.5,
+        "wallP95Ms": 56542.200000047684,
+        "scriptMedianMs": 755.716,
+        "longTasks": 0,
+        "maxLongTaskMs": 0,
+        "clickP95Ms": null,
+        "frameP95Ms": null,
+        "intentLatencyMedianMs": 57.30000019073486,
+        "intentLatencyP95Ms": 81.90000009536743,
+        "admissionMedianMs": 29274.89999985695,
+        "admissionP95Ms": 33752.699999809265,
+        "postAdmissionMedianMs": 22680.5,
+        "averageAdmissionPerIntentMedianMs": 58.5497999997139
+      },
+      "scriptTimingValid": true,
+      "scriptRatio": {
+        "ratio": 0.6046995450246372,
+        "ci95": [
+          0.5846269601480467,
+          0.6514778047902033
+        ]
+      },
+      "pairedWallRatio": {
+        "ratio": 0.9907899025386457,
+        "ci95": [
+          0.9444886004714329,
+          1.0561929878869452
+        ],
+        "pairs": 6
+      },
+      "pairedScriptRatio": {
+        "ratio": 0.6046995450246372,
+        "ci95": [
+          0.5644782460231275,
+          0.6780350245118508
+        ],
+        "pairs": 6
+      },
+      "wallRatio": {
+        "ratio": 0.994734156466454,
+        "ci95": [
+          0.9190355824915237,
+          1.1343767211628797
+        ]
+      }
+    }
+  },
+  "gate": {
+    "drain": "FAIL",
+    "coldScript": "UNAVAILABLE",
+    "burst": "PASS",
+    "correctness": {
+      "deniedApis": 3,
+      "retryResult": 1,
+      "durableCrashRecovery": true,
+      "batchCrashRecovery": {
+        "durablePrefix": 1,
+        "commands": 32,
+        "sameIds": true
+      },
+      "reconnect": true
+    },
+    "multiTab": {
+      "first": "legacy",
+      "second": "legacy"
+    },
+    "maxLoadFraction": 0.298125
+  }
+}
