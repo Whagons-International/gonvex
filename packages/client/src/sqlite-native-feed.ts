@@ -16,7 +16,7 @@ type Delta=Extract<ServerMessage,{type:'replica.delta'}>;
 export type SQLiteFeedSource={id:string;signature:string;entity:string;key:string;path:string;completeEntity?:true;columns?:readonly string[]};
 type Source=SQLiteFeedSource&{deferredKey:string;bytes:number;start?:Start;preparedStart?:Start;deferActivation?:boolean;opening:boolean;closing?:{promise:Promise<void>;resolve():void;reject(error:unknown):void;timer:ReturnType<typeof setTimeout>}};
 type ControlBatch={state:State;frames:ServerMessage[];admissions:Promise<unknown>[];bytes:number;previous:Promise<void>;preceding:Promise<void>;promise:Promise<void>;resolve():void;reject(error:unknown):void;timer?:ReturnType<typeof setTimeout>};
-type State={catchup:boolean;stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;watermark?:number};
+type State={catchup:boolean;stream:string;generation:number;scope:string;epoch:string;cursorEpoch?:string;logicalScope:string;gate:Promise<void>;ingress:SQLiteNativeIngress;admission?:number;closed:boolean;failure?:unknown;watermark?:number};
 type Options={owner:SQLiteOwnerProgramContext;sessions:SQLiteWorkerSessions;connection:string;artifactHash:string;
  reserve?(bytes:number):()=>void;
  /** Binary pages already own bounded protocol credit and must not consume
@@ -197,7 +197,7 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
  }
  private reject(state:State,error:unknown){if(this.state!==state||state.closed)return;const sourceID=String((error as Error)?.message??error).match(/source:[0-9a-f]{64}/)?.[0],source=sourceID?this.sources.get(sourceID):undefined;
   if((error as {code?:string})?.code==='BUDGET'){this.overflowResyncs++;error=Object.assign(new Error('Replica ingress requires resync after bounded admission overflow'),{code:'PAGE_CHANGED',resyncRequired:true});}
-  if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code,...((error as {resyncRequired?:boolean}).resyncRequired?{resyncRequired:true}:{})});this.stop();this.options.failed(error);}
+  if(source)error=Object.assign(new Error(`${String((error as Error).message)} (${source.path})`),{code:(error as {code?:string}).code,...((error as {resyncRequired?:boolean}).resyncRequired?{resyncRequired:true}:{})});state.failure=error;this.stop();this.options.failed(error);}
  /** Live windows share the authenticated database clock with replica frames. */
  observeCursor(cursor:ReplicaCursor){const state=this.state;if(!state)fail('FENCED','Native feed unavailable');this.check(state!);this.cursor(state!,cursor);}
  databaseEpoch(){return this.state?.cursorEpoch;}
@@ -364,7 +364,11 @@ export class SQLiteNativeFeed implements SQLiteTransportHost {
    if(!cached)fail('FENCED','Native feed unavailable');sqlitePayloadBytes(cached,4096);
    await this.options.owner.runOwner(0,async()=>{await this.options.owner.engine.verifyOwner();await this.readableEpoch(cached.scope,cached.epoch);const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',cached.scope,cached.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Cached feed requires reconciliation of its unfinished group');});return;
   }
-  await state.gate;await state.ingress.flush();await this.run(state,0,async()=>{await this.readableEpoch(state.scope,state.epoch,state.cursorEpoch);if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
+  // Readers already waiting on a failed admission must observe the same error
+  // as the reconnect path. In particular, bounded ingress pressure requests a
+  // resync rather than becoming a permanent query failure in the UI.
+  try{await state.gate;await state.ingress.flush();}catch(error){this.reject(state,error);throw state.failure??error;}
+  await this.run(state,0,async()=>{await this.readableEpoch(state.scope,state.epoch,state.cursorEpoch);if(await this.groups.pending(state.stream))fail('PAGE_CHANGED','Native feed awaits its terminal watermark');const progress=await this.options.owner.database.getFirstAsync<{unclosed:number}>('SELECT unclosed FROM gv_native_feed_progress WHERE scope=? AND epoch=?',state.scope,state.epoch);if(progress?.unclosed)fail('PAGE_CHANGED','Native feed awaits its terminal watermark');});
  }
  private async readableEpoch(scope:string,epoch:string,cursorEpoch?:string){if(await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_resets WHERE scope=?',scope))fail('PAGE_CHANGED','Cache reset awaits its terminal watermark');const current=await this.options.owner.database.getFirstAsync<{value:string}>("SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key='currentEpoch'",scope);if(!current)return;if(cursorEpoch&&current.value!==cursorEpoch)fail('PAGE_CHANGED','Canonical rows need the newly admitted database epoch');const progress=await this.options.owner.database.getFirstAsync('SELECT 1 FROM gv_native_feed_progress WHERE scope=? AND epoch=?',scope,epoch);if(!progress&&current.value!==epoch)fail('PAGE_CHANGED','Canonical rows have no committed admission epoch');}
  /** Only an authenticated registered source can select a pending disk stage.

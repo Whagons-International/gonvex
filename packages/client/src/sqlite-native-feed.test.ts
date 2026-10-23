@@ -538,6 +538,24 @@ it('coalesces ten wait-queue capacities of watermark frames without a budget fai
  for(let n=0;n<2560;n++)expect(()=>f.feed.frame({type:'replica.watermark',revision:11+n},1)).not.toThrow();
  await vi.waitFor(()=>expect(f.watermarks).toContain(2570));expect(f.failures).toEqual([]);expect(f.feed.stats().coalescedWatermarks).toBeGreaterThanOrEqual(2559);expect(budget.stats().peakBytes).toBeLessThanOrEqual(budget.maxBytes);expect(budget.stats().entries).toBe(0);expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual(rows.map(row=>({id:row.id,row})));
 });
+it('returns recoverable admission pressure to a reader waiting on the failed feed barrier',async()=>{
+ let overflow=false;
+ const f=await fixture({acquire:async()=>{if(overflow)throw Object.assign(Error('Native ingress wait budget exhausted'),{code:'BUDGET'});return ()=>{};}});
+ await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ overflow=true;f.transaction(12);
+ await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'PAGE_CHANGED',resyncRequired:true});
+ expect(f.failures).toHaveLength(1);expect(f.failures[0]).toMatchObject({code:'PAGE_CHANGED',resyncRequired:true});
+ expect(await f.canonical.loadEntityRows('visible','tasks',['a','b'])).toEqual(rows.map(row=>({id:row.id,row})));
+ expect(await f.engine.integrity()).toBe('ok');
+});
+it('preserves a permanent feed error for a reader waiting on that barrier',async()=>{
+ let malformed=false;
+ const f=await fixture({acquire:async()=>{if(malformed)throw Object.assign(Error('Invalid native payload'),{code:'INVALID_ROW'});return ()=>{};}});
+ await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await f.feed.assertReadable();
+ malformed=true;f.transaction(12);
+ await expect(f.feed.assertReadable()).rejects.toMatchObject({code:'INVALID_ROW',message:'Invalid native payload'});
+ expect(await f.engine.integrity()).toBe('ok');
+});
 it('drops an overloaded source cohort to resync without throwing or losing committed rows',async()=>{
  const budget=new SQLiteTransientBudget(),f=await fixture({acquire:bytes=>budget.acquire(bytes)});await f.start();await f.append(rows,0,true);await f.ready();f.feed.frame({type:'replica.watermark',revision:10},1);await vi.waitFor(()=>expect(f.watermarks).toContain(10));
  const hash=await digest();for(let n=0;n<2560;n++)expect(()=>f.feed.frame({type:'replica.delta',id:'source',cursor:cursor(11+n),canonicalUpserts:[],deleted:[],digest:hash},1)).not.toThrow();
