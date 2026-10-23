@@ -10,6 +10,14 @@ const packageJSON = JSON.parse(readFileSync(path.join(root, "package.json"), "ut
 const localCompose = readFileSync(path.join(root, "docker-compose.yml"), "utf8");
 const productionCompose = readFileSync(path.join(root, "docker-compose.production.yml"), "utf8");
 const persistentRoot = "/var/lib/gonvex";
+test("dashboard build and runtime use the same immutable fixed Node image", () => {
+  const dashboard = readFileSync(path.join(root, "Dockerfile.dashboard"), "utf8");
+  const images = [...dashboard.matchAll(/^FROM (\S+)(?: AS \S+)?$/gm)].map((match) => match[1]);
+  assert.equal(images.length, 2, "check both dashboard stages");
+  assert.match(images[0], /^node:22\.23\.4-alpine3\.24@sha256:[a-f0-9]{64}$/);
+  assert.equal(images[1], images[0], "build and runtime must share Node and Alpine versions");
+});
+
 test("runtime image contains no application compiler or Go plugin state", () => {
   const stages = dockerfile.split(/(?=^FROM )/m).filter((stage) => stage.startsWith("FROM "));
   const build = stages.find((stage) => / AS rust-build\s*$/m.test(stage));
