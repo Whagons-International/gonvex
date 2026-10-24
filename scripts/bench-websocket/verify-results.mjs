@@ -7,6 +7,8 @@ const rust = JSON.parse(await readFile(`${directory}/rust.json`, 'utf8'));
 const browser = JSON.parse(await readFile(`${directory}/browser.json`, 'utf8'));
 assert.equal(browser.complete, true);
 for (const result of browser.pipeline) {
+  if (result.storage === 'indexeddb') assert.equal(result.independentBrowserContext, true,
+    'Durable trials must use isolated browser contexts and the fresh database checks');
   const matrix = rust.matrix.find(row => ['workload', 'variant', 'codec', 'compression'].every(key => row[key] === result[key]));
   assert.ok(matrix, 'matching Rust compression case');
   assert.equal(result.actualWirePerTrial.frames, matrix.frames);

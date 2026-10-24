@@ -46,8 +46,7 @@ try {
   const smoke = process.env.GONVEX_BENCH_SMOKE === '1';
   results.environment.nodelay = process.env.GONVEX_BENCH_NODELAY === '1';
   if (!smoke && !resume && process.env.GONVEX_BENCH_SKIP_CODECS !== '1') results.codec = await page.evaluate(() => window.codecBench());
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send('Performance.enable');
+  await page.close();
   const fixtures = JSON.parse(await readFile(`${output}/fixtures.json`, 'utf8')).fixtures;
   for (const fixture of fixtures) {
     // The expired resume fixture intentionally reuses a complete snapshot.
@@ -62,6 +61,11 @@ try {
     for (const storage of smoke ? ['memory'] : (process.env.GONVEX_BENCH_STORES?.split(',') ?? ['memory', 'indexeddb'])) for (const candidate of smoke ? candidates.slice(0, 1) : candidates) {
       if (process.env.GONVEX_BENCH_CANDIDATES && !process.env.GONVEX_BENCH_CANDIDATES.split(',').includes(`${candidate.variant}/${candidate.codec}/${candidate.compression}`)) continue;
       if (resume && results.pipeline.some(row => row.workload === fixture.name && row.storage === storage && ['variant', 'codec', 'compression'].every(key => row[key] === candidate[key]))) continue;
+      const page = await browser.newPage();
+      await page.addInitScript(url => { window.benchWsBase = url; }, wire.url);
+      await page.goto(url); await page.waitForFunction(() => window.benchmarkReady, { timeout: 60000 });
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Performance.enable');
       await cdp.send('HeapProfiler.collectGarbage');
       const before = await cdp.send('Performance.getMetrics');
       const wireBefore = { ...wire.totals };
@@ -70,18 +74,20 @@ try {
       cdp.on('Tracing.dataCollected', tracing);
       await cdp.send('Tracing.start', { categories: 'v8,devtools.timeline', transferMode: 'ReportEvents' });
       const result = await page.evaluate(options => window.pipelineBench(options), { workload: fixture.name, ...candidate, storage,
-        samples: fixture.after.length > 1000 ? 8 : fixture.after.length === 1000 ? 30 : 100 });
+        samples: fixture.after.length > 1000 ? 3 : fixture.after.length === 1000 ? 30 : 100, warmups: fixture.after.length > 1000 ? 1 : 5 });
       const after = await cdp.send('Performance.getMetrics');
       const traceEnd = once(cdp, 'Tracing.tracingComplete');
       await cdp.send('Tracing.end'); await traceEnd; cdp.off('Tracing.dataCollected', tracing);
       result.gc = { count: gc.length, totalUs: gc.reduce((sum, e) => sum + e.us, 0), includesUntimedSetup: true };
-      result.actualWirePerTrial = Object.fromEntries(Object.entries(wire.totals).map(([k, v]) => [k, (v - wireBefore[k]) / (result.samples + 5)]));
+      result.actualWirePerTrial = Object.fromEntries(Object.entries(wire.totals).map(([k, v]) => [k, (v - wireBefore[k]) / (result.samples + (result.warmups ?? 5))]));
       const metric = (snapshot, name) => snapshot.metrics.find(m => m.name === name)?.value;
       result.rendererTaskDurationSeconds = metric(after, 'TaskDuration') - metric(before, 'TaskDuration');
       result.heapAfterBytes = metric(after, 'JSHeapUsedSize');
       await cdp.send('HeapProfiler.collectGarbage');
       result.retainedHeapAfterGcBytes = metric(await cdp.send('Performance.getMetrics'), 'JSHeapUsedSize');
+      result.independentBrowserContext = true;
       results.pipeline.push(result);
+      await page.close();
       await writeFile(`${output}/browser.json`, JSON.stringify(results, null, 2) + '\n');
       console.log(`${fixture.name} ${storage} ${candidate.variant} ${candidate.codec} ${candidate.compression}: ${result.latencyMs.p50.toFixed(2)} ms p50`);
     }

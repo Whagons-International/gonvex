@@ -97,7 +97,7 @@ window.pipelineBench = async (options) => {
   const metrics = { latencyMs: [], decodeUs: [], applyUs: [], serverEncodeUs: [], serverCompressSendUs: [], sampledHeapBytes: [] };
   let maxHeap = 0;
   try {
-    for (let trial = -5; trial < options.samples; trial++) {
+    for (let trial = -(options.warmups ?? 5); trial < options.samples; trial++) {
       const namespace = 'gonvex-protocol-benchmark';
       const storage = options.storage === 'indexeddb' ? new IndexedDBEngineReplicaStorage(namespace) : undefined;
       const replica = new LocalReplica(storage, { maxResidentRows: 20000, maxResidentBytes: 128 * 1024 * 1024 });
