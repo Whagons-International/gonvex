@@ -84,7 +84,7 @@ export class RowPatchDecoder {
         if (!version(row.version) || row.version <= newest || bytes > maxBytes) return invalid();
         newest = row.version;
         if (!evicted.has(row.version)) pending.set(row.version, { value, bytes });
-      } else if (row.base !== undefined || bytes <= maxBytes) return invalid();
+      } else if (row.base !== undefined) return invalid();
       decoded.set(row.index, value);
     }
     if (transaction && message.changes.some((change, index) => !object(change)

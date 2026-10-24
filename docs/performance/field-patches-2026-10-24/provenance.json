@@ -1,0 +1,59 @@
+{
+  "base": "e3f35efd9865601ee3148824fc8def2a5157d5c7",
+  "implementationCommit": "9945d4848840f7abd3b1847b2dda8de278194dde",
+  "date": "2026-10-24",
+  "fixtureSha256": "9aaa366942e46fe1fa5fef46745ff96ae527944e2954082a1c31fda1c09221aa",
+  "environment": {
+    "node": "v22.23.4",
+    "os": "7.2.4-arch1-2",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "loadBefore": [
+      2.03,
+      2.36,
+      2.13
+    ],
+    "commit": "e3f35efd9865601ee3148824fc8def2a5157d5c7",
+    "fixtureSha256": "9aaa366942e46fe1fa5fef46745ff96ae527944e2954082a1c31fda1c09221aa",
+    "browser": "149.0.7827.55",
+    "nodelay": true,
+    "loadAfter": [
+      4.94,
+      4.22,
+      2.96
+    ]
+  },
+  "rustCompiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "productionChecks": "Rust 1.94.0",
+  "format": "JSON / native permessage-deflate level 1, server window 12, threshold 1024, no context takeover",
+  "cases": {
+    "rustMatrix": 8,
+    "completeBrowserRun": 16,
+    "initialBrowserRun": 16,
+    "largeRowRepeat": 4
+  },
+  "wireVerification": "All 36 browser cases match independently encoded Rust frame/payload totals. Client benchmark ACKs, server completion trailers, handshake, TCP/IP and TLS bytes excluded.",
+  "method": [
+    "Each trial has ten successive status updates with increasing database revisions. The dictionary starts empty; the first complete value is included.",
+    "Each update waits for a benchmark-only application ACK after local application before sending the next. This is not production flow control.",
+    "Every trial starts from a fresh replica and asserts the actual engine database is empty. Every final row is compared to the fixture.",
+    "The full runs partly overlap builds/tests on a shared workstation. Large-row repeat began after those builds completed. This is not an isolated capacity or WAN test.",
+    "One warmup; 100 single-row trials, 30/16 hundred-row memory/IndexedDB trials, 10/3 thousand-row trials. Small-sample raw tails must not be treated as reliable tail estimates.",
+    "API IndexedDB commits in isolated contexts are measured, not physical persistent-profile disk flush or crash durability.",
+    "Counting System allocator instruments Rust encoder/compressor allocations and peak additional live bytes. It adds overhead and excludes prebuilt input messages.",
+    "Rust matrix includes patch cache/diff construction, JSON encoding and both compression candidates. Complete-row baseline starts after old-image omission; old-image preparation and feed/SQL work are excluded.",
+    "Browser decoding includes JSON.parse, reconstruction, cache checks and freezing. Native PMD inflation is included in overall latency but not separately exposed. SDK dispatch and digest verification are excluded.",
+    "Sampled browser heap is a lower bound. Renderer CPU and GC totals include untimed setup and cleanup."
+  ],
+  "sourceNotes": [
+    "Full-run environment.commit records the base HEAD while the implementation was uncommitted. It is not a claim that field patches existed at that base.",
+    "The initial run predates signed-zero comparison hardening. Final full run includes it. Fixture records do not contain negative zero.",
+    "The large-row repeat records implementation commit 9945d484 and its exact bundle/binary hashes. Later changes allow complete uncached small rows and add richer fixture metadata. Measured rows are cached, so that new uncached validation branch is not exercised by these performance cases.",
+    "The full fixture JSON is generated and not committed; the generator and SHA-256 are supplied. Raw results carry run-specific bundle/binary hashes."
+  ],
+  "validation": [
+    "Full client Vitest suite plus 19 OPFS checks passed; focused final tests cover new codec, storage equivalence, browser-compatible close code and recovery.",
+    "Rust 22 protocol, 25 WebSocket and runtime library/binary/integration tests passed with an owned PostgreSQL 16 fixture. Strict Clippy passed; initial format differences were corrected and format check passed.",
+    "Workspace build/typecheck, eight package tarballs, both example code generators and docs metadata passed.",
+    "Runtime import cycles remained zero, with the same unresolved alias in base and head."
+  ]
+}

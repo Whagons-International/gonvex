@@ -96,3 +96,9 @@ it('preserves signed zero just like native JSON decoding', () => {
   expect(Object.is(before.changes[0].newValue.zero, -0)).toBe(true);
   expect(Object.is(after.changes[0].newValue.zero, 0)).toBe(true);
 });
+
+it('permits complete uncached rows even when the sender chooses a lower cache budget', () => {
+  const decoder = new RowPatchDecoder();
+  expect(decoder.decode(transaction(1, [{ index: 0, value: { id: 'small' } }]))).toBeDefined();
+  expect(decoder.retainedEntries).toBe(0);
+});
