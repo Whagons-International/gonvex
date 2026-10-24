@@ -5,6 +5,7 @@ import { decompress as unzstd } from 'fzstd';
 import unbrotli from 'brotli/decompress.js';
 import { LocalReplica } from '../../packages/client/src/local-replica.ts';
 import { IndexedDBEngineReplicaStorage } from '../../packages/client/src/indexeddb-engine.ts';
+import { RowPatchDecoder } from '../../packages/client/src/row-patch.ts';
 import { applyPatch } from './patch-model.mjs';
 
 const canonical = v => JSON.stringify(v, (_k, value) => value && !Array.isArray(value) && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value);
@@ -95,7 +96,7 @@ window.pipelineBench = async (options) => {
   if (options.compression === 'deflate1-1024' && !socket.extensions.includes('permessage-deflate')) throw new Error('PMD not negotiated');
   const negotiatedExtensions = socket.extensions;
   const metrics = { latencyMs: [], decodeUs: [], applyUs: [], serverEncodeUs: [], serverCompressSendUs: [], sampledHeapBytes: [] };
-  let maxHeap = 0;
+  let maxHeap = 0, dictionaryPeak = 0;
   try {
     for (let trial = -(options.warmups ?? 5); trial < options.samples; trial++) {
       const namespace = 'gonvex-protocol-benchmark';
@@ -105,6 +106,10 @@ window.pipelineBench = async (options) => {
       if (replica.entityRows('tasks').length !== 0) throw new Error('benchmark database is not empty');
       if (fixture.before.length) await replica.replaceWindow({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id',
         rows: fixture.before, cursor: { epoch: 'benchmark-epoch', revision: 1 }, completeness: 'complete', source: 'server' });
+      const dictionary = new RowPatchDecoder();
+      const rounds = options.rounds ?? 1;
+      const baseVariant = options.variant === "wire-patch" ? "no-old" : options.variant;
+      const framesPerRound = fixture.variants[baseVariant].length;
       const bases = new Map(fixture.before.map(row => [row.id, { value: row, revision: 1 }]));
       const deltaBases = new Map(bases);
       let decodeUs = 0, applyUs = 0, seen = 0, elapsed, trailer;
@@ -118,7 +123,9 @@ window.pipelineBench = async (options) => {
             let data = event.data;
             if (typeof data !== 'string' && options.compression === 'zstd3') data = unzstd(new Uint8Array(data));
             if (typeof data !== 'string' && options.compression === 'brotli4') data = unbrotli(new Uint8Array(data));
-            const message = typeof data === 'string' ? JSON.parse(data) : options.codec === 'json' ? JSON.parse(typeof data === 'string' ? data : textDecoder.decode(data)) : decode(new Uint8Array(data));
+            let message = typeof data === 'string' ? JSON.parse(data) : options.codec === 'json' ? JSON.parse(typeof data === 'string' ? data : textDecoder.decode(data)) : decode(new Uint8Array(data));
+            if (message.type === 'replica.rowPatch') message = dictionary.decode(message);
+            if (!message) throw new Error('unexpected duplicate benchmark frame');
             if (message.type === 'bench.done') { trailer = message; resolve(); return; }
             decodeUs += (performance.now() - decoding) * 1000;
             const applying = performance.now();
@@ -144,15 +151,17 @@ window.pipelineBench = async (options) => {
             }
             applyUs += (performance.now() - applying) * 1000;
             seen++;
+            dictionaryPeak = Math.max(dictionaryPeak, dictionary.retainedBytes);
             maxHeap = Math.max(maxHeap, performance.memory?.usedJSHeapSize ?? 0);
-            if (seen === fixture.variants[options.variant].length) elapsed = performance.now() - start;
+            if (rounds > 1 && seen % framesPerRound === 0) socket.send(JSON.stringify({ type: 'bench.ack' }));
+            if (seen === framesPerRound * rounds) elapsed = performance.now() - start;
           }).catch(reject);
         };
         socket.onerror = reject;
         socket.send(JSON.stringify(options));
       });
       // Read the real replica after both consumers have applied the payload.
-      if (canonical(replica.entity('tasks', fixture.after[0].id)) !== canonical(fixture.after[0])) throw new Error('replica mismatch');
+      for (const expected of fixture.after) if (canonical(replica.entity('tasks', expected.id)) !== canonical(expected)) throw new Error('replica mismatch');
       if (trial >= 0) {
         metrics.latencyMs.push(elapsed); metrics.decodeUs.push(decodeUs); metrics.applyUs.push(applyUs);
         metrics.serverEncodeUs.push(trailer.encodeUs); metrics.serverCompressSendUs.push(trailer.compressSendUs);
@@ -168,7 +177,7 @@ window.pipelineBench = async (options) => {
     }
   } finally { socket.close(); }
   return { ...options, negotiatedExtensions, ...Object.fromEntries(Object.entries(metrics).map(([name, samples]) => [name, stats(samples)])),
-    sampledPeakHeapBytes: maxHeap, updatesPerSecond: fixture.after.length * 1000 / stats(metrics.latencyMs).mean,
+    sampledPeakHeapBytes: maxHeap, retainedDictionaryBytes: dictionaryPeak, updatesPerSecond: fixture.after.length * (options.rounds ?? 1) * 1000 / stats(metrics.latencyMs).mean,
     limitation: 'Owned loopback Rust transport to real LocalReplica, optional IndexedDB. Excludes SQL/feed/permissions, SDK dispatch, digest verification, TLS/WAN and reconnect handshake. Snapshots staged in JS; native direct ingestion is not simulated.' };
 };
 window.benchmarkReady = true;

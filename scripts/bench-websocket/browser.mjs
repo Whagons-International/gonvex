@@ -44,6 +44,8 @@ try {
   await page.goto(url); await page.waitForFunction(() => window.benchmarkReady, { timeout: 60000 });
   results.contract = await page.evaluate(() => window.contractBench());
   const smoke = process.env.GONVEX_BENCH_SMOKE === '1';
+  const patchRun = process.env.GONVEX_BENCH_PATCH_ROUNDS !== undefined;
+  const rounds = Number(process.env.GONVEX_BENCH_PATCH_ROUNDS ?? 1);
   results.environment.nodelay = process.env.GONVEX_BENCH_NODELAY === '1';
   if (!smoke && !resume && process.env.GONVEX_BENCH_SKIP_CODECS !== '1') results.codec = await page.evaluate(() => window.codecBench());
   await page.close();
@@ -52,12 +54,14 @@ try {
     // The expired resume fixture intentionally reuses a complete snapshot.
     if (process.env.GONVEX_BENCH_WORKLOADS && !process.env.GONVEX_BENCH_WORKLOADS.split(',').includes(fixture.name)) continue;
     if (fixture.name === 'reconnect-expired-cursor' || (smoke && fixture.name !== 'small-update')) continue;
+    if (patchRun && !fixture.before.length) continue;
     const variants = fixture.before.length ? ['baseline', 'no-old', 'patch'] : ['baseline', 'paged', 'canonical'];
     const candidates = variants.map(variant => ({ variant, codec: 'json', compression: 'deflate1-1024' }));
     candidates.push({ variant: 'baseline', codec: 'msgpack', compression: 'deflate1-1024' },
       { variant: fixture.before.length ? 'no-old' : 'paged', codec: 'msgpack', compression: 'deflate1-1024' },
       { variant: 'baseline', codec: 'json', compression: 'zstd3' },
       { variant: 'baseline', codec: 'json', compression: 'brotli4' });
+    if (patchRun) candidates.splice(0, candidates.length, { variant: 'no-old', codec: 'json', compression: 'deflate1-1024' }, { variant: 'wire-patch', codec: 'json', compression: 'deflate1-1024' });
     for (const storage of smoke ? ['memory'] : (process.env.GONVEX_BENCH_STORES?.split(',') ?? ['memory', 'indexeddb'])) for (const candidate of smoke ? candidates.slice(0, 1) : candidates) {
       if (process.env.GONVEX_BENCH_CANDIDATES && !process.env.GONVEX_BENCH_CANDIDATES.split(',').includes(`${candidate.variant}/${candidate.codec}/${candidate.compression}`)) continue;
       if (resume && results.pipeline.some(row => row.workload === fixture.name && row.storage === storage && ['variant', 'codec', 'compression'].every(key => row[key] === candidate[key]))) continue;
@@ -74,7 +78,7 @@ try {
       cdp.on('Tracing.dataCollected', tracing);
       await cdp.send('Tracing.start', { categories: 'v8,devtools.timeline', transferMode: 'ReportEvents' });
       const result = await page.evaluate(options => window.pipelineBench(options), { workload: fixture.name, ...candidate, storage,
-        samples: fixture.after.length > 1000 ? 3 : fixture.after.length === 1000 ? 30 : 100, warmups: fixture.after.length > 1000 ? 1 : 5 });
+        rounds, samples: patchRun ? (fixture.after.length === 1000 ? (storage === "indexeddb" ? 3 : 10) : fixture.after.length === 100 ? (storage === "indexeddb" ? 16 : 30) : 100) : fixture.after.length > 1000 ? 3 : fixture.after.length === 1000 ? 30 : 100, warmups: patchRun ? 1 : fixture.after.length > 1000 ? 1 : 5 });
       const after = await cdp.send('Performance.getMetrics');
       const traceEnd = once(cdp, 'Tracing.tracingComplete');
       await cdp.send('Tracing.end'); await traceEnd; cdp.off('Tracing.dataCollected', tracing);

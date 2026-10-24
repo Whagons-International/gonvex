@@ -75,6 +75,8 @@ The native path in [snapshot_delivery.rs](../../rust/crates/runtime/src/snapshot
 
 The browser SDK currently advertises only the legacy page capability and parses message data as JSON text. It does not negotiate native canonical snapshots or send their durable ACKs. Enabling those capability bits alone would be incorrect. The canonical snapshot experiment measures JS parsing of row strings, not direct binary storage. A browser implementation should stage each generation in IndexedDB or OPFS, persist pages before acknowledging them, verify the existing digest contract and atomically activate the completed generation. Keep live updates fenced behind that baseline and bound canceled/incomplete generations. This is the next credible memory project, rather than replacing ordinary application objects with a new binary object model.
 
+A subsequent implementation adds opt-in connection-local field patches while retaining the existing durable protocol. See [the field-patch report](field-patches.md) for the implemented contract, measured costs and usage. The prototype numbers above remain historical experimental results.
+
 The incremental order recommended by the measurements is:
 
 1. Ship TCP_NODELAY, negotiated old-image omission and bounded batching of stationary membership writes. These preserve existing protocol and storage contracts.

@@ -11,6 +11,7 @@ for (const result of browser.pipeline) {
     'Durable trials must use isolated browser contexts and the fresh database checks');
   const matrix = rust.matrix.find(row => ['workload', 'variant', 'codec', 'compression'].every(key => row[key] === result[key]));
   assert.ok(matrix, 'matching Rust compression case');
+  if (matrix.rounds !== undefined) assert.equal(result.rounds, matrix.rounds);
   assert.equal(result.actualWirePerTrial.frames, matrix.frames);
   assert.equal(result.actualWirePerTrial.wireBytes, matrix.serverWebSocketBytes,
     `${result.workload}/${result.variant}/${result.codec}/${result.compression}: actual TCP frame bytes differ from matrix`);
