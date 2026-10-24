@@ -1,11 +1,17 @@
 # Gonvex
 
-Gonvex is an open source realtime backend for teams that want a fast
-TypeScript, Postgres, React, and realtime data workflow.
+Gonvex is an open source realtime backend built on Postgres, with TypeScript
+backend functions and generated React bindings.
 
-You write backend functions next to your app, Gonvex generates frontend API
-references, and your React UI calls Queries and Reducers through a persistent
-Local Replica.
+Define reads, writes, and external work beside your app. Gonvex runs your
+functions on a Rust runtime, stores durable data in Postgres, and keeps clients
+up to date through Live Queries or a persistent Local Replica.
+
+[Documentation](https://whagons-international.github.io/gonvex/) ·
+[Quickstart](#quickstart) ·
+[Project blog](https://gabrielmalek.com/projects/gonvex) ·
+[Self-hosting](#self-hosting) ·
+[Contributing](#contributing)
 
 ```tsx
 import { api } from "./gonvex/_generated/api";
@@ -18,9 +24,6 @@ export function Tasks() {
   return <TaskList tasks={tasks ?? []} onCreate={createTask} />;
 }
 ```
-
-Gonvex keeps application state in Postgres while delivering an instant,
-persistent Local Replica to web and mobile clients.
 
 > **Status: beta.** The Rust runtime, self-hosted stack, TypeScript module execution,
 > modular authentication, multi-tenant routing, Live Queries,
@@ -62,15 +65,19 @@ tenant roles, teams, and permissions.
 
 ## Quickstart
 
-First, start the local reference runtime in a separate checkout:
+You need Docker with Compose and Make for the runtime, plus Node.js and npm
+for your app. Repository development uses Node.js 24 and pnpm 11.1.2.
+
+Start the local reference runtime in a separate terminal:
 
 ```bash
 git clone https://github.com/Whagons-International/gonvex.git
 cd gonvex
+cp .env.example .env
 make stack
 ```
 
-Then create a new app:
+Once the stack is ready, create a new app in another terminal:
 
 ```bash
 npm create gonvex@latest my-app
@@ -79,7 +86,11 @@ npm install
 npm run dev
 ```
 
-Or start Gonvex in an existing app:
+The runtime listens at `http://localhost:8080` and the dashboard at
+`http://localhost:3000`. Your app's `npm run dev` starts the frontend and watches
+backend code; keep the runtime stack running separately.
+
+To add Gonvex to an existing app:
 
 ```bash
 npm install --save-dev @gonvex/cli
@@ -336,47 +347,25 @@ For production self-hosting, put the runtime behind TLS, provide managed Postgre
 `VALKEY_URL` is optional. It accelerates dashboard data-explorer reads and has
 no role in reducer, change-feed, visibility, Live Query, or Local Replica correctness.
 
-## Current scope
+## Before production
 
-Gonvex currently includes:
-
-- application execution through exactly Queries, Reducers, and Actions, with
-  structured Live Queries and Replica Collections as Query delivery modes
-- safe Postgres schema sync with project and tenant scopes
-- generated TypeScript API and schema references
-- React hooks for Queries, Reducers, Actions, auth, connection state, Live Queries, and Replica Collections
-- reconnecting WebSocket client with typed failures and operation timeouts
-- exact committed-change routing, canonical Live Query groups, revision-only
-  freshness, unchanged suppression, and adaptive window diffs
-- transparent, scope-isolated persistent Local Replica
-- a normalized Local Replica backed by Postgres revisions and IndexedDB or SQLite
-- multi-project and database-per-tenant routing
-- pluggable Gonvex-native, Firebase, external OIDC, and hybrid authentication,
-  with memberships, invitations, roles, and live session revocation
-- recurring and one-shot scheduled work
-- optional S3-compatible files, browser error reporting, and uploaded data-file
-  analysis
-- dashboard views for projects, tenants, data, functions, files, logs, errors,
-  metrics, realtime connections, and scheduler health
-
-Still in progress before a stable production release:
-
-- migration previews, explicit destructive changes, rollback, and staged tenant
-  rollout controls
-- automated tenant database backup/restore, moves, and fleet operations
-- deployment records, zero-downtime upgrade automation, and rollback tooling
-- organization policy, SSO administration, and audit export
-- a generally available hosted control plane
+Gonvex is in beta. Before adopting it, read the
+[current limits](https://whagons-international.github.io/gonvex/docs/current-limits/)
+and [deployment model](https://whagons-international.github.io/gonvex/docs/deployment/).
+Work still in progress includes migration previews and staged tenant rollouts,
+fleet backup and restore, zero-downtime upgrades and rollback tooling,
+organization policy and SSO administration, and a public hosted control plane.
 
 ## Documentation
 
-- Docs: https://desarso.github.io/gonvex/
-- Quickstart: https://desarso.github.io/gonvex/docs/quickstart/
-- Installation: https://desarso.github.io/gonvex/docs/installation/
-- Deployment model: https://desarso.github.io/gonvex/docs/deployment/
-- Current limits: https://desarso.github.io/gonvex/docs/current-limits/
-- Replica Collections and Local Replica: https://desarso.github.io/gonvex/docs/replica-collections/
-- Scheduling: https://desarso.github.io/gonvex/docs/scheduling/
+- Project blog: [Gonvex by Gabriel Malek](https://gabrielmalek.com/projects/gonvex)
+- [Documentation](https://whagons-international.github.io/gonvex/)
+- [Quickstart](https://whagons-international.github.io/gonvex/docs/quickstart/)
+- [Installation](https://whagons-international.github.io/gonvex/docs/installation/)
+- [Deployment model](https://whagons-international.github.io/gonvex/docs/deployment/)
+- [Current limits](https://whagons-international.github.io/gonvex/docs/current-limits/)
+- [Replica Collections and Local Replica](apps/docs/content/docs/replica-collections.mdx)
+- [Scheduling](https://whagons-international.github.io/gonvex/docs/scheduling/)
 - Public tenant functions for signed-out browsers: [docs/public-functions.md](docs/public-functions.md)
 - Agent function catalog and attribution: [docs/agent-function-catalog-and-attribution.md](docs/agent-function-catalog-and-attribution.md)
 
