@@ -1,0 +1,19 @@
+[package]
+name = "gonvex-websocket-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde_json = "=1.0.151"
+rmp-serde = "1.3"
+flate2 = { version = "=1.1.9", default-features = false, features = ["zlib-rs"] }
+zstd = "0.13"
+brotli = "8"
+gonvex-websocket = { path = "../../../rust/crates/websocket" }
+zlib-rs = "=0.6.7"
+gonvex-protocol = { path = "../../../rust/crates/protocol" }

@@ -92,6 +92,7 @@ export type ReplicaChange = {
   entity: string;
   id: string;
   operation: "insert" | "update" | "delete";
+  /** Legacy optional image. Omitted when replicaNoOldValues is negotiated. */
   oldValue?: JsonValue;
   newValue?: JsonValue;
   changedColumns?: string[];
@@ -174,6 +175,8 @@ export type ReplicaDirective = {
 };
 
 export type ServerCapabilities = {
+  /** Can omit old transaction row images when the client advertises version 1. */
+  replicaNoOldValues?: 1;
   replicaSnapshotPages?: 1;
   /** Accepts cursor + xor1 row-hash digest, with needHashes repair. */
   replicaResume?: 1;
@@ -245,6 +248,8 @@ export type ReplicaReady = {
 };
 
 export type ClientCapabilities = {
+  /** Applies transactions from its local base; does not require oldValue. */
+  replicaNoOldValues?: 1;
   /** Accepts atomically activated replica.snapshotPage frames. */
   replicaSnapshotPages?: 1;
   /** Honors auth.result subscriptionsPreserved on an in-place refresh. */

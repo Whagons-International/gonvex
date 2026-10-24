@@ -1,9 +1,10 @@
 use std::process::ExitCode;
 
+use axum::serve::ListenerExt;
 use gonvex_runtime::config::Config;
 use gonvex_runtime::Runtime;
 use tokio::signal;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -68,7 +69,7 @@ async fn main() -> ExitCode {
 
     info!(%addr, "starting Gonvex Rust runtime");
     let server = axum::serve(
-        listener,
+        listener.tap_io(disable_nagle),
         runtime
             .router()
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -83,4 +84,29 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+fn disable_nagle(stream: &mut tokio::net::TcpStream) {
+    // Protocol frames already batch their headers and payloads. Holding a
+    // following small delta/ready frame for a delayed ACK adds a network stall.
+    if let Err(error) = stream.set_nodelay(true) {
+        warn!(%error, "failed to enable TCP_NODELAY");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_connections_disable_nagle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
+        let (client, accepted) = tokio::join!(client, listener.accept());
+        let _client = client.unwrap();
+        let (mut stream, _) = accepted.unwrap();
+        stream.set_nodelay(false).unwrap();
+        disable_nagle(&mut stream);
+        assert!(stream.nodelay().unwrap());
+    }
 }

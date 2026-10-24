@@ -33,6 +33,41 @@ function window(ids = ['a', 'b'], signature = 'tasks', revision = 1): ReplicaWin
     completeness: 'complete', source: 'server', cursor: { epoch: 'e', revision } };
 }
 const empty = { entities: {}, liveQueries: {} };
+
+it('persists identical replicas for legacy and compact transaction streams', async () => {
+  const legacyStore = store(), compactStore = store();
+  const legacy = replica(legacyStore), compact = replica(compactStore);
+  await legacy.activateScope('tenant-a'); await compact.activateScope('tenant-a');
+  let random = 0x13579bdf;
+  let delayed: Parameters<LocalReplica['applyTransaction']>[0] | undefined;
+  for (let revision = 1; revision <= 64; revision++) {
+    random ^= random << 13; random ^= random >>> 17; random ^= random << 5;
+    const id = `row-${(random >>> 0) % 8}`;
+    const remove = (random >>> 4) % 4 === 0;
+    const change = { entity: 'tasks', id, operation: remove ? 'delete' as const : 'update' as const,
+      oldValue: legacy.entity('tasks', id),
+      ...(remove ? {} : { newValue: { id, value: random & 1 ? null : random, nested: { revision } } }) };
+    const transaction = { cursor: { epoch: 'e', revision }, changes: [change] };
+    const { oldValue, ...withoutOld } = change;
+    await legacy.applyTransaction(transaction, 'tenant-a');
+    await compact.applyTransaction({ ...transaction, changes: [withoutOld] }, 'tenant-a');
+    if (delayed && revision % 3 === 0) {
+      await legacy.applyTransaction(delayed, 'tenant-a');
+      await compact.applyTransaction(delayed, 'tenant-a');
+    }
+    delayed = { ...transaction, changes: [withoutOld] };
+    expect(compact.entityRows('tasks')).toEqual(legacy.entityRows('tasks'));
+  }
+  expect(await compactStore.load('tenant-a')).toEqual(await legacyStore.load('tenant-a'));
+  const restored = replica(compactStore);
+  await restored.activateScope('tenant-a');
+  const byId = (value: LocalReplica) => Object.fromEntries(value.entityRows('tasks').map(row => [String(row.id), row]));
+  expect(byId(restored)).toEqual(byId(compact));
+  await restored.activateScope('tenant-b');
+  await restored.applyTransaction(delayed!, 'tenant-a');
+  expect(restored.entityRows('tasks')).toEqual([]);
+});
+
 async function seed(storage: IndexedDBEngineReplicaStorage, signature = 'tasks', revision = 1) {
   const value = window(['a', 'b'], signature, revision);
   await storage.replaceWindow(value, { ...empty, cursor: value.cursor }, 'default', [{ id: 'a', title: 'A', status: 'new' }, { id: 'b', title: 'B' }]);
