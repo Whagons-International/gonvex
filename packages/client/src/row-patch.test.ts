@@ -102,3 +102,14 @@ it('permits complete uncached rows even when the sender chooses a lower cache bu
   expect(decoder.decode(transaction(1, [{ index: 0, value: { id: 'small' } }]))).toBeDefined();
   expect(decoder.retainedEntries).toBe(0);
 });
+
+it('accepts a later row based on an earlier version in the same atomic frame', () => {
+  const decoder = new RowPatchDecoder();
+  const result: any = decoder.decode(transaction(1, [
+    { index: 0, version: 1, value: { id: 'a', status: 'first' } },
+    { index: 1, version: 2, base: 1, set: { status: 'second' } },
+  ], [1]));
+  expect(result.changes.map((change: any) => change.newValue.status)).toEqual(['first', 'second']);
+  expect(decoder.retainedEntries).toBe(1);
+  expect(decoder.retainedBytes).toBe(new TextEncoder().encode(JSON.stringify({ id: 'a', status: 'second' })).length);
+});

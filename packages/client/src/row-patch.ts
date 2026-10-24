@@ -60,7 +60,7 @@ export class RowPatchDecoder {
       } else {
         if (!version(row.base) || !object(row.set) || (row.unset !== undefined && (!Array.isArray(row.unset)
           || !row.unset.every(key => typeof key === 'string') || new Set(row.unset).size !== row.unset.length))) return invalid();
-        const base = this.entries.get(row.base);
+        const base = pending.get(row.base) ?? this.entries.get(row.base);
         if (!base) throw new Error('missing-replica-row-base');
         value = { ...base.value };
         bytes = base.bytes;
@@ -83,7 +83,7 @@ export class RowPatchDecoder {
       if (row.version !== undefined) {
         if (!version(row.version) || row.version <= newest || bytes > maxBytes) return invalid();
         newest = row.version;
-        if (!evicted.has(row.version)) pending.set(row.version, { value, bytes });
+        pending.set(row.version, { value, bytes });
       } else if (row.base !== undefined) return invalid();
       decoded.set(row.index, value);
     }
@@ -95,10 +95,10 @@ export class RowPatchDecoder {
       const previous = this.entries.get(id);
       if (previous) { bytes -= previous.bytes; count--; }
     }
-    for (const entry of pending.values()) { bytes += entry.bytes; count++; }
+    for (const [id, entry] of pending) if (!evicted.has(id)) { bytes += entry.bytes; count++; }
     if (bytes > maxBytes || count > maxEntries) return invalid();
     for (const id of evicted) this.entries.delete(id);
-    for (const [id, entry] of pending) this.entries.set(id, entry);
+    for (const [id, entry] of pending) if (!evicted.has(id)) this.entries.set(id, entry);
     this.bytes = bytes; this.sequence = frame.sequence; this.lastVersion = newest;
     if (transaction) return { ...message, changes: message.changes.map((change, index) =>
       decoded.has(index) ? { ...change, newValue: decoded.get(index)! } : change) };
