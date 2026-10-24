@@ -33,10 +33,82 @@ function window(ids = ['a', 'b'], signature = 'tasks', revision = 1): ReplicaWin
     completeness: 'complete', source: 'server', cursor: { epoch: 'e', revision } };
 }
 const empty = { entities: {}, liveQueries: {} };
+
+it('persists identical replicas for legacy and compact transaction streams', async () => {
+  const legacyStore = store(), compactStore = store();
+  const legacy = replica(legacyStore), compact = replica(compactStore);
+  await legacy.activateScope('tenant-a'); await compact.activateScope('tenant-a');
+  let random = 0x13579bdf;
+  let delayed: Parameters<LocalReplica['applyTransaction']>[0] | undefined;
+  for (let revision = 1; revision <= 64; revision++) {
+    random ^= random << 13; random ^= random >>> 17; random ^= random << 5;
+    const id = `row-${(random >>> 0) % 8}`;
+    const remove = (random >>> 4) % 4 === 0;
+    const change = { entity: 'tasks', id, operation: remove ? 'delete' as const : 'update' as const,
+      oldValue: legacy.entity('tasks', id),
+      ...(remove ? {} : { newValue: { id, value: random & 1 ? null : random, nested: { revision } } }) };
+    const transaction = { cursor: { epoch: 'e', revision }, changes: [change] };
+    const { oldValue, ...withoutOld } = change;
+    await legacy.applyTransaction(transaction, 'tenant-a');
+    await compact.applyTransaction({ ...transaction, changes: [withoutOld] }, 'tenant-a');
+    if (delayed && revision % 3 === 0) {
+      await legacy.applyTransaction(delayed, 'tenant-a');
+      await compact.applyTransaction(delayed, 'tenant-a');
+    }
+    delayed = { ...transaction, changes: [withoutOld] };
+    expect(compact.entityRows('tasks')).toEqual(legacy.entityRows('tasks'));
+  }
+  expect(await compactStore.load('tenant-a')).toEqual(await legacyStore.load('tenant-a'));
+  const restored = replica(compactStore);
+  await restored.activateScope('tenant-a');
+  const byId = (value: LocalReplica) => Object.fromEntries(value.entityRows('tasks').map(row => [String(row.id), row]));
+  expect(byId(restored)).toEqual(byId(compact));
+  await restored.activateScope('tenant-b');
+  await restored.applyTransaction(delayed!, 'tenant-a');
+  expect(restored.entityRows('tasks')).toEqual([]);
+});
+
 async function seed(storage: IndexedDBEngineReplicaStorage, signature = 'tasks', revision = 1) {
   const value = window(['a', 'b'], signature, revision);
   await storage.replaceWindow(value, { ...empty, cursor: value.cursor }, 'default', [{ id: 'a', title: 'A', status: 'new' }, { id: 'b', title: 'B' }]);
 }
+
+it('batches stationary membership hashes and startup patches without changing order or scope', async () => {
+  const storage = store(), db = (storage as any).database;
+  const before = Array.from({ length: 300 }, (_, i) => ({ id: String(i), status: 'open' }));
+  const after = before.map(row => ({ ...row, status: 'done' }));
+  const first = { ...window(before.map(row => row.id)), hashes: await replicaRowsHashes(before, 'id') };
+  await storage.replaceWindow(first, empty, 'default', before);
+  const next = { ...first, cursor: { epoch: 'e', revision: 2 }, hashes: await replicaRowsHashes(after, 'id') };
+  const reads = vi.spyOn(db.members, 'get'), writes = vi.spyOn(db.members, 'put');
+  const bulkReads = vi.spyOn(db.members, 'bulkGet'), bulkWrites = vi.spyOn(db.members, 'bulkPut');
+  await storage.applyWindowDelta(next, { upserts: after, deleted: [] }, { ...empty, cursor: next.cursor });
+  expect(reads).not.toHaveBeenCalled(); expect(writes).not.toHaveBeenCalled();
+  expect(bulkReads).toHaveBeenCalledTimes(3); expect(bulkWrites).toHaveBeenCalledTimes(3);
+  const loaded = await storage.load();
+  expect(loaded!.liveQueries.tasks.ids).toEqual(first.ids);
+  expect(loaded!.liveQueries.tasks.hashes).toEqual(next.hashes);
+  expect(Object.values(loaded!.entities.tasks).every((row: any) => row.status === 'done')).toBe(true);
+  const startup = await storage.loadWorkingSet('default', { maxRows: 1000, maxBytes: Infinity });
+  expect(startup!.liveQueries.tasks.ids).toEqual(first.ids);
+  expect(startup!.liveQueries.tasks.hashes).toEqual(next.hashes);
+  expect(await storage.load('other-tenant')).toBeUndefined();
+});
+
+it('rolls back batched members, row authority and cursor if a startup patch fails', async () => {
+  const storage = store(), db = (storage as any).database;
+  await seed(storage);
+  const before = await storage.load();
+  const failure = vi.spyOn(db.meta, 'bulkPut').mockRejectedValueOnce(new Error('startup patch failed'));
+  const next = window(['a', 'b'], 'tasks', 2);
+  await expect(storage.applyWindowDelta(next, { upserts: [{ id: 'a', title: 'Changed' }], deleted: [] },
+    { ...empty, cursor: next.cursor })).rejects.toThrow('startup patch failed');
+  failure.mockRestore();
+  expect(await storage.load()).toEqual(before);
+  const startup = await storage.loadWorkingSet('default', { maxRows: 100, maxBytes: Infinity });
+  expect(startup!.entities.tasks.a).toEqual(before!.entities.tasks.a);
+  expect(startup!.cursor).toEqual(before!.cursor);
+});
 
 it('isolates the engine namespace from an open legacy database and exports a client storage option', async () => {
   const name = 'shared-name';
@@ -61,7 +133,8 @@ it('writes one member and metadata only, and never rereads its adjacent row comm
   const metadataPut = vi.spyOn(db.windows, 'put'), reads = vi.spyOn(storage, 'readChanges');
   await local.applyWindowDelta({ signature: 'tasks', kind: 'replica', entity: 'tasks', key: 'id',
     upserts: [{ id: 'id-500', title: 'new' }], deleted: [], cursor: { epoch: 'e', revision: 2 } });
-  expect(reads).not.toHaveBeenCalled(); expect(memberPut).toHaveBeenCalledOnce(); expect(fullMembers).not.toHaveBeenCalled();
+  expect(reads).not.toHaveBeenCalled(); expect(memberPut).not.toHaveBeenCalled();
+  expect(fullMembers.mock.calls.flatMap(call => call[0])).toHaveLength(1);
   expect(JSON.parse(metadataPut.mock.calls[0][0].value)).not.toHaveProperty('ids');
   expect(JSON.parse(metadataPut.mock.calls[0][0].value)).not.toHaveProperty('hashes');
   await local.applyTransaction({ cursor: { epoch: 'e', revision: 3 }, changes: [{ entity: 'tasks', id: 'id-500', operation: 'update', newValue: { title: 'transaction' } }] });

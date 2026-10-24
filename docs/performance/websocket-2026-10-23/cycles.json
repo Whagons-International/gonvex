@@ -1,0 +1,1 @@
+{"tool":"madge 8.0.0, TS type imports excluded","base":{"cycles":[],"warnings":{"skipped":["@gonvex/local-runtime/read-view","@gonvex/local-runtime/portable-client","@gonvex/local-runtime/portable"]}},"head":{"cycles":[],"warnings":{"skipped":["@gonvex/local-runtime/read-view","@gonvex/local-runtime/portable-client","@gonvex/local-runtime/portable"]}},"unchanged":true}

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod replica_digest;
+mod replica_wire;
+pub use replica_wire::encode_compact_replica_transaction;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 
@@ -163,6 +165,9 @@ pub struct BrowserTelemetryInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCapabilities {
+    /// Applies replica transactions from its local base, without old row images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_no_old_values: Option<u8>,
     /// Client understands sum128-v1 Replica Collection integrity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_set_digest: Option<u8>,
@@ -433,6 +438,9 @@ pub struct PerformanceTelemetryEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
+    /// Omits old row images only when the client also advertises version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_no_old_values: Option<u8>,
     /// sum128-v1 is selected only when both peers advertise version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_set_digest: Option<u8>,
@@ -784,6 +792,32 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn old_value_omission_is_an_optional_versioned_capability() {
+        round_trip_client(r#"{"type":"auth","id":"a","capabilities":{"replicaNoOldValues":1}}"#);
+        round_trip_server(r#"{"type":"session.ready","capabilities":{"replicaNoOldValues":1}}"#);
+        let absent: ClientCapabilities = serde_json::from_str("{}").unwrap();
+        assert_ne!(absent.replica_no_old_values, Some(1));
+        for version in [0, 2, 255] {
+            let caps: ClientCapabilities = serde_json::from_value(serde_json::json!({
+                "replicaNoOldValues": version
+            }))
+            .unwrap();
+            assert_ne!(caps.replica_no_old_values, Some(1));
+        }
+        // Old clients keep accepting old and new images. Compact transactions
+        // retain the existing optional-field schema and complete new images.
+        for old in [false, true] {
+            let mut value = serde_json::json!({"type":"replica.transaction","cursor":{"epoch":"e","revision":2},
+                "changes":[{"entity":"tasks","id":"a","operation":"update","newValue":{"id":"a","nullable":null}}]});
+            if old {
+                value["changes"][0]["oldValue"] = serde_json::json!({"id":"a","nullable":1});
+            }
+            let parsed: ServerMessage = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        }
+    }
 
     #[test]
     fn native_snapshot_capabilities_frames_and_ack_round_trip() {

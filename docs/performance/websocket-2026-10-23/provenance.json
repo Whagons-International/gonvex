@@ -1,0 +1,57 @@
+{
+  "date": "2026-10-23 US/Pacific",
+  "base": "d860fb7e5cfa11ce7effe712351025ce25f1a647",
+  "productionCommits": [
+    "9350845b",
+    "cc004a7d"
+  ],
+  "fixtureSha256": "9aaa366942e46fe1fa5fef46745ff96ae527944e2954082a1c31fda1c09221aa",
+  "compiler": {
+    "matrix": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "productionChecks": "Rust 1.94.0",
+    "node": "v22.23.4",
+    "browser": "Chromium 149.0.7827.55"
+  },
+  "rustCodecVersions": {
+    "serde_json": "1.0.151",
+    "flate2": "1.1.9",
+    "zlib-rs": "0.6.7",
+    "rmp-serde": "1.3.1",
+    "zstd": "0.13.3",
+    "brotli": "8.0.4"
+  },
+  "browserCodecVersions": {
+    "@msgpack/msgpack": "3.1.3",
+    "@playwright/test": "1.61.0",
+    "esbuild": "0.28.2",
+    "flatbuffers": "25.9.23",
+    "protobufjs": "8.8.1",
+    "fzstd": "0.1.1",
+    "brotli": "1.3.3"
+  },
+  "host": "Shared AMD Ryzen 7 5800X 8-Core Processor, Linux 7.2.4-arch1-2. Not an isolated capacity test.",
+  "sourceNotes": [
+    "environment.commit records HEAD at run start; benchmark and production edits were still uncommitted during early measurements. It is not a claim that the benchmark existed at that commit.",
+    "rust.json uses protocol-shaped serde_json::Value fixtures. boundaries.json and guard-encoding.json use the actual typed ServerMessage serializer and production compact encoder.",
+    "Valid memory measurements predate per-case browser context isolation. Final IndexedDB measurements use fresh contexts and assert empty actual engine databases before every trial.",
+    "Earlier IndexedDB timings with incorrect namespace cleanup were discarded. No such timing is delivered.",
+    "The main browser bundle predates cc004a7d membership batching. after-storage.json includes that change with the same fixtures and wire settings.",
+    "Some native builds overlapped early memory trials. Cold snapshot trials overlapped the storage-after run. IndexedDB variability is large; do not infer universal speedups or rank codecs by the noisy durable cases.",
+    "IndexedDB API commits in isolated contexts are measured, not physical persistent-profile disk flush or crash durability.",
+    "Native PMD browser decompression is included in latency. Browser decodeUs does not separately observe native inflation.",
+    "Snapshot samples are limited to three durable or eight memory observations. Raw p95/p99 fields for those samples are not reliable tail estimates.",
+    "SQL, permissions, SDK dispatch, digest verification, auth/reconnect handshakes, TLS and WAN are excluded. Expired cursor is encoded as full-resnapshot fallback only.",
+    "Raw browser files record repeated run hashes. Original pre-resume bundle hash: 861bd965dceab11d56863235176fa56d032400ef7bdc5e2cbcc150d074673688; original matrix binary hash: 5418684584148e1fcde5e1aa8753cc4b502b1eb697fc21dac8f5fc182fae7818."
+  ],
+  "validation": {
+    "client": "Full Vitest suite and 19 OPFS checks pass, including bounded membership writes and atomic rollback.",
+    "rust": "17 protocol tests, 24 WebSocket tests, 190 runtime library tests, TCP_NODELAY binary test and eight PostgreSQL snapshot regressions passed. Runtime suite preceded final compact-helper relocation; final strict Clippy checks current runtime integration.",
+    "workspace": "pnpm build:packages, pnpm typecheck, 8 package tarballs, both example codegens, docs metadata, Rust fmt and strict Clippy passed.",
+    "patchModel": "10,000 seeded transitions; experimental only, not formal verification.",
+    "runtimeCycles": "0 base, 0 head, same three unresolved package aliases; see cycles.json."
+  },
+  "matrixCases": 324,
+  "browserPipelineCases": 70,
+  "storageAfterCases": 4,
+  "wireVerification": "All 70 matrix/browser cases and four storage-after cases match actual TCP-counted frame and payload bytes."
+}
