@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { RowPatchDecoder } from './row-patch.js';
 
@@ -112,4 +112,13 @@ it('accepts a later row based on an earlier version in the same atomic frame', (
   expect(result.changes.map((change: any) => change.newValue.status)).toEqual(['first', 'second']);
   expect(decoder.retainedEntries).toBe(1);
   expect(decoder.retainedBytes).toBe(new TextEncoder().encode(JSON.stringify({ id: 'a', status: 'second' })).length);
+});
+
+it('does not require TextEncoder while importing or creating an inactive decoder', async () => {
+  vi.resetModules();
+  vi.stubGlobal('TextEncoder', undefined);
+  try {
+    const { RowPatchDecoder: InactiveDecoder } = await import('./row-patch.js');
+    expect(new InactiveDecoder().retainedBytes).toBe(0);
+  } finally { vi.unstubAllGlobals(); }
 });
