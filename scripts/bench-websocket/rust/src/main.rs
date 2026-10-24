@@ -306,34 +306,44 @@ async fn websocket(State(state): State<Arc<Bench>>, request: Request) -> Respons
                     .iter()
                     .find(|v| v["name"] == request["workload"])
                     .unwrap();
-                let frames = fixture["variants"][request["variant"].as_str().unwrap()]
-                    .as_array()
-                    .unwrap();
+                let field_patches = request["variant"] == "wire-patch";
+                let rounds = request["rounds"].as_u64().unwrap_or(1) as usize;
+                let frames = stream_frames(fixture, rounds, if field_patches { "no-old" } else { request["variant"].as_str().unwrap() });
                 let codec = request["codec"].as_str().unwrap();
                 let compression = request["compression"].as_str().unwrap();
                 let mut encode_us = 0.0;
                 let mut send_us = 0.0;
-                for frame in frames {
+                let mut dictionary = gonvex_protocol::row_patch::RowPatchEncoder::default();
+                let mut retained = 0;
+                for round in frames.chunks(frames.len() / rounds) {
+                  for frame in round {
+                    let typed = if rounds > 1 || field_patches { Some(serde_json::from_value::<gonvex_protocol::ServerMessage>(frame.clone()).unwrap()) } else { None };
                     let start = Instant::now();
-                    let bytes = encode(frame, codec);
+                    let prepared = if field_patches { dictionary.prepare(typed.as_ref().unwrap()).unwrap() } else { None };
+                    retained = retained.max(dictionary.retained_bytes());
+                    let (bytes, patch) = if let Some((full, patch)) = prepared { (full.into_bytes(), patch) }
+                      else if let Some(typed) = &typed { (serde_json::to_vec(typed).unwrap(), None) }
+                      else { (encode(frame, codec), None) };
                     encode_us += start.elapsed().as_secs_f64() * 1e6;
                     let start = Instant::now();
-                    let message = if compression == "zstd3" || compression == "brotli4" {
-                        axum::extract::ws::Message::Binary(
-                            compress(&bytes, compression, &[]).into(),
-                        )
-                    } else if codec == "json" {
-                        axum::extract::ws::Message::Text(String::from_utf8(bytes).unwrap().into())
+                    if let Some(patch) = patch {
+                        if socket.send_best_text(std::str::from_utf8(&bytes).unwrap(), &patch).await.is_err() { return; }
                     } else {
-                        axum::extract::ws::Message::Binary(bytes.into())
-                    };
-                    if socket.send(message).await.is_err() {
-                        return;
+                        let message = if compression == "zstd3" || compression == "brotli4" {
+                            axum::extract::ws::Message::Binary(compress(&bytes, compression, &[]).into())
+                        } else if codec == "json" { axum::extract::ws::Message::Text(String::from_utf8(bytes).unwrap().into()) }
+                        else { axum::extract::ws::Message::Binary(bytes.into()) };
+                        if socket.send(message).await.is_err() { return; }
                     }
                     send_us += start.elapsed().as_secs_f64() * 1e6;
+                  }
+                  if rounds > 1 {
+                    let Some(Ok(axum::extract::ws::Message::Text(ack))) = socket.next().await else { return };
+                    if serde_json::from_str::<Value>(&ack).unwrap()["type"] != "bench.ack" { return; }
+                  }
                 }
                 let trailer =
-                    json!({"type":"bench.done","encodeUs":encode_us,"compressSendUs":send_us})
+                    json!({"type":"bench.done","encodeUs":encode_us,"compressSendUs":send_us,"retainedRowBytes":retained})
                         .to_string();
                 if socket
                     .send(axum::extract::ws::Message::Text(trailer.into()))
@@ -347,10 +357,141 @@ async fn websocket(State(state): State<Arc<Bench>>, request: Request) -> Respons
     )
     .await
 }
+fn stream_frames(fixture: &Value, rounds: usize, variant: &str) -> Vec<Value> {
+    let frames = fixture["variants"][variant].as_array().unwrap();
+    let mut output = Vec::new();
+    for round in 0..rounds {
+        for frame in frames {
+            let mut frame = frame.clone();
+            if rounds > 1 {
+                let revision = round as u64 + 2;
+                let status = if round % 2 == 1 || round + 1 == rounds {
+                    "done"
+                } else {
+                    "in-progress"
+                };
+                if frame.get("cursor").is_some() {
+                    frame["cursor"]["revision"] = json!(revision);
+                }
+                if frame["type"] == "replica.watermark" {
+                    frame["revision"] = json!(revision);
+                }
+                if let Some(changes) = frame.get_mut("changes").and_then(Value::as_array_mut) {
+                    for change in changes {
+                        change["newValue"]["status"] = json!(status);
+                    }
+                }
+                if let Some(rows) = frame.get_mut("upserts").and_then(Value::as_array_mut) {
+                    for row in rows {
+                        row["status"] = json!(status);
+                    }
+                }
+            }
+            output.push(frame);
+        }
+    }
+    output
+}
+
+fn patch_matrix(source: &Value, output: &str) {
+    let rounds = 10;
+    let mut results = Vec::new();
+    for fixture in source["fixtures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| !f["before"].as_array().unwrap().is_empty())
+    {
+        let messages: Vec<gonvex_protocol::ServerMessage> =
+            stream_frames(fixture, rounds, "no-old")
+                .into_iter()
+                .map(|v| serde_json::from_value(v).unwrap())
+                .collect();
+        for patches in [false, true] {
+            let run = || {
+                let mut dictionary = gonvex_protocol::row_patch::RowPatchEncoder::default();
+                let mut wire = 0;
+                let mut cold = 0;
+                let mut payload = 0;
+                let mut retained = 0;
+                for (i, message) in messages.iter().enumerate() {
+                    let prepared = if patches {
+                        dictionary.prepare(message).unwrap()
+                    } else {
+                        None
+                    };
+                    let (full, patch) =
+                        prepared.unwrap_or_else(|| (serde_json::to_string(message).unwrap(), None));
+                    let full = compress(full.as_bytes(), "deflate1-1024", &[]);
+                    let bytes = patch
+                        .map(|p| compress(p.as_bytes(), "deflate1-1024", &[]))
+                        .filter(|p| p.len() < full.len())
+                        .unwrap_or(full);
+                    payload += bytes.len();
+                    wire += bytes.len()
+                        + if bytes.len() < 126 {
+                            2
+                        } else if bytes.len() < 65536 {
+                            4
+                        } else {
+                            10
+                        };
+                    if i < 4 {
+                        cold = wire;
+                    }
+                    retained = retained.max(dictionary.retained_bytes());
+                }
+                (wire, cold, payload, retained)
+            };
+            let (wire, cold, payload, retained) = run();
+            let measured = measure(
+                || {
+                    black_box(run());
+                },
+                if fixture["before"].as_array().unwrap().len() >= 1000 {
+                    8
+                } else {
+                    100
+                },
+            );
+            results.push(json!({"workload":fixture["name"],"variant":if patches {"wire-patch"} else {"no-old"}, "codec":"json","compression":"deflate1-1024","rounds":rounds,
+          "serverWebSocketBytes":wire,"coldUpdateBytes":cold,"warmUpdatesBytes":wire-cold,"compressedPayloadBytes":payload,"frames":messages.len(),"retainedRowBytes":retained,"encodeAndCompress":measured}));
+        }
+    }
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&json!({"matrix":results})).unwrap(),
+    )
+    .unwrap();
+}
+
+fn patch_contract(source: &Value, output: &str) {
+    let mut encoder = gonvex_protocol::row_patch::RowPatchEncoder::default();
+    let cases: Vec<_> = source["cases"].as_array().unwrap().iter().map(|case| {
+        let message: gonvex_protocol::ServerMessage = serde_json::from_value(case["logical"].clone()).unwrap();
+        let (full, patch) = encoder.prepare(&message).unwrap().unwrap();
+        json!({"logical":serde_json::to_value(message).unwrap(),"full":serde_json::from_str::<Value>(&full).unwrap(),
+            "patch":patch.map(|text| serde_json::from_str::<Value>(&text).unwrap())})
+    }).collect();
+    std::fs::write(
+        output,
+        serde_json::to_vec_pretty(&json!({"version":1,"cases":cases})).unwrap(),
+    )
+    .unwrap();
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<_> = std::env::args().collect();
     let source: Value = serde_json::from_slice(&std::fs::read(&args[2]).unwrap()).unwrap();
+    if args[1] == "patch-matrix" {
+        patch_matrix(&source, &args[3]);
+        return;
+    }
+    if args[1] == "patch-contract" {
+        patch_contract(&source, &args[3]);
+        return;
+    }
     if args[1] == "matrix" {
         matrix(&source, &args[3]);
         return;

@@ -1341,6 +1341,8 @@ async fn websocket(
     let mut replica_sum_digest_enabled = false;
     let mut replica_native_rows_enabled = false;
     let mut replica_no_old_values_enabled = false;
+    let mut replica_field_patches_enabled = false;
+    let mut row_patches = gonvex_protocol::row_patch::RowPatchEncoder::default();
     let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
     let mut legacy_snapshot_delivery = snapshot_delivery::LegacySnapshotDelivery::default();
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
@@ -1373,6 +1375,7 @@ async fn websocket(
         replica: None,
         capabilities: Some(ServerCapabilities {
             replica_no_old_values: Some(1),
+            replica_field_patches: Some(1),
             replica_snapshot_pages: Some(1),
             replica_set_digest: Some(1),
             replica_native_rows: Some(1),
@@ -1403,6 +1406,7 @@ async fn websocket(
     macro_rules! discard_tenant_session {
         () => {{
             replicas.clear();
+            row_patches.clear();
             replica_opens.clear();
             pending_replica_opens.clear();
             snapshot_delivery.clear();
@@ -1565,6 +1569,21 @@ async fn websocket(
                             match runtime.apply_feed_event(session, &mut replicas, event).await {
                                 Ok(messages) => {
                                     for mut message in messages {
+                                        if replica_field_patches_enabled && !replica_native_rows_enabled {
+                                            match row_patches.prepare(&message) {
+                                                Ok(Some((full, patch))) => {
+                                                    let result = if let Some(patch) = patch {
+                                                        socket.send_best_text(&full, &patch).await
+                                                    } else {
+                                                        socket.send(Message::Text(full.into())).await
+                                                    };
+                                                    if result.is_err() { return; }
+                                                    continue;
+                                                }
+                                                Ok(None) => {}
+                                                Err(_) => return,
+                                            }
+                                        }
                                         if replica_no_old_values_enabled && !replica_native_rows_enabled {
                                             match gonvex_protocol::encode_compact_replica_transaction(&mut message, socket.compression_threshold()) {
                                                 Ok(Some(encoded)) => {
@@ -2086,6 +2105,9 @@ async fn websocket(
                         snapshot_pages_negotiated(capabilities.as_ref());
                     replica_no_old_values_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_no_old_values) == Some(1);
+                    replica_field_patches_enabled =
+                        capabilities.as_ref().and_then(|c| c.replica_field_patches) == Some(1);
+                    row_patches.clear();
                     replica_native_rows_enabled =
                         snapshot_delivery::negotiated(capabilities.as_ref());
                     snapshot_delivery.set_native(replica_native_rows_enabled);

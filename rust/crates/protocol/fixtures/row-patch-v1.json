@@ -1,0 +1,382 @@
+{
+  "cases": [
+    {
+      "full": {
+        "evicted": [],
+        "message": {
+          "changes": [
+            {
+              "entity": "tasks",
+              "id": "a",
+              "operation": "update"
+            }
+          ],
+          "cursor": {
+            "epoch": "e",
+            "revision": 1
+          },
+          "originCommandId": "command",
+          "type": "replica.transaction"
+        },
+        "rows": [
+          {
+            "index": 0,
+            "value": {
+              "__proto__": "data",
+              "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+              "id": "a",
+              "nested": {
+                "before": 1
+              },
+              "nullable": 7,
+              "removed": true,
+              "status": "open"
+            },
+            "version": 1
+          }
+        ],
+        "sequence": 1,
+        "type": "replica.rowPatch"
+      },
+      "logical": {
+        "changes": [
+          {
+            "entity": "tasks",
+            "id": "a",
+            "newValue": {
+              "__proto__": "data",
+              "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+              "id": "a",
+              "nested": {
+                "before": 1
+              },
+              "nullable": 7,
+              "removed": true,
+              "status": "open"
+            },
+            "operation": "update"
+          }
+        ],
+        "cursor": {
+          "epoch": "e",
+          "revision": 1
+        },
+        "originCommandId": "command",
+        "type": "replica.transaction"
+      },
+      "patch": null
+    },
+    {
+      "full": {
+        "evicted": [
+          1
+        ],
+        "message": {
+          "changes": [
+            {
+              "entity": "tasks",
+              "id": "a",
+              "operation": "update"
+            }
+          ],
+          "cursor": {
+            "epoch": "e",
+            "revision": 2
+          },
+          "originCommandId": "command",
+          "type": "replica.transaction"
+        },
+        "rows": [
+          {
+            "index": 0,
+            "value": {
+              "__proto__": "data",
+              "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+              "id": "a",
+              "nested": {
+                "after": 2
+              },
+              "nullable": null,
+              "status": "done"
+            },
+            "version": 2
+          }
+        ],
+        "sequence": 2,
+        "type": "replica.rowPatch"
+      },
+      "logical": {
+        "changes": [
+          {
+            "entity": "tasks",
+            "id": "a",
+            "newValue": {
+              "__proto__": "data",
+              "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+              "id": "a",
+              "nested": {
+                "after": 2
+              },
+              "nullable": null,
+              "status": "done"
+            },
+            "operation": "update"
+          }
+        ],
+        "cursor": {
+          "epoch": "e",
+          "revision": 2
+        },
+        "originCommandId": "command",
+        "type": "replica.transaction"
+      },
+      "patch": {
+        "evicted": [
+          1
+        ],
+        "message": {
+          "changes": [
+            {
+              "entity": "tasks",
+              "id": "a",
+              "operation": "update"
+            }
+          ],
+          "cursor": {
+            "epoch": "e",
+            "revision": 2
+          },
+          "originCommandId": "command",
+          "type": "replica.transaction"
+        },
+        "rows": [
+          {
+            "base": 1,
+            "index": 0,
+            "set": {
+              "nested": {
+                "after": 2
+              },
+              "nullable": null,
+              "status": "done"
+            },
+            "unset": [
+              "removed"
+            ],
+            "version": 2
+          }
+        ],
+        "sequence": 2,
+        "type": "replica.rowPatch"
+      }
+    },
+    {
+      "full": {
+        "evicted": [],
+        "message": {
+          "cursor": {
+            "epoch": "e",
+            "revision": 2
+          },
+          "deleted": [
+            "gone"
+          ],
+          "digest": "digest",
+          "id": "sub",
+          "originCommandIds": [
+            "command"
+          ],
+          "type": "replica.delta",
+          "upserts": []
+        },
+        "rows": [
+          {
+            "index": 0,
+            "value": {
+              "__proto__": "data",
+              "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+              "id": "a",
+              "nested": {
+                "after": 2
+              },
+              "nullable": null,
+              "status": "done"
+            },
+            "version": 3
+          }
+        ],
+        "sequence": 3,
+        "type": "replica.rowPatch"
+      },
+      "logical": {
+        "cursor": {
+          "epoch": "e",
+          "revision": 2
+        },
+        "deleted": [
+          "gone"
+        ],
+        "digest": "digest",
+        "id": "sub",
+        "originCommandIds": [
+          "command"
+        ],
+        "type": "replica.delta",
+        "upserts": [
+          {
+            "__proto__": "data",
+            "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+            "id": "a",
+            "nested": {
+              "after": 2
+            },
+            "nullable": null,
+            "status": "done"
+          }
+        ]
+      },
+      "patch": null
+    },
+    {
+      "full": {
+        "evicted": [
+          3
+        ],
+        "message": {
+          "cursor": {
+            "epoch": "e",
+            "revision": 3
+          },
+          "deleted": [
+            "gone"
+          ],
+          "digest": "digest",
+          "id": "sub",
+          "originCommandIds": [
+            "command"
+          ],
+          "type": "replica.delta",
+          "upserts": []
+        },
+        "rows": [
+          {
+            "index": 0,
+            "value": {
+              "__proto__": "data",
+              "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+              "id": "a",
+              "nested": {
+                "after": 2
+              },
+              "nullable": null,
+              "status": "archived"
+            },
+            "version": 4
+          }
+        ],
+        "sequence": 4,
+        "type": "replica.rowPatch"
+      },
+      "logical": {
+        "cursor": {
+          "epoch": "e",
+          "revision": 3
+        },
+        "deleted": [
+          "gone"
+        ],
+        "digest": "digest",
+        "id": "sub",
+        "originCommandIds": [
+          "command"
+        ],
+        "type": "replica.delta",
+        "upserts": [
+          {
+            "__proto__": "data",
+            "description": "東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀東京😀",
+            "id": "a",
+            "nested": {
+              "after": 2
+            },
+            "nullable": null,
+            "status": "archived"
+          }
+        ]
+      },
+      "patch": {
+        "evicted": [
+          3
+        ],
+        "message": {
+          "cursor": {
+            "epoch": "e",
+            "revision": 3
+          },
+          "deleted": [
+            "gone"
+          ],
+          "digest": "digest",
+          "id": "sub",
+          "originCommandIds": [
+            "command"
+          ],
+          "type": "replica.delta",
+          "upserts": []
+        },
+        "rows": [
+          {
+            "base": 3,
+            "index": 0,
+            "set": {
+              "status": "archived"
+            },
+            "version": 4
+          }
+        ],
+        "sequence": 4,
+        "type": "replica.rowPatch"
+      }
+    },
+    {
+      "full": {
+        "evicted": [],
+        "message": {
+          "changes": [
+            {
+              "entity": "tasks",
+              "id": "a",
+              "operation": "delete"
+            }
+          ],
+          "cursor": {
+            "epoch": "e",
+            "revision": 4
+          },
+          "originCommandId": "command",
+          "type": "replica.transaction"
+        },
+        "rows": [],
+        "sequence": 5,
+        "type": "replica.rowPatch"
+      },
+      "logical": {
+        "changes": [
+          {
+            "entity": "tasks",
+            "id": "a",
+            "operation": "delete"
+          }
+        ],
+        "cursor": {
+          "epoch": "e",
+          "revision": 4
+        },
+        "originCommandId": "command",
+        "type": "replica.transaction"
+      },
+      "patch": null
+    }
+  ],
+  "version": 1
+}

@@ -11,6 +11,7 @@ use serde_json::Value;
 
 pub mod replica_digest;
 mod replica_wire;
+pub mod row_patch;
 pub use replica_wire::encode_compact_replica_transaction;
 
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -168,6 +169,9 @@ pub struct ClientCapabilities {
     /// Applies replica transactions from its local base, without old row images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_no_old_values: Option<u8>,
+    /// Connection-local field patches, restored before durable replica application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_field_patches: Option<u8>,
     /// Client understands sum128-v1 Replica Collection integrity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_set_digest: Option<u8>,
@@ -441,6 +445,9 @@ pub struct ServerCapabilities {
     /// Omits old row images only when the client also advertises version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_no_old_values: Option<u8>,
+    /// Connection-local field patches, restored before durable replica application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_field_patches: Option<u8>,
     /// sum128-v1 is selected only when both peers advertise version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_set_digest: Option<u8>,
