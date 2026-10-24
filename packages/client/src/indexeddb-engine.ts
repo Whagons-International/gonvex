@@ -174,13 +174,17 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     return `startup:${JSON.stringify([signature, generation])}:`;
   }
 
-  private async cacheMember(member: MemberRecord | { scope: string; signature: string; generation: number; id: string; deleted: true }) {
+  private memberCacheRecord(member: MemberRecord | { scope: string; signature: string; generation: number; id: string; deleted: true }) {
     const value = 'deleted' in member ? { id: member.id, deleted: true } : {
       id: member.id, order: member.order, hash: member.hash ? hexHash(member.hash) : undefined,
       duplicateOrders: member.duplicateOrders, hashOnly: member.hashOnly,
     };
-    await this.database.meta.put({ scope: member.scope,
-      key: this.startupPrefix(member.signature, member.generation) + JSON.stringify(member.id), value: JSON.stringify(value) });
+    return { scope: member.scope,
+      key: this.startupPrefix(member.signature, member.generation) + JSON.stringify(member.id), value: JSON.stringify(value) };
+  }
+
+  private async cacheMember(member: MemberRecord | { scope: string; signature: string; generation: number; id: string; deleted: true }) {
+    await this.database.meta.put(this.memberCacheRecord(member));
   }
 
   private async putMember(member: MemberRecord) {
@@ -784,24 +788,48 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
           while (next < window.ids.length && changed.has(window.ids[next]!)) next++;
           return [{ id, moved: Boolean(window.orderBy), after: window.ids[index - 1], before: window.ids[next] }];
         });
-        for (const change of edits) {
-          const key: [string, string, number, string] = [normalizedScope, window.signature, generation, change.id];
-          const prior = await this.database.members.get(key);
-          if ((!prior || prior.hashOnly) && !change.moved) {
-            const index = window.ids.indexOf(change.id);
-            if (index < 0) continue;
-            change.moved = true;
-            if (!delta.memberships) { change.after ??= window.ids[index - 1]; }
-            else { change.after = window.ids[index - 1]; change.before = window.ids[index + 1]; }
+        // Existing, stationary members have no order dependencies. Read and
+        // write these records together, including their startup-cache patches,
+        // inside this same transaction. Inserts, hash-only tombstones and moves
+        // keep the sequential path because later neighbors can depend on them.
+        const stationary = edits.every(change => !change.moved);
+        for (let offset = 0; offset < edits.length; offset += membershipBatchSize) {
+          const batch = edits.slice(offset, offset + membershipBatchSize);
+          if (stationary) {
+            const previous = await this.database.members.bulkGet(batch.map(change =>
+              [normalizedScope, window.signature, generation, change.id] as [string, string, number, string]));
+            if (batch.every((_, index) => previous[index] && !previous[index]!.hashOnly && previous[index]!.order.length <= 64)) {
+              const members = batch.map((change, index): MemberRecord => ({
+                scope: normalizedScope, signature: window.signature, generation, entity: window.entity,
+                id: change.id, order: previous[index]!.order,
+                hash: binaryHash(window.hashes?.[change.id]), duplicateOrders: previous[index]!.duplicateOrders,
+              }));
+              await Promise.all([
+                this.database.members.bulkPut(members),
+                this.database.meta.bulkPut(members.map(member => this.memberCacheRecord(member))),
+              ]);
+              continue;
+            }
           }
-          const order = change.moved || !prior ? orderBetween(
-            change.after ? (await this.database.members.get([normalizedScope, window.signature, generation, change.after]))?.order : undefined,
-            change.before ? (await this.database.members.get([normalizedScope, window.signature, generation, change.before]))?.order : undefined,
-          ) : prior.order;
-          await this.putMember({ scope: normalizedScope, signature: window.signature, generation,
-            entity: window.entity, id: change.id, order,
-            hash: binaryHash(window.hashes?.[change.id]), duplicateOrders: prior?.duplicateOrders });
-          if (order.length > 64) await this.rebalance(normalizedScope, window.signature, generation, order);
+          for (const change of batch) {
+            const key: [string, string, number, string] = [normalizedScope, window.signature, generation, change.id];
+            const prior = await this.database.members.get(key);
+            if ((!prior || prior.hashOnly) && !change.moved) {
+              const index = window.ids.indexOf(change.id);
+              if (index < 0) continue;
+              change.moved = true;
+              if (!delta.memberships) { change.after ??= window.ids[index - 1]; }
+              else { change.after = window.ids[index - 1]; change.before = window.ids[index + 1]; }
+            }
+            const order = change.moved || !prior ? orderBetween(
+              change.after ? (await this.database.members.get([normalizedScope, window.signature, generation, change.after]))?.order : undefined,
+              change.before ? (await this.database.members.get([normalizedScope, window.signature, generation, change.before]))?.order : undefined,
+            ) : prior.order;
+            await this.putMember({ scope: normalizedScope, signature: window.signature, generation,
+              entity: window.entity, id: change.id, order,
+              hash: binaryHash(window.hashes?.[change.id]), duplicateOrders: prior?.duplicateOrders });
+            if (order.length > 64) await this.rebalance(normalizedScope, window.signature, generation, order);
+          }
         }
         await this.reconcileCheckpointHashes(normalizedScope, window, generation);
         await this.writeMetadata(normalizedScope, window, sequence, generation, check.prior.startupSequence !== undefined && check.prior.startupSequence === check.prior.sequence);

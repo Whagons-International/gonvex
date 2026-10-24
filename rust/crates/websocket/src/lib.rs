@@ -95,7 +95,7 @@ where
                 BytesMut::new(),
                 ratchet_core::Role::Server,
             );
-            callback(WebSocket::compressed(socket)).await;
+            callback(WebSocket::compressed(socket, threshold)).await;
         }
     });
     response.map(|_| axum::body::Body::empty()).into_response()
@@ -110,6 +110,7 @@ pub enum WebSocket {
 }
 
 pub struct Compressed {
+    threshold: usize,
     sender: ratchet_core::Sender<IoStream, Encode>,
     receiver: mpsc::Receiver<Result<ws::Message, axum::Error>>,
     reader: JoinHandle<()>,
@@ -132,7 +133,7 @@ impl Stream for WebSocket {
 }
 
 impl WebSocket {
-    fn compressed(socket: CompressedSocket) -> Self {
+    fn compressed(socket: CompressedSocket, threshold: usize) -> Self {
         let (sender, mut receiver) = socket.split().expect("fresh socket");
         let (tx, rx) = mpsc::channel(1);
         // Ratchet reads are not cancellation safe. Keep them in an owned task;
@@ -175,10 +176,19 @@ impl WebSocket {
             }
         });
         Self::Compressed(Box::new(Compressed {
+            threshold,
             sender,
             receiver: rx,
             reader,
         }))
+    }
+
+    /// The actual negotiated transport threshold; plain fallback cannot compress.
+    pub fn compression_threshold(&self) -> Option<usize> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Compressed(socket) => Some(socket.threshold),
+        }
     }
 
     pub async fn next(&mut self) -> Option<Result<ws::Message, axum::Error>> {
@@ -352,7 +362,11 @@ mod tests {
             threshold,
             4096,
             4096,
-            |mut socket| async move {
+            move |mut socket| async move {
+                assert_eq!(
+                    socket.compression_threshold(),
+                    matches!(socket, WebSocket::Compressed(_)).then_some(threshold),
+                );
                 loop {
                     // Exercise the same repeated cancellation as the runtime select loop.
                     let frame = match tokio::time::timeout(

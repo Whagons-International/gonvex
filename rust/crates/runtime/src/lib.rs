@@ -1340,6 +1340,7 @@ async fn websocket(
     let mut replica_snapshot_pages_enabled = false;
     let mut replica_sum_digest_enabled = false;
     let mut replica_native_rows_enabled = false;
+    let mut replica_no_old_values_enabled = false;
     let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
     let mut legacy_snapshot_delivery = snapshot_delivery::LegacySnapshotDelivery::default();
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
@@ -1371,6 +1372,7 @@ async fn websocket(
         tenant: None,
         replica: None,
         capabilities: Some(ServerCapabilities {
+            replica_no_old_values: Some(1),
             replica_snapshot_pages: Some(1),
             replica_set_digest: Some(1),
             replica_native_rows: Some(1),
@@ -1562,7 +1564,17 @@ async fn websocket(
                             }
                             match runtime.apply_feed_event(session, &mut replicas, event).await {
                                 Ok(messages) => {
-                                    for message in messages {
+                                    for mut message in messages {
+                                        if replica_no_old_values_enabled && !replica_native_rows_enabled {
+                                            match gonvex_protocol::encode_compact_replica_transaction(&mut message, socket.compression_threshold()) {
+                                                Ok(Some(encoded)) => {
+                                                    if socket.send(Message::Text(encoded.into())).await.is_err() { return; }
+                                                    continue;
+                                                }
+                                                Ok(None) => {}
+                                                Err(_) => return,
+                                            }
+                                        }
                                         if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                                     }
                                     // This is the connection-level commit
@@ -2072,6 +2084,8 @@ async fn websocket(
                     }
                     replica_snapshot_pages_enabled =
                         snapshot_pages_negotiated(capabilities.as_ref());
+                    replica_no_old_values_enabled =
+                        capabilities.as_ref().and_then(|c| c.replica_no_old_values) == Some(1);
                     replica_native_rows_enabled =
                         snapshot_delivery::negotiated(capabilities.as_ref());
                     snapshot_delivery.set_native(replica_native_rows_enabled);

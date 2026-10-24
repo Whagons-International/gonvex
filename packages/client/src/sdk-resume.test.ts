@@ -137,10 +137,40 @@ it.each([true, false])("honors the token refresh preservation acknowledgement: %
   value.setAuth({ token: "refreshed", identity: { sub: "account", iss: "project" } });
   const auth = socket.sent.findLast(frame => frame.type === "auth");
   expect(auth.capabilities.preserveSubscriptions).toBe(1);
+  expect(auth.capabilities.replicaNoOldValues).toBe(1);
   socket.receive({ type: "auth.result", id: auth.id, result: { replica: directive, ...(preserved ? { subscriptionsPreserved: true } : {}) } });
   await vi.waitFor(() => expect((value as any).authInFlight).toBe(false));
   expect(socket.sent.filter(frame => frame.type === "replica.open")).toHaveLength(preserved ? 1 : 2);
   expect(socket.sent.filter(frame => frame.type === "query.subscribe")).toHaveLength(queryOpens + (preserved ? 0 : 1));
+});
+
+it("applies transactions without old images across duplicates, deletes, reload and scope changes", async () => {
+  const storage = new MemoryLocalReplicaStorage();
+  const replica = new LocalReplica(storage);
+  await replica.activateScope("tenant-a");
+  await replica.replaceWindow({ signature: "tasks", kind: "replica", entity: "tasks", key: "id",
+    rows: [{ id: "a", title: "Cached", nullable: 1 }, { id: "b" }],
+    cursor: { epoch: "e", revision: 1 }, completeness: "complete", source: "server" });
+  const transaction = { cursor: { epoch: "e", revision: 3 }, changes: [
+    { entity: "tasks", id: "a", operation: "update" as const, newValue: { id: "a", nullable: null } },
+    { entity: "tasks", id: "b", operation: "delete" as const },
+  ] };
+  await replica.applyTransaction(transaction, "tenant-a");
+  await replica.applyTransaction(transaction, "tenant-a");
+  await replica.applyTransaction({ cursor: { epoch: "e", revision: 2 }, changes: [
+    { entity: "tasks", id: "a", operation: "update", newValue: { nullable: 2 } },
+    { entity: "tasks", id: "b", operation: "insert", newValue: { id: "b" } },
+  ] }, "tenant-a");
+  expect(replica.entity("tasks", "a")).toEqual({ id: "a", title: "Cached", nullable: null });
+  expect(replica.entity("tasks", "b")).toBeUndefined();
+  const restored = new LocalReplica(storage);
+  await restored.activateScope("tenant-a");
+  expect(restored.entity("tasks", "a")).toEqual(replica.entity("tasks", "a"));
+  expect(restored.entity("tasks", "b")).toBeUndefined();
+  await restored.activateScope("tenant-b");
+  await restored.applyTransaction(transaction, "tenant-a");
+  expect(restored.entityRows("tasks")).toEqual([]);
+  replica.dispose(); restored.dispose();
 });
 
 it("accepts an equal-revision full result during snapshot recovery or reconnect", () => {
