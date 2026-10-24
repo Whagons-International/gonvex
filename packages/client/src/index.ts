@@ -1,3 +1,4 @@
+import { RowPatchDecoder } from "./row-patch.js";
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
 import type { DataRead } from "@gonvex/module-sdk";
 import type {
@@ -525,6 +526,8 @@ export type GonvexClientAuth = {
 export type GonvexClientOptions = GonvexClientAuth & {
   /** Disable negotiated snapshot paging for a runtime rollback. Defaults to true. */
   replicaSnapshotPages?: boolean;
+  /** Opt into bounded connection-local field patches. Defaults to false. */
+  replicaFieldPatches?: boolean;
   /** Control Plane only, including tenant-scoped control calls. Disables local data and outbox. */
   role?: "control";
   /** Anonymous, online-only connection scoped to one tenant ID or routing domain. */
@@ -638,6 +641,7 @@ export class GonvexClient {
   private querySubscribeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private serverCapabilities: ServerCapabilities = {};
   private readonly replicaSnapshotPagesEnabled: boolean;
+  private replicaFieldPatchesEnabled: boolean;
   private activeArtifactHashValue = "";
   private readonly publicTenant?: string;
   private auth: GonvexClientAuth = {};
@@ -772,6 +776,7 @@ export class GonvexClient {
       options.querySubscriptionRetentionMs,
     );
     this.replicaSnapshotPagesEnabled = options.replicaSnapshotPages !== false;
+    this.replicaFieldPatchesEnabled = options.replicaFieldPatches === true;
     this.replicaSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.replicaSubscriptionRetentionMs,
     );
@@ -1881,6 +1886,7 @@ export class GonvexClient {
       transportUrl = publicUrl.toString();
     }
     const socket = new WebSocket(transportUrl);
+    const rowPatches = new RowPatchDecoder();
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -1901,6 +1907,7 @@ export class GonvexClient {
       this.notifyConnectionState();
     });
     socket.addEventListener("close", () => {
+      rowPatches.clear();
       if (this.socket !== socket || this.manuallyClosed) return;
       this.flushTelemetry();
       this.publishTenantAdmission(undefined);
@@ -1936,7 +1943,26 @@ export class GonvexClient {
       if (this.socket !== socket) return;
       let message: ServerMessage;
       try {
-        message = JSON.parse(String(event.data)) as ServerMessage;
+        const frame = JSON.parse(String(event.data));
+        if (frame?.type === "replica.rowPatch") {
+          try {
+            if (!this.replicaFieldPatchesEnabled || this.serverCapabilities.replicaFieldPatches !== 1) throw new Error("unnegotiated-replica-row-patch");
+            const decoded = rowPatches.decode(frame);
+            if (!decoded) return;
+            message = decoded;
+          } catch {
+            // Do not apply part of the frame or allow a queued watermark past
+            // it. Reconnect using complete logical rows for this client.
+            this.replicaFieldPatchesEnabled = false;
+            this.isWebSocketConnected = false;
+            this.replica.setFreshness("verifying");
+            socket.close(4002, "replica row patch recovery");
+            return;
+          }
+        } else {
+          message = frame as ServerMessage;
+        }
+        if (message.type === "auth.result") rowPatches.clear();
       } catch {
         return;
       }
@@ -4885,7 +4911,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
+		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 },
     });
   }
 

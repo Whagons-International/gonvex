@@ -7,6 +7,7 @@ use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
@@ -71,10 +72,12 @@ where
     let upgraded = hyper::upgrade::on(&mut request);
     tokio::spawn(async move {
         if let Ok(stream) = upgraded.await {
+            let alternative = Arc::default();
             let extension = Deflate {
                 encoder: Encode {
                     window_bits: selection.server_window,
                     threshold,
+                    alternative: Arc::clone(&alternative),
                 },
                 decoder: Decode {
                     window_bits: selection.client_window,
@@ -95,7 +98,7 @@ where
                 BytesMut::new(),
                 ratchet_core::Role::Server,
             );
-            callback(WebSocket::compressed(socket, threshold)).await;
+            callback(WebSocket::compressed(socket, threshold, alternative)).await;
         }
     });
     response.map(|_| axum::body::Body::empty()).into_response()
@@ -111,9 +114,19 @@ pub enum WebSocket {
 
 pub struct Compressed {
     threshold: usize,
+    alternative: Arc<Mutex<Option<Vec<u8>>>>,
     sender: ratchet_core::Sender<IoStream, Encode>,
     receiver: mpsc::Receiver<Result<ws::Message, axum::Error>>,
     reader: JoinHandle<()>,
+}
+
+// Cancellation or an early write error must never leave a candidate armed for
+// a later, unrelated text message.
+struct AlternativeGuard(Arc<Mutex<Option<Vec<u8>>>>);
+impl Drop for AlternativeGuard {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().take();
+    }
 }
 
 impl Drop for Compressed {
@@ -133,7 +146,11 @@ impl Stream for WebSocket {
 }
 
 impl WebSocket {
-    fn compressed(socket: CompressedSocket, threshold: usize) -> Self {
+    fn compressed(
+        socket: CompressedSocket,
+        threshold: usize,
+        alternative: Arc<Mutex<Option<Vec<u8>>>>,
+    ) -> Self {
         let (sender, mut receiver) = socket.split().expect("fresh socket");
         let (tx, rx) = mpsc::channel(1);
         // Ratchet reads are not cancellation safe. Keep them in an owned task;
@@ -177,6 +194,7 @@ impl WebSocket {
         });
         Self::Compressed(Box::new(Compressed {
             threshold,
+            alternative,
             sender,
             receiver: rx,
             reader,
@@ -195,6 +213,34 @@ impl WebSocket {
         match self {
             Self::Plain(socket) => socket.recv().await,
             Self::Compressed(socket) => socket.receiver.recv().await,
+        }
+    }
+
+    /// Compare both complete text messages using the actual negotiated PMD
+    /// settings. The extension sends the selected compressed bytes directly;
+    /// it does not recompress the winner. Plain connections compare raw bytes.
+    pub async fn send_best_text(&mut self, full: &str, patch: &str) -> Result<(), axum::Error> {
+        match self {
+            Self::Plain(socket) => {
+                socket
+                    .send(ws::Message::Text(
+                        if patch.len() < full.len() {
+                            patch
+                        } else {
+                            full
+                        }
+                        .to_owned()
+                        .into(),
+                    ))
+                    .await
+            }
+            Self::Compressed(socket) => {
+                let guard = AlternativeGuard(Arc::clone(&socket.alternative));
+                *socket.alternative.lock().unwrap() = Some(patch.as_bytes().to_vec());
+                let result = socket.sender.write_text(full).await;
+                drop(guard);
+                result.map_err(axum::Error::new)
+            }
         }
     }
 
@@ -238,6 +284,7 @@ struct Deflate {
 struct Encode {
     window_bits: u8,
     threshold: usize,
+    alternative: Arc<Mutex<Option<Vec<u8>>>>,
 }
 #[derive(Debug)]
 struct Decode {
@@ -249,6 +296,28 @@ struct Decode {
 impl ExtensionEncoder for Encode {
     type Error = io::Error;
     fn encode(&mut self, payload: &mut BytesMut, header: &mut FrameHeader) -> io::Result<()> {
+        if header.opcode == OpCode::Text {
+            let alternative = self.alternative.lock().unwrap().take();
+            if let Some(alternative) = alternative {
+                if !header.fin {
+                    return Err(io::Error::other(
+                        "outgoing alternatives require a complete message",
+                    ));
+                }
+                let full = compress_text(payload, self.window_bits, self.threshold)?;
+                let patch = compress_text(&alternative, self.window_bits, self.threshold)?;
+                if patch.as_ref().map_or(alternative.len(), Vec::len)
+                    < full.as_ref().map_or(payload.len(), Vec::len)
+                {
+                    header.rsv1 = patch.is_some();
+                    *payload = patch.as_deref().unwrap_or(&alternative).into();
+                } else if let Some(full) = full {
+                    *payload = full.as_slice().into();
+                    header.rsv1 = true;
+                }
+                return Ok(());
+            }
+        }
         if payload.len() < self.threshold {
             return Ok(());
         }
@@ -257,44 +326,50 @@ impl ExtensionEncoder for Encode {
                 "outgoing compression requires a complete message",
             ));
         }
-        // Both directions negotiate no context takeover. Allocate codec state for
-        // this call rather than retaining an allocation on idle sockets.
-        let mut codec = Compress::new_with_window_bits(
-            Compression::new(COMPRESSION_LEVEL),
-            false,
-            self.window_bits,
-        );
-        let mut encoded = Vec::with_capacity(payload.len() / 4);
-        let mut scratch = [0; 8192];
-        loop {
-            let before_in = codec.total_in();
-            let before_out = codec.total_out();
-            codec
-                .compress(
-                    &payload[before_in as usize..],
-                    &mut scratch,
-                    FlushCompress::Sync,
-                )
-                .map_err(io::Error::other)?;
-            let written = (codec.total_out() - before_out) as usize;
-            encoded.extend_from_slice(&scratch[..written]);
-            if codec.total_in() as usize == payload.len() && written < scratch.len() {
-                break;
-            }
-            if codec.total_in() == before_in && written == 0 {
-                return Err(io::Error::other("compressor stalled"));
-            }
-        }
-        if !encoded.ends_with(&[0, 0, 255, 255]) {
-            return Err(io::Error::other("missing deflate trailer"));
-        }
-        encoded.truncate(encoded.len() - 4);
-        if encoded.len() < payload.len() {
-            *payload = encoded.as_slice().into();
+        if let Some(bytes) = compress_text(payload, self.window_bits, self.threshold)? {
+            *payload = bytes.as_slice().into();
             header.rsv1 = true;
         }
         Ok(())
     }
+}
+
+fn compress_text(payload: &[u8], window_bits: u8, threshold: usize) -> io::Result<Option<Vec<u8>>> {
+    if payload.len() < threshold {
+        return Ok(None);
+    }
+    // No context takeover, including when comparing alternatives.
+    let mut codec =
+        Compress::new_with_window_bits(Compression::new(COMPRESSION_LEVEL), false, window_bits);
+    let mut encoded = Vec::with_capacity(payload.len() / 4);
+    let mut scratch = [0; 8192];
+    loop {
+        let before_in = codec.total_in();
+        let before_out = codec.total_out();
+        codec
+            .compress(
+                &payload[before_in as usize..],
+                &mut scratch,
+                FlushCompress::Sync,
+            )
+            .map_err(io::Error::other)?;
+        let written = (codec.total_out() - before_out) as usize;
+        encoded.extend_from_slice(&scratch[..written]);
+        if codec.total_in() as usize == payload.len() && written < scratch.len() {
+            break;
+        }
+        if codec.total_in() == before_in && written == 0 {
+            return Err(io::Error::other("compressor stalled"));
+        }
+    }
+    if !encoded.ends_with(&[0, 0, 255, 255]) {
+        return Err(io::Error::other("missing deflate trailer"));
+    }
+    encoded.truncate(encoded.len() - 4);
+    if encoded.len() < payload.len() {
+        return Ok(Some(encoded));
+    }
+    Ok(None)
 }
 impl ExtensionDecoder for Decode {
     type Error = io::Error;
@@ -349,6 +424,46 @@ impl SplittableExtension for Deflate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alternative_selection_compares_compressed_bytes_and_reuses_the_winner() {
+        for (full, patch, expected) in [
+            (
+                "a".repeat(4096),
+                "short but less compressible".repeat(8),
+                "a".repeat(4096),
+            ),
+            ("a".repeat(4096), "ok".to_owned(), "ok".to_owned()),
+            (
+                "complete".to_owned(),
+                "patch".to_owned(),
+                "patch".to_owned(),
+            ),
+        ] {
+            let alternative = Arc::new(Mutex::new(Some(patch.into_bytes())));
+            let mut encoder = Encode {
+                window_bits: 12,
+                threshold: 1024,
+                alternative: alternative.clone(),
+            };
+            let mut payload = BytesMut::from(full.as_bytes());
+            let mut header = FrameHeader {
+                fin: true,
+                rsv1: false,
+                rsv2: false,
+                rsv3: false,
+                opcode: OpCode::Text,
+            };
+            encoder.encode(&mut payload, &mut header).unwrap();
+            let decoded = if header.rsv1 {
+                inflate_message(&payload, 12, 8192).unwrap()
+            } else {
+                payload.to_vec()
+            };
+            assert_eq!(decoded, expected.as_bytes());
+            assert!(alternative.lock().unwrap().is_none());
+        }
+    }
     use axum::{extract::State, routing::get, Router};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -857,6 +972,7 @@ mod tests {
         let mut encoder = Encode {
             window_bits: 12,
             threshold: 1024,
+            alternative: Arc::default(),
         };
         let mut seed = 42u32;
         let data: Vec<u8> = (0..2048)
@@ -885,6 +1001,7 @@ mod tests {
         let mut encoder = Encode {
             window_bits: 12,
             threshold: 1024,
+            alternative: Arc::default(),
         };
         let mut seed = 42u32;
         for size in [1024, 8192, 131072] {

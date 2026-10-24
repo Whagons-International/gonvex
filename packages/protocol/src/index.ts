@@ -177,6 +177,8 @@ export type ReplicaDirective = {
 export type ServerCapabilities = {
   /** Can omit old transaction row images when the client advertises version 1. */
   replicaNoOldValues?: 1;
+  /** Connection-local field patches, decoded before applying logical messages. */
+  replicaFieldPatches?: 1;
   replicaSnapshotPages?: 1;
   /** Accepts cursor + xor1 row-hash digest, with needHashes repair. */
   replicaResume?: 1;
@@ -250,6 +252,8 @@ export type ReplicaReady = {
 export type ClientCapabilities = {
   /** Applies transactions from its local base; does not require oldValue. */
   replicaNoOldValues?: 1;
+  /** Connection-local field patches, decoded before applying logical messages. */
+  replicaFieldPatches?: 1;
   /** Accepts atomically activated replica.snapshotPage frames. */
   replicaSnapshotPages?: 1;
   /** Honors auth.result subscriptionsPreserved on an in-place refresh. */
@@ -556,3 +560,21 @@ export type ServerMessage =
   | { type: "action.error"; id: string; path?: string; error: string; trace?: MessageTrace }
   | { type: "client.updateRequired"; reason: string; contract: number }
   | { type: "system.reload"; reason: string; artifactHash?: string };
+
+/** A transport envelope, never a durable replica mutation. Versions and sequence
+ * are scoped to one successful auth on one WebSocket. Rows replace only object
+ * newValue slots in transactions, or the complete upserts array in a delta. */
+export type ReplicaRowPatchFrame = {
+  type: "replica.rowPatch";
+  sequence: number;
+  message: Extract<ServerMessage, { type: "replica.transaction" | "replica.delta" }>;
+  rows: Array<{
+    index: number;
+    version?: number;
+    value?: Record<string, JsonValue>;
+    base?: number;
+    set?: Record<string, JsonValue>;
+    unset?: string[];
+  }>;
+  evicted: number[];
+};

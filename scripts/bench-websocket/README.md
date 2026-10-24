@@ -45,3 +45,30 @@ Snapshots stage decoded rows in JavaScript, then activate through LocalReplica. 
 There are 100 measured trials plus five warmups for small/100-row updates, 30 trials for 1,000-row updates, and three trials for expensive 10k-row IndexedDB snapshots with one warmup. The recorded memory snapshot cases have eight trials and five warmups. Update cases have five warmups. The recorded run used 100 trials for the memory 1,000-row case before adopting the smaller expensive-write sample count. Snapshot p95/p99 are maxima of a small sample, not reliable tail estimates. CDP reports renderer task duration, GC events, sampled heap and retained heap after forced collection. CPU/GC totals include untimed setup and cleanup. Sampled peak heap is a lower bound and not an allocation count. These are single-machine synthetic experiments, not production capacity or WAN latency claims.
 
 `patch-model.mjs` is an experiment, not a supported protocol. Its seeded model tests exercise nulls, explicit deletion, duplicate delivery, ordering and missing-base recovery. Shipping it also needs persisted per-field authority, epoch/scope binding, projection changes, permission changes, crash/multi-tab races and atomic full-row repair. It is not imported by production code.
+
+
+## Negotiated field patches
+
+The implemented v1 codec is separate from the original seeded patch prototype. Run the actual Rust encoder and browser decoder over ten successive changing updates with:
+
+```sh
+"$ARTIFACTS/target/release/gonvex-websocket-bench" patch-matrix \
+  "$ARTIFACTS/fixtures.json" "$ARTIFACTS/rust.json"
+GONVEX_BENCH_BINARY="$ARTIFACTS/target/release/gonvex-websocket-bench" \
+  GONVEX_BENCH_NODELAY=1 GONVEX_BENCH_PATCH_ROUNDS=10 \
+  GONVEX_BENCH_SKIP_CODECS=1 TMPDIR="$ARTIFACTS" \
+  node scripts/bench-websocket/browser.mjs "$ARTIFACTS"
+node scripts/bench-websocket/verify-results.mjs "$ARTIFACTS"
+```
+
+Both variants start from empty wire dictionaries. The first complete update is included, and statuses alternate with increasing database revisions. A benchmark-only ACK waits for application of each update before the server proceeds; this does not alter production flow control. `no-old` is the typed complete-row baseline for these fixtures. The baseline codec measurement excludes prior old-image preparation and SQL/feed work. The `wire-patch` variant uses production `RowPatchEncoder`, `RowPatchDecoder` and the WebSocket selector that compares actual negotiated compressed sizes without recompressing the winner. All final rows are checked, not just one representative row. Recorded latency covers the ten-update stream. Samples are 100 for single-row workloads, 30/16 for 100-row memory/IndexedDB streams, and 10/3 for 1,000-row streams, with one warmup. Do not treat the three-sample tails as reliable estimates.
+
+Regenerate the shared fixture by passing the same path as input and output. Its logical cases are the generator input. Rust and SDK tests check both alternatives against those logical messages:
+
+```sh
+"$ARTIFACTS/target/release/gonvex-websocket-bench" patch-contract \
+  rust/crates/protocol/fixtures/row-patch-v1.json \
+  rust/crates/protocol/fixtures/row-patch-v1.json
+```
+
+See [the field-patch report](../../docs/performance/field-patches.md) for cold costs, memory/CPU trade-offs, recovery and opt-in usage. The original `summarize.mjs` describes single-update codec experiments; the field-patch report/table labels ten-update streams explicitly.
