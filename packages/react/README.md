@@ -229,7 +229,7 @@ remain Firebase's responsibility when this adapter is configured.
 
 ## Documentation
 
-Full docs live at https://desarso.github.io/gonvex/
+Full docs live at https://whagons-international.github.io/gonvex/
 
 [Use public tenant clients with the regular provider and query, Action, and Reducer hooks](../../docs/public-functions.md).
 
