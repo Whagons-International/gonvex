@@ -1,4 +1,4 @@
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
+FROM node:22.23.4-alpine3.24@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS build
 WORKDIR /app
 ENV UV_THREADPOOL_SIZE=2 RAYON_NUM_THREADS=2
 ARG VITE_GONVEX_ALLOWED_EMAILS
@@ -29,7 +29,7 @@ RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @gonvex/protocol build && pnpm --filter @gonvex/client build && pnpm --filter @gonvex/react build
 RUN pnpm --filter @gonvex/dashboard build
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+FROM node:22.23.4-alpine3.24@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
 WORKDIR /app
 ENV NODE_ENV=production PORT=80
 COPY apps/dashboard/server.mjs ./server.mjs
