@@ -1,8 +1,8 @@
 # Verifying Gonvex Rust with Verus
 
 Verus is a practical way to keep Rust and add machine-checked specifications to
-small policy modules. The first pilot verifies the production generation
-allocation body. No Verus library, macro or proof code enters the normal runtime
+small policy modules. The generation and capability checks verify production
+function bodies. No Verus library, macro or proof code enters the normal runtime
 build. This is a starting point for modular verification, not a proof of Gonvex.
 
 ## What the pilot proves
@@ -32,6 +32,47 @@ remain review obligations. Verus's translation, solver and Rust/compiler stack
 are trusted; this is not a proof of the compiler or machine code. The normal
 runtime uses Rust 1.94.0, while the pinned verifier uses Rust 1.99.1. The small
 body uses ordinary integer, comparison, match and Option operations.
+
+## Capability policy
+
+`rust/crates/module-runtime/src/capabilities.rs` owns the Query/Reducer/Action
+capability policy. V8 calls this shared module API. The policy has no allocations,
+I/O or runtime verifier dependency. The host grant remains a separate input.
+
+`verification/verus/verify_capabilities.py` copies the actual datatype
+declarations and both executable function bodies into the verifier. It inserts
+return binders, postconditions and a law harness. It proves the exact structural
+ceiling for each kind and, for every Boolean host grant, the exact intersection,
+absence of escalation beyond either input, and idempotence.
+
+The check deliberately removes each of the ten host-grant gates and each of
+the ten kind gates. All twenty variants must fail verification. A syntax error
+does not count as detecting a broken law. New kinds or capability fields require
+reviewing the adapter and specification. Receipts identify production sources,
+the adapter, runner and every generated harness by SHA-256. Incomplete runs and
+changed inputs cannot produce a successful receipt.
+
+The proof excludes Serde derives, serialization, V8 dispatch, host operation
+enforcement, and the compiler/ABI. Normal Rust and V8 tests still exercise the
+adapter that calls the verified policy. The specification itself remains a
+review obligation, including the intended capabilities of each function kind.
+
+Run `python3 verification/verus/verify_capabilities.py --output /path/to/proof`
+with the pinned verifier on PATH, or pass `--verus` explicitly.
+
+The runtime workflow calls the reusable policy workflow in a separate Rust
+1.99.1 job. Its `CI` aggregate requires both runtime tests and policy proofs to
+succeed. A failed, skipped or cancelled proof job cannot leave that aggregate
+green. Production compilation continues to use Rust 1.94.0.
+
+The [proof receipt](../../verification/verus/results/capabilities.json) records
+the production check and all twenty failing controls. The
+[CPU benchmark receipt](../../verification/results/capabilities-benchmark.json)
+compares pinned V8 policy bodies with the actual shared crate API, using the
+unchanged ABI types. All 3,072 kind/grant combinations agree before timing.
+Local paired medians were 1.84 and 1.78 ns per call. These samples do not measure
+V8 dispatch, server throughput or workspace build time. Reproduce with
+`python3 verification/benchmarks/capabilities.py --build-dir /path/to/build`.
 
 ## Comparison with Bend laws
 

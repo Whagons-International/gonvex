@@ -17,6 +17,9 @@ use thiserror::Error;
 /// the depth and must remain bounded so runtimes cannot recurse forever.
 pub const MAX_INVOCATION_DEPTH: u8 = 8;
 
+mod capabilities;
+pub use capabilities::{effective_capabilities, structural_capabilities};
+
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type ModuleGeneration = u64;
 

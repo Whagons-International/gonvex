@@ -1,0 +1,40 @@
+{
+  "baseline": "3ad2ec077bd5c6b82d4f76a7a5174ede93fd42b9",
+  "success": true,
+  "scope": "Exact pinned V8 policy bodies compiled against unchanged ABI types versus the actual shared crate API. CPU only, not V8 dispatch, server throughput, or workspace compilation time.",
+  "sampling": "All three kinds and 1024 grants checked for compatibility before timing. Nine paired rounds in separate binaries with alternating order and warm-up. Workstation jobs are not paused.",
+  "scriptSha256": "684ac4f175c914b905e840299eb5f6f7f20de371ba42bce27eed781eacdb7695",
+  "samplesNanoseconds": {
+    "baseline": [
+      2.207426,
+      1.8942982,
+      1.8125514,
+      1.7926426,
+      1.7961933,
+      1.8438345,
+      1.801275,
+      2.0545375,
+      1.8775574
+    ],
+    "current": [
+      1.9115407,
+      1.9922526,
+      2.072697,
+      1.7478007,
+      1.7165866,
+      1.6846621,
+      2.29508,
+      1.7237001,
+      1.7811058
+    ]
+  },
+  "medianNanoseconds": {
+    "baseline": 1.8438345,
+    "current": 1.7811058
+  },
+  "baselineSourceSha256": "ed20e60fa27cea6f1abd4578355dd545d16d7737a3e53f88c2f442012da86406",
+  "policySourceSha256": "081d109791349ee9a3deb566c71442891cfcf8db416113e6220fa29958214350",
+  "typeSourceSha256": "1e6a4cd3a3355b62f06d55253cd3a96767be44ba87abc338daffef05c129862c",
+  "harnessSha256": "f9770dfaa6c3b0cc039869d074f7a9cbeffa1c104591b28878c3e1302a9f8743",
+  "lockSha256": "60018024b49b7cd71bdb9735a06b46a26a502ffefdf9d2530d56996af318ee64"
+}
