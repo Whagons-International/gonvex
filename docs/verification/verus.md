@@ -74,6 +74,33 @@ Local paired medians were 1.84 and 1.78 ns per call. These samples do not measur
 V8 dispatch, server throughput or workspace build time. Reproduce with
 `python3 verification/benchmarks/capabilities.py --build-dir /path/to/build`.
 
+## Frame length admission
+
+The module-host reader and writer share `framing.rs::frame_length`. Verus
+checks the actual function body for every `usize` size and configured limit.
+Accepted sizes are nonzero, fit the configured limit and fit the `u32` wire
+header. The returned length equals the input, and rejection occurs exactly
+when one of those conditions fails. Empty, configured-limit, wire-limit and
+length-truncation mutations must each fail verification.
+
+This proof covers the pure decision. Rust tests check that rejected writes
+emit no bytes and rejected headers never poll the payload reader. Normal
+round-trip tests still exercise framing and JSON. Allocation, Tokio scheduling,
+transport correctness and error strings remain outside the formal proof.
+The runtime's required proof job runs this check alongside generation and
+capabilities. Production Rust gains no Verus dependency.
+
+Run `python3 verification/verus/verify_frame_length.py --output /path/to/proof`.
+The [proof receipt](../../verification/verus/results/frame-length.json)
+records the production check and all four controls. The
+[CPU benchmark receipt](../../verification/results/frame-length-benchmark.json)
+compares the old and shared length adapters, using their production bodies and
+error fields. Nine alternating paired samples, pinned to one CPU, measured
+100 million successful checks each. Local medians were 0.733 and 0.717 ns per
+check. This measures length validation only, excluding transport, allocation
+and server throughput. Other workstation jobs continued during measurement.
+Reproduce with `python3 verification/benchmarks/frame_length.py --build-dir /path/to/build`.
+
 ## Comparison with Bend laws
 
 | Question | Bend experiment | Rust with Verus |
@@ -118,7 +145,7 @@ The local `verus` wrapper selects those paths.
 ## Recommended next steps
 
 Keep Rust as the implementation while evaluating verification module by module.
-Next candidates are deadline budget selection, frame length validation, typed
+Next candidates are deadline budget selection, cursor admission, typed
 statement-key identity and transaction completion decisions. Give each module a
 small executable policy, explicit laws and deliberately broken controls.
 Preserve integration tests for the database and V8 effects behind those policies.
