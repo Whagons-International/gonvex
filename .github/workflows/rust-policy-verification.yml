@@ -35,3 +35,8 @@ jobs:
           python3 verification/verus/verify_capabilities.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/capability-proof"
+      - name: Prove frame length policy and reject broken bounds
+        run: |
+          python3 verification/verus/verify_frame_length.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/frame-proof"
