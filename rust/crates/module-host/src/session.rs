@@ -654,6 +654,10 @@ fn registry_error(module_id: &str, err: RegistryError) -> WireError {
             codes::GENERATION_CONFLICT,
             format!("module {module_id} generation {generation} is not newer than the active one"),
         ),
+        RegistryError::GenerationExhausted => WireError::new(
+            codes::GENERATION_CONFLICT,
+            format!("module {module_id} exhausted its generation counter"),
+        ),
         RegistryError::UnknownGeneration(generation) => WireError::new(
             codes::UNKNOWN_GENERATION,
             format!("module {module_id} generation {generation} was never loaded"),
