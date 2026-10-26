@@ -1,10 +1,11 @@
-//! PostgreSQL statement admission without a dependency on SQLx or the runtime.
+//! PostgreSQL lexical boundaries shared by migration scripts and runtime admission.
 //! This scans lexical boundaries, not SQL grammar. Ordinary strings assume
 //! standard_conforming_strings=on; E strings always process backslash escapes.
 #[derive(Debug, PartialEq, Eq)]
-pub struct StatementInfo {
+pub struct StatementInfo<'a> {
     pub count: usize,
-    pub first_word: Option<String>,
+    /// The first unquoted word, borrowed with its original spelling.
+    pub first_word: Option<&'a str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,8 +22,17 @@ fn word_start(byte: u8) -> bool {
 fn word_part(byte: u8) -> bool {
     word_start(byte) || byte.is_ascii_digit() || byte == b'$'
 }
-fn quoted(bytes: &[u8], mut index: usize, quote: u8, escapes: bool) -> Result<usize, LexError> {
+fn quoted(source: &str, mut index: usize, quote: u8, escapes: bool) -> Result<usize, LexError> {
+    let bytes = source.as_bytes();
     while index < bytes.len() {
+        if !escapes {
+            // ASCII quotes delimit UTF-8 boundaries. Skip ordinary literal
+            // contents with str's character search; only E strings need the
+            // byte-by-byte backslash handling below.
+            index += source[index..]
+                .find(char::from(quote))
+                .ok_or(LexError::UnterminatedQuote)?;
+        }
         if escapes && bytes[index] == b'\\' {
             index += 2;
         } else if bytes[index] == quote {
@@ -39,9 +49,10 @@ fn quoted(bytes: &[u8], mut index: usize, quote: u8, escapes: bool) -> Result<us
 }
 // PostgreSQL's quotecontinue rule permits whitespace/line comments containing
 // a newline. The original string mode carries across the continuation.
-fn string_literal(bytes: &[u8], mut index: usize, escapes: bool) -> Result<usize, LexError> {
+fn string_literal(source: &str, mut index: usize, escapes: bool) -> Result<usize, LexError> {
+    let bytes = source.as_bytes();
     loop {
-        let end = quoted(bytes, index, b'\'', escapes)?;
+        let end = quoted(source, index, b'\'', escapes)?;
         let mut gap = end;
         let mut newline = false;
         while gap < bytes.len() {
@@ -86,13 +97,32 @@ fn dollar_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
-pub fn analyze(source: &str) -> Result<StatementInfo, LexError> {
+/// Count nonempty statements and report the first unquoted keyword.
+/// This does not parse SQL grammar or enforce an invocation policy.
+pub fn analyze(source: &str) -> Result<StatementInfo<'_>, LexError> {
+    scan(source, |_| {})
+}
+
+/// Return byte ranges of nonempty statements, including their terminating `;`.
+/// Leading whitespace/comments belong to the next statement. A trailing
+/// comment or empty statement does not create an execution unit.
+pub fn statement_ranges(source: &str) -> Result<Vec<std::ops::Range<usize>>, LexError> {
+    let mut ranges = Vec::new();
+    scan(source, |range| ranges.push(range))?;
+    Ok(ranges)
+}
+
+fn scan(
+    source: &str,
+    mut on_statement: impl FnMut(std::ops::Range<usize>),
+) -> Result<StatementInfo<'_>, LexError> {
     let bytes = source.as_bytes();
     if bytes.contains(&0) {
         return Err(LexError::Nul);
     }
     let mut index = 0;
     let mut count = 0;
+    let mut start = 0;
     let mut active = false;
     let mut head_seen = false;
     let mut first_word = None;
@@ -124,18 +154,22 @@ pub fn analyze(source: &str) -> Result<StatementInfo, LexError> {
             }
         } else if byte == b';' {
             count += usize::from(active);
+            if active {
+                on_statement(start..index + 1);
+            }
             active = false;
             index += 1;
+            start = index;
         } else {
             active = true;
             let first = !head_seen;
             head_seen = true;
             if matches!(byte, b'e' | b'E') && bytes.get(index + 1) == Some(&b'\'') {
-                index = string_literal(bytes, index + 2, true)?;
+                index = string_literal(source, index + 2, true)?;
             } else if byte == b'\'' {
-                index = string_literal(bytes, index + 1, false)?;
+                index = string_literal(source, index + 1, false)?;
             } else if byte == b'"' {
-                index = quoted(bytes, index + 1, byte, false)?;
+                index = quoted(source, index + 1, byte, false)?;
             } else if byte == b'$' {
                 if let Some(end) = dollar_end(bytes, index) {
                     let tag = &source[index..end];
@@ -153,7 +187,7 @@ pub fn analyze(source: &str) -> Result<StatementInfo, LexError> {
                     index += 1;
                 }
                 if first {
-                    first_word = Some(source[start..index].to_ascii_lowercase());
+                    first_word = Some(&source[start..index]);
                 }
             } else {
                 index += 1;
@@ -161,6 +195,9 @@ pub fn analyze(source: &str) -> Result<StatementInfo, LexError> {
         }
     }
     count += usize::from(active);
+    if active {
+        on_statement(start..source.len());
+    }
     Ok(StatementInfo { count, first_word })
 }
 
@@ -176,12 +213,14 @@ mod tests {
             r"SELECT E'a\';b' AS n",
             "-- leading comment\nSELECT 42 AS n",
             "SELECT 'it''s ; okay' AS n",
+            "SELECT 'café'';okay' AS n",
             "SELECT $tag$quote ' ; /*comment*/$tag$ AS n",
             "SELECT $é$quote ' ; /*comment*/$é$ AS n",
             "SELECT 1 /*outer /*inner*/ ; ' */ AS n",
             "SELECT 1 -- comment\r;",
             "SELECT 1 AS \"semi;colon\"",
             "SELECT 1 AS \"a\"\";b\"",
+            "SELECT 1 AS \"é\"\";b\"",
         ];
         let prefixes = [
             "",
@@ -199,7 +238,7 @@ mod tests {
                         analyze(&source),
                         Ok(StatementInfo {
                             count: 1,
-                            first_word: Some("select".into())
+                            first_word: Some("SELECT")
                         }),
                         "{source:?}"
                     );

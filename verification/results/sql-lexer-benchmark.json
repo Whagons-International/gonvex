@@ -1,0 +1,100 @@
+{
+  "baseline": "0832985abbf13e43cb777459c215d754333d4294",
+  "scope": "SQL scanner CPU cost only. No database, server throughput, memory, or whole-workspace build comparison.",
+  "sampling": "Nine paired rounds in separate binaries with identical harnesses, alternating process order. Each case warms up before timing. Other machine work is not paused.",
+  "scriptSha256": "9e03a9a0ad00db544adaefda3e475a5275e680b35d93984e1ce5b399dd29ca80",
+  "baselineSourceSha256": "1a34204c96f5de31fcbef30bcb1c7927ab27db1e868ceb41a788ff2410e17e00",
+  "currentSourceSha256": "6d4e0dcbf61c771f297bfb994a50aa4fb8b5e60264e89f75d31bdd72b44a44a5",
+  "harnessSha256": "71216bb5e1c67d30e67663956a1d19d49612b16fc6b6ac30c8da2aa805765952",
+  "samplesNanoseconds": {
+    "short": {
+      "baseline": [
+        54,
+        48,
+        56,
+        55,
+        57,
+        55,
+        53,
+        54,
+        48
+      ],
+      "current": [
+        40,
+        35,
+        38,
+        40,
+        39,
+        40,
+        42,
+        39,
+        40
+      ]
+    },
+    "join": {
+      "baseline": [
+        197,
+        176,
+        199,
+        178,
+        198,
+        200,
+        196,
+        173,
+        206
+      ],
+      "current": [
+        147,
+        143,
+        161,
+        162,
+        163,
+        160,
+        160,
+        166,
+        165
+      ]
+    },
+    "large_literal": {
+      "baseline": [
+        29112,
+        25754,
+        29649,
+        26832,
+        29039,
+        29025,
+        25652,
+        26987,
+        29641
+      ],
+      "current": [
+        8988,
+        8997,
+        10299,
+        10053,
+        11742,
+        10090,
+        10121,
+        10078,
+        9578
+      ]
+    }
+  },
+  "medianNanoseconds": {
+    "short": {
+      "baseline": 54,
+      "current": 40
+    },
+    "join": {
+      "baseline": 197,
+      "current": 161
+    },
+    "large_literal": {
+      "baseline": 29025,
+      "current": 10078
+    }
+  },
+  "success": true,
+  "started": 1792997875.6322846,
+  "finished": 1792997892.743616
+}

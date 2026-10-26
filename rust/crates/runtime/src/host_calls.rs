@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::error_class::TransientFault;
 use crate::module_host::HostCallHandler;
 use crate::sql_admission::require_invocation_statement;
-use crate::sql_statement_lexer;
+use gonvex_postgres::sql_lexer as sql_statement_lexer;
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
@@ -368,7 +368,7 @@ impl DatabaseHostCalls {
     async fn query(&mut self, statement: &str, parameters: Value) -> Result<Value, String> {
         let admitted = require_single_statement(statement)?;
         if self.capability == DatabaseCapability::Query {
-            require_read_head(admitted.first_word.as_deref().unwrap_or_default())?;
+            require_read_head(admitted.first_word.unwrap_or_default())?;
         }
         let parameters = match parameters {
             Value::Null => Vec::new(),
@@ -869,12 +869,13 @@ fn valid_identifier(name: &str) -> bool {
 }
 
 fn require_read_head(head: &str) -> Result<(), String> {
-    if matches!(
-        head,
-        "select" | "with" | "values" | "table" | "explain" | "show"
-    ) {
+    if ["select", "with", "values", "table", "explain", "show"]
+        .iter()
+        .any(|keyword| head.eq_ignore_ascii_case(keyword))
+    {
         Ok(())
     } else {
+        let head = head.to_ascii_lowercase();
         Err(format!(
             "a Query may only read; {head:?} is not a read statement"
         ))
@@ -884,10 +885,12 @@ fn require_read_head(head: &str) -> Result<(), String> {
 #[cfg(test)]
 fn require_read_statement(statement: &str) -> Result<(), String> {
     let admitted = require_single_statement(statement)?;
-    require_read_head(admitted.first_word.as_deref().unwrap_or_default())
+    require_read_head(admitted.first_word.unwrap_or_default())
 }
 
-fn require_single_statement(statement: &str) -> Result<sql_statement_lexer::StatementInfo, String> {
+fn require_single_statement(
+    statement: &str,
+) -> Result<sql_statement_lexer::StatementInfo<'_>, String> {
     let statement = statement.trim();
     if statement.is_empty() {
         return Err("a database statement is required".to_owned());
@@ -971,6 +974,8 @@ mod tests {
     #[test]
     fn query_statement_rejects_writes_and_batches() {
         assert!(require_read_statement("SELECT * FROM tasks").is_ok());
+        assert!(require_read_statement("sElEcT * FROM tasks").is_ok());
+        assert!(require_read_statement("selective * FROM tasks").is_err());
         assert!(require_read_statement("UPDATE tasks SET title = 'x'").is_err());
         assert!(require_single_statement("SELECT ';'; SELECT 2").is_err());
         assert!(require_single_statement("SELECT ';'").is_ok());
