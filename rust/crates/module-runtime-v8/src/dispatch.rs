@@ -430,6 +430,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_payload_numbers_survive_json_lowering() {
+        // The module boundary parses, encodes and parses JSON again. Without
+        // float_roundtrip this value changes bits on the second parse.
+        let source = r#"{"kind":"fetch","request":{"n":2122042278.885959312537476119018239e172}}"#;
+        let original: serde_json::Value = serde_json::from_str(source).unwrap();
+        let request: HostCallRequest = serde_json::from_str(source).unwrap();
+        let HostCall::Fetch { request } = request.into_host_call().unwrap() else {
+            panic!("fetch request changed operation");
+        };
+        let lowered: serde_json::Value = serde_json::from_slice(&request).unwrap();
+        assert_eq!(lowered, original["request"]);
+    }
+
+    #[test]
     fn insert_preserves_sdk_allocation_without_changing_the_application_row() {
         let request: HostCallRequest = serde_json::from_value(serde_json::json!({
             "kind": "dbInsert", "table": "messages",

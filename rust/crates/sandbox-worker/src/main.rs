@@ -143,6 +143,7 @@ async fn run() -> Result<(JsonValue, Vec<LogLine>), String> {
         artifact,
         V8Config {
             max_heap_bytes: usize::try_from(request.max_heap_bytes).unwrap_or(64 << 20),
+            initialization_timeout: Duration::from_millis(request.timeout_ms),
             execution_timeout: Duration::from_millis(request.timeout_ms),
             action_execution_timeout: Duration::from_millis(request.timeout_ms),
             max_result_bytes: request.max_output_bytes,

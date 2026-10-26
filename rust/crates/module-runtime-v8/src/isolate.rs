@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as sync_mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,7 @@ use gonvex_module_runtime::{
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit};
 
 use crate::dispatch::{
     decode_result, kind_name, CapabilityFlags, DispatchRequest, HostCallOutcome, HostCallRequest,
@@ -46,6 +46,8 @@ const WEB_STREAMS: &str = include_str!("vendor/web_streams_ponyfill.js");
 pub(crate) struct ModuleSource {
     specifier: ModuleSpecifier,
     code: String,
+    #[cfg(test)]
+    pub(crate) probe: Arc<WorkerTestProbe>,
 }
 
 impl ModuleSource {
@@ -71,7 +73,44 @@ impl ModuleSource {
                     "module id {module_id} is not a usable module specifier: {err}"
                 ))
             })?;
-        Ok(Self { specifier, code })
+        Ok(Self {
+            specifier,
+            code,
+            #[cfg(test)]
+            probe: Arc::default(),
+        })
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct WorkerTestProbe {
+    pub(crate) started: std::sync::atomic::AtomicUsize,
+    pub(crate) stopped: std::sync::atomic::AtomicUsize,
+    teardown: std::sync::Mutex<Option<(sync_mpsc::Sender<()>, sync_mpsc::Receiver<()>)>>,
+}
+
+#[cfg(test)]
+impl WorkerTestProbe {
+    pub(crate) fn hold_teardown(&self) -> (sync_mpsc::Receiver<()>, sync_mpsc::Sender<()>) {
+        let (entered, receive) = sync_mpsc::channel();
+        let (release, held) = sync_mpsc::channel();
+        *self.teardown.lock().unwrap() = Some((entered, held));
+        (receive, release)
+    }
+}
+
+#[cfg(test)]
+struct TestWorkerLifetime(Arc<WorkerTestProbe>);
+
+#[cfg(test)]
+impl Drop for TestWorkerLifetime {
+    fn drop(&mut self) {
+        if let Some((entered, release)) = self.0.teardown.lock().unwrap().take() {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
+        self.0.stopped.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -109,6 +148,63 @@ pub(crate) struct WorkerReply {
 /// A handle to one isolate thread.
 pub(crate) struct IsolateWorker {
     calls: mpsc::UnboundedSender<WorkerCall>,
+    control: Arc<WorkerControl>,
+}
+
+#[derive(Default)]
+struct WorkerState {
+    handle: Option<v8::IsolateHandle>,
+    retiring_permit: Option<OwnedSemaphorePermit>,
+    stopped: bool,
+}
+
+#[derive(Default)]
+struct WorkerControl {
+    canceled: AtomicBool,
+    changed: Notify,
+    state: Mutex<WorkerState>,
+}
+
+impl WorkerControl {
+    fn install(&self, handle: v8::IsolateHandle) {
+        let mut state = self.state.lock().expect("isolate control lock");
+        if self.canceled.load(Ordering::SeqCst) {
+            handle.terminate_execution();
+        }
+        state.handle = Some(handle);
+    }
+
+    fn cancel(&self) {
+        self.canceled.store(true, Ordering::SeqCst);
+        self.changed.notify_one();
+        if let Some(handle) = &self.state.lock().expect("isolate control lock").handle {
+            handle.terminate_execution();
+        }
+    }
+
+    async fn canceled(&self) {
+        if !self.canceled.load(Ordering::SeqCst) {
+            self.changed.notified().await;
+        }
+    }
+
+    fn stopped(&self) {
+        let permit = {
+            let mut state = self.state.lock().expect("isolate control lock");
+            state.stopped = true;
+            state.handle = None;
+            state.retiring_permit.take()
+        };
+        drop(permit);
+    }
+}
+
+struct WorkerExit(Arc<WorkerControl>);
+
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        self.0.stopped();
+    }
 }
 
 impl IsolateWorker {
@@ -121,13 +217,15 @@ impl IsolateWorker {
     ) -> Result<(Self, oneshot::Receiver<Result<(), ModuleError>>), ModuleError> {
         let (calls, call_receiver) = mpsc::unbounded_channel();
         let (ready, ready_receiver) = oneshot::channel();
+        let control = Arc::<WorkerControl>::default();
+        let worker_control = Arc::clone(&control);
         thread::Builder::new()
             .name("gonvex-module-isolate".to_owned())
-            .spawn(move || worker_main(source, config, ready, call_receiver))
+            .spawn(move || worker_main(source, config, ready, call_receiver, worker_control))
             .map_err(|err| {
                 ModuleError::Execution(format!("failed to start module isolate thread: {err}"))
             })?;
-        Ok((Self { calls }, ready_receiver))
+        Ok((Self { calls, control }, ready_receiver))
     }
 
     pub(crate) fn send(&self, call: WorkerCall) -> Result<(), ModuleError> {
@@ -135,18 +233,40 @@ impl IsolateWorker {
             .send(call)
             .map_err(|_| ModuleError::Execution("module isolate is no longer running".to_owned()))
     }
+
+    /// Transfer admission capacity to the worker until its runtime has been
+    /// disposed. Cancellation remains nonblocking for the caller.
+    pub(crate) fn retire(self, permit: OwnedSemaphorePermit) {
+        let mut state = self.control.state.lock().expect("isolate control lock");
+        if !state.stopped {
+            assert!(state.retiring_permit.is_none(), "worker retired twice");
+            state.retiring_permit = Some(permit);
+        }
+        // Dropping self signals cancellation after releasing the control lock.
+    }
 }
 
-// Dropping the handle drops the call channel, which ends the worker loop after
-// the call in flight. The thread is deliberately not joined: a cancelled
-// invocation must not block the dropping task until the isolate's deadline.
+impl Drop for IsolateWorker {
+    fn drop(&mut self) {
+        self.control.cancel();
+    }
+}
 
 fn worker_main(
     source: Arc<ModuleSource>,
     config: V8Config,
     ready: oneshot::Sender<Result<(), ModuleError>>,
     calls: mpsc::UnboundedReceiver<WorkerCall>,
+    control: Arc<WorkerControl>,
 ) {
+    // Declared first, so the runtime and test teardown guard drop before this
+    // releases the retired worker's permit, including on early return/panic.
+    let _exit = WorkerExit(Arc::clone(&control));
+    #[cfg(test)]
+    let _lifetime = {
+        source.probe.started.fetch_add(1, Ordering::SeqCst);
+        TestWorkerLifetime(Arc::clone(&source.probe))
+    };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -160,7 +280,10 @@ fn worker_main(
         }
     };
     // deno_core drives `!Send` futures, so the event loop runs inside a LocalSet.
-    tokio::task::LocalSet::new().block_on(&runtime, worker_loop(source, config, ready, calls));
+    tokio::task::LocalSet::new().block_on(
+        &runtime,
+        worker_loop(source, config, ready, calls, &control),
+    );
 }
 
 async fn worker_loop(
@@ -168,8 +291,14 @@ async fn worker_loop(
     config: V8Config,
     ready: oneshot::Sender<Result<(), ModuleError>>,
     mut calls: mpsc::UnboundedReceiver<WorkerCall>,
+    control: &WorkerControl,
 ) {
-    let mut isolate = match ModuleIsolate::create(&source, config).await {
+    let initialized = tokio::select! {
+        biased;
+        _ = control.canceled() => Err(ModuleError::Execution("module isolate startup was canceled".into())),
+        result = ModuleIsolate::create(&source, config, control) => result,
+    };
+    let mut isolate = match initialized {
         Ok(isolate) => {
             if ready.send(Ok(())).is_err() {
                 return;
@@ -181,8 +310,17 @@ async fn worker_loop(
             return;
         }
     };
-    while let Some(call) = calls.recv().await {
-        let reply = isolate.run(call.spec).await;
+    loop {
+        let call = tokio::select! {
+            biased;
+            _ = control.canceled() => return,
+            call = calls.recv() => match call { Some(call) => call, None => return },
+        };
+        let reply = tokio::select! {
+            biased;
+            _ = control.canceled() => return,
+            reply = isolate.run(call.spec) => reply,
+        };
         let healthy = reply.healthy;
         let _ = call.reply.send(reply);
         if !healthy {
@@ -410,7 +548,23 @@ struct ModuleIsolate {
 }
 
 impl ModuleIsolate {
-    async fn create(source: &ModuleSource, config: V8Config) -> Result<Self, ModuleError> {
+    async fn create(
+        source: &ModuleSource,
+        config: V8Config,
+        control: &WorkerControl,
+    ) -> Result<Self, ModuleError> {
+        if config.initialization_timeout.is_zero() {
+            return Err(ModuleError::BudgetExceeded(
+                "module initialization deadline elapsed".into(),
+            ));
+        }
+        let deadline = Instant::now()
+            .checked_add(config.initialization_timeout)
+            .ok_or_else(|| {
+                ModuleError::Unsupported(
+                    "module initialization timeout exceeds the monotonic clock range".into(),
+                )
+            })?;
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![gonvex_host::init_ops()],
             // No module loader is installed: the artifact must be one
@@ -427,6 +581,7 @@ impl ModuleIsolate {
         let terminated = Arc::new(AtomicBool::new(false));
         let heap_exhausted = Arc::new(AtomicBool::new(false));
         let handle = runtime.v8_isolate().thread_safe_handle();
+        control.install(handle.clone());
         {
             let heap_exhausted = Arc::clone(&heap_exhausted);
             let handle = handle.clone();
@@ -441,6 +596,42 @@ impl ModuleIsolate {
             });
         }
 
+        let watchdog = Watchdog::spawn(handle, Arc::clone(&terminated))?;
+        watchdog.arm(deadline);
+        let initialized = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Self::initialize(&mut runtime, source),
+        )
+        .await;
+        watchdog.disarm();
+        if heap_exhausted.load(Ordering::SeqCst) {
+            return Err(ModuleError::BudgetExceeded(format!(
+                "module initialization exceeded the {} byte isolate heap limit",
+                config.max_heap_bytes
+            )));
+        }
+        if initialized.is_err() || terminated.load(Ordering::SeqCst) {
+            return Err(ModuleError::BudgetExceeded(format!(
+                "module initialization exceeded its {} ms deadline",
+                config.initialization_timeout.as_millis()
+            )));
+        }
+        let (dispatch, namespace) = initialized.expect("initialization timeout checked")?;
+        Ok(Self {
+            watchdog,
+            dispatch,
+            namespace,
+            runtime,
+            terminated,
+            heap_exhausted,
+            config,
+        })
+    }
+
+    async fn initialize(
+        runtime: &mut JsRuntime,
+        source: &ModuleSource,
+    ) -> Result<(v8::Global<v8::Function>, v8::Global<v8::Object>), ModuleError> {
         // The bootstrap's completion value is the dispatcher, so it is reachable
         // from Rust without being installed on globalThis.
         runtime
@@ -488,38 +679,80 @@ impl ModuleIsolate {
             ModuleError::InvalidArtifact(format!("JavaScript bundle exposes no exports: {err}"))
         })?;
 
-        let watchdog = Watchdog::spawn(handle, Arc::clone(&terminated))?;
-        Ok(Self {
-            watchdog,
-            dispatch,
-            namespace,
-            runtime,
-            terminated,
-            heap_exhausted,
-            config,
-        })
+        Ok((dispatch, namespace))
+    }
+
+    fn budget_failure(&mut self, timeout: Option<Duration>) -> Option<ModuleError> {
+        self.watchdog.disarm();
+        let terminated = self.terminated.swap(false, Ordering::SeqCst);
+        let heap_exhausted = self.heap_exhausted.load(Ordering::SeqCst);
+        if terminated {
+            self.runtime.v8_isolate().cancel_terminate_execution();
+        }
+        if heap_exhausted {
+            Some(ModuleError::BudgetExceeded(format!(
+                "module exceeded the {} byte isolate heap limit",
+                self.config.max_heap_bytes
+            )))
+        } else if terminated {
+            Some(ModuleError::BudgetExceeded(format!(
+                "module exceeded its {} ms execution deadline",
+                timeout.unwrap_or_default().as_millis()
+            )))
+        } else {
+            None
+        }
+    }
+
+    fn early_failure(&mut self, error: ModuleError, timeout: Option<Duration>) -> WorkerReply {
+        let budget = self.budget_failure(timeout);
+        WorkerReply {
+            healthy: budget.is_none(),
+            result: Err(budget.unwrap_or(error)),
+        }
     }
 
     async fn run(&mut self, spec: CallSpec) -> WorkerReply {
+        // Export path getters run JavaScript too. They spend the same budget
+        // as the handler, and every early exit must disarm before pool reuse.
+        let deadline = if let Some(timeout) = spec.timeout {
+            if timeout.is_zero() {
+                return WorkerReply {
+                    result: Err(ModuleError::BudgetExceeded(
+                        "module execution deadline elapsed before handler lookup".into(),
+                    )),
+                    healthy: true,
+                };
+            }
+            let Some(deadline) = Instant::now().checked_add(timeout) else {
+                return WorkerReply {
+                    result: Err(ModuleError::Unsupported(
+                        "module execution timeout exceeds the monotonic clock range".into(),
+                    )),
+                    healthy: true,
+                };
+            };
+            self.watchdog.arm(deadline);
+            Some(deadline)
+        } else {
+            None
+        };
         let handler = match self.resolve_handler(&spec.contract) {
             Ok(handler) => handler,
             Err(err) => {
-                return WorkerReply {
-                    result: Err(err),
-                    healthy: true,
-                }
+                return self.early_failure(err, spec.timeout);
             }
         };
         let args = match std::str::from_utf8(&spec.invocation.args) {
             Ok(args) => args,
             Err(_) => {
-                return WorkerReply {
-                    result: Err(ModuleError::Execution(format!(
+                return self.early_failure(
+                    ModuleError::Execution(format!(
                         "arguments for {} are not valid UTF-8 JSON",
                         spec.invocation.function
-                    ))),
-                    healthy: true,
-                }
+                    )),
+                    spec.timeout,
+                );
             }
         };
         let request = DispatchRequest {
@@ -538,12 +771,10 @@ impl ModuleIsolate {
         let request = match serde_json::to_string(&request) {
             Ok(request) => request,
             Err(err) => {
-                return WorkerReply {
-                    result: Err(ModuleError::Execution(format!(
-                        "failed to encode the invocation: {err}"
-                    ))),
-                    healthy: true,
-                }
+                return self.early_failure(
+                    ModuleError::Execution(format!("failed to encode the invocation: {err}")),
+                    spec.timeout,
+                );
             }
         };
 
@@ -555,22 +786,22 @@ impl ModuleIsolate {
                 (Some(request), Some(args)) => {
                     let request: v8::Local<v8::Value> = request.into();
                     let args: v8::Local<v8::Value> = args.into();
-                    vec![
+                    Ok(vec![
                         handler,
                         v8::Global::new(scope, request),
                         v8::Global::new(scope, args),
-                    ]
+                    ])
                 }
                 // V8 refuses strings past its own maximum length.
-                _ => {
-                    return WorkerReply {
-                        result: Err(ModuleError::BudgetExceeded(
-                            "invocation arguments are too large for the isolate".to_owned(),
-                        )),
-                        healthy: true,
-                    }
-                }
+                _ => Err(ModuleError::BudgetExceeded(
+                    "invocation arguments are too large for the isolate".to_owned(),
+                )),
             }
+        };
+
+        let arguments = match arguments {
+            Ok(arguments) => arguments,
+            Err(error) => return self.early_failure(error, spec.timeout),
         };
 
         self.runtime
@@ -606,17 +837,22 @@ impl ModuleIsolate {
                 host: spec.host,
                 violation: None,
             });
-        if let Some(timeout) = spec.timeout {
-            self.watchdog.arm(Instant::now() + timeout);
-        }
 
         let call = self.runtime.call_with_args(&self.dispatch, &arguments);
-        let outcome = self
+        let pending = self
             .runtime
-            .with_event_loop_promise(call, PollEventLoopOptions::default())
-            .await;
+            .with_event_loop_promise(call, PollEventLoopOptions::default());
+        // Terminating V8 interrupts executing JavaScript but does not wake an
+        // idle event loop awaiting a host op. Bound both with the same deadline.
+        let outcome = match deadline {
+            Some(deadline) => {
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), pending)
+                    .await
+                    .ok()
+            }
+            None => Some(pending.await),
+        };
 
-        self.watchdog.disarm();
         // Taking the slot back also drops the host channel, which tells the
         // invoking task that no further host calls are coming.
         let violation = self
@@ -628,24 +864,17 @@ impl ModuleIsolate {
             .take()
             .and_then(|active| active.violation);
 
-        let terminated = self.terminated.swap(false, Ordering::SeqCst);
-        let heap_exhausted = self.heap_exhausted.load(Ordering::SeqCst);
-        if terminated {
-            // Leave the isolate droppable even though it is about to be retired.
-            self.runtime.v8_isolate().cancel_terminate_execution();
-        }
-
-        let mut healthy = !terminated && !heap_exhausted;
-        let result = if heap_exhausted {
-            Err(ModuleError::BudgetExceeded(format!(
-                "module exceeded the {} byte isolate heap limit",
-                self.config.max_heap_bytes
-            )))
-        } else if terminated {
-            Err(ModuleError::BudgetExceeded(format!(
-                "module exceeded its {} ms execution deadline",
-                spec.timeout.unwrap_or_default().as_millis()
-            )))
+        let budget_error = self.budget_failure(spec.timeout).or_else(|| {
+            outcome.is_none().then(|| {
+                ModuleError::BudgetExceeded(format!(
+                    "module exceeded its {} ms execution deadline",
+                    spec.timeout.unwrap_or_default().as_millis()
+                ))
+            })
+        });
+        let mut healthy = budget_error.is_none();
+        let result = if let Some(error) = budget_error {
+            Err(error)
         } else if let Some(violation) = violation {
             // A denial or an exhausted budget fails the invocation even when the
             // module catches the error, so a module cannot quietly probe for
@@ -658,7 +887,7 @@ impl ModuleIsolate {
                 }
             })
         } else {
-            match outcome {
+            match outcome.expect("event-loop timeout classified above") {
                 Ok(value) => self.decode(value, spec.max_result_bytes),
                 Err(err) => {
                     // The dispatcher answers handler failures with an envelope,
@@ -832,6 +1061,7 @@ impl Watchdog {
 
 impl Drop for Watchdog {
     fn drop(&mut self) {
+        self.disarm();
         let _ = self.signals.send(WatchdogSignal::Shutdown);
     }
 }
@@ -841,6 +1071,13 @@ fn watchdog_main(
     terminated: Arc<AtomicBool>,
     inbox: sync_mpsc::Receiver<WatchdogSignal>,
 ) {
+    watchdog_loop(inbox, || {
+        terminated.store(true, Ordering::SeqCst);
+        handle.terminate_execution();
+    });
+}
+
+fn watchdog_loop(inbox: sync_mpsc::Receiver<WatchdogSignal>, mut terminate: impl FnMut()) {
     let mut deadline: Option<Instant> = None;
     loop {
         let signal = match deadline {
@@ -851,8 +1088,7 @@ fn watchdog_main(
             Some(at) => match inbox.recv_timeout(at.saturating_duration_since(Instant::now())) {
                 Ok(signal) => Some(signal),
                 Err(sync_mpsc::RecvTimeoutError::Timeout) => {
-                    terminated.store(true, Ordering::SeqCst);
-                    handle.terminate_execution();
+                    terminate();
                     deadline = None;
                     None
                 }
@@ -868,5 +1104,51 @@ fn watchdog_main(
             Some(WatchdogSignal::Shutdown) => return,
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::*;
+
+    #[test]
+    fn disarm_waits_for_an_inflight_termination_callback() {
+        let (signals, inbox) = sync_mpsc::channel();
+        let (entered, callback_entered) = sync_mpsc::channel();
+        let (release, released) = sync_mpsc::channel();
+        let worker = thread::spawn(move || {
+            watchdog_loop(inbox, || {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+            });
+        });
+        let watchdog = Watchdog { signals };
+        watchdog.arm(Instant::now());
+        callback_entered
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let (started, disarm_started) = sync_mpsc::channel();
+        let (finished, disarm_finished) = sync_mpsc::channel();
+        let disarmer = thread::spawn(move || {
+            started.send(()).unwrap();
+            watchdog.disarm();
+            finished.send(()).unwrap();
+        });
+        disarm_started.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The termination callback is held by a gate, so an acknowledged
+        // disarm cannot complete yet, regardless of the configured deadline.
+        let early = disarm_finished.recv_timeout(Duration::from_millis(50));
+        release.send(()).unwrap();
+        if early.is_err() {
+            disarm_finished
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+        }
+        disarmer.join().unwrap();
+        worker.join().unwrap();
+        assert!(
+            matches!(early, Err(sync_mpsc::RecvTimeoutError::Timeout)),
+            "disarm returned while termination was still in flight"
+        );
     }
 }
