@@ -33,6 +33,32 @@ are trusted; this is not a proof of the compiler or machine code. The normal
 runtime uses Rust 1.94.0, while the pinned verifier uses Rust 1.99.1. The small
 body uses ordinary integer, comparison, match and Option operations.
 
+## Cursor resume admission
+
+The runtime's private `replica_cursor` module owns the cursor admission policy.
+Verus checks its production body and the actual `ReplicaCursor` fields. A
+cursor can resume exactly when it exists, its epoch equals the current epoch,
+and its revision is between the retained and current revisions, inclusive.
+The contract has no precondition on the ordering of those limits. Epoch
+comparison uses the standard Verus specification of Rust `String` equality,
+including all string contents rather than a replacement Boolean argument.
+
+Six negative controls accept an absent cursor, ignore the epoch, accept a
+future or expired revision, or incorrectly exclude either valid boundary.
+Each must fail verification. The required policy CI job runs this check.
+Serialization, retained-history storage, digest validation and callers remain
+outside this proof. Existing runtime replica tests exercise its integration.
+
+Run `python3 verification/verus/verify_cursor.py --output /path/to/proof`.
+The [proof receipt](../../verification/verus/results/cursor.json) records all
+seven outcomes. The [CPU benchmark](../../verification/results/cursor-benchmark.json)
+compares the old and extracted production bodies using the actual cursor fields.
+Prebuilt cases cover absent, expired, future and boundary revisions, Unicode
+epochs and long shared prefixes. Nine alternating paired rounds, pinned to one
+CPU, measured local medians of 5.332 and 5.350 ns per decision. These samples
+exclude serialization, storage and server throughput. Reproduce with
+`python3 verification/benchmarks/cursor.py --build-dir /path/to/build`.
+
 ## Capability policy
 
 `rust/crates/module-runtime/src/capabilities.rs` owns the Query/Reducer/Action
@@ -73,32 +99,6 @@ unchanged ABI types. All 3,072 kind/grant combinations agree before timing.
 Local paired medians were 1.84 and 1.78 ns per call. These samples do not measure
 V8 dispatch, server throughput or workspace build time. Reproduce with
 `python3 verification/benchmarks/capabilities.py --build-dir /path/to/build`.
-
-## Cursor resume admission
-
-The runtime's private `replica_cursor` module owns the cursor admission policy.
-Verus checks its production body and the actual `ReplicaCursor` fields. A
-cursor can resume exactly when it exists, its epoch equals the current epoch,
-and its revision is between the retained and current revisions, inclusive.
-The contract has no precondition on the ordering of those limits. Epoch
-comparison uses the standard Verus specification of Rust `String` equality,
-including all string contents rather than a replacement Boolean argument.
-
-Six negative controls accept an absent cursor, ignore the epoch, accept a
-future or expired revision, or incorrectly exclude either valid boundary.
-Each must fail verification. The required policy CI job runs this check.
-Serialization, retained-history storage, digest validation and callers remain
-outside this proof. Existing runtime replica tests exercise its integration.
-
-Run `python3 verification/verus/verify_cursor.py --output /path/to/proof`.
-The [proof receipt](../../verification/verus/results/cursor.json) records all
-seven outcomes. The [CPU benchmark](../../verification/results/cursor-benchmark.json)
-compares the old and extracted production bodies using the actual cursor fields.
-Prebuilt cases cover absent, expired, future and boundary revisions, Unicode
-epochs and long shared prefixes. Nine alternating paired rounds, pinned to one
-CPU, measured local medians of 5.332 and 5.350 ns per decision. These samples
-exclude serialization, storage and server throughput. Reproduce with
-`python3 verification/benchmarks/cursor.py --build-dir /path/to/build`.
 
 ## Comparison with Bend laws
 
