@@ -71,15 +71,78 @@ pub async fn write_frame<W>(writer: &mut W, payload: &[u8], limit: usize) -> Res
 where
     W: AsyncWrite + Unpin,
 {
-    if payload.len() > limit {
-        return Err(FrameError::TooLarge {
-            size: payload.len(),
-            limit,
-        });
-    }
-    let header = (payload.len() as u32).to_be_bytes();
+    let length = checked_frame_length(payload.len(), limit)?;
+    let header = length.to_be_bytes();
     writer.write_all(&header).await?;
     writer.write_all(payload).await?;
     writer.flush().await?;
     Ok(())
+}
+
+fn checked_frame_length(size: usize, limit: usize) -> Result<u32, FrameError> {
+    if size == 0 {
+        return Err(FrameError::Malformed("frame is empty".to_owned()));
+    }
+    let wire_limit = limit.min(u32::MAX as usize);
+    if size > wire_limit {
+        return Err(FrameError::TooLarge {
+            size,
+            limit: wire_limit,
+        });
+    }
+    Ok(size as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn frame_lengths_fit_the_wire_and_reader_contract() {
+        assert!(matches!(
+            checked_frame_length(0, 64),
+            Err(FrameError::Malformed(_))
+        ));
+        assert_eq!(checked_frame_length(64, 64).unwrap(), 64);
+        assert!(matches!(
+            checked_frame_length(65, 64),
+            Err(FrameError::TooLarge { .. })
+        ));
+        assert_eq!(
+            checked_frame_length(u32::MAX as usize, usize::MAX).unwrap(),
+            u32::MAX
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert!(matches!(
+            checked_frame_length(u32::MAX as usize + 1, usize::MAX),
+            Err(FrameError::TooLarge { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejected_empty_frame_writes_no_bytes() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        assert!(matches!(
+            write_frame(&mut writer, &[], 64).await,
+            Err(FrameError::Malformed(_))
+        ));
+        writer.shutdown().await.unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn admitted_json_round_trips_with_newlines_and_unicode() {
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        let payload = "{\"message\":\"café\\nready\"}".as_bytes();
+        write_frame(&mut writer, payload, payload.len())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frame(&mut reader, payload.len()).await.unwrap(),
+            payload
+        );
+    }
 }

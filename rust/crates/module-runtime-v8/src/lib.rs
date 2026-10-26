@@ -22,8 +22,11 @@
 //! taken back out afterwards, never in a JavaScript global, so isolate reuse
 //! cannot carry one call's authority into the next.
 
+mod budget;
 mod dispatch;
 mod isolate;
+#[cfg(test)]
+mod lookup_deadline_tests;
 mod pool;
 #[cfg(test)]
 mod runtime_contract_tests;
@@ -41,6 +44,7 @@ use gonvex_module_runtime::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::budget::CallBudget;
 use crate::dispatch::effective_capabilities;
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
@@ -58,6 +62,9 @@ pub struct V8Config {
     /// Ceiling on one isolate's V8 heap. Crossing it terminates the running
     /// call and retires the isolate.
     pub max_heap_bytes: usize,
+    /// Ceiling on bootstrap and top-level module initialization, including
+    /// asynchronous evaluation. Independent of the handler execution budget.
+    pub initialization_timeout: Duration,
     /// Upper bound on a single call. An invocation deadline shortens it; it
     /// never lengthens it.
     pub execution_timeout: Duration,
@@ -74,6 +81,7 @@ impl Default for V8Config {
     fn default() -> Self {
         Self {
             max_heap_bytes: 64 * 1024 * 1024,
+            initialization_timeout: Duration::from_secs(10),
             execution_timeout: Duration::from_secs(10),
             action_execution_timeout: Duration::from_secs(15 * 60),
             max_result_bytes: 8 * 1024 * 1024,
@@ -233,7 +241,7 @@ impl EngineInner {
             &arguments,
         )
         .map_err(ModuleError::InvalidArguments)?;
-        let timeout = self.call_timeout(&invocation.context, &contract)?;
+        let budget = self.call_budget(&invocation.context, &contract)?;
         let capabilities = effective_capabilities(&contract.kind, &invocation.context.capabilities);
         let context = invocation.context.clone();
         // A host-stamped `now` keeps every engine reporting the same clock for
@@ -255,7 +263,25 @@ impl EngineInner {
                     "nested function invocation exceeded the maximum depth".to_owned(),
                 )
             })?;
-        let lease = pool.acquire().await?;
+        let lease = match budget.invocation_remaining()? {
+            Some(remaining) => tokio::time::timeout(remaining, pool.acquire())
+                .await
+                .map_err(|_| {
+                    ModuleError::BudgetExceeded(
+                        "invocation deadline elapsed while waiting for a module isolate".to_owned(),
+                    )
+                })??,
+            None => pool.acquire().await?,
+        };
+        let timeout = match budget.execution_timeout() {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                // A deadline may elapse just as the permit becomes available.
+                // Nothing ran, so keep the healthy worker and its call budget.
+                lease.release_unused();
+                return Err(error);
+            }
+        };
         let (host_sender, mut host_calls) = mpsc::unbounded_channel::<HostRequest>();
         let (reply, mut replied) = oneshot::channel();
         lease.dispatch(WorkerCall {
@@ -279,12 +305,16 @@ impl EngineInner {
         // These futures borrow this invocation and are cancelled when it ends.
         let mut network: FuturesUnordered<BoxFuture<'_, ()>> = FuturesUnordered::new();
         let mut bridging = true;
+        let mut serial: Option<BoxFuture<'_, ()>> = None;
         let reply = loop {
             tokio::select! {
                 biased;
                 reply = &mut replied => break reply,
                 Some(()) = network.next(), if !network.is_empty() => {},
-                request = host_calls.recv(), if bridging => match request {
+                () = async { serial.as_mut().expect("enabled serial host future").await }, if serial.is_some() => {
+                    serial = None;
+                },
+                request = host_calls.recv(), if bridging && serial.is_none() => match request {
                     Some(request) => {
                         if matches!(request.call, gonvex_module_runtime::HostCall::Fetch { .. }) {
                             if network.len() >= 16 {
@@ -299,8 +329,11 @@ impl EngineInner {
                                 let _ = request.reply.send(response);
                             }));
                         } else {
-                            let response = host.call(&context, request.call).await;
-                            let _ = request.reply.send(response);
+                            let context = &context;
+                            serial = Some(Box::pin(async move {
+                                let response = host.call(context, request.call).await;
+                                let _ = request.reply.send(response);
+                            }));
                         }
                     }
                     // The isolate dropped its end of the bridge: the call is
@@ -310,6 +343,10 @@ impl EngineInner {
             }
         };
 
+        // End the borrowed host work before returning the worker or its result.
+        drop(serial);
+        drop(network);
+        drop(host_calls);
         let result = match reply {
             Ok(reply) => {
                 lease.finish(reply.healthy);
@@ -336,11 +373,11 @@ impl EngineInner {
 
     /// The call deadline is the configured ceiling, shortened by whatever the
     /// invocation's own deadline leaves.
-    fn call_timeout(
+    fn call_budget(
         &self,
         context: &InvocationContext,
         contract: &FunctionContract,
-    ) -> Result<Option<Duration>, ModuleError> {
+    ) -> Result<CallBudget, ModuleError> {
         let agent = matches!(contract.kind, gonvex_module_runtime::FunctionKind::Action)
             && contract
                 .metadata
@@ -348,17 +385,7 @@ impl EngineInner {
                 .and_then(serde_json::Value::as_str)
                 == Some("agent");
         let ceiling = (!agent).then(|| self.config.timeout_for(&contract.kind));
-        let Some(deadline) = context.deadline else {
-            return Ok(ceiling);
-        };
-        let remaining = deadline.duration_since(SystemTime::now()).map_err(|_| {
-            ModuleError::BudgetExceeded(
-                "invocation deadline elapsed before the module started".to_owned(),
-            )
-        })?;
-        Ok(Some(
-            ceiling.map_or(remaining, |limit| remaining.min(limit)),
-        ))
+        CallBudget::capture(context.deadline, ceiling)
     }
 }
 
@@ -371,6 +398,139 @@ mod host_call_tests {
     };
     use serde_json::{json, Map};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct DeadlineQueueHost {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl ModuleHost for DeadlineQueueHost {
+        fn call<'a>(
+            &'a self,
+            _: &'a InvocationContext,
+            call: HostCall,
+        ) -> BoxFuture<'a, Result<HostResponse, HostError>> {
+            Box::pin(async move {
+                match call {
+                    HostCall::ToolInvoke { tool, .. } if tool == "hold" => {
+                        self.entered.notify_one();
+                        self.release.notified().await;
+                        Ok(HostResponse {
+                            value: b"null".to_vec(),
+                        })
+                    }
+                    _ => Err(HostError::Failed("unexpected queue-test host call".into())),
+                }
+            })
+        }
+    }
+
+    fn queued_invocation(hold: bool, deadline: Option<SystemTime>) -> Invocation {
+        Invocation {
+            function: "run".into(),
+            kind: FunctionKind::Action,
+            args: serde_json::to_vec(&json!({ "hold": hold })).unwrap(),
+            context: InvocationContext {
+                generation: 1,
+                deadline,
+                action_tools: vec!["hold".into()],
+                capabilities: Capabilities {
+                    action_tools: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn queued_invocation_respects_deadline_without_retiring_healthy_isolate() {
+        run_v8_test(async {
+            let engine = V8ModuleEngine::from_artifact(
+                ModuleArtifact {
+                    manifest: ModuleManifest {
+                        module_id: "queue-deadline".into(),
+                        generation: 1,
+                        language: ModuleLanguage::TypeScript,
+                        artifact_hash: "test".into(),
+                        functions: vec![FunctionContract {
+                            path: "run".into(),
+                            kind: FunctionKind::Action,
+                            internal: false,
+                            delivery: None,
+                            args_schema: Some(json!({"kind":"any"})),
+                            result_schema: Some(json!({"kind":"any"})),
+                            metadata: Map::from_iter([("export".into(), json!("run"))]),
+                        }],
+                        metadata: Map::new(),
+                    },
+                    payload: br#"let calls = 0;
+                        export async function run(ctx, args) {
+                            calls += 1;
+                            if (args.hold) await ctx.tools.hold({});
+                            return calls;
+                        }"#
+                    .to_vec(),
+                },
+                V8Config {
+                    isolate_pool_size: 1,
+                    action_execution_timeout: Duration::from_secs(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            engine.prewarm().await.unwrap();
+            let host = Arc::new(DeadlineQueueHost::default());
+            let first = tokio::spawn({
+                let engine = engine.clone();
+                let host = host.clone();
+                async move { engine.invoke(&*host, queued_invocation(true, None)).await }
+            });
+            tokio::time::timeout(Duration::from_secs(1), host.entered.notified())
+                .await
+                .unwrap();
+            let mut second = tokio::spawn({
+                let engine = engine.clone();
+                let host = host.clone();
+                async move {
+                    engine
+                        .invoke(
+                            &*host,
+                            queued_invocation(
+                                false,
+                                Some(SystemTime::now() + Duration::from_millis(50)),
+                            ),
+                        )
+                        .await
+                }
+            });
+            let early = tokio::time::timeout(Duration::from_millis(250), &mut second).await;
+            let answered_while_queued = early.is_ok();
+            host.release.notify_one();
+            first.await.unwrap().unwrap();
+            let result = match early {
+                Ok(result) => result.unwrap(),
+                Err(_) => second.await.unwrap(),
+            };
+            assert!(
+                matches!(result, Err(ModuleError::BudgetExceeded(_))),
+                "expired queued call ran: {result:?}"
+            );
+            assert!(
+                answered_while_queued,
+                "deadline must bound the isolate queue wait"
+            );
+            let third = engine
+                .invoke(&*host, queued_invocation(false, None))
+                .await
+                .unwrap();
+            assert_eq!(
+                third.value, b"2",
+                "expired waiter must neither run nor retire the healthy isolate"
+            );
+        });
+    }
 
     pub(super) fn run_v8_test(test: impl std::future::Future<Output = ()> + Send + 'static) {
         // Match module-host: initialize V8 and start all isolate generations
@@ -402,6 +562,13 @@ mod host_call_tests {
             }))
             .unwrap();
         if let Err(panic) = result.recv().unwrap() {
+            // The persistent runner may inherit another libtest thread's
+            // output capture. Forward the payload on this failing test too.
+            if let Some(message) = panic.downcast_ref::<String>() {
+                eprintln!("V8 worker test failed: {message}");
+            } else if let Some(message) = panic.downcast_ref::<&str>() {
+                eprintln!("V8 worker test failed: {message}");
+            }
             std::panic::resume_unwind(panic);
         }
     }
@@ -420,6 +587,49 @@ mod host_call_tests {
                 })
             })
         }
+    }
+
+    #[test]
+    fn initialization_watchdog_does_not_shorten_later_invocations() {
+        // Keep the handler wait longer than the initialization ceiling, with
+        // startup slack for loaded CI hosts. The gated watchdog unit test
+        // separately checks the in-flight termination/disarm race.
+        run_v8_test(async {
+            let engine = V8ModuleEngine::from_artifact(ModuleArtifact {
+                manifest: ModuleManifest {
+                    module_id: "initialization-watchdog".into(), generation: 1,
+                    language: ModuleLanguage::TypeScript, artifact_hash: "test".into(),
+                    functions: vec![FunctionContract {
+                        path: "run".into(), kind: FunctionKind::Query, internal: false, delivery: None,
+                        args_schema: Some(json!({"kind":"any"})), result_schema: Some(json!({"kind":"any"})),
+                        metadata: Map::from_iter([("export".into(), json!("run"))]),
+                    }], metadata: Map::new(),
+                },
+                payload: b"export async function run() { await new Promise(resolve => setTimeout(resolve, 1500)); return 'completed'; }".to_vec(),
+            }, V8Config { initialization_timeout: Duration::from_secs(1), execution_timeout: Duration::from_secs(10), ..Default::default() }).unwrap();
+            engine
+                .prewarm()
+                .await
+                .expect("watchdog fixture initialization failed");
+            for _ in 0..2 {
+                let result = engine
+                    .invoke(
+                        &CountingHost(AtomicUsize::new(0)),
+                        Invocation {
+                            function: "run".into(),
+                            kind: FunctionKind::Query,
+                            args: b"null".to_vec(),
+                            context: InvocationContext {
+                                generation: 1,
+                                ..Default::default()
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.value, br#""completed""#);
+            }
+        });
     }
 
     #[test]
@@ -1035,3 +1245,6 @@ mod host_call_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod host_wait_tests;

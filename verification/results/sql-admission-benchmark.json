@@ -1,0 +1,128 @@
+{
+  "baseline": "f28b6cd18a1a9ee5ae13b2c35e8735023c02cc8a",
+  "started": 1792974703.930124,
+  "scope": "Rust admission CPU cost on three valid SQL samples; not database or server throughput.",
+  "sampling": "Nine sequential samples per strategy in fixed order; other machine work is not paused.",
+  "scriptSha256": "d05ee51dd6f47d0a35b353f25200967e6bb465194f121cbfb01882beca6617df",
+  "commands": [
+    {
+      "name": "headroom",
+      "exit": 0,
+      "seconds": 0.05431989498902112
+    },
+    {
+      "name": "baseline-source",
+      "exit": 0,
+      "seconds": 0.0033047510078176856
+    },
+    {
+      "name": "compile",
+      "exit": 0,
+      "seconds": 0.37883672304451466
+    },
+    {
+      "name": "benchmark",
+      "exit": 0,
+      "seconds": 2.8656533940229565
+    }
+  ],
+  "sourceItems": {
+    "baseline_require_single_statement": "e4a5075890a8ffd73b3e904185acc15c6e2c8bbc16bb584cd70ff46a7acf4b22",
+    "baseline_require_read_statement": "9d15c3089aab9515f09bb1c5fb3202ae4be8d0ae0f6c6864cad990c8f4aaeac1",
+    "current_require_single_statement": "fa0d753ea72ca7e8a33d0f3eea56c3bfb5a17612b052537c7d3a85332ffff55b",
+    "current_require_read_head": "212c0ae4df19a09c5c29572eea200e0bf1a3cec72f809e3aada5c4a3a65c6ea1"
+  },
+  "harnessSha256": "7f7faa2aa8b527d12f875ef730dcb8e495f74c31ee53a92d284ba13e40ce794b",
+  "samplesNanoseconds": {
+    "short": {
+      "baseline": [
+        206,
+        179,
+        173,
+        172,
+        170,
+        170,
+        171,
+        171,
+        171
+      ],
+      "current": [
+        76,
+        78,
+        78,
+        78,
+        78,
+        77,
+        77,
+        77,
+        79
+      ]
+    },
+    "join": {
+      "baseline": [
+        402,
+        400,
+        405,
+        403,
+        405,
+        413,
+        405,
+        403,
+        401
+      ],
+      "current": [
+        219,
+        220,
+        221,
+        220,
+        220,
+        266,
+        278,
+        219,
+        218
+      ]
+    },
+    "large_literal": {
+      "baseline": [
+        182189,
+        176338,
+        174582,
+        175157,
+        182512,
+        176317,
+        175224,
+        178704,
+        174354
+      ],
+      "current": [
+        28746,
+        26272,
+        26092,
+        25979,
+        26246,
+        26378,
+        26257,
+        26150,
+        26127
+      ]
+    }
+  },
+  "medianNanoseconds": {
+    "short": {
+      "baseline": 171,
+      "current": 78
+    },
+    "join": {
+      "baseline": 403,
+      "current": 220
+    },
+    "large_literal": {
+      "baseline": 176317,
+      "current": 26246
+    }
+  },
+  "lexerSha256": "1a34204c96f5de31fcbef30bcb1c7927ab27db1e868ceb41a788ff2410e17e00",
+  "success": true,
+  "finished": 1792974707.232867,
+  "environmentNote": "A separate release Rust workspace build was active during measurement. No CPU isolation or end-to-end server workload."
+}

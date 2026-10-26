@@ -4,6 +4,8 @@
 //! implementation. The production module host embeds these primitives while
 //! the Rust network/database host retains transaction ownership.
 
+mod generation;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -122,6 +124,8 @@ impl RetiredGeneration {
 pub enum RegistryError {
     #[error("module generation {0} is not newer than the active generation")]
     NonMonotonicGeneration(u64),
+    #[error("module generation counter is exhausted")]
+    GenerationExhausted,
     #[error("module generation {0} was never loaded")]
     UnknownGeneration(u64),
     #[error("no active module generation")]
@@ -285,14 +289,15 @@ impl ModuleHostRuntime {
 #[derive(Default)]
 pub struct ModuleRegistry {
     modules: Mutex<BTreeMap<String, Arc<ModuleSlot>>>,
+    // Issued numbers outlive an unloaded slot. A delayed load or activation
+    // must never collide with a new incarnation of the same module.
+    issued: Mutex<BTreeMap<String, u64>>,
 }
 
 struct ModuleSlot {
     registry: Arc<GenerationRegistry>,
     /// Loaded but not yet activated generations, highest generation last.
     staged: Mutex<BTreeMap<u64, Arc<dyn ModuleEngine>>>,
-    /// Monotonic generation counter, never reused within one host process.
-    issued: Mutex<u64>,
 }
 
 impl ModuleSlot {
@@ -300,7 +305,6 @@ impl ModuleSlot {
         Self {
             registry: Arc::new(GenerationRegistry::new()),
             staged: Mutex::new(BTreeMap::new()),
-            issued: Mutex::new(0),
         }
     }
 }
@@ -329,15 +333,17 @@ impl ModuleRegistry {
         requested: Option<u64>,
     ) -> Result<u64, RegistryError> {
         let slot = self.slot(module_id);
-        let mut issued = slot.issued.lock().expect("module generation lock");
-        let floor = (*issued).max(slot.registry.active_generation().unwrap_or(0));
-        let generation = match requested {
-            Some(requested) if requested <= floor => {
-                return Err(RegistryError::NonMonotonicGeneration(requested))
-            }
-            Some(requested) => requested,
-            None => floor + 1,
-        };
+        let mut counters = self.issued.lock().expect("module generation lock");
+        let issued = counters.entry(module_id.to_owned()).or_default();
+        let generation = generation::next_generation(
+            *issued,
+            slot.registry.active_generation().unwrap_or(0),
+            requested,
+        )
+        .ok_or(match requested {
+            Some(value) => RegistryError::NonMonotonicGeneration(value),
+            None => RegistryError::GenerationExhausted,
+        })?;
         *issued = generation;
         Ok(generation)
     }
@@ -366,7 +372,15 @@ impl ModuleRegistry {
             .expect("module staging lock")
             .remove(&generation)
             .ok_or(RegistryError::UnknownGeneration(generation))?;
+        // Use the same issued -> active lock order as reserve_generation.
+        // Recording a manually staged generation must be atomic with activation
+        // so an unload/reload cannot allocate below it in between these steps.
+        let mut counters = self.issued.lock().expect("module generation lock");
+        let actual_generation = engine.manifest().generation;
         let retired = slot.registry.activate(engine)?;
+        let issued = counters.entry(module_id.to_owned()).or_default();
+        *issued = (*issued).max(actual_generation);
+        drop(counters);
         // Anything still staged below the new generation can never be activated
         // now that activation is strictly monotonic.
         slot.staged
@@ -434,5 +448,152 @@ impl ModuleRegistry {
             drained &= slot.registry.drain(timeout);
         }
         drained
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use gonvex_module_runtime::{ModuleLanguage, ModuleManifest};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Engine {
+        manifest: ModuleManifest,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Engine {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ModuleEngine for Engine {
+        fn manifest(&self) -> &ModuleManifest {
+            &self.manifest
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            _host: &'a dyn ModuleHost,
+            _invocation: Invocation,
+        ) -> BoxFuture<'a, Result<InvocationResult, ModuleError>> {
+            Box::pin(async { Err(ModuleError::Unsupported("test engine".into())) })
+        }
+    }
+
+    fn engine(generation: u64, drops: &Arc<AtomicUsize>) -> Arc<dyn ModuleEngine> {
+        Arc::new(Engine {
+            manifest: ModuleManifest {
+                module_id: "m".into(),
+                generation,
+                language: ModuleLanguage::TypeScript,
+                artifact_hash: "test".into(),
+                functions: Vec::new(),
+                metadata: Default::default(),
+            },
+            drops: Arc::clone(drops),
+        })
+    }
+
+    #[test]
+    fn automatic_reservation_rejects_exhaustion_without_poisoning() {
+        let registry = ModuleRegistry::new();
+        assert_eq!(
+            registry.reserve_generation("m", Some(u64::MAX)).unwrap(),
+            u64::MAX
+        );
+        assert!(matches!(
+            registry.reserve_generation("m", None),
+            Err(RegistryError::GenerationExhausted)
+        ));
+        assert!(matches!(
+            registry.reserve_generation("m", Some(u64::MAX)),
+            Err(RegistryError::NonMonotonicGeneration(u64::MAX))
+        ));
+    }
+
+    #[test]
+    fn reservations_survive_unload_and_shutdown() {
+        let registry = ModuleRegistry::new();
+        assert_eq!(registry.reserve_generation("m", None).unwrap(), 1);
+        assert!(registry.unload("m", None));
+        assert_eq!(registry.reserve_generation("m", None).unwrap(), 2);
+        assert!(registry.shutdown(None));
+        assert_eq!(registry.reserve_generation("m", None).unwrap(), 3);
+        assert_eq!(registry.reserve_generation("other", None).unwrap(), 1);
+    }
+
+    #[test]
+    fn failed_reservation_preserves_the_counter() {
+        let registry = ModuleRegistry::new();
+        assert_eq!(registry.reserve_generation("m", Some(10)).unwrap(), 10);
+        assert!(registry.reserve_generation("m", Some(9)).is_err());
+        assert_eq!(registry.reserve_generation("m", None).unwrap(), 11);
+    }
+
+    #[test]
+    fn manually_staged_generation_survives_unload_in_the_issued_ledger() {
+        let registry = ModuleRegistry::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        // Stage keys and engine manifests are distinct inputs to the library.
+        registry.stage("m", 2, engine(42, &drops));
+        registry.activate("m", 2).unwrap();
+        assert!(registry.unload("m", None));
+        assert_eq!(registry.reserve_generation("m", None).unwrap(), 43);
+    }
+
+    #[test]
+    fn concurrent_reservations_are_unique() {
+        let registry = Arc::new(ModuleRegistry::new());
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                std::thread::spawn(move || {
+                    (0..128)
+                        .map(|_| registry.reserve_generation("m", None).unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut generations: Vec<_> = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect();
+        generations.sort_unstable();
+        assert_eq!(generations, (1..=512).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn activation_preserves_old_leases_until_release() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let registry = GenerationRegistry::new();
+        assert!(registry.activate(engine(1, &drops)).unwrap().is_none());
+        let old = registry.acquire().unwrap();
+        let retired = registry.activate(engine(2, &drops)).unwrap().unwrap();
+        assert_eq!(old.generation(), 1);
+        assert_eq!(registry.acquire().unwrap().generation(), 2);
+        assert!(!retired.wait_for_drain(Some(Duration::ZERO)));
+        assert!(registry.reap(Some(Duration::ZERO)).is_empty());
+        drop(old);
+        assert!(retired.wait_for_drain(Some(Duration::ZERO)));
+        assert_eq!(registry.reap(Some(Duration::ZERO)), vec![1]);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(retired);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unload_reports_a_live_lease_and_releases_the_engine_afterwards() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let registry = ModuleRegistry::new();
+        registry.stage("m", 1, engine(1, &drops));
+        registry.activate("m", 1).unwrap();
+        let lease = registry.acquire("m").unwrap();
+        assert!(!registry.unload("m", Some(Duration::ZERO)));
+        assert!(matches!(registry.acquire("m"), Err(RegistryError::Empty)));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(lease);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }

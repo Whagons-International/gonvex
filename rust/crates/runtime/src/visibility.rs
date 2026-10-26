@@ -10,7 +10,7 @@ use sqlx::types::Json;
 use sqlx::Row;
 use thiserror::Error;
 
-use crate::host_calls::bind_value;
+use crate::sql_parameters::Parameters;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -385,10 +385,9 @@ async fn resolve_member(
             continue;
         }
         let (statement, parameters) = compile_set(set, &direct)?;
-        let mut query = sqlx::query(&statement);
-        for parameter in &parameters {
-            query = bind_value(query, parameter).map_err(VisibilityError::Invalid)?;
-        }
+        let parameters = Parameters::scalars(&parameters).map_err(VisibilityError::Invalid)?;
+        let statement_key = parameters.statement(&statement);
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         let rows = query.fetch_all(&mut **transaction.transaction()).await?;
         let values = rows
             .into_iter()
@@ -1131,10 +1130,9 @@ mod tests {
         let mut parameters = Vec::new();
         let predicate = compile_predicate(plan, resolved, "r", &mut parameters).unwrap();
         let statement = format!("SELECT r.id FROM members AS r WHERE {predicate} ORDER BY r.id");
-        let mut query = sqlx::query(&statement);
-        for value in &parameters {
-            query = bind_value(query, value).unwrap();
-        }
+        let parameters = Parameters::scalars(&parameters).unwrap();
+        let statement_key = parameters.statement(&statement);
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         let rows = query.fetch_all(&mut **tx.transaction()).await.unwrap();
         assert_eq!(
             rows.iter()
