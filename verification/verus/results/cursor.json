@@ -1,0 +1,91 @@
+{
+  "verus": "Verus\n  Version: 0.2026.10.18.7d82994\n  Profile: release\n  Platform: linux_x86_64\n  Toolchain: 1.99.1-x86_64-unknown-linux-gnu (overridden by environment variable RUSTUP_TOOLCHAIN)",
+  "sources": {
+    "rust/crates/runtime/src/replica_cursor.rs": "645c5e2bc1634044f22af84e135c8276cd3320a4125929c46cac803a7d534b2f",
+    "rust/crates/protocol/src/lib.rs": "eddae4db3dce203cbe96cf9e8757f77ab81994f55fbda52e64b95ec761396789"
+  },
+  "scope": "Actual production cursor decision and ReplicaCursor fields. For all strings and u64 revisions: a cursor exists, epochs match, and retained <= client <= current. No retained/current ordering precondition. Serialization, history retention, hash validation and caller behavior are outside this proof. String equality uses Verus standard-library specifications.",
+  "adapterSha256": "3285c62da4b694476808e4303bf74f00819edfd1e6d61cf6b25848d38c6317d3",
+  "runnerSha256": "402ae32d85f66ea950dc502aff53f13d965cbb105312b4499d48114b6f9dd298",
+  "checks": [
+    {
+      "name": "production",
+      "expectedToVerify": true,
+      "exit": 0,
+      "passed": true,
+      "seconds": 0.9511210840428248,
+      "harnessSha256": "c8c78f0c478a5ada132eae150808927203000a9ee09afe0517e79d39249fa46e",
+      "summary": [
+        "verification results:: 1 verified, 0 errors"
+      ]
+    },
+    {
+      "name": "accept_missing",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.587057241005823,
+      "harnessSha256": "758cf8a1970be96f48a02470878b0821f697b447723123ed1995f5ae053567c7",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "ignore_epoch",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5605481549864635,
+      "harnessSha256": "3609799439942aac7cfc615bf5ead46a44710d014e3282e9dba21e1a380f636c",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "accept_future",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6237655651057139,
+      "harnessSha256": "dcb123b888c0ddf78d53a79679ac439aec51a03230cad7be25e39f968aea72bb",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "accept_expired",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5289597230730578,
+      "harnessSha256": "c72c153104ce25d627a671fa28f129e963e01c1726abbebf483cfb503a1df007",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "exclude_current",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5145879869814962,
+      "harnessSha256": "88b5fdc705abfab2dfd7c856f5034589f728c492c17dde8d350f38dbd758264a",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "exclude_retained",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5722791330190375,
+      "harnessSha256": "4e87ac03c29d2782c4018238985e1412128a5f6f690bdf0716e6770b99700c7d",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    }
+  ],
+  "expectedChecks": 7,
+  "success": true
+}

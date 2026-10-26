@@ -18,6 +18,7 @@ mod operations;
 mod operator_data;
 pub mod public_functions;
 pub mod replica;
+mod replica_cursor;
 mod replica_open_queue;
 pub mod sandbox;
 pub mod scheduler;

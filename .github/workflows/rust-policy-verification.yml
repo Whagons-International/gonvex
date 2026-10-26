@@ -25,6 +25,11 @@ jobs:
           curl -fL --retry 2 -o verus.zip https://github.com/verus-lang/verus/releases/download/release/0.2026.10.18.7d82994/verus-0.2026.10.18.7d82994-x86-linux.zip
           echo 'e9af03732d4bdd32b93a8fcf471706739c24c1473fa5086618d96c47237845dd  verus.zip' | sha256sum -c -
           unzip -q verus.zip
+      - name: Prove cursor resume policy and reject broken admission
+        run: |
+          python3 verification/verus/verify_cursor.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/cursor-proof"
       - name: Prove production allocation and reject broken variants
         run: |
           python3 verification/verus/verify_generation.py \
