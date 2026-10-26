@@ -666,6 +666,23 @@ fn compile_expression(
             });
             format!("({joined})")
         }
+        // Boolean double negation is the original admission decision. Avoid
+        // nested SQL truth tests, which can hide an indexable equality.
+        "not" if expression.children[0].operator == "not" => compile_expression(
+            &expression.children[0].children[0],
+            plan,
+            resolved,
+            row_alias,
+            parameters,
+            account_parameter,
+        )?,
+        "not" if expression.children[0].operator == "eq" => compile_literal_comparison(
+            row_alias,
+            &expression.children[0].column,
+            visibility_literal(expression.children[0].value.as_ref())?,
+            parameters,
+            true,
+        )?,
         // Visibility uses Boolean admission: a nullable equality that does not
         // admit a row is false to the Rust evaluator. SQL NOT would preserve
         // UNKNOWN and disagree under negation. IS NOT TRUE complements the
@@ -862,12 +879,27 @@ fn compile_literal_equality(
     literal: &Value,
     parameters: &mut Vec<Value>,
 ) -> Result<String, VisibilityError> {
+    compile_literal_comparison(row_alias, column, literal, parameters, false)
+}
+
+fn compile_literal_comparison(
+    row_alias: &str,
+    column: &str,
+    literal: &Value,
+    parameters: &mut Vec<Value>,
+    negated: bool,
+) -> Result<String, VisibilityError> {
     let column = quote(column)?;
     if literal.is_null() {
-        return Ok(format!("{row_alias}.{column} IS NULL"));
+        let predicate = if negated { "IS NOT NULL" } else { "IS NULL" };
+        return Ok(format!("{row_alias}.{column} {predicate}"));
     }
     parameters.push(literal.clone());
-    Ok(format!("{row_alias}.{column} = ${}", parameters.len()))
+    let operator = if negated { "IS DISTINCT FROM" } else { "=" };
+    Ok(format!(
+        "{row_alias}.{column} {operator} ${}",
+        parameters.len()
+    ))
 }
 
 fn visibility_fingerprint(
