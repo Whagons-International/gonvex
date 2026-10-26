@@ -22,7 +22,8 @@ the test functions return early. CI supplies PostgreSQL.
 | V8-HANDLER-LOOKUP-DEADLINE | An exported getter ran before the watchdog and could hang lookup. Arm the watchdog before resolving the handler and disarm every early return. | `module-runtime-v8/src/lookup_deadline_tests.rs`: lookup timeout, retirement, healthy reuse and invalid budgets. |
 | V8-PENDING-SERIAL-HOST | A pending serial host future hid a ready native result. A pending host promise could also miss its deadline wakeup. Select native completion while host work waits and use the same deadline for the async event loop. | `module-runtime-v8/src/host_wait_tests.rs`: `pending_serial_host_cannot_swallow_deadline` and `pending_serial_host_cannot_swallow_native_result`. |
 | POSTGRES-PARAMETER-CACHE-TYPE-CONFUSION | Reuse `SELECT $1` with integer 0, then text `abcdefgh`. The old cache returned bigint `7017280452245743464`. SDK CRUD with numeric and eight-character string IDs could target unrelated numeric rows. Describing varchar/char arrays also poisoned later text-array binds. Partition SQLx execution cache keys by actual bound OIDs and separate description keys. | `runtime/src/sql_parameters.rs`, `sql_statement_key.rs`, `host_calls_parameter_tests.rs`: changing scalar types, described arrays and actual SDK update/delete/deleteMany. |
-| SQL-STATEMENT-ADMISSION | Valid dollar quotes, escape strings, trailing comments and leading comments were rejected. CR-only comments could hide a batch from admission, although PostgreSQL's extended protocol rejected that batch. Use one lexical pass for statement count and the first keyword. | `runtime/src/sql_statement_lexer.rs` and `host_calls_parameter_tests.rs`: literals, nested/CR comments, continued escape strings and healthy transactions after local batch rejection. |
+| SQL-STATEMENT-ADMISSION | Valid dollar quotes, escape strings, trailing comments and leading comments were rejected. CR-only comments could hide a batch from admission, although PostgreSQL's extended protocol rejected that batch. Use one lexical pass for statement count and the first keyword. | `postgres/src/sql_lexer.rs` and `runtime/src/host_calls_parameter_tests.rs`: literals, nested/CR comments, continued escape strings and healthy transactions after local batch rejection. |
+| MIGRATION-SQL-LEXING | The staging migration splitter combined statements after CR-only comments, rejected valid escape strings, and split Unicode dollar quotes at embedded semicolons. Share the lexical scanner with runtime admission while retaining separate execution policies. | `postgres/src/sql_script.rs` regression cases and `provision.rs::migrations_keep_postgres_lexical_boundaries_in_both_transaction_modes`: actual migration execution and receipt-based replay in both transaction modes. |
 
 ## Exact database examples
 
@@ -60,10 +61,19 @@ production function body. It does not prove registry concurrency, SQL parsing,
 SQLx encoding, PostgreSQL transactions or V8 cancellation. Their ordinary Rust
 regressions remain necessary.
 
-The admission lexer assumes PostgreSQL `standard_conforming_strings=on` and is
-not a full SQL parser. The separate migration parser in `postgres/src/sql_script.rs`
-has not been replaced. Review custom session string modes and migration parsing
-before claiming general PostgreSQL lexical support.
+The shared lexer assumes PostgreSQL `standard_conforming_strings=on` and is
+not a full SQL parser. The migration adapter consumes statement ranges from the
+same scanner used for runtime admission. Migrations permit batches, while module
+invocations retain their single-statement and transaction-ownership checks.
+Custom session string modes remain outside this scanner's contract. See
+[PostgreSQL lexical rules](https://www.postgresql.org/docs/current/sql-syntax-lexical.html).
+
+Migration lexer regression tests failed before the fix on staging
+`0832985abbf13e43cb777459c215d754333d4294`. The PostgreSQL migration test
+executes scripts containing CR-only comments, escaped quotes and Unicode dollar
+tags with transaction mode both enabled and disabled, then checks values and
+replay receipts. No deployed occurrence has been established. SQL lexing remains
+covered by regression tests, with no formal proof claimed.
 
 The aborted-commit guard adds a database round trip to successful reducer commit.
 Typed statement keys add allocation and produce distinct cache entries per type
@@ -86,3 +96,16 @@ Median admission time over nine samples was 171 to 78 ns for a short query,
 A separate Rust build was active and CPU isolation was not used. These results
 measure only admission CPU cost on valid samples; they establish neither a
 server throughput result nor the cost of commit preflight or typed cache keys.
+
+The [shared scanner benchmark](../verification/results/sql-lexer-benchmark.json)
+compares the scanner with staging `0832985abbf13e43cb777459c215d754333d4294`.
+It uses separate binaries with the same harness, warm-up, and nine paired rounds
+with alternating process order. Local medians were 54 to 40 ns for a short query,
+197 to 161 ns for a join, and 29,025 to 10,078 ns for a 100 KB literal.
+The shared scanner borrows the first word and searches ordinary quoted contents
+without visiting every byte in the Rust loop. Runtime read admission compares
+that word case-insensitively. The quote search preserves doubled quotes and
+keeps escape strings on their existing backslash-aware path.
+These CPU-only samples use an active workstation without isolation and do not
+measure cross-crate call overhead, database execution or server throughput.
+Reproduce with `python3 rust/tools/benchmark_sql_lexer.py --build-dir /path/to/build`.

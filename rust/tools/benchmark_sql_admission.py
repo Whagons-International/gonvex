@@ -47,7 +47,7 @@ def main():
             command('headroom', [gate, out])
         old = command('baseline-source', ['git', 'show', args.baseline + ':rust/crates/runtime/src/host_calls.rs'])
         current = (ROOT / 'rust/crates/runtime/src/host_calls.rs').read_text()
-        lexer = (ROOT / 'rust/crates/runtime/src/sql_statement_lexer.rs').read_text().split('#[cfg(test)]')[0]
+        lexer = (ROOT / 'rust/crates/postgres/src/sql_lexer.rs').read_text().split('#[cfg(test)]')[0]
         policy = '\n'.join(line for line in (ROOT / 'rust/crates/runtime/src/sql_admission.rs').read_text().split('#[cfg(test)]')[0].splitlines() if not line.startswith('//!'))
         code = 'mod sql_statement_lexer {\n' + lexer + '\n}\n' + policy + '\n'
         for name, replacement in [('require_single_statement', 'baseline_single'), ('require_read_statement', 'baseline_read')]:
@@ -69,7 +69,7 @@ fn run(variant: usize, sql: &str, count: u32) -> u128 {
             baseline_read(sql).unwrap();
         } else {
             let result = require_single_statement(sql).unwrap();
-            require_read_head(result.first_word.as_deref().unwrap_or_default()).unwrap();
+            require_read_head(result.first_word.unwrap_or_default()).unwrap();
         }
     }
     start.elapsed().as_nanos() / u128::from(count)
@@ -107,7 +107,7 @@ fn main() {
         data = json.loads(command('benchmark', [out / 'bench']))
         receipt['samplesNanoseconds'] = data
         receipt['medianNanoseconds'] = {case: {variant: statistics.median(samples) for variant, samples in variants.items()} for case, variants in data.items()}
-        receipt['lexerSha256'] = hashlib.sha256((ROOT / 'rust/crates/runtime/src/sql_statement_lexer.rs').read_bytes()).hexdigest()
+        receipt['lexerSha256'] = hashlib.sha256((ROOT / 'rust/crates/postgres/src/sql_lexer.rs').read_bytes()).hexdigest()
         receipt['success'] = True
     except BaseException as error:
         receipt.update(success=False, failure=str(error))
