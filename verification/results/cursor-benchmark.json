@@ -1,0 +1,161 @@
+{
+  "baseline": "3ad2ec077bd5c6b82d4f76a7a5174ede93fd42b9",
+  "success": true,
+  "commands": [
+    {
+      "name": "headroom",
+      "exit": 0,
+      "seconds": 0.055544688017107546
+    },
+    {
+      "name": "baseline-source",
+      "exit": 0,
+      "seconds": 0.005183403962291777
+    },
+    {
+      "name": "headroom-baseline",
+      "exit": 0,
+      "seconds": 0.05651695793494582
+    },
+    {
+      "name": "compile-baseline",
+      "exit": 0,
+      "seconds": 0.23928787698969245
+    },
+    {
+      "name": "headroom-current",
+      "exit": 0,
+      "seconds": 0.05891975306440145
+    },
+    {
+      "name": "compile-current",
+      "exit": 0,
+      "seconds": 0.2344940910115838
+    },
+    {
+      "name": "sample-0-baseline",
+      "exit": 0,
+      "seconds": 0.12892705691047013
+    },
+    {
+      "name": "sample-0-current",
+      "exit": 0,
+      "seconds": 0.1316928779706359
+    },
+    {
+      "name": "sample-1-current",
+      "exit": 0,
+      "seconds": 0.13814683503005654
+    },
+    {
+      "name": "sample-1-baseline",
+      "exit": 0,
+      "seconds": 0.11062933795619756
+    },
+    {
+      "name": "sample-2-baseline",
+      "exit": 0,
+      "seconds": 0.1112367770401761
+    },
+    {
+      "name": "sample-2-current",
+      "exit": 0,
+      "seconds": 0.11988587607629597
+    },
+    {
+      "name": "sample-3-current",
+      "exit": 0,
+      "seconds": 0.11035505903419107
+    },
+    {
+      "name": "sample-3-baseline",
+      "exit": 0,
+      "seconds": 0.10811040399130434
+    },
+    {
+      "name": "sample-4-baseline",
+      "exit": 0,
+      "seconds": 0.10784983006305993
+    },
+    {
+      "name": "sample-4-current",
+      "exit": 0,
+      "seconds": 0.10971688199788332
+    },
+    {
+      "name": "sample-5-current",
+      "exit": 0,
+      "seconds": 0.10953143099322915
+    },
+    {
+      "name": "sample-5-baseline",
+      "exit": 0,
+      "seconds": 0.10834849299862981
+    },
+    {
+      "name": "sample-6-baseline",
+      "exit": 0,
+      "seconds": 0.1082522519864142
+    },
+    {
+      "name": "sample-6-current",
+      "exit": 0,
+      "seconds": 0.10947360203135759
+    },
+    {
+      "name": "sample-7-current",
+      "exit": 0,
+      "seconds": 0.10928913298994303
+    },
+    {
+      "name": "sample-7-baseline",
+      "exit": 0,
+      "seconds": 0.10878249502275139
+    },
+    {
+      "name": "sample-8-baseline",
+      "exit": 0,
+      "seconds": 0.11024630395695567
+    },
+    {
+      "name": "sample-8-current",
+      "exit": 0,
+      "seconds": 0.10872640798334032
+    }
+  ],
+  "scope": "Actual production cursor decision bodies and unchanged ReplicaCursor fields, excluding Serde derives. Prebuilt cursor strings, including Unicode and long equal prefixes. CPU only, not retention storage, serialization or server throughput.",
+  "sampling": "Nine paired rounds in separate binaries, alternating order after warm-up, 10 million checks per sample. Other workstation jobs are not paused.",
+  "cpuAffinity": 15,
+  "scriptSha256": "301b3602125a4101bde71801b3d65727880fe24137a496d20cdfb3cda6394000",
+  "samplesNanoseconds": {
+    "baseline": [
+      6.2981285,
+      5.3683438,
+      5.355214,
+      5.2719936,
+      5.2844492,
+      5.2812772,
+      5.3147494,
+      5.3323147,
+      5.398522
+    ],
+    "current": [
+      6.560851400000001,
+      5.2487547,
+      5.4367833,
+      5.3012539,
+      5.3714267,
+      5.2998754,
+      5.3972625,
+      5.3497386,
+      5.3278031
+    ]
+  },
+  "medianNanoseconds": {
+    "baseline": 5.3323147,
+    "current": 5.3497386
+  },
+  "baselineSourceSha256": "c4d9e2874e963275feaeb1a338c646c57d2faf691e262049581d27c8002de265",
+  "currentSourceSha256": "645c5e2bc1634044f22af84e135c8276cd3320a4125929c46cac803a7d534b2f",
+  "typeSourceSha256": "eddae4db3dce203cbe96cf9e8757f77ab81994f55fbda52e64b95ec761396789"
+}
