@@ -1,112 +1,47 @@
-//! SQL script parsing shared by tenant migrations and framework installation.
+//! SQL script execution units for migrations and framework installation.
 
-use crate::DatabaseError;
+use crate::{sql_lexer, DatabaseError};
 
 pub(crate) fn split_statements(source: &str) -> Result<Vec<String>, DatabaseError> {
-    let mut statements = Vec::new();
-    let mut start = 0;
-    let mut quote = None;
-    let mut line_comment = false;
-    let mut block_comment = 0_u32;
-    let mut dollar_tag = String::new();
-    let mut chars = source.char_indices().peekable();
-    while let Some((index, character)) = chars.next() {
-        if line_comment {
-            if character == '\n' {
-                line_comment = false;
-            }
-            continue;
-        }
-        if block_comment > 0 {
-            if source[index..].starts_with("/*") {
-                block_comment += 1;
-                let _ = chars.next();
-                continue;
-            }
-            if source[index..].starts_with("*/") {
-                block_comment -= 1;
-                let _ = chars.next();
-                continue;
-            }
-            continue;
-        }
-        if !dollar_tag.is_empty() {
-            if source[index..].starts_with(&dollar_tag) {
-                for _ in 1..dollar_tag.len() {
-                    let _ = chars.next();
-                }
-                dollar_tag.clear();
-            }
-            continue;
-        }
-        if let Some(active_quote) = quote {
-            if character == active_quote as char {
-                if chars
-                    .peek()
-                    .is_some_and(|(_, next_character)| *next_character == character)
-                {
-                    let _ = chars.next();
-                    continue;
-                }
-                quote = None;
-            }
-            continue;
-        }
-        if source[index..].starts_with("--") {
-            line_comment = true;
-            let _ = chars.next();
-            continue;
-        }
-        if source[index..].starts_with("/*") {
-            block_comment = 1;
-            let _ = chars.next();
-            continue;
-        }
-        if matches!(character, '\'' | '"') {
-            quote = Some(character as u8);
-            continue;
-        }
-        if character == '$' {
-            if let Some(relative_end) = source[index + 1..].find('$') {
-                let end = index + relative_end + 2;
-                let candidate = &source[index..end];
-                if candidate
-                    .strip_prefix('$')
-                    .and_then(|tag| tag.strip_suffix('$'))
-                    .is_some_and(|tag| {
-                        tag.bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                    })
-                {
-                    dollar_tag = candidate.to_owned();
-                    for _ in 1..dollar_tag.len() {
-                        let _ = chars.next();
-                    }
-                    continue;
-                }
-            }
-        }
-        if character == ';' {
-            let statement = source[start..=index].trim();
-            if !statement.is_empty() {
-                statements.push(statement.to_owned());
-            }
-            start = index + character.len_utf8();
-        }
-    }
-    if quote.is_some() || !dollar_tag.is_empty() || block_comment != 0 {
-        return Err(sqlx::Error::Protocol("unterminated SQL quote or comment".to_owned()).into());
-    }
-    let trailing = source[start..].trim();
-    if !trailing.is_empty() {
-        statements.push(trailing.to_owned());
-    }
-    Ok(statements)
+    let ranges = sql_lexer::statement_ranges(source)
+        .map_err(|error| sqlx::Error::Protocol(format!("invalid SQL script: {error:?}")))?;
+    Ok(ranges
+        .into_iter()
+        .map(|range| source[range].trim().to_owned())
+        .collect())
 }
 
 #[cfg(test)]
 mod split_statements_tests {
     use super::split_statements;
+
+    #[test]
+    fn postgres_literal_and_comment_boundaries_keep_two_statements() {
+        for first in [
+            "SELECT 1 -- comment\r;",
+            r"SELECT E'a\';b';",
+            "SELECT $é$semi;colon$é$;",
+            "SELECT identifier$tag$part;",
+            "SELECT E'a' -- continue\r'b\\';c';",
+        ] {
+            let source = format!("{first} SELECT 2;");
+            assert_eq!(
+                split_statements(&source).unwrap(),
+                vec![first.to_owned(), "SELECT 2;".to_owned()],
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn comments_and_empty_statements_do_not_create_work() {
+        assert!(split_statements("; -- comment\r; /* comment */ ;")
+            .unwrap()
+            .is_empty());
+        for source in ["SELECT 'a", "SELECT $é$a", "SELECT 1 /* a", "SELECT 1\0"] {
+            assert!(split_statements(source).is_err(), "{source:?}");
+        }
+    }
 
     #[test]
     fn handles_multibyte_text_inside_dollar_quoted_statement() {
