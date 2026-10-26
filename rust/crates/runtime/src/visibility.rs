@@ -666,8 +666,29 @@ fn compile_expression(
             });
             format!("({joined})")
         }
+        // Boolean double negation is the original admission decision. Avoid
+        // nested SQL truth tests, which can hide an indexable equality.
+        "not" if expression.children[0].operator == "not" => compile_expression(
+            &expression.children[0].children[0],
+            plan,
+            resolved,
+            row_alias,
+            parameters,
+            account_parameter,
+        )?,
+        "not" if expression.children[0].operator == "eq" => compile_literal_comparison(
+            row_alias,
+            &expression.children[0].column,
+            visibility_literal(expression.children[0].value.as_ref())?,
+            parameters,
+            true,
+        )?,
+        // Visibility uses Boolean admission: a nullable equality that does not
+        // admit a row is false to the Rust evaluator. SQL NOT would preserve
+        // UNKNOWN and disagree under negation. IS NOT TRUE complements the
+        // child's admission result, including UNKNOWN, without evaluating it twice.
         "not" => format!(
-            "NOT ({})",
+            "({}) IS NOT TRUE",
             compile_expression(
                 &expression.children[0],
                 plan,
@@ -858,12 +879,27 @@ fn compile_literal_equality(
     literal: &Value,
     parameters: &mut Vec<Value>,
 ) -> Result<String, VisibilityError> {
+    compile_literal_comparison(row_alias, column, literal, parameters, false)
+}
+
+fn compile_literal_comparison(
+    row_alias: &str,
+    column: &str,
+    literal: &Value,
+    parameters: &mut Vec<Value>,
+    negated: bool,
+) -> Result<String, VisibilityError> {
     let column = quote(column)?;
     if literal.is_null() {
-        return Ok(format!("{row_alias}.{column} IS NULL"));
+        let predicate = if negated { "IS NOT NULL" } else { "IS NULL" };
+        return Ok(format!("{row_alias}.{column} {predicate}"));
     }
     parameters.push(literal.clone());
-    Ok(format!("{row_alias}.{column} = ${}", parameters.len()))
+    let operator = if negated { "IS DISTINCT FROM" } else { "=" };
+    Ok(format!(
+        "{row_alias}.{column} {operator} ${}",
+        parameters.len()
+    ))
 }
 
 fn visibility_fingerprint(
@@ -920,6 +956,101 @@ fn quote(value: &str) -> Result<String, VisibilityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nullable_negation_matches_postgres_admission() {
+        use sqlx::postgres::PgPoolOptions;
+
+        let Ok(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping nullable visibility test");
+            return;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TEMP TABLE visibility_negation_values ON COMMIT DROP AS \
+             SELECT row_number() OVER ()::text AS id, s.status, e.enabled \
+             FROM (VALUES (NULL::text), ('blocked'), ('allowed')) AS s(status) \
+             CROSS JOIN (VALUES (NULL::boolean), (false), (true)) AS e(enabled)",
+        )
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let rows: Vec<Json<Value>> = sqlx::query_scalar(
+            "SELECT to_jsonb(r) FROM visibility_negation_values AS r ORDER BY id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        let status =
+            serde_json::json!({"operator":"eq", "column":"status", "value":{"literal":"blocked"}});
+        let enabled =
+            serde_json::json!({"operator":"eq", "column":"enabled", "value":{"literal":true}});
+        let null =
+            serde_json::json!({"operator":"eq", "column":"status", "value":{"literal":null}});
+        let negate = |child: Value| serde_json::json!({"operator":"not", "children":[child]});
+        let mut expressions = vec![
+            status.clone(),
+            enabled.clone(),
+            null.clone(),
+            negate(status.clone()),
+            negate(enabled.clone()),
+            negate(null),
+            negate(negate(status.clone())),
+        ];
+        for operator in ["and", "or"] {
+            let combined = serde_json::json!({"operator":operator, "children":[status, enabled]});
+            expressions.push(combined.clone());
+            expressions.push(negate(combined));
+            expressions.push(serde_json::json!({"operator":operator, "children":[negate(status.clone()), enabled]}));
+        }
+        let resolved = ResolvedVisibility {
+            ephemeral_member: false,
+            revision: 1,
+            direct: BTreeMap::new(),
+            role: String::new(),
+            permissions: Value::Null,
+            sets: BTreeMap::new(),
+            fingerprint: String::new(),
+        };
+        for expression in expressions {
+            let plan: VisibilityPlan = serde_json::from_value(serde_json::json!({
+                "table":"visibility_negation_values", "key":"id", "where":expression
+            }))
+            .unwrap();
+            plan.validate().unwrap();
+            let expected: Vec<String> = rows
+                .iter()
+                .filter(|row| row_matches(&plan, &resolved, &row.0))
+                .map(|row| row.0["id"].as_str().unwrap().to_owned())
+                .collect();
+            let mut values = Vec::new();
+            let predicate = compile_predicate(&plan, &resolved, "r", &mut values).unwrap();
+            let statement = format!(
+                "SELECT r.id FROM visibility_negation_values AS r WHERE {predicate} ORDER BY r.id"
+            );
+            let parameters = Parameters::scalars(&values).unwrap();
+            let key = parameters.statement(&statement);
+            let actual: Vec<String> = parameters
+                .bind(sqlx::query(&key))
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.get("id"))
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "predicate={predicate}; expression={expression}"
+            );
+        }
+        tx.rollback().await.unwrap();
+        pool.close().await;
+    }
 
     #[tokio::test]
     async fn developer_visibility_without_membership_preserves_admission() {
