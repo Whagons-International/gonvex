@@ -24,6 +24,7 @@ the test functions return early. CI supplies PostgreSQL.
 | POSTGRES-PARAMETER-CACHE-TYPE-CONFUSION | Reuse `SELECT $1` with integer 0, then text `abcdefgh`. The old cache returned bigint `7017280452245743464`. SDK CRUD with numeric and eight-character string IDs could target unrelated numeric rows. Describing varchar/char arrays also poisoned later text-array binds. Partition SQLx execution cache keys by actual bound OIDs and separate description keys. | `runtime/src/sql_parameters.rs`, `sql_statement_key.rs`, `host_calls_parameter_tests.rs`: changing scalar types, described arrays and actual SDK update/delete/deleteMany. |
 | SQL-STATEMENT-ADMISSION | Valid dollar quotes, escape strings, trailing comments and leading comments were rejected. CR-only comments could hide a batch from admission, although PostgreSQL's extended protocol rejected that batch. Use one lexical pass for statement count and the first keyword. | `postgres/src/sql_lexer.rs` and `runtime/src/host_calls_parameter_tests.rs`: literals, nested/CR comments, continued escape strings and healthy transactions after local batch rejection. |
 | MIGRATION-SQL-LEXING | The staging migration splitter combined statements after CR-only comments, rejected valid escape strings, and split Unicode dollar quotes at embedded semicolons. Share the lexical scanner with runtime admission while retaining separate execution policies. | `postgres/src/sql_script.rs` regression cases and `provision.rs::migrations_keep_postgres_lexical_boundaries_in_both_transaction_modes`: actual migration execution and receipt-based replay in both transaction modes. |
+| VISIBILITY-NULL-NOT-PARITY | A NULL status under `not(eq(status, "blocked"))` passed the Rust row evaluator but failed the SQL predicate. Compile negation as the complement of Boolean admission with null-safe predicates, including SQL UNKNOWN. | `runtime/src/visibility.rs::nullable_negation_matches_postgres_admission`: real PostgreSQL and Rust decisions across nine nullable/nonnull rows and thirteen nested Boolean expressions. |
 
 ## Exact database examples
 
@@ -109,3 +110,35 @@ keeps escape strings on their existing backslash-aware path.
 These CPU-only samples use an active workstation without isolation and do not
 measure cross-crate call overhead, database execution or server throughput.
 Reproduce with `python3 rust/tools/benchmark_sql_lexer.py --build-dir /path/to/build`.
+
+## Nullable visibility negation
+
+Visibility negation complements the Rust row admission decision. A nullable
+comparison to a non-null literal does not admit a NULL-valued row; negating that
+comparison admits it. SQL `NOT` retains UNKNOWN and excluded the row instead.
+Negated literal equality uses `IS DISTINCT FROM`, or `IS NOT NULL` for a null
+literal. Remaining negation uses `(child) IS NOT TRUE`. Each form complements the
+child's admission result and evaluates it once. Boolean double negation lowers
+directly to the original child, preserving indexable equality predicates.
+See [PostgreSQL comparison predicates](https://www.postgresql.org/docs/current/functions-comparison.html).
+
+The live PostgreSQL regression compares thirteen expressions over nine complete
+rows covering NULL, blocked/allowed text, and nullable Boolean values. It failed
+on the original staging implementation and passes after the fix. This is a
+regression check for the recorded negation bug, not a formal proof of all SQL
+types, missing fields, or visibility dependencies. No deployed occurrence has
+been established.
+
+The [query benchmark](../verification/results/visibility-negation-benchmark.json)
+uses a temporary 31,000-row fixture with non-null values and equal admitted row
+sets. The baseline and corrected forms use the same scan/index node types.
+Nine paired rounds of 100-query batch means on one CPU gave median execution
+times of 1.846/1.688 ms for negated equality, 1.089/1.084 ms for double negation,
+and 2.174/2.173 ms for a negated conjunction. These are explicit SQL templates
+matching the lowering rules, not SQL emitted by the Rust compiler during the
+benchmark. They do not establish server throughput, parameter binding costs or
+performance when the corrected predicate admits additional NULL-valued rows.
+
+Reproduce with `GONVEX_TEST_POSTGRES_URL` pointing at a disposable PostgreSQL
+instance and `python3 verification/benchmarks/visibility_negation.py --output
+/path/to/result.json --repetitions 100`.
