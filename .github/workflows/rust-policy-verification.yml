@@ -35,3 +35,8 @@ jobs:
           python3 verification/verus/verify_capabilities.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/capability-proof"
+      - name: Prove cursor resume policy and reject broken admission
+        run: |
+          python3 verification/verus/verify_cursor.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/cursor-proof"

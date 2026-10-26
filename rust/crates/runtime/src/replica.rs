@@ -15,6 +15,7 @@ use thiserror::Error;
 
 use crate::change_feed::{FeedEvent, LogChange, ReplicaClock};
 use crate::modules::ReplicaCollectionDefinition;
+use crate::replica_cursor::cursor_resumable;
 use crate::sql_parameters::Parameters;
 use crate::visibility::{self, ResolvedVisibility, VisibilityPlan};
 use crate::Runtime;
@@ -977,18 +978,6 @@ fn requested_sum_digest(
 
 fn row_hash(row: &Value) -> String {
     hex_digest(stable_json(row).as_bytes())
-}
-
-fn cursor_resumable(
-    client: Option<&ReplicaCursor>,
-    current: &ReplicaCursor,
-    retained: u64,
-) -> bool {
-    client.is_some_and(|client| {
-        client.epoch == current.epoch
-            && client.revision <= current.revision
-            && client.revision >= retained
-    })
 }
 
 fn verify_resume_hashes(
