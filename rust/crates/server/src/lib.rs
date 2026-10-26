@@ -340,7 +340,7 @@ impl ModuleRegistry {
             slot.registry.active_generation().unwrap_or(0),
             requested,
         )
-        .ok_or_else(|| match requested {
+        .ok_or(match requested {
             Some(value) => RegistryError::NonMonotonicGeneration(value),
             None => RegistryError::GenerationExhausted,
         })?;

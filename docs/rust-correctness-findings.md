@@ -16,7 +16,7 @@ the test functions return early. CI supplies PostgreSQL.
 | GENERATION-REUSE-AFTER-UNLOAD | Reserve, unload, reserve could issue 1 twice. Keep an issued-generation ledger across unload and shutdown. | `server/src/lib.rs`: `reservations_survive_unload_and_shutdown`, manual activation and concurrent reservations. |
 | HOST-JSON-NUMERIC-ROUNDTRIP | Host JSON changed binary64 bits `659474afcab3011b` to `659474afcab3011a`. Enable serde JSON `float_roundtrip`. | `module-runtime-v8/src/dispatch.rs`: `host_payload_numbers_survive_json_lowering`. |
 | POSTGRES-ABORTED-COMMIT | Catch a SQL error, then finish a reducer successfully. SQLx reported COMMIT success while PostgreSQL rolled back. Check transaction usability and await rollback on failure. Query snapshots retain their rollback/fallback behavior. | `postgres/src/transaction_commit_tests.rs`: aborted commit, healthy commit, explicit rollback, read-only fallback and deferred constraints. |
-| POSTGRES-RAW-TRANSACTION-CONTROL | Raw `COMMIT` or `END` persisted writes before the invocation's outer rollback. Reject outer transaction commands while retaining savepoints and ordinary prepared statements. | `runtime/src/sql_admission.rs`: transaction boundary and savepoint/prepared-statement tests. |
+| POSTGRES-RAW-TRANSACTION-CONTROL | Raw `COMMIT` or `END` persisted writes before the invocation's outer rollback. Reject outer transaction commands while retaining savepoints and ordinary prepared statements. | `runtime/src/sql_admission.rs` and `host_calls_parameter_tests.rs`: unit admission, actual host rollback/savepoint histories and Query fallback after a caught SQL error. |
 | V8-QUEUE-DEADLINE | A call expired in the isolate queue and still executed. Bound admission and recheck the remaining budget before dispatch. | `module-runtime-v8/src/lib.rs`: `queued_invocation_respects_deadline_without_retiring_healthy_isolate`. |
 | V8-INITIALIZATION-CANCELLATION | Cancelled startup returned capacity before the native heap was disposed. Initializers could also run beyond their budget. Hold capacity through disposal and bound CPU/async initialization. | `module-runtime-v8/src/pool.rs`: gated teardown, startup timeout, cancellation and later-invocation tests. |
 | V8-HANDLER-LOOKUP-DEADLINE | An exported getter ran before the watchdog and could hang lookup. Arm the watchdog before resolving the handler and disarm every early return. | `module-runtime-v8/src/lookup_deadline_tests.rs`: lookup timeout, retirement, healthy reuse and invalid budgets. |
@@ -76,3 +76,13 @@ Run full application flows for live-query, visibility and replica behavior befor
 production promotion. Tests that require object storage or an external module-host
 binary must be reported separately from the database component tests. Preserve
 this findings log regardless of whether the Bend experiment continues.
+
+## Admission benchmark snapshot
+
+The [Rust-only benchmark receipt](../verification/results/sql-admission-benchmark.json)
+compares staging `f28b6cd18a1a9ee5ae13b2c35e8735023c02cc8a` with this lexer.
+Median admission time over nine samples was 171 to 78 ns for a short query,
+403 to 220 ns for a join, and 176,317 to 26,246 ns for a 100 KB literal.
+A separate Rust build was active and CPU isolation was not used. These results
+measure only admission CPU cost on valid samples; they establish neither a
+server throughput result nor the cost of commit preflight or typed cache keys.

@@ -253,3 +253,86 @@ async fn carriage_return_batch_rejects_before_postgres_and_keeps_transaction_usa
     assert_eq!(fixture.rows().await, vec![(2, "valid".to_owned())]);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn raw_transaction_boundaries_cannot_escape_invocation_rollback() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    for boundary in [
+        "COMMIT",
+        "END WORK",
+        "ROLLBACK",
+        "ABORT",
+        "BEGIN",
+        "START TRANSACTION",
+        "PREPARE TRANSACTION 'escape'",
+        ";;/* prefix */ COMMIT",
+        "-- prefix\rEND",
+    ] {
+        let mut calls = fixture.calls().await;
+        calls
+            .query(
+                "INSERT INTO tasks VALUES (2,'before boundary')",
+                Value::Null,
+            )
+            .await
+            .unwrap();
+        assert!(
+            calls
+                .query(boundary, Value::Null)
+                .await
+                .unwrap_err()
+                .contains("transaction boundaries"),
+            "{boundary}"
+        );
+        // A local rejection must not abort the transaction or lose earlier work.
+        assert_eq!(
+            calls
+                .query("SELECT count(*) AS n FROM tasks", Value::Null)
+                .await
+                .unwrap(),
+            serde_json::json!([{"n":1}])
+        );
+        calls.finish(false).await.unwrap();
+        assert!(
+            fixture.rows().await.is_empty(),
+            "{boundary} escaped outer rollback"
+        );
+    }
+    let mut calls = fixture.calls().await;
+    for statement in [
+        "INSERT INTO tasks VALUES (2,'kept')",
+        "SAVEPOINT app",
+        "INSERT INTO tasks VALUES (3,'rolled back')",
+        "ROLLBACK TO SAVEPOINT app",
+        "RELEASE SAVEPOINT app",
+    ] {
+        calls.query(statement, Value::Null).await.unwrap();
+    }
+    calls.finish(true).await.unwrap();
+    assert_eq!(fixture.rows().await, vec![(2, "kept".to_owned())]);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn caught_query_sql_errors_can_return_a_fallback_after_snapshot_rollback() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    for statement in ["SELECT 1/0", "SELECT * FROM missing_table"] {
+        let transaction = fixture
+            .control
+            .begin_control_transaction(true)
+            .await
+            .unwrap();
+        let mut calls = DatabaseHostCalls::new(transaction, DatabaseCapability::Query);
+        assert!(calls.query(statement, Value::Null).await.is_err());
+        calls
+            .finish(true)
+            .await
+            .expect("a Query fallback should survive snapshot rollback");
+    }
+    assert!(fixture.rows().await.is_empty());
+    fixture.close().await;
+}

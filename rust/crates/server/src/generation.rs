@@ -1,5 +1,5 @@
 // Keep allocation arithmetic independent of registry locks and engine effects.
-// rust/verification/verify_generation.py checks this exact function body.
+// verification/verus/verify_generation.py checks this exact function body.
 pub(crate) fn next_generation(issued: u64, active: u64, requested: Option<u64>) -> Option<u64> {
     let floor = if issued > active { issued } else { active };
     match requested {

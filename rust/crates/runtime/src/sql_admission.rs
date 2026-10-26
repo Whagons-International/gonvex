@@ -5,7 +5,7 @@
 
 fn invocation_head_tokens(mut source: &str) -> [String; 3] {
     let mut tokens = [String::new(), String::new(), String::new()];
-    for slot in 0..3 {
+    for (slot, token) in tokens.iter_mut().enumerate() {
         loop {
             source = source.trim_start_matches(|ch: char| ch.is_whitespace() || ch == ';');
             if let Some(comment) = source.strip_prefix("--") {
@@ -46,11 +46,11 @@ fn invocation_head_tokens(mut source: &str) -> [String; 3] {
         if size == 0 {
             // A typed prepared statement named `transaction` has a type list.
             if slot == 2 && source.starts_with('(') {
-                tokens[slot] = "(".to_owned();
+                *token = "(".to_owned();
             }
             break;
         }
-        tokens[slot] = source[..size].to_ascii_lowercase();
+        *token = source[..size].to_ascii_lowercase();
         source = &source[size..];
     }
     tokens

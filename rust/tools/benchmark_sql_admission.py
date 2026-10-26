@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import statistics
 import subprocess
@@ -24,6 +23,8 @@ def main():
         'baseline': args.baseline,
         'started': time.time(),
         'scope': 'Rust admission CPU cost on three valid SQL samples; not database or server throughput.',
+        'sampling': 'Nine sequential samples per strategy in fixed order; other machine work is not paused.',
+        'scriptSha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'commands': [],
         'sourceItems': {},
     }
@@ -98,6 +99,7 @@ fn main() {
     println!("}}");
 }
 '''
+        receipt['harnessSha256'] = hashlib.sha256(code.encode()).hexdigest()
         (out / 'bench.rs').write_text(code)
         compile_gate = Path.home() / '.local/bin/coach-compile'
         prefix = [compile_gate, '--'] if compile_gate.exists() else []
