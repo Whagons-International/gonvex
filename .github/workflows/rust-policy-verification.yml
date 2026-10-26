@@ -1,24 +1,15 @@
 name: Rust policy verification
 
 on:
-  pull_request:
-    paths:
-      - rust/crates/server/**
-      - verification/verus/**
-      - .github/workflows/rust-policy-verification.yml
-  push:
-    branches: [main, staging]
-    paths:
-      - rust/crates/server/**
-      - verification/verus/**
-      - .github/workflows/rust-policy-verification.yml
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  generation:
-    name: Verify generation allocation
+  policies:
+    name: Verify Rust policy laws
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -39,3 +30,8 @@ jobs:
           python3 verification/verus/verify_generation.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/generation-proof"
+      - name: Prove capability policy and reject every gate bypass
+        run: |
+          python3 verification/verus/verify_capabilities.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/capability-proof"
