@@ -30,6 +30,11 @@ jobs:
           python3 verification/verus/verify_generation.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/generation-proof"
+      - name: Prove mutable ACK progress and reject broken transitions
+        run: |
+          python3 verification/verus/verify_snapshot_ack.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/snapshot-ack-proof"
       - name: Prove capability policy and reject every gate bypass
         run: |
           python3 verification/verus/verify_capabilities.py \
@@ -40,8 +45,3 @@ jobs:
           python3 verification/verus/verify_frame_length.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/frame-proof"
-      - name: Prove mutable ACK progress and reject broken transitions
-        run: |
-          python3 verification/verus/verify_snapshot_ack.py \
-            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
-            --output "$RUNNER_TEMP/snapshot-ack-proof"
