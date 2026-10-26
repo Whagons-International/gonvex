@@ -1,0 +1,68 @@
+{
+  "verus": "Verus\n  Version: 0.2026.10.18.7d82994\n  Profile: release\n  Platform: linux_x86_64\n  Toolchain: 1.99.1-x86_64-unknown-linux-gnu (overridden by environment variable RUSTUP_TOOLCHAIN)",
+  "sources": {
+    "rust/crates/module-host/src/framing.rs": "bb37ac1febc063bd170b540babb4528b505b3f9273ef1d6bbb1a4fea2c7a5cc5"
+  },
+  "scope": "Pure production length admission for every usize size/limit: nonempty, exact u32 length, within configured and wire limits, rejection iff invalid. Rust error adapters, payload allocation, transport and async scheduling are outside this proof.",
+  "adapterSha256": "3e0e52fa8725efab9a66edb0b0b2910dea890eddc3781e580383714e8943200b",
+  "runnerSha256": "402ae32d85f66ea950dc502aff53f13d965cbb105312b4499d48114b6f9dd298",
+  "checks": [
+    {
+      "name": "production",
+      "expectedToVerify": true,
+      "exit": 0,
+      "passed": true,
+      "seconds": 2.6786026139743626,
+      "harnessSha256": "17bc0222a3d6622ebb492518afc2f51a60dd865e3ca47d1bfd47aac7f49ab7ec",
+      "summary": [
+        "verification results:: 1 verified, 0 errors"
+      ]
+    },
+    {
+      "name": "allow_empty",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6699505420401692,
+      "harnessSha256": "682f1c1291634b795cbc6895b485cf4364e23fb8c3755186d2168f739b5b0ae3",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "ignore_configured_limit",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5806895189452916,
+      "harnessSha256": "d794eba72a398baa1b7262d517525b107a479e08d4f621d344a73a5a806d522b",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "ignore_wire_limit",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5868788060033694,
+      "harnessSha256": "845ad3bd10da74d41b9a92c95cf38457f49e7aac2dfece292bf456e0f9136f91",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "shorten_frame",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.7763577139703557,
+      "harnessSha256": "3bb2d7ee83bbd004115ff873cc35dd57bae189ac3d588a373b9b20e50d5f3e35",
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ]
+    }
+  ],
+  "expectedChecks": 5,
+  "success": true
+}

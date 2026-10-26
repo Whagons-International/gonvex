@@ -49,14 +49,8 @@ where
         });
     }
     let size = u32::from_be_bytes(header) as usize;
-    if size == 0 {
-        return Err(FrameError::Malformed("frame is empty".to_owned()));
-    }
-    if size > limit {
-        // The payload is deliberately not drained: a peer that overshoots the
-        // limit has lost framing sync, so the connection is finished either way.
-        return Err(FrameError::TooLarge { size, limit });
-    }
+    // Reject before allocation. Oversized payloads are deliberately not drained.
+    checked_frame_length(size, limit)?;
     let mut payload = vec![0u8; size];
     if let Err(err) = reader.read_exact(&mut payload).await {
         return Err(match err.kind() {
@@ -79,18 +73,25 @@ where
     Ok(())
 }
 
-fn checked_frame_length(size: usize, limit: usize) -> Result<u32, FrameError> {
-    if size == 0 {
-        return Err(FrameError::Malformed("frame is empty".to_owned()));
-    }
+#[inline]
+fn frame_length(size: usize, limit: usize) -> Option<u32> {
     let wire_limit = limit.min(u32::MAX as usize);
-    if size > wire_limit {
-        return Err(FrameError::TooLarge {
-            size,
-            limit: wire_limit,
-        });
+    if size == 0 || size > wire_limit {
+        None
+    } else {
+        Some(size as u32)
     }
-    Ok(size as u32)
+}
+
+fn checked_frame_length(size: usize, limit: usize) -> Result<u32, FrameError> {
+    match frame_length(size, limit) {
+        Some(length) => Ok(length),
+        None if size == 0 => Err(FrameError::Malformed("frame is empty".to_owned())),
+        None => Err(FrameError::TooLarge {
+            size,
+            limit: limit.min(u32::MAX as usize),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -121,16 +122,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_empty_frame_writes_no_bytes() {
-        let (mut writer, mut reader) = tokio::io::duplex(64);
-        assert!(matches!(
-            write_frame(&mut writer, &[], 64).await,
-            Err(FrameError::Malformed(_))
-        ));
-        writer.shutdown().await.unwrap();
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await.unwrap();
-        assert!(bytes.is_empty());
+    async fn rejected_frame_writes_no_bytes() {
+        for (payload, limit) in [(&b""[..], 64), (&b"oversized"[..], 1)] {
+            let (mut writer, mut reader) = tokio::io::duplex(64);
+            let result = write_frame(&mut writer, payload, limit).await;
+            assert!(if payload.is_empty() {
+                matches!(result, Err(FrameError::Malformed(_)))
+            } else {
+                matches!(result, Err(FrameError::TooLarge { .. }))
+            });
+            writer.shutdown().await.unwrap();
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).await.unwrap();
+            assert!(bytes.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_header_never_polls_the_payload() {
+        struct HeaderOnly {
+            header: [u8; 4],
+            read: bool,
+        }
+        impl AsyncRead for HeaderOnly {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                let reader = self.get_mut();
+                assert!(
+                    !reader.read,
+                    "invalid headers must not request payload bytes"
+                );
+                buffer.put_slice(&reader.header);
+                reader.read = true;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        for size in [0_u32, 65] {
+            let mut reader = HeaderOnly {
+                header: size.to_be_bytes(),
+                read: false,
+            };
+            let result = read_frame(&mut reader, 64).await;
+            assert!(if size == 0 {
+                matches!(result, Err(FrameError::Malformed(_)))
+            } else {
+                matches!(
+                    result,
+                    Err(FrameError::TooLarge {
+                        size: 65,
+                        limit: 64
+                    })
+                )
+            });
+        }
     }
 
     #[tokio::test]
