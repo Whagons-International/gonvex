@@ -74,35 +74,32 @@ Local paired medians were 1.84 and 1.78 ns per call. These samples do not measur
 V8 dispatch, server throughput or workspace build time. Reproduce with
 `python3 verification/benchmarks/capabilities.py --build-dir /path/to/build`.
 
-## Current-snapshot ACK progress
+## Frame length admission
 
-`snapshot_ack.rs::record_ack` owns the mutable sequence transition for a
-current snapshot. Verus checks its actual struct and executable function body.
-For every combination of optional `u64` sent and acknowledged sequences, it
-proves that ACKs for unsent or future frames fail without mutation. Repeated or
-older ACKs return without mutation. Accepted ACKs advance exactly to the given
-sequence and cannot change the sent high-water mark. A well-ordered state stays
-well ordered. A second application of the same ACK cannot advance again.
+The module-host reader and writer share `framing.rs::frame_length`. Verus
+checks the actual function body for every `usize` size and configured limit.
+Accepted sizes are nonzero, fit the configured limit and fit the `u32` wire
+header. The returned length equals the input, and rejection occurs exactly
+when one of those conditions fails. Empty, configured-limit, wire-limit and
+length-truncation mutations must each fail verification.
 
-There are no input preconditions. Seven mutations must fail verification,
-including accepting future ACKs, advancing duplicates, regressing progress,
-forgetting the accepted sequence and changing the sent high-water mark.
-The required policy CI job runs this check. Normal snapshot-delivery tests
-exercise the caller, retained credits, cancellation and ready certificates.
-The proof itself excludes retired-snapshot routing, deque contents, byte/frame
-credit accounting, transport and the client's durable storage. It establishes
-the sequence transition, not the whole delivery protocol.
+This proof covers the pure decision. Rust tests check that rejected writes
+emit no bytes and rejected headers never poll the payload reader. Normal
+round-trip tests still exercise framing and JSON. Allocation, Tokio scheduling,
+transport correctness and error strings remain outside the formal proof.
+The runtime's required proof job runs this check alongside generation and
+capabilities. Production Rust gains no Verus dependency.
 
-Run `python3 verification/verus/verify_snapshot_ack.py --output /path/to/proof`.
-The [proof receipt](../../verification/verus/results/snapshot-ack.json) records
-the production proof, replay law and seven controls. The
-[CPU benchmark](../../verification/results/snapshot-ack-benchmark.json)
-compares the previous ACK branch with the extracted transition. Its baseline
-replaces the old error string with unit and early `Ok(None)` with `Ok(false)`,
-then returns `Ok(true)` at the queue-release boundary. Nine alternating paired
-rounds pinned to one CPU measured local medians of 3.766 and 3.701 ns.
-This excludes routing, queues, storage and transport. Reproduce with
-`python3 verification/benchmarks/snapshot_ack.py --build-dir /path/to/build`.
+Run `python3 verification/verus/verify_frame_length.py --output /path/to/proof`.
+The [proof receipt](../../verification/verus/results/frame-length.json)
+records the production check and all four controls. The
+[CPU benchmark receipt](../../verification/results/frame-length-benchmark.json)
+compares the old and shared length adapters, using their production bodies and
+error fields. Nine alternating paired samples, pinned to one CPU, measured
+100 million successful checks each. Local medians were 0.733 and 0.717 ns per
+check. This measures length validation only, excluding transport, allocation
+and server throughput. Other workstation jobs continued during measurement.
+Reproduce with `python3 verification/benchmarks/frame_length.py --build-dir /path/to/build`.
 
 ## Comparison with Bend laws
 
@@ -145,10 +142,40 @@ On Gabriel's workstation, the pinned verifier is under `/mnt/data/tools/verus/`
 and its separate Rust toolchain is under `/mnt/data/tools/verus-rustup/`.
 The local `verus` wrapper selects those paths.
 
+## Current-snapshot ACK progress
+
+`snapshot_ack.rs::record_ack` owns the mutable sequence transition for a
+current snapshot. Verus checks its actual struct and executable function body.
+For every combination of optional `u64` sent and acknowledged sequences, it
+proves that ACKs for unsent or future frames fail without mutation. Repeated or
+older ACKs return without mutation. Accepted ACKs advance exactly to the given
+sequence and cannot change the sent high-water mark. A well-ordered state stays
+well ordered. A second application of the same ACK cannot advance again.
+
+There are no input preconditions. Seven mutations must fail verification,
+including accepting future ACKs, advancing duplicates, regressing progress,
+forgetting the accepted sequence and changing the sent high-water mark.
+The required policy CI job runs this check. Normal snapshot-delivery tests
+exercise the caller, retained credits, cancellation and ready certificates.
+The proof itself excludes retired-snapshot routing, deque contents, byte/frame
+credit accounting, transport and the client's durable storage. It establishes
+the sequence transition, not the whole delivery protocol.
+
+Run `python3 verification/verus/verify_snapshot_ack.py --output /path/to/proof`.
+The [proof receipt](../../verification/verus/results/snapshot-ack.json) records
+the production proof, replay law and seven controls. The
+[CPU benchmark](../../verification/results/snapshot-ack-benchmark.json)
+compares the previous ACK branch with the extracted transition. Its baseline
+replaces the old error string with unit and early `Ok(None)` with `Ok(false)`,
+then returns `Ok(true)` at the queue-release boundary. Nine alternating paired
+rounds pinned to one CPU measured local medians of 3.766 and 3.701 ns.
+This excludes routing, queues, storage and transport. Reproduce with
+`python3 verification/benchmarks/snapshot_ack.py --build-dir /path/to/build`.
+
 ## Recommended next steps
 
 Keep Rust as the implementation while evaluating verification module by module.
-Next candidates are deadline budget selection, frame length validation, typed
+Next candidates are deadline budget selection, cursor admission, typed
 statement-key identity and transaction completion decisions. Give each module a
 small executable policy, explicit laws and deliberately broken controls.
 Preserve integration tests for the database and V8 effects behind those policies.
