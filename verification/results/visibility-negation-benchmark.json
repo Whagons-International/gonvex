@@ -1,0 +1,155 @@
+{
+  "baseline": "3ad2ec077bd5c6b82d4f76a7a5174ede93fd42b9",
+  "postgres": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+  "rows": 31000,
+  "scope": "PostgreSQL execution of explicit templates matching the lowering rules, on a non-null-valued temporary fixture with equal admitted row sets. SQL is not emitted by the Rust compiler in this benchmark. Not runtime throughput, nullable-result cost, TypeScript, or network performance. Other workstation jobs are not paused.",
+  "sampling": "One connection; warm-up counts; nine paired rounds of batch means with alternating variant order; JIT and parallel query disabled; EXPLAIN ANALYZE with per-node timing off.",
+  "repetitionsPerBatch": 100,
+  "cpuAffinity": [
+    15
+  ],
+  "source": "rust/crates/runtime/src/visibility.rs",
+  "baselineSourceSha256": "25143a252f3a85aea05e39a6a6fbe683cf1a5aa230cfde86e97509d12023b2ea",
+  "currentSourceSha256": "3340a9be668fb8bae0996e7aa9a6579c654813144a8701cc8cfbc49704cc233e",
+  "scriptSha256": "e92f7d8655d33c44c8801d46e3132e4d811bfd9e032c1bb3fcd4a4c23b5cf723",
+  "predicates": [
+    {
+      "name": "not_equality",
+      "baseline": "NOT (status = 'blocked')",
+      "current": "status IS DISTINCT FROM 'blocked'"
+    },
+    {
+      "name": "double_not",
+      "baseline": "NOT (NOT (status = 'blocked'))",
+      "current": "status = 'blocked'"
+    },
+    {
+      "name": "not_conjunction",
+      "baseline": "NOT ((status = 'blocked') AND enabled)",
+      "current": "((status = 'blocked') AND enabled) IS NOT TRUE"
+    }
+  ],
+  "samplesMilliseconds": {
+    "not_equality": {
+      "baseline": [
+        1.9528500000000002,
+        1.9656299999999995,
+        1.8889500000000004,
+        1.8457800000000006,
+        1.9083700000000006,
+        1.7006700000000003,
+        1.7514900000000002,
+        1.7199499999999999,
+        1.7193499999999995
+      ],
+      "current": [
+        1.7125899999999996,
+        1.6877900000000006,
+        1.9678200000000006,
+        1.7453099999999997,
+        1.7325699999999997,
+        1.6500000000000006,
+        1.67033,
+        1.6745299999999992,
+        1.66482
+      ]
+    },
+    "double_not": {
+      "baseline": [
+        1.0887199999999997,
+        1.14246,
+        1.0888600000000006,
+        1.2800399999999994,
+        1.1676699999999995,
+        1.0726200000000006,
+        1.0794000000000001,
+        1.07392,
+        1.1006399999999998
+      ],
+      "current": [
+        1.0915899999999996,
+        1.1310499999999997,
+        1.0835199999999998,
+        1.2387199999999998,
+        1.2172100000000001,
+        1.0695600000000005,
+        1.0627099999999996,
+        1.0797700000000003,
+        1.0792399999999993
+      ]
+    },
+    "not_conjunction": {
+      "baseline": [
+        2.1759699999999995,
+        2.3688499999999992,
+        2.1851799999999995,
+        2.3771700000000004,
+        2.1737200000000003,
+        2.16311,
+        2.12127,
+        2.17424,
+        2.144030000000001
+      ],
+      "current": [
+        2.12125,
+        2.24858,
+        2.15471,
+        2.4135900000000006,
+        2.1730600000000004,
+        2.250210000000001,
+        2.22186,
+        2.1510700000000007,
+        2.134090000000001
+      ]
+    }
+  },
+  "medianMilliseconds": {
+    "not_equality": {
+      "baseline": 1.8457800000000006,
+      "current": 1.6877900000000006
+    },
+    "double_not": {
+      "baseline": 1.0888600000000006,
+      "current": 1.0835199999999998
+    },
+    "not_conjunction": {
+      "baseline": 2.17424,
+      "current": 2.1730600000000004
+    }
+  },
+  "success": true,
+  "planNodes": {
+    "not_equality": {
+      "baseline": [
+        "Aggregate",
+        "Seq Scan"
+      ],
+      "current": [
+        "Aggregate",
+        "Seq Scan"
+      ]
+    },
+    "double_not": {
+      "baseline": [
+        "Aggregate",
+        "Bitmap Heap Scan",
+        "Bitmap Index Scan"
+      ],
+      "current": [
+        "Aggregate",
+        "Bitmap Heap Scan",
+        "Bitmap Index Scan"
+      ]
+    },
+    "not_conjunction": {
+      "baseline": [
+        "Aggregate",
+        "Seq Scan"
+      ],
+      "current": [
+        "Aggregate",
+        "Seq Scan"
+      ]
+    }
+  }
+}
