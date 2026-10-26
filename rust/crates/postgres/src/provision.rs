@@ -1123,6 +1123,85 @@ mod sync_bootstrap_tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
 
+    #[tokio::test]
+    async fn migrations_keep_postgres_lexical_boundaries_in_both_transaction_modes() {
+        let Ok(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping migration lexer test");
+            return;
+        };
+        let schema = format!("migration_lex_{}", uuid::Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&base_url)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let mut url = Url::parse(&base_url).unwrap();
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={schema}"));
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(url.as_str())
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE migration_values (name text, value text)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut migrations = Vec::new();
+        let mut expected = Vec::new();
+        for no_transaction in [false, true] {
+            for (case, literal, value, comment) in [
+                ("cr", "'first'", "first", " -- comment\r"),
+                ("escape", r"E'a\';b'", "a';b", ""),
+                ("unicode", "$é$semi;colon$é$", "semi;colon", ""),
+            ] {
+                let name = format!("{case}_{no_transaction}");
+                migrations.push(SqlMigration::new(
+                    name.clone(),
+                    MigrationScope::ControlPlane,
+                    no_transaction,
+                    format!(
+                        "INSERT INTO migration_values VALUES ('{name}', {literal}){comment}; \
+                         INSERT INTO migration_values VALUES ('{name}', 'second');"
+                    ),
+                ));
+                expected.push((name.clone(), value.to_owned()));
+                expected.push((name, "second".to_owned()));
+            }
+        }
+        let applied = apply_migrations(
+            pool.clone(),
+            migrations.clone(),
+            MigrationScope::ControlPlane,
+        )
+        .await
+        .unwrap();
+        assert_eq!(applied.len(), migrations.len());
+        assert!(
+            apply_migrations(pool.clone(), migrations, MigrationScope::ControlPlane)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT name,value FROM migration_values ORDER BY name,value")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        expected.sort();
+        assert_eq!(rows, expected, "replay must not execute migrations twice");
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+    }
+
     // Use the same opt-in PostgreSQL harness as the crate's integration tests.
     // ddl_command_end records actual executed DDL, including CREATE OR REPLACE
     // on an existing function whose OID would otherwise remain unchanged.

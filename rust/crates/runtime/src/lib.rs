@@ -26,7 +26,6 @@ mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
 mod sql_statement_key;
-mod sql_statement_lexer;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;

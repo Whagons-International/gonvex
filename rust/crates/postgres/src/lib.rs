@@ -23,6 +23,7 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 mod provision;
 mod reference_integrity;
+pub mod sql_lexer;
 mod sql_script;
 pub use provision::{MigrationScope, SqlMigration};
 
