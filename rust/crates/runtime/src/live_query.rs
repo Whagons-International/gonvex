@@ -15,7 +15,7 @@ use sqlx::Row;
 use thiserror::Error;
 
 use crate::change_feed::{FeedEvent, LogChange};
-use crate::host_calls::bind_value;
+use crate::sql_parameters::Parameters;
 use crate::visibility::{self, ResolvedVisibility, VisibilityDependencies, VisibilityPlan};
 use crate::Runtime;
 
@@ -803,10 +803,9 @@ pub(super) async fn execute_in_transaction(
         statement.push_str(&format!(" OFFSET ${}", parameters.len()));
     }
     statement.push_str(") AS _gonvex_live_row");
-    let mut query = sqlx::query(&statement);
-    for parameter in &parameters {
-        query = bind_value(query, parameter).map_err(LiveQueryError::Invalid)?;
-    }
+    let parameters = Parameters::scalars(&parameters).map_err(LiveQueryError::Invalid)?;
+    let statement_key = parameters.statement(&statement);
+    let query = parameters.bind(sqlx::query(statement_key.as_ref()));
     let rows = query.fetch_all(&mut **transaction.transaction()).await?;
     let rows = rows
         .into_iter()

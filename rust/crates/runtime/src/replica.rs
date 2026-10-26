@@ -14,8 +14,8 @@ use sqlx::Row;
 use thiserror::Error;
 
 use crate::change_feed::{FeedEvent, LogChange, ReplicaClock};
-use crate::host_calls::bind_value;
 use crate::modules::ReplicaCollectionDefinition;
+use crate::sql_parameters::Parameters;
 use crate::visibility::{self, ResolvedVisibility, VisibilityPlan};
 use crate::Runtime;
 
@@ -802,10 +802,9 @@ pub(super) async fn query_rows(
         statement.push_str(&format!(" LIMIT ${}", parameters.len()));
     }
     statement.push_str(") AS _gonvex_visible_row");
-    let mut query = sqlx::query(&statement);
-    for parameter in &parameters {
-        query = bind_value(query, parameter).map_err(ReplicaError::InvalidIdentifier)?;
-    }
+    let parameters = Parameters::scalars(&parameters).map_err(ReplicaError::InvalidIdentifier)?;
+    let statement_key = parameters.statement(&statement);
+    let query = parameters.bind(sqlx::query(statement_key.as_ref()));
     // Decode and admit one row at a time. SQL still uses maxRows + 1;
     // a byte-limited source must not first allocate its entire SQL result.
     let rows = query.fetch(&mut **transaction.transaction()).map(|row| {

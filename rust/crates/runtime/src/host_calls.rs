@@ -17,14 +17,17 @@ use gonvex_module_host::protocol::HostCallFrame;
 use gonvex_postgres::TenantTransaction;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::{PgArguments, PgRow};
-use sqlx::query::Query;
+use sqlx::postgres::PgRow;
 use sqlx::types::Json;
-use sqlx::{Column, Either, Executor, Postgres, Row, TypeInfo, ValueRef};
+#[cfg(test)]
+use sqlx::{postgres::PgArguments, query::Query, Postgres};
+use sqlx::{Column, Either, Executor, Row, TypeInfo, ValueRef};
 use uuid::Uuid;
 
 use crate::error_class::TransientFault;
 use crate::module_host::HostCallHandler;
+use crate::sql_admission::require_invocation_statement;
+use crate::sql_statement_lexer;
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
@@ -363,9 +366,9 @@ impl DatabaseHostCalls {
     }
 
     async fn query(&mut self, statement: &str, parameters: Value) -> Result<Value, String> {
-        require_single_statement(statement)?;
+        let admitted = require_single_statement(statement)?;
         if self.capability == DatabaseCapability::Query {
-            require_read_statement(statement)?;
+            require_read_head(admitted.first_word.as_deref().unwrap_or_default())?;
         }
         let parameters = match parameters {
             Value::Null => Vec::new(),
@@ -374,8 +377,9 @@ impl DatabaseHostCalls {
         };
         let parameter_types = if parameters.iter().any(Value::is_array) {
             let fault = self.fault.clone();
+            let description_key = crate::sql_statement_key::description(statement.trim());
             let description = (&mut **self.transaction()?.transaction())
-                .describe(statement.trim())
+                .describe(description_key.as_str())
                 .await
                 .map_err(|error| {
                     format!(
@@ -393,11 +397,20 @@ impl DatabaseHostCalls {
         } else {
             Vec::new()
         };
-        let mut query = sqlx::query(statement.trim());
-        for (index, value) in parameters.iter().enumerate() {
-            query = bind_query_value(query, value, parameter_types.get(index).map(String::as_str))
-                .map_err(|error| format!("parameter ${}: {error}", index + 1))?;
-        }
+        let parameters = parameters
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                crate::sql_parameters::Parameter::for_query(
+                    value,
+                    parameter_types.get(index).map(String::as_str),
+                )
+                .map_err(|error| format!("parameter ${}: {error}", index + 1))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let parameters = crate::sql_parameters::Parameters::new(parameters);
+        let statement_key = parameters.statement(statement.trim());
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let rows = query
@@ -461,7 +474,12 @@ impl DatabaseHostCalls {
             select_columns.join(", ")
         );
         let payload = Value::Object(values.into_iter().collect());
-        let query = sqlx::query(&statement).bind(Json(payload));
+        let parameters =
+            crate::sql_parameters::Parameters::new(vec![crate::sql_parameters::Parameter::Jsonb(
+                payload,
+            )]);
+        let statement_key = parameters.statement(&statement);
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let row = query
@@ -499,8 +517,12 @@ impl DatabaseHostCalls {
             assignments.join(", ")
         );
         let payload = Value::Object(values.into_iter().collect());
-        let mut query = sqlx::query(&statement).bind(Json(payload));
-        query = bind_value(query, &id)?;
+        let parameters = crate::sql_parameters::Parameters::new(vec![
+            crate::sql_parameters::Parameter::Jsonb(payload),
+            crate::sql_parameters::Parameter::scalar(&id)?,
+        ]);
+        let statement_key = parameters.statement(&statement);
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let row = query
@@ -517,7 +539,9 @@ impl DatabaseHostCalls {
         let table = quote_identifier(table)?;
         require_row_id(&id)?;
         let statement = format!("DELETE FROM {table} WHERE {key} = $1");
-        let query = bind_value(sqlx::query(&statement), &id)?;
+        let parameters = crate::sql_parameters::Parameters::scalars(std::iter::once(&id))?;
+        let statement_key = parameters.statement(&statement);
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let result = query
@@ -547,10 +571,9 @@ impl DatabaseHostCalls {
             .collect::<Vec<_>>()
             .join(", ");
         let statement = format!("DELETE FROM {table} WHERE {key} IN ({parameters})");
-        let mut query = sqlx::query(&statement);
-        for id in ids {
-            query = bind_value(query, id)?;
-        }
+        let parameters = crate::sql_parameters::Parameters::scalars(ids)?;
+        let statement_key = parameters.statement(&statement);
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         let fault = self.fault.clone();
         let transaction = self.transaction()?.transaction();
         let result = query
@@ -637,136 +660,13 @@ impl DatabaseHostCalls {
     }
 }
 
-pub(crate) fn bind_value<'query>(
-    query: Query<'query, Postgres, PgArguments>,
-    value: &Value,
-) -> Result<Query<'query, Postgres, PgArguments>, String> {
-    Ok(match value {
-        Value::Null => query.bind(Option::<String>::None),
-        Value::Bool(value) => query.bind(*value),
-        Value::String(value) => query.bind(value.clone()),
-        Value::Number(value) if value.is_i64() => query.bind(
-            value
-                .as_i64()
-                .ok_or_else(|| "integer is outside PostgreSQL bigint range".to_owned())?,
-        ),
-        Value::Number(value) if value.is_u64() => {
-            let value = value
-                .as_u64()
-                .and_then(|value| i64::try_from(value).ok())
-                .ok_or_else(|| "integer is outside PostgreSQL bigint range".to_owned())?;
-            query.bind(value)
-        }
-        Value::Number(value) => query.bind(
-            value
-                .as_f64()
-                .ok_or_else(|| "number is not representable as a float".to_owned())?,
-        ),
-        Value::Array(_) | Value::Object(_) => query.bind(Json(value.clone())),
-    })
-}
-
+#[cfg(test)]
 fn bind_query_value<'query>(
     query: Query<'query, Postgres, PgArguments>,
     value: &Value,
     postgres_type: Option<&str>,
 ) -> Result<Query<'query, Postgres, PgArguments>, String> {
-    let Value::Array(values) = value else {
-        return bind_value(query, value);
-    };
-    let invalid = |expected: &str| {
-        format!("PostgreSQL expects {expected}, but the JSON array contains an incompatible value")
-    };
-    Ok(match postgres_type {
-        Some("_TEXT" | "_VARCHAR" | "_BPCHAR" | "TEXT[]" | "VARCHAR[]" | "CHAR[]") => query.bind(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .map(str::to_owned)
-                        .ok_or_else(|| invalid("a text array"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("_INT2" | "INT2[]" | "SMALLINT[]") => query.bind(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_i64()
-                        .and_then(|value| i16::try_from(value).ok())
-                        .ok_or_else(|| invalid("a smallint array"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("_INT4" | "INT4[]" | "INTEGER[]") => query.bind(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_i64()
-                        .and_then(|value| i32::try_from(value).ok())
-                        .ok_or_else(|| invalid("an integer array"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("_INT8" | "INT8[]" | "BIGINT[]") => query.bind(
-            values
-                .iter()
-                .map(|value| value.as_i64().ok_or_else(|| invalid("a bigint array")))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("_FLOAT4" | "FLOAT4[]" | "REAL[]") => query.bind(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_f64()
-                        .map(|value| value as f32)
-                        .ok_or_else(|| invalid("a real array"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("_FLOAT8" | "FLOAT8[]" | "DOUBLE PRECISION[]") => query.bind(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_f64()
-                        .ok_or_else(|| invalid("a double precision array"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("_BOOL" | "BOOL[]" | "BOOLEAN[]") => query.bind(
-            values
-                .iter()
-                .map(|value| value.as_bool().ok_or_else(|| invalid("a boolean array")))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("_UUID" | "UUID[]") => query.bind(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .ok_or_else(|| invalid("a UUID array"))
-                        .and_then(|value| {
-                            Uuid::parse_str(value).map_err(|_| invalid("a UUID array"))
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        Some("JSON" | "JSONB") | None => query.bind(Json(value.clone())),
-        Some(postgres_type) if postgres_type.starts_with('_') || postgres_type.ends_with("[]") => {
-            return Err(format!(
-                "PostgreSQL array parameter type {postgres_type} is not supported"
-            ));
-        }
-        Some(postgres_type) => {
-            return Err(format!("PostgreSQL expects scalar parameter type {postgres_type}, but received a JSON array"));
-        }
-    })
+    Ok(crate::sql_parameters::Parameter::for_query(value, postgres_type)?.bind(query))
 }
 
 fn rows_to_json(rows: Vec<PgRow>) -> Result<Value, String> {
@@ -968,15 +868,9 @@ fn valid_identifier(name: &str) -> bool {
     })
 }
 
-fn require_read_statement(statement: &str) -> Result<(), String> {
-    let head = statement
-        .trim_start()
-        .split(|character: char| character.is_whitespace() || character == '(')
-        .find(|part| !part.is_empty())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+fn require_read_head(head: &str) -> Result<(), String> {
     if matches!(
-        head.as_str(),
+        head,
         "select" | "with" | "values" | "table" | "explain" | "show"
     ) {
         Ok(())
@@ -987,66 +881,26 @@ fn require_read_statement(statement: &str) -> Result<(), String> {
     }
 }
 
-fn require_single_statement(statement: &str) -> Result<(), String> {
+#[cfg(test)]
+fn require_read_statement(statement: &str) -> Result<(), String> {
+    let admitted = require_single_statement(statement)?;
+    require_read_head(admitted.first_word.as_deref().unwrap_or_default())
+}
+
+fn require_single_statement(statement: &str) -> Result<sql_statement_lexer::StatementInfo, String> {
     let statement = statement.trim();
     if statement.is_empty() {
         return Err("a database statement is required".to_owned());
     }
-    let mut single = false;
-    let mut double = false;
-    let mut line_comment = false;
-    let mut block_comment = false;
-    let characters = statement.chars().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < characters.len() {
-        let current = characters[index];
-        let next = characters.get(index + 1).copied().unwrap_or('\0');
-        if line_comment {
-            line_comment = current != '\n';
-        } else if block_comment {
-            if current == '*' && next == '/' {
-                block_comment = false;
-                index += 1;
-            }
-        } else if single {
-            if current == '\'' {
-                if next == '\'' {
-                    index += 1;
-                } else {
-                    single = false;
-                }
-            }
-        } else if double {
-            if current == '"' {
-                double = false;
-            }
-        } else if current == '-' && next == '-' {
-            line_comment = true;
-            index += 1;
-        } else if current == '/' && next == '*' {
-            block_comment = true;
-            index += 1;
-        } else if current == '\'' {
-            single = true;
-        } else if current == '"' {
-            double = true;
-        } else if current == ';'
-            && characters[index + 1..]
-                .iter()
-                .collect::<String>()
-                .trim()
-                .is_empty()
-        {
-            // One trailing semicolon is allowed.
-        } else if current == ';' {
-            return Err("a database statement may not contain more than one statement".to_owned());
-        }
-        index += 1;
+    require_invocation_statement(statement)?;
+    let admitted = sql_statement_lexer::analyze(statement).map_err(|error| match error {
+        sql_statement_lexer::LexError::Nul => "a database statement may not contain NUL".to_owned(),
+        _ => "a database statement contains an unterminated literal or comment".to_owned(),
+    })?;
+    if admitted.count > 1 {
+        return Err("a database statement may not contain more than one statement".to_owned());
     }
-    if single || double || block_comment {
-        return Err("a database statement contains an unterminated literal or comment".to_owned());
-    }
-    Ok(())
+    Ok(admitted)
 }
 
 #[cfg(test)]
@@ -1364,3 +1218,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "host_calls_parameter_tests.rs"]
+mod parameter_tests;
