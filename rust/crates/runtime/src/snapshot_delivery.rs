@@ -1,6 +1,7 @@
 //! Connection-owned native snapshot delivery. Credits are restored only by a
 //! cumulative durable-stage ACK, never by socket send completion or a retry.
 use crate::replica::SnapshotPages;
+use crate::snapshot_ack::{record_ack, AckProgress};
 use gonvex_protocol::{ClientCapabilities, ServerMessage};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -21,8 +22,7 @@ struct Pending {
     pages: SnapshotPages,
     start: Option<ServerMessage>,
     snapshot: String,
-    sent: Option<u64>,
-    acked: Option<u64>,
+    progress: AckProgress,
     in_flight: VecDeque<(u64, usize)>,
     last_sent: bool,
     buffered: Option<(Vec<u8>, u64, bool)>,
@@ -99,8 +99,10 @@ impl SnapshotDelivery {
                 pages,
                 start: Some(start),
                 snapshot,
-                sent: None,
-                acked: None,
+                progress: AckProgress {
+                    sent: None,
+                    acked: None,
+                },
                 in_flight: VecDeque::new(),
                 last_sent: false,
                 buffered: None,
@@ -138,13 +140,11 @@ impl SnapshotDelivery {
         if pending.snapshot != snapshot {
             return Ok(None);
         }
-        if pending.sent.is_none_or(|sent| sequence > sent) {
-            return Err("snapshot acknowledgement exceeds sent sequence");
-        }
-        if pending.acked.is_some_and(|acked| sequence <= acked) {
+        if !record_ack(&mut pending.progress, sequence)
+            .map_err(|()| "snapshot acknowledgement exceeds sent sequence")?
+        {
             return Ok(None);
         }
-        pending.acked = Some(sequence);
         while pending
             .in_flight
             .front()
@@ -260,7 +260,7 @@ impl SnapshotDelivery {
                     if let Some(start) = pending.start.take() {
                         batch.starts.push(start);
                     }
-                    pending.sent = Some(sequence);
+                    pending.progress.sent = Some(sequence);
                     pending.last_sent = last;
                     pending.in_flight.push_back((sequence, encoded.len()));
                     count += 1;

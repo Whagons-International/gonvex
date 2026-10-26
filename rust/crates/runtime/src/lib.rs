@@ -23,6 +23,7 @@ mod replica_open_queue;
 pub mod sandbox;
 pub mod scheduler;
 mod service_principal;
+mod snapshot_ack;
 mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
