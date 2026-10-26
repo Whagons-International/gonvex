@@ -1436,7 +1436,18 @@ impl TenantTransaction {
         Ok(id.to_owned())
     }
 
-    pub async fn commit(self) -> Result<(), DatabaseError> {
+    pub async fn commit(mut self) -> Result<(), DatabaseError> {
+        // COMMIT on an aborted PostgreSQL transaction succeeds with a ROLLBACK
+        // tag. SQLx discards that tag, so require a usable transaction first.
+        if let Err(error) = sqlx::query("SELECT 1")
+            .execute(&mut *self.transaction)
+            .await
+        {
+            // Drain rollback before releasing admission. A rollback failure is
+            // infrastructure trouble and takes precedence over the SQL error.
+            self.transaction.rollback().await?;
+            return Err(DatabaseError::Sql(error));
+        }
         self.transaction.commit().await?;
         Ok(())
     }
@@ -1446,6 +1457,9 @@ impl TenantTransaction {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod transaction_commit_tests;
 
 fn required(value: &str, error: DatabaseError) -> Result<&str, DatabaseError> {
     let value = value.trim();
