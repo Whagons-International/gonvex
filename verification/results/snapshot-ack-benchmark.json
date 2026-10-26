@@ -1,0 +1,160 @@
+{
+  "baseline": "3ad2ec077bd5c6b82d4f76a7a5174ede93fd42b9",
+  "success": true,
+  "commands": [
+    {
+      "name": "headroom",
+      "exit": 0,
+      "seconds": 0.09158341400325298
+    },
+    {
+      "name": "baseline-source",
+      "exit": 0,
+      "seconds": 0.015942438039928675
+    },
+    {
+      "name": "headroom-baseline",
+      "exit": 0,
+      "seconds": 0.1217725119786337
+    },
+    {
+      "name": "compile-baseline",
+      "exit": 0,
+      "seconds": 0.2274887110106647
+    },
+    {
+      "name": "headroom-current",
+      "exit": 0,
+      "seconds": 0.06118609302211553
+    },
+    {
+      "name": "compile-current",
+      "exit": 0,
+      "seconds": 0.15425757004413754
+    },
+    {
+      "name": "sample-0-baseline",
+      "exit": 0,
+      "seconds": 0.0829600669676438
+    },
+    {
+      "name": "sample-0-current",
+      "exit": 0,
+      "seconds": 0.07410982099827379
+    },
+    {
+      "name": "sample-1-current",
+      "exit": 0,
+      "seconds": 0.07430861704051495
+    },
+    {
+      "name": "sample-1-baseline",
+      "exit": 0,
+      "seconds": 0.08135569398291409
+    },
+    {
+      "name": "sample-2-baseline",
+      "exit": 0,
+      "seconds": 0.08385828603059053
+    },
+    {
+      "name": "sample-2-current",
+      "exit": 0,
+      "seconds": 0.07807840604800731
+    },
+    {
+      "name": "sample-3-current",
+      "exit": 0,
+      "seconds": 0.07783552701584995
+    },
+    {
+      "name": "sample-3-baseline",
+      "exit": 0,
+      "seconds": 0.07346451096236706
+    },
+    {
+      "name": "sample-4-baseline",
+      "exit": 0,
+      "seconds": 0.07929578796029091
+    },
+    {
+      "name": "sample-4-current",
+      "exit": 0,
+      "seconds": 0.07943375897593796
+    },
+    {
+      "name": "sample-5-current",
+      "exit": 0,
+      "seconds": 0.07651837600860745
+    },
+    {
+      "name": "sample-5-baseline",
+      "exit": 0,
+      "seconds": 0.0817011360777542
+    },
+    {
+      "name": "sample-6-baseline",
+      "exit": 0,
+      "seconds": 0.08371072693262249
+    },
+    {
+      "name": "sample-6-current",
+      "exit": 0,
+      "seconds": 0.07878230698406696
+    },
+    {
+      "name": "sample-7-current",
+      "exit": 0,
+      "seconds": 0.07244723697658628
+    },
+    {
+      "name": "sample-7-baseline",
+      "exit": 0,
+      "seconds": 0.07696721504908055
+    },
+    {
+      "name": "sample-8-baseline",
+      "exit": 0,
+      "seconds": 0.07853921700734645
+    },
+    {
+      "name": "sample-8-current",
+      "exit": 0,
+      "seconds": 0.07851916004437953
+    }
+  ],
+  "scope": "Old production current-snapshot ACK branch versus extracted mutable production function. Baseline substitutes its error string with unit and early Ok(None) with Ok(false), then returns Ok(true) at the former queue-release boundary. Only ACK progress CPU, excluding frame queues, routing, storage and transport.",
+  "sampling": "Nine paired rounds in separate binaries, alternating order after warm-up, 10 million checks per sample. Other workstation jobs are not paused.",
+  "cpuAffinity": 15,
+  "scriptSha256": "f96f2c3ee12ef57cc3fa84b0f9f1955f1a196e474fd09faba652ba6d78af2e78",
+  "samplesNanoseconds": {
+    "baseline": [
+      4.1529172,
+      3.7396317,
+      3.6714758,
+      3.5558461,
+      3.8572822,
+      3.7664003,
+      3.7395475,
+      3.7784079,
+      3.7727974
+    ],
+    "current": [
+      3.6282991,
+      3.5820556,
+      3.6907722,
+      4.0630592,
+      3.7425572,
+      3.7007331,
+      3.8134753,
+      3.4836647,
+      3.7458183
+    ]
+  },
+  "medianNanoseconds": {
+    "baseline": 3.7664003,
+    "current": 3.7007331
+  },
+  "baselineSourceSha256": "351f92ca6f909942d90c575278893aa197310a6b50f43eee362d744717a586fe",
+  "currentSourceSha256": "096ef8f01d297542891b0c934ce15c39981e898fac351cd6ea15eabca2d2b287"
+}

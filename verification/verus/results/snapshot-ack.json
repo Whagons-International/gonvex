@@ -1,0 +1,101 @@
+{
+  "verus": "Verus\n  Version: 0.2026.10.18.7d82994\n  Profile: release\n  Platform: linux_x86_64\n  Toolchain: 1.99.1-x86_64-unknown-linux-gnu (overridden by environment variable RUSTUP_TOOLCHAIN)",
+  "sources": {
+    "rust/crates/runtime/src/snapshot_ack.rs": "096ef8f01d297542891b0c934ce15c39981e898fac351cd6ea15eabca2d2b287"
+  },
+  "scope": "Actual mutable production ACK transition for all optional u64 sent/acked states. Invalid and duplicate ACKs do not mutate progress; accepted advances are bounded by sent; sent stays unchanged; valid ordering is preserved; replay cannot advance twice. Retired-snapshot routing, frame queues, credits, transport and durable client storage remain outside this proof.",
+  "adapterSha256": "8d35e97a146e096266b6d09fe8313de1ff239717e142aaf15144b69ebc847941",
+  "runnerSha256": "402ae32d85f66ea950dc502aff53f13d965cbb105312b4499d48114b6f9dd298",
+  "checks": [
+    {
+      "name": "production",
+      "expectedToVerify": true,
+      "exit": 0,
+      "passed": true,
+      "seconds": 0.8828787789680064,
+      "harnessSha256": "6d8802cc853511b437a2778b4bad0d897d1c76a0baefc215192c18b697c74d0a",
+      "summary": [
+        "verification results:: 2 verified, 0 errors"
+      ]
+    },
+    {
+      "name": "accept_unsent",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6416172200115398,
+      "harnessSha256": "22a35aa349f05a0cccdb3a35978d99076f765ce51d1d8af25728c6ce1624a784",
+      "summary": [
+        "verification results:: 1 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "accept_future",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6682132410351187,
+      "harnessSha256": "31624f2e0597ccc2bf3f856d9b361768c1d544e7c1356ccb1a5e939166b0b171",
+      "summary": [
+        "verification results:: 1 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "reject_sent_boundary",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6416872309055179,
+      "harnessSha256": "02a375e7c8c9053e187a4f33c42ba8519a71b1494a1c3ac124035bcf5803f0c7",
+      "summary": [
+        "verification results:: 1 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "advance_duplicate",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6186143500963226,
+      "harnessSha256": "0e1152450032fcd6d60d8b92fa980c6586c134ca41336bb2b8f3f60f8d43d1b2",
+      "summary": [
+        "verification results:: 1 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "regress_progress",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6756016010185704,
+      "harnessSha256": "bdba4724ba0d0fad303121d0e43909b10e9a58486173e2dcde3f8fe2fa3912fe",
+      "summary": [
+        "verification results:: 1 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "forget_progress",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6706802049884573,
+      "harnessSha256": "d136b8cbc197508e511532b10d2cba9cbd913e00db09bbba2ecf165458f24ff8",
+      "summary": [
+        "verification results:: 1 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "mutate_sent",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.690128038986586,
+      "harnessSha256": "ef67bf9ae382a3438b8073df50a1366ab87bc61dc1e46c81b26bdbef27711d53",
+      "summary": [
+        "verification results:: 1 verified, 1 errors"
+      ]
+    }
+  ],
+  "expectedChecks": 8,
+  "success": true
+}

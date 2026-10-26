@@ -74,6 +74,36 @@ Local paired medians were 1.84 and 1.78 ns per call. These samples do not measur
 V8 dispatch, server throughput or workspace build time. Reproduce with
 `python3 verification/benchmarks/capabilities.py --build-dir /path/to/build`.
 
+## Current-snapshot ACK progress
+
+`snapshot_ack.rs::record_ack` owns the mutable sequence transition for a
+current snapshot. Verus checks its actual struct and executable function body.
+For every combination of optional `u64` sent and acknowledged sequences, it
+proves that ACKs for unsent or future frames fail without mutation. Repeated or
+older ACKs return without mutation. Accepted ACKs advance exactly to the given
+sequence and cannot change the sent high-water mark. A well-ordered state stays
+well ordered. A second application of the same ACK cannot advance again.
+
+There are no input preconditions. Seven mutations must fail verification,
+including accepting future ACKs, advancing duplicates, regressing progress,
+forgetting the accepted sequence and changing the sent high-water mark.
+The required policy CI job runs this check. Normal snapshot-delivery tests
+exercise the caller, retained credits, cancellation and ready certificates.
+The proof itself excludes retired-snapshot routing, deque contents, byte/frame
+credit accounting, transport and the client's durable storage. It establishes
+the sequence transition, not the whole delivery protocol.
+
+Run `python3 verification/verus/verify_snapshot_ack.py --output /path/to/proof`.
+The [proof receipt](../../verification/verus/results/snapshot-ack.json) records
+the production proof, replay law and seven controls. The
+[CPU benchmark](../../verification/results/snapshot-ack-benchmark.json)
+compares the previous ACK branch with the extracted transition. Its baseline
+replaces the old error string with unit and early `Ok(None)` with `Ok(false)`,
+then returns `Ok(true)` at the queue-release boundary. Nine alternating paired
+rounds pinned to one CPU measured local medians of 3.766 and 3.701 ns.
+This excludes routing, queues, storage and transport. Reproduce with
+`python3 verification/benchmarks/snapshot_ack.py --build-dir /path/to/build`.
+
 ## Comparison with Bend laws
 
 | Question | Bend experiment | Rust with Verus |
