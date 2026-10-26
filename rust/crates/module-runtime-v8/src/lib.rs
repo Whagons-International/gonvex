@@ -45,9 +45,9 @@ use gonvex_module_runtime::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::budget::CallBudget;
-use crate::dispatch::effective_capabilities;
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
+use gonvex_module_runtime::effective_capabilities;
 
 /// Initialize V8 on the process's common parent thread before any isolate
 /// workers are spawned. Since V8 11.6, allowing the first worker to perform

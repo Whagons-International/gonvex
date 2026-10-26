@@ -14,8 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  policies:
+    uses: ./.github/workflows/rust-policy-verification.yml
+
   test:
-    name: CI
+    name: Runtime tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
     services:
@@ -82,3 +85,17 @@ jobs:
       - name: Lint Rust runtime
         working-directory: rust
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  ci:
+    name: CI
+    if: always()
+    needs: [test, policies]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require runtime tests and Rust policy proofs
+        env:
+          RUNTIME_RESULT: ${{ needs.test.result }}
+          POLICY_RESULT: ${{ needs.policies.result }}
+        run: |
+          test "$RUNTIME_RESULT" = success
+          test "$POLICY_RESULT" = success

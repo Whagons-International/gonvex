@@ -124,7 +124,7 @@ pub(crate) struct HostRequest {
 pub(crate) struct CallSpec {
     pub(crate) contract: FunctionContract,
     pub(crate) invocation: Invocation,
-    /// Already narrowed to the function kind by `dispatch::effective_capabilities`.
+    /// Already narrowed to the function kind by `gonvex_module_runtime::effective_capabilities`.
     pub(crate) capabilities: Capabilities,
     /// The host's wall clock for this call, surfaced to the module as `ctx.now`.
     pub(crate) now_unix_ms: u64,

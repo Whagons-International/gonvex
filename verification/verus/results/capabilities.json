@@ -1,0 +1,245 @@
+{
+  "verus": "Verus\n  Version: 0.2026.10.18.7d82994\n  Profile: release\n  Platform: linux_x86_64\n  Toolchain: 1.99.1-x86_64-unknown-linux-gnu (overridden by environment variable RUSTUP_TOOLCHAIN)",
+  "sources": {
+    "rust/crates/module-runtime/src/lib.rs": "1e6a4cd3a3355b62f06d55253cd3a96767be44ba87abc338daffef05c129862c",
+    "rust/crates/module-runtime/src/capabilities.rs": "081d109791349ee9a3deb566c71442891cfcf8db416113e6220fa29958214350"
+  },
+  "scope": "All function kinds and Boolean host grants. Exact structural ceilings, intersection, no grant escalation, no kind escalation, and idempotence. Actual datatype declarations and executable function bodies are copied unchanged; only return binders/contracts and a law harness are added. Serde/derive attributes, V8 dispatch, host operation checks, compiler and ABI behavior are outside the proof.",
+  "adapterSha256": "f7d2533fa1964a54886a33965452583a1d71ba1d5508df0369f06103553e2e6b",
+  "runnerSha256": "402ae32d85f66ea950dc502aff53f13d965cbb105312b4499d48114b6f9dd298",
+  "checks": [
+    {
+      "name": "production",
+      "expectedToVerify": true,
+      "exit": 0,
+      "passed": true,
+      "seconds": 1.8435837250435725,
+      "harnessSha256": "afc2d7ad61ea80b714f00a791e1cad77be5651d6b982257c19c6b3181549675b",
+      "summary": [
+        "verification results:: 3 verified, 0 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_db_read",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.7512307199649513,
+      "harnessSha256": "4a05bd741c4041e2dc9afab200f0c417ab46d4fa2774e21ec5679ce05b614197",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_db_read",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.9990085900062695,
+      "harnessSha256": "1bd6c6d40b4190131fc1b15573dd9863322d3ee7647d5d8553d4421c9b17f263",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_db_write",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.8599478430114686,
+      "harnessSha256": "b5fbe75809ca393fc2619481562a2f611fe4fce567dad03bd4059d1315bc0270",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_db_write",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.7713202780578285,
+      "harnessSha256": "7cdd3e556285d92f143332173be4834845dffafe81508d400e248bcd7b6b560d",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_action_outbox",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5638414589921013,
+      "harnessSha256": "5568d687e99da2ced8f6f02355ece682095b9b631a695a916b41d8ad0144ab36",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_action_outbox",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5789118389366195,
+      "harnessSha256": "d3c849979d5029bfcd32df4638aaf48f8c0ebf02d24970994cdbf63175235e10",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_action_tools",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5951830960111693,
+      "harnessSha256": "397ec614684861fb8e1e7f0f651e80f53b73dd3bfd418dde96b1ca48f6e0b4f1",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_action_tools",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6148878150852397,
+      "harnessSha256": "af78a23594aa2305564a54dd19acddc1c47b48b6c5124bcda6f514fd5e941700",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_scheduler",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6128110649297014,
+      "harnessSha256": "ece0effe943c3bc1f77af58651a1985aab113dfad539d0fa2a47e7e052697da2",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_scheduler",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6206912249326706,
+      "harnessSha256": "58ce5c670c2a127b4cb0e4af70f1b36c0a140c06e41d17316e2c62f214ae1b9e",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_network",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6083218170097098,
+      "harnessSha256": "1fb9a96887d986bb1387f6c9ff61b7e24e3df4d9dc2e01f935a4467886aca8ca",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_network",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5782470620470122,
+      "harnessSha256": "a0240f1eba454b619da261ae819beaef7cd81cc97834c2fe4e5417739afd6ee0",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_storage",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6333059869939461,
+      "harnessSha256": "f57d7986808f34b1fc2f622bb32b1b03fede36a8407e557f920ef0b17954f0a6",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_storage",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.611292285961099,
+      "harnessSha256": "226eebd3620b89bc2452f02102febf39bb2f081237747cf42d0e7d7fa713093e",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_sandbox",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5677299209637567,
+      "harnessSha256": "3c05070d1f6762c623bc2a4e55545b50b5fa4c7661581b5a418ec4b32f21e67c",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_sandbox",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5497198909288272,
+      "harnessSha256": "f6198d31d259d2d5f06cf9b297d6b82e816cc934deb460c924fd00ee664632ad",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_secrets",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.605028216028586,
+      "harnessSha256": "bdc94303548f61e56714ace694fa208c1bb0c3ef5dc48e51deaa94087ce467a4",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_secrets",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.6066135689616203,
+      "harnessSha256": "a127afcea5aac1546fc79e3662a14fe3c39878080aa0ab36d1f87aed0e4df260",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_grant_functions",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.623505569063127,
+      "harnessSha256": "32de1d1bf1cbd08acc4a467bad855759f30e83a85f276113dd16c28c32633da4",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    },
+    {
+      "name": "bypass_kind_functions",
+      "expectedToVerify": false,
+      "exit": 1,
+      "passed": true,
+      "seconds": 0.5538703779457137,
+      "harnessSha256": "3dbdcfecca5df5c64e037567e2b706df9929dee9cbfa3d2eea9994c057a0bd15",
+      "summary": [
+        "verification results:: 2 verified, 1 errors"
+      ]
+    }
+  ],
+  "expectedChecks": 21,
+  "success": true
+}

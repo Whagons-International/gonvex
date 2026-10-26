@@ -12,57 +12,6 @@ use gonvex_module_runtime::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The capabilities a function kind may ever reach, before the host's own
-/// grant is applied. This is the structural half of Query/Reducer/Action
-/// separation: a query has no path to a write no matter what the host granted,
-/// and an action has no direct database access at all — it goes through a
-/// reducer, which is where the host owns the transaction.
-fn structural_capabilities(kind: &FunctionKind) -> Capabilities {
-    match kind {
-        FunctionKind::Query => Capabilities {
-            db_read: true,
-            ..Capabilities::default()
-        },
-        FunctionKind::Reducer => Capabilities {
-            db_read: true,
-            db_write: true,
-            storage: true,
-            action_outbox: true,
-            scheduler: true,
-            ..Capabilities::default()
-        },
-        // Actions run outside the transaction: they may reach the network and
-        // storage, and mutate only by calling a reducer.
-        FunctionKind::Action => Capabilities {
-            action_tools: true,
-            functions: true,
-            scheduler: true,
-            network: true,
-            storage: true,
-            sandbox: true,
-            secrets: true,
-            ..Capabilities::default()
-        },
-    }
-}
-
-/// Intersects the kind's structural reach with the grant on the invocation.
-pub(crate) fn effective_capabilities(kind: &FunctionKind, granted: &Capabilities) -> Capabilities {
-    let structural = structural_capabilities(kind);
-    Capabilities {
-        db_read: structural.db_read && granted.db_read,
-        db_write: structural.db_write && granted.db_write,
-        action_outbox: structural.action_outbox && granted.action_outbox,
-        action_tools: structural.action_tools && granted.action_tools,
-        scheduler: structural.scheduler && granted.scheduler,
-        network: structural.network && granted.network,
-        storage: structural.storage && granted.storage,
-        sandbox: structural.sandbox && granted.sandbox,
-        secrets: structural.secrets && granted.secrets,
-        functions: structural.functions && granted.functions,
-    }
-}
-
 pub(crate) fn kind_name(kind: &FunctionKind) -> &'static str {
     match kind {
         FunctionKind::Query => "query",
@@ -428,6 +377,7 @@ pub(crate) fn decode_result(envelope: &str) -> Result<Vec<u8>, ModuleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gonvex_module_runtime::effective_capabilities;
 
     #[test]
     fn host_payload_numbers_survive_json_lowering() {
