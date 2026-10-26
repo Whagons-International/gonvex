@@ -1,0 +1,41 @@
+name: Rust policy verification
+
+on:
+  pull_request:
+    paths:
+      - rust/crates/server/**
+      - verification/verus/**
+      - .github/workflows/rust-policy-verification.yml
+  push:
+    branches: [main, staging]
+    paths:
+      - rust/crates/server/**
+      - verification/verus/**
+      - .github/workflows/rust-policy-verification.yml
+
+permissions:
+  contents: read
+
+jobs:
+  generation:
+    name: Verify generation allocation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustc-dev,llvm-tools
+      - name: Install pinned Verus
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fL --retry 2 -o verus.zip https://github.com/verus-lang/verus/releases/download/release/0.2026.10.18.7d82994/verus-0.2026.10.18.7d82994-x86-linux.zip
+          echo 'e9af03732d4bdd32b93a8fcf471706739c24c1473fa5086618d96c47237845dd  verus.zip' | sha256sum -c -
+          unzip -q verus.zip
+      - name: Prove production allocation and reject broken variants
+        run: |
+          python3 verification/verus/verify_generation.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/generation-proof"

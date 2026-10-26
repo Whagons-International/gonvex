@@ -1,0 +1,50 @@
+{
+  "verus": "Verus\n  Version: 0.2026.10.18.7d82994\n  Profile: release\n  Platform: linux_x86_64\n  Toolchain: 1.99.1-x86_64-unknown-linux-gnu (overridden by environment variable RUSTUP_TOOLCHAIN)",
+  "productionSource": "rust/crates/server/src/generation.rs",
+  "sourceSha256": "91bfe4eeeb2d306242d1c52fe263dc5ae80289093b2f6bc7f3aef9495a5c792d",
+  "functionSha256": "d38a5d9a984c2c1fbab9db0aac34a438b10a175ddf5d715f5a5b937887bfbec8",
+  "scope": "Allocation arithmetic for every u64 input and Option<u64> request. Registry locks, unload persistence, and native effects are outside this proof.",
+  "checks": [
+    {
+      "name": "production",
+      "expectedToVerify": true,
+      "exit": 0,
+      "seconds": 0.541209522052668,
+      "summary": [
+        "verification results:: 1 verified, 0 errors"
+      ],
+      "passed": true
+    },
+    {
+      "name": "accept_equal_generation",
+      "expectedToVerify": false,
+      "exit": 1,
+      "seconds": 0.485454683075659,
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ],
+      "passed": true
+    },
+    {
+      "name": "reuse_generation",
+      "expectedToVerify": false,
+      "exit": 1,
+      "seconds": 0.43463289097417146,
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ],
+      "passed": true
+    },
+    {
+      "name": "unchecked_exhaustion",
+      "expectedToVerify": false,
+      "exit": 1,
+      "seconds": 0.4669298429507762,
+      "summary": [
+        "verification results:: 0 verified, 1 errors"
+      ],
+      "passed": true
+    }
+  ],
+  "success": true
+}
