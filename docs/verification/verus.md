@@ -307,3 +307,77 @@ from this arithmetic proof.
 - [Official installation instructions](https://github.com/verus-lang/verus/blob/main/INSTALL.md).
 - [Pinned Verus release](https://github.com/verus-lang/verus/releases/tag/release/0.2026.10.18.7d82994).
 - [Bend source and language documentation](https://github.com/bendlang/bend).
+
+## SQL statement cache key append bodies
+
+`verification/verus/verify_sql_statement_key.py` extracts `append_decimal`,
+`append_execution`, and `append_description` directly from
+`rust/crates/runtime/src/sql_statement_key.rs`. It retains their executable bodies,
+adds contracts and ghost annotations, and checks the inverse annotation transform.
+All bodies and proof lemmas run with pinned Verus `0.2026.10.18.7d82994`,
+`--no-cheating`, and one verification thread. Production stays on Rust 1.94.
+
+The laws cover canonical unsigned decimal for every `u32`, decimal decode recovery,
+exact String content and UTF-8 bytes for arbitrary SQL, execution equality iff SQL
+and ordered OID slices are equal, description identity, and disjoint namespaces.
+Empty OID slices, zero, maximum values, order and duplicates remain in the domain.
+The comma after every OID, space before `*/`, newline and SQL suffix are preserved.
+
+`append_decimal` uses a fixed `['0'; 10]` stack buffer. It writes at least the
+least-significant digit, fills earlier positions right to left, then appends the
+used suffix with `String::push`. The extraction adds ghost state and proof-only
+annotations. Its fill invariant equates canonical decimal to the remaining
+nonzero quotient's decimal followed by the initialized suffix. The proof establishes
+at most ten digits for every `u32`, valid array indices and termination for both
+loops. No UTF-8 conversion, temporary heap buffer or formatter contract is used.
+
+Every negative harness must first pass type checking. Fourteen mutations fail
+exact-content postconditions or loop invariants. A separate no-comma harness has
+correct contracts for its changed format but fails the concrete identity law for
+`[1,23]` versus `[12,3]`; the comma-preserving witness passes. The driver rejects
+compiler errors, unsupported APIs, bounds/precondition failures and timeouts as
+proof-sensitivity evidence. It records input/body/harness hashes and fails on drift.
+
+The proof boundary excludes the allocation/capacity/Cow wrappers, although the
+driver pins their reviewed shapes. Description reserves the description header byte
+length plus `sql.len()` before appending; execution retains its existing reservation.
+This capacity choice is outside the proof. Neither allocation count nor speed is
+proved. It does not verify SQLx codecs, `produces`,
+`type_info`, PostgreSQL, cache behavior, or callers using the same owned parameter
+plan for key construction and binding. It does not establish all-caller isolation.
+Pinned vstd's String, array, slice and UTF-8 contracts, the verifier, solver and compiler
+remain trusted. No new formatter, injectivity or serializer axiom is introduced.
+
+The former `write!` is unsupported by this pinned Verus; `format!` has no content
+postcondition. Native byte differential tests retain them as compatibility oracles,
+not formal facts. Run those tests and real SQLx/PostgreSQL regressions separately.
+The proof does not approve runtime speed or resolve performance PR #207's hold.
+The exact-count caller fix in PR #208 is independent and is not changed here.
+
+### Reproduce the native serializer comparison
+
+The Linux helper benchmark compiles the actual current module and the formatter
+at staging `8bae698880d6a7e63472596b1a22c5dc1ced0ebc`. That commit must be
+available locally. Prepare under build limits, then measure separately under CPU
+and memory limits without concurrent compilation. On Arch3, use the resource
+runner and headroom gate required by `AGENTS.md`; place the output under `/mnt/data`.
+The output directory must be new. Preparation runs the seven native byte tests.
+
+```sh
+python3 verification/benchmarks/sql_statement_key.py prepare --output /path/to/new-output
+python3 verification/benchmarks/sql_statement_key.py measure --output /path/to/new-output
+```
+
+Use `--rustc` to select the production Rust 1.94 compiler. Preparation snapshots
+both modules and records compiler, source, harness and binary hashes. Measurement
+checks those hashes and current-source identity before and after execution. It
+retains every CPU/wall-time sample and eight alternating pairs per case. Cases
+include no parameters, actual built-in OIDs, decimal boundaries, long Unicode SQL
+and 1,024 maximum-size OIDs. Iterations scale down for large inputs to bound work;
+this is neither a production frequency estimate nor an acceptance threshold.
+
+A one-CPU local comparison of the final stack-buffer candidate found median
+thread CPU time of 30.63 to 17.69 ns for a one-OID key and 19.77 to 14.42 microseconds
+for 1,024 maximum OIDs. Description of `SELECT 1` fell from 21.11 to 13.22 ns.
+The no-parameter `SELECT 1` case rose from 18.13 to 18.36 ns. These helper-level
+measurements do not establish whole-runtime throughput or a general speed bound.
