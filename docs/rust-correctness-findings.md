@@ -28,6 +28,8 @@ the test functions return early. CI supplies PostgreSQL.
 | VISIBILITY-NULL-NOT-PARITY | A NULL status under `not(eq(status, "blocked"))` passed the Rust row evaluator but failed the SQL predicate. Compile negation as the complement of Boolean admission with null-safe predicates, including SQL UNKNOWN. | `runtime/src/visibility.rs::nullable_negation_matches_postgres_admission`: real PostgreSQL and Rust decisions across nine nullable/nonnull rows and thirteen nested Boolean expressions. |
 
 | LIVE-QUERY-EXACT-COUNT-CACHE-TYPE | On one cached connection, exact-count live queries with integer 0, then float 1.0, returned the correct rows but total 0 for row 1. The count branch omitted the typed statement key used by the row branch. Use one owned `Parameters` plan for count identity and binding. | `runtime/src/live_query.rs::tests::exact_count_parameter_type_changes_match_rows_on_one_connection`: actual row/count calls with integer, float and integer parameters on one transaction. |
+| SYNC-EARLY-FINALIZATION-LATE-WRITE | A Reducer inserts A, fires deferred constraints early, returns them to deferred, then inserts B. Both application rows commit, but B has NULL feed revision/ordinal and is omitted from revision-based reads. Reject tracked writes after this transaction has finalized, using its actual provenance row. | `runtime/src/host_calls_parameter_tests.rs::sync_finalization_late_write_has_no_unpublished_events`: provisioned triggers, admitted host queries, completion and durable rows/feed/provenance. |
+| SYNC-SESSION-GUARD-SUPPRESSION | A Reducer commits a session-level `gonvex.sync_revision` setting. A later transaction on the same physical pooled connection commits a normal row with NULL feed revision and no transaction metadata. Finalization now consults current-transaction provenance; the writable setting is no longer authority. | `runtime/src/host_calls_parameter_tests.rs::sync_finalization_session_guard_does_not_poison_next_transaction`: explicit same-backend reuse and complete feed capture. |
 
 ## Exact database examples
 
@@ -170,3 +172,44 @@ The regression returns to the integer type after the float call and checks all
 three row results and totals. It uses a normal enabled SQLx statement cache and
 runs in the required PostgreSQL CI suite. This test covers the remaining caller
 omission; it is not a formal proof of SQLx, PostgreSQL or cache-key serialization.
+
+## Sync finalization phase and pooled settings
+
+Both sync findings were reproduced on staging `8bae698880d6a7e63472596b1a22c5dc1ced0ebc`
+through `DatabaseHostCalls` with Reducer capability, production provisioning and
+`TenantTransaction` completion. Neither reproduction used an external live tenant.
+The late-write case committed A and B, but only A received revision 1. In the
+session-setting case, backend PIDs matched across transactions and the later
+application row committed while its feed revision and ordinal were NULL, the clock
+remained zero, and transaction provenance was absent.
+
+The correction uses the existing unique transaction-ID index on
+`_gonvex_sync_transactions` for both stage admission and repeated-finalizer
+recognition. A late tracked row change raises SQLSTATE `55000` with an explicit
+sync-finalization error. Unrecovered errors roll back the invocation; savepoint
+recovery must preserve complete capture of the surviving work. Early constraint
+flushing can close the transaction to subsequent tracked DML, including after
+constraints return to DEFERRED. Unrelated named constraints remain available.
+The session setting may still exist, but it cannot suppress finalization.
+
+The singleton clock update, one-batch drain, event-ID ordinals, command attribution
+and notification stay in PostgreSQL's transaction. Actual SQL changes alter the
+bootstrap digests, so the installer must upgrade both infrastructure and table
+triggers atomically. No TypeScript, client storage or wire-format change is needed.
+This does not protect against a database owner deliberately rewriting internal
+provenance, functions, triggers or search paths.
+
+The guards add indexed PostgreSQL checks per staged event and per finalizer call.
+They add no network round trip but can increase bulk and serialized COMMIT work.
+One capped serial comparison ran eight old/new pairs each for 1, 10, 100 and
+1,000 rows with durable commits enabled. All 64 measured commits had complete
+capture. Paired median transaction differences were about +0.07 ms for 1 and 10
+rows, +3.60 ms for 100 rows, and -33.59 ms for 1,000 rows. Individual pairs varied
+widely in both directions. The fixture began each transaction without retained
+feed history, and backend CPU counters had only 10 ms resolution. These results
+supply no reliable general overhead bound, speedup or throughput-parity claim.
+Correctness tests do not establish maintained throughput. These PostgreSQL behaviors are regression-tested boundaries, with no
+formal verification of PL/pgSQL, MVCC, WAL durability or notification delivery
+claimed. The independently observed clock-lock write bottleneck and held metrics
+PR are separate from these missing-feed correctness findings. No deployed
+occurrence or historical CPU-spike cause has been established.
