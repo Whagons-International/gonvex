@@ -3,15 +3,14 @@ import { ExpoSQLiteLocalReplicaStorage, type ExpoSQLiteDatabase } from './index.
 import { publicationContract, type PublicationFactory } from '../../client/test/local-replica-publication-contract.js';
 import { publicationWireContract } from '../../client/test/local-replica-publication-wire.js';
 
-// Separate new runner. The parent's local-replica-publication.test.ts is untouched.
 // Real Node SQLite through the Expo interface, not a native Expo-driver test.
 const create: PublicationFactory = () => {
   const db = new DatabaseSync(':memory:');
   const database: ExpoSQLiteDatabase = {
     async execAsync(sql) { db.exec(sql); },
     async runAsync(sql, ...params) { return db.prepare(sql).run(...params as SQLInputValue[]); },
-    async getAllAsync<T>(sql, ...params) { return db.prepare(sql).all(...params as SQLInputValue[]) as T[]; },
-    async getFirstAsync<T>(sql, ...params) { return db.prepare(sql).get(...params as SQLInputValue[]) as T ?? null; },
+    async getAllAsync<T>(sql: string, ...params: unknown[]) { return db.prepare(sql).all(...params as SQLInputValue[]) as T[]; },
+    async getFirstAsync<T>(sql: string, ...params: unknown[]) { return db.prepare(sql).get(...params as SQLInputValue[]) as T ?? null; },
     async withTransactionAsync(run) {
       db.exec('BEGIN');
       try { await run(); db.exec('COMMIT'); }

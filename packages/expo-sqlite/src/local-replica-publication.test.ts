@@ -5,8 +5,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { LocalReplica, type ReplicaRow } from '../../client/src/local-replica.js';
 import { ExpoSQLiteLocalReplicaStorage, type ExpoSQLiteDatabase } from './index.js';
 
-// Artifact baseline: 79668483b46fd8901aa0beacaf9f6e837d2f92e6.
-// Proposed regression expectations, unrun when authored. No runtime fix here.
+// Public LocalReplica regressions through the production SQLite adapter.
 const disposals: Array<() => void> = [];
 afterEach(() => { for (const dispose of disposals.splice(0).reverse()) dispose(); });
 const scope = 'publication-tenant';

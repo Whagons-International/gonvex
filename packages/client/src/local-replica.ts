@@ -117,8 +117,8 @@ export type ReplicaStoragePostImages = {
 };
 
 /** Keys removed speculatively from RAM during a full window replacement.
- * Storage uses them to correct a rejected replacement without loading a whole
- * prior window's row payloads. Older adapters may ignore this optional context. */
+ * Arbitrating storage must report their final live/null post-images even when
+ * the window write succeeds. Exact-candidate adapters may ignore this input. */
 export type ReplicaWindowWriteContext = { removedIDs: readonly string[] };
 
 type ReplicaWriteReceipt = ReplicaMetadataCommit | ReplicaStorageCommit | ReplicaStoragePostImages;

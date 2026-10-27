@@ -726,6 +726,12 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       }
       if (transaction.memberships?.length) await this.writeWindows(normalizedScope,transaction.memberships,sequence);
       const changes = this.receipt()!.changes;
+      // A rejected sibling delete may have captured this owner's old window
+      // before accepted deletes edited membership. Return the final certificate.
+      for (const signature of checkpoints.keys()) if (changes.windows[signature]) {
+        const final = await this.database.windows.get([normalizedScope, signature]);
+        changes.windows[signature] = final && !final.deleted ? await this.materializeWindow(final) : null;
+      }
       if (changes.removedMemberships) changes.removedMemberships = changes.removedMemberships.filter(({ signature, id }) =>
         !changes.windows[signature]?.ids.includes(id));
       await this.saveCursor(normalizedScope,transaction.cursor);

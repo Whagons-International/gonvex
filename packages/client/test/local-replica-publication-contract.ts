@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalReplica, type LocalReplicaStorage, type ReplicaRow } from '../src/local-replica.js';
 
-// Artifact baseline 79668483b46fd8901aa0beacaf9f6e837d2f92e6. Unrun expansion.
+// Public publication regressions shared by the persistent adapters.
 // These are public LocalReplica method contracts, not server reachability claims.
 export type PublicationStorage = LocalReplicaStorage & Required<Pick<LocalReplicaStorage,
   'loadEntityRows' | 'loadWindowRows'>>;
@@ -197,6 +197,23 @@ export function publicationContract(name: string, create: PublicationFactory) {
     expect((await storage.loadWindowRows(scope, 'tasks'))!.window.ids).toEqual(['a']);
   });
 
+  it.each([['a', 'b'], ['b', 'a']])('publishes final membership for mixed deletes ordered %s then %s', async (first, second) => {
+    const { replica, storage, cold } = await fixture();
+    const a = { _id: 'a', status: 'old' }, b = { _id: 'b', status: 'working' };
+    await replica.replaceWindow(input('tasks', 1, [a, b]));
+    await replica.replaceWindow(input('newer', 10, [b]));
+    const seen: string[][] = [];
+    disposals.push(replica.subscribe(() => seen.push([...replica.getWindow('tasks')!.ids])));
+    await replica.applyTransaction({ cursor: cursor(9), changes: [first, second].map(id => ({ entity: 'tasks', id, operation: 'delete' as const })) }, scope);
+    expect((await storage.loadWindowRows(scope, 'tasks'))!.window.ids).toEqual(['b']);
+    expect(replica.getWindow('tasks')!.ids).toEqual(['b']);
+    expect((await cold()).getWindow('tasks')!.ids).toEqual(['b']);
+    expect(replica.entity('tasks', 'a')).toBeUndefined();
+    expect(replica.entity('tasks', 'b')).toEqual(b);
+    expect(seen.length).toBeGreaterThan(0);
+    for (const ids of seen) expect(ids).toEqual(['b']);
+  });
+
   it('applies explicit membership after an accepted entity deletion', async () => {
     const { replica, storage } = await fixture();
     await replica.replaceWindow(input('tasks', 10, [latest]));
@@ -207,20 +224,21 @@ export function publicationContract(name: string, create: PublicationFactory) {
     expect((await storage.loadWindowRows(scope, 'tasks'))!.window.ids).toEqual(['a']);
   });
 
-  it.each(['snapshot', 'delta'] as const)('corrects an affected row outside old membership during %s replacement', async method => {
+  it.each([['snapshot', 9], ['delta', 9], ['snapshot', 12], ['delta', 12]] as const)('corrects an affected row outside old membership during %s replacement at %s', async (method, revision) => {
     const { replica, storage, cold } = await fixture();
     const orphan = { _id: 'c', status: 'orphan' };
     await replica.replaceWindow(input('orphan', 5, [orphan]));
     await replica.removeWindow('orphan');
     await replica.replaceWindow(input('tasks', 10, [latest]));
-    if (method === 'snapshot') await replica.replaceWindow({ ...input('tasks', 9, []), removedIDs: ['c'] });
-    else await replica.applyWindowDelta({ ...input('tasks', 9, []), upserts: [], deleted: ['c'] });
+    if (method === 'snapshot') await replica.replaceWindow({ ...input('tasks', revision, []), removedIDs: ['c'] });
+    else await replica.applyWindowDelta({ ...input('tasks', revision, []), upserts: [], deleted: ['c'] });
     // Legacy pruning can accept a row deletion even when its window loses.
     // Compare the actual committed outcome rather than imposing a new policy.
     const committed = (await storage.loadEntityRows(scope, 'tasks', ['c']))[0]?.row;
     expect(replica.entity('tasks', 'c')).toEqual(committed);
     expect((await cold()).entity('tasks', 'c')).toEqual(committed);
-    expect(replica.getWindow('tasks')!.ids).toEqual(['a']);
+    const committedWindow = (await storage.loadWindowRows(scope, 'tasks'))!.window;
+    expect(replica.getWindow('tasks')!.ids).toEqual(committedWindow.ids);
   });
 
   it.each(['snapshot', 'delta', 'transaction'] as const)(

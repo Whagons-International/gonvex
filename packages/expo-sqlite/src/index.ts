@@ -806,6 +806,14 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         );
         Object.assign(postImages.entities[window.entity], pruned);
       }
+      // RAM may remove an affected ID outside the previous membership. Such
+      // rows were not pruned here, so publish their final stored values too.
+      const affected = [...new Set(context?.removedIDs ?? [])].filter(id =>
+        !Object.hasOwn(postImages.entities[window.entity]!, id));
+      for (const id of affected) postImages.entities[window.entity]![id] = null;
+      for (const { id, row } of await this.loadEntityRows(scope, window.entity, affected)) {
+        postImages.entities[window.entity]![id] = row;
+      }
       if (checkpoint) {
         await this.database.runAsync(
           `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
