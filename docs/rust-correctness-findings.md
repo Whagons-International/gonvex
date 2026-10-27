@@ -201,8 +201,14 @@ provenance, functions, triggers or search paths.
 
 The guards add indexed PostgreSQL checks per staged event and per finalizer call.
 They add no network round trip but can increase bulk and serialized COMMIT work.
-Their cost requires measurement; correctness tests do not establish maintained
-throughput. These PostgreSQL behaviors are regression-tested boundaries, with no
+One capped serial comparison ran eight old/new pairs each for 1, 10, 100 and
+1,000 rows with durable commits enabled. All 64 measured commits had complete
+capture. Paired median transaction differences were about +0.07 ms for 1 and 10
+rows, +3.60 ms for 100 rows, and -33.59 ms for 1,000 rows. Individual pairs varied
+widely in both directions. The fixture began each transaction without retained
+feed history, and backend CPU counters had only 10 ms resolution. These results
+supply no reliable general overhead bound, speedup or throughput-parity claim.
+Correctness tests do not establish maintained throughput. These PostgreSQL behaviors are regression-tested boundaries, with no
 formal verification of PL/pgSQL, MVCC, WAL durability or notification delivery
 claimed. The independently observed clock-lock write bottleneck and held metrics
 PR are separate from these missing-feed correctness findings. No deployed
