@@ -198,6 +198,87 @@ rounds pinned to one CPU measured local medians of 3.766 and 3.701 ns.
 This excludes routing, queues, storage and transport. Reproduce with
 `python3 verification/benchmarks/snapshot_ack.py --build-dir /path/to/build`.
 
+## Snapshot ACK buffer-prefix release
+
+`snapshot_ack.rs::release_acked_prefix` mutates the production
+`std::collections::VecDeque<(u64, usize)>`. Both active and retired delivery
+paths call it after their existing identity and sent-sequence admission checks.
+The verifier extracts the proposed production executable body and its queue
+type import. It adds ghost state, loop invariants and contracts only. There is
+no second executable queue model and no runtime proof counter or extra walk.
+
+For every queue and `u64` ACK, without a sortedness precondition, it proves:
+
+- The final queue is exactly the original suffix after some removed prefix.
+  Every retained sequence and byte length is unchanged.
+- Every removed record has sequence at most the ACK. The first retained record
+  has sequence greater than the ACK, or the queue is empty.
+- Original frame count and mathematical byte sum equal removed-prefix plus
+  retained-suffix totals. A composition harness proves those equalities for
+  two independent queues using the same extracted operation.
+- Repeating the ACK, or applying any older ACK immediately afterward, changes
+  neither the queue nor its byte sum.
+
+The proof does not assert that an arbitrary unsorted queue removes every record
+at or below the ACK. It proves the actual leading-prefix operation. Production
+sequence ordering, queue insertion and retirement routing are separate caller
+obligations.
+
+`admit_frame` is also extracted from production. For arbitrary `usize` inputs,
+it accepts exactly when `count < frame_limit` and the mathematical sum of
+existing bytes and frame bytes is at most `byte_limit`. It returns exactly the
+incremented frame count and byte total, both within their supplied limits.
+Subtraction and addition cannot overflow. `pump` uses the returned pair instead
+of recomputing additions. Its existing aggregate active/retired `.sum()` calls
+remain unchanged and unverified. Their safety and the global 8-frame/512-KiB
+reachable-state invariant do not follow from this local arithmetic proof.
+
+The pinned verifier rejects both `VecDeque::is_empty` and `VecDeque::front` as
+unsupported. API probes under the implementation artifact's `api-probes/`
+record those diagnostics. The helper therefore uses the ordinary
+`while frames.len() > 0` prefix loop with a function-scoped
+`#[allow(clippy::len_zero)]`. Index zero is checked under the nonempty condition.
+No custom trusted specification is introduced to cover the missing APIs.
+
+`verification/verus/verify_snapshot_credit.py` requires the supported import and
+signatures and checks that both delivery paths use the shared helper and that
+the pump consumes the admission result. These are syntactic integration checks,
+not a formal proof of the callers. It records source, adapter, specification,
+extracted-body and harness hashes. Every negative control must first pass
+Verus typechecking; unsupported APIs and parse/type errors cannot count as
+rejected laws. A partial local run is marked `partial: true` in its receipt.
+Only a complete non-partial successful receipt establishes the full run.
+
+Nine validly typed controls must fail verification: retaining an equal ACK,
+releasing an unacknowledged frame, popping from the wrong end, releasing only
+one covered record, corrupting a retained byte length, admitting an extra frame,
+admitting excessive bytes, losing the frame increment, and losing the byte
+increment. The unchanged current-snapshot ACK progress proof remains a separate
+check.
+
+The trust boundary includes the extraction/annotation adapter, these contracts,
+pinned Verus and vstd's standard-library specifications, SMT solver, Rust
+translation/compiler and host execution. No project `assume`, `admit`, `axiom`,
+`external_body`, or custom external function specification is used. The Verus
+Rust toolchain differs from production Rust. This is not verification of the
+whole delivery protocol, compiled machine code, the active/retired maps,
+ACK identity validation, `record_ack` callers, aggregate `.sum()` overflow,
+queue insertion, encoding, transport, durable client storage or concurrency.
+It gives no liveness, fairness or throughput result.
+
+Run after integration, inside the parent's approved resource runner:
+
+```sh
+python3 verification/verus/verify_snapshot_credit.py \
+  --root "$PWD" --verus /home/gabriel/.local/bin/verus \
+  --output /mnt/data/work/OWNED_BUILD/snapshot-credit-proof
+```
+
+Focused Rust additions cover wrapped deques, active and retired prefix release,
+shared frame and byte credit, invalid ACKs, replay, retired-entry cleanup and
+machine-integer admission boundaries. They are supplied for the parent to run
+with the normal runtime toolchain. The child ran standalone Verus only.
+
 ## Recommended next steps
 
 Keep Rust as the implementation while evaluating verification module by module.

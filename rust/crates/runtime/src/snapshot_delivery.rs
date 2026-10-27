@@ -1,7 +1,7 @@
 //! Connection-owned native snapshot delivery. Credits are restored only by a
 //! cumulative durable-stage ACK, never by socket send completion or a retry.
 use crate::replica::SnapshotPages;
-use crate::snapshot_ack::{record_ack, AckProgress};
+use crate::snapshot_ack::{admit_frame, record_ack, release_acked_prefix, AckProgress};
 use gonvex_protocol::{ClientCapabilities, ServerMessage};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -126,9 +126,7 @@ impl SnapshotDelivery {
             if frames.back().is_some_and(|(sent, _)| sequence > *sent) {
                 return Err("snapshot acknowledgement exceeds sent sequence");
             }
-            while frames.front().is_some_and(|(sent, _)| *sent <= sequence) {
-                frames.pop_front();
-            }
+            release_acked_prefix(frames, sequence);
             if frames.is_empty() {
                 self.retired.remove(&retired_key);
             }
@@ -145,13 +143,7 @@ impl SnapshotDelivery {
         {
             return Ok(None);
         }
-        while pending
-            .in_flight
-            .front()
-            .is_some_and(|(sent, _)| *sent <= sequence)
-        {
-            pending.in_flight.pop_front();
-        }
+        release_acked_prefix(&mut pending.in_flight, sequence);
         if pending.last_sent && pending.in_flight.is_empty() {
             return Ok(self.pending.remove(id).and_then(|pending| pending.ready));
         }
@@ -252,19 +244,25 @@ impl SnapshotDelivery {
             });
             match encoded {
                 Ok((encoded, sequence, last)) => {
-                    if bytes + encoded.len() > IN_FLIGHT_BYTES {
+                    let Some((next_count, next_bytes)) = admit_frame(
+                        count,
+                        bytes,
+                        encoded.len(),
+                        IN_FLIGHT_FRAMES,
+                        IN_FLIGHT_BYTES,
+                    ) else {
                         pending.buffered = Some((encoded, sequence, last));
                         blocked += 1;
                         continue;
-                    }
+                    };
                     if let Some(start) = pending.start.take() {
                         batch.starts.push(start);
                     }
                     pending.progress.sent = Some(sequence);
                     pending.last_sent = last;
                     pending.in_flight.push_back((sequence, encoded.len()));
-                    count += 1;
-                    bytes += encoded.len();
+                    count = next_count;
+                    bytes = next_bytes;
                     batch.frames.push(encoded);
                     blocked = 0;
                 }
@@ -379,6 +377,130 @@ mod tests {
             )]),
         }
     }
+    // Directly seed retained credits to isolate ACK routing from page sizing.
+    fn retained_credits(delivery: &SnapshotDelivery) -> (usize, usize) {
+        delivery
+            .pending
+            .values()
+            .flat_map(|pending| &pending.in_flight)
+            .chain(delivery.retired.values().flatten())
+            .fold((0, 0), |(count, bytes), (_, len)| (count + 1, bytes + len))
+    }
+
+    #[test]
+    fn ack_prefix_preserves_wrapped_deque_records_and_replay_is_inert() {
+        let mut frames = VecDeque::with_capacity(4);
+        for sequence in 0..4 {
+            frames.push_back((sequence, 10 + sequence as usize));
+        }
+        frames.pop_front();
+        frames.pop_front();
+        frames.push_back((4, 400));
+        frames.push_back((5, 500));
+        release_acked_prefix(&mut frames, 3);
+        assert_eq!(frames, VecDeque::from([(4, 400), (5, 500)]));
+        let retained = frames.clone();
+        release_acked_prefix(&mut frames, 3);
+        release_acked_prefix(&mut frames, 0);
+        assert_eq!(frames, retained);
+        release_acked_prefix(&mut frames, u64::MAX);
+        assert!(frames.is_empty());
+        release_acked_prefix(&mut frames, u64::MAX);
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn active_and_retired_ack_prefixes_conserve_shared_credit_and_replays() {
+        let mut delivery = SnapshotDelivery::default();
+        delivery.begin(snapshot("active", 2000)).unwrap();
+        let active = delivery.pending.get_mut("active").unwrap();
+        let generation = active.snapshot.clone();
+        active.progress.sent = Some(4);
+        active.in_flight = VecDeque::from([(0, 11), (2, 23), (4, 47)]);
+        let retired_key = ("closed".to_owned(), "old".to_owned());
+        delivery
+            .retired
+            .insert(retired_key.clone(), VecDeque::from([(1, 101), (3, 103)]));
+        assert_eq!(retained_credits(&delivery), (5, 285));
+        assert!(delivery.acknowledge("active", &generation, 5).is_err());
+        assert!(delivery.acknowledge("closed", "old", 4).is_err());
+        assert_eq!(retained_credits(&delivery), (5, 285));
+        delivery.acknowledge("active", &generation, 2).unwrap();
+        assert_eq!(
+            delivery.pending["active"].in_flight,
+            VecDeque::from([(4, 47)])
+        );
+        assert_eq!(retained_credits(&delivery), (3, 251));
+        delivery.acknowledge("closed", "old", 1).unwrap();
+        assert_eq!(delivery.retired[&retired_key], VecDeque::from([(3, 103)]));
+        assert_eq!(retained_credits(&delivery), (2, 150));
+        for sequence in [0, 1, 2] {
+            delivery
+                .acknowledge("active", &generation, sequence)
+                .unwrap();
+        }
+        for sequence in [0, 1] {
+            delivery.acknowledge("closed", "old", sequence).unwrap();
+        }
+        assert_eq!(retained_credits(&delivery), (2, 150));
+        delivery.acknowledge("closed", "old", 3).unwrap();
+        assert!(!delivery.retired.contains_key(&retired_key));
+        delivery.acknowledge("closed", "old", 3).unwrap();
+        assert_eq!(retained_credits(&delivery), (1, 47));
+        delivery.acknowledge("active", &generation, 4).unwrap();
+        assert_eq!(retained_credits(&delivery), (0, 0));
+    }
+
+    #[test]
+    fn retired_partial_ack_opens_exactly_one_frame_slot_and_replay_opens_none() {
+        let mut delivery = SnapshotDelivery::default();
+        delivery.begin(snapshot("active", 2000)).unwrap();
+        let old_key = ("closed".to_owned(), "old".to_owned());
+        delivery
+            .retired
+            .insert(old_key.clone(), (0..8).map(|i| (i, 1024)).collect());
+        assert!(delivery.pump().frames.is_empty());
+        delivery.acknowledge("closed", "old", 0).unwrap();
+        assert_eq!(delivery.pump().frames.len(), 1);
+        assert_eq!(retained_credits(&delivery).0, IN_FLIGHT_FRAMES);
+        let credits = retained_credits(&delivery);
+        delivery.acknowledge("closed", "old", 0).unwrap();
+        assert!(delivery.pump().frames.is_empty());
+        assert_eq!(retained_credits(&delivery), credits);
+        assert_eq!(delivery.retired[&old_key].front().unwrap().0, 1);
+    }
+
+    #[test]
+    fn retired_bytes_block_active_until_their_exact_prefix_is_acked() {
+        let mut delivery = SnapshotDelivery::default();
+        delivery.begin(snapshot("active", 2000)).unwrap();
+        delivery.retired.insert(
+            ("closed".to_owned(), "old".to_owned()),
+            (0..4).map(|sequence| (sequence, FRAME_LIMIT)).collect(),
+        );
+        assert!(delivery.pump().frames.is_empty());
+        delivery.acknowledge("closed", "old", 0).unwrap();
+        assert!(!delivery.pump().frames.is_empty());
+        let credits = retained_credits(&delivery);
+        assert!(credits.0 <= IN_FLIGHT_FRAMES && credits.1 <= IN_FLIGHT_BYTES);
+        delivery.acknowledge("closed", "old", 0).unwrap();
+        assert_eq!(retained_credits(&delivery), credits);
+    }
+
+    #[test]
+    fn frame_admission_handles_exact_limits_and_machine_integer_edges() {
+        assert_eq!(admit_frame(7, 500, 12, 8, 512), Some((8, 512)));
+        assert_eq!(admit_frame(8, 0, 0, 8, 512), None);
+        assert_eq!(admit_frame(0, 501, 12, 8, 512), None);
+        assert_eq!(admit_frame(0, 513, 0, 8, 512), None);
+        assert_eq!(admit_frame(usize::MAX, 0, 0, usize::MAX, usize::MAX), None);
+        assert_eq!(admit_frame(0, usize::MAX, 1, 8, usize::MAX), None);
+        assert_eq!(
+            admit_frame(usize::MAX - 1, usize::MAX - 1, 1, usize::MAX, usize::MAX),
+            Some((usize::MAX, usize::MAX))
+        );
+    }
+
     #[test]
     fn negotiated_only_with_native_hash_and_paging_contracts() {
         let mut caps = ClientCapabilities::default();
