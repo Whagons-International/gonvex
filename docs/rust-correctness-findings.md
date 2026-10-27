@@ -1,9 +1,9 @@
 # Rust correctness fixes found during the Bend experiment
 
-These 12 failures were reproduced against staging commit
-`c233a96cb198669540fa29bb638fd7860611e5b8`. This branch extracts their Rust fixes
-onto current staging without the Bend implementation. A reproduced library
-failure does not establish a deployed incident. No deployment is part of this PR.
+The initial 12 failures were reproduced against staging commit
+`c233a96cb198669540fa29bb638fd7860611e5b8`. Later entries record additional Rust
+correctness investigations. These fixes are independent of the Bend experiment.
+A reproduced library failure does not establish a deployed incident.
 
 Paths below are relative to `rust/crates/`. Each fix retains ordinary Rust tests.
 PostgreSQL regressions need a disposable `GONVEX_TEST_POSTGRES_URL`; without it,
@@ -25,6 +25,9 @@ the test functions return early. CI supplies PostgreSQL.
 | SQL-STATEMENT-ADMISSION | Valid dollar quotes, escape strings, trailing comments and leading comments were rejected. CR-only comments could hide a batch from admission, although PostgreSQL's extended protocol rejected that batch. Use one lexical pass for statement count and the first keyword. | `postgres/src/sql_lexer.rs` and `runtime/src/host_calls_parameter_tests.rs`: literals, nested/CR comments, continued escape strings and healthy transactions after local batch rejection. |
 | MIGRATION-SQL-LEXING | The staging migration splitter combined statements after CR-only comments, rejected valid escape strings, and split Unicode dollar quotes at embedded semicolons. Share the lexical scanner with runtime admission while retaining separate execution policies. | `postgres/src/sql_script.rs` regression cases and `provision.rs::migrations_keep_postgres_lexical_boundaries_in_both_transaction_modes`: actual migration execution and receipt-based replay in both transaction modes. |
 | VISIBILITY-NULL-NOT-PARITY | A NULL status under `not(eq(status, "blocked"))` passed the Rust row evaluator but failed the SQL predicate. Compile negation as the complement of Boolean admission with null-safe predicates, including SQL UNKNOWN. | `runtime/src/visibility.rs::nullable_negation_matches_postgres_admission`: real PostgreSQL and Rust decisions across nine nullable/nonnull rows and thirteen nested Boolean expressions. |
+
+| SYNC-EARLY-FINALIZATION-LATE-WRITE | A Reducer inserts A, fires deferred constraints early, returns them to deferred, then inserts B. Both application rows commit, but B has NULL feed revision/ordinal and is omitted from revision-based reads. Reject tracked writes after this transaction has finalized, using its actual provenance row. | `runtime/src/host_calls_parameter_tests.rs::sync_finalization_late_write_has_no_unpublished_events`: provisioned triggers, admitted host queries, completion and durable rows/feed/provenance. |
+| SYNC-SESSION-GUARD-SUPPRESSION | A Reducer commits a session-level `gonvex.sync_revision` setting. A later transaction on the same physical pooled connection commits a normal row with NULL feed revision and no transaction metadata. Finalization now consults current-transaction provenance; the writable setting is no longer authority. | `runtime/src/host_calls_parameter_tests.rs::sync_finalization_session_guard_does_not_poison_next_transaction`: explicit same-backend reuse and complete feed capture. |
 
 ## Exact database examples
 
@@ -142,3 +145,38 @@ performance when the corrected predicate admits additional NULL-valued rows.
 Reproduce with `GONVEX_TEST_POSTGRES_URL` pointing at a disposable PostgreSQL
 instance and `python3 verification/benchmarks/visibility_negation.py --output
 /path/to/result.json --repetitions 100`.
+
+## Sync finalization phase and pooled settings
+
+Both sync findings were reproduced on staging `8bae698880d6a7e63472596b1a22c5dc1ced0ebc`
+through `DatabaseHostCalls` with Reducer capability, production provisioning and
+`TenantTransaction` completion. Neither reproduction used an external live tenant.
+The late-write case committed A and B, but only A received revision 1. In the
+session-setting case, backend PIDs matched across transactions and the later
+application row committed while its feed revision and ordinal were NULL, the clock
+remained zero, and transaction provenance was absent.
+
+The correction uses the existing unique transaction-ID index on
+`_gonvex_sync_transactions` for both stage admission and repeated-finalizer
+recognition. A late tracked row change raises SQLSTATE `55000` with an explicit
+sync-finalization error. Unrecovered errors roll back the invocation; savepoint
+recovery must preserve complete capture of the surviving work. Early constraint
+flushing can close the transaction to subsequent tracked DML, including after
+constraints return to DEFERRED. Unrelated named constraints remain available.
+The session setting may still exist, but it cannot suppress finalization.
+
+The singleton clock update, one-batch drain, event-ID ordinals, command attribution
+and notification stay in PostgreSQL's transaction. Actual SQL changes alter the
+bootstrap digests, so the installer must upgrade both infrastructure and table
+triggers atomically. No TypeScript, client storage or wire-format change is needed.
+This does not protect against a database owner deliberately rewriting internal
+provenance, functions, triggers or search paths.
+
+The guards add indexed PostgreSQL checks per staged event and per finalizer call.
+They add no network round trip but can increase bulk and serialized COMMIT work.
+Their cost requires measurement; correctness tests do not establish maintained
+throughput. These PostgreSQL behaviors are regression-tested boundaries, with no
+formal verification of PL/pgSQL, MVCC, WAL durability or notification delivery
+claimed. The independently observed clock-lock write bottleneck and held metrics
+PR are separate from these missing-feed correctness findings. No deployed
+occurrence or historical CPU-spike cause has been established.
