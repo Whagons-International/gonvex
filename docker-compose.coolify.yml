@@ -3,7 +3,7 @@
 # The runtime and dashboard are intentionally separate Dockerfile Applications.
 # Coolify can roll Applications health-first, but cannot roll Compose services.
 # Keeping only durable dependencies here also prevents an application release
-# from restarting Postgres or Valkey.
+# from restarting Postgres.
 services:
   gonvex-postgres:
     image: postgres:16-alpine
@@ -21,27 +21,5 @@ services:
       retries: 30
       start_period: 10s
 
-  gonvex-valkey:
-    image: valkey/valkey:8-alpine
-    restart: unless-stopped
-    command:
-      - valkey-server
-      - --maxmemory
-      - ${GONVEX_VALKEY_MAXMEMORY:-2gb}
-      - --maxmemory-policy
-      - allkeys-lfu
-      - --appendonly
-      - "yes"
-      - --appendfsync
-      - everysec
-    volumes:
-      - gonvex-valkey-data:/data
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-
 volumes:
   gonvex-postgres-data:
-  gonvex-valkey-data:

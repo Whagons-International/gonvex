@@ -4,7 +4,7 @@ name: gonvex-maker
 # supplies the SERVICE_* secrets on first import and attaches public domains
 # only to `gonvex-maker-runtime` and `gonvex-maker-dashboard`. Every service
 # name is stack-specific so Coolify's shared network cannot resolve a generic
-# alias to an unrelated application's container. Postgres, Valkey, MinIO, and
+# alias to an unrelated application's container. Postgres, MinIO, and
 # backups stay on the resource-private network and publish no host ports. The
 # runtime alone also joins Coolify's edge network under a portfolio-specific
 # alias so same-server product containers do not depend on public-IP hairpin
@@ -32,37 +32,6 @@ services:
           memory: 6G
         reservations:
           memory: 1G
-
-  gonvex-maker-valkey:
-    image: valkey/valkey:8-alpine@sha256:b027235326507cfdade9b6684056ec1d0b0c0757412e628245129b5d7b788618
-    restart: unless-stopped
-    command:
-      - valkey-server
-      - --maxmemory
-      - 2gb
-      - --maxmemory-policy
-      - allkeys-lfu
-      - --appendonly
-      - "yes"
-      - --appendfsync
-      - everysec
-      - --save
-      - "60"
-      - "1000"
-    volumes:
-      - gonvex-valkey-data:/data
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: 3G
-        reservations:
-          memory: 256M
 
   gonvex-maker-minio:
     image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
@@ -116,13 +85,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runtime
+      args:
+        GONVEX_DUCKDB: ${GONVEX_DUCKDB:-false}
     working_dir: /var/lib/gonvex
     user: "0:0"
     restart: unless-stopped
     depends_on:
       gonvex-maker-postgres:
-        condition: service_healthy
-      gonvex-maker-valkey:
         condition: service_healthy
       gonvex-maker-minio-init:
         condition: service_healthy
@@ -130,10 +99,8 @@ services:
       GONVEX_ADDR: 0.0.0.0:8080
       GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
       DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
-      VALKEY_URL: redis://gonvex-maker-valkey:6379/0
       GONVEX_DATA_DIR: /var/lib/gonvex/data
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
-      GONVEX_ROWS_CACHE_TTL: 10m
       # Keep one runtime well below PostgreSQL's default 100-client ceiling.
       # Tenant provisioning is single-flighted, and these explicit bounds keep
       # a future environment override from turning lock contention into an outage.
@@ -318,8 +285,6 @@ networks:
 volumes:
   gonvex-postgres-data:
     name: ${GONVEX_POSTGRES_VOLUME:-gonvex-maker-postgres-data}
-  gonvex-valkey-data:
-    name: ${GONVEX_VALKEY_VOLUME:-gonvex-maker-valkey-data}
   gonvex-minio-data:
     name: ${GONVEX_MINIO_VOLUME:-gonvex-maker-minio-data}
   gonvex-runtime-data:

@@ -74,6 +74,16 @@ jobs:
       - name: Check Rust formatting
         working-directory: rust
         run: cargo fmt --all -- --check
+      - name: Keep analysis dependencies out of default builds
+        working-directory: rust
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          tree = subprocess.check_output(["cargo", "tree", "--locked", "-p", "gonvex-runtime", "-p", "gonvex-sandbox-worker", "-e", "normal", "--prefix", "none"], text=True)
+          forbidden = {"duckdb", "libduckdb-sys", "calamine"}
+          found = {line.split()[0] for line in tree.splitlines() if line.split()} & forbidden
+          assert not found, f"Default build includes analysis dependencies: {found}"
+          PY
       - name: Test Rust runtime with PostgreSQL
         working-directory: rust
         run: cargo test --locked --workspace --all-targets -- --test-threads=1
@@ -85,6 +95,12 @@ jobs:
       - name: Lint Rust runtime
         working-directory: rust
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test optional DuckDB analysis
+        working-directory: rust
+        run: |
+          cargo test --locked -p gonvex-runtime --features duckdb --lib data_ingest::tests
+          cargo test --locked -p gonvex-sandbox-worker --features duckdb --all-targets
+          cargo clippy --locked -p gonvex-runtime -p gonvex-sandbox-worker --features gonvex-runtime/duckdb,gonvex-sandbox-worker/duckdb --all-targets -- -D warnings
 
   ci:
     name: CI

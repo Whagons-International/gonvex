@@ -115,6 +115,12 @@ impl SandboxManager {
 
     async fn create(&self, scope: Scope, payload: Value, duckdb: bool) -> Result<Value, String> {
         exact_fields(&payload, &["ttlMs"])?;
+        if duckdb && !cfg!(feature = "duckdb") {
+            return Err(
+                "DuckDB analysis is unavailable in this build; enable the duckdb Cargo feature"
+                    .to_owned(),
+            );
+        }
         let ttl_ms = payload
             .get("ttlMs")
             .and_then(Value::as_u64)
@@ -650,6 +656,29 @@ mod tests {
         assert!(safe_file(root, "/etc/passwd").is_err());
     }
 
+    #[cfg(not(feature = "duckdb"))]
+    #[tokio::test]
+    async fn unavailable_duckdb_does_not_create_a_workspace() {
+        let root =
+            std::env::temp_dir().join(format!("gonvex-disabled-analysis-{}", Uuid::new_v4()));
+        let manager = SandboxManager::new(SandboxConfig {
+            root: root.clone(),
+            ..SandboxConfig::default()
+        });
+        let scope = Scope {
+            project: "p".into(),
+            tenant: "t".into(),
+            account: "a".into(),
+        };
+        let error = manager
+            .create(scope, serde_json::json!({}), true)
+            .await
+            .unwrap_err();
+        assert!(error.contains("unavailable in this build"), "{error}");
+        assert!(manager.inner.workspaces.lock().await.is_empty());
+        assert!(!root.exists());
+    }
+
     #[tokio::test]
     async fn destroy_releases_a_completed_workspace_immediately() {
         let root =
@@ -664,7 +693,7 @@ mod tests {
             account: "account".to_owned(),
         };
         let created = manager
-            .create(scope.clone(), serde_json::json!({}), true)
+            .create(scope.clone(), serde_json::json!({}), false)
             .await
             .unwrap();
         let sandbox_id = created["sandboxId"].as_str().unwrap().to_owned();

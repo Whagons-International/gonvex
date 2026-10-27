@@ -47,7 +47,7 @@ runtime or plugin fallback.
 - **Agent API catalogs**: emit a deterministic, signed inventory of interactive functions and invoke them through the acting Member's normal authorization path.
 - **Background work**: commit Action outbox rows with business data and process external work after commit.
 - **Operational tooling**: inspect functions, data, files, errors, metrics, connections, and scheduler health in the dashboard.
-- **Self-hostable runtime**: run Gonvex with Postgres, Valkey/Redis, and optional S3-compatible object storage.
+- **Self-hostable runtime**: run Gonvex with Postgres and optional S3-compatible object storage.
 - **Open source core**: the runtime, CLI, client packages, dashboard, docs, and starter templates live in this repo.
 
 ## Gonvex v2 model
@@ -317,7 +317,6 @@ Gonvex is designed to be self-hosted. A full deployment has:
 ```txt
 Gonvex Rust runtime  Executes functions, serves HTTP/WebSocket traffic, routes projects and tenants
 Postgres            Stores app data and Gonvex control-plane data
-Valkey or Redis     Optional cache for dashboard data-explorer reads
 Object storage      Optional S3-compatible storage for apps that use file APIs
 Dashboard           Optional web UI for inspecting projects, tables, functions, logs, and metrics
 ```
@@ -337,15 +336,16 @@ This starts:
 Runtime:   http://localhost:8080
 Dashboard: http://localhost:3000
 Postgres:  localhost:5432
-Valkey:    localhost:6380
 S3 API:    http://localhost:9000
 MinIO UI:  http://localhost:9001
 ```
 
-For production self-hosting, put the runtime behind TLS, provide managed Postgres, configure backups and allowed origins, and add Valkey or S3-compatible storage only when you need dashboard row caching or file APIs. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
+For production self-hosting, put the runtime behind TLS, provide managed Postgres, configure backups and allowed origins, and add S3-compatible storage when you need file APIs. Production deployment automation is still early, so treat the Docker stack as the best current reference implementation rather than a finished operations guide.
 
-`VALKEY_URL` is optional. It accelerates dashboard data-explorer reads and has
-no role in reducer, change-feed, visibility, Live Query, or Local Replica correctness.
+The Rust runtime does not use Redis or Valkey. Older release notes and health
+response fields retain their historical names; the cache fields report disabled.
+DuckDB analysis is an explicit build option, excluded from default builds.
+See [runtime dependencies and backend choices](docs/runtime-dependencies.md).
 
 ## Before production
 
@@ -447,7 +447,7 @@ cd rust && cargo test --workspace --all-targets
 Useful development commands:
 
 ```bash
-make services      # start local Postgres and Valkey
+make services      # start local Postgres
 make runtime       # run the local runtime
 make dashboard     # run the dashboard app
 make packages      # watch/build npm packages

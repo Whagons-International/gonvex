@@ -3,6 +3,7 @@
 # transactions, the change feed, visibility, and the replica protocol. The
 # separately bounded V8 process owns TypeScript application execution only.
 FROM rust:1.94-bookworm AS rust-build
+ARG GONVEX_DUCKDB=false
 WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/crates ./crates
@@ -13,7 +14,12 @@ COPY packages/module-sdk/runtime-contract /src/packages/module-sdk/runtime-contr
 RUN --mount=type=cache,id=gonvex-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=gonvex-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=gonvex-runtime-rust-1.94,target=/src/rust/target,sharing=locked \
-    CARGO_INCREMENTAL=1 cargo build --locked --release \
+    case "$GONVEX_DUCKDB" in \
+      false) analytics_features="" ;; \
+      true) analytics_features="gonvex-runtime/duckdb,gonvex-sandbox-worker/duckdb" ;; \
+      *) echo "GONVEX_DUCKDB must be true or false" >&2; exit 1 ;; \
+    esac \
+    && CARGO_INCREMENTAL=1 cargo build --locked --release --features "$analytics_features" \
     -p gonvex-admin \
     -p gonvex-runtime \
     -p gonvex-module-host \

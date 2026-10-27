@@ -27,7 +27,7 @@ cd gonvex
 make stack
 ```
 
-The command runs `docker compose up --build --wait` for Postgres, Valkey, MinIO, the
+The command runs `docker compose up --build --wait` for Postgres, MinIO, the
 runtime, and dashboard, then creates the local object-storage bucket.
 
 | Service | Address | Container port |
@@ -35,7 +35,6 @@ runtime, and dashboard, then creates the local object-storage bucket.
 | Runtime | `http://localhost:8080` | `8080` |
 | Dashboard | `http://localhost:3000` | `80` |
 | Postgres | `localhost:5432` | `5432` |
-| Valkey | `localhost:6380` | `6379` |
 | MinIO API | `http://localhost:9000` | `9000` |
 | MinIO console | `http://localhost:9001` | `9001` |
 
@@ -54,7 +53,18 @@ docker compose down
 ```
 
 Do not add `-v` to `docker compose down` unless you intentionally want to delete the
-local Postgres, Valkey, MinIO, and runtime volumes.
+local Postgres, MinIO, and runtime volumes.
+
+## Optional analysis support
+
+The default runtime image excludes DuckDB and spreadsheet analysis dependencies.
+Plain TypeScript sandbox execution and workspace files remain available when the
+sandbox is enabled. To include DuckDB queries and CSV/spreadsheet analysis imports,
+set `GONVEX_DUCKDB=true` before building the Compose stack, or pass
+`--build-arg GONVEX_DUCKDB=true` to `docker build -f Dockerfile.runtime`.
+Build both the runtime and sandbox worker with matching analysis support. This
+build option does not replace sandbox enablement or application capability checks.
+Redis and Valkey are not required.
 
 ## Upgrade the runtime
 
@@ -92,17 +102,18 @@ prefers a valid full SHA from that value over the legacy manually maintained
 `GONVEX_RUNTIME_VERSION`, so `/healthz.version` identifies the actual webhook
 checkout and the production promotion gate cannot pass on stale version metadata.
 
-Postgres and the optional Valkey dashboard cache stay in the separate
+Postgres stays in the separate
 `docker-compose.coolify.yml` data-plane service. Runtime releases therefore do
-not restart either service.
+not restart the database.
 Source manifests live in Postgres and data files can rehydrate from object storage.
 An installation may persist `/var/lib/gonvex` for module artifacts, data files,
 and telemetry. Build caches and temporary runtime state live outside that tree.
 
 The runtime does not report healthy until every persisted project manifest has
 hydrated. Scheduled jobs and deterministic cron occurrences live in Postgres and
-use renewable row leases for crash recovery. Valkey is optional and only caches
-dashboard data-explorer rows; realtime correctness remains entirely Postgres-backed.
+use renewable row leases for crash recovery. The Rust runtime does not use Redis
+or Valkey. Realtime correctness is backed by the durable PostgreSQL change log;
+notifications wake listeners so they can read it.
 
 Production is a separate, manually approved promotion lane. Run **Promote Gonvex
 production** with the full SHA that is already healthy in development and a
@@ -115,8 +126,8 @@ and verifies the exact SHA reported by the development runtime. The protected
 is released.
 
 After approval, the workflow rolls the independent production runtime first and
-the dashboard second. Postgres and Valkey remain in the production data-plane
-service and are not restarted. Before deployment it preserves configured trusted
+the dashboard second. Postgres remains in the production data-plane
+service and is not restarted. Before deployment it preserves configured trusted
 proxy networks, adds `127.0.0.1/32` for the supervisor-to-worker hop, and disables
 push auto-deploy on both production Applications. This prevents the final
 `production` branch update from causing a duplicate Coolify rollout. Public health
@@ -275,9 +286,6 @@ Runtime
 Postgres
   Stores runtime control data and application data in the reference stack.
 
-Valkey
-  Optionally caches dashboard data-explorer rows.
-
 Dashboard
   Inspects and manages the development runtime.
 
@@ -294,8 +302,8 @@ responsibility.
 
 `docker-compose.production.yml` is the hardened Git-backed profile used by the
 Moneymaker installation. Unlike the reference development stack, it publishes no
-database, cache, or object-storage ports; pins third-party images by digest; enables
-durable Valkey persistence; requires dashboard/runtime authentication; persists the
+database or object-storage ports; pins third-party images by digest;
+requires dashboard/runtime authentication; persists the
 module-artifact, database, and object-storage state; and writes daily retained PostgreSQL
 dumps to a separate volume. Coolify attaches domains only to the
 `gonvex-maker-runtime` and `gonvex-maker-dashboard` services and generates the
@@ -348,7 +356,6 @@ a distributed edge/WAF limit as well.
 - Replace the Compose database, MinIO, and dashboard development credentials.
 - Use durable Postgres storage and test database restoration.
 - Persist `/var/lib/gonvex` for module artifacts and telemetry data.
-- Run Valkey/Redis with an appropriate durability and eviction policy for your load.
 - Back up every application database and object-storage bucket.
 - Restrict access to the dashboard and `/dev/*` management endpoints.
 - Preserve project authentication headers on proxied `/dev/*` requests.

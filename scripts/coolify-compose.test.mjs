@@ -23,12 +23,12 @@ function resolvedCompose() {
 
 test("Coolify Compose is a stable data plane only", () => {
   const compose = resolvedCompose();
-  assert.deepEqual(Object.keys(compose.services).sort(), ["gonvex-postgres", "gonvex-valkey"]);
+  assert.deepEqual(Object.keys(compose.services).sort(), ["gonvex-postgres"]);
   assert.equal(compose.services["gonvex-runtime"], undefined);
   assert.equal(compose.services["gonvex-dashboard"], undefined);
   assert.equal(compose.volumes["gonvex-runtime-data"], undefined);
   assert.ok(compose.volumes["gonvex-postgres-data"]);
-  assert.ok(compose.volumes["gonvex-valkey-data"]);
+  assert.equal(compose.volumes["gonvex-valkey-data"], undefined);
   for (const service of Object.values(compose.services)) {
     assert.equal(service.ports, undefined, "durable dependencies must not publish host ports");
   }

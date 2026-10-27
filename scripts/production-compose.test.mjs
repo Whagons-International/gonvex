@@ -14,11 +14,11 @@ const secretEnvironment = {
   SERVICE_REALBASE64_64_GONVEX_DASHBOARD_SESSION: "compose-contract-session",
 };
 
-function resolvedCompose() {
+function resolvedCompose(overrides = {}) {
   const result = spawnSync(
     "docker",
     ["compose", "-f", composePath, "config", "--format", "json"],
-    { cwd: root, env: secretEnvironment, encoding: "utf8" },
+    { cwd: root, env: { ...secretEnvironment, GONVEX_DUCKDB: "false", ...overrides }, encoding: "utf8" },
   );
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return JSON.parse(result.stdout);
@@ -33,7 +33,6 @@ test("production compose keeps stateful dependencies private and pinned", () => 
     "gonvex-maker-postgres",
     "gonvex-maker-postgres-backup",
     "gonvex-maker-runtime",
-    "gonvex-maker-valkey",
   ];
   assert.deepEqual(Object.keys(compose.services).sort(), expected);
 
@@ -43,7 +42,6 @@ test("production compose keeps stateful dependencies private and pinned", () => 
   for (const name of [
     "gonvex-maker-postgres",
     "gonvex-maker-postgres-backup",
-    "gonvex-maker-valkey",
     "gonvex-maker-minio",
     "gonvex-maker-minio-init",
   ]) {
@@ -69,6 +67,7 @@ test("production runtime and dashboard require protected durable configuration",
   const { services } = resolvedCompose();
   const runtime = services["gonvex-maker-runtime"];
   const dashboard = services["gonvex-maker-dashboard"];
+  assert.equal(runtime.build.args.GONVEX_DUCKDB, "false");
   assert.equal(runtime.environment.GONVEX_ENVIRONMENT, "production");
   assert.equal(runtime.environment.GONVEX_REQUIRE_AUTH, "true");
   assert.equal(runtime.working_dir, "/var/lib/gonvex");
@@ -82,7 +81,7 @@ test("production runtime and dashboard require protected durable configuration",
     runtime.environment.DATABASE_URL,
     "postgres://gonvex:compose-contract-postgres@gonvex-maker-postgres:5432/gonvex?sslmode=disable",
   );
-  assert.equal(runtime.environment.VALKEY_URL, "redis://gonvex-maker-valkey:6379/0");
+  assert.equal(runtime.environment.VALKEY_URL, undefined);
   assert.equal(runtime.environment.GONVEX_DB_MAX_TOTAL_CONNS, "20");
   assert.equal(runtime.environment.GONVEX_DB_MAX_OPEN_CONNS, "2");
   assert.equal(runtime.environment.GONVEX_DB_MAX_IDLE_CONNS, "1");
@@ -94,9 +93,14 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(dashboard.environment.GONVEX_RUNTIME_URL, "http://gonvex-maker-runtime:8080");
   assert.equal(dashboard.read_only, true);
   assert.equal(runtime.depends_on["gonvex-maker-postgres"].condition, "service_healthy");
-  assert.equal(runtime.depends_on["gonvex-maker-valkey"].condition, "service_healthy");
+  assert.equal(runtime.depends_on["gonvex-maker-valkey"], undefined);
   assert.equal(runtime.depends_on["gonvex-maker-minio-init"].condition, "service_healthy");
   assert.equal(services["gonvex-maker-runtime-permissions"], undefined);
+});
+
+test("production image can explicitly include DuckDB analysis", () => {
+  const { services } = resolvedCompose({ GONVEX_DUCKDB: "true" });
+  assert.equal(services["gonvex-maker-runtime"].build.args.GONVEX_DUCKDB, "true");
 });
 
 test("production public routes use the Gabriel server HTTP challenge resolver", () => {

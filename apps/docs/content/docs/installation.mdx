@@ -60,7 +60,7 @@ same TypeScript module workflow as the frontend.
 ## Runtime options
 
 ```txt
-Local runtime       Runtime and Postgres run locally; Valkey is optional.
+Local runtime       Runtime and Postgres run locally.
 Self-hosted runtime You operate the runtime, Control Plane, tenant databases,
                     and optional object storage.
 Hosted runtime      No generally available public Gonvex Cloud service yet.
@@ -78,7 +78,7 @@ VITE_GONVEX_WS_URL=ws://localhost:8080/ws
 ```
 
 The runtime needs Control Plane configuration and tenant database connections.
-Valkey is optional for dashboard row caching. Application code must not hardcode
+Redis and Valkey are not used by the Rust runtime. Application code must not hardcode
 tenant database URLs.
 
 ## Generated files

@@ -17,21 +17,6 @@ services:
       timeout: 5s
       retries: 20
 
-  valkey:
-    image: valkey/valkey:8-alpine
-    container_name: gonvex-valkey-dev
-    restart: unless-stopped
-    command: valkey-server --maxmemory 1gb --maxmemory-policy allkeys-lfu --appendonly no --save ""
-    ports:
-      - "6380:6379"
-    volumes:
-      - valkey-data:/data
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   minio:
     image: quay.io/minio/minio:latest
     container_name: gonvex-minio-dev
@@ -73,5 +58,4 @@ services:
 
 volumes:
   postgres-data:
-  valkey-data:
   minio-data:
