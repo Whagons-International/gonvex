@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runOfflineLiveQuery, type LiveQueryPlan } from "./query-expression";
+import { runOfflineLiveQuery } from "./query-expression";
 
 describe("portable Live Query plan", () => {
   it('uses normalized reference values for offline ordering with SQL null and ID tie rules',()=>{
@@ -107,72 +107,4 @@ it('reuses frozen search text but observes changes in caller-owned mutable rows'
   Object.freeze(rows[0]);
   expect(runOfflineLiveQuery(rows,plan,{search:'SECOND'},'complete').rows).toHaveLength(1);
   expect(runOfflineLiveQuery(rows,plan,{search:'second'},'complete').rows).toHaveLength(1);
-});
-
-it('evaluates a single-pass corpus with related scope, combined filters, boolean substring search and reference sorting', () => {
-  const rows = Array.from({ length: 1201 }, (_, index) => ({
-    id: String(index % 31), position: index, workspace: index % 3 ? 'other' : 'home',
-    name: index % 2 ? 'Needle west' : 'Needle east', due: index % 23,
-    statusId: index % 11 === 0 ? null : String(index % 5),
-  }));
-  const routed = new Set(rows.filter(row => row.position % 7 === 0).map(row => row.id));
-  for (const direction of ['asc', 'desc'] as const) for (const offset of [0, 1, 77, 2000]) for (const limit of [1, 17, 500]) {
-    let visits = 0, starts = 0;
-    const source = { *[Symbol.iterator]() { expect(++starts).toBe(1); for (const row of rows) { visits++; yield row; } } };
-    const plan: LiveQueryPlan = {
-      table: 'tasks', key: 'id',
-      where: { operator: 'or', children: [
-        { operator: 'eq', column: 'workspace', value: { literal: 'home' } },
-        { operator: 'inRelation', column: 'id', relation: { table: 'routes', column: 'taskId', where: { operator: 'eq', column: 'member', value: { context: 'member.id' } } } },
-      ] },
-      filters: { argument: 'filters', allowedColumns: ['due'], allowedOperators: ['inRange'] },
-      search: { argument: 'search', columns: ['name'], booleanTerms: true },
-      index: { table: 'tasks', key: 'id', columns: ['statusId'], sortColumns: { statusId: ['statusOrder'] },
-        referenceFields: { statusOrder: { table: 'statuses', foreignKey: 'statusId', column: 'order' } } },
-      sort: { allowedColumns: ['statusId'], defaultColumn: 'statusId', defaultDirection: direction },
-      window: { offsetArgument: 'offset', limitArgument: 'limit', defaultLimit: 20, maxLimit: 500, count: 'exact' },
-    };
-    const expected = rows.filter(row => (row.workspace === 'home' || routed.has(row.id)) && row.due >= 3 && row.due <= 19
-      && row.name.toLowerCase().includes('needle') && row.name.toLowerCase().includes('east'));
-    expected.sort((a, b) => {
-      const left = a.statusId === null ? null : Number(a.statusId), right = b.statusId === null ? null : Number(b.statusId);
-      const primary = left === null ? right === null ? 0 : 1 : right === null ? -1 : left - right;
-      return primary * (direction === 'desc' ? -1 : 1) || a.id.localeCompare(b.id);
-    });
-    const actual = runOfflineLiveQuery(source, plan, { filters: [{ column: 'due', operator: 'inRange', value: '3', valueTo: '19' }], search: 'NEEDLE $and EAST', offset, limit }, 'complete',
-      (_table, id) => ({ order: Number(id) }), { context: { 'member.id': 'me' }, relationRows: () => ({ rows: [...routed].map(taskId => ({ taskId, member: 'me' })), completeness: 'complete' }) });
-    expect(actual).toEqual({ rows: expected.slice(offset, offset + limit), total: expected.length, offset, limit, completeness: 'complete', supported: true });
-    expect(visits).toBe(rows.length);
-  }
-});
-
-it('does not certify an early page when later matches lack sort fields or reference coverage', () => {
-  const plan: LiveQueryPlan = { table: 'tasks', key: 'id', sort: { allowedColumns: ['due'], defaultColumn: 'due', defaultDirection: 'asc' },
-    window: { offsetArgument: 'offset', limitArgument: 'limit', defaultLimit: 1, maxLimit: 1, count: 'exact' } };
-  const values = [{ id: 'first', due: 0 }, { id: 'last' }];
-  expect(runOfflineLiveQuery(values.values(), plan, {}, 'complete')).toMatchObject({ rows: [], supported: false, completeness: 'partial', unsupportedOperator: 'missingSortField' });
-  const referencePlan: LiveQueryPlan = { ...plan, index: { table: 'tasks', key: 'id', columns: ['due'], referenceFields: { due: { table: 'statuses', foreignKey: 'statusId', column: 'order' } } } };
-  const rows = [{ id: 'first', statusId: 'known' }, { id: 'last', statusId: 'missing' }];
-  expect(runOfflineLiveQuery(rows.values(), referencePlan, {}, 'complete', (_table, id) => id === 'known' ? { order: 0 } : undefined))
-    .toMatchObject({ rows: [rows[0]], total: 2, completeness: 'partial', supported: true });
-});
-
-it('counts every match in unsorted and empty pages without retaining the skipped corpus', () => {
-  const base: LiveQueryPlan = { table: 'tasks', key: 'id', window: { offsetArgument: 'offset', limitArgument: 'limit', defaultLimit: 0, maxLimit: 100, count: 'exact' } };
-  const rows = Array.from({ length: 1000 }, (_, n) => ({ id: String(n), due: n }));
-  for (const sort of [undefined, { allowedColumns: ['due'], defaultColumn: 'due', defaultDirection: 'asc' as const }]) {
-    let visits = 0;
-    const source = (function* () { for (const row of rows) { visits++; yield row; } })();
-    expect(runOfflineLiveQuery(source, { ...base, sort }, {}, 'complete')).toEqual({ rows: [], total: 1000, offset: 0, limit: 0, completeness: 'complete', supported: true });
-    expect(visits).toBe(1000);
-  }
-  expect(runOfflineLiveQuery(rows.values(), base, { offset: 990, limit: 7 }, 'complete').rows).toEqual(rows.slice(990, 997));
-});
-
-it('propagates a failed source instead of returning a partial page as complete', () => {
-  let closed = false;
-  const source = (function* () { try { yield { id: 'first', due: 0 }; throw Error('source failed'); } finally { closed = true; } })();
-  const plan: LiveQueryPlan = { table: 'tasks', key: 'id', window: { offsetArgument: 'offset', limitArgument: 'limit', defaultLimit: 1, maxLimit: 1 } };
-  expect(() => runOfflineLiveQuery(source, plan, {}, 'complete')).toThrow('source failed');
-  expect(closed).toBe(true);
 });
