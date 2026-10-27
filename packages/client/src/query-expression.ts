@@ -1,6 +1,5 @@
 import type { JsonValue } from "@gonvex/protocol";
 import type { DataPredicate } from "@gonvex/module-sdk";
-import { LocalQueryBudgetError } from './local-query-budget.js';
 
 export type LiveQueryValue = { context?: "account.id" | "member.id" | "tenant.id"; argument?: string; literal?: JsonValue };
 export type FilterOperator = "contains" | "notContains" | "equals" | "notEquals" | "startsWith" | "endsWith" | "empty" | "notEmpty" | "oneOf" | "lessThan" | "lessThanOrEqual" | "greaterThan" | "greaterThanOrEqual" | "inRange";
@@ -45,12 +44,6 @@ export type OfflineLiveQueryResult<T> = {
   rows: T[];
   /** Count of matching cached rows before the requested window, when exact counting was requested. */
   total?: number;
-  /** Local-view group counts across all matching rows, before pagination. */
-  groups?: { key: string; count: number }[];
-  /** Data-relative ranks for a local view that requests sparse windows. */
-  positions?: number[];
-  /** Bounded local-view output without hydrating canonical entity bodies. */
-  projected?: { id: string; values: JsonValue[] }[];
   offset?: number;
   limit?: number;
   completeness: "complete" | "partial";
@@ -62,17 +55,12 @@ const relatedMemberships = new WeakMap<LiveQueryExpression, ReadonlySet<string>>
 
 export type RelatedQueryRead = {
   context?: Readonly<Record<string, JsonValue>>;
-  relationRows?: (table: string, where: LiveQueryExpression | undefined) => { rows: Iterable<Record<string, unknown>>; completeness: "complete" | "partial" };
+  relationRows?: (table: string, where: LiveQueryExpression | undefined) => { rows: readonly Record<string, unknown>[]; completeness: "complete" | "partial" };
 };
-
-/** Optional working-memory guard for disk iterators. It accounts for retained
- * relation keys and selected row/sort values, not the caller's source corpus
- * or the browser process. Exhaustion throws before returning any result. */
-export type LiveQueryBudget = { candidateBytes: number };
 
 /** Lower each related scope once, avoiding an N-by-M scan for every root row. */
 function resolveRelatedScope(expression: LiveQueryExpression | undefined, args: Record<string, JsonValue>, read: RelatedQueryRead,
-  state: { incomplete: boolean; unsupported?: string; reserve(bytes: number): void }): LiveQueryExpression | undefined {
+  state: { incomplete: boolean; unsupported?: string }): LiveQueryExpression | undefined {
   if (!expression) return undefined;
   const resolve = (value: LiveQueryValue | undefined): LiveQueryValue | undefined => {
     if (!value?.context) return value;
@@ -88,10 +76,7 @@ function resolveRelatedScope(expression: LiveQueryExpression | undefined, args: 
     if (related.completeness !== 'complete') state.incomplete = true;
     const keys = new Set<string>();
     for (const row of related.rows) {
-      if ((!where || evaluateLiveExpression(where, row, args)) && row[relation.column] != null) {
-        const key = String(row[relation.column]);
-        if (!keys.has(key)) { state.reserve(key.length * 2 + 128); keys.add(key); }
-      }
+      if ((!where || evaluateLiveExpression(where, row, args)) && row[relation.column] != null) keys.add(String(row[relation.column]));
     }
     // The internal membership set is not serialized or retained across evaluations.
     const lowered: LiveQueryExpression = { operator: 'in', column: expression.column };
@@ -104,96 +89,76 @@ function resolveRelatedScope(expression: LiveQueryExpression | undefined, args: 
 
 /** Execute the server-issued Live Query AST against the bounded cached corpus. */
 export function runOfflineLiveQuery<T extends Record<string, unknown>>(
-  rows: Iterable<T>,
+  rows: readonly T[],
   plan: LiveQueryPlan,
   args: Record<string, JsonValue>,
   completeness: "complete" | "partial",
   referenceRow?: (table:string,id:string)=>Record<string,unknown>|undefined,
   relatedRead: RelatedQueryRead = {},
-  budget?: LiveQueryBudget,
 ): OfflineLiveQueryResult<T> {
-  if (budget && (!Number.isSafeInteger(budget.candidateBytes) || budget.candidateBytes < 0)) throw Error('Invalid Live Query candidate budget');
-  let retainedBytes = 0;
-  const reserve = (bytes: number) => {
-    retainedBytes += bytes;
-    if (budget && retainedBytes > budget.candidateBytes) throw new LocalQueryBudgetError('candidateByteBudget', 'Live Query candidate byte budget');
-  };
-  const cost = (value: unknown) => budget ? JSON.stringify(value).length * 2 + 256 : 0;
-  const state: { incomplete: boolean; unsupported?: string; reserve(bytes: number): void } = { incomplete: false, reserve };
+  const state: { incomplete: boolean; unsupported?: string } = { incomplete: false };
   const where = resolveRelatedScope(plan.where, args, relatedRead, state);
   const unsupported = state.unsupported ?? (plan.serverOnly ? "serverOnly" : firstUnsupported(where));
   if (state.incomplete) completeness = 'partial';
   if (unsupported) return { rows: [], completeness, supported: false, unsupportedOperator: unsupported };
 
-  const filterResult = structuredFilterPredicate(plan.filters, args);
+  let result = where ? rows.filter((row) => evaluateLiveExpression(where, row, args)) : [...rows];
+  const filterResult = applyStructuredFilters(result, plan.filters, args);
   if (!filterResult.supported) return { rows: [], completeness, supported: false, unsupportedOperator: filterResult.reason };
-  const matchesFilters = filterResult.matches;
+  result = filterResult.rows;
   const search = plan.search ? String(args[plan.search.argument] ?? "").trim().toLocaleLowerCase() : "";
-  const separator = plan.search?.booleanTerms && search.includes('$and') ? '$and' : plan.search?.booleanTerms && search.includes('$or') ? '$or' : '';
-  const terms = (separator ? search.split(separator) : [search]).map(term => term.trim()).filter(Boolean);
-  const columns = plan.search?.offlineColumns ?? plan.search?.columns ?? [];
   if (search && plan.search) {
+    const separator = plan.search.booleanTerms && search.includes('$and') ? '$and' : plan.search.booleanTerms && search.includes('$or') ? '$or' : '';
+    const terms = (separator ? search.split(separator) : [search]).map(term=>term.trim()).filter(Boolean);
+    const columns = plan.search.offlineColumns ?? plan.search.columns;
+    result = result.filter(row => {
+      const matches = terms.map(term => columns.some(column => String(row[column] ?? '').toLowerCase().includes(term)));
+      return separator === '$or' ? matches.some(Boolean) : matches.every(Boolean);
+    });
     // A partial working set cannot prove matches in server-only search documents.
     if (plan.search.sources?.length) completeness = 'partial';
   }
-  let matched = 0;
-  function* candidates() {
-    for (const row of rows) {
-      if (where && !evaluateLiveExpression(where, row, args) || !matchesFilters(row)) continue;
-      if (search && plan.search) {
-        const matches = (term: string) => columns.some(column => String(row[column] ?? '').toLowerCase().includes(term));
-        if (!(separator === '$or' ? terms.some(matches) : terms.every(matches))) continue;
-      }
-      matched++;
-      yield row;
-    }
-  }
-  const offset = plan.window ? nonNegativeInteger(args[plan.window.offsetArgument], 0) : undefined;
-  const requestedLimit = plan.window ? nonNegativeInteger(args[plan.window.limitArgument], plan.window.defaultLimit) : undefined;
-  const limit = plan.window ? Math.min(requestedLimit || plan.window.defaultLimit, plan.window.maxLimit || requestedLimit || plan.window.defaultLimit) : undefined;
-  let result: T[];
+  const total = plan.window?.count === "exact" ? result.length : undefined;
   if (plan.sort) {
     const requestedColumn = plan.sort.columnArgument ? String(args[plan.sort.columnArgument] ?? "") : "";
     const column = plan.sort.allowedColumns.includes(requestedColumn) ? requestedColumn : plan.sort.defaultColumn;
     const requestedDirection = plan.sort.directionArgument ? String(args[plan.sort.directionArgument] ?? "").toLocaleLowerCase() : "";
     const direction = requestedDirection === "asc" || requestedDirection === "desc" ? requestedDirection : plan.sort.defaultDirection;
     const fields = plan.index?.sortColumns?.[column] ?? [column];
-    type Ordered = { row: T; values: unknown[] };
-    let missingSortField = false;
-    function* ordered(): Generator<Ordered> {
-      for (const row of candidates()) {
-        const values = fields.map(field => {
-          const reference = plan.index?.referenceFields?.[field];
-          if (!reference) { if (!Object.hasOwn(row, field)) missingSortField = true; return row[field]; }
-          const id = row[reference.foreignKey];
-          const related = id == null ? undefined : referenceRow?.(reference.table, String(id));
-          if (id != null && !related) completeness = 'partial';
-          return related?.[reference.column] ?? reference.fallback ?? null;
-        });
-        yield { row, values };
-      }
+    const resolved = fields.some(field => plan.index?.referenceFields?.[field]) ? new Map<T, unknown[]>() : undefined;
+    if (resolved) for (const row of result) {
+      resolved.set(row,fields.map(field=>{
+        const reference=plan.index?.referenceFields?.[field];
+        if(!reference)return row[field];
+        const id=row[reference.foreignKey];
+        const related=id == null ? undefined : referenceRow?.(reference.table,String(id));
+        if(id!=null && !related)completeness='partial';
+        return related?.[reference.column] ?? reference.fallback ?? null;
+      }));
     }
-    const comparator = (left: Ordered, right: Ordered) => {
+    if(fields.some(field=>!plan.index?.referenceFields?.[field] && result.some(row=>!Object.hasOwn(row,field))))return {rows:[],completeness:'partial',supported:false,unsupportedOperator:'missingSortField'};
+    const comparator = (left: T, right: T) => {
       for(let i=0;i<fields.length;i++){
-        const a=left.values[i],b=right.values[i];
+        const a=resolved ? resolved.get(left)![i] : left[fields[i]!],b=resolved ? resolved.get(right)![i] : right[fields[i]!];
         // PostgreSQL ASC puts NULL last; DESC puts it first.
         const order=a==null ? b==null ? 0 : 1 : b==null ? -1 : compare(a,b);
         if(order)return direction==='desc'?-order:order;
       }
-      return compare(left.row[plan.key],right.row[plan.key]);
+      return compare(left[plan.key],right[plan.key]);
     };
-    const selected = plan.window ? smallestRows(ordered(), offset! + limit!, comparator, cost, reserve) : [...(function* () {
-      for (const entry of ordered()) { reserve(cost(entry)); yield entry; }
-    })()].sort(comparator);
-    if (missingSortField) return { rows: [], completeness: 'partial', supported: false, unsupportedOperator: 'missingSortField' };
-    result = (plan.window ? selected.slice(offset, offset! + limit!) : selected).map(entry => entry.row);
-  } else {
-    result = [];
-    // Continue visiting every match for exact counts and coverage, even after
-    // the requested page is full. Only the requested rows remain retained.
-    for (const row of candidates()) if (!plan.window || matched > offset! && matched <= offset! + limit!) { reserve(cost(row)); result.push(row); }
+    const requestedLimit = plan.window && nonNegativeInteger(args[plan.window.limitArgument], plan.window.defaultLimit);
+    const take = plan.window ? nonNegativeInteger(args[plan.window.offsetArgument], 0)
+      + Math.min(requestedLimit || plan.window.defaultLimit, plan.window.maxLimit || requestedLimit || plan.window.defaultLimit) : result.length;
+    result = take < result.length ? smallestRows(result, take, comparator) : result.sort(comparator);
   }
-  const total = plan.window?.count === "exact" ? matched : undefined;
+  let offset: number | undefined;
+  let limit: number | undefined;
+  if (plan.window) {
+    offset = nonNegativeInteger(args[plan.window.offsetArgument], 0);
+    const requestedLimit = nonNegativeInteger(args[plan.window.limitArgument], plan.window.defaultLimit);
+    limit = Math.min(requestedLimit || plan.window.defaultLimit, plan.window.maxLimit || requestedLimit || plan.window.defaultLimit);
+    result = result.slice(offset, offset + limit);
+  }
   return {
     rows: result,
     ...(total === undefined ? {} : { total }),
@@ -205,25 +170,15 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
 }
 
 /** A bounded max heap, with input position preserving stable-sort ties. */
-export function smallestRows<T>(rows: Iterable<T>, count: number, compareRows: (a: T, b: T) => number,
-  cost: (row: T) => number, reserve: (bytes: number) => void): T[] {
-  const selection = smallestRowSelection(count, compareRows, cost, reserve);
-  for (const row of rows) selection.add(row);
-  return selection.finish();
-}
-
-/** The same bounded selection for synchronous and asynchronous row streams. */
-export function smallestRowSelection<T>(count: number, compareRows: (a: T, b: T) => number,
-  cost: (row: T) => number, reserve: (bytes: number) => void) {
-  type Entry = { row: T; position: number; cost: number };
+function smallestRows<T>(rows: readonly T[], count: number, compareRows: (a: T, b: T) => number): T[] {
+  if (!count) return [];
+  type Entry = { row: T; position: number };
   const compare = (a: Entry, b: Entry) => compareRows(a.row, b.row) || a.position - b.position;
   const heap: Entry[] = [];
-  let nextPosition = 0;
-  const add = (row: T) => {
-    const position = nextPosition++;
-    if (!count) return;
+  for (let position = 0; position < rows.length; position++) {
+    const row = rows[position]!;
     if (heap.length < count) {
-      const entry = { row, position, cost: cost(row) }; reserve(entry.cost);
+      const entry = { row, position };
       heap.push(entry);
       let i = heap.length - 1;
       while (i > 0) {
@@ -233,7 +188,7 @@ export function smallestRowSelection<T>(count: number, compareRows: (a: T, b: T)
       }
       heap[i] = entry;
     } else if ((compareRows(row,heap[0]!.row) || position - heap[0]!.position) < 0) {
-      const entry = { row, position, cost: cost(row) }; reserve(entry.cost - heap[0]!.cost);
+      const entry = { row, position };
       let i = 0;
       while (i * 2 + 1 < heap.length) {
         let child = i * 2 + 1;
@@ -243,8 +198,8 @@ export function smallestRowSelection<T>(count: number, compareRows: (a: T, b: T)
       }
       heap[i] = entry;
     }
-  };
-  return { add, finish: () => heap.sort(compare).map(entry => entry.row) };
+  }
+  return heap.sort(compare).map(entry => entry.row);
 }
 
 /** All tables that can affect evaluation, including reference sorts and coverage. */
@@ -277,26 +232,27 @@ export function liveQueryEquality(expression: LiveQueryExpression | undefined, a
   return value === null || ['string', 'number', 'boolean', 'undefined'].includes(typeof value) ? { column: expression.column, value } : undefined;
 }
 
-export function structuredFilterPredicate(
+function applyStructuredFilters<T extends Record<string, unknown>>(
+  rows: T[],
   definition: LiveQueryPlan["filters"],
   args: Record<string, JsonValue>,
-): { matches(row: Record<string, unknown>): boolean; supported: true } | { supported: false; reason: string } {
-  if (!definition) return { matches: () => true, supported: true };
+): { rows: T[]; supported: true } | { rows: T[]; supported: false; reason: string } {
+  if (!definition) return { rows, supported: true };
   const raw = args[definition.argument];
-  if (raw === undefined || raw === null) return { matches: () => true, supported: true };
-  if (!Array.isArray(raw)) return { supported: false, reason: "invalidFilter" };
+  if (raw === undefined || raw === null) return { rows, supported: true };
+  if (!Array.isArray(raw)) return { rows: [], supported: false, reason: "invalidFilter" };
   const allowedColumns = new Set(definition.allowedColumns);
   const allowedOperators = new Set(definition.allowedOperators);
   const filters: Array<{ column: string; operator: FilterOperator; value: string; valueTo?: string }> = [];
   for (const candidate of raw) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return { supported: false, reason: "invalidFilter" };
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return { rows: [], supported: false, reason: "invalidFilter" };
     const filter = candidate as Record<string, unknown>;
     if (typeof filter.column !== "string" || !allowedColumns.has(filter.column) || typeof filter.operator !== "string" || !allowedOperators.has(filter.operator as FilterOperator) || typeof filter.value !== "string" || (filter.valueTo !== undefined && typeof filter.valueTo !== "string")) {
-      return { supported: false, reason: "invalidFilter" };
+      return { rows: [], supported: false, reason: "invalidFilter" };
     }
     filters.push({ column: filter.column, operator: filter.operator as FilterOperator, value: filter.value, ...(filter.valueTo === undefined ? {} : { valueTo: filter.valueTo }) });
   }
-  return { matches: row => filters.every(filter => evaluateFilter(row[filter.column], filter)), supported: true };
+  return { rows: rows.filter((row) => filters.every((filter) => evaluateFilter(row[filter.column], filter))), supported: true };
 }
 
 function evaluateFilter(left: unknown, filter: { operator: FilterOperator; value: string; valueTo?: string }): boolean {
@@ -369,20 +325,18 @@ function firstUnsupported(expression?: LiveQueryExpression): string | undefined 
   return undefined;
 }
 
-export function nonNegativeInteger(value: JsonValue | undefined, fallback: number) {
+function nonNegativeInteger(value: JsonValue | undefined, fallback: number) {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : Number.NaN;
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-export function compareLiveQueryValues(left: unknown, right: unknown) {
+function compare(left: unknown, right: unknown) {
   if (left === right) return 0;
   if (left === null || left === undefined) return -1;
   if (right === null || right === undefined) return 1;
   if (typeof left === "number" && typeof right === "number") return left - right;
   return String(left).localeCompare(String(right));
 }
-
-const compare = compareLiveQueryValues;
 
 function equal(left: unknown, right: unknown) {
   return JSON.stringify(left) === JSON.stringify(right);
