@@ -442,7 +442,8 @@ it('retains the exact collection certificate after a normalized delete and verif
   const client = new GonvexClient('ws://runtime.test/ws', { errorReporting: false, localReplica: { storage } }); clients.push(client);
   const state = client as any; await state.replica.hydrate(); state.serverCapabilities = { replicaResume: 1 }; state.replicaScope = 'default';
   const subscription = { key: 'tasks', id: 'r', path: 'tasks.list', args: {}, entity: 'tasks',
-    columns: ['id', 'value'], retiredEpochs: new Set(), verificationGeneration: 1, forceFullIntegrity: false };
+    columns: ['id', 'value'], retiredEpochs: new Set(), verificationGeneration: 1, forceFullIntegrity: false, scope: state.replicaScope };
+  state.replicaSubscriptions.set(subscription.key, subscription);
   state.emitReplicaMessage = vi.fn();
   expect(state.replica.getWindow('tasks')).toMatchObject({ ids: ['b'], hashes });
   expect(state.replicaOpenRequest(subscription)).toEqual({ id: 'r', path: 'tasks.list', args: {},
