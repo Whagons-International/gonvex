@@ -824,14 +824,14 @@ pub(super) async fn execute_in_transaction(
             source,
             predicates.join(" AND ")
         );
-        let mut query = sqlx::query_scalar::<_, i64>(&statement);
-        for parameter in &base_parameters {
-            query = bind_scalar(query, parameter)?;
-        }
+        let parameters = Parameters::scalars(&base_parameters).map_err(LiveQueryError::Invalid)?;
+        let statement_key = parameters.statement(&statement);
+        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
         Some(
             query
                 .fetch_one(&mut **transaction.transaction())
                 .await?
+                .try_get::<i64, _>(0)?
                 .max(0) as u64,
         )
     } else {
@@ -1576,34 +1576,144 @@ fn require_name(value: &str, label: &str) -> Result<(), LiveQueryError> {
     }
 }
 
-fn bind_scalar<'query>(
-    query: sqlx::query::QueryScalar<'query, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
-    value: &Value,
-) -> Result<
-    sqlx::query::QueryScalar<'query, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
-    LiveQueryError,
-> {
-    Ok(match value {
-        Value::Null => query.bind(Option::<String>::None),
-        Value::Bool(value) => query.bind(*value),
-        Value::String(value) => query.bind(value.clone()),
-        Value::Number(value) if value.is_i64() => query.bind(value.as_i64().unwrap_or_default()),
-        Value::Number(value) if value.is_u64() => query.bind(
-            i64::try_from(value.as_u64().unwrap_or_default())
-                .map_err(|_| LiveQueryError::Invalid("integer exceeds bigint".to_owned()))?,
-        ),
-        Value::Number(value) => query.bind(
-            value
-                .as_f64()
-                .ok_or_else(|| LiveQueryError::Invalid("number is not finite".to_owned()))?,
-        ),
-        Value::Array(_) | Value::Object(_) => query.bind(sqlx::types::Json(value.clone())),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exact_count_parameter_type_changes_match_rows_on_one_connection() {
+        use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
+        use sqlx::{postgres::PgPoolOptions, Connection};
+
+        let Ok(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
+            eprintln!("PostgreSQL live count regression skipped: set GONVEX_TEST_POSTGRES_URL");
+            return;
+        };
+        let schema = format!("gonvex_live_count_{}", uuid::Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if database_url.contains('?') { '&' } else { '?' };
+        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
+        let pools = PoolRegistry::new(PoolLimits {
+            max_total_connections: 1,
+            max_connections_per_database: 1,
+            ..PoolLimits::default()
+        });
+        let control = ControlPlane::connect(&scoped_url, pools.clone(), BTreeMap::new())
+            .await
+            .unwrap();
+        let route = TenantRoute {
+            project_id: "project".to_owned(),
+            tenant_id: "tenant".to_owned(),
+            database_url: scoped_url,
+        };
+        // Keep this transaction open for setup and all three direct executions.
+        // It owns one physical connection and never uses SharedLiveQueryCache.
+        let mut transaction = control
+            .begin_tenant_transaction(&route, false)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TEMP TABLE live_count_items (id bigint PRIMARY KEY) ON COMMIT DROP;
+             INSERT INTO live_count_items VALUES (0), (1);
+             CREATE TEMP TABLE members (account_id text, status text) ON COMMIT DROP;
+             INSERT INTO members VALUES ('account', 'active');",
+        )
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+        let plan: LiveQueryPlan = serde_json::from_value(serde_json::json!({
+            "table": "live_count_items",
+            "key": "id",
+            "columns": ["id"],
+            "resultPath": ["items"],
+            "where": {"operator": "eq", "column": "id", "value": {"argument": "needle"}},
+            "window": {
+                "offsetArgument": "offset", "limitArgument": "limit",
+                "defaultLimit": 10, "maxLimit": 10, "count": "exact"
+            }
+        }))
+        .unwrap();
+        plan.validate().unwrap();
+        let visibility: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "table": "live_count_items", "key": "id", "where": {"operator": "public"}
+        }))
+        .unwrap();
+        visibility.validate().unwrap();
+        let resolved = ResolvedVisibility {
+            ephemeral_member: false,
+            revision: 1,
+            direct: BTreeMap::from([("account.id".to_owned(), "account".to_owned())]),
+            role: "member".to_owned(),
+            permissions: Value::Null,
+            sets: BTreeMap::new(),
+            fingerprint: "live-count-regression".to_owned(),
+        };
+        let float = Value::from(1.0_f64);
+        assert!(matches!(&float, Value::Number(number) if number.is_f64() && !number.is_i64()));
+        // Discard schema bootstrap statements, then prime through the real row
+        // and count path together. No separately prepared row query can mask it.
+        transaction
+            .transaction()
+            .clear_cached_statements()
+            .await
+            .unwrap();
+        let mut results = Vec::new();
+        for needle in [Value::from(0), float, Value::from(0)] {
+            let args = Map::from_iter([("needle".to_owned(), needle)]);
+            let result = execute_in_transaction(
+                &mut transaction,
+                &plan,
+                &visibility,
+                &resolved,
+                &args,
+                &BTreeMap::new(),
+            )
+            .await
+            .unwrap();
+            if results.is_empty() {
+                assert!(
+                    transaction.transaction().cached_statements_size() >= 2,
+                    "the row and count statements must both remain cached"
+                );
+            }
+            results.push(result);
+        }
+        transaction.rollback().await.unwrap();
+        pools.close().await;
+        sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        admin.close().await;
+
+        // Collect all results and clean up before assertions so the final INT8
+        // cache reuse still executes when the FLOAT8 count regresses.
+        for (index, expected_id) in [0, 1, 0].into_iter().enumerate() {
+            assert_eq!(
+                results[index]["items"],
+                serde_json::json!([{"id": expected_id}]),
+                "row query at execution {index}"
+            );
+        }
+        for (index, result) in results.iter().enumerate() {
+            assert_eq!(result["total"], 1, "exact count at execution {index}");
+            assert_eq!(
+                result["total"].as_u64().unwrap(),
+                result["items"].as_array().unwrap().len() as u64,
+                "rows and total disagree at execution {index}"
+            );
+            assert_eq!(result["offset"], 0);
+            assert_eq!(result["limit"], 10);
+        }
+    }
 
     fn compile_expression(
         expression: &LiveExpression,
