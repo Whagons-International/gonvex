@@ -1,5 +1,6 @@
 import type { ServerMessage } from "@gonvex/protocol";
 import { replicaAggregateDigest, replicaHashesDigest, replicaRowsHashes } from "./replica-integrity.js";
+import { isReplicaRevision } from "./revision-policy.js";
 
 export type SnapshotPage = Extract<ServerMessage, { type: "replica.snapshotPage" }>;
 type Snapshot = Extract<ServerMessage, { type: "replica.snapshot" }>;
@@ -24,7 +25,7 @@ export class SnapshotPageStager {
       || typeof page.last !== "boolean" || typeof page.snapshotId !== "string" || !page.snapshotId
       || typeof page.key !== "string" || !page.key || typeof page.scope !== "string" || !page.scope
       || typeof page.visibilityScope !== "string" || !page.visibilityScope
-      || !Number.isSafeInteger(page.cursor.revision) || page.cursor.revision < 0 || !page.cursor.epoch
+      || !isReplicaRevision(page.cursor.revision) || !page.cursor.epoch
       || !Array.isArray(result)
       || !sameMetadata(metadata, this.first)
       || (!page.last && (result.length === 0 || digest !== undefined))
