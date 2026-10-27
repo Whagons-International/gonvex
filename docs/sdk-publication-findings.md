@@ -53,3 +53,25 @@ so they do not acknowledge their individual revisions. SQLite rejects an old
 snapshot epoch as the reset checkpoint for a new-epoch window. The production
 live-query dispatcher currently omits a cursor, so this fixture does not establish
 that wire path's production reachability.
+
+## Exploratory publication cost
+
+Measured candidate `7d8a71d5` against control `e6ad8d33`, which includes PR222 hydration and staging `08fd3359`. Six serial jobs retained eight alternating pairs and 20 calls per sample for every adapter, size and operation. Each job used one CPU, a 512 MiB hard cap and zero swap. An initial all-in-one run hit its240-second cap and is excluded.
+
+The table shows 1,000-row fixtures. Before/after are medians of sample mean time per call. Paired ratios summarize each adjacent A/B pair separately. Timings varied enough that these summaries sometimes disagree. These measurements do not establish performance parity.
+
+| Adapter | Operation | Before ms | After ms | Ratio of medians | Median paired ratio |
+| --- | --- | ---: | ---: | ---: | ---: |
+| legacy-idb | accepted-transaction | 28.395 | 31.657 | 1.115 | 0.860 |
+| legacy-idb | stale-projection | 24.690 | 26.602 | 1.077 | 1.034 |
+| legacy-idb | watermark | 0.815 | 0.793 | 0.974 | 0.961 |
+| engine-idb | accepted-transaction | 26.579 | 24.012 | 0.903 | 0.903 |
+| engine-idb | stale-projection | 32.284 | 39.314 | 1.218 | 1.151 |
+| engine-idb | watermark | 1.103 | 1.002 | 0.908 | 0.956 |
+| node-sqlite | accepted-transaction | 0.303 | 0.313 | 1.032 | 1.092 |
+| node-sqlite | stale-projection | 0.309 | 0.330 | 1.069 | 1.107 |
+| node-sqlite | watermark | 0.127 | 0.132 | 1.043 | 1.056 |
+
+The Node fixture uses fake-indexeddb and in-memory SQLite with instrumented method calls. Setup and committed-value checks run outside each timer, but influence caches. Both builds share a process with no explicit warmup. Every call reaches its intended storage mutator. Source/dist/dependency hashes remain unchanged across all six completed reports. These are fixture API calls, not physical disk I/O or phone costs. SQLite stores row authority in its shared metadata table, so table counters alone cannot distinguish those keys.
+
+SQLite control publishes the old status during the stale-projection cell, while both IndexedDB controls publish the correct status in that mixed-field workload. Therefore that cell compares correction cost against an incorrect SQLite hot result, not equivalent behavior. Separate negative regressions cover unchanged rejected writes in IndexedDB. Some cells are slower; a controlled native-backend profile is needed before any general speed claim.
