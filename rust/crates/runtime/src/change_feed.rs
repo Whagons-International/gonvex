@@ -232,7 +232,7 @@ async fn prune_retained(
 ) -> Result<(), gonvex_postgres::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
     let _admission = pools.admit().await?;
-    let mut transaction = pool.begin().await?;
+    let mut transaction = pools.begin(&pool).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('_gonvex_sync_changes_prune'))")
         .execute(&mut *transaction)
         .await?;
@@ -316,10 +316,9 @@ pub async fn read_clock(
 ) -> Result<ReplicaClock, gonvex_postgres::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
     let _admission = pools.admit().await?;
-    let row = sqlx::query(
+    let row = gonvex_postgres::pool_query!(pools, &pool, sqlx::query(
         "SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = true",
-    )
-    .fetch_one(&pool)
+    ), fetch_one)
     .await?;
     let revision: i64 = row.get("revision");
     let retained: i64 = row.get("retained_revision");
@@ -338,7 +337,7 @@ pub async fn read_changes(
 ) -> Result<Vec<LogChange>, gonvex_postgres::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
     let _admission = pools.admit().await?;
-    let rows = sqlx::query(
+    let rows = gonvex_postgres::pool_query!(pools, &pool, sqlx::query(
         r#"SELECT changes.revision, changes.ordinal, COALESCE(changes.command_id, '') AS command_id,
                   table_name, row_id, operation,
                   COALESCE(changed_columns, ARRAY[]::text[]) AS changed_columns,
@@ -354,8 +353,7 @@ pub async fn read_changes(
            ORDER BY changes.revision, changes.ordinal"#,
     )
     .bind(after as i64)
-    .bind(through as i64)
-    .fetch_all(&pool)
+    .bind(through as i64), fetch_all)
     .await?;
     Ok(rows
         .into_iter()
