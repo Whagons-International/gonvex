@@ -56,6 +56,28 @@ The production runtime image installs all four binaries. The sandbox remains off
 until the operator enables `GONVEX_SANDBOX_ENABLED`; the module host remains
 selected through `GONVEX_MODULE_HOST_BINARY`.
 
+### Optional DuckDB analysis
+
+Default builds do not compile or link DuckDB or the spreadsheet reader. Ordinary
+TypeScript sandbox execution and workspace file operations remain available.
+DuckDB queries, row registration and CSV/spreadsheet analysis imports require an
+explicit feature on both the runtime and sandbox worker:
+
+```bash
+cargo build --locked -p gonvex-runtime -p gonvex-sandbox-worker \
+  --features gonvex-runtime/duckdb,gonvex-sandbox-worker/duckdb
+```
+
+For the reference Docker image, use `docker build -f Dockerfile.runtime
+--build-arg GONVEX_DUCKDB=true .`, or set `GONVEX_DUCKDB=true` when building the
+Compose stack. This is a build argument, not a runtime environment switch.
+Sandbox execution still requires its existing runtime enablement and capability
+checks. Builds without analysis support return an explicit unavailable error
+when an application requests a DuckDB sandbox.
+
+Both feature configurations run in CI. See [runtime dependencies and backend
+choices](../docs/runtime-dependencies.md).
+
 Run the identity upgrade with the shipped admin binary:
 
 ```bash

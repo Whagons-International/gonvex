@@ -16,20 +16,6 @@ services:
       timeout: 5s
       retries: 20
 
-  valkey:
-    image: valkey/valkey:8-alpine
-    restart: unless-stopped
-    command: valkey-server --maxmemory 1gb --maxmemory-policy allkeys-lfu --appendonly no --save ""
-    ports:
-      - "6380:6379"
-    volumes:
-      - valkey-data:/data
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   minio:
     image: quay.io/minio/minio:latest
     restart: unless-stopped
@@ -69,21 +55,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runtime
+      args:
+        GONVEX_DUCKDB: ${GONVEX_DUCKDB:-false}
     working_dir: /var/lib/gonvex
     user: "0:0"
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
-      valkey:
-        condition: service_healthy
     environment:
       GONVEX_ADDR: 0.0.0.0:8080
       GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable
-      VALKEY_URL: redis://valkey:6379/0
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
-      GONVEX_ROWS_CACHE_TTL: 10m
       S3_ENDPOINT: http://minio:9000
       S3_REGION: us-east-1
       S3_BUCKET: gonvex-dev
@@ -152,6 +136,5 @@ services:
 
 volumes:
   postgres-data:
-  valkey-data:
   minio-data:
   runtime-data:

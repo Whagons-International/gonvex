@@ -8,6 +8,7 @@ license.workspace = true
 [features]
 default = []
 test-firebase-auth-emulator = []
+duckdb = ["dep:duckdb", "dep:calamine"]
 
 [dependencies]
 axum.workspace = true
@@ -15,7 +16,7 @@ async-trait.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
 bigdecimal.workspace = true
-calamine.workspace = true
+calamine = { workspace = true, optional = true }
 chrono.workspace = true
 cron.workspace = true
 futures-util.workspace = true
@@ -42,7 +43,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 url.workspace = true
-duckdb.workspace = true
+duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
 
 [dev-dependencies]

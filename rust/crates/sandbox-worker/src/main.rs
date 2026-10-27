@@ -1,12 +1,16 @@
+#[cfg(feature = "duckdb")]
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+#[cfg(feature = "duckdb")]
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use deno_ast::{EmitOptions, MediaType, ParseParams, TranspileModuleOptions, TranspileOptions};
+#[cfg(feature = "duckdb")]
 use duckdb::types::{Value, ValueRef};
+#[cfg(feature = "duckdb")]
 use duckdb::{params_from_iter, Config};
 use gonvex_module_runtime::{
     BoxFuture, Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse,
@@ -31,7 +35,9 @@ struct Request {
     max_file_bytes: u64,
     max_workspace_bytes: u64,
     max_output_bytes: usize,
+    #[cfg_attr(not(feature = "duckdb"), allow(dead_code))]
     max_rows: usize,
+    #[cfg_attr(not(feature = "duckdb"), allow(dead_code))]
     duckdb_memory_bytes: u64,
     timeout_ms: u64,
     worker_uid: u32,
@@ -39,6 +45,7 @@ struct Request {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(not(feature = "duckdb"), allow(dead_code))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Import {
     alias: String,
@@ -66,7 +73,9 @@ struct WorkerHost {
     files: PathBuf,
     max_file_bytes: u64,
     max_workspace_bytes: u64,
+    #[cfg(feature = "duckdb")]
     max_rows: usize,
+    #[cfg(feature = "duckdb")]
     duckdb: Option<Mutex<duckdb::Connection>>,
 }
 
@@ -106,6 +115,13 @@ async fn run() -> Result<(JsonValue, Vec<LogLine>), String> {
     }
     if request.timeout_ms == 0 {
         return Err("worker timeout is required".to_owned());
+    }
+
+    if !cfg!(feature = "duckdb") && (request.duckdb || !request.imports.is_empty()) {
+        return Err(
+            "DuckDB analysis is unavailable in this build; enable the duckdb Cargo feature"
+                .to_owned(),
+        );
     }
 
     isolate_filesystem(
@@ -248,6 +264,7 @@ export async function run(ctx: any): Promise<any> {{
 
 impl WorkerHost {
     fn new(request: &Request, root: &Path) -> Result<Self, String> {
+        #[cfg(feature = "duckdb")]
         let duckdb = if request.duckdb {
             let memory = format!("{}B", request.duckdb_memory_bytes);
             let config = Config::default()
@@ -285,7 +302,9 @@ impl WorkerHost {
             files: root.join("files"),
             max_file_bytes: request.max_file_bytes,
             max_workspace_bytes: request.max_workspace_bytes,
+            #[cfg(feature = "duckdb")]
             max_rows: request.max_rows,
+            #[cfg(feature = "duckdb")]
             duckdb,
         })
     }
@@ -300,6 +319,7 @@ impl WorkerHost {
                 required_string(&payload, "content")?,
             ),
             "worker.listFiles" => self.list_files(),
+            #[cfg(feature = "duckdb")]
             "worker.query" => self.query(
                 required_string(&payload, "statement")?,
                 payload
@@ -308,6 +328,7 @@ impl WorkerHost {
                     .cloned()
                     .unwrap_or_default(),
             ),
+            #[cfg(feature = "duckdb")]
             "worker.register" => self.register(
                 required_string(&payload, "name")?,
                 payload
@@ -360,6 +381,7 @@ impl WorkerHost {
         Ok(json!(files))
     }
 
+    #[cfg(feature = "duckdb")]
     fn query(&self, statement: &str, parameters: Vec<JsonValue>) -> Result<JsonValue, String> {
         let connection = self
             .duckdb
@@ -402,6 +424,7 @@ impl WorkerHost {
         )
     }
 
+    #[cfg(feature = "duckdb")]
     fn register(&self, name: &str, rows: Vec<JsonValue>) -> Result<JsonValue, String> {
         let name = identifier(name)?;
         if rows.len() > 100_000 {
@@ -503,6 +526,7 @@ fn required_string<'a>(value: &'a JsonValue, key: &str) -> Result<&'a str, Strin
         .ok_or_else(|| format!("{key} must be a non-empty string"))
 }
 
+#[cfg(feature = "duckdb")]
 fn identifier(value: &str) -> Result<String, String> {
     let valid = value.len() <= 63
         && value.chars().enumerate().all(|(index, character)| {
@@ -571,6 +595,7 @@ fn list_relative(root: &Path, current: &Path, output: &mut Vec<String>) -> Resul
     Ok(())
 }
 
+#[cfg(feature = "duckdb")]
 fn json_to_duck(value: &JsonValue) -> Result<Value, String> {
     Ok(match value {
         JsonValue::Null => Value::Null,
@@ -588,6 +613,7 @@ fn json_to_duck(value: &JsonValue) -> Result<Value, String> {
     })
 }
 
+#[cfg(feature = "duckdb")]
 fn duck_to_json(value: ValueRef<'_>) -> JsonValue {
     match value {
         ValueRef::Null => JsonValue::Null,
@@ -612,6 +638,7 @@ fn duck_to_json(value: ValueRef<'_>) -> JsonValue {
     }
 }
 
+#[cfg(feature = "duckdb")]
 fn infer_type(rows: &[&Map<String, JsonValue>], column: &str) -> &'static str {
     let mut kind = "NULL";
     for value in rows
@@ -639,6 +666,7 @@ fn infer_type(rows: &[&Map<String, JsonValue>], column: &str) -> &'static str {
     }
 }
 
+#[cfg(feature = "duckdb")]
 fn register_value(value: Option<&JsonValue>, kind: &str) -> Result<Value, String> {
     let Some(value) = value else {
         return Ok(Value::Null);
@@ -858,10 +886,14 @@ mod tests {
     fn paths_and_identifiers_fail_closed() {
         assert!(file_path(Path::new("files"), "../secret").is_err());
         assert!(file_path(Path::new("files"), "/etc/passwd").is_err());
-        assert!(identifier("safe_table_1").is_ok());
-        assert!(identifier("tasks; attach '/tmp/x'").is_err());
+        #[cfg(feature = "duckdb")]
+        {
+            assert!(identifier("safe_table_1").is_ok());
+            assert!(identifier("tasks; attach '/tmp/x'").is_err());
+        }
     }
 
+    #[cfg(feature = "duckdb")]
     #[test]
     fn tenant_rows_get_stable_duckdb_types() {
         let first = Map::from_iter([
@@ -877,6 +909,7 @@ mod tests {
         assert_eq!(infer_type(&rows, "name"), "VARCHAR");
     }
 
+    #[cfg(feature = "duckdb")]
     #[test]
     fn optional_duckdb_registers_and_analyzes_tenant_rows() {
         let nonce = SystemTime::now()
@@ -919,6 +952,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(feature = "duckdb")]
     #[test]
     fn approved_spreadsheet_artifact_is_attached_read_only() {
         let nonce = SystemTime::now()

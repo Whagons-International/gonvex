@@ -1232,10 +1232,7 @@ async function watchProject(root: string, settings: Settings, once: boolean, sig
       } catch (error) {
         lastSyncSucceeded = false;
         const detail = error instanceof Error ? error.message : String(error);
-        const valkeyHint = isLocalRuntimeURL(settings.runtimeURL)
-          ? " Local runtimes require a reachable VALKEY_URL, for example VALKEY_URL=redis://127.0.0.1:6380/0."
-          : "";
-        console.error(`[gonvex] runtime sync failed: ${detail}.${valkeyHint}`);
+        console.error(`[gonvex] runtime sync failed: ${detail}`);
       }
     } else if (shouldVerifyRuntimeState) {
       const manifest = lastManifest;
@@ -2006,7 +2003,6 @@ async function writeProjectEnv(root: string, runtimeURL: string, projectID: stri
     VITE_GONVEX_PROJECT_ID: projectID,
     VITE_GONVEX_URL: runtimeURL,
     VITE_GONVEX_WS_URL: webSocketURL(runtimeURL),
-    ...(isLocalRuntimeURL(runtimeURL) ? { VALKEY_URL: "redis://127.0.0.1:6380/0" } : {}),
   }, overwrite);
 }
 
@@ -2394,17 +2390,7 @@ async function writeEnvLocal(root: string, project: string, runtime: string) {
   const envPath = join(root, ".env.local");
   if (existsSync(envPath)) return;
   const wsURL = runtime.replace(/^http:/, "ws:").replace(/^https:/, "wss:").replace(/\/$/, "") + "/ws";
-  const valkey = isLocalRuntimeURL(runtime) ? "VALKEY_URL=redis://127.0.0.1:6380/0\n" : "";
-  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\n${valkey}VITE_GONVEX_PROJECT_ID=${project}\nVITE_GONVEX_URL=${runtime}\nVITE_GONVEX_WS_URL=${wsURL}\n`);
-}
-
-function isLocalRuntimeURL(runtime: string) {
-  try {
-    const hostname = new URL(runtime).hostname;
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  } catch {
-    return false;
-  }
+  await writeFile(envPath, `GONVEX_PROJECT_ID=${project}\nGONVEX_RUNTIME_URL=${runtime}\nGONVEX_PROJECT_KEY=\nVITE_GONVEX_PROJECT_ID=${project}\nVITE_GONVEX_URL=${runtime}\nVITE_GONVEX_WS_URL=${wsURL}\n`);
 }
 
 function templateDir(template: string) {

@@ -4,11 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+duckdb = ["dep:duckdb"]
+
 [dependencies]
 gonvex-module-runtime = { path = "../module-runtime" }
 gonvex-module-runtime-v8 = { path = "../module-runtime-v8" }
 deno_ast.workspace = true
-duckdb.workspace = true
+duckdb = { workspace = true, optional = true }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
