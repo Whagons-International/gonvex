@@ -740,8 +740,8 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
       // A collection cursor proves its epoch, not a global feed floor. When
       // no snapshot floor is supplied, checkpoint only that epoch at zero.
       // The monotone upsert below preserves an existing same-epoch floor.
-      const checkpoint = snapshot.cursor ?? (window.cursor
-        ? { epoch: window.cursor.epoch, revision: 0 } : undefined);
+      const checkpoint = window.cursor && snapshot.cursor?.epoch !== window.cursor.epoch
+        ? { epoch: window.cursor.epoch, revision: 0 } : snapshot.cursor;
       await this.resetForEpoch(scope, checkpoint);
       const oldRecord = await this.database.getFirstAsync<QueryRecord>(
         `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?`,

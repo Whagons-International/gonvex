@@ -45,3 +45,11 @@ these storage and publication paths are covered by tests and source review.
 The work stays behind `LocalReplicaStorage`, so another storage backend can run
 the same contracts. Native snapshot ACKs, metadata-only watermarks, optimistic
 command settlement and independent-writer epoch races remain separate work.
+
+Review also reproduced a supported-input epoch edge in all three adapters: a
+cursor-bearing live window could switch datasets while retaining the old global
+checkpoint. Consecutive live windows now start the new epoch at revision zero,
+so they do not acknowledge their individual revisions. SQLite rejects an old
+snapshot epoch as the reset checkpoint for a new-epoch window. The production
+live-query dispatcher currently omits a cursor, so this fixture does not establish
+that wire path's production reachability.

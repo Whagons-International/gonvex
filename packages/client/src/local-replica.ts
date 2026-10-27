@@ -1335,7 +1335,10 @@ export class LocalReplica implements LocalReplicaView {
     // snapshot can discard an older, still-unapplied transaction for another
     // collection. The only revision proven by snapshots alone is the minimum
     // cursor shared by every materialized Replica window in the epoch.
-    const nextCursor = replicaTransactionFloor(this.cursorValue, nextQueries);
+    // A live window proves the new epoch, but no connection-wide revision.
+    const floorStart = epochChanged && input.cursor
+      ? { epoch: input.cursor.epoch, revision: 0 } : this.cursorValue;
+    const nextCursor = replicaTransactionFloor(floorStart, nextQueries);
     const snapshot = storageSnapshotFrom(nextCursor, nextEntities, nextQueries);
     const membershipChanged = !sameWindowRowDefinition(previous, window);
     const rowsChanged = membershipChanged || changedRowIDs.size > 0;
@@ -1360,7 +1363,7 @@ export class LocalReplica implements LocalReplicaView {
     // last reconciled sequence. Our next maps already contain that exact write.
     // A peer write in between breaks the proof and retains normal catch-up.
     const adjacentCommit = await this.acceptStorageCommit(metadataCommit, writeScope, nextEntities, nextQueries, effects);
-    const correctedFloor = replicaTransactionFloor(this.cursorValue, nextQueries);
+    const correctedFloor = replicaTransactionFloor(floorStart, nextQueries);
     // Correct a rejected own window before catch-up. A peer's newer window
     // is not evidence that this socket processed a newer feed revision.
     const committedCursor = correctedFloor && nextCursor?.epoch === correctedFloor.epoch

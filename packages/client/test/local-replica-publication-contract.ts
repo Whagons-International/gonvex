@@ -241,6 +241,27 @@ export function publicationContract(name: string, create: PublicationFactory) {
     expect(replica.getWindow('tasks')!.ids).toEqual(committedWindow.ids);
   });
 
+  it('replaces an old epoch with consecutive cursor-bearing live windows without acknowledging their revisions', async () => {
+    const { replica, storage, cold } = await fixture();
+    await replica.replaceWindow(input('old', 7, [latest]));
+    const next = (revision: number) => ({ epoch: 'next-publication-epoch', revision });
+    await replica.replaceWindow({ ...input('live-one', 50, [{ _id: 'b', status: 'new epoch' }]), kind: 'live', cursor: next(50) });
+    expect(replica.cursor()).toEqual(next(0));
+    expect(replica.entity('tasks', 'a')).toBeUndefined();
+    expect(await storage.loadEntityRows(scope, 'tasks', ['a'])).toEqual([]);
+    expect(await storage.loadWindowRows(scope, 'old')).toBeUndefined();
+    await replica.replaceWindow({ ...input('live-two', 60, [{ _id: 'c', status: 'second' }]), kind: 'live', cursor: next(60) });
+    expect(replica.cursor()).toEqual(next(0));
+    expect(replica.entity('tasks', 'b')).toEqual({ _id: 'b', status: 'new epoch' });
+    await replica.applyTransaction({ cursor: next(1), changes: [{ entity: 'tasks', id: 'b', operation: 'update', newValue: { _id: 'b', applied: true } }] }, scope);
+    expect(replica.cursor()).toEqual(next(1));
+    const restored = await cold();
+    expect(restored.entity('tasks', 'a')).toBeUndefined();
+    expect(restored.entity('tasks', 'b')).toEqual({ _id: 'b', status: 'new epoch', applied: true });
+    expect(restored.getWindow('live-one')).toBeDefined();
+    expect(restored.getWindow('live-two')).toBeDefined();
+  });
+
   it.each(['snapshot', 'delta', 'transaction'] as const)(
     'corrects an unchanged rejected row after the checkpoint for a stale %s', async (method) => {
       const { replica, storage, cold } = await fixture();
