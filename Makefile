@@ -25,10 +25,10 @@ dev:
 		done'
 
 services:
-	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres valkey
+	docker compose -f infra/docker-compose.dev.yml up -d --wait postgres
 
 stack:
-	docker compose up -d --build --wait postgres valkey minio runtime dashboard
+	docker compose up -d --build --wait postgres minio runtime dashboard
 	docker compose run --rm minio-init
 
 stack-storage: stack

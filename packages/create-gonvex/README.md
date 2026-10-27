@@ -15,10 +15,8 @@ npm run dev
 ```
 
 The generated app expects a running Gonvex runtime. `npm run dev` watches and
-syncs the backend and starts Vite; it does not start Postgres, Valkey, or the
-Rust runtime. New local projects receive
-`VALKEY_URL=redis://127.0.0.1:6380/0`; Gonvex requires that service to be
-reachable when the runtime starts.
+syncs the backend and starts Vite; it does not start PostgreSQL or the Rust
+runtime. Start those separately. The Rust runtime does not require Redis or Valkey.
 
 With pnpm:
 

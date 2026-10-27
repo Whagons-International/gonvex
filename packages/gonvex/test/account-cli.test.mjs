@@ -123,6 +123,7 @@ test("password login can mint an account token that provisions and configures a 
   await main(["project", "list", "--runtime-url", runtimeURL]);
   await main(["project", "create", "cli-app", "--runtime-url", runtimeURL, "--project-root", root]);
   const env = await readFile(join(root, ".env.local"), "utf8");
+  assert.doesNotMatch(env, /^(VALKEY_URL|REDIS_URL)=/m);
   assert.match(env, /^UNRELATED=value$/m);
   assert.match(env, /^GONVEX_PROJECT_ID=project-v6-id$/m);
   assert.match(env, new RegExp(`^GONVEX_RUNTIME_URL=${runtimeURL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));

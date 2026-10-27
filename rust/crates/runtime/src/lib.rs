@@ -3,6 +3,10 @@ pub mod change_feed;
 pub mod config;
 pub mod control;
 mod dashboard;
+#[cfg(feature = "duckdb")]
+mod data_ingest;
+#[cfg(not(feature = "duckdb"))]
+#[path = "data_ingest_disabled.rs"]
 mod data_ingest;
 pub mod error_class;
 pub mod execution;
