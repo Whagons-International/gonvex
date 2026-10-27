@@ -27,7 +27,7 @@ export function publicationContract(name: string, create: PublicationFactory) {
  describe(`${name}: public publication contract`, () => {
   const disposals: Array<() => void> = [];
   afterEach(() => { for (const dispose of disposals.splice(0).reverse()) dispose(); });
-  async function fixture() {
+  async function fixture(anchor = true) {
     const owner = create();
     disposals.push(() => owner.close());
     const storage = owner.storage;
@@ -35,7 +35,7 @@ export function publicationContract(name: string, create: PublicationFactory) {
     disposals.push(() => replica.dispose());
     await replica.activateScope(scope);
     // Anchor FIRST. A low window cannot rewind an already advanced floor.
-    await replica.replaceWindow({ ...input('anchor', 1, []), entity: 'anchors' });
+    if (anchor) await replica.replaceWindow({ ...input('anchor', 1, []), entity: 'anchors' });
     async function cold() {
       // New adapter and replica, same database namespace. No crash simulation.
       const restored = new LocalReplica(owner.fresh());
@@ -241,9 +241,10 @@ export function publicationContract(name: string, create: PublicationFactory) {
     expect(replica.getWindow('tasks')!.ids).toEqual(committedWindow.ids);
   });
 
-  it('replaces an old epoch with consecutive cursor-bearing live windows without acknowledging their revisions', async () => {
-    const { replica, storage, cold } = await fixture();
-    await replica.replaceWindow(input('old', 7, [latest]));
+  it.each([true, false])('replaces an old epoch with consecutive cursor-bearing live windows without acknowledging their revisions, anchored=%s', async anchored => {
+    const { replica, storage, cold } = await fixture(anchored);
+    await replica.replaceWindow({ ...input('old', 7, [latest]), kind: anchored ? 'replica' : 'live' });
+    expect(replica.cursor()).toEqual(cursor(anchored ? 1 : 0));
     const next = (revision: number) => ({ epoch: 'next-publication-epoch', revision });
     await replica.replaceWindow({ ...input('live-one', 50, [{ _id: 'b', status: 'new epoch' }]), kind: 'live', cursor: next(50) });
     expect(replica.cursor()).toEqual(next(0));

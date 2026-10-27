@@ -1336,7 +1336,7 @@ export class LocalReplica implements LocalReplicaView {
     // collection. The only revision proven by snapshots alone is the minimum
     // cursor shared by every materialized Replica window in the epoch.
     // A live window proves the new epoch, but no connection-wide revision.
-    const floorStart = epochChanged && input.cursor
+    const floorStart = input.cursor && (!this.cursorValue || epochChanged)
       ? { epoch: input.cursor.epoch, revision: 0 } : this.cursorValue;
     const nextCursor = replicaTransactionFloor(floorStart, nextQueries);
     const snapshot = storageSnapshotFrom(nextCursor, nextEntities, nextQueries);
