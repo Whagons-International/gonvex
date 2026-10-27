@@ -900,6 +900,13 @@ async fn install_table_trigger(
         r#"CREATE OR REPLACE FUNCTION {stage_function}() RETURNS trigger AS $$
 DECLARE old_data jsonb; new_data jsonb; changed_columns text[]; row_key text;
 BEGIN
+  IF EXISTS (
+    SELECT 1 FROM _gonvex_sync_transactions WHERE transaction_id=txid_current()::bigint
+  ) THEN
+    RAISE EXCEPTION USING ERRCODE='55000',
+      MESSAGE='tracked writes are not allowed after sync finalization',
+      HINT='Keep sync constraints deferred until all tracked writes finish, or roll back to a savepoint before finalization.';
+  END IF;
   IF TG_OP='INSERT' THEN
     old_data:=NULL; new_data:={new_projection};
     row_key:=NEW.{key_ident}::text; changed_columns:=ARRAY(SELECT jsonb_object_keys(new_data));
@@ -1079,13 +1086,15 @@ ALTER TABLE _gonvex_action_outbox ADD COLUMN IF NOT EXISTS provenance jsonb NOT 
 CREATE INDEX IF NOT EXISTS _gonvex_action_outbox_pending ON _gonvex_action_outbox(available_at,created_at)
   WHERE status='pending';
 CREATE OR REPLACE FUNCTION gonvex_sync_finalize_transaction() RETURNS trigger AS $$
-DECLARE revision_text text; next_revision bigint; current_epoch text; changed_tables text[]; notify_payload jsonb;
+DECLARE next_revision bigint; current_epoch text; changed_tables text[]; notify_payload jsonb;
 BEGIN
-  revision_text:=current_setting('gonvex.sync_revision',true);
-  IF revision_text IS NULL OR revision_text='' THEN
+  IF EXISTS (
+    SELECT 1 FROM _gonvex_sync_transactions WHERE transaction_id=txid_current()::bigint
+  ) THEN
+    RETURN NULL;
+  END IF;
     UPDATE _gonvex_sync_clock SET revision=revision+1 WHERE singleton=true
       RETURNING revision,epoch INTO next_revision,current_epoch;
-    PERFORM set_config('gonvex.sync_revision',next_revision::text,true);
     WITH ranked AS (
       SELECT event_id,row_number() OVER(ORDER BY event_id)::integer row_ordinal
       FROM _gonvex_sync_changes WHERE transaction_id=txid_current()::bigint AND revision IS NULL
@@ -1113,7 +1122,6 @@ BEGIN
       notify_payload:=jsonb_build_object('epoch',current_epoch,'revision',next_revision);
     END IF;
     PERFORM pg_notify('gonvex_change_feed',notify_payload::text);
-  END IF;
   RETURN NULL;
 END; $$ LANGUAGE plpgsql;
 "#;
@@ -1442,3 +1450,7 @@ mod sync_bootstrap_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "provision_upgrade_tests.rs"]
+mod sync_bootstrap_upgrade_tests;
