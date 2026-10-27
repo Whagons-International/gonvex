@@ -76,8 +76,10 @@ it('issues metadata receipts only for exact, non-resetting, committed windows', 
     expect(await storage.applyWindowDelta(advanced, { upserts: [], deleted: [] }, { ...snapshot, cursor: advanced.cursor }, scope))
       .toEqual({ scope, previousSequence: 1, sequence: 2 });
     const changed = { ...window, cursor: { epoch: 'first', revision: 3 } };
-    expect(await storage.applyWindowDelta(changed, { upserts: [{ id: 'one', title: 'Changed' }], deleted: [] }, { ...snapshot, cursor: changed.cursor }, scope)).toBeUndefined();
-    expect(await storage.applyWindowDelta(advanced, { upserts: [], deleted: [] }, snapshot, scope)).toBeUndefined();
+    expect(await storage.applyWindowDelta(changed, { upserts: [{ id: 'one', title: 'Changed' }], deleted: [] }, { ...snapshot, cursor: changed.cursor }, scope))
+      .toMatchObject({ scope, previousSequence: 2, sequence: 3, changes: { sequence: 3, entities: { tasks: { one: { id: 'one', title: 'Changed' } } }, windows: { tasks: changed } } });
+    expect(await storage.applyWindowDelta(advanced, { upserts: [], deleted: [] }, snapshot, scope))
+      .toMatchObject({ scope, previousSequence: 3, sequence: 4, changes: { sequence: 4, entities: {}, windows: { tasks: changed } } });
     expect((await storage.load(scope))?.liveQueries.tasks?.cursor).toEqual(changed.cursor);
     expect(await storage.advanceWatermark([advanced], advanced.cursor, scope)).toBeUndefined();
     const table = (storage as any).database.windows;
@@ -87,7 +89,8 @@ it('issues metadata receipts only for exact, non-resetting, committed windows', 
     failure.mockRestore();
     expect(await storage.load(scope)).toEqual(before);
     const reset = { ...window, ids: [], cursor: { epoch: 'second', revision: 1 } };
-    expect(await storage.applyWindowDelta(reset, { upserts: [], deleted: [] }, { cursor: reset.cursor, entities: {}, liveQueries: { tasks: reset } }, scope)).toBeUndefined();
+    expect(await storage.applyWindowDelta(reset, { upserts: [], deleted: [] }, { cursor: reset.cursor, entities: {}, liveQueries: { tasks: reset } }, scope))
+      .toMatchObject({ scope, previousSequence: 5, sequence: 6, changes: { sequence: 6, reset: true, entities: {}, windows: { tasks: reset } } });
     expect((await storage.load(scope))?.entities).toEqual({});
   } finally {
     vi.restoreAllMocks(); storage.close();
@@ -203,7 +206,8 @@ it('keeps a wide multi-batch transaction atomic and preserves newer projected fi
     await storage.replaceWindow(window, snapshot, 'tenant', rows);
     await expect(storage.applyTransaction({ cursor: window.cursor, changes: [
       { entity: 'tasks', id: 'ignored', operation: 'update' },
-    ] }, snapshot, 'tenant')).resolves.toBeUndefined();
+    ] }, snapshot, 'tenant')).resolves.toMatchObject({ scope: 'tenant', previousSequence: 1, sequence: 2,
+      changes: { sequence: 2, entities: { tasks: { ignored: null } } } });
     await storage.replaceWindow({ ...window, signature: 'other', ids: ['unrelated'] }, snapshot, 'other', [{ _id: 'unrelated', field0: 'untouched' }]);
     const table = (storage as any).database.entities;
     const original = table.bulkPut.bind(table);

@@ -650,13 +650,14 @@ it("rolls back an epoch snapshot reset with its entities, windows, authority, an
   expect(cold.windowRows("statuses")).toEqual([{ _id: "s", name: "Old status" }]);
 });
 
-it("checkpoints a window-only epoch without treating its collection revision as a global floor", async () => {
+it.each([false, true])("checkpoints a window-only epoch without treating its collection revision as a global floor, stale snapshot floor=%s", async staleFloor => {
   const { storage, adapter } = fixture();
   const empty = { entities: {}, liveQueries: {} };
   await storage.applyTransaction({ cursor: { epoch: "old", revision: 20 }, changes: [] }, empty, "tenant");
   const put = async (signature: string, revision: number) => {
     const row = { _id: signature, name: signature };
-    await storage.replaceWindow(completeWindow(signature, "tasks", [row], { epoch: "new", revision }), empty, "tenant", [row]);
+    await storage.replaceWindow(completeWindow(signature, "tasks", [row], { epoch: "new", revision }),
+      staleFloor ? { ...empty, cursor: { epoch: "old", revision: 20 } } : empty, "tenant", [row]);
   };
   await put("a", 10);
   expect.soft((await storage.load("tenant"))!.cursor).toEqual({ epoch: "new", revision: 0 });
