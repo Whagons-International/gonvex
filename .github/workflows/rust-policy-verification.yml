@@ -65,3 +65,23 @@ jobs:
           python3 verification/verus/verify_sql_statement_key.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/sql-statement-key-proof"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Install frozen SDK proof dependencies
+        run: |
+          corepack enable && corepack prepare pnpm@11.1.2 --activate
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Prove actual TypeScript revision policies and reject broken variants
+        run: |
+          node --test verification/typescript/verify-revisions.test.mjs
+          node verification/typescript/verify-revisions.mjs \
+            --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
+            --output "$RUNNER_TEMP/sdk-revision-proof"
+      - name: Retain SDK source and solver receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-revision-proof
+          path: ${{ runner.temp }}/sdk-revision-proof
+          if-no-files-found: ignore
