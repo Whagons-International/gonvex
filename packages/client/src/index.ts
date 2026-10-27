@@ -3146,6 +3146,10 @@ export class GonvexClient {
         this.emitReplicaMessage(subscription, snapshot, scope);
         return;
       }
+      const publicationId = subscription.id;
+      const canPublishDelta = () => this.ownsReplicaSubscription(subscription)
+        && subscription.id === publicationId && scope === this.replicaScope
+        && subscription.scope === scope;
       // Incremental integrity is safe only for full projected row images. Older
       // partial-row protocols keep the full normalized rehash on replica.ready.
       const canCarryHashes = prior?.hashes && subscription.columns?.length
@@ -3153,7 +3157,7 @@ export class GonvexClient {
       const hashes = message.hashes ?? (canCarryHashes
         ? await applyReplicaHashDelta(prior!.hashes!, projectReplicaIntegrityRows(upserts, subscription.columns), message.deleted ?? [], prior?.key ?? "id", prior?.aggregateDigest)
         : undefined);
-      if (scope !== this.replicaScope || verificationGeneration !== subscription.verificationGeneration) return;
+      if (!canPublishDelta() || verificationGeneration !== subscription.verificationGeneration) return;
       await this.replica.applyWindowDelta({
         scope,
         signature: subscription.key,
@@ -3173,6 +3177,9 @@ export class GonvexClient {
         maxBytes: prior?.maxBytes,
         hashes,
       });
+      // An admitted write can commit after transport loss. Retire publication
+      // only when its owner, routing identity or authorized scope has changed.
+      if (!canPublishDelta()) return;
       const snapshot: ReplicaMessage = {
         type: "replica.snapshot", id: subscription.id, path: subscription.path,
         result: [], cursor: message.cursor,

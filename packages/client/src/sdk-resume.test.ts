@@ -100,7 +100,8 @@ it("persists the aggregate of committed delta rows for the next resume", async (
   await state.replica.replaceWindow({ signature: "tasks", kind: "replica", entity: "tasks", key: "id", rows,
     hashes, cursor: { epoch: "e", revision: 1 }, completeness: "complete", source: "server" });
   const subscription = { key: "tasks", id: "r", path: "tasks.list", args: {}, entity: "tasks",
-    columns: ["id", "value"], retiredEpochs: new Set(), verificationGeneration: 1 };
+    columns: ["id", "value"], retiredEpochs: new Set(), verificationGeneration: 1, scope: state.replicaScope };
+  state.replicaSubscriptions.set(subscription.key, subscription);
   state.emitReplicaMessage = vi.fn();
   const upserts = [{ id: "a", value: 3 }, { id: "c", value: 4 }];
   const expected = await replicaRowsHashes(upserts, "id");
@@ -198,10 +199,12 @@ it.each(["replica.ready", "replica.delta"])("does not accept %s when reconnect i
   await state.replica.replaceWindow({ signature: "tasks", kind: "replica", entity: "tasks", key: "id", rows,
     cursor: { epoch: "e", revision: 1 }, completeness: "partial", source: "cache", ...(type === "replica.delta" ? { hashes } : {}) });
   const subscription = { key: "tasks", id: "r", path: "tasks.list", retiredEpochs: new Set(),
-    verificationGeneration: 1, isUpToDate: false, columns: ["id"] };
+    verificationGeneration: 1, isUpToDate: false, columns: ["id"], scope: state.replicaScope };
+  state.replicaSubscriptions.set(subscription.key, subscription);
   const timer = setTimeout(() => { subscription.verificationGeneration += 1; }, 0);
   await state.handleReplicaMessage(subscription, { type, id: "r", cursor: { epoch: "e", revision: 1 }, digest, upserts: rows });
   clearTimeout(timer);
+  expect(subscription.verificationGeneration).toBe(2);
   expect(subscription.isUpToDate).toBe(false);
   expect(state.replica.getWindow("tasks").source).toBe("cache");
 });
@@ -257,7 +260,8 @@ it("verifies an aggregate ready after a resumed delta without rehashing the held
   await state.replica.replaceWindow({ signature: "tasks", kind: "replica", entity: "tasks", key: "id", rows,
     hashes, cursor: { epoch: "e", revision: 1 }, completeness: "complete", source: "server" });
   const subscription = { key: "tasks", id: "r", path: "tasks.list", args: {}, entity: "tasks",
-    columns: ["id", "value"], retiredEpochs: new Set(), verificationGeneration: 1, forceFullIntegrity: true };
+    columns: ["id", "value"], retiredEpochs: new Set(), verificationGeneration: 1, forceFullIntegrity: true, scope: state.replicaScope };
+  state.replicaSubscriptions.set(subscription.key, subscription);
   state.emitReplicaMessage = vi.fn();
   const upserts = [{ id: "a", value: 2 }];
   const nextHashes = await replicaRowsHashes(upserts, "id");
