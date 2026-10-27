@@ -1,9 +1,10 @@
 # Rust correctness fixes found during the Bend experiment
 
-The initial 12 failures were reproduced against staging commit
-`c233a96cb198669540fa29bb638fd7860611e5b8`. Later entries record additional Rust
-correctness investigations. These fixes are independent of the Bend experiment.
-A reproduced library failure does not establish a deployed incident.
+The first twelve failures were reproduced against staging commit
+`c233a96cb198669540fa29bb638fd7860611e5b8` and fixed in Rust separately from Bend.
+Later entries record additional regressions found during modularization and
+verification work. A reproduced library failure does not establish a deployed
+incident. Source fixes do not establish deployment.
 
 Paths below are relative to `rust/crates/`. Each fix retains ordinary Rust tests.
 PostgreSQL regressions need a disposable `GONVEX_TEST_POSTGRES_URL`; without it,
@@ -26,6 +27,7 @@ the test functions return early. CI supplies PostgreSQL.
 | MIGRATION-SQL-LEXING | The staging migration splitter combined statements after CR-only comments, rejected valid escape strings, and split Unicode dollar quotes at embedded semicolons. Share the lexical scanner with runtime admission while retaining separate execution policies. | `postgres/src/sql_script.rs` regression cases and `provision.rs::migrations_keep_postgres_lexical_boundaries_in_both_transaction_modes`: actual migration execution and receipt-based replay in both transaction modes. |
 | VISIBILITY-NULL-NOT-PARITY | A NULL status under `not(eq(status, "blocked"))` passed the Rust row evaluator but failed the SQL predicate. Compile negation as the complement of Boolean admission with null-safe predicates, including SQL UNKNOWN. | `runtime/src/visibility.rs::nullable_negation_matches_postgres_admission`: real PostgreSQL and Rust decisions across nine nullable/nonnull rows and thirteen nested Boolean expressions. |
 
+| LIVE-QUERY-EXACT-COUNT-CACHE-TYPE | On one cached connection, exact-count live queries with integer 0, then float 1.0, returned the correct rows but total 0 for row 1. The count branch omitted the typed statement key used by the row branch. Use one owned `Parameters` plan for count identity and binding. | `runtime/src/live_query.rs::tests::exact_count_parameter_type_changes_match_rows_on_one_connection`: actual row/count calls with integer, float and integer parameters on one transaction. |
 | SYNC-EARLY-FINALIZATION-LATE-WRITE | A Reducer inserts A, fires deferred constraints early, returns them to deferred, then inserts B. Both application rows commit, but B has NULL feed revision/ordinal and is omitted from revision-based reads. Reject tracked writes after this transaction has finalized, using its actual provenance row. | `runtime/src/host_calls_parameter_tests.rs::sync_finalization_late_write_has_no_unpublished_events`: provisioned triggers, admitted host queries, completion and durable rows/feed/provenance. |
 | SYNC-SESSION-GUARD-SUPPRESSION | A Reducer commits a session-level `gonvex.sync_revision` setting. A later transaction on the same physical pooled connection commits a normal row with NULL feed revision and no transaction metadata. Finalization now consults current-transaction provenance; the writable setting is no longer authority. | `runtime/src/host_calls_parameter_tests.rs::sync_finalization_session_guard_does_not_poison_next_transaction`: explicit same-backend reuse and complete feed capture. |
 
@@ -40,8 +42,8 @@ execution have distinct prefixes even for zero parameters.
 `SELECT $1::varchar[] AS n` previously failed when describe populated a VARCHAR[]
 entry and `Vec<String>` supplied binary TEXT[] elements. The same issue affected
 `char[]`. The owned parameter plan derives both cache identity and encoding from
-the actual SQLx Rust types. Raw SDK SQL, CRUD and structured live-query,
-visibility and replica reads use this plan.
+the actual SQLx Rust types. Raw SDK SQL, CRUD, structured live-query row and exact-count reads, visibility
+and replica reads use this plan.
 
 These single statements were incorrectly rejected before the lexer fix:
 
@@ -145,6 +147,31 @@ performance when the corrected predicate admits additional NULL-valued rows.
 Reproduce with `GONVEX_TEST_POSTGRES_URL` pointing at a disposable PostgreSQL
 instance and `python3 verification/benchmarks/visibility_negation.py --output
 /path/to/result.json --repetitions 100`.
+
+
+## Exact-count live-query statement reuse
+
+The test-only regression failed against staging
+`8bae698880d6a7e63472596b1a22c5dc1ced0ebc`. It pins one physical PostgreSQL
+connection in a transaction, primes both actual row/count statements with an
+integer predicate, then runs a float predicate and the original integer again.
+The float remains a JSON float and reaches the exact-count branch. The observed
+middle call returned row ID 1 but total 0. All row assertions passed before the
+middle count assertion failed. This is a native library reproduction, with no
+observed deployed occurrence or write-corruption claim for this count path.
+
+The row query already included actual parameter OIDs in its SQLx statement key.
+The separate count binder reused an unprefixed cached statement. The count now
+uses `Parameters::scalars` for both the ordered key OIDs and the encoded values,
+then decodes the count column as bigint. It retains the predicates and bindings
+from before LIMIT/OFFSET, so the total still counts the full filtered relation.
+The obsolete duplicate scalar binder is removed. SQL, pagination and public
+items/total/offset/limit fields retain their meaning.
+
+The regression returns to the integer type after the float call and checks all
+three row results and totals. It uses a normal enabled SQLx statement cache and
+runs in the required PostgreSQL CI suite. This test covers the remaining caller
+omission; it is not a formal proof of SQLx, PostgreSQL or cache-key serialization.
 
 ## Sync finalization phase and pooled settings
 
