@@ -1,4 +1,5 @@
 import { RowRecency } from "./row-recency.js";
+import { isReplicaRevision, isTransactionRevision } from "./revision-policy.js";
 import { ResidentMap } from "./resident-map.js";
 import { replicaAggregateDigest } from "./replica-integrity.js";
 import type { DataPredicate } from '@gonvex/module-sdk';
@@ -1090,7 +1091,7 @@ export class LocalReplica implements LocalReplicaView {
     const requestedScope = scope === undefined ? undefined : normalizeReplicaScope(scope);
     const application = this.enqueueApplication(async () => {
       if (requestedScope !== undefined && requestedScope !== this.scopeValue) return;
-      if (!Number.isSafeInteger(revision) || revision < 0 || signatures.length === 0) return;
+      if (!isReplicaRevision(revision) || signatures.length === 0) return;
 
       const eligible = new Set(signatures);
       const nextQueries = new Map(this.liveQueries);
@@ -2127,7 +2128,7 @@ export class MemoryLocalReplicaStorage implements LocalReplicaStorage {
 }
 
 function validateTransaction(transaction: ReplicaTransaction) {
-  if (!transaction.cursor.epoch.trim() || transaction.cursor.revision <= 0) {
+  if (!transaction.cursor.epoch.trim() || !isTransactionRevision(transaction.cursor.revision)) {
     throw new Error("replica transaction requires a positive revision and epoch");
   }
   for (const change of transaction.changes) {

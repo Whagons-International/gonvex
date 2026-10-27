@@ -30,4 +30,4 @@ replicaStorageContract('SQLite storage', (): StorageFixture => {
     reopen() { return new ExpoSQLiteLocalReplicaStorage(adapter); },
     interruptNextCommit() { writesUntilFailure = 2; },
   };
-}, { reopen: true, rollback: true });
+}, { reopen: true, rollback: true, versionedRows: true });

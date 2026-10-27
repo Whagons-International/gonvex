@@ -1,3 +1,4 @@
+import { isReplicaRevision } from "./revision-policy.js";
 import { RowPatchDecoder } from "./row-patch.js";
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
 import type { DataRead } from "@gonvex/module-sdk";
@@ -3288,7 +3289,7 @@ export class GonvexClient {
   }
 
   private enqueueReplicaWatermark(revision: number) {
-    if (!Number.isSafeInteger(revision) || revision < 0) return;
+    if (!isReplicaRevision(revision)) return;
     const pending = this.queuedReplicaWatermark;
     if (pending && pending.scope === this.replicaScope && pending.generation === this.socketGeneration) {
       pending.revision = Math.max(pending.revision, revision);
@@ -3393,7 +3394,7 @@ export class GonvexClient {
   }
 
   private async handleReplicaWatermark(revision: number) {
-    if (!Number.isSafeInteger(revision) || revision < 0) return;
+    if (!isReplicaRevision(revision)) return;
     const eligibleSignatures: string[] = [];
     for (const subscription of this.replicaSubscriptions.values()) {
       if (
