@@ -68,3 +68,30 @@ it.each(['sequence mismatch', 'gap without catch-up'] as const)('rejects a seque
   await expect(replica.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: 'a', operation: 'delete' }] })).rejects.toThrow(kind === 'sequence mismatch' ? 'invalid storage commit receipt' : 'requires peer catch-up');
   expect(replica.entity('tasks', 'a')).toEqual({ id: 'a', value: 1 });
 });
+
+it('detaches nested corrected window values from a retained adapter result', async () => {
+  const receipt = correction(2);
+  receipt.postImages.windows.tasks = { ...window('tasks', 1), resultSkeleton: { nested: { value: 2 } }, scalar: { values: [2] } };
+  const { replica } = await fixture({ applyTransaction: async () => receipt });
+  await replica.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: 'a', operation: 'update', newValue: { id: 'a', value: 9 } }] });
+  (receipt.postImages.windows.tasks!.resultSkeleton as { nested: { value: number } }).nested.value = 99;
+  (receipt.postImages.windows.tasks!.scalar as { values: number[] }).values.push(99);
+  expect(replica.getWindow('tasks')!.resultSkeleton).toEqual({ nested: { value: 2 } });
+  expect(replica.getWindow('tasks')!.scalar).toEqual({ values: [2] });
+});
+
+it('does not publish completeness or row-version bookkeeping when catch-up fails', async () => {
+  const receipt = correction(2); receipt.postImages.windows.tasks = { ...window('tasks', 1), ids: ['a', 'missing'] };
+  const { replica } = await fixture({ applyTransaction: async () => receipt, readChanges: async () => { throw new Error('late read failed'); } });
+  const version = replica.executionReadVersion('tasks', 'a');
+  expect(replica.entityCompleteness('tasks')).toBe('complete');
+  await expect(replica.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: 'a', operation: 'delete' }] })).rejects.toThrow('late read failed');
+  expect(replica.entityCompleteness('tasks')).toBe('complete'); expect(replica.executionReadVersion('tasks', 'a')).toBe(version);
+  expect(replica.entity('tasks', 'a')).toEqual({ id: 'a', value: 1 }); expect(replica.getWindow('tasks')!.ids).toEqual(['a']);
+});
+
+it.each([5, 6])('rejects a catch-up barrier at %s before its own commit sequence', async sequence => {
+  const { replica } = await fixture({ applyTransaction: async () => ({ scope: 'tenant', previousSequence: 6, sequence: 7, changes: { sequence: 7, entities: {}, windows: {} } }), readChanges: async () => ({ ...empty, sequence }) });
+  await expect(replica.applyTransaction({ cursor: cursor(2), changes: [{ entity: 'tasks', id: 'a', operation: 'delete' }] })).rejects.toThrow('required sequence');
+  expect(replica.entity('tasks', 'a')).toEqual({ id: 'a', value: 1 }); expect(replica.cursor()).toEqual(cursor(1));
+});

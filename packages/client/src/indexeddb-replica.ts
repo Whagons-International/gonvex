@@ -13,6 +13,7 @@ import type {
   ReplicaStorageChanges,
   ReplicaMetadataCommit,
   ReplicaStorageCommit,
+  ReplicaWindowWriteContext,
 } from "./local-replica.js";
 
 type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean };
@@ -587,7 +588,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return receipt;
   }
 
-  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[]): Promise<ReplicaStorageCommit> {
+  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[], context?: ReplicaWindowWriteContext): Promise<ReplicaStorageCommit> {
     const normalizedScope = normalizeScope(scope);
     return this.commit(normalizedScope, async (sequence, changes) => {
       changes.reset = await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
@@ -605,6 +606,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       }
       await this.writeRows(normalizedScope,window.entity,window.key,projection ?? window.ids.flatMap(id=>rows()[id] ? [rows()[id]!] : []),window.cursor ?? snapshot.cursor,sequence,changes);
       await this.writeWindows(normalizedScope,[window],sequence,changes);
+      await this.captureRows(normalizedScope, window.entity, context?.removedIDs ?? [], changes);
       await this.saveCursor(normalizedScope,snapshot.cursor);
     });
   }

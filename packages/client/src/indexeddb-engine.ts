@@ -694,7 +694,10 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       for (const [entity, ids] of deleted) for (const id of ids) {
         for (const { member, window } of await this.owners(normalizedScope, entity, id, ownerWindows)) {
           const metadata = JSON.parse(window.value) as ReplicaWindow & { hasHashes?: boolean };
-          if (metadata.cursor?.epoch === transaction.cursor.epoch && metadata.cursor.revision > transaction.cursor.revision) continue;
+          if (metadata.cursor?.epoch === transaction.cursor.epoch && metadata.cursor.revision > transaction.cursor.revision) {
+            this.receipt()!.changes.windows[member.signature] = await this.materializeWindow(window);
+            continue;
+          }
           // Retain projected hashes until the collection certificate advances,
           // without retaining membership/ownership. Batch native requests while
           // keeping rows, startup patches and checkpoints in this transaction.
@@ -722,6 +725,9 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         ]);
       }
       if (transaction.memberships?.length) await this.writeWindows(normalizedScope,transaction.memberships,sequence);
+      const changes = this.receipt()!.changes;
+      if (changes.removedMemberships) changes.removedMemberships = changes.removedMemberships.filter(({ signature, id }) =>
+        !changes.windows[signature]?.ids.includes(id));
       await this.saveCursor(normalizedScope,transaction.cursor);
     });
   }
