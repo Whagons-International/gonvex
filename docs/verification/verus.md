@@ -369,7 +369,8 @@ python3 verification/benchmarks/sql_statement_key.py measure --output /path/to/n
 ```
 
 Use `--rustc` to select the production Rust 1.94 compiler. Preparation snapshots
-both modules and records compiler, source, harness and binary hashes. Measurement
+both modules and records the compiler version and source, harness and binary hashes.
+Measurement
 checks those hashes and current-source identity before and after execution. It
 retains every CPU/wall-time sample and eight alternating pairs per case. Cases
 include no parameters, actual built-in OIDs, decimal boundaries, long Unicode SQL
