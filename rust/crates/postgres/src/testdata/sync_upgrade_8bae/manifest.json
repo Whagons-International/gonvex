@@ -1,0 +1,37 @@
+{
+  "source_commit": "8bae698880d6a7e63472596b1a22c5dc1ced0ebc",
+  "source_path": "rust/crates/postgres/src/provision.rs",
+  "source_sha256": "3058ae3d7acb4bfea11aec03b1855ec10f93c2a16c228fb6e5f7b15045d24031",
+  "derivation_script_sha256": "1c936dd2514b0b876c6dcf1eae2b0dc622f3e9ec078dea7727029734a8c25599",
+  "stage_installer_sha256": "f2cda2c398dac6c442e9d7d50782cd8731b04e3e1527c31f5cc79a4d7a6e9f13",
+  "stage_template_sha256": "614debc9eb242e4a68f83e0c01752a13399c4ac9373d314617b849a70d11886c",
+  "inputs": {
+    "table": "tasks",
+    "key": "id",
+    "columns": [
+      "id",
+      "title"
+    ]
+  },
+  "format_arguments": {
+    "stage_function": "\"gonvex_sync_tasks_stage\"",
+    "stage_trigger": "\"gonvex_sync_tasks_stage_trigger\"",
+    "finalize_trigger": "\"gonvex_sync_tasks_finalize_trigger\"",
+    "table_ident": "\"tasks\"",
+    "key_ident": "\"id\"",
+    "old_projection": "jsonb_build_object('id',OLD.\"id\",'title',OLD.\"title\")",
+    "new_projection": "jsonb_build_object('id',NEW.\"id\",'title',NEW.\"title\")",
+    "table_literal": "'tasks'"
+  },
+  "fixtures": {
+    "infrastructure.sql": {
+      "bytes": 4836,
+      "sha256": "fb03d86b9151a6196ca744cfeb6b167c2a86d292720d7f8add55eb93c93baaf5"
+    },
+    "tasks.sql": {
+      "bytes": 1686,
+      "sha256": "6b90237008ace136f4f755b22b6460a98afb7b4a1d77e5fec0191af3a716bb35"
+    }
+  },
+  "digest_contract": "lowercase SHA-256 hex over the exact UTF-8 SQL bytes, with no trimming"
+}
