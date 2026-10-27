@@ -684,16 +684,17 @@ export class StoreReducerOutbox implements ReducerOutbox {
     if (reducer.localExecution && this.memoryOnly) throw new Error("Durable storage is required for local reducer execution");
     await this.refreshShared(reducer.scope);
     const superseded = coalescingCandidate(this.sortedEntries(reducer.scope), draft);
-    const replacement = superseded && this.store.replacePending ? await this.store.replacePending(superseded.id, draft) : undefined;
+    const replacement = superseded && !this.memoryOnly && this.store.replacePending ? await this.store.replacePending(superseded.id, draft) : undefined;
     if (replacement) {
       entry = replacement;
     } else if (reducer.localExecution && this.store.append) {
       entry = await this.store.append(draft);
     } else {
-      entry = { ...draft, id: this.store.allocateId ? await this.store.allocateId() : this.nextId++ };
+      entry = { ...draft, id: !this.memoryOnly && this.store.allocateId ? await this.store.allocateId() : this.nextId++ };
       if (reducer.localExecution) await this.store.put(cloneEntry(entry));
       else await this.persistPut(entry);
     }
+    this.nextId = Math.max(this.nextId, entry.id + 1);
     this.entries.set(entry.id, entry);
     this.notify();
     return cloneEntry(entry);
@@ -777,7 +778,7 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async markPending(id: number): Promise<void> {
     await this.ready;
-    if(this.store.update) { await this.updateShared(id,entry=>isParked(entry) ? entry : ({...entry,state:'pending',nextAttemptAt:Date.now(),lastError:undefined}));this.notify();return; }
+    if(this.store.update && !this.memoryOnly) { await this.updateShared(id,entry=>isParked(entry) ? entry : ({...entry,state:'pending',nextAttemptAt:Date.now(),lastError:undefined}));this.notify();return; }
     const entry = this.entries.get(id);
     if (!entry || entry.state === "pending" || isParked(entry)) return;
     const updated: ReducerOutboxEntry = {
@@ -793,7 +794,7 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async markCommitted(id: number): Promise<void> {
     await this.ready;
-    if(this.store.update) { await this.updateShared(id,entry=>({...entry,state:'committed'}));this.notify();return; }
+    if(this.store.update && !this.memoryOnly) { await this.updateShared(id,entry=>({...entry,state:'committed'}));this.notify();return; }
     const entry = this.entries.get(id);
     if (!entry || entry.state === "committed") return;
     const updated = { ...entry, state: "committed" as const };
@@ -924,7 +925,10 @@ export class StoreReducerOutbox implements ReducerOutbox {
     const generation = this.sharedGeneration;
     const entries = await this.store.load(scope);
     for (const [id, entry] of this.entries) if (entry.scope === scope) this.entries.delete(id);
-    for (const entry of entries) this.entries.set(entry.id, cloneEntry(entry));
+    for (const entry of entries) {
+      this.entries.set(entry.id, cloneEntry(entry));
+      this.nextId = Math.max(this.nextId, entry.id + 1);
+    }
     this.loadedScopes.set(scope, generation);
   }
 
