@@ -271,7 +271,10 @@ async fn sqlx_cancel_balances_waiters_without_releasing_held_resources() {
 #[tokio::test]
 #[ignore = "requires isolated GONVEX_POOL_METRICS_TEST_DATABASE_URL"]
 async fn sqlx_timeout_is_not_cancellation() {
-    let pool = sqlx_pool(Duration::from_millis(20)).await;
+    // SQLx also applies this deadline while establishing the fixture connection.
+    // Use the other database tests' setup budget, then exhaust the same deadline
+    // by retaining the pool's sole connection throughout the queued acquisition.
+    let pool = sqlx_pool(Duration::from_secs(5)).await;
     let pools = registry(Duration::from_secs(5));
     let mut held = pool.acquire().await.unwrap();
     let mut queued = Box::pin(pools.acquire(&pool));
