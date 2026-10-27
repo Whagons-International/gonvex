@@ -14,6 +14,7 @@ import type {
   ReplicaMetadataCommit,
   ReplicaStorageCommit,
   ReplicaWindowDelta,
+  ReplicaWindowWriteContext,
 } from "./local-replica.js";
 
 type MemberRecord = {
@@ -66,6 +67,19 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     const receipt = this.receipt();
     if (!receipt) return;
     for (const record of records) (receipt.changes.entities[record.entity] ??= Object.create(null))[record.id] = record.deleted ? null : JSON.parse(record.value);
+  }
+
+  private async captureRows(scope: string, entity: string, ids: readonly string[]) {
+    const receipt = this.receipt();
+    if (!receipt || !ids.length) return;
+    for (let offset = 0; offset < ids.length; offset += writeBatchSize) {
+      const batch = ids.slice(offset, offset + writeBatchSize);
+      const records = await this.database.entities.bulkGet(batch.map(id => [scope, entity, id]) as [string, string, string][]);
+      for (const [index, id] of batch.entries()) {
+        const record = records[index];
+        (receipt.changes.entities[entity] ??= Object.create(null))[id] = !record || record.deleted ? null : JSON.parse(record.value);
+      }
+    }
   }
 
   private async commit(scope: string, run: (sequence: number) => Promise<void>): Promise<ReplicaStorageCommit> {
@@ -442,7 +456,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     for (const id of ids) {
       if (!(await this.owners(scope, window.entity, id)).some(owner => owner.member.signature !== window.signature)) {
         await this.writeEntity(scope, window.entity, id, null, cursor, sequence);
-      }
+      } else await this.captureRows(scope, window.entity, [id]);
     }
   }
 
@@ -680,7 +694,10 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       for (const [entity, ids] of deleted) for (const id of ids) {
         for (const { member, window } of await this.owners(normalizedScope, entity, id, ownerWindows)) {
           const metadata = JSON.parse(window.value) as ReplicaWindow & { hasHashes?: boolean };
-          if (metadata.cursor?.epoch === transaction.cursor.epoch && metadata.cursor.revision > transaction.cursor.revision) continue;
+          if (metadata.cursor?.epoch === transaction.cursor.epoch && metadata.cursor.revision > transaction.cursor.revision) {
+            this.receipt()!.changes.windows[member.signature] = await this.materializeWindow(window);
+            continue;
+          }
           // Retain projected hashes until the collection certificate advances,
           // without retaining membership/ownership. Batch native requests while
           // keeping rows, startup patches and checkpoints in this transaction.
@@ -708,6 +725,15 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
         ]);
       }
       if (transaction.memberships?.length) await this.writeWindows(normalizedScope,transaction.memberships,sequence);
+      const changes = this.receipt()!.changes;
+      // A rejected sibling delete may have captured this owner's old window
+      // before accepted deletes edited membership. Return the final certificate.
+      for (const signature of checkpoints.keys()) if (changes.windows[signature]) {
+        const final = await this.database.windows.get([normalizedScope, signature]);
+        changes.windows[signature] = final && !final.deleted ? await this.materializeWindow(final) : null;
+      }
+      if (changes.removedMemberships) changes.removedMemberships = changes.removedMemberships.filter(({ signature, id }) =>
+        !changes.windows[signature]?.ids.includes(id));
       await this.saveCursor(normalizedScope,transaction.cursor);
     });
   }
@@ -740,11 +766,9 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
     return receipt;
   }
 
-  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[]): Promise<void> {
-    await this.initialize();
+  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[], context?: ReplicaWindowWriteContext): Promise<ReplicaStorageCommit> {
     const normalizedScope = normalizeScope(scope);
-    await this.database.transaction("rw", this.database.entities, this.database.windows,this.database.members, this.database.meta, async () => {
-      const sequence=await this.nextSequence(normalizedScope);
+    return this.commit(normalizedScope, async sequence => {
       await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
       // A window replacement owns only its projected entity rows. Rewriting the
       // complete normalized replica for every snapshot made startup quadratic:
@@ -760,10 +784,9 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       }
       await this.writeRows(normalizedScope,window.entity,window.key,projection ?? window.ids.flatMap(id=>rows()[id] ? [rows()[id]!] : []),window.cursor ?? snapshot.cursor,sequence);
       await this.writeWindows(normalizedScope,[window],sequence);
+      await this.captureRows(normalizedScope, window.entity, context?.removedIDs ?? []);
       await this.saveCursor(normalizedScope,snapshot.cursor);
     });
-    this.channel?.postMessage({scope:normalizedScope});
-    this.scheduleCleanup(normalizedScope);
   }
 
   async applyWindowDelta(window: ReplicaWindow, delta: ReplicaWindowDelta, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<ReplicaStorageCommit> {
@@ -776,6 +799,7 @@ export class IndexedDBEngineReplicaStorage implements LocalReplicaStorage {
       if (check.accepted) await this.pruneRows(normalizedScope, window, delta.deleted.filter(id => rows[id] === undefined), window.cursor ?? snapshot.cursor, sequence);
       await this.writeRows(normalizedScope, window.entity, window.key, delta.upserts, window.cursor ?? snapshot.cursor, sequence);
       if (!check.accepted) {
+        await this.captureRows(normalizedScope, window.entity, delta.deleted);
         if (check.prior) this.receipt()!.changes.windows[window.signature] = await this.materializeWindow(check.prior);
       } else if (reset || !check.prior || check.prior.deleted) {
         await this.writeWindows(normalizedScope, [window], sequence);
