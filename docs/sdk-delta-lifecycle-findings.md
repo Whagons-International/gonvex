@@ -25,8 +25,8 @@ the test timeout and is cancelled by cleanup.
 
 These are Node tests using the real public GonvexClient, controlled WebSocket
 frames and the actual memory adapter. Only the existing frame-lane promise is
-read privately to join delivered frames. No private handler or subscription map
-is mutated. The fixture is source-derived, not a captured runtime session.
+read privately to join delivered frames. The new public fixtures do not mutate
+a private handler or subscription map. The fixture is source-derived, not a captured runtime session.
 
 Close remains synchronous and does not cancel or join an active storage operation.
 The guard addresses an obsolete continuation before it begins publication. It
@@ -35,3 +35,11 @@ client during an emission already in progress. It does not change the cursor-onl
 watermark path or establish native Expo, Hermes, browser or whole-SDK proofs.
 Effective optimistic-ack corruption and delta-triggered reconnect claims were
 rejected because the source did not support them.
+
+Validation passed with 625 client tests, 19 OPFS checks, client typechecking,
+all package builds, docs and function-binding generation, and 31 repository
+script checks. One optional runtime integration check was skipped. Existing
+private-handler integrity tests now register their fixture subscriptions and
+scopes; the chunked-hash test also asserts that reconnect invalidation ran.
+Runtime import cycles are unchanged against staging. The bounded validation
+used one CPU, a 1 GiB hard memory cap and no swap.
