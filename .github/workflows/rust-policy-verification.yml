@@ -60,3 +60,8 @@ jobs:
           python3 verification/verus/verify_budgets.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/budget-proof"
+      - name: Prove actual SQL key bytes and reject broken serializers
+        run: |
+          python3 verification/verus/verify_sql_statement_key.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/sql-statement-key-proof"
