@@ -12,6 +12,7 @@ import type {
   ReplicaRow,
   ReplicaStorageChanges,
   ReplicaMetadataCommit,
+  ReplicaStorageCommit,
 } from "./local-replica.js";
 
 type WindowRecord = { scope: ReplicaScope; signature: string; value: string; sequence?:number; deleted?:boolean };
@@ -118,9 +119,39 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
 
   private async nextSequence(scope:string):Promise<number> {
     const prior=await this.database.meta.get([scope,'sequence']);
-    const sequence=Number(prior?.value ?? 0)+1;
+    const previousSequence=Number(prior?.value ?? 0);
+    if (!Number.isSafeInteger(previousSequence) || previousSequence < 0 || previousSequence === Number.MAX_SAFE_INTEGER) {
+      throw new Error('Invalid or exhausted replica storage sequence.');
+    }
+    const sequence=previousSequence+1;
     await this.database.meta.put({scope,key:'sequence',value:String(sequence)});
     return sequence;
+  }
+
+  private async commit(scope: ReplicaScope, run: (sequence: number, changes: ReplicaStorageChanges) => Promise<void>): Promise<ReplicaStorageCommit> {
+    await this.initialize();
+    const receipt = await this.database.transaction('rw', this.database.entities, this.database.windows, this.database.meta, async () => {
+      const sequence = await this.nextSequence(scope);
+      const changes: ReplicaStorageChanges = { sequence, entities: Object.create(null), windows: Object.create(null) };
+      await run(sequence, changes);
+      return { scope, previousSequence: sequence - 1, sequence, changes };
+    });
+    // Dexie's transaction promise resolves after native commit. An abort must
+    // expose neither these private post-images nor a peer notification.
+    this.channel?.postMessage({ scope });
+    return receipt;
+  }
+
+  private recordRow(changes: ReplicaStorageChanges, entity: string, id: string, record: EntityRecord | undefined) {
+    (changes.entities[entity] ??= Object.create(null))[id] = !record || record.deleted ? null : JSON.parse(record.value);
+  }
+
+  private async captureRows(scope: string, entity: string, ids: readonly string[], changes: ReplicaStorageChanges) {
+    for (let offset = 0; offset < ids.length; offset += writeBatchSize) {
+      const batch = ids.slice(offset, offset + writeBatchSize);
+      const records = await this.database.entities.bulkGet(batch.map(id => [scope, entity, id]) as [string, string, string][]);
+      for (const [index, id] of batch.entries()) this.recordRow(changes, entity, id, records[index]);
+    }
   }
 
   private versionedRecord(scope:string,entity:string,id:string,row:ReplicaRow|null,cursor:ReplicaCursor|undefined,sequence:number,previous:EntityRecord|undefined):EntityRecord {
@@ -136,10 +167,11 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return {...record,authority:merged.authority,sequence};
   }
 
-  private async writeEntity(scope:string,entity:string,id:string,row:ReplicaRow|null,cursor:ReplicaCursor|undefined,sequence:number) {
+  private async writeEntity(scope:string,entity:string,id:string,row:ReplicaRow|null,cursor:ReplicaCursor|undefined,sequence:number,changes?:ReplicaStorageChanges) {
     const previous=await this.database.entities.get([scope,entity,id]);
     const record=this.versionedRecord(scope,entity,id,row,cursor,sequence,previous);
     if (record !== previous) await this.database.entities.put(record);
+    if (changes) this.recordRow(changes, entity, id, record);
     return record;
   }
 
@@ -163,21 +195,32 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     if (batch.length) await this.database.entities.bulkPut(batch);
   }
 
-  private async writeRows(scope:string,entity:string,key:string,rows:readonly ReplicaRow[],cursor:ReplicaCursor|undefined,sequence:number) {
-    return this.writeRowEntries(scope,entity,rows.map(row=>[String(row[key]),row]),cursor,sequence);
+  private async writeRows(scope:string,entity:string,key:string,rows:readonly ReplicaRow[],cursor:ReplicaCursor|undefined,sequence:number,changes?:ReplicaStorageChanges) {
+    return this.writeRowEntries(scope,entity,rows.map(row=>[String(row[key]),row]),cursor,sequence,changes);
   }
 
-  private async writeRowEntries(scope:string,entity:string,rows:readonly (readonly [string,ReplicaRow])[],cursor:ReplicaCursor|undefined,sequence:number) {
+  private async writeRowEntries(scope:string,entity:string,rows:readonly (readonly [string,ReplicaRow])[],cursor:ReplicaCursor|undefined,sequence:number,changes?:ReplicaStorageChanges) {
     // Bounded batches retain only the incoming rows and their previous values.
     for(let offset=0;offset<rows.length;offset+=writeBatchSize) {
       const batch=rows.slice(offset,offset+writeBatchSize);
       const prior=await this.database.entities.bulkGet(batch.map(([id])=>[scope,entity,id]) as [string,string,string][]);
-      const records = batch.map(([id,row],index)=>this.versionedRecord(scope,entity,id,row,cursor,sequence,prior[index])).filter((record,index)=>record !== prior[index]);
+      const resolved = batch.map(([id,row],index)=>this.versionedRecord(scope,entity,id,row,cursor,sequence,prior[index]));
+      const records = resolved.filter((record,index)=>record !== prior[index]);
       if (records.length) await this.writeRecords(records);
+      if (changes) {
+        // Capture unchanged rejected records as well as writes. With duplicate
+        // IDs, an unchanged later attempt issues no put, so the last actual put
+        // in this batch remains the post-image. Keep the existing write order.
+        const postImages = new Map<string, EntityRecord>();
+        for (const [index, record] of resolved.entries()) {
+          if (!postImages.has(record.id) || record !== prior[index]) postImages.set(record.id, record);
+        }
+        for (const record of postImages.values()) this.recordRow(changes, entity, record.id, record);
+      }
     }
   }
 
-  private async writeWindows(scope:string,windows:readonly ReplicaWindow[],sequence:number) {
+  private async writeWindows(scope:string,windows:readonly ReplicaWindow[],sequence:number,changes?:ReplicaStorageChanges) {
     // Small/empty windows need few native round trips; large memberships must
     // not share an unbounded burst. A single window remains indivisible. Every
     // flush still belongs to the caller's original atomic transaction.
@@ -192,11 +235,13 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
         const before=record && !record.deleted ? JSON.parse(record.value) as ReplicaWindow : undefined;
         if(before?.cursor && (!window.cursor || (before.cursor.epoch===window.cursor.epoch && before.cursor.revision>window.cursor.revision))) {
           accepted = false;
+          if (changes) changes.windows[window.signature] = before;
           return [{...record!,sequence}];
         }
         // Serialization already isolates persisted values. Copying ordered IDs
         // and large integrity maps before stringifying doubled temporary memory
         // for every cursor-only checkpoint.
+        if (changes) changes.windows[window.signature] = JSON.parse(value) as ReplicaWindow;
         return [{scope,sequence,signature:window.signature,value}];
       }));
       batch = []; bytes = 0;
@@ -240,7 +285,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return Boolean(state);
   }
 
-  private async pruneRows(scope:string,window:ReplicaWindow,ids:readonly string[],cursor:ReplicaCursor|undefined,sequence:number) {
+  private async pruneRows(scope:string,window:ReplicaWindow,ids:readonly string[],cursor:ReplicaCursor|undefined,sequence:number,changes?:ReplicaStorageChanges) {
     if(!ids.length)return;
     const retained=new Set<string>();
     await visitRecords(this.database.windows.where('scope').equals(scope),record=>{
@@ -248,7 +293,10 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       const other=JSON.parse(record.value) as ReplicaWindow;
       if(other.entity===window.entity)for(const id of other.ids)retained.add(id);
     });
-    for(const id of ids)if(!retained.has(id))await this.writeEntity(scope,window.entity,id,null,cursor,sequence);
+    for(const id of ids)if(!retained.has(id))await this.writeEntity(scope,window.entity,id,null,cursor,sequence,changes);
+    // Another durable owner can retain a row that the caller's candidate maps
+    // removed. Its unchanged post-image is still an own-write correction.
+    if (changes) await this.captureRows(scope, window.entity, ids.filter(id => retained.has(id)), changes);
   }
 
   async readChanges(scope:string,afterSequence:number,interest?:{rows:Record<string,string[]>;hasRow?:(entity:string,id:string)=>boolean;windows:string[];availableRows:number;availableBytes:number;maxRows:number;maxBytes:number}):Promise<ReplicaStorageChanges> {
@@ -448,18 +496,22 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     });
   }
 
-  async applyTransaction(transaction: ReplicaTransaction, _snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
-    await this.initialize();
+  async applyTransaction(transaction: ReplicaTransaction, _snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<ReplicaStorageCommit> {
     const normalizedScope = normalizeScope(scope);
-    await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
-      const sequence=await this.nextSequence(normalizedScope);
-      await this.acceptEpoch(normalizedScope,transaction.cursor,sequence);
+    return this.commit(normalizedScope, async (sequence, changes) => {
+      changes.reset = await this.acceptEpoch(normalizedScope,transaction.cursor,sequence);
       const grouped = new Map<string, {entity: string; id: string; changes: ReplicaTransaction['changes']}>();
+      const attemptedDeletes = new Map<string, Set<string>>();
       for (const change of transaction.changes) {
         const key = JSON.stringify([change.entity, change.id]);
         let entry = grouped.get(key);
         if (!entry) { entry = {entity: change.entity, id: change.id, changes: []}; grouped.set(key, entry); }
         entry.changes.push(change);
+        if (change.operation === 'delete') {
+          let ids = attemptedDeletes.get(change.entity);
+          if (!ids) { ids = new Set(); attemptedDeletes.set(change.entity, ids); }
+          ids.add(change.id);
+        }
       }
       const entries = [...grouped.values()];
       const deleted = new Map<string, Set<string>>();
@@ -473,6 +525,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
             if (change.operation !== 'delete' && !change.newValue) continue;
             record = this.versionedRecord(normalizedScope, entry.entity, entry.id, change.operation === 'delete' ? null : change.newValue!, transaction.cursor, sequence, record);
           }
+          this.recordRow(changes, entry.entity, entry.id, record);
           if (!record) continue;
           // Snapshots can already cover a delayed or repeated transaction.
           // Preserve per-field authority, but do not rewrite an unchanged row
@@ -486,23 +539,32 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
         }
         if (records.length) await this.writeRecords(records);
       }
-      if (deleted.size) {
+      if (deleted.size || attemptedDeletes.size) {
         const windows = await this.database.windows.where('scope').equals(normalizedScope).toArray();
         const changed: WindowRecord[] = [];
         for (const record of windows) {
           if (record.deleted) continue;
           const window = JSON.parse(record.value) as ReplicaWindow;
           const ids = deleted.get(window.entity);
-          if (!ids || !window.ids.some(id => ids.has(id)) || (window.cursor?.epoch === transaction.cursor.epoch && window.cursor.revision > transaction.cursor.revision)) continue;
-          window.ids = window.ids.filter(id => !ids.has(id));
-          changed.push({...record, sequence, value: JSON.stringify(window)});
+          const removesMember = ids && window.ids.some(id => ids.has(id));
+          const attempted = attemptedDeletes.get(window.entity);
+          const correctOwner = attempted && window.ids.some(id => attempted.has(id));
+          if (!removesMember && !correctOwner) continue;
+          if (removesMember && !(window.cursor?.epoch === transaction.cursor.epoch && window.cursor.revision > transaction.cursor.revision)) {
+            window.ids = window.ids.filter(id => !ids!.has(id));
+            changed.push({...record, sequence, value: JSON.stringify(window)});
+          }
+          // Include unchanged owners after a rejected delete, and owners whose
+          // newer window certificate prevented an otherwise accepted removal.
+          changes.windows[window.signature] = window;
         }
-        await this.database.windows.bulkPut(changed);
+        if (changed.length) await this.database.windows.bulkPut(changed);
       }
-      if (transaction.memberships?.length) await this.writeWindows(normalizedScope,transaction.memberships,sequence);
+      // Explicit memberships run last, just as before. Their final post-images
+      // supersede any owner correction or entity-delete membership edit above.
+      if (transaction.memberships?.length) await this.writeWindows(normalizedScope,transaction.memberships,sequence,changes);
       await this.saveCursor(normalizedScope,transaction.cursor);
     });
-    this.channel?.postMessage({scope:normalizedScope});
   }
 
   async advanceWatermark(
@@ -525,12 +587,10 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     return receipt;
   }
 
-  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[]): Promise<void> {
-    await this.initialize();
+  async replaceWindow(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope, projection?:readonly ReplicaRow[]): Promise<ReplicaStorageCommit> {
     const normalizedScope = normalizeScope(scope);
-    await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
-      const sequence=await this.nextSequence(normalizedScope);
-      await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
+    return this.commit(normalizedScope, async (sequence, changes) => {
+      changes.reset = await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
       // A window replacement owns only its projected entity rows. Rewriting the
       // complete normalized replica for every snapshot made startup quadratic:
       // each newly opened collection persisted every entity loaded by all prior
@@ -541,32 +601,34 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
       if (previousRecord && !previousRecord.deleted) {
         const previous = JSON.parse(previousRecord.value) as ReplicaWindow;
         const nextIDs = new Set(window.ids);
-        await this.pruneRows(normalizedScope,window,previous.ids.filter(id=>!nextIDs.has(id) && rows()[id]===undefined),window.cursor ?? snapshot.cursor,sequence);
+        await this.pruneRows(normalizedScope,window,previous.ids.filter(id=>!nextIDs.has(id) && rows()[id]===undefined),window.cursor ?? snapshot.cursor,sequence,changes);
       }
-      await this.writeRows(normalizedScope,window.entity,window.key,projection ?? window.ids.flatMap(id=>rows()[id] ? [rows()[id]!] : []),window.cursor ?? snapshot.cursor,sequence);
-      await this.writeWindows(normalizedScope,[window],sequence);
+      await this.writeRows(normalizedScope,window.entity,window.key,projection ?? window.ids.flatMap(id=>rows()[id] ? [rows()[id]!] : []),window.cursor ?? snapshot.cursor,sequence,changes);
+      await this.writeWindows(normalizedScope,[window],sequence,changes);
       await this.saveCursor(normalizedScope,snapshot.cursor);
     });
-    this.channel?.postMessage({scope:normalizedScope});
   }
 
-  async applyWindowDelta(window: ReplicaWindow, delta: { upserts: ReplicaRow[]; deleted: string[] }, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void | ReplicaMetadataCommit> {
-    await this.initialize();
+  async applyWindowDelta(window: ReplicaWindow, delta: { upserts: ReplicaRow[]; deleted: string[] }, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<ReplicaMetadataCommit | ReplicaStorageCommit> {
     const normalizedScope = normalizeScope(scope);
-    const receipt = await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
-      const sequence=await this.nextSequence(normalizedScope);
-      const reset = await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
+    let exactMetadata = false;
+    const receipt = await this.commit(normalizedScope, async (sequence, changes) => {
+      const reset = changes.reset = await this.acceptEpoch(normalizedScope,window.cursor ?? snapshot.cursor,sequence);
       const rows = delta.deleted.length ? snapshot.entities[window.entity] ?? {} : {};
-      await this.pruneRows(normalizedScope,window,delta.deleted.filter(id=>rows[id]===undefined),window.cursor ?? snapshot.cursor,sequence);
-      await this.writeRows(normalizedScope,window.entity,window.key,delta.upserts,window.cursor ?? snapshot.cursor,sequence);
-      const accepted = await this.writeWindows(normalizedScope,[window],sequence);
-      await this.saveCursor(normalizedScope,snapshot.cursor);
-      if (accepted && !reset && delta.upserts.length === 0 && delta.deleted.length === 0) {
-        return { scope: normalizedScope, previousSequence: sequence - 1, sequence };
+      await this.pruneRows(normalizedScope,window,delta.deleted.filter(id=>rows[id]===undefined),window.cursor ?? snapshot.cursor,sequence,changes);
+      await this.writeRows(normalizedScope,window.entity,window.key,delta.upserts,window.cursor ?? snapshot.cursor,sequence,changes);
+      const metadataOnly = !reset && delta.upserts.length === 0 && delta.deleted.length === 0;
+      // Preserve the accepted row-free fast path without decoding a redundant
+      // window receipt. A rejected checkpoint instead needs the stored window.
+      const accepted = await this.writeWindows(normalizedScope,[window],sequence,metadataOnly ? undefined : changes);
+      if (metadataOnly && !accepted) {
+        const record = await this.database.windows.get([normalizedScope, window.signature]);
+        changes.windows[window.signature] = !record || record.deleted ? null : JSON.parse(record.value);
       }
+      await this.saveCursor(normalizedScope,snapshot.cursor);
+      exactMetadata = metadataOnly && accepted;
     });
-    this.channel?.postMessage({scope:normalizedScope});
-    return receipt;
+    return exactMetadata ? { scope: receipt.scope, previousSequence: receipt.previousSequence, sequence: receipt.sequence } : receipt;
   }
 
   async removeWindow(signature: string, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {

@@ -107,6 +107,22 @@ export type ReplicaMetadataCommit = {
  * sequence; an intervening peer commit still requires readChanges. */
 export type ReplicaStorageCommit = ReplicaMetadataCommit & { changes: ReplicaStorageChanges };
 
+/** Authoritative post-images captured in the write transaction and returned only
+ * after it commits. They correct this write, including unchanged rejected rows
+ * and windows. They neither certify a storage sequence nor skip peer catch-up. */
+export type ReplicaStoragePostImages = {
+  scope: ReplicaScope;
+  postImages: Pick<ReplicaStorageChanges, "entities" | "windows">;
+};
+
+/** Keys removed speculatively from RAM during a full window replacement.
+ * Storage uses them to correct a rejected replacement without loading a whole
+ * prior window's row payloads. Older adapters may ignore this optional context. */
+export type ReplicaWindowWriteContext = { removedIDs: readonly string[] };
+
+type ReplicaWriteReceipt = ReplicaMetadataCommit | ReplicaStorageCommit | ReplicaStoragePostImages;
+
+
 export type ReplicaWindowDelta = {
   upserts: ReplicaRow[];
   deleted: string[];
@@ -140,18 +156,18 @@ export interface LocalReplicaStorage {
   loadSession?(identityScope: string): Promise<LocalReplicaSession | undefined>;
   saveSession?(identityScope: string, session: LocalReplicaSession | undefined): Promise<void>;
   load(scope?: ReplicaScope): Promise<ReplicaSnapshot | undefined>;
-  applyTransaction(transaction: ReplicaTransaction, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void | ReplicaStorageCommit>;
+  applyTransaction(transaction: ReplicaTransaction, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void | ReplicaStorageCommit | ReplicaStoragePostImages>;
   /** Advance ready Replica Collection cursors without rewriting normalized rows. */
   advanceWatermark?(windows: readonly ReplicaWindow[], cursor: ReplicaCursor | undefined, scope?: ReplicaScope): Promise<void | ReplicaMetadataCommit>;
   /** Persist a normalized Query/Collection materialization atomically. */
   replaceSnapshot?(snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
-  replaceWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope?: ReplicaScope, projection?:readonly ReplicaRow[]): Promise<void>;
+  replaceWindow?(window: ReplicaWindow, snapshot: ReplicaSnapshot, scope?: ReplicaScope, projection?:readonly ReplicaRow[], context?: ReplicaWindowWriteContext): Promise<void | ReplicaStorageCommit | ReplicaStoragePostImages>;
   applyWindowDelta?(
     window: ReplicaWindow,
     delta: ReplicaWindowDelta,
     snapshot: ReplicaSnapshot,
     scope?: ReplicaScope,
-  ): Promise<void | ReplicaMetadataCommit | ReplicaStorageCommit>;
+  ): Promise<void | ReplicaWriteReceipt>;
   removeWindow?(signature: string, snapshot: ReplicaSnapshot, scope?: ReplicaScope): Promise<void>;
   clear?(scope?: ReplicaScope): Promise<void>;
 }
@@ -761,6 +777,13 @@ export class LocalReplica implements LocalReplicaView {
       ...this.residencyBudget,
     } : undefined);
     if (changes.sequence === this.storageSequence) return false;
+    this.mergeStoragePostImages(entities, windows, changes);
+    this.storageSequence = changes.sequence;
+    return true;
+  }
+
+  private mergeStoragePostImages(entities: Map<string, Map<string, ReplicaRow>>, windows: Map<string, ReplicaWindow>,
+    changes: Pick<ReplicaStorageChanges, "entities" | "windows" | "reset" | "removedMemberships">): void {
     if (changes.reset) {
       entities.clear();
       windows.clear();
@@ -805,8 +828,6 @@ export class LocalReplica implements LocalReplicaView {
       windows.set(signature, { ...window, ids: window.ids.filter(member => member !== id) });
       this.markWindowChanged(signature);
     }
-    this.storageSequence = changes.sequence;
-    return true;
   }
 
   freshness() {
@@ -1290,7 +1311,7 @@ export class LocalReplica implements LocalReplicaView {
     const membershipChanged = !sameWindowRowDefinition(previous, window);
     const rowsChanged = membershipChanged || changedRowIDs.size > 0;
     const writeScope = this.scopeValue;
-    let metadataCommit: void | ReplicaMetadataCommit | ReplicaStorageCommit = undefined;
+    let metadataCommit: void | ReplicaWriteReceipt = undefined;
     if (!epochChanged && this.storage?.applyWindowDelta && (delta || !rowsChanged)) {
       const writeDelta: ReplicaWindowDelta = delta ? {
         upserts: this.storage.supportsMembershipDeltas ? delta.upserts : delta.upserts.filter(row => changedRowIDs.has(String(row[input.key]))),
@@ -1301,7 +1322,7 @@ export class LocalReplica implements LocalReplicaView {
       } : {}) };
       metadataCommit = await this.persist(() => this.storage!.applyWindowDelta!(window, writeDelta, snapshot, writeScope));
     } else if (this.storage?.replaceWindow) {
-      await this.persist(() => this.storage!.replaceWindow!(window, snapshot, writeScope,input.rows));
+      metadataCommit = await this.persist(() => this.storage!.replaceWindow!(window, snapshot, writeScope,input.rows, { removedIDs: input.removedIDs ?? [] }));
     } else if (this.storage?.replaceSnapshot) {
       await this.persist(() => this.storage!.replaceSnapshot!(snapshot, writeScope));
     }
@@ -1309,12 +1330,20 @@ export class LocalReplica implements LocalReplicaView {
     // The adapter can prove that this metadata commit immediately follows our
     // last reconciled sequence. Our next maps already contain that exact write.
     // A peer write in between breaks the proof and retains normal catch-up.
-    if (!await this.acceptStorageCommit(metadataCommit, writeScope, nextEntities, nextQueries) && this.storage?.readChanges) {
+    const adjacentCommit = await this.acceptStorageCommit(metadataCommit, writeScope, nextEntities, nextQueries);
+    const correctedFloor = replicaTransactionFloor(this.cursorValue, nextQueries);
+    // Correct a rejected own window before catch-up. A peer's newer window
+    // is not evidence that this socket processed a newer feed revision.
+    const committedCursor = correctedFloor && nextCursor?.epoch === correctedFloor.epoch
+      ? { epoch: correctedFloor.epoch, revision: Math.min(nextCursor.revision, correctedFloor.revision) }
+      : correctedFloor;
+    if (!adjacentCommit && this.storage?.readChanges) {
       await this.mergeStoredChanges(nextEntities, nextQueries);
     }
     this.entities = nextEntities;
     this.liveQueries = nextQueries;
-    if(window.kind==='replica' && window.completeness==='complete' && !window.truncated && window.ids.every(id=>nextEntities.get(window.entity)?.has(id)))this.residentPartialTables.delete(window.entity);
+    const committedWindow = nextQueries.get(input.signature);
+    if(committedWindow?.kind==='replica' && committedWindow.completeness==='complete' && !committedWindow.truncated && committedWindow.ids.every(id=>nextEntities.get(committedWindow.entity)?.has(id)))this.residentPartialTables.delete(committedWindow.entity);
     if (changedRowIDs.size) {
       this.markEntityChanged(input.entity, changedRowIDs);
       const affected = new Set<string>();
@@ -1323,7 +1352,7 @@ export class LocalReplica implements LocalReplicaView {
     }
     this.markWindowChanged(input.signature, rowsChanged);
 
-    this.cursorValue = nextCursor;
+    this.cursorValue = committedCursor;
     if (input.source === "server") this.freshnessValue = "current";
     this.notify(true);
   }
@@ -1790,21 +1819,28 @@ export class LocalReplica implements LocalReplicaView {
     if (changed && notify) this.notify();
   }
 
-  private async acceptStorageCommit(receipt: void | ReplicaMetadataCommit | ReplicaStorageCommit, scope: ReplicaScope,
+  private async acceptStorageCommit(receipt: void | ReplicaWriteReceipt, scope: ReplicaScope,
     entities: Map<string, Map<string, ReplicaRow>>, windows: Map<string, ReplicaWindow>): Promise<boolean> {
-    const previous = this.storageSequence;
-    const adjacent = this.acceptMetadataCommit(receipt, scope);
-    if (receipt && 'changes' in receipt && receipt.scope === scope && scope === this.scopeValue
-      && Number.isSafeInteger(receipt.previousSequence) && receipt.previousSequence >= previous
-      && Number.isSafeInteger(receipt.sequence) && receipt.sequence === receipt.previousSequence + 1) {
-      // A rejected stale write may leave the disk row at an older sequence.
-      // Apply that authority correction before peer catch-up; later disk changes
-      // still win, and a gap must not advance our reconciled sequence.
-      this.storageSequence = previous;
-      await this.mergeStoredChanges(entities, windows, receipt.changes);
-      if (!adjacent) this.storageSequence = previous;
+    if (receipt && 'postImages' in receipt) {
+      if (receipt.scope !== scope || scope !== this.scopeValue) throw new Error("storage post-images have the wrong replica scope");
+      this.mergeStoragePostImages(entities, windows, receipt.postImages);
+      // These own-write corrections carry no peer ordering evidence.
+      return false;
     }
-    return adjacent;
+    const previous = this.storageSequence;
+    if (receipt && 'changes' in receipt) {
+      if (receipt.scope !== scope || scope !== this.scopeValue
+        || !Number.isSafeInteger(receipt.previousSequence) || receipt.previousSequence < previous
+        || !Number.isSafeInteger(receipt.sequence) || receipt.sequence !== receipt.previousSequence + 1
+        || receipt.changes.sequence !== receipt.sequence) throw new Error("invalid storage commit receipt");
+      const needsCatchUp = receipt.previousSequence !== previous || receipt.changes.reset === true;
+      if (needsCatchUp && !this.storage?.readChanges) throw new Error("storage commit requires peer catch-up");
+      // Apply unchanged rejects even if their durable modification sequence is
+      // old. A gap or reset still needs a consistent catch-up from our old floor.
+      this.mergeStoragePostImages(entities, windows, receipt.changes);
+      if (needsCatchUp) return false;
+    }
+    return this.acceptMetadataCommit(receipt, scope);
   }
 
   private acceptMetadataCommit(receipt: void | ReplicaMetadataCommit, scope: ReplicaScope): boolean {

@@ -5,6 +5,8 @@ import type {
   ReplicaRow,
   ReplicaSnapshot,
   ReplicaTransaction,
+  ReplicaStoragePostImages,
+  ReplicaWindowWriteContext,
 } from "@gonvex/client";
 import {
   pagedReplicaReadView,
@@ -454,8 +456,9 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     transaction: ReplicaTransaction,
     _snapshot: ReplicaSnapshot,
     scope: ReplicaScope = defaultReplicaScope,
-  ): Promise<void> {
+  ): Promise<ReplicaStoragePostImages> {
     await this.initialize();
+    const postImages: ReplicaStoragePostImages['postImages'] = { entities: Object.create(null), windows: Object.create(null) };
     await this.database.withTransactionAsync(async () => {
       const previous = await this.database.getFirstAsync<MetaRecord>(
         `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
@@ -490,8 +493,15 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         });
         grouped.set(change.entity, rows);
       }
-      for (const [entity, rows] of grouped)
-        await this.writeRecords(scope, entity, rows, transaction.cursor);
+      const attemptedDeletes = new Map<string, Set<string>>();
+      for (const [entity, rows] of grouped) {
+        postImages.entities[entity] = await this.writeRecords(scope, entity, rows, transaction.cursor);
+        for (const change of rows) if (change.row === null) {
+          let ids = attemptedDeletes.get(entity);
+          if (!ids) { ids = new Set(); attemptedDeletes.set(entity, ids); }
+          ids.add(change.id);
+        }
+      }
       for (const membership of transaction.memberships ?? []) {
         await this.database.runAsync(
           `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
@@ -500,6 +510,30 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
           membership.signature,
           JSON.stringify(membership),
         );
+      }
+      // Persist accepted entity-deletion membership changes. A newer window
+      // certificate, a rejected row delete, or an explicit membership override
+      // keeps its own final membership, which must also correct candidate RAM.
+      if (attemptedDeletes.size) {
+        const explicit = new Set((transaction.memberships ?? []).map(window => window.signature));
+        const records = await this.database.getAllAsync<QueryRecord>(
+          `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=?`, scope);
+        for (const record of records) {
+          let window: ReplicaWindow = JSON.parse(record.value);
+          const attempted = attemptedDeletes.get(window.entity);
+          if (!attempted || !window.ids.some(id => attempted.has(id))) continue;
+          if (!explicit.has(window.signature)
+            && !(window.cursor?.epoch === transaction.cursor.epoch && window.cursor.revision > transaction.cursor.revision)) {
+            const ids = window.ids.filter(id => !attempted.has(id) || postImages.entities[window.entity]?.[id] !== null);
+            if (ids.length !== window.ids.length) {
+              window = { ...window, ids };
+              await this.database.runAsync(
+                `UPDATE _gonvex_replica_queries SET value=? WHERE scope=? AND signature=?`,
+                JSON.stringify(window), scope, window.signature);
+            }
+          }
+          postImages.windows[window.signature] = window;
+        }
       }
       await this.database.runAsync(
         `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
@@ -510,6 +544,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         JSON.stringify(transaction.cursor),
       );
     });
+    return { scope, postImages };
   }
 
   async advanceWatermark(
@@ -600,7 +635,8 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     entity: string,
     rows: readonly { id: string; row: ReplicaRow | null }[],
     cursor?: ReplicaSnapshot["cursor"],
-  ) {
+  ): Promise<Record<string, ReplicaRow | null>> {
+    const resolved: Record<string, ReplicaRow | null> = Object.create(null);
     const previous = new Map(
       (
         await this.loadEntityRows(
@@ -646,6 +682,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
           ...mergeReplicaRecord({ row: old, authority: prior }, row, cursor),
         };
       });
+      for (const { id, row } of versions) resolved[id] = row;
       const params = versions.flatMap(({ id, row }) => [
         scope,
         entity,
@@ -666,6 +703,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
           ]),
         );
     }
+    return resolved;
   }
 
   async replaceWindow(
@@ -673,8 +711,10 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     snapshot: ReplicaSnapshot,
     scope: ReplicaScope = defaultReplicaScope,
     projection?: readonly ReplicaRow[],
-  ): Promise<void> {
+    context?: ReplicaWindowWriteContext,
+  ): Promise<ReplicaStoragePostImages> {
     await this.initialize();
+    const postImages: ReplicaStoragePostImages['postImages'] = { entities: Object.create(null), windows: Object.create(null) };
     await this.database.withTransactionAsync(async () => {
       const oldRecord = await this.database.getFirstAsync<QueryRecord>(
         `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?`,
@@ -689,14 +729,20 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         window.cursor &&
         oldWindow.cursor.epoch === window.cursor.epoch &&
         oldWindow.cursor.revision > window.cursor.revision
-      )
+      ) {
+        postImages.windows[window.signature] = oldWindow;
+        const ids = new Set([...window.ids, ...(context?.removedIDs ?? [])]);
+        const values = Object.fromEntries([...ids].map(id => [id, null as ReplicaRow | null]));
+        for (const { id, row } of await this.loadEntityRows(scope, window.entity, [...ids])) values[id] = row;
+        postImages.entities[window.entity] = values;
         return;
+      }
       const rows =
         projection ??
         window.ids
           .map((id) => snapshot.entities[window.entity]?.[id])
           .filter((row): row is ReplicaRow => row !== undefined);
-      await this.writeRecords(
+      postImages.entities[window.entity] = await this.writeRecords(
         scope,
         window.entity,
         rows.map((row) => ({ id: String(row[window.key]), row })),
@@ -709,6 +755,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         window.signature,
         JSON.stringify(normalizeWindow(window)),
       );
+      postImages.windows[window.signature] = normalizeWindow(window);
       const removed =
         oldWindow?.ids.filter((id) => !window.ids.includes(id)) ?? [];
       if (removed.length) {
@@ -722,7 +769,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
             return other.entity === window.entity ? other.ids : [];
           }),
         );
-        await this.writeRecords(
+        const pruned = await this.writeRecords(
           scope,
           window.entity,
           removed
@@ -730,6 +777,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
             .map((id) => ({ id, row: null })),
           window.cursor,
         );
+        Object.assign(postImages.entities[window.entity], pruned);
       }
       if (snapshot.cursor) {
         await this.database.runAsync(
@@ -742,6 +790,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         );
       }
     });
+    return { scope, postImages };
   }
 
   async applyWindowDelta(
@@ -749,8 +798,8 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     delta: { upserts: ReplicaRow[]; deleted: string[] },
     snapshot: ReplicaSnapshot,
     scope: ReplicaScope = defaultReplicaScope,
-  ): Promise<void> {
-    await this.replaceWindow(window, snapshot, scope, delta.upserts);
+  ): Promise<ReplicaStoragePostImages> {
+    return this.replaceWindow(window, snapshot, scope, delta.upserts, { removedIDs: delta.deleted });
   }
 
   async removeWindow(

@@ -79,6 +79,8 @@ export {
   type LocalReplicaStorage,
   type ReplicaStorageChanges,
   type ReplicaStorageCommit,
+  type ReplicaStoragePostImages,
+  type ReplicaWindowWriteContext,
   type ReplicaWindowDelta,
   type LocalReplicaSession,
   type LocalReplicaView,
