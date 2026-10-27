@@ -1,5 +1,6 @@
 import type {ReplicaCursor} from '@gonvex/protocol';
 import type {ReplicaRow} from './local-replica.js';
+import {canDeleteReplicaRow, canReplaceReplicaField, canResurrectReplicaRow, isReplicaRevision} from './revision-policy.js';
 
 /** Per-field authority is required because collections can project different
  * columns at different revisions, including when two tabs resume together. */
@@ -18,15 +19,16 @@ export function mergeReplicaRecord(
   incoming:ReplicaRow | null,
   cursor:ReplicaCursor,
 ): VersionedReplicaRecord {
+  if (!isReplicaRevision(cursor.revision)) throw new Error('replica row requires a nonnegative safe integer revision');
   const prior = previous?.authority.epoch === cursor.epoch ? previous : undefined;
   const priorAuthority = prior?.authority;
   if (incoming === null) {
     const newest = Math.max(priorAuthority?.deleted ?? -1, ...Object.values(priorAuthority?.fields ?? {}), -1);
-    if (cursor.revision < newest || (prior?.row === null && priorAuthority?.deleted === cursor.revision)) return prior!;
+    if (!canDeleteReplicaRow(cursor.revision, newest) || (prior?.row === null && priorAuthority?.deleted === cursor.revision)) return prior!;
     return {row:null,authority:{epoch:cursor.epoch,fields:{},deleted:cursor.revision}};
   }
   // A delayed snapshot must never resurrect a row deleted at a newer revision.
-  if (priorAuthority?.deleted !== undefined && cursor.revision <= priorAuthority.deleted) return prior!;
+  if (priorAuthority?.deleted !== undefined && !canResurrectReplicaRow(cursor.revision, priorAuthority.deleted)) return prior!;
   let authority = priorAuthority ?? {epoch:cursor.epoch,fields:{}};
   let row: ReplicaRow = prior?.row ?? {};
   let copiedRow = !prior?.row;
@@ -40,7 +42,8 @@ export function mergeReplicaRecord(
   };
   if (authority.deleted !== undefined) delete mutableAuthority().deleted;
   for (const column of Object.keys(incoming)) {
-    if (cursor.revision < (authority.fields[column] ?? -1)) continue;
+    const fieldRevision = Object.prototype.hasOwnProperty.call(authority.fields, column) ? authority.fields[column]! : -1;
+    if (!canReplaceReplicaField(cursor.revision, fieldRevision)) continue;
     const value = incoming[column];
     const before = row[column];
     const equal = Object.is(before,value) || (before !== null && value !== null && typeof before === 'object' && typeof value === 'object' && JSON.stringify(before) === JSON.stringify(value));
