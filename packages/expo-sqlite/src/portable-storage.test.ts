@@ -1,12 +1,21 @@
 import { afterEach, expect, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
+import type { LocalReplicaSession, ReplicaRow, ReplicaWindow } from "@gonvex/client";
+import { LocalReplica } from "../../client/src/local-replica.js";
 import {
   ExpoSQLiteLocalReplicaStorage,
   type ExpoSQLiteDatabase,
-} from "./index";
+} from "./index.js";
 
 const databases: DatabaseSync[] = [];
+const replicas: LocalReplica[] = [];
+function createReplica(...args: ConstructorParameters<typeof LocalReplica>) {
+  const replica = new LocalReplica(...args);
+  replicas.push(replica);
+  return replica;
+}
 afterEach(() => {
+  for (const replica of replicas.splice(0)) replica.dispose();
   for (const db of databases.splice(0)) db.close();
 });
 function fixture() {
@@ -21,11 +30,11 @@ function fixture() {
       queries.push({ sql, params });
       return db.prepare(sql).run(...(params as any[]));
     },
-    async getAllAsync<T>(sql, ...params) {
+    async getAllAsync<T>(sql: string, ...params: unknown[]) {
       queries.push({ sql, params });
       return db.prepare(sql).all(...(params as any[])) as T[];
     },
-    async getFirstAsync<T>(sql, ...params) {
+    async getFirstAsync<T>(sql: string, ...params: unknown[]) {
       queries.push({ sql, params });
       return (db.prepare(sql).get(...(params as any[])) as T) ?? null;
     },
@@ -40,7 +49,7 @@ function fixture() {
       }
     },
   };
-  return { storage: new ExpoSQLiteLocalReplicaStorage(adapter), queries };
+  return { storage: new ExpoSQLiteLocalReplicaStorage(adapter), queries, adapter };
 }
 
 it("loads a bounded working set and reads one cold row through the SQLite primary key", async () => {
@@ -360,4 +369,307 @@ it("clears one replica scope for a cache reset without touching the offline sess
   expect((await storage.load("visible"))?.entities.tasks?.t1).toBeUndefined();
   expect((await storage.load("other"))?.entities.tasks?.t2).toMatchObject({ name: "Other" });
   expect(await storage.loadSession(identity)).toMatchObject({ directive: { visibilityScope: "visible" } });
+});
+
+function completeWindow(
+  signature: string,
+  entity: string,
+  rows: ReplicaRow[],
+  cursor = { epoch: "e", revision: 1 },
+): ReplicaWindow {
+  return {
+    signature,
+    kind: "replica",
+    entity,
+    key: "_id",
+    ids: rows.map((row) => String(row._id)),
+    completeness: "complete",
+    source: "server",
+    cursor,
+  };
+}
+
+it.each(["rows", "bytes"] as const)(
+  "marks omitted live tables under a %s budget and retries LocalReplica scans on SQLite",
+  async (limit) => {
+    const { storage, queries } = fixture();
+    const row = (_id: string) => ({ _id, name: _id, note: "x".repeat(4096) });
+    const first = [row("first")];
+    const tasks = [row("a"), row("b"), row("c")];
+    const last = [row("last")];
+    const windows = [
+      completeWindow("first", "aardvark", first),
+      completeWindow("tasks", "tasks", tasks),
+      completeWindow("last", "zulu", last),
+    ];
+    await storage.replaceSnapshot(
+      {
+        cursor: { epoch: "e", revision: 1 },
+        entities: {
+          aardvark: Object.fromEntries(first.map((row) => [row._id, row])),
+          tasks: Object.fromEntries(tasks.map((row) => [row._id, row])),
+          zulu: Object.fromEntries(last.map((row) => [row._id, row])),
+        },
+        liveQueries: Object.fromEntries(windows.map((window) => [window.signature, window])),
+      },
+      "tenant",
+    );
+    await storage.applyTransaction(
+      {
+        cursor: { epoch: "e", revision: 2 },
+        changes: [{ entity: "tombstones", id: "deleted", operation: "delete" }],
+      },
+      { entities: {}, liveQueries: {} },
+      "tenant",
+    );
+    await storage.replaceSnapshot(
+      { entities: { otherOnly: { secret: row("secret") } }, liveQueries: {} },
+      "other",
+    );
+    const bytes = (row: ReplicaRow) => JSON.stringify(row).length * 2 + 256;
+    // The byte fixture admits two rows, then stops within the same SQL page.
+    // The row fixture stops before asking SQLite for the later tables.
+    const budget = limit === "rows"
+      ? { maxRows: 2, maxBytes: 1024 * 1024 }
+      : { maxRows: 10, maxBytes: bytes(first[0]) + bytes(tasks[0]) + Math.floor(bytes(tasks[1]) / 2) };
+    const snapshot = await storage.loadWorkingSet("tenant", budget);
+    expect(snapshot!.entities).toEqual({
+      aardvark: { first: first[0] },
+      tasks: { a: tasks[0] },
+    });
+    // Soft assertions let the baseline continue to the public scan checks.
+    expect.soft(snapshot!.residentPartialTables).toEqual(["tasks", "zulu"]);
+    expect(snapshot!.liveQueries.tasks.completeness).toBe("complete");
+    expect(snapshot!.liveQueries.last.completeness).toBe("complete");
+    expect.soft((await storage.loadWorkingSet("tenant", {
+      maxRows: 10,
+      maxBytes: 1024 * 1024,
+    }))!.residentPartialTables).toEqual([]);
+
+    const replica = createReplica(storage, {
+      maxResidentRows: budget.maxRows,
+      maxResidentBytes: budget.maxBytes,
+    });
+    await replica.activateScope("tenant");
+    expect(replica.entityRows("tasks").length).toBeLessThanOrEqual(1);
+    expect(replica.entityRows("zulu")).toEqual([]);
+    expect.soft(replica.entityCompleteness("tasks")).toBe("partial");
+    expect.soft(replica.entityCompleteness("zulu")).toBe("partial");
+    if (limit === "rows") expect(replica.entityCompleteness("aardvark")).toBe("complete");
+    const before = replica.snapshot().entities;
+    queries.length = 0;
+    for (const [table, expected] of [["tasks", tasks], ["zulu", last]] as const) {
+      let attempts = 0;
+      const selected = await replica.withReadView(
+        () => ({ [table]: { key: "_id", complete: true, columns: ["_id", "name", "note"] } }),
+        false,
+        async (view) => {
+          attempts++;
+          const result = await view.select({ table, columns: ["_id", "name", "note"] });
+          // As in the portable executor, incomplete coverage retries the whole
+          // read through LocalReplica's actual SQLite fallback.
+          if (!result.complete) {
+            const error = new Error("scan needs complete disk coverage");
+            error.name = "IncompleteReplicaError";
+            throw error;
+          }
+          return result;
+        },
+      );
+      expect.soft(attempts).toBe(2);
+      expect.soft(selected).toEqual({ rows: expected, complete: true });
+      expect.soft(queries.some(({ sql, params }) =>
+        sql.includes("entity = ? AND id > ?") && params[0] === "tenant" && params[1] === table,
+      )).toBe(true);
+    }
+    expect(replica.snapshot().entities).toEqual(before);
+    expect.soft(replica.entityCompleteness("tasks")).toBe("partial");
+    expect.soft(replica.entityCompleteness("zulu")).toBe("partial");
+  },
+);
+
+it.each([
+  { maxRows: 0, maxBytes: 1024 },
+  { maxRows: 10, maxBytes: 0 },
+  { maxRows: 10, maxBytes: 1 },
+])("keeps data-only scopes visible when no live row fits %j", async (budget) => {
+  const { storage } = fixture();
+  await storage.replaceSnapshot(
+    { entities: { tasks: { a: { _id: "a" } }, zulu: { z: { _id: "z" } } }, liveQueries: {} },
+    "tenant",
+  );
+  const snapshot = await storage.loadWorkingSet("tenant", budget);
+  expect(snapshot).toMatchObject({
+    entities: {},
+    liveQueries: {},
+    residentPartialTables: ["tasks", "zulu"],
+  });
+  expect(await storage.loadWorkingSet("empty", budget)).toBeUndefined();
+});
+
+it("resets all SQLite epoch state before a LocalReplica snapshot, cold hydrate, and new transaction", async () => {
+  const { storage, adapter } = fixture();
+  const replica = createReplica(storage);
+  await replica.activateScope("tenant");
+  const materialize = (signature: string, entity: string, rows: ReplicaRow[], epoch: string, revision: number) => {
+    const { ids: _ids, ...window } = completeWindow(signature, entity, rows, { epoch, revision });
+    return replica.replaceWindow({ ...window, rows });
+  };
+  await materialize("tasks", "tasks", [
+    { _id: "shared", name: "Old", oldOnly: "must disappear" },
+    { _id: "retired", name: "Retired" },
+  ], "old", 7);
+  await materialize("extra", "tasks", [{ _id: "orphan", name: "Orphan" }], "old", 7);
+  await materialize("statuses", "statuses", [{ _id: "s", name: "Old status" }], "old", 7);
+  await replica.applyTransaction({
+    cursor: { epoch: "old", revision: 8 },
+    changes: [{ entity: "archive", id: "gone", operation: "delete" }],
+  });
+  const session: LocalReplicaSession = {
+    directive: { protocolVersion: 1, scope: "tenant", visibilityScope: "tenant", epoch: "old" },
+    identity: {
+      auth: { account: { id: "account" } },
+      tenant: { id: "tenant" },
+      member: { id: "member", accountId: "account", permissions: {} },
+    },
+    artifactHash: "cached-artifact",
+  };
+  await storage.saveSession("identity", session);
+  await storage.saveSession("tenant", session);
+  await adapter.runAsync(
+    `INSERT INTO _gonvex_replica_meta (scope,key,value) VALUES (?, ?, ?)`,
+    "tenant", "invariant:test", JSON.stringify({ keep: true }),
+  );
+  const other = { _id: "other", name: "Other scope" };
+  const otherWindow = completeWindow("other", "tasks", [other], { epoch: "other", revision: 1 });
+  await storage.replaceWindow(otherWindow, { entities: {}, liveQueries: {}, cursor: otherWindow.cursor }, "other", [other]);
+  const beforeOther = await storage.load("other");
+
+  const shared = { _id: "shared", name: "Fresh" };
+  const fresh = { _id: "fresh", name: "New" };
+  await materialize("tasks", "tasks", [shared, fresh], "new", 1);
+  const expected = { tasks: { shared, fresh } };
+  expect(replica.snapshot().entities).toEqual(expected);
+  expect(replica.hasLiveQuery("statuses")).toBe(false);
+  expect(replica.hasLiveQuery("extra")).toBe(false);
+  const stored = (await storage.load("tenant"))!;
+  expect(stored.entities).toEqual(expected);
+  expect(Object.keys(stored.liveQueries)).toEqual(["tasks"]);
+  expect(stored.cursor).toEqual({ epoch: "new", revision: 1 });
+  // Reading the old window before reset would create fresh tombstones for its
+  // retired IDs. No old entity record or authority should survive that order.
+  const records = await adapter.getAllAsync<{ id: string; value: string }>(
+    `SELECT id,value FROM _gonvex_replica_entities WHERE scope=? ORDER BY id`, "tenant",
+  );
+  expect(records).toEqual([
+    { id: "fresh", value: JSON.stringify(fresh) },
+    { id: "shared", value: JSON.stringify(shared) },
+  ]);
+  const authorities = await adapter.getAllAsync<{ key: string; value: string }>(
+    `SELECT key,value FROM _gonvex_replica_meta WHERE scope=? AND key LIKE 'row:%' ORDER BY key`, "tenant",
+  );
+  expect(authorities.map(({ key }) => key)).toEqual([
+    'row:["tasks","fresh"]', 'row:["tasks","shared"]',
+  ]);
+  expect(authorities.map(({ value }) => JSON.parse(value))).toEqual([
+    { epoch: "new", fields: { _id: 1, name: 1 } },
+    { epoch: "new", fields: { _id: 1, name: 1 } },
+  ]);
+  expect(await adapter.getAllAsync(
+    `SELECT id FROM _gonvex_replica_lookup WHERE scope=? AND id IN ('retired','orphan','s','gone')`, "tenant",
+  )).toEqual([]);
+
+  replica.dispose();
+  const coldStorage = new ExpoSQLiteLocalReplicaStorage(adapter);
+  const cold = createReplica(coldStorage);
+  await cold.activateScope("tenant");
+  expect(cold.snapshot().entities).toEqual(expected);
+  expect(cold.windowRows("tasks")).toEqual([shared, fresh]);
+  expect(cold.hasLiveQuery("statuses")).toBe(false);
+  expect(cold.hasLiveQuery("extra")).toBe(false);
+  expect(cold.entityCompleteness("tasks")).toBe("complete");
+  await cold.applyTransaction({
+    cursor: { epoch: "new", revision: 2 },
+    changes: [{ entity: "tasks", id: "shared", operation: "update", newValue: { _id: "shared", name: "Updated" } }],
+  });
+  const updated = { tasks: { shared: { _id: "shared", name: "Updated" }, fresh } };
+  expect(cold.snapshot().entities).toEqual(updated);
+  expect((await coldStorage.load("tenant"))!.entities).toEqual(updated);
+  const again = createReplica(new ExpoSQLiteLocalReplicaStorage(adapter));
+  await again.activateScope("tenant");
+  expect(again.snapshot().entities).toEqual(updated);
+  expect(Object.keys(again.snapshot().liveQueries)).toEqual(["tasks"]);
+  expect(await coldStorage.loadSession("identity")).toEqual(session);
+  expect(await coldStorage.loadSession("tenant")).toEqual(session);
+  expect(await adapter.getFirstAsync(
+    `SELECT value FROM _gonvex_replica_meta WHERE scope=? AND key=?`, "tenant", "invariant:test",
+  )).toEqual({ value: JSON.stringify({ keep: true }) });
+  expect(await coldStorage.load("other")).toEqual(beforeOther);
+});
+
+it("rolls back an epoch snapshot reset with its entities, windows, authority, and cursor", async () => {
+  const { storage, adapter } = fixture();
+  const replica = createReplica(storage);
+  await replica.activateScope("tenant");
+  await replica.replaceWindow({
+    signature: "tasks", kind: "replica", entity: "tasks", key: "_id",
+    rows: [{ _id: "old", name: "Old" }], completeness: "complete", source: "server",
+    cursor: { epoch: "old", revision: 1 },
+  });
+  await replica.replaceWindow({
+    signature: "statuses", kind: "replica", entity: "statuses", key: "_id",
+    rows: [{ _id: "s", name: "Old status" }], completeness: "complete", source: "server",
+    cursor: { epoch: "old", revision: 1 },
+  });
+  const before = replica.snapshot();
+  const beforeDisk = await storage.load("tenant");
+  const readAuthorities = () => adapter.getAllAsync(
+    `SELECT key,value FROM _gonvex_replica_meta WHERE scope=? AND key LIKE 'row:%' ORDER BY key`, "tenant",
+  );
+  const beforeAuthority = await readAuthorities();
+  const run = adapter.runAsync;
+  let fail = true;
+  adapter.runAsync = async (sql, ...params) => {
+    if (fail && sql.includes("VALUES (?, 'cursor', ?)")) {
+      fail = false;
+      throw new Error("interrupted epoch snapshot");
+    }
+    return run(sql, ...params);
+  };
+  await expect(replica.replaceWindow({
+    signature: "tasks", kind: "replica", entity: "tasks", key: "_id",
+    rows: [{ _id: "new", name: "Fresh" }], completeness: "complete", source: "server",
+    cursor: { epoch: "new", revision: 1 },
+  })).rejects.toThrow("interrupted epoch snapshot");
+  expect(replica.snapshot()).toEqual(before);
+  expect(await storage.load("tenant")).toEqual(beforeDisk);
+  expect(await readAuthorities()).toEqual(beforeAuthority);
+  const cold = createReplica(new ExpoSQLiteLocalReplicaStorage(adapter));
+  await cold.activateScope("tenant");
+  expect(cold.snapshot().entities).toEqual(before.entities);
+  expect(cold.windowRows("statuses")).toEqual([{ _id: "s", name: "Old status" }]);
+});
+
+it("checkpoints a window-only epoch without treating its collection revision as a global floor", async () => {
+  const { storage, adapter } = fixture();
+  const empty = { entities: {}, liveQueries: {} };
+  await storage.applyTransaction({ cursor: { epoch: "old", revision: 20 }, changes: [] }, empty, "tenant");
+  const put = async (signature: string, revision: number) => {
+    const row = { _id: signature, name: signature };
+    await storage.replaceWindow(completeWindow(signature, "tasks", [row], { epoch: "new", revision }), empty, "tenant", [row]);
+  };
+  await put("a", 10);
+  expect.soft((await storage.load("tenant"))!.cursor).toEqual({ epoch: "new", revision: 0 });
+  await put("b", 12);
+  expect.soft(Object.keys((await storage.load("tenant"))!.entities.tasks)).toEqual(["a", "b"]);
+  await storage.applyTransaction({ cursor: { epoch: "new", revision: 1 }, changes: [] }, empty, "tenant");
+  await put("c", 15);
+  const loaded = (await storage.load("tenant"))!;
+  expect(loaded.cursor).toEqual({ epoch: "new", revision: 1 });
+  expect(loaded.entities.tasks).toEqual({ a: { _id: "a", name: "a" }, b: { _id: "b", name: "b" }, c: { _id: "c", name: "c" } });
+  const cold = createReplica(new ExpoSQLiteLocalReplicaStorage(adapter));
+  await cold.activateScope("tenant");
+  expect(cold.snapshot().cursor).toEqual({ epoch: "new", revision: 1 });
+  expect(Object.keys(cold.snapshot().liveQueries)).toEqual(["a", "b", "c"]);
+  expect(cold.snapshot().entities.tasks).toEqual(loaded.entities.tasks);
 });

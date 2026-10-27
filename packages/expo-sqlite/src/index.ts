@@ -232,6 +232,15 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         `SELECT scope, signature, value FROM _gonvex_replica_queries WHERE scope = ? ORDER BY signature`,
         scope,
       );
+      // Count live rows for every table in this read transaction. Looking
+      // only at the loaded page misses tables entirely beyond either budget.
+      const liveCounts = await this.database.getAllAsync<{
+        entity: string;
+        count: number;
+      }>(
+        `SELECT entity, COUNT(*) AS count FROM _gonvex_replica_entities WHERE scope = ? AND value <> 'null' GROUP BY entity ORDER BY entity`,
+        scope,
+      );
       const entities: ReplicaSnapshot["entities"] = {};
       let count = 0,
         bytes = 0,
@@ -265,10 +274,15 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         afterEntity = last.entity;
         afterId = last.id;
       }
-      if (cursor || queries.length || count)
+      if (cursor || queries.length || liveCounts.length)
         snapshot = {
           cursor: cursor ? JSON.parse(cursor.value) : undefined,
           entities,
+          residentPartialTables: liveCounts
+            .filter(({ entity, count }) =>
+              count > Object.keys(entities[entity] ?? {}).length,
+            )
+            .map(({ entity }) => entity),
           liveQueries: Object.fromEntries(
             queries.map((row) => [
               row.signature,
@@ -452,6 +466,33 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
       );
   }
 
+  // The caller must hold the SQLite write transaction. Reset epoch-bound
+  // state before reading an old window or merging projected row fields.
+  private async resetForEpoch(
+    scope: ReplicaScope,
+    cursor: ReplicaSnapshot["cursor"],
+  ): Promise<void> {
+    if (!cursor) return;
+    const previous = await this.database.getFirstAsync<MetaRecord>(
+      `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
+      scope,
+    );
+    if (previous && JSON.parse(previous.value).epoch !== cursor.epoch) {
+      await this.database.runAsync(
+        `DELETE FROM _gonvex_replica_meta WHERE scope = ? AND key LIKE 'row:%'`,
+        scope,
+      );
+      await this.database.runAsync(
+        `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
+        scope,
+      );
+      await this.database.runAsync(
+        `DELETE FROM _gonvex_replica_queries WHERE scope = ?`,
+        scope,
+      );
+    }
+  }
+
   async applyTransaction(
     transaction: ReplicaTransaction,
     _snapshot: ReplicaSnapshot,
@@ -460,27 +501,7 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     await this.initialize();
     const postImages: ReplicaStoragePostImages['postImages'] = { entities: Object.create(null), windows: Object.create(null) };
     await this.database.withTransactionAsync(async () => {
-      const previous = await this.database.getFirstAsync<MetaRecord>(
-        `SELECT scope, key, value FROM _gonvex_replica_meta WHERE scope = ? AND key = 'cursor'`,
-        scope,
-      );
-      if (
-        previous &&
-        JSON.parse(previous.value).epoch !== transaction.cursor.epoch
-      ) {
-        await this.database.runAsync(
-          `DELETE FROM _gonvex_replica_meta WHERE scope = ? AND key LIKE 'row:%'`,
-          scope,
-        );
-        await this.database.runAsync(
-          `DELETE FROM _gonvex_replica_entities WHERE scope = ?`,
-          scope,
-        );
-        await this.database.runAsync(
-          `DELETE FROM _gonvex_replica_queries WHERE scope = ?`,
-          scope,
-        );
-      }
+      await this.resetForEpoch(scope, transaction.cursor);
       const grouped = new Map<
         string,
         Array<{ id: string; row: ReplicaRow | null }>
@@ -716,6 +737,12 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
     await this.initialize();
     const postImages: ReplicaStoragePostImages['postImages'] = { entities: Object.create(null), windows: Object.create(null) };
     await this.database.withTransactionAsync(async () => {
+      // A collection cursor proves its epoch, not a global feed floor. When
+      // no snapshot floor is supplied, checkpoint only that epoch at zero.
+      // The monotone upsert below preserves an existing same-epoch floor.
+      const checkpoint = snapshot.cursor ?? (window.cursor
+        ? { epoch: window.cursor.epoch, revision: 0 } : undefined);
+      await this.resetForEpoch(scope, checkpoint);
       const oldRecord = await this.database.getFirstAsync<QueryRecord>(
         `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?`,
         scope,
@@ -779,14 +806,14 @@ export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
         );
         Object.assign(postImages.entities[window.entity], pruned);
       }
-      if (snapshot.cursor) {
+      if (checkpoint) {
         await this.database.runAsync(
           `INSERT INTO _gonvex_replica_meta (scope, key, value) VALUES (?, 'cursor', ?)
            ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value
            WHERE json_extract(_gonvex_replica_meta.value, '$.epoch') <> json_extract(excluded.value, '$.epoch')
               OR json_extract(_gonvex_replica_meta.value, '$.revision') <= json_extract(excluded.value, '$.revision')`,
           scope,
-          JSON.stringify(snapshot.cursor),
+          JSON.stringify(checkpoint),
         );
       }
     });
