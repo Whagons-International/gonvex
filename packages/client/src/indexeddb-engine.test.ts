@@ -205,7 +205,8 @@ it.each(['delta', 'replacement'] as const)('does not prune rows for a rejected s
   const snapshot = { ...empty, cursor: stale.cursor };
   if (method === 'delta') {
     const receipt = await storage.applyWindowDelta(stale, { upserts: [], deleted: ['a'] }, snapshot);
-    expect(receipt.changes.entities).toEqual({});
+    // No row is rewritten, but RAM still needs its unchanged committed value.
+    expect(receipt.changes.entities).toEqual({ tasks: { a: before.entities.tasks.a } });
     expect(receipt.changes.windows.tasks).toEqual(current);
   } else {
     await storage.replaceWindow(stale, snapshot);
