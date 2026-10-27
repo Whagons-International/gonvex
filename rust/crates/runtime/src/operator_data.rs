@@ -192,12 +192,15 @@ async fn data_pool(
         .map_err(|cause| error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()))
 }
 
-async fn columns(pool: &PgPool, table: &str) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar::<_, String>(
+async fn columns(
+    pools: &gonvex_postgres::PoolRegistry,
+    pool: &PgPool,
+    table: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    gonvex_postgres::pool_query!(pools, pool, sqlx::query_scalar::<_, String>(
         "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 ORDER BY ordinal_position",
     )
-    .bind(table)
-    .fetch_all(pool)
+    .bind(table), fetch_all)
     .await
 }
 
@@ -221,8 +224,11 @@ async fn list_tables(
     };
     // Catalog statistics avoid one full-table COUNT and column query per table.
     // Exact counts belong to the selected, filtered row page, not navigation.
-    let rows = match sqlx::query(
-        r#"SELECT c.relname AS name,
+    let rows = match gonvex_postgres::pool_query!(
+        &runtime.inner.pools,
+        &pool,
+        sqlx::query(
+            r#"SELECT c.relname AS name,
                   GREATEST(c.reltuples, 0)::bigint AS row_count,
                   array_agg(a.attname::text ORDER BY a.attnum) AS columns
            FROM pg_class c
@@ -230,8 +236,9 @@ async fn list_tables(
            JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped
            WHERE n.nspname=current_schema() AND c.relkind IN ('r','p')
            GROUP BY c.oid,c.relname,c.reltuples ORDER BY c.relname"#,
+        ),
+        fetch_all
     )
-    .fetch_all(&pool)
     .await
     {
         Ok(rows) => rows,
@@ -460,7 +467,7 @@ async fn read_rows(
         Ok(admission) => admission,
         Err(response) => return response,
     };
-    let all = match columns(&pool, &table).await {
+    let all = match columns(&runtime.inner.pools, &pool, &table).await {
         Ok(columns) if !columns.is_empty() => columns,
         Ok(_) => return error(StatusCode::BAD_REQUEST, "table does not exist"),
         Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
@@ -486,7 +493,14 @@ async fn read_rows(
         if let Err(message) = append_where(&mut count, &all_set, &query.search, &filters) {
             return error(StatusCode::BAD_REQUEST, message);
         }
-        match count.build_query_scalar::<i64>().fetch_one(&pool).await {
+        match gonvex_postgres::pool_query!(
+            &runtime.inner.pools,
+            &pool,
+            count.build_query_scalar::<i64>(),
+            fetch_one
+        )
+        .await
+        {
             Ok(total) => total,
             Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
         }
@@ -540,17 +554,20 @@ async fn read_rows(
         .push_bind(limit)
         .push(" OFFSET ")
         .push_bind(offset);
-    let result = match rows.build().fetch_all(&pool).await {
-        Ok(rows) => rows
-            .into_iter()
-            .filter_map(|row| {
-                row.try_get::<SqlJson<Value>, _>("row")
-                    .ok()
-                    .map(|value| value.0)
-            })
-            .collect::<Vec<_>>(),
-        Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
-    };
+    let result =
+        match gonvex_postgres::pool_query!(&runtime.inner.pools, &pool, rows.build(), fetch_all)
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    row.try_get::<SqlJson<Value>, _>("row")
+                        .ok()
+                        .map(|value| value.0)
+                })
+                .collect::<Vec<_>>(),
+            Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
+        };
     let inferred_total = if exact_total {
         total
     } else {
@@ -597,7 +614,7 @@ async fn insert_row(
         Ok(admission) => admission,
         Err(response) => return response,
     };
-    let all = match columns(&pool, &table).await {
+    let all = match columns(&runtime.inner.pools, &pool, &table).await {
         Ok(columns) if !columns.is_empty() => columns,
         _ => return error(StatusCode::BAD_REQUEST, "table does not exist"),
     };
@@ -624,10 +641,13 @@ async fn insert_row(
         "INSERT INTO {quoted_table} ({}) SELECT {} FROM jsonb_populate_record(NULL::{quoted_table},$1::jsonb) r RETURNING to_jsonb({quoted_table}.*) AS row",
         quoted_names.join(","), select_names.join(",")
     );
-    match sqlx::query(&sql)
-        .bind(SqlJson(payload))
-        .fetch_optional(&pool)
-        .await
+    match gonvex_postgres::pool_query!(
+        &runtime.inner.pools,
+        &pool,
+        sqlx::query(&sql).bind(SqlJson(payload)),
+        fetch_optional
+    )
+    .await
     {
         Ok(Some(row)) => match row.try_get::<SqlJson<Value>, _>("row") {
             Ok(row) => (
@@ -683,7 +703,7 @@ async fn update_row(
         Ok(admission) => admission,
         Err(response) => return response,
     };
-    let all = match columns(&pool, &table).await {
+    let all = match columns(&runtime.inner.pools, &pool, &table).await {
         Ok(columns) if !columns.is_empty() => columns,
         _ => return error(StatusCode::BAD_REQUEST, "table does not exist"),
     };
@@ -719,7 +739,16 @@ async fn update_row(
         "UPDATE {quoted_table} t SET {} FROM jsonb_populate_record(NULL::{quoted_table},$1::jsonb) r WHERE t.{}::text=$2 RETURNING to_jsonb(t.*) AS row",
         assignments.join(","), quote_ident(id_column).expect("validated id")
     );
-    changed_row(&pool, &table, &sql, payload, &row_id, "update").await
+    changed_row(
+        &runtime.inner.pools,
+        &pool,
+        &table,
+        &sql,
+        payload,
+        &row_id,
+        "update",
+    )
+    .await
 }
 
 async fn delete_row(
@@ -747,7 +776,7 @@ async fn delete_row(
         Ok(admission) => admission,
         Err(response) => return response,
     };
-    let all = match columns(&pool, &table).await {
+    let all = match columns(&runtime.inner.pools, &pool, &table).await {
         Ok(columns) => columns,
         Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
     };
@@ -766,7 +795,14 @@ async fn delete_row(
         "DELETE FROM {quoted_table} WHERE {}::text=$1 RETURNING to_jsonb({quoted_table}.*) AS row",
         quote_ident(id_column).expect("validated id")
     );
-    match sqlx::query(&sql).bind(&row_id).fetch_optional(&pool).await {
+    match gonvex_postgres::pool_query!(
+        &runtime.inner.pools,
+        &pool,
+        sqlx::query(&sql).bind(&row_id),
+        fetch_optional
+    )
+    .await
+    {
         Ok(Some(row)) => match row.try_get::<SqlJson<Value>, _>("row") {
             Ok(row) => Json(json!({"table":table,"row":row.0})).into_response(),
             Err(cause) => error(StatusCode::BAD_REQUEST, cause.to_string()),
@@ -777,6 +813,7 @@ async fn delete_row(
 }
 
 async fn changed_row(
+    pools: &gonvex_postgres::PoolRegistry,
     pool: &PgPool,
     table: &str,
     sql: &str,
@@ -784,11 +821,13 @@ async fn changed_row(
     row_id: &str,
     action: &str,
 ) -> Response {
-    match sqlx::query(sql)
-        .bind(SqlJson(payload))
-        .bind(row_id)
-        .fetch_optional(pool)
-        .await
+    match gonvex_postgres::pool_query!(
+        pools,
+        pool,
+        sqlx::query(sql).bind(SqlJson(payload)).bind(row_id),
+        fetch_optional
+    )
+    .await
     {
         Ok(Some(row)) => match row.try_get::<SqlJson<Value>, _>("row") {
             Ok(row) => Json(json!({"table":table,"row":row.0})).into_response(),
@@ -856,7 +895,7 @@ async fn replace_references(
         Ok(admission) => admission,
         Err(response) => return response,
     };
-    let mut transaction = match pool.begin().await {
+    let mut transaction = match runtime.inner.pools.begin(&pool).await {
         Ok(transaction) => transaction,
         Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
     };
