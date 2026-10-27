@@ -39,5 +39,5 @@ for (const Storage of [IndexedDBLocalReplicaStorage, IndexedDBEngineReplicaStora
         });
       },
     };
-  }, { reopen: true, rollback: true });
+  }, { reopen: true, rollback: true, versionedRows: true });
 }

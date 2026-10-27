@@ -6,6 +6,7 @@ import type {ReplicaRow} from './local-replica.js';
 export type ReplicaRecordVersion = {
   epoch:string;
   fields:Record<string,number>;
+  /** Last valid deletion also fences projections from an earlier row lifetime. */
   deleted?:number;
 };
 export type VersionedReplicaRecord = {
@@ -38,7 +39,10 @@ export function mergeReplicaRecord(
     }
     return authority;
   };
-  if (authority.deleted !== undefined) delete mutableAuthority().deleted;
+  // Keep a valid deletion fence even after a narrow projection recreates the
+  // row. Otherwise a delayed old projection can fill its missing old fields.
+  // Legacy invalid authority must retain the previous recovery behavior.
+  if (authority.deleted !== undefined && (!Number.isSafeInteger(authority.deleted) || authority.deleted < 0)) delete mutableAuthority().deleted;
   for (const column of Object.keys(incoming)) {
     if (cursor.revision < (authority.fields[column] ?? -1)) continue;
     const value = incoming[column];
@@ -46,10 +50,17 @@ export function mergeReplicaRecord(
     const equal = Object.is(before,value) || (before !== null && value !== null && typeof before === 'object' && typeof value === 'object' && JSON.stringify(before) === JSON.stringify(value));
     if (!equal || !Object.prototype.hasOwnProperty.call(row,column)) {
       if (!copiedRow) { row = {...row}; copiedRow = true; }
-      row[column] = value;
+      setOwnField(row, column, value);
     }
-    if (authority.fields[column] !== cursor.revision) mutableAuthority().fields[column] = cursor.revision;
+    if (authority.fields[column] !== cursor.revision) setOwnField(mutableAuthority().fields, column, cursor.revision);
   }
   if (prior && !copiedRow && !copiedAuthority) return prior;
   return {row,authority};
+}
+
+/** Assignment to __proto__ on a plain object invokes its inherited setter.
+ * Rows and authority dictionaries must preserve that JSON key as ordinary data. */
+function setOwnField<T>(target: Record<string, T>, key: string, value: T): void {
+  if (key === '__proto__') Object.defineProperty(target, key, {value, enumerable: true, writable: true, configurable: true});
+  else target[key] = value;
 }

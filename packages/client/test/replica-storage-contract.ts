@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { LocalReplicaStorage, ReplicaSnapshot, ReplicaTransaction } from '../src/local-replica.js';
+import type { LocalReplicaStorage, ReplicaRow, ReplicaSnapshot, ReplicaTransaction } from '../src/local-replica.js';
 
 export type StorageFixture = {
   storage: LocalReplicaStorage;
@@ -23,7 +23,7 @@ const logical = (value: ReplicaSnapshot | undefined) => value && ({
 /** Shared executable contract. A replacement adapter should run this same suite.
  * The snapshot argument is the already resolved post-image supplied by LocalReplica.
  * Commit sequence receipts are adapter-specific and excluded from logical equality. */
-export function replicaStorageContract(name: string, create: () => StorageFixture, options: { reopen?: boolean; rollback?: boolean } = {}) {
+export function replicaStorageContract(name: string, create: () => StorageFixture, options: { reopen?: boolean; rollback?: boolean; versionedRows?: boolean } = {}) {
   describe(name, () => {
     let fixture: StorageFixture;
     beforeEach(() => { fixture = create(); });
@@ -79,6 +79,55 @@ export function replicaStorageContract(name: string, create: () => StorageFixtur
       loaded!.liveQueries.tasks.ids.length = 0;
       expect(logical(await fixture.storage.load('tenant'))).toEqual(snapshot(1, 'original'));
     });
+
+    if (options.versionedRows) {
+      it('retains the deletion barrier after reopening a recreated projected row', async () => {
+        const state = (revision: number, row?: ReplicaRow): ReplicaSnapshot => ({
+          cursor: cursor(revision), entities: row ? {tasks: {a: row}} : {}, liveQueries: {},
+        });
+        const old = {id: 'a', obsolete: 'old lifetime'};
+        const fresh = {id: 'a', status: 'new lifetime'};
+        await fixture.storage.applyTransaction({cursor: cursor(1), changes: [
+          {entity: 'tasks', id: 'a', operation: 'insert', newValue: old},
+        ]}, state(1, old), 'tenant');
+        await fixture.storage.applyTransaction({cursor: cursor(2), changes: [
+          {entity: 'tasks', id: 'a', operation: 'delete'},
+        ]}, state(2), 'tenant');
+        await fixture.storage.applyTransaction({cursor: cursor(3), changes: [
+          {entity: 'tasks', id: 'a', operation: 'insert', newValue: fresh},
+        ]}, state(3, fresh), 'tenant');
+        if (fixture.reopen) fixture.storage = fixture.reopen();
+        await fixture.storage.applyTransaction({cursor: cursor(1), changes: [
+          {entity: 'tasks', id: 'a', operation: 'update', newValue: old},
+        ]}, state(3, fresh), 'tenant');
+        expect((await fixture.storage.load('tenant'))?.entities.tasks.a).toEqual(fresh);
+      });
+
+      it('round-trips a __proto__ column and rejects its stale persisted overwrite', async () => {
+        const row = JSON.parse('{"id":"a","__proto__":{"label":"new"}}');
+        const after: ReplicaSnapshot = {cursor: cursor(3), entities: {tasks: {a: row}}, liveQueries: {}};
+        await fixture.storage.applyTransaction({cursor: cursor(1), changes: [
+          {entity: 'tasks', id: 'a', operation: 'insert', newValue: {id: 'a'}},
+        ]}, {cursor: cursor(1), entities: {tasks: {a: {id: 'a'}}}, liveQueries: {}}, 'tenant');
+        await fixture.storage.applyTransaction({cursor: cursor(3), changes: [
+          {entity: 'tasks', id: 'a', operation: 'update', newValue: JSON.parse('{"__proto__":{"label":"new"}}')},
+        ]}, after, 'tenant');
+        if (fixture.reopen) fixture.storage = fixture.reopen();
+        const loaded = (await fixture.storage.load('tenant'))!.entities.tasks.a;
+        expect(Object.prototype.hasOwnProperty.call(loaded, '__proto__')).toBe(true);
+        expect(Object.getPrototypeOf(loaded)).toBe(Object.prototype);
+        expect(loaded).toEqual(row);
+        await fixture.storage.applyTransaction({cursor: cursor(2), changes: [
+          {entity: 'tasks', id: 'a', operation: 'update', newValue: JSON.parse('{"__proto__":{"label":"old"}}')},
+        ]}, after, 'tenant');
+        expect((await fixture.storage.load('tenant'))!.entities.tasks.a).toEqual(row);
+        // The special column must also participate in newest-revision deletion admission.
+        await fixture.storage.applyTransaction({cursor: cursor(2), changes: [
+          {entity: 'tasks', id: 'a', operation: 'delete'},
+        ]}, after, 'tenant');
+        expect((await fixture.storage.load('tenant'))!.entities.tasks.a).toEqual(row);
+      });
+    }
 
     if (options.reopen) it('loads the complete committed state through a new adapter instance', async () => {
       await fixture.storage.replaceSnapshot!(snapshot(1, 'committed'), 'tenant');
