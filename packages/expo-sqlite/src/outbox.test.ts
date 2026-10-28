@@ -195,3 +195,19 @@ it('atomically replaces only unsent overwrites and rolls back a failed replaceme
   const later = await outbox.enqueue({ ...draft, args: { value: 4 } });
   expect(later.id).not.toBe(latest.id);
 });
+
+it("does not revive committed intents during delivery recovery, including after SQLite restart", async () => {
+  const { adapter } = sqlite();
+  const outbox = createReducerOutbox({ store: new ExpoSQLiteOutboxStore(adapter) });
+  const committed = await outbox.enqueue({ scope, path: "tasks.save", args: {}, idempotencyKey: "accepted" });
+  await outbox.markCommitted(committed.id);
+  await outbox.markPending(committed.id);
+  expect(await outbox.markInflight(committed.id)).toBe(false);
+  const pending = await outbox.enqueue({ scope, path: "tasks.save", args: {}, idempotencyKey: "pending" });
+  expect((await outbox.markInflightMany!([committed.id, pending.id, pending.id])).map(entry => entry.id)).toEqual([pending.id]);
+  const restored = createReducerOutbox({ store: new ExpoSQLiteOutboxStore(adapter) });
+  expect(await restored.loadAll(scope)).toMatchObject([
+    { id: committed.id, idempotencyKey: "accepted", state: "committed" },
+    { id: pending.id, idempotencyKey: "pending", state: "pending" },
+  ]);
+});

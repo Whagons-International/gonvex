@@ -78,10 +78,18 @@ jobs:
           node verification/typescript/verify-revisions.mjs \
             --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
             --output "$RUNNER_TEMP/sdk-revision-proof"
+      - name: Prove delivery state invariants and reject broken transitions
+        run: |
+          node --test verification/typescript/verify-outbox.test.mjs
+          node verification/typescript/verify-outbox.mjs \
+            --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
+            --output "$RUNNER_TEMP/sdk-delivery-proof"
       - name: Retain SDK source and solver receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sdk-revision-proof
-          path: ${{ runner.temp }}/sdk-revision-proof
+          path: |
+            ${{ runner.temp }}/sdk-revision-proof
+            ${{ runner.temp }}/sdk-delivery-proof
           if-no-files-found: ignore
