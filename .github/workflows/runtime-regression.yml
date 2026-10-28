@@ -65,6 +65,12 @@ jobs:
       # Some script contracts import built package output (packages/*/dist).
       - name: Validate repository script contracts
         run: node --test scripts/*.test.mjs
+      - name: Test PostgreSQL stall recorder against a real lock
+        run: |
+          test -n "$GONVEX_STALL_TEST_CONTAINER"
+          python3 scripts/postgres-stall-recorder.test.py -v
+        env:
+          GONVEX_STALL_TEST_CONTAINER: ${{ job.services.postgres.id }}
       - name: Test JavaScript workspace
         run: pnpm -r test
       - name: Type-check JavaScript workspace
