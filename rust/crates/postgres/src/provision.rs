@@ -10,7 +10,7 @@ use sqlx::Row;
 use url::Url;
 
 use super::sql_script::split_statements;
-use super::{ControlPlane, DatabaseError, TenantRoute};
+use super::{ControlPlane, DatabaseError, PoolRegistry, TenantRoute};
 
 fn project_key(project_id: &str) -> String {
     let mut secret = [0_u8; 32];
@@ -73,7 +73,7 @@ impl SqlMigration {
 impl ControlPlane {
     pub(crate) async fn prepare_identity_schema_upgrade(&self) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit().await?;
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pools.begin(&self.pool).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gonvex:identity-schema-upgrade'))")
             .execute(&mut *transaction)
             .await?;
@@ -147,7 +147,7 @@ impl ControlPlane {
 
     pub(crate) async fn ensure_control_schema(&self) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit().await?;
-        execute_script_pool(&self.pool, include_str!("control_schema.sql")).await
+        execute_script_pool(&self.pools, &self.pool, include_str!("control_schema.sql")).await
     }
 
     pub async fn create_database(
@@ -168,9 +168,13 @@ impl ControlPlane {
         maintenance_url.set_path("/postgres");
         let pool = self.pools.pool(maintenance_url.as_str()).await?;
         let _admission = self.pools.admit().await?;
-        let owner: String = sqlx::query_scalar("SELECT current_user")
-            .fetch_one(&pool)
-            .await?;
+        let owner: String = crate::pool_query!(
+            &self.pools,
+            &pool,
+            sqlx::query_scalar("SELECT current_user"),
+            fetch_one
+        )
+        .await?;
         if !owner
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -178,7 +182,9 @@ impl ControlPlane {
             return Err(sqlx::Error::Protocol("invalid database owner".to_owned()).into());
         }
         let statement = format!("CREATE DATABASE \"{database_name}\" OWNER \"{owner}\"");
-        if let Err(error) = sqlx::query(&statement).execute(&pool).await {
+        if let Err(error) =
+            crate::pool_query!(&self.pools, &pool, sqlx::query(&statement), execute).await
+        {
             if error
                 .as_database_error()
                 .and_then(|error| error.code())
@@ -376,12 +382,11 @@ impl ControlPlane {
         let maintenance = self.pools.pool(maintenance_url.as_str()).await?;
         for (name, url) in &databases {
             self.pools.close_database(url).await;
-            sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()")
-                .bind(name)
-                .execute(&maintenance)
+            crate::pool_query!(&self.pools, &maintenance, sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()")
+                .bind(name), execute)
                 .await?;
             let statement = format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)");
-            sqlx::query(&statement).execute(&maintenance).await?;
+            crate::pool_query!(&self.pools, &maintenance, sqlx::query(&statement), execute).await?;
         }
         let mut finish = self.begin_control_transaction(false).await?;
         sqlx::query("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'")
@@ -534,12 +539,11 @@ impl ControlPlane {
         tenant_id: &str,
     ) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit().await?;
-        sqlx::query(
+        crate::pool_query!(&self.pools, &self.pool, sqlx::query(
             "UPDATE gonvex_runtime_tenants SET provisioned=TRUE,updated_at=now() WHERE project_id=$1 AND tenant_id=$2",
         )
         .bind(project_id)
-        .bind(tenant_id)
-        .execute(&self.pool)
+        .bind(tenant_id), execute)
         .await?;
         Ok(())
     }
@@ -603,16 +607,19 @@ impl ControlPlane {
         maintenance_url.set_path("/postgres");
         let maintenance = self.pools.pool(maintenance_url.as_str()).await?;
         self.pools.close_database(&database_url).await;
-        sqlx::query(
+        crate::pool_query!(&self.pools, &maintenance, sqlx::query(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()",
         )
-        .bind(&database_name)
-        .execute(&maintenance)
+        .bind(&database_name), execute)
         .await?;
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)"
-        ))
-        .execute(&maintenance)
+        crate::pool_query!(
+            &self.pools,
+            &maintenance,
+            sqlx::query(&format!(
+                "DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)"
+            )),
+            execute
+        )
         .await?;
 
         let mut finish = self.begin_control_transaction(false).await?;
@@ -635,9 +642,15 @@ impl ControlPlane {
         Box::pin(async move {
             let pool = self.pools.pool(&route.database_url).await?;
             let _admission = self.pools.admit().await?;
-            execute_script_pool(&pool, TENANT_IDENTITY_SQL).await?;
-            apply_migrations(pool.clone(), migrations, MigrationScope::Tenant).await?;
-            install_change_feed(pool).await?;
+            execute_script_pool(&self.pools, &pool, TENANT_IDENTITY_SQL).await?;
+            apply_migrations(
+                &self.pools,
+                pool.clone(),
+                migrations,
+                MigrationScope::Tenant,
+            )
+            .await?;
+            install_change_feed(&self.pools, pool).await?;
             Ok(())
         })
     }
@@ -648,17 +661,24 @@ impl ControlPlane {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DatabaseError>> + Send + 'static>> {
         Box::pin(async move {
             let _admission = self.pools.admit().await?;
-            apply_migrations(self.pool.clone(), migrations, MigrationScope::ControlPlane).await
+            apply_migrations(
+                &self.pools,
+                self.pool.clone(),
+                migrations,
+                MigrationScope::ControlPlane,
+            )
+            .await
         })
     }
 }
 
 async fn apply_migrations(
+    pools: &PoolRegistry,
     pool: sqlx::PgPool,
     migrations: Vec<SqlMigration>,
     scope: MigrationScope,
 ) -> Result<Vec<String>, DatabaseError> {
-    let mut connection = pool.acquire().await?;
+    let mut connection = pools.acquire(&pool).await?;
     sqlx::query(
         "SELECT pg_advisory_lock(hashtext('gonvex_sql_migrations:' || current_database()))",
     )
@@ -754,11 +774,14 @@ async fn apply_migrations_locked(
     Ok(applied)
 }
 
-async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
+async fn install_change_feed(
+    pools: &PoolRegistry,
+    pool: sqlx::PgPool,
+) -> Result<(), DatabaseError> {
     // Share the migration lock so neither another bootstrap nor a migration can
     // change the schema between catalog inspection and trigger installation.
     // Keep DDL and its receipt atomic: a failed install must never become a cache hit.
-    let mut tx = pool.begin().await?;
+    let mut tx = pools.begin(&pool).await?;
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtext('gonvex_sql_migrations:' || current_database()))",
     )
@@ -992,9 +1015,13 @@ async fn execute_script_transaction(
     Ok(())
 }
 
-async fn execute_script_pool(pool: &sqlx::PgPool, source: &str) -> Result<(), DatabaseError> {
+async fn execute_script_pool(
+    pools: &PoolRegistry,
+    pool: &sqlx::PgPool,
+    source: &str,
+) -> Result<(), DatabaseError> {
     for statement in split_statements(source)? {
-        sqlx::query(&statement).execute(pool).await?;
+        crate::pool_query!(pools, pool, sqlx::query(&statement), execute).await?;
     }
     Ok(())
 }
@@ -1182,6 +1209,7 @@ mod sync_bootstrap_tests {
             }
         }
         let applied = apply_migrations(
+            &PoolRegistry::new(Default::default()),
             pool.clone(),
             migrations.clone(),
             MigrationScope::ControlPlane,
@@ -1189,12 +1217,15 @@ mod sync_bootstrap_tests {
         .await
         .unwrap();
         assert_eq!(applied.len(), migrations.len());
-        assert!(
-            apply_migrations(pool.clone(), migrations, MigrationScope::ControlPlane)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(apply_migrations(
+            &PoolRegistry::new(Default::default()),
+            pool.clone(),
+            migrations,
+            MigrationScope::ControlPlane
+        )
+        .await
+        .unwrap()
+        .is_empty());
         let rows: Vec<(String, String)> =
             sqlx::query_as("SELECT name,value FROM migration_values ORDER BY name,value")
                 .fetch_all(&pool)
@@ -1238,6 +1269,7 @@ mod sync_bootstrap_tests {
             .await
             .unwrap();
         execute_script_pool(
+            &PoolRegistry::new(Default::default()),
             &pool,
             &format!(
                 r#"
@@ -1266,7 +1298,9 @@ mod sync_bootstrap_tests {
         .unwrap();
         clear_audit(&pool).await;
         let started = Instant::now();
-        install_change_feed(pool.clone()).await.unwrap();
+        install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+            .await
+            .unwrap();
         eprintln!(
             "31k-row fixture cold sync bootstrap: {:?}",
             started.elapsed()
@@ -1297,7 +1331,9 @@ mod sync_bootstrap_tests {
 
         clear_audit(&pool).await;
         let started = Instant::now();
-        install_change_feed(pool.clone()).await.unwrap();
+        install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+            .await
+            .unwrap();
         eprintln!(
             "31k-row fixture warm sync bootstrap: {:?}",
             started.elapsed()
@@ -1313,7 +1349,9 @@ mod sync_bootstrap_tests {
             .await
             .unwrap();
         clear_audit(&pool).await;
-        install_change_feed(pool.clone()).await.unwrap();
+        install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+            .await
+            .unwrap();
         let changed = audit(&pool).await;
         assert_eq!(
             changed.len(),
@@ -1330,7 +1368,9 @@ mod sync_bootstrap_tests {
             .await
             .unwrap();
         clear_audit(&pool).await;
-        install_change_feed(pool.clone()).await.unwrap();
+        install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+            .await
+            .unwrap();
         assert_eq!(audit(&pool).await.len(), 3);
         assert_change(&pool, "repaired", true).await;
 
@@ -1339,13 +1379,17 @@ mod sync_bootstrap_tests {
             .execute(&pool)
             .await
             .unwrap();
-        install_change_feed(pool.clone()).await.unwrap();
+        install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+            .await
+            .unwrap();
         assert_change(&pool, "enabled", true).await;
         sqlx::query("DROP FUNCTION gonvex_sync_notes_stage() CASCADE")
             .execute(&pool)
             .await
             .unwrap();
-        install_change_feed(pool.clone()).await.unwrap();
+        install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO notes VALUES ('note', 'restored')")
             .execute(&pool)
             .await
@@ -1368,7 +1412,11 @@ mod sync_bootstrap_tests {
             .await
             .unwrap();
         clear_audit(&pool).await;
-        assert!(install_change_feed(pool.clone()).await.is_err());
+        assert!(
+            install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+                .await
+                .is_err()
+        );
         assert!(audit(&pool).await.is_empty());
         assert_eq!(
             sqlx::query_scalar::<_, String>(
@@ -1383,7 +1431,9 @@ mod sync_bootstrap_tests {
             .execute(&pool)
             .await
             .unwrap();
-        install_change_feed(pool.clone()).await.unwrap();
+        install_change_feed(&PoolRegistry::new(Default::default()), pool.clone())
+            .await
+            .unwrap();
 
         // Concurrent cold installers must not race metadata creation or duplicate DDL.
         sqlx::query("DROP TABLE _gonvex_sync_bootstrap")
@@ -1391,9 +1441,10 @@ mod sync_bootstrap_tests {
             .await
             .unwrap();
         clear_audit(&pool).await;
+        let pools = PoolRegistry::new(Default::default());
         let (a, b) = tokio::join!(
-            install_change_feed(pool.clone()),
-            install_change_feed(pool.clone())
+            install_change_feed(&pools, pool.clone()),
+            install_change_feed(&pools, pool.clone())
         );
         a.unwrap();
         b.unwrap();

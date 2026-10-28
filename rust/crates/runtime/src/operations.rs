@@ -881,10 +881,9 @@ async fn project_auth_memberships(
             Ok(admission) => admission,
             Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
         };
-        match sqlx::query(
+        match gonvex_postgres::pool_query!(&runtime.inner.pools, &pool, sqlx::query(
             "SELECT id,account_id,display_name,role,permissions FROM members WHERE status='active' ORDER BY lower(display_name),id",
-        )
-        .fetch_all(&pool)
+        ), fetch_all)
         .await
         {
             Ok(rows) => rows,
@@ -1089,8 +1088,8 @@ async fn delete_project_auth_membership(
             Ok(admission) => admission,
             Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
         };
-        match sqlx::query("UPDATE members SET status='revoked',membership_revision=membership_revision+1,updated_at=now() WHERE id=$1")
-            .bind(query.member.trim()).execute(&pool).await {
+        match gonvex_postgres::pool_query!(&runtime.inner.pools, &pool, sqlx::query("UPDATE members SET status='revoked',membership_revision=membership_revision+1,updated_at=now() WHERE id=$1")
+            .bind(query.member.trim()), execute).await {
             Ok(result) if result.rows_affected() > 0 => {}
             Ok(_) => return error(StatusCode::BAD_REQUEST, "member was not found"),
             Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
@@ -1546,6 +1545,27 @@ async fn metrics(
     }
 }
 
+fn database_acquisition_metrics(database: &gonvex_postgres::PoolRegistrySnapshot) -> Value {
+    json!({
+        "pools":database.pools,
+        "openConnections":database.open_connections,
+        "inUse":database.in_use,
+        "idle":database.idle,
+        "maxOpenConnections":database.max_open_connections,
+        // Older consumers interpret these as capacity contention. Broad acquire
+        // suspension includes ping/connect I/O and must not populate them.
+        "waitCount":0,
+        "waitDurationMs":0,
+        "legacyWaitMetricsSupported":false,
+        "sqlxAcquire":database.sqlx_acquire_wait,
+        "processAdmission":database.admission_wait,
+        "waitMeasurement":"first pending poll through acquire completion or drop; SQLx checks/connect included; BEGIN/query execution excluded",
+        "unmeasuredAcquisitions":["initial pool connect", "listener connect and reconnect", "raw PgPool users outside registry helpers"],
+        "snapshotAtomic":false,
+        "series":[],
+    })
+}
+
 async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     let control = runtime.inner.control_plane.read().await.clone()?;
     let mut transaction = control.begin_control_transaction(true).await.ok()?;
@@ -1629,17 +1649,12 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     .collect::<Vec<_>>();
     let websocket = runtime.inner.metrics.snapshot(project);
     let database = runtime.inner.pools.snapshot().await;
-    let database_json = json!({
-        "pools":database.pools,
-        "openConnections":database.open_connections,
-        "inUse":database.in_use,
-        "idle":database.idle,
-        "maxOpenConnections":database.max_open_connections,
-        "waitCount":0,
-        "waitDurationMs":0,
-        "series":[],
-    });
+    let database_json = database_acquisition_metrics(&database);
     let query_admission = json!({
+        "processAdmission":database.admission_wait,
+        "legacyLaneMetricsSupported":false,
+        "measurementScope":"shared runtime PoolRegistry admission; legacy foreground/reactive/bootstrap lane and tenant-queue fields are unsupported placeholders",
+        "snapshotAtomic":false,
         "enabled":database.admission_limit > 0,
         "totalPermits":database.admission_limit,
         "active":database.admission_active,
@@ -3411,6 +3426,20 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn acquisition_suspension_does_not_populate_legacy_contention_counters() {
+        let pools = gonvex_postgres::PoolRegistry::new(Default::default());
+        let mut snapshot = pools.snapshot().await;
+        snapshot.sqlx_acquire_wait.wait_count = 3;
+        snapshot.sqlx_acquire_wait.wait_duration_ms = 125;
+        let value = database_acquisition_metrics(&snapshot);
+        assert_eq!(value["sqlxAcquire"]["waitCount"], 3);
+        assert_eq!(value["sqlxAcquire"]["waitDurationMs"], 125);
+        assert_eq!(value["waitCount"], 0);
+        assert_eq!(value["waitDurationMs"], 0);
+        assert_eq!(value["legacyWaitMetricsSupported"], false);
+    }
 
     #[test]
     fn password_hashes_match_the_existing_dashboard_contract() {
