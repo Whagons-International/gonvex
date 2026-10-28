@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,17 @@ class RecorderTests(unittest.TestCase):
         with patch.object(recorder, "runtime_origin", side_effect=ValueError("private")):
             sample = recorder.health_sample("unused", 2)
         self.assertEqual(sample["error"], "ValueError")
+        self.assertNotIn("private", json.dumps(sample))
+
+    def test_unhealthy_http_response_releases_its_body(self):
+        body = io.BytesIO(b"private response")
+        error = recorder.urllib.error.HTTPError("http://local", 503, "unhealthy", {}, body)
+        with patch.object(recorder, "runtime_origin", return_value="http://local"), \
+                patch.object(recorder.urllib.request, "build_opener") as opener:
+            opener.return_value.open.side_effect = error
+            sample = recorder.health_sample("unused", 2)
+        self.assertEqual(sample["status"], 503)
+        self.assertTrue(body.closed)
         self.assertNotIn("private", json.dumps(sample))
 
     def test_rotation_keeps_three_private_files(self):

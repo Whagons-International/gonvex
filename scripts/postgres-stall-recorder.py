@@ -85,6 +85,7 @@ def health_sample(container, timeout):
             sample = {"status": response.status}
     except urllib.error.HTTPError as error:
         sample = {"status": error.code}
+        error.close()
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         sample = {"error": type(error).__name__}
     sample["elapsedMs"] = round((time.monotonic() - started) * 1000, 1)
