@@ -22,7 +22,7 @@ Document unresolved gaps rather than calling a subsystem fully verified.
 | MUT-1 | A successful authenticated reducer corresponds to its committed tenant transaction. | Rust rollback/aborted-commit regressions and transactional receipt tests exist. Whole invocation/receipt protocol remains unproved. PostgreSQL durability, tenant routing and effects staying inside the transaction are assumptions. |
 | MUT-2 | Retries of one logical intent do not repeat its transactional business effects. | Receipt claim/result and writes share a transaction. Finite protocol model plus eight passing native replay/rollback/competing-claim tests, with three failing baseline regressions, are recorded in reducer-receipts.md. No whole-source refinement proof. Namespace is tenant database + account subject + intent key. Path reuse is checked; argument equivalence is a caller obligation. Anonymous reducers/actions are excluded. Receipt retention is not promised as permanent. |
 | SDK-1 | Delivery and recovery do not revive committed or parked queue entries. | Source-linked finite-state proof and public queue regressions in this tranche. Explicit retry, commit, rejection, deletion, adapter atomicity and complete SDK delivery remain outside the proof. See outbox-delivery.md. |
-| SDK-2 | Durable acknowledgements and local-intent retirement cannot pass an unapplied transaction. | Staging now fences failed data lanes before later watermarks and retains capable-runtime patchless intents until their barrier. Public adapter schedules and a finite protocol model cover the fixed failures; see replica-durability.md. Server snapshot delivery ordering and the complete protocol remain unproved. |
+| SDK-2 | Durable acknowledgements and local-intent retirement cannot pass an unapplied transaction. | Staging fences failed data lanes and retains capable-runtime intents through their watermark. The finite protocol model, public adapter regressions and real Chromium crash/abort/snapshot scenarios provide evidence for selected failures; see replica-durability.md and indexeddb-browser.md. No complete protocol proof or native-phone evidence yet. |
 | SYNC-1 | Duplicate/stale frames cannot undo newer authorized data; reconnect eventually catches up under explicit progress assumptions. | Revision primitive proofs and storage/lifecycle regressions exist. Full merge, snapshot/epoch transitions and recovery protocol remain unproved. |
 | AUTH-1 | Old account/tenant/subscription operations cannot publish into a new owner. | Lifecycle regression coverage exists. Need source-linked ownership transitions and tests across every async boundary. Authorization-policy enforcement is separate from callback ownership. |
 | RES-1 | Resource permits, deadlines and credits remain correctly owned through cancellation and cleanup. | Smaller Rust policy/credit proofs exist. Need composition with actual lifetime/cleanup paths and failure tests. |
@@ -60,17 +60,22 @@ must state their domains/bounds and demonstrate implementation correspondence.
 
 ## Unresolved boundaries and next experiments
 
-1. Check server snapshot delivery ordering before terminal call watermarks.
-   An installed cursor does not itself establish that every snapshot chunk has
-   been delivered. Reproduce the pending native snapshot schedule.
+1. Extend actual app SQLite and other browser-engine crash/restart coverage.
+   Chromium now covers both IndexedDB adapters, including native aborts and
+   preserved intent identity. Native encoded server snapshots are a separate
+   protocol extension; this shared SDK does not negotiate that capability.
 2. Extend receipt coverage to tenant routing and deployment restart boundaries.
    A current head can exceed the original commit revision. Native tests and the
    finite model establish selected schedules under the stated database/epoch
    assumptions, not exact historical attribution or permanent retention.
 3. Specify explicit commit/reject/retry race semantics. The delivery proof does
    not establish the behavior of every mutation of an outbox record.
-4. Add crash/restart and competing-claim PostgreSQL tests tied to the declared
-   receipt namespace, with no live staging traffic or production load.
+4. Add PostgreSQL process-crash/restart evidence tied to the declared receipt
+   namespace. Native competing-claim tests already cover commit and rollback.
+   Use isolated fixtures without live staging traffic or production load.
+5. Check server-native encoded snapshot ordering separately from the current
+   SDK protocol. An installed cursor alone does not establish chunk delivery;
+   current paged SDK consumers defer interleaved watermarks during staging.
 
 Backend fixtures require PostgreSQL's documented transactional behavior and a
 known durable configuration. Node SQLite tests do not establish Expo/Hermes or

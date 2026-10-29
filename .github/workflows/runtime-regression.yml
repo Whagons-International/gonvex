@@ -62,6 +62,18 @@ jobs:
         run: test -z "$(find . -path ./node_modules -prune -o -path ./rust/target -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -print)"
       - name: Build JavaScript packages
         run: pnpm build:packages
+      - name: Verify native browser IndexedDB durability and SDK barriers
+        run: pnpm --filter @gonvex/client test:browser-storage
+        env:
+          GONVEX_BROWSER_TEST_DIR: ${{ runner.temp }}/indexeddb-guarantees
+          GONVEX_BROWSER_TEST_OUTPUT: ${{ runner.temp }}/indexeddb-guarantees.json
+      - name: Retain browser persistence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: indexeddb-guarantees
+          path: ${{ runner.temp }}/indexeddb-guarantees.json
+          if-no-files-found: ignore
       # Some script contracts import built package output (packages/*/dist).
       - name: Validate repository script contracts
         run: node --test scripts/*.test.mjs
