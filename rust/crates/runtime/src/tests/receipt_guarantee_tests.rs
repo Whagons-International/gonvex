@@ -288,3 +288,186 @@ async fn failed_reducer_rolls_back_business_write_and_receipt_together() {
     );
     f.close().await;
 }
+
+#[tokio::test]
+async fn noop_receipt_replays_with_a_zero_revision_barrier() {
+    let Some(f) = Fixture::new().await else {
+        return;
+    };
+    let first = f.call("first", "noop-intent", "noop", "unused").await;
+    let replay = f.call("new-request", "noop-intent", "noop", "unused").await;
+    assert_eq!(first.value, replay.value);
+    assert_eq!(replay.committed_revision, Some(0));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn receipt_rejects_path_reuse_and_separates_account_subjects() {
+    let Some(f) = Fixture::new().await else {
+        return;
+    };
+    f.call("first", "same-key", "write", "original").await;
+    assert!(f
+        .runtime
+        .execute_tenant_reducer(
+            &f.session,
+            "wrong-path",
+            Some("same-key"),
+            "noop",
+            serde_json::json!({})
+        )
+        .await
+        .is_err());
+    let mut other = f.session.clone();
+    other.identity.account.id = "other-account".into();
+    other.member.account_id = "other-account".into();
+    f.runtime
+        .execute_tenant_reducer(
+            &other,
+            "other-request",
+            Some("same-key"),
+            "write",
+            serde_json::json!({"id":"other-row","value":9}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_reducer_idempotency")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        2
+    );
+    f.close().await;
+}
+
+// Observe the actual PostgreSQL unique-index wait. A delay alone would not
+// establish that both claims overlap before the owner commits or rolls back.
+async fn competing_claim(owner_commits: bool) {
+    let Some(f) = Fixture::new().await else {
+        return;
+    };
+    f.control
+        .ensure_reducer_idempotency(&f.session.route)
+        .await
+        .unwrap();
+    let mut owner = f
+        .control
+        .begin_tenant_transaction(&f.session.route, false)
+        .await
+        .unwrap();
+    let owner_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut **owner.transaction())
+        .await
+        .unwrap();
+    assert!(owner
+        .claim_reducer("account", "competing", "write")
+        .await
+        .unwrap());
+    sqlx::query("INSERT INTO receipt_records VALUES ('owner', 1)")
+        .execute(&mut **owner.transaction())
+        .await
+        .unwrap();
+    owner
+        .store_reducer_result("account", "competing", &serde_json::json!({"owner":true}))
+        .await
+        .unwrap();
+    // Uncommitted effects and the receipt are invisible to other connections.
+    for table in ["receipt_records", "_gonvex_reducer_idempotency"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    let mut contender = f
+        .control
+        .begin_tenant_transaction(&f.session.route, false)
+        .await
+        .unwrap();
+    let contender_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut **contender.transaction())
+        .await
+        .unwrap();
+    let task = tokio::spawn(async move {
+        let claimed = contender
+            .claim_reducer("account", "competing", "write")
+            .await
+            .unwrap();
+        if claimed {
+            sqlx::query("INSERT INTO receipt_records VALUES ('contender', 2)")
+                .execute(&mut **contender.transaction())
+                .await
+                .unwrap();
+            contender
+                .store_reducer_result("account", "competing", &serde_json::json!({"owner":false}))
+                .await
+                .unwrap();
+        }
+        contender.commit().await.unwrap();
+        claimed
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let blocked = sqlx::query_scalar::<_, bool>("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(owner_pid)
+                .bind(contender_pid)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+            if blocked {
+                break;
+            }
+            assert!(
+                !task.is_finished(),
+                "contender completed without waiting on receipt owner"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("PostgreSQL did not report the receipt claim blocker");
+    if owner_commits {
+        owner.commit().await.unwrap();
+    } else {
+        owner.rollback().await.unwrap();
+    }
+    let claimed = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed, !owner_commits);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM receipt_records")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let replay = f
+        .control
+        .replay_reducer_result(&f.session.route, "account", "competing", "write")
+        .await
+        .unwrap();
+    assert_eq!(replay, serde_json::json!({"owner":owner_commits}));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn competing_claim_replays_after_owner_commits() {
+    competing_claim(true).await;
+}
+
+#[tokio::test]
+async fn competing_claim_executes_after_owner_rolls_back() {
+    competing_claim(false).await;
+}
