@@ -42,7 +42,10 @@ impl Fixture {
     async fn begin(&self) -> TenantTransaction {
         TenantTransaction {
             transaction: self.pool.begin().await.unwrap(),
-            _admission: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+            _admission: AdmissionPermit {
+                _shared: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+                _database: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+            },
             read_only: false,
         }
     }

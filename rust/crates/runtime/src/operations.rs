@@ -877,7 +877,7 @@ async fn project_auth_memberships(
         Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
     };
     let member_rows = {
-        let _admission = match runtime.inner.pools.admit().await {
+        let _admission = match runtime.inner.pools.admit(&route.database_url).await {
             Ok(admission) => admission,
             Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
         };
@@ -1085,7 +1085,7 @@ async fn delete_project_auth_membership(
             Ok(pool) => pool,
             Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
         };
-        let _admission = match runtime.inner.pools.admit().await {
+        let _admission = match runtime.inner.pools.admit(&route.database_url).await {
             Ok(admission) => admission,
             Err(cause) => return error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()),
         };
