@@ -20,7 +20,7 @@ before(async () => {
   receipt.sourceHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   receipt.nodeVersion = process.version;
   receipt.sourceSha256 = {};
-  for (const file of ['index.ts', 'indexeddb-replica.ts', 'indexeddb-engine.ts', 'outbox.ts']) {
+  for (const file of ['index.ts', 'indexeddb-replica.ts', 'indexeddb-engine.ts', 'outbox.ts', 'outbox-policy.ts']) {
     receipt.sourceSha256[file] = createHash('sha256').update(await readFile(join(directory, '../src', file))).digest('hex');
   }
   const [bundler] = globSync('node_modules/.pnpm/esbuild@*/node_modules/esbuild/lib/main.js', { cwd: root });
@@ -58,7 +58,8 @@ before(async () => {
   origin = `http://127.0.0.1:${server.address().port}`;
 });
 after(async () => {
-  receipt.complete = receipt.cases.length === 4 && receipt.cases.filter(c => c.complete).length === 2
+  receipt.complete = receipt.cases.length === 5 && receipt.cases.filter(c => c.complete).length === 3
+    && receipt.cases.some(c => c.contract === 'accepted-outbox-survives-crash-and-late-settlement' && c.complete)
     && receipt.cases.filter(c => c.observedViolation === 'checkpoint-passes-missing-row').length === 2;
   if (process.env.GONVEX_BROWSER_TEST_OUTPUT) await writeFile(process.env.GONVEX_BROWSER_TEST_OUTPUT, JSON.stringify(receipt, null, 2) + '\n');
   if (server) await new Promise(resolve => server.close(resolve));
@@ -164,6 +165,21 @@ for (const kind of ['legacy', 'engine']) test(`${kind}: native IndexedDB rollbac
     });
   } finally { if (context.browser()?.isConnected()) await context.close(); }
   evidence.complete = evidence.checks.length === 7;
+});
+
+test('accepted outbox survives browser crash without late settlement re-arming it', { timeout: 60000 }, async () => {
+  const profile = join(temporary, 'accepted-outbox');
+  let { context, page } = await launch(profile);
+  try {
+    const accepted = await page.evaluate(() => browserGuarantees.acceptedQueue('accepted-outbox', true));
+    assert.equal(accepted.length, 1); assert.equal(accepted[0].state, 'committed');
+    await crash(context);
+    ({ context, page } = await launch(profile));
+    const result = await page.evaluate(() => browserGuarantees.acceptedQueue('accepted-outbox'));
+    assert.deepEqual(result.before, accepted); assert.deepEqual(result.after, accepted);
+    assert.equal(result.retried, null); assert.equal(result.ready, null);
+    receipt.cases.push({ contract: 'accepted-outbox-survives-crash-and-late-settlement', complete: true });
+  } finally { if (context.browser()?.isConnected()) await context.close(); }
 });
 
 test('negative control: omitting snapshot deferral certifies a missing row', { timeout: 60000 }, async () => {

@@ -41,9 +41,11 @@ watermark is not, by itself, evidence of an unsafe SDK acknowledgement. The
 consumer's snapshot deferral is part of the contract.
 
 The suite contains ten positive adapter scenarios and the broken-bundle check
-for both adapters. The Node runner reports 13 tests including parent tests. The
-local Chromium 149 run passed all 13 under one CPU, 1 GiB memory and no swap;
-peak charged memory was 304 MiB. CI repeats the suite and retains a JSON receipt
+for both adapters. A separate outbox scenario commits an accepted intent, kills
+the browser and verifies late rejection/retry/failure cannot re-arm the same
+durable record after restart. The Node runner reports 14 tests including parent
+tests. The original 13-test Chromium 149 run used one CPU, 1 GiB memory and no
+swap; peak charged memory was 304 MiB. CI repeats the suite and retains a JSON receipt
 with completion status, source hashes, bundle hashes and browser version. A
 missing declared case or failed negative control fails the run.
 

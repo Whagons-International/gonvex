@@ -68,6 +68,34 @@ it("persists one row per intent and survives a restart through the SDK queue", a
   expect(third.id).toBeGreaterThan(second.id);
 });
 
+it("keeps accepted intent state and identity across late rejection and SQLite reopen", async () => {
+  const { adapter } = sqlite();
+  const queue = createReducerOutbox({ store: new ExpoSQLiteOutboxStore(adapter) });
+  const entry = await queue.enqueue({ scope, path: "tasks.update", args: { n: 1 }, idempotencyKey: "accepted" });
+  await queue.markInflight(entry.id);
+  await queue.markCommitted(entry.id);
+  const accepted = await queue.list(scope);
+  await queue.reject(entry.id, "late rejection");
+  expect(await queue.retry(entry.id)).toBeUndefined();
+  await queue.fail(entry.id, "late timeout", { maxAttempts: 1 });
+  const restarted = createReducerOutbox({ store: new ExpoSQLiteOutboxStore(adapter) });
+  expect(await restarted.loadAll(scope)).toEqual(accepted);
+  expect(await restarted.nextReady(scope, Number.MAX_SAFE_INTEGER)).toBeUndefined();
+});
+
+it("persists positive batch acceptance even after an earlier attempt was parked", async () => {
+  const { adapter } = sqlite();
+  const queue = createReducerOutbox({ store: new ExpoSQLiteOutboxStore(adapter) });
+  const failed = await queue.enqueue({ scope, path: "tasks.update", args: {}, idempotencyKey: "failed-then-accepted" });
+  const rejected = await queue.enqueue({ scope, path: "tasks.update", args: {}, idempotencyKey: "rejected-then-accepted" });
+  await queue.fail(failed.id, "timed out", { maxAttempts: 1 });
+  await queue.reject(rejected.id, "earlier rejection");
+  await queue.markCommittedMany!([failed.id, rejected.id]);
+  const restarted = createReducerOutbox({ store: new ExpoSQLiteOutboxStore(adapter) });
+  expect((await restarted.loadAll(scope)).map(entry => [entry.id, entry.idempotencyKey, entry.state]))
+    .toEqual([[failed.id, "failed-then-accepted", "committed"], [rejected.id, "rejected-then-accepted", "committed"]]);
+});
+
 it("updates a single row transactionally instead of rewriting the queue", async () => {
   const { adapter, statements } = sqlite();
   const store = new ExpoSQLiteOutboxStore(adapter);
