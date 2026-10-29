@@ -3268,7 +3268,7 @@ export class GonvexClient {
     if (this.snapshotDeferredBytes > 2 * 1024 * 1024 || this.snapshotDeferredFrames.length >= 1024) {
       // Reconnect from durable checkpoints rather than lose an authoritative
       // transaction or retain an unbounded interleaved feed.
-      this.socket?.close();
+      this.handleReplicaFrameFailure(this.replicaScope, this.socketGeneration, this.socket);
       return true;
     }
     const scope = this.replicaScope;
@@ -3281,6 +3281,9 @@ export class GonvexClient {
 
   private async drainSnapshotFrames() {
     if (this.snapshotPageSubscriptions.size > 0) return;
+    const scope = this.replicaScope;
+    const generation = this.socketGeneration;
+    const socket = this.socket;
     const frames = this.snapshotDeferredFrames;
     this.snapshotDeferredFrames = [];
     this.snapshotDeferredBytes = 0;
@@ -3290,7 +3293,7 @@ export class GonvexClient {
       } catch (error) {
         // The rest of the backlog was already dequeued. Reconnect from the
         // durable checkpoint so no later watermark passes an unapplied frame.
-        this.socket?.close();
+        this.handleReplicaFrameFailure(scope, generation, socket);
         throw error;
       }
     }
@@ -3299,10 +3302,25 @@ export class GonvexClient {
   private restartPagedSnapshots() {
     // A malformed or interrupted stream must not modify the active rows or
     // checkpoint. Closing also fences async verification and replays the feed.
-    this.socket?.close();
+    this.handleReplicaFrameFailure(this.replicaScope, this.socketGeneration, this.socket);
+  }
+
+  private handleReplicaFrameFailure(scope: ReplicaScope, generation: number, socket: WebSocket | undefined, watermark = false) {
+    if (this.manuallyClosed || scope !== this.replicaScope || generation !== this.socketGeneration
+      || socket !== this.socket || !this.isWebSocketConnected) return;
+    // Fence before notifying observers: close events may arrive later, and an
+    // observer may synchronously replace this connection.
+    if (!watermark) this.isWebSocketConnected = false;
+    try { this.replica.setFreshness("verifying"); }
+    catch { /* Application observers must not interrupt transport recovery. */ }
+    // A later watermark cannot certify data this stream failed to save.
+    if (!watermark) socket?.close();
   }
 
   private enqueueReplicaFrame(operation: () => Promise<void>, watermark = false) {
+    const scope = this.replicaScope;
+    const generation = this.socketGeneration;
+    const socket = this.socket;
     // Any entity/window frame seals the adjacent watermark batch. Advancing
     // across that barrier could make an unapplied transaction look stale.
     if (!watermark) this.queuedReplicaWatermark = undefined;
@@ -3311,7 +3329,7 @@ export class GonvexClient {
       if (this.snapshotDeferredFrames.length > 0) await this.drainSnapshotFrames();
     });
     this.replicaFrames = processing.catch(() => {
-      this.replica.setFreshness("verifying");
+      this.handleReplicaFrameFailure(scope, generation, socket, watermark);
     });
   }
 
@@ -3343,6 +3361,8 @@ export class GonvexClient {
   }
 
   private async applyReplicaTransaction(message: Extract<ServerMessage, { type: "replica.transaction" }>, scope: ReplicaScope) {
+    const watermark = this.serverCapabilities.replicaWatermark === 1;
+    const generation = this.socketGeneration;
     await this.replica.applyTransaction({
       cursor: message.cursor,
       originCommandId: message.originCommandId,
@@ -3353,7 +3373,11 @@ export class GonvexClient {
         newValue: asReplicaRow(change.newValue),
       })),
     }, scope);
-    if (message.originCommandId && !this.replica.hasPendingCommand(message.originCommandId)) {
+    // On capable runtimes the data frame is not the commit's full barrier.
+    // Keep its intent until the result/watermark path retires it, even if it
+    // has no optimistic patches. Negotiation belongs to the original owner.
+    if (!watermark && scope === this.replicaScope && generation === this.socketGeneration
+      && message.originCommandId && !this.replica.hasPendingCommand(message.originCommandId)) {
       await this.ackOptimisticReducer(message.originCommandId);
     }
   }
