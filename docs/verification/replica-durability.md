@@ -49,8 +49,9 @@ missing rows, retained intents, delayed close, late owner failures and replay of
 the same command key through a successful data/write watermark barrier.
 
 Memory, both IndexedDB adapters and the Expo SQLite adapter are exercised. The
-IndexedDB schedules use `fake-indexeddb`, so real browser-engine persistence,
-process restart and quota behavior remain separate verification work. The
+original Node schedules use `fake-indexeddb`. The separate real Chromium suite
+in `indexeddb-browser.md` now covers native transaction abort, browser-process
+crash/restart and snapshot/watermark barriers for both IndexedDB adapters. The
 SQLite tests use Node's actual SQLite engine, not Expo/Hermes or a phone. Injected
 pre-write rejection does not establish every adapter's partial-write/crash
 atomicity. Other adapter rollback tests remain separate evidence. The server is
