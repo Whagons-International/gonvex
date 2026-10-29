@@ -346,10 +346,18 @@ impl Runtime {
                         receipt_path,
                     )
                     .await?;
-                // Offline retries reuse the command ID. Preserve the commit
-                // barrier even when a response was lost after the first commit.
-                let committed_revision =
-                    control.command_revision(&session.route, command_id).await?;
+                // The retained receipt is visible only after its transaction
+                // commits. This database's monotonic clock therefore provides
+                // a sufficient barrier, even with a new transport ID or after
+                // the original command's change-feed rows have been pruned.
+                let committed_revision = Some(
+                    crate::change_feed::read_clock(&self.inner.pools, &session.route)
+                        .await?
+                        .revision,
+                );
+                if let Some(tracker) = committed_revisions.as_ref() {
+                    tracker.observe(committed_revision);
+                }
                 return Ok(ReducerExecution {
                     value,
                     committed_revision,

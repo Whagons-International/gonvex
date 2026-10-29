@@ -4203,6 +4203,7 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    mod receipt_guarantee_tests;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {
         use futures_util::{SinkExt, StreamExt};
