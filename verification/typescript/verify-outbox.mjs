@@ -1,4 +1,4 @@
-// Source-linked proof of the finite delivery/recovery transition system.
+// Source-linked proof of transitions on an existing queue record.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
@@ -9,7 +9,7 @@ import {spawnSync} from 'node:child_process';
 const ts = createRequire(new URL('../../packages/gonvex/package.json', import.meta.url))('typescript-api');
 assert.equal(ts.version, '6.0.3');
 const SOURCE = fileURLToPath(new URL('../../packages/client/src/outbox-policy.ts', import.meta.url));
-const domains = {ReducerOutboxState: ['pending', 'inflight', 'committed', 'failed', 'rejected'], DeliveryAction: ['start', 'recover']};
+const domains = {ReducerOutboxState: ['pending', 'inflight', 'committed', 'failed', 'rejected'], DeliveryAction: ['start', 'recover', 'commit', 'reject', 'retry', 'fail-retry', 'fail-park']};
 const sort = name => name === 'ReducerOutboxState' ? 'State' : 'Action';
 const symbol = name => 'v_' + name;
 export function extract(source) {
@@ -63,19 +63,37 @@ export function extract(source) {
   return `(define-fun next ((state State) (action Action)) State ${result.smt})`;
 }
 const prelude = Object.entries(domains).map(([name, values]) => `(declare-datatypes () ((${sort(name)} ${values.map(symbol).join(' ')})))`).join('\n') + '\n(declare-const s State) (declare-const a Action)';
-// These contracts state admission/recovery independently of the source expression.
+// Independently specified outcomes in action order. Positive acceptance wins;
+// an exhausted or rejected intent is sendable again only after explicit retry.
+const expected = {
+  pending:   ['inflight', 'pending', 'committed', 'rejected', 'pending', 'pending', 'failed'],
+  inflight:  ['inflight', 'pending', 'committed', 'rejected', 'inflight', 'pending', 'failed'],
+  committed: ['committed', 'committed', 'committed', 'committed', 'committed', 'committed', 'committed'],
+  failed:    ['failed', 'failed', 'committed', 'rejected', 'pending', 'failed', 'failed'],
+  rejected:  ['rejected', 'rejected', 'committed', 'rejected', 'pending', 'rejected', 'rejected'],
+};
+const bookkeeping = '(or (= a v_start) (= a v_recover) (= a v_fail-retry) (= a v_fail-park))';
 const laws = {
+  ...Object.fromEntries(Object.entries(expected).flatMap(([state, values]) => values.map((result, index) => {
+    const action = domains.DeliveryAction[index];
+    return [`table-${state}-${action}`, `(= (next ${symbol(state)} ${symbol(action)}) ${symbol(result)})`];
+  }))),
   'start-admits-exactly-pending': '(= (and (= (next s v_start) v_inflight) (not (= s v_inflight))) (= s v_pending))',
   'pending-starts': '(= (next v_pending v_start) v_inflight)',
   'inflight-start-is-idempotent': '(= (next v_inflight v_start) v_inflight)',
   'recovery-only-changes-inflight': '(=> (not (= s v_inflight)) (= (next s v_recover) s))',
   'inflight-recovers': '(= (next v_inflight v_recover) v_pending)',
   'committed-invariant-step': '(=> (= s v_committed) (= (next s a) v_committed))',
-  'failed-invariant-step': '(=> (= s v_failed) (= (next s a) v_failed))',
-  'rejected-invariant-step': '(=> (= s v_rejected) (= (next s a) v_rejected))',
+  'failed-bookkeeping-invariant-step': `(=> (and (= s v_failed) ${bookkeeping}) (= (next s a) v_failed))`,
+  'rejected-bookkeeping-invariant-step': `(=> (and (= s v_rejected) ${bookkeeping}) (= (next s a) v_rejected))`,
   'start-idempotent': '(= (next (next s v_start) v_start) (next s v_start))',
   'recovery-idempotent': '(= (next (next s v_recover) v_recover) (next s v_recover))',
-  'active-stays-active': '(=> (or (= s v_pending) (= s v_inflight)) (or (= (next s a) v_pending) (= (next s a) v_inflight)))',
+  'acceptance-is-conclusive': '(= (next s v_commit) v_committed)',
+  'retry-preserves-acceptance': '(= (next v_committed v_retry) v_committed)',
+  'rejection-preserves-acceptance': '(= (next v_committed v_reject) v_committed)',
+  'commit-idempotent': '(= (next (next s v_commit) v_commit) (next s v_commit))',
+  'reject-idempotent': '(= (next (next s v_reject) v_reject) (next s v_reject))',
+  'retry-idempotent': '(= (next (next s v_retry) v_retry) (next s v_retry))',
 };
 const checks = Object.values(laws).map(law => `(push) (assert (not ${law})) (check-sat) (pop)`).join('\n');
 function solve(z3, body, file) {
@@ -93,23 +111,32 @@ export function verify({z3, output}) {
   const source = readFileSync(SOURCE, 'utf8');
   assert(solve(z3, extract(source), resolve(output, 'candidate.smt2')).every(r => r === 'unsat'));
   const mutants = [
-    ['resend-committed', 'state === "pending"', 'state !== "inflight"'],
-    ['recover-committed', 'state === "inflight"', 'state !== "pending"'],
+    ['resend-committed', '? state === "pending" ? "inflight" : state', '? state !== "inflight" ? "inflight" : state'],
+    ['recover-committed', ': action === "recover"\n      ? state === "inflight"', ': action === "recover"\n      ? state !== "pending"'],
     ['start-does-nothing', '? "inflight" : state', '? "pending" : state'],
-    ['recovery-does-nothing', '? "pending" : state', '? "inflight" : state'],
-    ['wrong-action', 'action === "start"', 'action === "recover"'],
+    ['recovery-does-nothing', ': action === "recover"\n      ? state === "inflight" ? "pending" : state', ': action === "recover"\n      ? state === "inflight" ? "inflight" : state'],
+    ['wrong-action', 'action === "start"\n    ? state === "pending" ? "inflight" : state\n    : action === "recover"', 'action === "recover"\n    ? state === "pending" ? "inflight" : state\n    : action === "start"'],
     ['erase-parked-on-start', '? "inflight" : state', '? "inflight" : "pending"'],
+    ['late-rejection-uncommits', '? state === "committed" ? state : "rejected"', '? "rejected"'],
+    ['commit-only-inflight', '? "committed"\n        : action', '? state === "inflight" ? "committed" : state\n        : action'],
+    ['retry-uncommits', ': action === "retry"\n            ? state === "failed"', ': action === "retry"\n            ? state === "committed"'],
+    ['failure-parks-accepted', ': state === "pending" ? "failed" : state === "inflight" ? "failed" : state;', ': "failed";'],
+    ['failure-does-not-recover', ': action === "fail-retry"\n              ? state === "inflight" ? "pending" : state', ': action === "fail-retry"\n              ? state'],
   ];
   const files = [];
+  const negativeResults = [];
   for (const [name, before, after] of mutants) {
     assert.equal(source.split(before).length, 2, name);
     const candidate = source.replace(before, after), file = resolve(output, name + '.ts');
     writeFileSync(file, candidate); files.push(file);
-    assert(solve(z3, extract(candidate), resolve(output, name + '.smt2')).includes('sat'), `broken transition escaped: ${name}`);
+    const answers = solve(z3, extract(candidate), resolve(output, name + '.smt2'));
+    const violatedLaws = Object.keys(laws).filter((_, index) => answers[index] === 'sat');
+    assert(violatedLaws.length > 0, `broken transition escaped: ${name}`);
+    negativeResults.push({name, violatedLaws});
   }
   const program = ts.createProgram([SOURCE, ...files], {strict: true, noEmit: true, skipLibCheck: true, types: [], target: ts.ScriptTarget.ES2022});
   const errors = ts.getPreEmitDiagnostics(program); assert.equal(errors.length, 0, errors.map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('\n'));
-  const receipt = {source: 'packages/client/src/outbox-policy.ts', sourceSha256: hash(source), verifierSha256: hash(readFileSync(fileURLToPath(import.meta.url))), parser: ts.version, solver: version.stdout.trim(), solverSha256: hash(readFileSync(z3)), laws: Object.keys(laws), negativeControls: mutants.map(m => m[0]), boundary: 'Closed five-state/two-action source transition; Invariant step plus a protected initial state supports arbitrary finite delivery/recovery sequences. Does not prove storage atomicity, integration, retries, commit, deletion, metadata or async delivery.'};
+  const receipt = {source: 'packages/client/src/outbox-policy.ts', sourceSha256: hash(source), verifierSha256: hash(readFileSync(fileURLToPath(import.meta.url))), parser: ts.version, solver: version.stdout.trim(), solverSha256: hash(readFileSync(z3)), laws: Object.keys(laws), negativeControls: negativeResults, boundary: 'Closed five-state/seven-action source transition on existing records. Committed is absorbing across arbitrary finite action sequences. Covers state-level admission, recovery, commit, rejection, explicit retry and transient/exhausted failure. Does not prove storage atomicity, integration, deletion, metadata, attempt budgets, callback identity or async delivery.'};
   writeFileSync(resolve(output, 'source.ts'), source); writeFileSync(resolve(output, 'receipt.json'), JSON.stringify(receipt, null, 2)+'\n');
   console.log(`${Object.keys(laws).length} delivery laws verified; ${mutants.length} typed broken transitions rejected`); return receipt;
 }

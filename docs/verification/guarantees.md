@@ -21,7 +21,7 @@ Document unresolved gaps rather than calling a subsystem fully verified.
 | --- | --- | --- |
 | MUT-1 | A successful authenticated reducer corresponds to its committed tenant transaction. | Rust rollback/aborted-commit regressions and transactional receipt tests exist. Whole invocation/receipt protocol remains unproved. PostgreSQL durability, tenant routing and effects staying inside the transaction are assumptions. |
 | MUT-2 | Retries of one logical intent do not repeat its transactional business effects. | Receipt claim/result and writes share a transaction. Finite protocol model plus eight passing native replay/rollback/competing-claim tests, with three failing baseline regressions, are recorded in reducer-receipts.md. No whole-source refinement proof. Namespace is tenant database + account subject + intent key. Path reuse is checked; argument equivalence is a caller obligation. Anonymous reducers/actions are excluded. Receipt retention is not promised as permanent. |
-| SDK-1 | Delivery and recovery do not revive committed or parked queue entries. | Source-linked finite-state proof and public queue regressions in this tranche. Explicit retry, commit, rejection, deletion, adapter atomicity and complete SDK delivery remain outside the proof. See outbox-delivery.md. |
+| SDK-1 | Accepted queue entries cannot be re-armed; parked entries require explicit retry. | Source-linked five-state/seven-action proof covers delivery, recovery and settlement, including accepted-state preservation. Public adapter regressions cover metadata, single/batch acceptance and missing records; SQLite checks cover adapter reopen. Deletion, callback identity, adapter atomicity and complete SDK delivery remain outside the proof. See outbox-delivery.md. |
 | SDK-2 | Durable acknowledgements and local-intent retirement cannot pass an unapplied transaction. | Staging fences failed data lanes and retains capable-runtime intents through their watermark. The finite protocol model, public adapter regressions, real Chromium crash/abort/snapshot scenarios and Android/Hermes shared-handle/process-restart checks provide evidence for selected failures; see replica-durability.md, indexeddb-browser.md and sqlite-transactions.md. No complete protocol proof, iOS or native-phone evidence yet. |
 | SYNC-1 | Duplicate/stale frames cannot undo newer authorized data; reconnect eventually catches up under explicit progress assumptions. | Revision primitive proofs and storage/lifecycle regressions exist. Full merge, snapshot/epoch transitions and recovery protocol remain unproved. |
 | AUTH-1 | Old account/tenant/subscription operations cannot publish into a new owner. | Lifecycle regression coverage exists. Need source-linked ownership transitions and tests across every async boundary. Authorization-policy enforcement is separate from callback ownership. |
@@ -69,8 +69,9 @@ must state their domains/bounds and demonstrate implementation correspondence.
    A current head can exceed the original commit revision. Native tests and the
    finite model establish selected schedules under the stated database/epoch
    assumptions, not exact historical attribution or permanent retention.
-3. Specify explicit commit/reject/retry race semantics. The delivery proof does
-   not establish the behavior of every mutation of an outbox record.
+3. Extend the settlement state contract to callback identity, deletion and
+   coalescing races. The seven-action proof covers state decisions on existing
+   records; it does not establish every mutation's async/storage behavior.
 4. Add PostgreSQL process-crash/restart evidence tied to the declared receipt
    namespace. Native competing-claim tests already cover commit and rollback.
    Use isolated fixtures without live staging traffic or production load.

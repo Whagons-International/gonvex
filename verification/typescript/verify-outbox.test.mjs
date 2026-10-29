@@ -6,6 +6,7 @@ const source = readFileSync(new URL('../../packages/client/src/outbox-policy.ts'
 test('extracts the actual production transition', () => assert.match(extract(source), /^\(define-fun next/));
 for (const [name, before, after] of [
   ['extra state', '"failed" | "rejected"', '"failed" | "rejected" | "unknown"'],
+  ['extra action', '"fail-park";', '"fail-park" | "unknown";'],
   ['extra statement', 'return action', 'console.log(state); return action'],
   ['call', 'return action', 'return String(action)'],
   ['coercion', 'action ===', 'action =='],
