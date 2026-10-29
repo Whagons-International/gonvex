@@ -17,6 +17,9 @@ jobs:
   policies:
     uses: ./.github/workflows/rust-policy-verification.yml
 
+  native:
+    uses: ./.github/workflows/native-sqlite-verification.yml
+
   test:
     name: Runtime tests
     runs-on: ubuntu-latest
@@ -138,13 +141,15 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [test, policies]
+    needs: [test, policies, native]
     runs-on: ubuntu-latest
     steps:
-      - name: Require runtime tests and Rust policy proofs
+      - name: Require runtime tests, Rust policy proofs and native storage checks
         env:
           RUNTIME_RESULT: ${{ needs.test.result }}
           POLICY_RESULT: ${{ needs.policies.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
         run: |
           test "$RUNTIME_RESULT" = success
           test "$POLICY_RESULT" = success
+          test "$NATIVE_RESULT" = success

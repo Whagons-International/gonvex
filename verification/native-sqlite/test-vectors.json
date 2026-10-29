@@ -1,0 +1,378 @@
+{
+  "provenance": "Postconditions from the Android 16/Hermes run recorded 2026-10-29; test envelopes are added by unit tests.",
+  "phases": {
+    "all": [
+      {
+        "type": "environment",
+        "platform": "android",
+        "android": 36,
+        "hermes": true,
+        "sqlite": "3.50.3"
+      },
+      {
+        "type": "case",
+        "variant": "baseline",
+        "case": "replicaOutbox",
+        "result": {
+          "during": {
+            "settled": true,
+            "statements": [
+              "BEGIN",
+              "ROLLBACK"
+            ]
+          },
+          "outcomes": [
+            "rejected",
+            "rejected"
+          ],
+          "saved": {
+            "cursor": {
+              "epoch": "e",
+              "revision": 8
+            },
+            "entities": {
+              "tasks": {
+                "a": {
+                  "id": "a",
+                  "name": "Original"
+                }
+              }
+            },
+            "liveQueries": {}
+          },
+          "entries": []
+        }
+      },
+      {
+        "type": "case",
+        "variant": "baseline",
+        "case": "twoOutboxes",
+        "result": {
+          "outcomes": [
+            "rejected",
+            "rejected"
+          ],
+          "identities": []
+        }
+      },
+      {
+        "type": "case",
+        "variant": "baseline",
+        "case": "reader",
+        "result": {
+          "before": {
+            "published": true,
+            "reads": 3
+          },
+          "write": "fulfilled",
+          "saved": {
+            "cursor": {
+              "epoch": "e",
+              "revision": 7
+            },
+            "entities": {
+              "tasks": {
+                "a": {
+                  "id": "a",
+                  "name": "Changed"
+                },
+                "c": {
+                  "id": "c",
+                  "name": "New"
+                }
+              }
+            },
+            "liveQueries": {}
+          }
+        }
+      },
+      {
+        "type": "case",
+        "variant": "fixed",
+        "case": "replicaOutbox",
+        "result": {
+          "during": {
+            "settled": false,
+            "statements": []
+          },
+          "outcomes": [
+            "fulfilled",
+            "fulfilled"
+          ],
+          "saved": {
+            "cursor": {
+              "epoch": "e",
+              "revision": 8
+            },
+            "entities": {
+              "tasks": {
+                "a": {
+                  "id": "a",
+                  "name": "Changed"
+                },
+                "c": {
+                  "id": "c",
+                  "name": "New"
+                }
+              }
+            },
+            "liveQueries": {}
+          },
+          "entries": [
+            {
+              "scope": "account",
+              "path": "tasks.write",
+              "args": {
+                "key": "intent"
+              },
+              "idempotencyKey": "intent",
+              "entityKeys": [],
+              "createdAt": 1,
+              "attempts": 0,
+              "nextAttemptAt": 0,
+              "state": "pending",
+              "id": 1
+            }
+          ]
+        }
+      },
+      {
+        "type": "case",
+        "variant": "fixed",
+        "case": "twoOutboxes",
+        "result": {
+          "outcomes": [
+            "fulfilled",
+            "fulfilled"
+          ],
+          "identities": [
+            [
+              1,
+              "first"
+            ],
+            [
+              2,
+              "second"
+            ]
+          ]
+        }
+      },
+      {
+        "type": "case",
+        "variant": "fixed",
+        "case": "reader",
+        "result": {
+          "before": {
+            "published": false,
+            "reads": 0
+          },
+          "write": "fulfilled",
+          "saved": {
+            "cursor": {
+              "epoch": "e",
+              "revision": 8
+            },
+            "entities": {
+              "tasks": {
+                "a": {
+                  "id": "a",
+                  "name": "Changed"
+                },
+                "c": {
+                  "id": "c",
+                  "name": "New"
+                }
+              }
+            },
+            "liveQueries": {}
+          }
+        }
+      },
+      {
+        "type": "case",
+        "variant": "fixed",
+        "case": "rejectedOwner",
+        "result": {
+          "write": "rejected",
+          "next": "fulfilled",
+          "revision": 8
+        }
+      },
+      {
+        "type": "case",
+        "variant": "fixed",
+        "case": "migrations",
+        "result": {
+          "initialized": 4,
+          "ids": [
+            1,
+            2
+          ],
+          "revision": 7
+        }
+      },
+      {
+        "type": "case",
+        "variant": "fixed",
+        "case": "independent",
+        "result": {
+          "independentCommitted": true
+        }
+      },
+      {
+        "type": "complete",
+        "passed": true,
+        "baselineCounterexamples": 3,
+        "fixedCases": 6
+      }
+    ],
+    "crash-seed": [
+      {
+        "type": "environment",
+        "platform": "android",
+        "android": 36,
+        "hermes": true,
+        "sqlite": "3.50.3"
+      },
+      {
+        "type": "committed-before-crash",
+        "id": 1,
+        "key": "native-intent",
+        "sync": {
+          "synchronous": 2
+        },
+        "journal": {
+          "journal_mode": "delete"
+        }
+      },
+      {
+        "type": "write-held-for-process-crash",
+        "database": "gonvex-proof-native-sqlite-1028-r2-process-crash.db",
+        "successfulEntityStatement": true,
+        "id": 1,
+        "key": "native-intent"
+      }
+    ],
+    "recover": [
+      {
+        "type": "environment",
+        "platform": "android",
+        "android": 36,
+        "hermes": true,
+        "sqlite": "3.50.3"
+      },
+      {
+        "type": "recovered-and-recommitted",
+        "saved": {
+          "cursor": {
+            "epoch": "e",
+            "revision": 7
+          },
+          "entities": {
+            "tasks": {
+              "a": {
+                "id": "a",
+                "name": "Original"
+              }
+            }
+          },
+          "liveQueries": {}
+        },
+        "recovered": [
+          {
+            "scope": "account",
+            "path": "tasks.write",
+            "args": {
+              "key": "native-intent"
+            },
+            "idempotencyKey": "native-intent",
+            "entityKeys": [],
+            "createdAt": 1,
+            "attempts": 0,
+            "nextAttemptAt": 0,
+            "state": "pending",
+            "sentAt": 1,
+            "id": 1
+          }
+        ],
+        "nextId": 2,
+        "committedRevision": 8,
+        "journal": {
+          "journal_mode": "delete"
+        },
+        "sync": {
+          "synchronous": 2
+        }
+      }
+    ],
+    "reopen-committed": [
+      {
+        "type": "environment",
+        "platform": "android",
+        "android": 36,
+        "hermes": true,
+        "sqlite": "3.50.3"
+      },
+      {
+        "type": "process-restart-complete",
+        "passed": true,
+        "saved": {
+          "cursor": {
+            "epoch": "e",
+            "revision": 8
+          },
+          "entities": {
+            "tasks": {
+              "a": {
+                "id": "a",
+                "name": "Changed"
+              },
+              "c": {
+                "id": "c",
+                "name": "New"
+              }
+            }
+          },
+          "liveQueries": {}
+        },
+        "entries": [
+          {
+            "scope": "account",
+            "path": "tasks.write",
+            "args": {
+              "key": "native-intent"
+            },
+            "idempotencyKey": "native-intent",
+            "entityKeys": [],
+            "createdAt": 1,
+            "attempts": 0,
+            "nextAttemptAt": 0,
+            "state": "pending",
+            "sentAt": 1,
+            "id": 1
+          },
+          {
+            "scope": "account",
+            "path": "tasks.write",
+            "args": {
+              "key": "after-crash"
+            },
+            "idempotencyKey": "after-crash",
+            "entityKeys": [],
+            "createdAt": 1,
+            "attempts": 0,
+            "nextAttemptAt": 0,
+            "state": "pending",
+            "id": 2
+          }
+        ],
+        "journal": {
+          "journal_mode": "delete"
+        },
+        "sync": {
+          "synchronous": 2
+        }
+      }
+    ]
+  }
+}
