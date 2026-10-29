@@ -95,6 +95,21 @@ jobs:
         run: cargo test --locked --workspace --all-targets -- --test-threads=1
         env:
           GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+      - name: Build module host for required native receipt regressions
+        working-directory: rust
+        run: cargo build --locked -p gonvex-module-host --bin gonvex-module-host
+      - name: Test native receipt replay and rollback guarantees
+        working-directory: rust
+        shell: bash
+        env:
+          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+          GONVEX_TEST_MODULE_HOST_BINARY: ${{ github.workspace }}/rust/target/debug/gonvex-module-host
+          GONVEX_RECEIPT_TEST_REQUIRE_NATIVE: "1"
+        run: |
+          set -euo pipefail
+          test -x "$GONVEX_TEST_MODULE_HOST_BINARY"
+          cargo test --locked -p gonvex-runtime --lib tests::receipt_guarantee_tests -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/native-receipts.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-receipts.log"
       - name: Test opt-in debug Firebase Auth Emulator verification
         working-directory: rust
         run: cargo test --locked -p gonvex-runtime --lib external_auth::tests --features test-firebase-auth-emulator
