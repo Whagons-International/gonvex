@@ -72,7 +72,7 @@ impl SqlMigration {
 
 impl ControlPlane {
     pub(crate) async fn prepare_identity_schema_upgrade(&self) -> Result<(), DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gonvex:identity-schema-upgrade'))")
             .execute(&mut *transaction)
@@ -146,7 +146,7 @@ impl ControlPlane {
     }
 
     pub(crate) async fn ensure_control_schema(&self) -> Result<(), DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         execute_script_pool(&self.pool, include_str!("control_schema.sql")).await
     }
 
@@ -167,7 +167,7 @@ impl ControlPlane {
             .map_err(|error| sqlx::Error::Protocol(format!("invalid database URL: {error}")))?;
         maintenance_url.set_path("/postgres");
         let pool = self.pools.pool(maintenance_url.as_str()).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(maintenance_url.as_str()).await?;
         let owner: String = sqlx::query_scalar("SELECT current_user")
             .fetch_one(&pool)
             .await?;
@@ -533,7 +533,7 @@ impl ControlPlane {
         project_id: &str,
         tenant_id: &str,
     ) -> Result<(), DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         sqlx::query(
             "UPDATE gonvex_runtime_tenants SET provisioned=TRUE,updated_at=now() WHERE project_id=$1 AND tenant_id=$2",
         )
@@ -634,7 +634,7 @@ impl ControlPlane {
     ) -> Pin<Box<dyn Future<Output = Result<(), DatabaseError>> + Send + 'static>> {
         Box::pin(async move {
             let pool = self.pools.pool(&route.database_url).await?;
-            let _admission = self.pools.admit().await?;
+            let _admission = self.pools.admit(&route.database_url).await?;
             execute_script_pool(&pool, TENANT_IDENTITY_SQL).await?;
             apply_migrations(pool.clone(), migrations, MigrationScope::Tenant).await?;
             install_change_feed(pool).await?;
@@ -647,7 +647,7 @@ impl ControlPlane {
         migrations: Vec<SqlMigration>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DatabaseError>> + Send + 'static>> {
         Box::pin(async move {
-            let _admission = self.pools.admit().await?;
+            let _admission = self.pools.admit(&self.database_url).await?;
             apply_migrations(self.pool.clone(), migrations, MigrationScope::ControlPlane).await
         })
     }

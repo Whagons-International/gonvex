@@ -112,11 +112,14 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({"error":message.into()}))).into_response()
 }
 
-async fn admit(runtime: &Runtime) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
+async fn admit(
+    runtime: &Runtime,
+    database_url: &str,
+) -> Result<gonvex_postgres::AdmissionPermit, Response> {
     runtime
         .inner
         .pools
-        .admit()
+        .admit(database_url)
         .await
         .map_err(|cause| error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()))
 }
@@ -145,7 +148,7 @@ async fn data_pool(
     runtime: &Runtime,
     project: &str,
     tenant: &str,
-) -> Result<Option<PgPool>, Response> {
+) -> Result<Option<(PgPool, String)>, Response> {
     if project.trim().is_empty() {
         return Err(error(StatusCode::BAD_REQUEST, "project is required"));
     }
@@ -164,7 +167,7 @@ async fn data_pool(
             .pools
             .pool(database_url)
             .await
-            .map(Some)
+            .map(|pool| Some((pool, database_url.to_owned())))
             .map_err(|cause| error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()));
     }
     let control = runtime
@@ -188,7 +191,7 @@ async fn data_pool(
         .pools
         .pool(&route.database_url)
         .await
-        .map(Some)
+        .map(|pool| Some((pool, route.database_url)))
         .map_err(|cause| error(StatusCode::SERVICE_UNAVAILABLE, cause.to_string()))
 }
 
@@ -210,12 +213,13 @@ async fn list_tables(
     if let Err(response) = authorize_read(&runtime, &headers, &project).await {
         return response;
     }
-    let pool = match data_pool(&runtime, &project, &tenant(&headers, &query)).await {
+    let (pool, database_url) = match data_pool(&runtime, &project, &tenant(&headers, &query)).await
+    {
         Ok(Some(pool)) => pool,
         Ok(None) => return Json(json!({"tables":[]})).into_response(),
         Err(response) => return response,
     };
-    let _admission = match admit(&runtime).await {
+    let _admission = match admit(&runtime, &database_url).await {
         Ok(admission) => admission,
         Err(response) => return response,
     };
@@ -446,7 +450,8 @@ async fn read_rows(
     if !valid_ident(&table) {
         return error(StatusCode::BAD_REQUEST, "invalid table name");
     }
-    let pool = match data_pool(&runtime, &project, &tenant(&headers, &query)).await {
+    let (pool, database_url) = match data_pool(&runtime, &project, &tenant(&headers, &query)).await
+    {
         Ok(Some(pool)) => pool,
         Ok(None) => {
             return Json(
@@ -456,7 +461,7 @@ async fn read_rows(
         }
         Err(response) => return response,
     };
-    let _admission = match admit(&runtime).await {
+    let _admission = match admit(&runtime, &database_url).await {
         Ok(admission) => admission,
         Err(response) => return response,
     };
@@ -588,12 +593,13 @@ async fn insert_row(
     if values.is_empty() {
         return error(StatusCode::BAD_REQUEST, "no values provided");
     }
-    let pool = match data_pool(&runtime, &project, &tenant(&headers, &query)).await {
+    let (pool, database_url) = match data_pool(&runtime, &project, &tenant(&headers, &query)).await
+    {
         Ok(Some(pool)) => pool,
         Ok(None) => return error(StatusCode::BAD_REQUEST, "database URL is not configured"),
         Err(response) => return response,
     };
-    let _admission = match admit(&runtime).await {
+    let _admission = match admit(&runtime, &database_url).await {
         Ok(admission) => admission,
         Err(response) => return response,
     };
@@ -674,12 +680,13 @@ async fn update_row(
             "identity and tenant columns cannot be changed",
         );
     }
-    let pool = match data_pool(&runtime, &project, &tenant(&headers, &query)).await {
+    let (pool, database_url) = match data_pool(&runtime, &project, &tenant(&headers, &query)).await
+    {
         Ok(Some(pool)) => pool,
         Ok(None) => return error(StatusCode::BAD_REQUEST, "database URL is not configured"),
         Err(response) => return response,
     };
-    let _admission = match admit(&runtime).await {
+    let _admission = match admit(&runtime, &database_url).await {
         Ok(admission) => admission,
         Err(response) => return response,
     };
@@ -738,12 +745,13 @@ async fn delete_row(
     if !valid_ident(&table) {
         return error(StatusCode::BAD_REQUEST, "invalid table name");
     }
-    let pool = match data_pool(&runtime, &project, &tenant(&headers, &query)).await {
+    let (pool, database_url) = match data_pool(&runtime, &project, &tenant(&headers, &query)).await
+    {
         Ok(Some(pool)) => pool,
         Ok(None) => return error(StatusCode::BAD_REQUEST, "database URL is not configured"),
         Err(response) => return response,
     };
-    let _admission = match admit(&runtime).await {
+    let _admission = match admit(&runtime, &database_url).await {
         Ok(admission) => admission,
         Err(response) => return response,
     };
@@ -847,12 +855,13 @@ async fn replace_references(
         );
     }
     let project = project(&headers, &query);
-    let pool = match data_pool(&runtime, &project, &tenant(&headers, &query)).await {
+    let (pool, database_url) = match data_pool(&runtime, &project, &tenant(&headers, &query)).await
+    {
         Ok(Some(pool)) => pool,
         Ok(None) => return error(StatusCode::BAD_REQUEST, "database URL is not configured"),
         Err(response) => return response,
     };
-    let _admission = match admit(&runtime).await {
+    let _admission = match admit(&runtime, &database_url).await {
         Ok(admission) => admission,
         Err(response) => return response,
     };

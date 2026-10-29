@@ -73,11 +73,19 @@ Interpret a recording together with PostgreSQL's timestamped logs:
 - A slow independent database probe requires checking PostgreSQL and the host.
   Its elapsed time also includes Docker execution overhead.
 
-Do not increase connection limits based only on an acquisition timeout. In the
-current implementation, requests take global admission before waiting for a
-per-database connection; a busy pool can consume permits while its requests
-wait. Establish the initiating wait and any nested acquisition before changing
-that scheduling policy.
+Do not increase connection limits based only on an acquisition timeout. The
+incident build took global admission before waiting for a database connection.
+Its queued requests could therefore exhaust shared capacity while doing no SQL.
+
+Database jobs now reserve a slot bounded by the existing per-database connection
+limit before requesting shared admission. Both queues share the existing
+admission deadline. The guard retains both slots through transaction completion
+and releases them on cancellation, timeout or error. Pool registration opens no
+connections; the shared guard still bounds connection creation for admitted jobs.
+Control-plane LISTEN uses a dedicated connection, as tenant feed listeners do,
+so a long-lived listener cannot occupy a query slot. This isolates a database's
+queued work from the shared budget; it does not identify the original stall's
+trigger or promise that active SQL cannot time out.
 
 ## Staging logging enabled during this investigation
 

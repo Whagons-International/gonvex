@@ -103,7 +103,20 @@ pub enum DatabaseError {
 pub struct PoolRegistry {
     limits: PoolLimits,
     admission: Arc<Semaphore>,
-    pools: Arc<RwLock<BTreeMap<String, PgPool>>>,
+    pools: Arc<RwLock<BTreeMap<String, DatabasePool>>>,
+}
+
+#[derive(Clone)]
+struct DatabasePool {
+    pool: PgPool,
+    capacity: Arc<Semaphore>,
+}
+
+/// A database-capacity slot and shared admission, held for the whole SQL job.
+/// Queued jobs for one database do not reserve shared capacity.
+pub struct AdmissionPermit {
+    _shared: OwnedSemaphorePermit,
+    _database: OwnedSemaphorePermit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -129,30 +142,48 @@ impl PoolRegistry {
     }
 
     pub async fn pool(&self, database_url: &str) -> Result<PgPool, DatabaseError> {
+        Ok(self.database_pool(database_url).await?.pool)
+    }
+
+    async fn database_pool(&self, database_url: &str) -> Result<DatabasePool, DatabaseError> {
         let database_url = database_url.trim();
         if let Some(pool) = self.pools.read().await.get(database_url).cloned() {
             return Ok(pool);
         }
+        // Register capacity before opening connections. A cold database must
+        // not open a connection for every queued caller outside admission.
         let pool = PgPoolOptions::new()
             .max_connections(self.limits.max_connections_per_database)
             .min_connections(0)
             .max_lifetime(Duration::from_secs(30 * 60))
             .idle_timeout(self.limits.idle_timeout)
             .acquire_timeout(self.limits.acquire_timeout)
-            .connect(database_url)
-            .await?;
+            .connect_lazy(database_url)?;
+        let database = DatabasePool {
+            pool,
+            capacity: Arc::new(Semaphore::new(
+                self.limits.max_connections_per_database as usize,
+            )),
+        };
         let mut pools = self.pools.write().await;
         Ok(pools
             .entry(database_url.to_owned())
-            .or_insert_with(|| pool.clone())
+            .or_insert(database)
             .clone())
     }
 
-    pub async fn admit(&self) -> Result<OwnedSemaphorePermit, DatabaseError> {
-        tokio::time::timeout(
-            self.limits.acquire_timeout,
-            self.admission.clone().acquire_owned(),
-        )
+    pub async fn admit(&self, database_url: &str) -> Result<AdmissionPermit, DatabaseError> {
+        let database = self.database_pool(database_url).await?;
+        // One existing admission deadline covers both queues. Cancellation or
+        // timeout drops any acquired slot, including while waiting globally.
+        tokio::time::timeout(self.limits.acquire_timeout, async {
+            let local = database.capacity.acquire_owned().await?;
+            let shared = self.admission.clone().acquire_owned().await?;
+            Ok::<_, tokio::sync::AcquireError>(AdmissionPermit {
+                _shared: shared,
+                _database: local,
+            })
+        })
         .await
         .map_err(|_| DatabaseError::AdmissionTimeout)?
         .map_err(|_| DatabaseError::AdmissionTimeout)
@@ -160,8 +191,14 @@ impl PoolRegistry {
 
     pub async fn snapshot(&self) -> PoolRegistrySnapshot {
         let pools = self.pools.read().await;
-        let open_connections = pools.values().map(PgPool::size).sum::<u32>();
-        let idle = pools.values().map(PgPool::num_idle).sum::<usize>();
+        let open_connections = pools
+            .values()
+            .map(|database| database.pool.size())
+            .sum::<u32>();
+        let idle = pools
+            .values()
+            .map(|database| database.pool.num_idle())
+            .sum::<usize>();
         PoolRegistrySnapshot {
             pools: pools.len(),
             open_connections,
@@ -179,21 +216,24 @@ impl PoolRegistry {
     }
 
     pub async fn close(&self) {
-        let pools: Vec<PgPool> = self
+        let pools: Vec<DatabasePool> = self
             .pools
             .write()
             .await
             .split_off("")
             .into_values()
             .collect();
-        for pool in pools {
-            pool.close().await;
+        for database in pools {
+            database.capacity.close();
+            database.pool.close().await;
         }
     }
 
     pub async fn close_database(&self, database_url: &str) {
-        if let Some(pool) = self.pools.write().await.remove(database_url.trim()) {
-            pool.close().await;
+        let database = self.pools.write().await.remove(database_url.trim());
+        if let Some(database) = database {
+            database.capacity.close();
+            database.pool.close().await;
         }
     }
 }
@@ -364,6 +404,7 @@ pub struct ClaimedAction {
 
 #[derive(Clone)]
 pub struct ControlPlane {
+    database_url: Arc<str>,
     pool: PgPool,
     pools: PoolRegistry,
     configured_tenants: Arc<BTreeMap<String, String>>,
@@ -386,7 +427,9 @@ fn developer_session_metadata(
 
 impl ControlPlane {
     pub async fn listener(&self, channels: &[&str]) -> Result<PgListener, DatabaseError> {
-        let mut listener = PgListener::connect_with(&self.pool).await?;
+        // LISTEN owns a long-lived connection; keep it outside the finite SQL
+        // job pool, just like the tenant change-feed listeners.
+        let mut listener = PgListener::connect(&self.database_url).await?;
         for channel in channels {
             listener.listen(channel).await?;
         }
@@ -394,6 +437,7 @@ impl ControlPlane {
     }
 
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<(), DatabaseError> {
+        let _admission = self.pools.admit(&self.database_url).await?;
         sqlx::query("SELECT pg_notify($1,$2)")
             .bind(channel)
             .bind(payload)
@@ -409,6 +453,7 @@ impl ControlPlane {
     ) -> Result<Self, DatabaseError> {
         let pool = pools.pool(database_url).await?;
         let control = Self {
+            database_url: database_url.trim().into(),
             pool,
             pools,
             configured_tenants: Arc::new(configured_tenants),
@@ -420,7 +465,7 @@ impl ControlPlane {
     }
 
     pub async fn ping(&self) -> Result<(), DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
     }
@@ -431,7 +476,7 @@ impl ControlPlane {
         &self,
         read_only: bool,
     ) -> Result<TenantTransaction, DatabaseError> {
-        let admission = self.pools.admit().await?;
+        let admission = self.pools.admit(&self.database_url).await?;
         let mut transaction = self.pool.begin().await?;
         if read_only {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -455,7 +500,7 @@ impl ControlPlane {
             return Err(DatabaseError::InvalidSession);
         }
         let token_hash = token_hash(token);
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let row = sqlx::query(
             r#"SELECT session.project_id, account.id, account.email,
                       COALESCE(identity.verified_email, FALSE) AS email_verified,
@@ -556,7 +601,7 @@ impl ControlPlane {
             return Err(DatabaseError::InvalidSession);
         }
         let next = random_token("dev");
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let mut transaction = self.pool.begin().await?;
         let statement = if token.starts_with("gvx_imp_") {
             r#"UPDATE gonvex_impersonation_grants SET
@@ -673,7 +718,7 @@ impl ControlPlane {
         if !token.trim().starts_with("gvx_dev_") {
             return Err(DatabaseError::InvalidSession);
         }
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let row = sqlx::query(
             r#"SELECT id,project_id,actor_account_id,target_account_id,tenant_id,reason,expires_at
                FROM gonvex_impersonation_grants
@@ -701,6 +746,7 @@ impl ControlPlane {
                 .timestamp_millis(),
         )
         .is_some();
+        drop(_admission);
         if developer {
             self.admit_developer(&project_id, &tenant_id, &account_id)
                 .await?;
@@ -717,7 +763,7 @@ impl ControlPlane {
         tenant_id: &str,
         account_id: &str,
     ) -> Result<TenantSession, DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let row = sqlx::query(
             r#"SELECT account.id, account.email,
                       COALESCE(identity.verified_email, FALSE) AS email_verified,
@@ -770,7 +816,7 @@ impl ControlPlane {
         project_id: &str,
         account_id: &str,
     ) -> Result<String, DatabaseError> {
-        let admission = self.pools.admit().await?;
+        let admission = self.pools.admit(&self.database_url).await?;
         let rows = sqlx::query(
             r#"SELECT tenant.tenant_id
                FROM gonvex_runtime_tenants tenant
@@ -802,7 +848,7 @@ impl ControlPlane {
 
     pub async fn project(&self, project_id: &str) -> Result<Project, DatabaseError> {
         let project_id = required(project_id, DatabaseError::MissingProject)?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let row = sqlx::query(
             r#"SELECT id, name, environment, database_mode, status, auth_mode
                FROM gonvex_runtime_projects
@@ -816,7 +862,7 @@ impl ControlPlane {
     }
 
     pub async fn runtime_manifests(&self) -> Result<Vec<RuntimeManifestRecord>, DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let rows = sqlx::query(
             r#"SELECT project_id, module_hash, manifest
                FROM gonvex_runtime_manifests
@@ -841,7 +887,7 @@ impl ControlPlane {
         key: &str,
         fallback_key: Option<&str>,
     ) -> Result<bool, DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let project_key = sqlx::query_scalar::<_, String>(
             "SELECT project_key FROM gonvex_runtime_projects WHERE id=$1 AND status NOT IN ('deleted','disabled')",
         )
@@ -862,7 +908,7 @@ impl ControlPlane {
         &self,
         record: &RuntimeManifestRecord,
     ) -> Result<(), DatabaseError> {
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         sqlx::query(
             r#"INSERT INTO gonvex_runtime_manifests(project_id,manifest,module_hash,updated_at)
                VALUES($1,$2,$3,now()) ON CONFLICT(project_id) DO UPDATE SET
@@ -883,7 +929,7 @@ impl ControlPlane {
     ) -> Result<TenantDirectoryEntry, DatabaseError> {
         let project_id = required(project_id, DatabaseError::MissingProject)?;
         let tenant_id = required(tenant_id, DatabaseError::MissingTenant)?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let row = sqlx::query(
             r#"SELECT tenant_id, project_id, name, domain, timezone, profile, status
                FROM gonvex_runtime_tenants
@@ -903,7 +949,7 @@ impl ControlPlane {
 
     pub async fn tenant_routes(&self, project_id: &str) -> Result<Vec<TenantRoute>, DatabaseError> {
         let project_id = required(project_id, DatabaseError::MissingProject)?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let rows = sqlx::query(
             r#"SELECT tenant_id,database_url FROM gonvex_runtime_tenants
                WHERE project_id=$1 AND deleted_at IS NULL
@@ -946,7 +992,7 @@ impl ControlPlane {
             });
         }
 
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&self.database_url).await?;
         let row = sqlx::query(
             r#"SELECT tenant_id,NULLIF(database_url, '') AS database_url
                FROM gonvex_runtime_tenants
@@ -1000,7 +1046,7 @@ impl ControlPlane {
         let account_id = required(account_id, DatabaseError::MissingAccount)?;
         let route = self.resolve_tenant(project_id, tenant_id).await?;
         let tenant_pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         let mut transaction = tenant_pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *transaction)
@@ -1082,7 +1128,7 @@ impl ControlPlane {
         member_id: &str,
     ) -> Result<Option<Member>, DatabaseError> {
         let tenant_pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         let row = sqlx::query(
             r#"SELECT id, account_id, status, display_name, avatar_url, role,
                       permissions, membership_revision
@@ -1100,7 +1146,7 @@ impl ControlPlane {
         route: &TenantRoute,
         read_only: bool,
     ) -> Result<TenantTransaction, DatabaseError> {
-        let admission = self.pools.admit().await?;
+        let admission = self.pools.admit(&route.database_url).await?;
         let pool = self.pools.pool(&route.database_url).await?;
         let mut transaction = pool.begin().await?;
         if read_only {
@@ -1121,7 +1167,7 @@ impl ControlPlane {
         command_id: &str,
     ) -> Result<Option<u64>, DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         let revision: i64 = sqlx::query_scalar(
             r#"SELECT COALESCE(MAX(revision), 0)
                FROM _gonvex_sync_changes
@@ -1138,7 +1184,7 @@ impl ControlPlane {
         route: &TenantRoute,
     ) -> Result<(), DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         sqlx::raw_sql(
             r#"DO $$ BEGIN
                  IF to_regclass('public._gonvex_mutation_idempotency') IS NOT NULL
@@ -1170,7 +1216,7 @@ impl ControlPlane {
         path: &str,
     ) -> Result<Value, DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         let row = sqlx::query(
             r#"SELECT result, path FROM _gonvex_reducer_idempotency
                WHERE subject = $1 AND idempotency_key = $2"#,
@@ -1197,7 +1243,7 @@ impl ControlPlane {
         route: &TenantRoute,
     ) -> Result<Option<ClaimedAction>, DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         let mut transaction = pool.begin().await?;
         let row = sqlx::query(
             r#"SELECT id, action_path, args,
@@ -1246,7 +1292,7 @@ impl ControlPlane {
         attempt: i32,
     ) -> Result<bool, DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         let result = sqlx::query(
             "UPDATE _gonvex_action_outbox SET locked_at = now() WHERE id = $1 AND status = 'processing' AND attempts = $2",
         ).bind(action_id).bind(attempt).execute(&pool).await?;
@@ -1259,7 +1305,7 @@ impl ControlPlane {
         action_id: &str,
     ) -> Result<(), DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         sqlx::query("DELETE FROM _gonvex_action_outbox WHERE id = $1")
             .bind(action_id)
             .execute(&pool)
@@ -1275,7 +1321,7 @@ impl ControlPlane {
         error: &str,
     ) -> Result<(), DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit().await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
         sqlx::query(
             r#"UPDATE _gonvex_action_outbox
                SET status = 'pending', locked_at = NULL,
@@ -1308,7 +1354,7 @@ pub struct TransactionAttribution<'a> {
 /// runtime-wide database limit.
 pub struct TenantTransaction {
     transaction: Transaction<'static, Postgres>,
-    _admission: OwnedSemaphorePermit,
+    _admission: AdmissionPermit,
     read_only: bool,
 }
 
@@ -1689,6 +1735,7 @@ mod tests {
             "postgres://trusted/tenant-a".to_owned(),
         )]);
         let control = ControlPlane {
+            database_url: "postgres://unused".into(),
             pool: PgPoolOptions::new()
                 .connect_lazy("postgres://unused")
                 .unwrap(),

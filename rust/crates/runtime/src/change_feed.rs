@@ -231,7 +231,7 @@ pub(crate) async fn prune_retained(
     route: &TenantRoute,
 ) -> Result<(), gonvex_postgres::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
-    let _admission = pools.admit().await?;
+    let _admission = pools.admit(&route.database_url).await?;
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('_gonvex_sync_changes_prune'))")
         .execute(&mut *transaction)
@@ -315,7 +315,7 @@ pub async fn read_clock(
     route: &TenantRoute,
 ) -> Result<ReplicaClock, gonvex_postgres::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
-    let _admission = pools.admit().await?;
+    let _admission = pools.admit(&route.database_url).await?;
     let row = sqlx::query(
         "SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = true",
     )
@@ -337,7 +337,7 @@ pub async fn read_changes(
     through: u64,
 ) -> Result<Vec<LogChange>, gonvex_postgres::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
-    let _admission = pools.admit().await?;
+    let _admission = pools.admit(&route.database_url).await?;
     let rows = sqlx::query(
         r#"SELECT changes.revision, changes.ordinal, COALESCE(changes.command_id, '') AS command_id,
                   table_name, row_id, operation,
