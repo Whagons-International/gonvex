@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Gonvex SQLite verification",
+    "slug": "gonvex-sqlite-verification",
+    "version": "1.0.0",
+    "jsEngine": "hermes",
+    "platforms": [
+      "android"
+    ],
+    "android": {
+      "package": "com.gonvex.sqliteproof"
+    }
+  }
+}

@@ -28,8 +28,7 @@ independent-handle control passes:
 - A second replica instance reads changed, uncommitted data alongside the old
   revision 7 checkpoint before the writer commits.
 
-These are controlled defect reproductions, not observed deployed incidents or
-native-phone executions.
+These are controlled defect reproductions, not observed deployed incidents.
 
 ## Implementation and argument
 
@@ -76,8 +75,27 @@ provided view. It must not reenter another SDK operation on the same handle
 while holding admission. The coordinator cannot supply liveness for a callback
 that never settles.
 
-The Node fixture validates SQLite and Expo-compatible wrapper behavior. It does
-not establish Expo/Hermes execution, phone filesystem durability, OS power-loss
-behavior or arbitrary raw SQL interleaving. Native app device evidence remains
-required before claiming those boundaries verified. No OPFS or SQLite WASM
-work is included.
+## Native execution and process recovery
+
+The same three baseline defects and all six fixed cases were reproduced with
+actual Expo SQLite 16.0.10, Expo 54.0.34, React Native 0.81.5, Hermes and SQLite
+3.50.3 on an Android API 36 x86_64 emulator. The fixed adapter files matched the
+merged staging source at `1ec0a880`. A successful native entity statement was
+held inside a transaction while the app process was killed. Restart recovered
+the original rows and checkpoint 7, retained the previously committed intent's
+ID/key/arguments, recovered it from inflight to pending and allocated ID 2 next.
+After retry committed revision 8, another process restart retained the changed
+rows, new row and both intents.
+
+The portable [native fixture](../../verification/native-sqlite/README.md) checks
+these postconditions against current repository source and a checksum-pinned
+baseline. Required CI runs the actual native engine when its execution inputs
+change, records process identity changes and rejects missing or foreign events.
+Its host-validator unit vectors are historical observations, not native execution.
+The original local evidence archive is
+`/mnt/data/work/gonvex-sqlite-guarantees/native/evidence-20261029-android-r2/`.
+
+This establishes selected Android/Hermes schedules and app-process failure
+recovery. It does not establish iOS, physical-phone filesystem durability,
+OS power-loss behavior, arbitrary raw SQL interleaving or a complete SDK
+protocol proof. No OPFS or SQLite WASM work is included.

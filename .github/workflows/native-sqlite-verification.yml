@@ -1,0 +1,81 @@
+name: Native SQLite verification
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    name: Determine native SQLite scope
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.scope.outputs.required }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate receipt and scope guards
+        run: python3 -m unittest discover -s verification/native-sqlite -p 'test_*.py' -v
+      - id: scope
+        env:
+          NATIVE_EVENT: ${{ github.event_name }}
+          NATIVE_BASE: ${{ github.event.pull_request.base.sha }}
+          NATIVE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 verification/native-sqlite/scope.py
+
+  android:
+    name: Expo SQLite on Android and Hermes
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: verification/native-sqlite/package-lock.json
+      - name: Install frozen workspace and native fixture
+        run: |
+          corepack enable && corepack prepare pnpm@11.1.2 --activate
+          pnpm install --frozen-lockfile
+          pnpm build:packages
+          npm --prefix verification/native-sqlite ci --ignore-scripts --no-audit --no-fund
+      - name: Enable KVM on the ephemeral CI runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Execute actual native SQLite contracts and process recovery
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          avd-name: gonvex_native_sqlite
+          cores: 2
+          ram-size: 2048M
+          disk-size: 6G
+          emulator-options: -no-window -gpu swiftshader_indirect -feature -Vulkan -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
+          script: python3 verification/native-sqlite/run.py --serial emulator-5554 --output "$RUNNER_TEMP/native-sqlite"
+      - name: Retain native source, observations and process witnesses
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-sqlite
+          path: |
+            ${{ runner.temp }}/native-sqlite/receipt.json
+            ${{ runner.temp }}/native-sqlite/source.json
+            ${{ runner.temp }}/native-sqlite/events.ndjson
+            ${{ runner.temp }}/native-sqlite/process-events.log
+            ${{ runner.temp }}/native-sqlite/metro.log
+            ${{ runner.temp }}/native-sqlite/device.log
+          if-no-files-found: ignore
