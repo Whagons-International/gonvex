@@ -15,6 +15,7 @@ import {
   type ReplicaReadCoverage,
   type ReplicaReducerReadView,
 } from "@gonvex/client";
+import { withSQLiteOperation } from './database-operations.js';
 
 export interface ExpoSQLiteDatabase {
   execAsync(sql: string): Promise<void>;
@@ -42,6 +43,72 @@ const replicaSchemaVersion = 3;
  * cursor inside one SQLite transaction.
  */
 export class ExpoSQLiteLocalReplicaStorage implements LocalReplicaStorage {
+  private readonly core: SQLiteReplicaStorageCore;
+
+  constructor(private readonly database: ExpoSQLiteDatabase) {
+    // Core-to-core calls stay inside one admission; every public entry gates
+    // reads and initialization too, so uncommitted rows cannot escape.
+    this.core = new SQLiteReplicaStorageCore(database);
+  }
+
+  load(...args: Parameters<SQLiteReplicaStorageCore['load']>) {
+    return withSQLiteOperation(this.database, () => this.core.load(...args));
+  }
+
+  loadWorkingSet(...args: Parameters<SQLiteReplicaStorageCore['loadWorkingSet']>) {
+    return withSQLiteOperation(this.database, () => this.core.loadWorkingSet(...args));
+  }
+
+  loadEntityRows(...args: Parameters<SQLiteReplicaStorageCore['loadEntityRows']>) {
+    return withSQLiteOperation(this.database, () => this.core.loadEntityRows(...args));
+  }
+
+  loadWindowRows(...args: Parameters<SQLiteReplicaStorageCore['loadWindowRows']>) {
+    return withSQLiteOperation(this.database, () => this.core.loadWindowRows(...args));
+  }
+
+  loadSession(...args: Parameters<SQLiteReplicaStorageCore['loadSession']>) {
+    return withSQLiteOperation(this.database, () => this.core.loadSession(...args));
+  }
+
+  saveSession(...args: Parameters<SQLiteReplicaStorageCore['saveSession']>) {
+    return withSQLiteOperation(this.database, () => this.core.saveSession(...args));
+  }
+
+  applyTransaction(...args: Parameters<SQLiteReplicaStorageCore['applyTransaction']>) {
+    return withSQLiteOperation(this.database, () => this.core.applyTransaction(...args));
+  }
+
+  advanceWatermark(...args: Parameters<SQLiteReplicaStorageCore['advanceWatermark']>) {
+    return withSQLiteOperation(this.database, () => this.core.advanceWatermark(...args));
+  }
+
+  replaceSnapshot(...args: Parameters<SQLiteReplicaStorageCore['replaceSnapshot']>) {
+    return withSQLiteOperation(this.database, () => this.core.replaceSnapshot(...args));
+  }
+
+  replaceWindow(...args: Parameters<SQLiteReplicaStorageCore['replaceWindow']>) {
+    return withSQLiteOperation(this.database, () => this.core.replaceWindow(...args));
+  }
+
+  applyWindowDelta(...args: Parameters<SQLiteReplicaStorageCore['applyWindowDelta']>) {
+    return withSQLiteOperation(this.database, () => this.core.applyWindowDelta(...args));
+  }
+
+  removeWindow(...args: Parameters<SQLiteReplicaStorageCore['removeWindow']>) {
+    return withSQLiteOperation(this.database, () => this.core.removeWindow(...args));
+  }
+
+  clear(...args: Parameters<SQLiteReplicaStorageCore['clear']>) {
+    return withSQLiteOperation(this.database, () => this.core.clear(...args));
+  }
+
+  withReadView<T>(scope: string, coverage: ReplicaReadCoverage, run: (view: ReplicaReducerReadView) => Promise<T>): Promise<T> {
+    return withSQLiteOperation(this.database, () => this.core.withReadView(scope, coverage, run));
+  }
+}
+
+class SQLiteReplicaStorageCore implements LocalReplicaStorage {
   private initialized?: Promise<void>;
 
   constructor(private readonly database: ExpoSQLiteDatabase) {}

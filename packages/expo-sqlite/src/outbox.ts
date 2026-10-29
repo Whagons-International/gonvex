@@ -1,5 +1,6 @@
 import type { OutboxStore, ReducerOutboxEntry, ReducerOutboxState } from "@gonvex/client";
 import type { ExpoSQLiteDatabase } from "./index.js";
+import { withSQLiteOperation } from './database-operations.js';
 
 const outboxStates: ReadonlySet<ReducerOutboxState> = new Set(["pending", "inflight", "committed", "failed", "rejected"]);
 
@@ -20,7 +21,6 @@ type OutboxRow = { value: string };
 export class ExpoSQLiteOutboxStore implements OutboxStore {
   readonly strictPersistence = false;
   private initialized?: Promise<void>;
-  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly database: ExpoSQLiteDatabase) {}
 
@@ -174,16 +174,14 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
 
   /**
    * Expo's withTransactionAsync is not exclusive against other statements on
-   * the same connection. Serialize this store's own work so two outbox
-   * transactions never interleave.
+   * the same connection. Share admission with every replica and outbox
+   * instance using this handle, including reads and schema initialization.
    */
   private serial<T>(run: () => Promise<T>): Promise<T> {
-    const job = this.queue.then(async () => {
+    return withSQLiteOperation(this.database, async () => {
       await this.initialize();
       return run();
     });
-    this.queue = job.catch(() => undefined);
-    return job;
   }
 
   private async transaction<T>(run: () => Promise<T>): Promise<T> {
