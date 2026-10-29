@@ -226,7 +226,7 @@ async fn run_feed(
     }
 }
 
-async fn prune_retained(
+pub(crate) async fn prune_retained(
     pools: &PoolRegistry,
     route: &TenantRoute,
 ) -> Result<(), gonvex_postgres::DatabaseError> {
