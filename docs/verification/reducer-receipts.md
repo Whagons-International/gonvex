@@ -52,7 +52,11 @@ at `ffbb248516026bc59dffafb7e4d2f7540d209115` compiled and executed all four
 original tests. Rollback passed. Both changed-ID and pruned-feed replay returned
 `committed_revision=None` after original revision 1 and later revision 2. The
 unreadable-clock replay also incorrectly succeeded. Fixed-source validation
-must pass these regressions and the additional native controls.
+in the [follow-up native run](https://github.com/Whagons-International/gonvex/actions/runs/40792591655)
+at `bdf4697b1143f246017c9eac8f7d80a13ca45860` passed all eight tests with no
+ignored tests. This includes the original regressions and both witnessed
+competing-claim outcomes. The session fixture is synthetic and trusted; it does
+not test authentication admission or tenant routing.
 
 The protocol assumes correct tenant routing, one intact database epoch,
 monotonic runtime metadata, PostgreSQL's transactional behavior and a durable

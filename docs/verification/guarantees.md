@@ -20,7 +20,7 @@ Document unresolved gaps rather than calling a subsystem fully verified.
 | ID | Intended guarantee | Current evidence and remaining work |
 | --- | --- | --- |
 | MUT-1 | A successful authenticated reducer corresponds to its committed tenant transaction. | Rust rollback/aborted-commit regressions and transactional receipt tests exist. Whole invocation/receipt protocol remains unproved. PostgreSQL durability, tenant routing and effects staying inside the transaction are assumptions. |
-| MUT-2 | Retries of one logical intent do not repeat its transactional business effects. | Receipt claim/result and writes share a transaction. Finite protocol model and required native replay/competing-claim fixtures are described in reducer-receipts.md; native results must be recorded before claiming the implementation verified. Namespace is tenant database + account subject + intent key. Path reuse is checked; argument equivalence is a caller obligation. Anonymous reducers/actions are excluded. Receipt retention is not promised as permanent. |
+| MUT-2 | Retries of one logical intent do not repeat its transactional business effects. | Receipt claim/result and writes share a transaction. Finite protocol model plus eight passing native replay/rollback/competing-claim tests, with three failing baseline regressions, are recorded in reducer-receipts.md. No whole-source refinement proof. Namespace is tenant database + account subject + intent key. Path reuse is checked; argument equivalence is a caller obligation. Anonymous reducers/actions are excluded. Receipt retention is not promised as permanent. |
 | SDK-1 | Delivery and recovery do not revive committed or parked queue entries. | Source-linked finite-state proof and public queue regressions in this tranche. Explicit retry, commit, rejection, deletion, adapter atomicity and complete SDK delivery remain outside the proof. See outbox-delivery.md. |
 | SDK-2 | Durable acknowledgements and local-intent retirement cannot pass an unapplied transaction. | Staging now fences failed data lanes before later watermarks and retains capable-runtime patchless intents until their barrier. Public adapter schedules and a finite protocol model cover the fixed failures; see replica-durability.md. Server snapshot delivery ordering and the complete protocol remain unproved. |
 | SYNC-1 | Duplicate/stale frames cannot undo newer authorized data; reconnect eventually catches up under explicit progress assumptions. | Revision primitive proofs and storage/lifecycle regressions exist. Full merge, snapshot/epoch transitions and recovery protocol remain unproved. |
@@ -63,10 +63,10 @@ must state their domains/bounds and demonstrate implementation correspondence.
 1. Check server snapshot delivery ordering before terminal call watermarks.
    An installed cursor does not itself establish that every snapshot chunk has
    been delivered. Reproduce the pending native snapshot schedule.
-2. Validate the conservative replay clock barrier against native baselines and
-   fixed-source tests. A current head can exceed the original commit revision;
-   prove sufficiency under the stated database/epoch assumptions rather than
-   promising exact historical attribution or permanent receipt retention.
+2. Extend receipt coverage to tenant routing and deployment restart boundaries.
+   A current head can exceed the original commit revision. Native tests and the
+   finite model establish selected schedules under the stated database/epoch
+   assumptions, not exact historical attribution or permanent retention.
 3. Specify explicit commit/reject/retry race semantics. The delivery proof does
    not establish the behavior of every mutation of an outbox record.
 4. Add crash/restart and competing-claim PostgreSQL tests tied to the declared
