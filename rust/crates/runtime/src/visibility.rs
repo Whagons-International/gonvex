@@ -284,7 +284,7 @@ fn active_visibility_sets(
     if role_only_value(expression, role).is_some() {
         return;
     }
-    if expression.operator == "inSet" {
+    if matches!(expression.operator.as_str(), "inSet" | "nonEmpty") {
         sets.insert(expression.set.clone());
     }
     for child in &expression.children {
@@ -582,15 +582,11 @@ fn compile_expression(
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
         "nonEmpty" => {
-            if resolved
-                .sets
-                .get(&expression.set)
-                .is_some_and(|set| !set.is_empty())
-            {
-                "TRUE".to_owned()
-            } else {
-                "FALSE".to_owned()
-            }
+            let set = plan.sets.get(&expression.set).ok_or_else(|| {
+                VisibilityError::Invalid(format!("unknown set {:?}", expression.set))
+            })?;
+            let subquery = compile_set_with_parameters(set, &resolved.direct, parameters)?;
+            format!("EXISTS ({subquery})")
         }
         // SQL snapshots and in-memory deltas must use the same admitted
         // principal. Ordinary members keep their live database role checks.
@@ -973,6 +969,29 @@ fn quote(value: &str) -> Result<String, VisibilityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_empty_flags_retain_dependencies_and_follow_set_contents() {
+        let plan = dependency_plan(serde_json::json!({"operator":"nonEmpty","set":"assigned"}));
+        plan.validate().unwrap();
+        let mut member = dependency_member("member");
+        assert!(plan.resolved_dependency_columns(&member).change_affects(
+            "taskUsers",
+            "insert",
+            &[]
+        ));
+        assert!(!row_matches(&plan, &member, &serde_json::json!({})));
+        member
+            .sets
+            .insert("assigned".to_owned(), BTreeSet::from(["task-1".to_owned()]));
+        assert!(row_matches(&plan, &member, &serde_json::json!({})));
+        let mut parameters = Vec::new();
+        assert!(compile_predicate(&plan, &member, "r", &mut parameters)
+            .unwrap()
+            .starts_with("EXISTS ("));
+        let unknown = dependency_plan(serde_json::json!({"operator":"nonEmpty","set":"missing"}));
+        assert!(unknown.validate().is_err());
+    }
 
     #[tokio::test]
     async fn nullable_negation_matches_postgres_admission() {
