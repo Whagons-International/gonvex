@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Waker};
 use std::time::Duration;
 
 use gonvex_postgres::{ControlPlane, DatabaseError, PoolLimits, PoolRegistry, TenantRoute};
@@ -96,12 +96,10 @@ async fn busy_tenant_waiters_leave_shared_capacity_for_other_tenants_and_control
     let mut waiters = Vec::new();
     for _ in 0..8 {
         let mut waiter = Box::pin(tokio::task::unconstrained(fixture.begin(0, true)));
-        assert!(matches!(
-            waiter
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop())),
-            Poll::Pending
-        ));
+        assert!(waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
         waiters.push(waiter);
     }
     assert_eq!(
@@ -133,12 +131,10 @@ async fn cancelling_a_shared_queue_waiter_releases_its_database_slot() {
     let first = fixture.begin(0, true).await.unwrap();
     let second = fixture.begin(1, true).await.unwrap();
     let mut waiting = Box::pin(tokio::task::unconstrained(fixture.begin(2, true)));
-    assert!(matches!(
-        waiting
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop())),
-        Poll::Pending
-    ));
+    assert!(waiting
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+        .is_pending());
     assert_eq!(fixture.pools.snapshot().await.admission_active, 2);
     assert_eq!(
         fixture
@@ -217,23 +213,19 @@ async fn closing_one_database_cancels_its_queue_without_locking_other_pools() {
     };
     let held = fixture.begin(0, true).await.unwrap();
     let mut waiter = Box::pin(tokio::task::unconstrained(fixture.begin(0, true)));
-    assert!(matches!(
-        waiter
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop())),
-        Poll::Pending
-    ));
+    assert!(waiter
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+        .is_pending());
     let mut closing = Box::pin(tokio::task::unconstrained(
         fixture
             .pools
             .close_database(&fixture.routes[0].database_url),
     ));
-    assert!(matches!(
-        closing
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop())),
-        Poll::Pending
-    ));
+    assert!(closing
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+        .is_pending());
     assert!(matches!(waiter.await, Err(DatabaseError::AdmissionTimeout)));
     let healthy = fixture.begin(1, true).await.unwrap();
     healthy.rollback().await.unwrap();
