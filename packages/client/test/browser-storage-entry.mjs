@@ -180,5 +180,25 @@ async function recoveredQueue(name) {
   return (await Promise.all(scopes.map(scope => queue.loadAll(scope.scope)))).flat();
 }
 
+async function acceptedQueue(name, seed = false) {
+  const queue = new DexieReducerOutbox({ databaseName: name + '-queue' });
+  const scope = 'accepted-account';
+  try {
+    if (seed) {
+      const entry = await queue.enqueue({ scope, path: 'tasks.save', args: { value: 1 }, idempotencyKey: 'accepted-intent' });
+      await queue.markInflight(entry.id);
+      await queue.markCommitted(entry.id);
+      return await queue.list(scope);
+    }
+    const before = await queue.loadAll(scope);
+    if (before.length !== 1) throw Error('accepted queue record missing after crash');
+    await queue.reject(before[0].id, 'late rejection');
+    const retried = await queue.retry(before[0].id);
+    await queue.fail(before[0].id, 'late timeout', { maxAttempts: 1 });
+    return { before, after: await queue.list(scope), retried: retried ?? null,
+      ready: await queue.nextReady(scope, Number.MAX_SAFE_INTEGER) ?? null };
+  } finally { queue.dispose?.(); }
+}
+
 window.browserGuarantees = { seed, read, abortTransaction, commitTransaction,
-  crashTransaction, snapshotBarrier, recoveredQueue };
+  crashTransaction, snapshotBarrier, recoveredQueue, acceptedQueue };

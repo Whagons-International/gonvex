@@ -327,26 +327,7 @@ export class DexieReducerOutbox implements ReducerOutbox {
   }
 
   async markCommitted(id: number): Promise<void> {
-    if (this.memoryOnly) {
-      this.markCommittedInMemory(id);
-      return;
-    }
-    try {
-      const database = await this.open();
-      let updated: ReducerOutboxEntry | undefined;
-      await database.transaction("rw", database.entries, async () => {
-        const entry = await database.entries.get(id);
-        if (!entry || entry.state === "committed") return;
-        updated = { ...entry, state: "committed" as const };
-        await database.entries.put(updated);
-      });
-      if (!updated) return;
-      this.remember(updated);
-      this.notify();
-    } catch {
-      this.degradeToMemory();
-      this.markCommittedInMemory(id);
-    }
+    await this.transition(id, markCommittedChange);
   }
 
   async ack(id: number): Promise<void> {
@@ -468,13 +449,6 @@ export class DexieReducerOutbox implements ReducerOutbox {
     }
     if (changed) this.notify();
     return this.sortedMemoryEntries(scope).map(cloneEntry);
-  }
-
-  private markCommittedInMemory(id: number) {
-    const entry = this.memoryEntries.get(id);
-    if (!entry || entry.state === "committed") return;
-    this.memoryEntries.set(id, { ...entry, state: "committed" });
-    this.notify();
   }
 
   private ackInMemory(id: number) {
@@ -751,13 +725,7 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async markCommitted(id: number): Promise<void> {
     await this.ready;
-    if(this.store.update && !this.memoryOnly) { await this.updateShared(id,entry=>({...entry,state:'committed'}));this.notify();return; }
-    const entry = this.entries.get(id);
-    if (!entry || entry.state === "committed") return;
-    const updated = { ...entry, state: "committed" as const };
-    this.entries.set(id, updated);
-    await this.persistPut(updated);
-    this.notify();
+    await this.transition(id, markCommittedChange);
   }
 
   async markCommittedMany(ids: number[]): Promise<void> {
@@ -767,7 +735,7 @@ export class StoreReducerOutbox implements ReducerOutbox {
       for (const id of ids) await this.markCommitted(id);
       return;
     }
-    const updated = await this.store.updateMany(ids, entry => entry.state === "inflight" ? { ...entry, state: "committed" } : entry);
+    const updated = await this.store.updateMany(ids, entry => markCommittedChange(entry) ?? entry);
     for (const entry of updated) this.entries.set(entry.id, cloneEntry(entry));
     this.notify();
   }
@@ -1085,7 +1053,7 @@ function failedEntry(entry: ReducerOutboxEntry, error: string, now: number, opti
   return {
     ...entry,
     attempts,
-    state: park ? "failed" : "pending",
+    state: deliveryState(entry.state, park ? "fail-park" : "fail-retry"),
     nextAttemptAt: now + (options.delayMs ?? outboxBackoffMs(attempts, options.maxBackoffMs)),
     lastError: error,
     ...(options.errorClass ? { lastErrorClass: options.errorClass } : {}),
@@ -1093,7 +1061,8 @@ function failedEntry(entry: ReducerOutboxEntry, error: string, now: number, opti
   };
 }
 
-/** Failed and rejected records leave their state only through retry(). */
+/** Delivery failure cannot re-arm parked records. Positive server acceptance
+ * can still settle them, and an explicit retry can re-arm them. */
 function isParked(entry: Pick<ReducerOutboxEntry, "state">) {
   return entry.state === "failed" || entry.state === "rejected";
 }
@@ -1110,16 +1079,23 @@ function markPendingChange(entry: ReducerOutboxEntry): ReducerOutboxEntry | unde
   return { ...entry, state, nextAttemptAt: Date.now(), lastError: undefined };
 }
 
+function markCommittedChange(entry: ReducerOutboxEntry): ReducerOutboxEntry | undefined {
+  const state = deliveryState(entry.state, "commit");
+  return state === entry.state ? undefined : { ...entry, state };
+}
+
 function failChange(entry: ReducerOutboxEntry, error: string, now: number, options: OutboxFailureOptions) {
   // A concurrent discard/reject/commit already decided this entry's fate.
   if (isParked(entry) || entry.state === "committed") return undefined;
   return failedEntry(entry, error, now, options);
 }
 
-function rejectChange(entry: ReducerOutboxEntry, error: string, now: number): ReducerOutboxEntry {
+function rejectChange(entry: ReducerOutboxEntry, error: string, now: number): ReducerOutboxEntry | undefined {
+  const state = deliveryState(entry.state, "reject");
+  if (state === entry.state) return undefined;
   return {
     ...entry,
-    state: "rejected",
+    state,
     lastError: error,
     lastErrorClass: "rejected",
     nextAttemptAt: now,
@@ -1128,11 +1104,12 @@ function rejectChange(entry: ReducerOutboxEntry, error: string, now: number): Re
 }
 
 function retryChange(entry: ReducerOutboxEntry, now: number): ReducerOutboxEntry | undefined {
-  if (entry.state !== "failed" && entry.state !== "rejected") return undefined;
+  const state = deliveryState(entry.state, "retry");
+  if (state === entry.state) return undefined;
   const { lastError: _error, lastErrorClass: _class, settledAt: _settled, ...rest } = entry;
   // Same id, same idempotency key: the server replays instead of re-applying
   // if an earlier attempt did commit before its response was lost.
-  return { ...rest, state: "pending", attempts: 0, nextAttemptAt: now };
+  return { ...rest, state, attempts: 0, nextAttemptAt: now };
 }
 
 function summarizeScopes(entries: Iterable<ReducerOutboxEntry>): ReducerOutboxScopeSummary[] {
