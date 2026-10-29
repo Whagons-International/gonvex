@@ -18,6 +18,11 @@ keeps normalized rows and query memberships on disk; it does not hydrate the
 whole database to execute a Reducer. Incoming projections update only their fields.
 Schema upgrades, cursor changes, row authority, and tombstones are transactional.
 
+Keep this database handle dedicated to Gonvex. Replica and outbox instances that
+receive the same handle object share one queue, so their reads, writes and
+schema upgrades cannot interrupt each other's transactions. Raw application SQL
+on that connection is outside this queue. Use a separate connection for it.
+
 ## Durable reducer outbox
 
 `expoSQLiteOutbox(database)` stores queued reducer intents one row per intent,
@@ -40,6 +45,11 @@ const client = new GonvexClient(url, {
   outbox: { store: outbox },
 });
 ```
+
+Use the same `database` object for both adapters. Read-view callbacks must await
+their reads and use the supplied view without reentering another SDK operation
+on that handle. See [the transaction contract](../../docs/verification/sqlite-transactions.md)
+for the reproduced failures and evidence limits.
 
 Run the migration before constructing the client. Imported entries keep their
 ids and idempotency keys, so a replay is still deduplicated by the runtime.
