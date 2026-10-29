@@ -1,3 +1,4 @@
+import { deliveryState, type ReducerOutboxState } from "./outbox-policy.js";
 import type { Dexie as DexieDatabase, Table } from "dexie";
 import type { OptimisticPatch } from "./optimistic.js";
 import type { LocalExecution } from "@gonvex/local-runtime";
@@ -93,7 +94,8 @@ export type ReducerOutboxEntry = {
  *   back; the record stays so a UI can explain what happened until the app
  *   dismisses (discards) or retries it.
  */
-export type ReducerOutboxState = "pending" | "inflight" | "committed" | "failed" | "rejected";
+
+export type { ReducerOutboxState } from "./outbox-policy.js";
 
 /** Server classification, plus `network` for a dropped connection with no verdict. */
 export type OutboxErrorClass = ReducerErrorClass | "network";
@@ -321,31 +323,7 @@ export class DexieReducerOutbox implements ReducerOutbox {
   }
 
   async markPending(id: number): Promise<void> {
-    if (this.memoryOnly) {
-      this.markPendingInMemory(id);
-      return;
-    }
-    try {
-      const database = await this.open();
-      let updated: ReducerOutboxEntry | undefined;
-      await database.transaction("rw", database.entries, async () => {
-        const entry = await database.entries.get(id);
-        if (!entry || entry.state === "pending" || isParked(entry)) return;
-        updated = {
-          ...entry,
-          state: "pending",
-          nextAttemptAt: Date.now(),
-          lastError: undefined,
-        };
-        await database.entries.put(updated);
-      });
-      if (!updated) return;
-      this.remember(updated);
-      this.notify();
-    } catch {
-      this.degradeToMemory();
-      this.markPendingInMemory(id);
-    }
+    await this.transition(id, markPendingChange);
   }
 
   async markCommitted(id: number): Promise<void> {
@@ -490,18 +468,6 @@ export class DexieReducerOutbox implements ReducerOutbox {
     }
     if (changed) this.notify();
     return this.sortedMemoryEntries(scope).map(cloneEntry);
-  }
-
-  private markPendingInMemory(id: number) {
-    const entry = this.memoryEntries.get(id);
-    if (!entry || entry.state === "pending" || isParked(entry)) return;
-    this.memoryEntries.set(id, {
-      ...entry,
-      state: "pending",
-      nextAttemptAt: Date.now(),
-      lastError: undefined,
-    });
-    this.notify();
   }
 
   private markCommittedInMemory(id: number) {
@@ -756,20 +722,22 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async markInflightMany(ids: number[]): Promise<ReducerOutboxEntry[]> {
     if (ids.length === 0) return [];
+    ids = [...new Set(ids)];
     await this.ready;
     if (!this.store.updateMany || this.memoryOnly) {
       const admitted: ReducerOutboxEntry[] = [];
-      for (const id of ids) if (await this.markInflight(id)) {
-        const entry = this.entries.get(id);
-        if (entry) admitted.push(cloneEntry(entry));
+      for (const id of ids) {
+        const { after } = await this.transition(id, markInflightChange);
+        if (after) admitted.push(cloneEntry(after));
       }
       return admitted;
     }
     const admitted = new Set<number>();
     const updated = await this.store.updateMany(ids, entry => {
-      if (entry.state !== "pending") return entry;
+      const next = markInflightChange(entry);
+      if (!next) return entry;
       admitted.add(entry.id);
-      return markInflightChange(entry) ?? entry;
+      return next;
     });
     for (const entry of updated) this.entries.set(entry.id, cloneEntry(entry));
     this.notify();
@@ -778,18 +746,7 @@ export class StoreReducerOutbox implements ReducerOutbox {
 
   async markPending(id: number): Promise<void> {
     await this.ready;
-    if(this.store.update && !this.memoryOnly) { await this.updateShared(id,entry=>isParked(entry) ? entry : ({...entry,state:'pending',nextAttemptAt:Date.now(),lastError:undefined}));this.notify();return; }
-    const entry = this.entries.get(id);
-    if (!entry || entry.state === "pending" || isParked(entry)) return;
-    const updated: ReducerOutboxEntry = {
-      ...entry,
-      state: "pending",
-      nextAttemptAt: Date.now(),
-      lastError: undefined,
-    };
-    this.entries.set(id, updated);
-    await this.persistPut(updated);
-    this.notify();
+    await this.transition(id, markPendingChange);
   }
 
   async markCommitted(id: number): Promise<void> {
@@ -1142,9 +1099,15 @@ function isParked(entry: Pick<ReducerOutboxEntry, "state">) {
 }
 
 function markInflightChange(entry: ReducerOutboxEntry): ReducerOutboxEntry | undefined {
-  // A parked or rejected record only leaves its state through retry().
-  if (entry.state === "inflight" || entry.state === "failed" || entry.state === "rejected") return undefined;
-  return { ...entry, sentAt: entry.sentAt ?? Date.now(), state: "inflight" };
+  const state = deliveryState(entry.state, "start");
+  if (state === entry.state) return undefined;
+  return { ...entry, sentAt: entry.sentAt ?? Date.now(), state };
+}
+
+function markPendingChange(entry: ReducerOutboxEntry): ReducerOutboxEntry | undefined {
+  const state = deliveryState(entry.state, "recover");
+  if (state === entry.state) return undefined;
+  return { ...entry, state, nextAttemptAt: Date.now(), lastError: undefined };
 }
 
 function failChange(entry: ReducerOutboxEntry, error: string, now: number, options: OutboxFailureOptions) {
