@@ -510,7 +510,7 @@ export type LiveQueryPlan = {
   readonly serverOnly?: boolean;
 };
 
-export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "and" | "or" | "not";
+export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "and" | "or" | "not";
 export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 export type VisibilityLiteral = { readonly literal: JsonValue };
 
@@ -554,6 +554,7 @@ export type VisibilityExpression =
   | { readonly operator: "permission" | "role"; readonly value: string }
   | { readonly operator: "eq"; readonly column: string; readonly value: VisibilityLiteral }
   | { readonly operator: "eqContext"; readonly column: string; readonly context: VisibilityContextKey }
+  | { readonly operator: "nonEmpty"; readonly set: string }
   | { readonly operator: "inSet"; readonly column: string; readonly set: string }
   | { readonly operator: "and" | "or"; readonly children: readonly VisibilityExpression[] }
   | { readonly operator: "not"; readonly children: readonly [VisibilityExpression] };
@@ -832,7 +833,7 @@ const validateStructuredQueryPlan: (value: unknown, path: string) => asserts val
   }
 };
 
-const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eq", "eqContext", "inSet", "and", "or", "not"]);
+const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "and", "or", "not"]);
 const visibilityContexts = new Set<VisibilityContextKey>(["account.id", "member.id", "tenant.id"]);
 
 const validateExactObject: (
@@ -905,6 +906,12 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
       requireVisibilityString(value.column, `${path}.column`);
       validateVisibilityContext(value.context, `${path}.context`);
       return;
+    case "nonEmpty": {
+      validateExactObject(value, path, ["operator", "set"]);
+      const set = requireVisibilityString(value.set, `${path}.set`);
+      if (!Object.prototype.hasOwnProperty.call(sets, set)) throw new Error(`${path}.set references unknown visibility set ${set}`);
+      return;
+    }
     case "inSet": {
       validateExactObject(value, path, ["operator", "column", "set"]);
       requireVisibilityString(value.column, `${path}.column`);

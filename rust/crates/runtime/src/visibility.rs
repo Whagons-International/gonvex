@@ -524,8 +524,10 @@ fn validate_expression(
             identifier(&expression.column)?;
             context_key(&expression.context)?;
         }
-        "inSet" => {
-            identifier(&expression.column)?;
+        "inSet" | "nonEmpty" => {
+            if expression.operator == "inSet" {
+                identifier(&expression.column)?;
+            }
             if !sets.contains_key(&expression.set) {
                 return Err(VisibilityError::Invalid(format!(
                     "unknown visibility set {:?}",
@@ -579,6 +581,17 @@ fn compile_expression(
     };
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
+        "nonEmpty" => {
+            if resolved
+                .sets
+                .get(&expression.set)
+                .is_some_and(|set| !set.is_empty())
+            {
+                "TRUE".to_owned()
+            } else {
+                "FALSE".to_owned()
+            }
+        }
         // SQL snapshots and in-memory deltas must use the same admitted
         // principal. Ordinary members keep their live database role checks.
         "permission" | "role" if resolved.ephemeral_member => {
@@ -813,6 +826,10 @@ fn match_expression(
 ) -> bool {
     match expression.operator.as_str() {
         "public" => true,
+        "nonEmpty" => resolved
+            .sets
+            .get(&expression.set)
+            .is_some_and(|set| !set.is_empty()),
         "permission" => expression
             .value
             .as_ref()
