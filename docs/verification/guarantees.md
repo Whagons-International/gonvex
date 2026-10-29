@@ -7,6 +7,9 @@ runtime and shared web/React Native SDK. Develop against staging, preserve APIs,
 keep database/transport implementations replaceable, and measure changes in
 resource-capped local sandboxes. Deployment is a separate authorized action.
 
+Storage scope is native SQLite through the app SDK and both browser IndexedDB
+adapters. Dedicated OPFS and SQLite WASM verification is excluded by the owner.
+
 A guarantee is established only when its specification, assumptions, production
 implementation, proof/model boundary, negative controls, adapter failure/restart
 evidence and CI enforcement are recorded. Proof counts are not coverage claims.
@@ -19,7 +22,7 @@ Document unresolved gaps rather than calling a subsystem fully verified.
 | MUT-1 | A successful authenticated reducer corresponds to its committed tenant transaction. | Rust rollback/aborted-commit regressions and transactional receipt tests exist. Whole invocation/receipt protocol remains unproved. PostgreSQL durability, tenant routing and effects staying inside the transaction are assumptions. |
 | MUT-2 | Retries of one logical intent do not repeat its transactional business effects. | Receipt claim/result and writes share a transaction. Prove the protocol and test competing/lost-response retries. Namespace is tenant database + account subject + command key. Path reuse is checked; argument equivalence is a caller obligation. Anonymous reducers/actions are excluded. Receipt retention is not promised as permanent. |
 | SDK-1 | Delivery and recovery do not revive committed or parked queue entries. | Source-linked finite-state proof and public queue regressions in this tranche. Explicit retry, commit, rejection, deletion, adapter atomicity and complete SDK delivery remain outside the proof. See outbox-delivery.md. |
-| SDK-2 | Durable acknowledgements and local-intent retirement cannot pass an unapplied transaction. | Success-path and metadata-write-failure regressions exist. Failed data frame followed by watermark is a high-priority unconfirmed source candidate. No complete protocol proof yet. |
+| SDK-2 | Durable acknowledgements and local-intent retirement cannot pass an unapplied transaction. | Staging fences failed data lanes and retains capable-runtime intents through their watermark. The finite protocol model, public adapter regressions and real Chromium crash/abort/snapshot scenarios provide evidence for selected failures; see replica-durability.md and indexeddb-browser.md. No complete protocol proof or native-phone evidence yet. |
 | SYNC-1 | Duplicate/stale frames cannot undo newer authorized data; reconnect eventually catches up under explicit progress assumptions. | Revision primitive proofs and storage/lifecycle regressions exist. Full merge, snapshot/epoch transitions and recovery protocol remain unproved. |
 | AUTH-1 | Old account/tenant/subscription operations cannot publish into a new owner. | Lifecycle regression coverage exists. Need source-linked ownership transitions and tests across every async boundary. Authorization-policy enforcement is separate from callback ownership. |
 | RES-1 | Resource permits, deadlines and credits remain correctly owned through cancellation and cleanup. | Smaller Rust policy/credit proofs exist. Need composition with actual lifetime/cleanup paths and failure tests. |
@@ -57,11 +60,10 @@ must state their domains/bounds and demonstrate implementation correspondence.
 
 ## Unresolved boundaries and next experiments
 
-1. Reproduce failed `storage.applyTransaction` followed by a queued watermark.
-   `enqueueReplicaFrame` currently catches an error and fulfills the frame lane
-   after changing freshness. Determine whether later watermark success can
-   retire work whose data was never saved. Preserve supported retry of a failed
-   metadata-only watermark. Extend the real public fixture in `index.test.ts`.
+1. Extend actual app SQLite and other browser-engine crash/restart coverage.
+   Chromium now covers both IndexedDB adapters, including native aborts and
+   preserved intent identity. Native encoded server snapshots are a separate
+   protocol extension; this shared SDK does not negotiate that capability.
 2. Reconcile long-offline replay. `command_revision` reads the change feed, whose
    records are pruned after 30 days, while no receipt pruning path was found.
    Test replay when the receipt remains but its original feed revision is gone.
