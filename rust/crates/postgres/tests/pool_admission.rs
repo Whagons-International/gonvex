@@ -177,12 +177,22 @@ async fn control_listener_does_not_occupy_the_only_sql_connection() {
     let Some(fixture) = Fixture::new().await else {
         return;
     };
-    let listener = fixture
+    let mut listener = fixture
         .control
         .listener(&["pool_admission_test"])
         .await
         .unwrap();
     fixture.control.ping().await.unwrap();
+    fixture
+        .control
+        .notify("pool_admission_test", "ready")
+        .await
+        .unwrap();
+    let notification = tokio::time::timeout(Duration::from_secs(2), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.payload(), "ready");
     assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
     drop(listener);
     fixture.close().await;
@@ -231,6 +241,34 @@ async fn closing_one_database_cancels_its_queue_without_locking_other_pools() {
     healthy.rollback().await.unwrap();
     held.rollback().await.unwrap();
     closing.await;
+    assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn closing_a_database_with_a_shared_waiter_does_not_reopen_its_pool() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let first = fixture.begin(0, true).await.unwrap();
+    let second = fixture.begin(1, true).await.unwrap();
+    let mut waiting = Box::pin(tokio::task::unconstrained(fixture.begin(2, true)));
+    assert!(waiting
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+        .is_pending());
+    fixture
+        .pools
+        .close_database(&fixture.routes[2].database_url)
+        .await;
+    let registered = fixture.pools.snapshot().await.pools;
+    first.rollback().await.unwrap();
+    assert!(matches!(
+        waiting.await,
+        Err(DatabaseError::Sql(sqlx::Error::PoolClosed))
+    ));
+    assert_eq!(fixture.pools.snapshot().await.pools, registered);
+    second.rollback().await.unwrap();
     assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
     fixture.close().await;
 }

@@ -1146,8 +1146,8 @@ impl ControlPlane {
         route: &TenantRoute,
         read_only: bool,
     ) -> Result<TenantTransaction, DatabaseError> {
-        let admission = self.pools.admit(&route.database_url).await?;
         let pool = self.pools.pool(&route.database_url).await?;
+        let admission = self.pools.admit(&route.database_url).await?;
         let mut transaction = pool.begin().await?;
         if read_only {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
