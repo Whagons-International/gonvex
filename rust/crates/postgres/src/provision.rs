@@ -787,6 +787,7 @@ async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
     ).fetch_one(&mut *tx).await?;
     if !bootstrap_matches(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?
         || !infrastructure_present
+        || !function_bodies_match(&mut tx, SYNC_INFRASTRUCTURE_SQL).await?
     {
         execute_script_transaction(&mut tx, SYNC_INFRASTRUCTURE_SQL).await?;
         record_bootstrap(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?;
@@ -944,15 +945,71 @@ CREATE CONSTRAINT TRIGGER {finalize_trigger} AFTER INSERT OR UPDATE OR DELETE ON
             WHERE tgrelid=to_regclass(format('%I.%I',current_schema(),$1))
               AND tgname=$4 AND tgenabled='O' AND tgtype=29
               AND tgdeferrable AND tginitdeferred
-              AND tgfoid=to_regprocedure(format('%I.gonvex_sync_finalize_transaction()',current_schema())))"#,
+              AND tgfoid=to_regprocedure(format('%I.gonvex_sync_finalize_transaction()',current_schema())))
+          AND (SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc
+            WHERE oid=to_regprocedure(format('%I.%I()', current_schema(), $2)))=$5"#,
     ).bind(table).bind(artifact("stage")).bind(artifact("stage_trigger"))
-        .bind(artifact("finalize_trigger")).fetch_one(&mut **tx).await?;
+        .bind(artifact("finalize_trigger")).bind(stage_body_digest(&statement)?)
+        .fetch_one(&mut **tx).await?;
     let receipt = format!("table:{table}");
     if !present || !bootstrap_matches(tx, &receipt, &statement).await? {
         execute_script_transaction(tx, &statement).await?;
         record_bootstrap(tx, &receipt, &statement).await?;
     }
     Ok(())
+}
+
+/// `CREATE OR REPLACE FUNCTION <name>() ... AS $$<body>$$` definitions in a script, as (name, body).
+/// PostgreSQL keeps the dollar-quoted body verbatim in `pg_proc.prosrc`.
+fn function_bodies(script: &str) -> Vec<(&str, &str)> {
+    const CREATE: &str = "CREATE OR REPLACE FUNCTION ";
+    let mut found = Vec::new();
+    let mut rest = script;
+    while let Some(start) = rest.find(CREATE) {
+        rest = &rest[start + CREATE.len()..];
+        let Some(open) = rest.find("()") else { break };
+        let name = rest[..open].trim_matches('"');
+        let Some(body_start) = rest.find("AS $$") else {
+            break;
+        };
+        let body = &rest[body_start + 5..];
+        let Some(body_end) = body.find("$$") else {
+            break;
+        };
+        found.push((name, &body[..body_end]));
+        rest = &body[body_end + 2..];
+    }
+    found
+}
+
+fn stage_body_digest(statement: &str) -> Result<String, DatabaseError> {
+    match function_bodies(statement).as_slice() {
+        [(_, body)] => Ok(bootstrap_digest(body)),
+        _ => Err(
+            sqlx::Error::Protocol("change-feed trigger must define one function".to_owned()).into(),
+        ),
+    }
+}
+
+/// A matching receipt only proves what this runtime last installed. Another writer (an older runtime build during a
+/// rollback, or a manual edit) can replace a function afterwards, so the installed bodies must still match too.
+async fn function_bodies_match(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    script: &str,
+) -> Result<bool, DatabaseError> {
+    for (name, body) in function_bodies(script) {
+        let installed: Option<String> = sqlx::query_scalar(
+            r#"SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc
+               WHERE oid=to_regprocedure(format('%I.%I()', current_schema(), $1))"#,
+        )
+        .bind(name)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if installed.as_deref() != Some(bootstrap_digest(body).as_str()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn bootstrap_digest(source: &str) -> String {
@@ -1454,3 +1511,7 @@ mod sync_bootstrap_tests {
 #[cfg(test)]
 #[path = "provision_upgrade_tests.rs"]
 mod sync_bootstrap_upgrade_tests;
+
+#[cfg(test)]
+#[path = "provision_foreign_writer_tests.rs"]
+mod sync_bootstrap_foreign_writer_tests;
