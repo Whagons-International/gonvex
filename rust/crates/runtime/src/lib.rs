@@ -35,6 +35,7 @@ mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
+pub mod visibility_index;
 mod visibility_mask;
 
 use std::collections::{BTreeMap, VecDeque};
