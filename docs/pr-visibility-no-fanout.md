@@ -88,7 +88,16 @@ Full raw inventory: `docs/visibility-history-inventory.txt`. Load the old plans 
 
 ### Remaining migration blockers
 
-No decision authorizes dropping these access rules or relabeling frequent data writes as permission changes. Contract extensions, Reducer-maintained fields, or explicit partial-migration approval are still required.
+F1–F4 contract additions are approved and the parent is implementing them in Rust. No decision authorizes dropping access rules or relabeling frequently written data tables as permission inputs. The table below remains open until the landed runtime, SDK/CLI mirror and client parity demonstrate each replacement. No denormalization or Reducer changes are part of this approved extension.
+
+Approved additions awaiting landed runtime commits and SDK/CLI mirroring:
+
+- F1: optional literal-only parent-row `where` on `inherits`.
+- F2: a principal set may read its source table when that table is explicitly in `permissionTables`; self-source grant rules remain unchanged.
+- F3: derived indexes map a token to every matching row, and derived filters accept a literal, member/account `context`, or `inSet` referencing a principal/grant set of the same plan.
+- F4: `inheritsAny`, with `via: { table, childColumn, parentColumn }`, parent `table`/`key`, and optional literal parent filtering.
+
+Exact validation, index-update and inheritance-transition semantics must follow the landed Rust implementation. These pending additions are not yet part of the published SDK contract.
 
 | Plans | Unsupported requirement |
 |---|---|
