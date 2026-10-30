@@ -9,15 +9,23 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
-
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args
+    let verify = args
         .first()
-        .is_some_and(|value| value == "verify-module-artifact")
-    {
+        .is_some_and(|value| value == "verify-module-artifact");
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if verify {
+        // stdout carries only the verified hash; diagnostics such as the
+        // legacy-visibility deprecation warning go to stderr.
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
+
+    if verify {
         let path = args
             .windows(2)
             .find_map(|values| (values[0] == "--file").then_some(values[1].as_str()));
