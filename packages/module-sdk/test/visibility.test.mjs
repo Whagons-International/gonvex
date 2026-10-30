@@ -157,3 +157,11 @@ test("ModuleBuilder emits plans keyed by their source table", () => {
   assert.equal(module.manifest().visibility.tasks, plan);
   assert.throws(() => module.visibility(validPlan()), /duplicate visibility plan: tasks/);
 });
+
+
+test("visibility validates principal nonEmpty flags without a row column", () => {
+  const where = { operator: "nonEmpty", set: "teams" };
+  assert.deepEqual(visibility({ ...validPlan(), where }).where, where);
+  assert.throws(() => visibility({ ...validPlan(), where: { operator: "nonEmpty", set: "missing" } }), /unknown visibility set missing/);
+  assert.throws(() => visibility({ ...validPlan(), where: { ...where, column: "teamId" } }), /column/);
+});
