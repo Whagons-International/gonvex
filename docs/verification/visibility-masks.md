@@ -44,16 +44,37 @@ Compiler errors do not count as failed-proof controls. Receipts must name the
 Verus version, source/extractor/harness hashes, proof boundaries and all controls,
 following call-budgets.md and verus.md. No Verus result is claimed here.
 
-## Measured integrated status at fc33b110
+## Measured legacy and v2 status
 
-The implementation owner reports the real-collection fixture passing with 201
-connections. Task insert/update/delete each caused zero SQL, snapshots and
-rebuilds. One team grant caused eight targeted fetches restricted to m1–m3.
-An m1 membership change caused four rebuilds on m1's two connections. A parent
-grant caused two targeted fetches for m0 only. These are owner-reported measured
-counts; the raw transcript belongs with the PR evidence.
+Both real-collection tests passed on 1b503997 plus the legacy-baseline fixture
+change, with 200 members and 201 connections. The baseline uses the current
+runtime's legacy compatibility path with task-ID sets selected FROM tasks and
+child sets joining tasks, not the historical incident binary. Both modes use
+the same fixture, collections and committed writes. Counters reset per scenario
+and before each task operation.
 
-Cross-connection/subscription principal sharing is now an explicitly accepted
+| Scenario | Legacy visibility SQL / full snapshots | V2 visibility SQL / full snapshots / principal rebuilds |
+|---|---|---|
+| Task insert | 402 / 402 | 0 / 0 / 0 |
+| Task update | 201 / 201 | 0 / 0 / 0 |
+| Task delete | 402 / 402 | 0 / 0 / 0 |
+| Team grant | 402 / 402, every connection | 8 / 0 / 0, m1-m3 only |
+| m1 membership | 4 / 4, m1's two connections | 4 / 4 / 4, m1's two connections |
+| Parent grant | 402 / 402, unrelated connections included | 2 / 0 / 0, m0 only |
+
+The title-only legacy update rebuilds tasks but column relevance lets notes
+skip, explaining the 201 count. Legacy principal_rebuilds is zero because that
+counter classifies the v2 path; legacy rebuilds appear as collection_snapshots.
+The v2 row-check counts are 603 per task write and 402 for the remaining
+scenarios. All live-query rerun counters are zero in this collection fixture.
+
+The two-test body took 12.97 seconds on this run. This is registry cost evidence,
+not a test threshold or a latency comparison. The counters are the runtime's
+instrumented operations, not an inferred count from timing. The test asserts
+that the legacy source shape fans out and that the v2 path stays within its
+statement budgets and named-member scope. SQLx tracing checks child-fetch scope.
+
+Cross-connection/subscription principal sharing is an explicitly accepted
 follow-up. The four membership-change rebuilds must not be described as one
 shared rebuild or as establishing that portion of V3. The guarantee above remains
 intended and incomplete. Pure in-memory relevance checks are excluded from the

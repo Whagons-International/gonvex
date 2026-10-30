@@ -33,12 +33,12 @@
     "origin": "Whagons staging visibility fan-out incident, 2026-10-29; approvals.decideByTask pinned the Rust runtime for approximately 60 seconds",
     "why": "Data-table visibility sets and budgeted-source invalidation made an ordinary task write rerun visibility SQL across unrelated connections",
     "cost": {
-      "seconds": null,
+      "seconds": 12.97,
       "contextTokens": 0
     },
     "falsePositives": 0,
     "lastFired": null,
-    "measurement": "No execution-time measurement yet. CI uses 200 fixture members plus one duplicate connection. Deterministic budgets require zero visibility SQL and snapshots for task inserts/updates/deletes, grant work restricted to named members, one principal rebuild for a single-member permission change, and inherited children delivered only to the newly authorized member. Test: rust/crates/runtime/tests/visibility_fanout.rs. Run with GONVEX_TEST_POSTGRES_URL and GONVEX_TEST_MODULE_HOST_BINARY. GONVEX_VIS_FANOUT_MEMBERS changes fixture size.",
+    "measurement": "Measured legacy-baseline plus v2 integration test body: 12.97s, excluding 36.57s compilation on this run. CI uses 200 members plus one duplicate connection. Legacy task insert/update/delete: 402/201/402 visibility SQL operations and full snapshots; v2: zero for each. Team grant: legacy 402 SQL/snapshots across all connections, v2 eight targeted fetches only for m1-m3. Membership change: four SQL/snapshots scoped to m1's two connections; v2 records four principal rebuilds, with cross-connection sharing explicitly deferred. Parent grant: legacy 402 SQL/snapshots, v2 two fetches for m0. Counters, not elapsed time, decide correctness. Tests: visibility_fanout_legacy_baseline and visibility_fanout_stays_within_statement_budgets in rust/crates/runtime/tests/visibility_fanout.rs; configure GONVEX_TEST_POSTGRES_URL, GONVEX_TEST_MODULE_HOST_BINARY and optionally GONVEX_VIS_FANOUT_MEMBERS.",
     "retainedRules": "No existing rule removed. Counts enforce the observed regression budget rather than wall-clock timing."
   }
 ]

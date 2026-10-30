@@ -94,7 +94,7 @@ fn test_config(database_url: String) -> Config {
     }
 }
 
-fn fixture_manifest() -> (Value, String) {
+fn fixture_manifest(legacy: bool) -> (Value, String) {
     let permissions = json!(["memberTeams"]);
     let tasks = json!({"version":2,"table":"tasks","key":"id","permissionTables":permissions,"sets":{
         "teams":{"kind":"principal","table":"memberTeams","select":"teamId","joins":[],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]},
@@ -102,6 +102,22 @@ fn fixture_manifest() -> (Value, String) {
         "teamAssigned":{"kind":"grant","table":"taskUsers","select":"taskId","joins":[{"table":"memberTeams","leftColumn":"teamId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]}
     },"where":{"operator":"or","children":[{"operator":"inSet","column":"workspaceId","set":"teams"},{"operator":"inSet","column":"id","set":"assigned"},{"operator":"inSet","column":"id","set":"teamAssigned"}]}});
     let notes = json!({"version":2,"table":"taskNotes","key":"id","permissionTables":permissions,"sets":{},"where":{"operator":"inherits","column":"taskId","table":"tasks","key":"id"}});
+    let (tasks, notes) = if legacy {
+        // Today's failure shape: task IDs selected FROM tasks, and child sets
+        // that join tasks. Every task write becomes a set dependency change.
+        let workspace = json!({"table":"tasks","select":"id","joins":[{"table":"memberTeams","leftColumn":"workspaceId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]});
+        let assigned = json!({"table":"taskUsers","select":"taskId","joins":[],"where":[{"table":"taskUsers","column":"userId","context":"member.id"}]});
+        let team = json!({"table":"taskUsers","select":"taskId","joins":[{"table":"memberTeams","leftColumn":"teamId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]});
+        let tasks = json!({"table":"tasks","key":"id","sets":{"workspaceTasks":workspace,"assigned":assigned,"teamAssigned":team},"where":{"operator":"or","children":[{"operator":"inSet","column":"id","set":"workspaceTasks"},{"operator":"inSet","column":"id","set":"assigned"},{"operator":"inSet","column":"id","set":"teamAssigned"}]}});
+        let notes = json!({"table":"taskNotes","key":"id","sets":{
+            "workspaceTasks":{"table":"memberTeams","select":"id","selectFrom":"tasks","joins":[{"table":"tasks","leftColumn":"teamId","rightColumn":"workspaceId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]},
+            "assigned":{"table":"taskUsers","select":"taskId","joins":[{"table":"tasks","leftColumn":"taskId","rightColumn":"id"}],"where":[{"table":"taskUsers","column":"userId","context":"member.id"}]},
+            "teamAssigned":{"table":"taskUsers","select":"taskId","joins":[{"table":"tasks","leftColumn":"taskId","rightColumn":"id"},{"table":"memberTeams","leftAlias":"taskUsers","leftColumn":"teamId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]}
+        },"where":{"operator":"or","children":[{"operator":"inSet","column":"taskId","set":"workspaceTasks"},{"operator":"inSet","column":"taskId","set":"assigned"},{"operator":"inSet","column":"taskId","set":"teamAssigned"}]}});
+        (tasks, notes)
+    } else {
+        (tasks, notes)
+    };
     let mut functions = json!({});
     for (path, table, columns) in [
         ("tasks.list", "tasks", vec!["id", "workspaceId", "title"]),
@@ -188,6 +204,16 @@ async fn committed(pools: &PoolRegistry, route: &TenantRoute, after: &mut u64) -
 
 #[tokio::test]
 async fn visibility_fanout_stays_within_statement_budgets() {
+    run_visibility_fixture(false).await;
+}
+
+#[tokio::test]
+async fn visibility_fanout_legacy_baseline() {
+    run_visibility_fixture(true).await;
+}
+
+async fn run_visibility_fixture(legacy: bool) {
+    let mode = if legacy { "legacy" } else { "v2" };
     let Ok(base) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
         eprintln!("GONVEX_TEST_POSTGRES_URL absent; PostgreSQL fixture unavailable");
         return;
@@ -269,7 +295,7 @@ async fn visibility_fanout_stays_within_statement_budgets() {
             .await
             .unwrap();
     }
-    let (manifest, hash) = fixture_manifest();
+    let (manifest, hash) = fixture_manifest(legacy);
     control
         .save_runtime_manifest(&RuntimeManifestRecord {
             project_id: "fanout".into(),
@@ -342,25 +368,48 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         "UPDATE tasks SET title='After' WHERE id='changed'",
         "DELETE FROM tasks WHERE id='changed'",
     ] {
+        runtime.visibility_metrics().reset_for_test();
         sqlx::query(statement).execute(&db).await.unwrap();
         let event = committed(&pools, &route, &mut revision).await;
-        deliver(&runtime, &mut connections, &event).await;
+        let worked = deliver(&runtime, &mut connections, &event).await;
         let counters = runtime.visibility_metrics().snapshot();
-        assert_eq!(
-            counters.visibility_sql_statements, 0,
-            "ordinary task write ran visibility SQL"
-        );
-        assert_eq!(
-            counters.collection_snapshots, 0,
-            "ordinary task write rebuilt a collection"
-        );
-        assert_eq!(counters.principal_rebuilds, 0);
-        eprintln!("fanout task-write {statement:?}: {counters:?}");
+        if legacy {
+            assert!(
+                counters.visibility_sql_statements > 0,
+                "legacy source dependency must issue visibility SQL"
+            );
+            assert!(
+                counters.collection_snapshots > 0,
+                "legacy source dependency must rebuild collections"
+            );
+            assert_eq!(
+                worked
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                n,
+                "legacy task writes must reproduce fan-out across every fixture member"
+            );
+        } else {
+            assert_eq!(
+                counters.visibility_sql_statements, 0,
+                "ordinary task write ran visibility SQL"
+            );
+            assert_eq!(
+                counters.collection_snapshots, 0,
+                "ordinary task write rebuilt a collection"
+            );
+            assert_eq!(counters.principal_rebuilds, 0);
+        }
+        eprintln!("fanout {mode} task-write {statement:?}: {counters:?}");
     }
-    assert!(
-        runtime.visibility_metrics().snapshot().in_memory_row_checks > 0,
-        "instrumentation must count production evaluator work"
-    );
+    if !legacy {
+        assert!(
+            runtime.visibility_metrics().snapshot().in_memory_row_checks > 0,
+            "instrumentation must count production evaluator work"
+        );
+    }
     runtime.visibility_metrics().reset_for_test();
     sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')")
         .execute(&db)
@@ -368,18 +417,26 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         .unwrap();
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
-    assert_eq!(
-        worked
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from([1, 2, 3]),
-        "one team grant must affect exactly its three member recipients"
-    );
-    assert!(
-        worked.iter().all(|member| (1..=3).contains(member)),
-        "grant work reached unnamed members: {worked:?}"
-    );
+    if legacy {
+        assert!(
+            worked.iter().any(|member| *member == 0),
+            "legacy grant dependencies must reach unnamed member m0"
+        );
+        assert!(runtime.visibility_metrics().snapshot().collection_snapshots > 0);
+    } else {
+        assert_eq!(
+            worked
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([1, 2, 3]),
+            "one team grant must affect exactly its three member recipients"
+        );
+        assert!(
+            worked.iter().all(|member| (1..=3).contains(member)),
+            "grant work reached unnamed members: {worked:?}"
+        );
+    }
     for connection in &connections {
         assert_eq!(
             connection.subscriptions["tasks"]
@@ -400,13 +457,15 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         .snapshot()
         .visibility_sql_statements;
     eprintln!(
-        "fanout team-grant: worked={worked:?} {:?}",
+        "fanout {mode} team-grant: worked={worked:?} {:?}",
         runtime.visibility_metrics().snapshot()
     );
-    assert!(
-        statements <= named_connections * 2,
-        "grant fetches exceeded one per named connection and collection: {statements}"
-    );
+    if !legacy {
+        assert!(
+            statements <= named_connections * 2,
+            "grant fetches exceeded one per named connection and collection: {statements}"
+        );
+    }
     runtime.visibility_metrics().reset_for_test();
     sqlx::query("INSERT INTO \"memberTeams\" VALUES('extra','m1','extra')")
         .execute(&db)
@@ -428,45 +487,63 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         .sum::<u64>();
     let rebuilds = runtime.visibility_metrics().snapshot().principal_rebuilds;
     eprintln!(
-        "fanout member-team change: worked={worked:?} {:?}",
+        "fanout {mode} member-team change: worked={worked:?} {:?}",
         runtime.visibility_metrics().snapshot()
     );
-    assert!(
+    if legacy {
+        assert_eq!(
+            runtime.visibility_metrics().snapshot().collection_snapshots,
+            member_one_collections,
+            "legacy membership changes remain scoped to m1 here"
+        );
+    } else {
+        assert!(
         (1..=member_one_collections).contains(&rebuilds),
         "permission change rebuilt {rebuilds} collections; member 1 holds {member_one_collections}"
     );
+    }
     runtime.visibility_metrics().reset_for_test();
     sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)")
         .execute(&db)
         .await
         .unwrap();
     let event = committed(&pools, &route, &mut revision).await;
-    for connection in &mut connections {
-        let statements = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(SqlCapture(statements.clone()));
-        runtime
-            .apply_feed_event(
-                &connection.session,
-                &mut connection.subscriptions,
-                event.clone(),
-            )
-            .with_subscriber(subscriber)
-            .await
-            .unwrap();
-        let child_fetches = statements
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|sql| sql.contains("taskNotes") && sql.to_ascii_uppercase().contains("SELECT"))
-            .count();
-        if connection.member == 0 {
-            assert!(child_fetches > 0, "newly visible parent must execute a real targeted child fetch; SQLx query tracing must be enabled");
-        } else {
-            assert_eq!(
-                child_fetches, 0,
-                "child fetch reached unrelated member {}",
-                connection.member
-            );
+    if legacy {
+        let worked = deliver(&runtime, &mut connections, &event).await;
+        assert!(
+            worked.iter().any(|member| *member != 0),
+            "legacy parent grant must issue work for unrelated members"
+        );
+    } else {
+        for connection in &mut connections {
+            let statements = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry().with(SqlCapture(statements.clone()));
+            runtime
+                .apply_feed_event(
+                    &connection.session,
+                    &mut connection.subscriptions,
+                    event.clone(),
+                )
+                .with_subscriber(subscriber)
+                .await
+                .unwrap();
+            let child_fetches = statements
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|sql| {
+                    sql.contains("taskNotes") && sql.to_ascii_uppercase().contains("SELECT")
+                })
+                .count();
+            if connection.member == 0 {
+                assert!(child_fetches > 0, "newly visible parent must execute a real targeted child fetch; SQLx query tracing must be enabled");
+            } else {
+                assert_eq!(
+                    child_fetches, 0,
+                    "child fetch reached unrelated member {}",
+                    connection.member
+                );
+            }
         }
     }
     for connection in &connections {
@@ -479,14 +556,18 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         );
     }
     eprintln!(
-        "fanout parent-grant child fetch: {:?}",
+        "fanout {mode} parent-grant child fetch: {:?}",
         runtime.visibility_metrics().snapshot()
     );
-    assert_eq!(
-        runtime.visibility_metrics().snapshot().collection_snapshots,
-        0,
-        "inheritance transition rebuilt an entire collection"
-    );
+    if legacy {
+        assert!(runtime.visibility_metrics().snapshot().collection_snapshots > 0);
+    } else {
+        assert_eq!(
+            runtime.visibility_metrics().snapshot().collection_snapshots,
+            0,
+            "inheritance transition rebuilt an entire collection"
+        );
+    }
     runtime.shutdown().await;
     db.close().await;
     pools.close().await;
