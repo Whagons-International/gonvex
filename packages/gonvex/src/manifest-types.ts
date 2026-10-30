@@ -120,6 +120,8 @@ export type SchemaDefinition = {
 };
 
 export type VisibilityPlan = {
+  version?: 2;
+  permissionTables?: string[];
   table: string;
   key: string;
   sets: Record<string, VisibilitySet>;
@@ -127,6 +129,7 @@ export type VisibilityPlan = {
 };
 
 export type VisibilitySet = {
+  kind?: "principal" | "grant";
   table: string;
   alias?: string;
   select: string;
@@ -151,15 +154,17 @@ export type VisibilityConstraint = {
   value?: { literal: JsonValue };
 };
 
-export type VisibilityOperator = "public" | "permission" | "role" | "eqContext" | "inSet" | "and" | "or" | "not";
+export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "inherits" | "and" | "or" | "not";
 export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 
 export type VisibilityExpression = {
   operator: VisibilityOperator;
   column?: string;
+  table?: string;
+  key?: string;
   context?: VisibilityContextKey;
   set?: string;
-  value?: string;
+  value?: string | { literal: JsonValue };
   children?: VisibilityExpression[];
 };
 

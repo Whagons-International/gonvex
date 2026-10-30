@@ -582,3 +582,21 @@ test("artifact parser rejects unsafe public function declarations", async t => {
     await assert.rejects(buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }), /public.*(internal|interactive|one-shot|server-only)/);
   }
 });
+
+test("TypeScript artifacts retain the frozen mask manifest contract", async (t) => {
+  const mask = {
+    version: 2, table: "taskNotes", key: "id", permissionTables: ["members"],
+    sets: {
+      own: { kind: "principal", table: "members", select: "id", joins: [], where: [{ table: "members", column: "id", context: "member.id" }] },
+      grants: { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] },
+    },
+    where: { operator: "or", children: [
+      { operator: "inherits", column: "taskId", table: "tasks", key: "id" },
+      { operator: "nonEmpty", set: "own" },
+      { operator: "eq", column: "public", value: { literal: true } },
+    ] },
+  };
+  const project = await moduleProject(t, `const visibility = x => x; export const notesVisibility = visibility(${JSON.stringify(mask)});`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.visibility.taskNotes, mask);
+});

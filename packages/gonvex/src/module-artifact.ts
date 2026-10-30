@@ -344,6 +344,10 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
   const rawSets = readMember(value, "sets");
   const where = parseVisibilityExpression(readMember(value, "where"));
   if (!table || !key || !isJsonObject(rawSets) || !where) return undefined;
+  const version = readMember(value, "version");
+  const permissionTables = readMember(value, "permissionTables");
+  if (version !== undefined && version !== 2) throw new Error(`visibility ${table}: version must be 2`);
+  if (version === 2 && (!Array.isArray(permissionTables) || permissionTables.some((table) => typeof table !== "string"))) throw new Error(`visibility ${table}: permissionTables must be a string array`);
   const sets: Record<string, VisibilitySet> = {};
   for (const name of Object.keys(rawSets).sort()) {
     const candidate = rawSets[name];
@@ -380,7 +384,18 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
       constraints.some(invalidConstraint)) {
       return undefined;
     }
+    const kind = stringMember(candidate, "kind");
+    if (version === 2) {
+      const permissions = new Set(permissionTables as string[]);
+      const fail = (reason: string): never => { throw new Error(`visibility ${table} set ${name}: ${reason}; use a permission-only principal set, a single-source grant set, or inherits`); };
+      if (kind !== "principal" && kind !== "grant") fail("kind must be principal or grant");
+      if (setTable === table || joins.some((join) => join.table === table)) fail("reads its own source table");
+      if (kind === "principal" && !permissions.has(setTable)) fail(`undeclared permission table ${setTable}`);
+      for (const join of joins) if (!permissions.has(join.table)) fail(`joins data table ${join.table}`);
+      if (kind === "grant" && !constraints.some((constraint) => constraint.context === "member.id" || constraint.context === "account.id")) fail("grant requires member.id or account.id anchor");
+    }
     sets[name] = {
+      ...(kind === "principal" || kind === "grant" ? { kind } : {}),
       table: setTable,
       ...(alias ? { alias } : {}),
       select,
@@ -390,21 +405,25 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
     };
   }
   if (!visibilityExpressionSetsExist(where, sets)) return undefined;
-  return { table, key, sets, where };
+  return { ...(version === 2 ? { version: 2 as const, permissionTables: permissionTables as string[] } : {}), table, key, sets, where };
 }
 
 function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpression | undefined {
   const operator = stringMember(value, "operator");
-  if (!operator || !["public", "permission", "role", "eqContext", "inSet", "and", "or", "not"].includes(operator)) return undefined;
+  if (!operator || !["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "inherits", "and", "or", "not"].includes(operator)) return undefined;
   const result: VisibilityExpression = { operator: operator as VisibilityExpression["operator"] };
   const column = stringMember(value, "column");
   const context = stringMember(value, "context");
   const set = stringMember(value, "set");
-  const expressionValue = stringMember(value, "value");
+  const expressionValue = readMember(value, "value");
   if (column) result.column = column;
   if (context === "account.id" || context === "member.id" || context === "tenant.id") result.context = context;
   if (set) result.set = set;
-  if (expressionValue) result.value = expressionValue;
+  if (typeof expressionValue === "string" || (isJsonObject(expressionValue) && Object.prototype.hasOwnProperty.call(expressionValue, "literal"))) result.value = expressionValue as string | { literal: JsonValue };
+  const table = stringMember(value, "table");
+  const key = stringMember(value, "key");
+  if (table) result.table = table;
+  if (key) result.key = key;
   const rawChildren = readMember(value, "children");
   if (Array.isArray(rawChildren)) {
     const children = rawChildren.map(parseVisibilityExpression);
@@ -415,6 +434,9 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
     case "public": return Object.keys(result).length === 1 ? result : undefined;
     case "permission":
     case "role": return result.value ? result : undefined;
+    case "eq": return result.column && typeof result.value === "object" ? result : undefined;
+    case "nonEmpty": return result.set && !result.column ? result : undefined;
+    case "inherits": return result.column && result.table && result.key ? result : undefined;
     case "eqContext": return result.column && result.context ? result : undefined;
     case "inSet": return result.column && result.set ? result : undefined;
     case "and":
@@ -424,7 +446,7 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
 }
 
 function visibilityExpressionSetsExist(expression: VisibilityExpression, sets: Record<string, VisibilitySet>): boolean {
-  if (expression.operator === "inSet" && (!expression.set || !(expression.set in sets))) return false;
+  if ((expression.operator === "inSet" || expression.operator === "nonEmpty") && (!expression.set || !(expression.set in sets))) return false;
   return (expression.children ?? []).every((child) => visibilityExpressionSetsExist(child, sets));
 }
 
