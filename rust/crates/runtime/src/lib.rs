@@ -87,6 +87,7 @@ struct RuntimeInner {
     live_query_cache: live_query::SharedLiveQueryCache,
     membership_projector: membership_projector::MembershipProjector,
     metrics: metrics::RuntimeMetrics,
+    visibility_metrics: visibility_metrics::VisibilityMetrics,
     public_limiter: Arc<public_functions::PublicLimiter>,
 }
 
@@ -237,6 +238,7 @@ impl Runtime {
                 live_query_cache: live_query::SharedLiveQueryCache::default(),
                 membership_projector: membership_projector::MembershipProjector::default(),
                 metrics,
+                visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 public_limiter: Arc::new(public_functions::PublicLimiter::default()),
             }),
         }
