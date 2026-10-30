@@ -327,3 +327,12 @@ Explicitly declared permission-source tables may be read and joined by their
 own principal plans, supporting bounded administrative spot trees. The source
 must be declared in permissionTables; frequently written data must not be
 relabeled a permission table to bypass visibility budgets.
+
+
+F5 adds an optional `predicate` to inherits and inheritsAny. It replaces the
+parent collection's predicate and evaluates the indexed parent row with the
+child plan's sets, role, permissions and context, together with parent literal
+where filters. It accepts pure row/principal operators and and/or/not, but no
+nested inherits/inheritsAny. Keep the child's plugin/access gates outside it.
+Without the override, parent visibility is unchanged. onMissing remains exclusive
+to inherits and applies only to an absent parent, never to a failing predicate.

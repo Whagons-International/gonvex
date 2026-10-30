@@ -296,3 +296,31 @@ test("inheritsAny participates in module inheritance cycle and parent-key valida
   wrongKey.visibility({ version: 2, table: "b", key: "id", permissionTables: [], sets: {}, where: { operator: "public" } });
   assert.throws(() => wrongKey.manifest(), /key wrong differs/);
 });
+
+test("F5 parent overrides preserve child-set references, literals and deep freezing on both operators", () => {
+  const seed = { kind: "grant", table: "goalParticipants", select: "goalId", joins: [], where: [{ table: "goalParticipants", column: "memberId", context: "member.id" }] };
+  const predicate = { operator: "or", children: [
+    { operator: "inSet", column: "id", set: "myGoals" },
+    { operator: "eqContext", column: "ownerId", context: "member.id" },
+    { operator: "and", children: [{ operator: "role", value: "admin" }, { operator: "eq", column: "scope", value: { literal: "organization" } }, { operator: "nonEmpty", set: "myGoals" }] },
+  ] };
+  const base = { version: 2, table: "goalUpdates", key: "id", permissionTables: [], sets: { myGoals: seed } };
+  for (const operator of ["inherits", "inheritsAny"]) {
+    const where = { operator, column: "goalId", table: "goals", key: "id", predicate, where: [{ column: "deletedAt", value: { literal: null } }], ...(operator === "inheritsAny" ? { via: { table: "goalLinks", childColumn: "updateId", parentColumn: "goalId" } } : { onMissing: { operator: "role", value: "admin" } }) };
+    const plan = visibility({ ...base, where });
+    assert.deepEqual(JSON.parse(JSON.stringify(plan.where)), where);
+    assert.ok(Object.isFrozen(plan.where.predicate.children));
+    assert.ok(Object.isFrozen(plan.where.predicate.children[2].children[1].value));
+    assert.throws(() => visibility({ ...base, where: { ...where, predicate: { operator: "inSet", column: "id", set: "parentOnly" } } }), /predicate.set.*unknown/);
+    for (const nested of [
+      { operator: "inherits", column: "id", table: "x", key: "id" },
+      { operator: "inheritsAny", column: "id", table: "x", key: "id", via: { table: "links", childColumn: "a", parentColumn: "b" } },
+    ]) {
+      assert.throws(() => visibility({ ...base, where: { ...where, predicate: nested } }), /cannot inherit again/);
+      assert.throws(() => visibility({ ...base, where: { ...where, predicate: { operator: "not", children: [nested] } } }), /cannot inherit again/);
+    }
+  }
+  const cycle = { operator: "and", children: [] }; cycle.children.push(cycle);
+  assert.throws(() => visibility({ ...base, where: { operator: "inherits", column: "goalId", table: "goals", key: "id", predicate: cycle } }), /cycle/);
+  assert.throws(() => visibility({ ...base, where: { operator: "public", predicate } }), /predicate/);
+});

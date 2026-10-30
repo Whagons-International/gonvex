@@ -260,6 +260,15 @@ type DerivedSet = {
   joins?: readonly []; where: readonly DerivedFilter[];
 };
 type Via = { table: string; childColumn: string; parentColumn: string };
+type RowMaskExpression =
+  | { operator: "public" }
+  | { operator: "role" | "permission"; value: string }
+  | { operator: "eq"; column: string; value: Literal }
+  | { operator: "eqContext"; column: string; context: Context }
+  | { operator: "inSet"; column: string; set: string }
+  | { operator: "nonEmpty"; set: string }
+  | { operator: "and" | "or"; children: readonly RowMaskExpression[] }
+  | { operator: "not"; children: readonly [RowMaskExpression] };
 type MaskExpression =
   | { operator: "public" }
   | { operator: "role" | "permission"; value: string }
@@ -268,9 +277,9 @@ type MaskExpression =
   | { operator: "inSet"; column: string; set: string }
   | { operator: "nonEmpty"; set: string }
   | { operator: "inherits"; column: string; table: string; key: string;
-      where?: readonly LiteralFilter[]; onMissing?: MaskExpression }
+      where?: readonly LiteralFilter[]; predicate?: RowMaskExpression; onMissing?: MaskExpression }
   | { operator: "inheritsAny"; column: string; table: string; key: string;
-      via: Via; where?: readonly LiteralFilter[] }
+      via: Via; where?: readonly LiteralFilter[]; predicate?: RowMaskExpression }
   | { operator: "and" | "or"; children: readonly MaskExpression[] }
   | { operator: "not"; children: readonly [MaskExpression] };
 type MaskPlan = {
@@ -478,8 +487,9 @@ grant-anchor, inheritance-cycle or depth limits are relaxed.
 ### F1: parent literal filters
 
 `inherits` accepts `where: [{column, value:{literal:...}}]`. Every condition is
-ANDed with the inherited parent's normal visibility predicate. It does not
-replace that predicate or its powerup/privacy gates. Filters apply to the parent
+ANDed with the inherited parent's normal visibility predicate, or the explicit
+F5 predicate override when supplied. F1 filtering alone does not replace that
+predicate or its powerup/privacy gates. Filters apply to the parent
 row, never to the child. A null literal also matches a missing parent-row column.
 If an existing parent fails a filter, access is denied; onMissing does not run.
 
@@ -524,7 +534,7 @@ inheritsAny checks whether any matching association leads to a visible parent.
 `row[column]` matches `via.childColumn` in `via.table`; each association's
 `via.parentColumn` names the parent by table/key. The association index is a
 multimap. Apply optional literal where filters to each parent row, then its
-normal visibility predicate. Association rows themselves have no implicit
+normal visibility predicate, or the F5 override. Association rows themselves have no implicit
 soft-delete/type filter. Preserve those policies through the appropriate
 source predicate rather than assuming a hidden filter.
 
@@ -537,3 +547,37 @@ access. inheritsAny has no onMissing fallback. Its parent participates in the
 same module inheritance cycle, key-match and four-edge depth validation as
 inherits. Parent and association changes are maintained from the feed; the SDK
 schema does not authorize per-connection visibility re-querying.
+
+## F5: independent parent ACL predicate, runtime b6e65ad4
+
+Both inherits and inheritsAny accept optional `predicate: RowMaskExpression`.
+It replaces the parent collection's predicate. Evaluate it on the indexed parent
+row with the CHILD plan's principal: its declared sets, role, permissions and
+member/account context. AND it with any inherited parent `where` literals.
+Do not evaluate it with the parent's resolved sets or apply the parent's full
+collection rule as an additional gate. Without an override, existing inheritance
+semantics are unchanged.
+
+```json
+{"operator":"inherits","column":"goalId","table":"goals","key":"_id","where":[{"column":"deletedAt","value":{"literal":null}}],"predicate":{"operator":"or","children":[{"operator":"inSet","column":"_id","set":"myGoals"},{"operator":"eqContext","column":"ownerId","context":"member.id"}]}}
+```
+
+The predicate supports public, role, permission, eq, eqContext, inSet, nonEmpty,
+and/or/not. All set references resolve against the child plan and must exist
+there. Inheritance operators are forbidden anywhere inside the override,
+including beneath not/and/or. The parent index projects the override's columns;
+SQL snapshots, row evaluation and parent-change transitions use the same rule.
+The ordinary inheritance graph checks still require a declared parent and
+matching key and enforce cycles/depth independently of the override.
+
+For inherits, onMissing still runs only when the parent is absent, never when
+an existing parent fails the override or its where filters. inheritsAny still
+has no onMissing. Child-row plugin/access gates stay outside the inherited
+expression. This permits goal children to evaluate the parent's row ACL without
+accidentally imposing the goals collection's independent powerupSlug gate.
+The runtime regression is mask_tests::inherited_parent_predicate_uses_the_child_principal.
+
+The client worker must retain full old/new parity, including parent-only vs
+child-only grants, hidden existing parents, missing parents, literal parent
+filters and each child's independent plugin gates. No denormalized columns or
+Reducer changes are required by F5 itself.

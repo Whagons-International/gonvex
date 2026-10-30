@@ -510,6 +510,15 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
     if (!table || !childColumn || !parentColumn) throw new Error("visibility inheritsAny requires via table, childColumn and parentColumn");
     result.via = { table, childColumn, parentColumn };
   } else if (rawVia !== undefined) throw new Error("visibility via is allowed only on inheritsAny");
+  const rawPredicate = readMember(value, "predicate");
+  if (rawPredicate !== undefined) {
+    if (operator !== "inherits" && operator !== "inheritsAny") throw new Error("visibility predicate is allowed only on inherits/inheritsAny");
+    const predicate = parseVisibilityExpression(rawPredicate);
+    if (!predicate) throw new Error("visibility inherited predicate must be a valid mask expression");
+    const hasInheritance = (expression: VisibilityExpression): boolean => expression.operator === "inherits" || expression.operator === "inheritsAny" || (expression.children ?? []).some(hasInheritance);
+    if (hasInheritance(predicate)) throw new Error("visibility inherited parent predicate cannot inherit again");
+    result.predicate = predicate;
+  }
   const rawOnMissing = readMember(value, "onMissing");
   if (rawOnMissing !== undefined) {
     const onMissing = parseVisibilityExpression(rawOnMissing);
@@ -540,6 +549,7 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
 
 function visibilityExpressionSetsExist(expression: VisibilityExpression, sets: Record<string, VisibilitySet>): boolean {
   if ((expression.operator === "inSet" || expression.operator === "nonEmpty") && (!expression.set || !(expression.set in sets))) return false;
+  if (expression.predicate && !visibilityExpressionSetsExist(expression.predicate, sets)) throw new Error("visibility inherited predicate references an unknown child-plan set");
   return (!expression.onMissing || visibilityExpressionSetsExist(expression.onMissing, sets)) && (expression.children ?? []).every((child) => visibilityExpressionSetsExist(child, sets));
 }
 

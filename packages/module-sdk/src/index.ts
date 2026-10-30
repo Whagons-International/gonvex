@@ -576,13 +576,24 @@ export type VisibilityConstraint = {
   readonly value?: VisibilityLiteral;
 };
 
+/** Parent-row predicates use only the child principal and cannot inherit. */
+export type VisibilityRowExpression =
+  | { readonly operator: "public" }
+  | { readonly operator: "permission" | "role"; readonly value: string }
+  | { readonly operator: "eq"; readonly column: string; readonly value: VisibilityLiteral }
+  | { readonly operator: "eqContext"; readonly column: string; readonly context: VisibilityContextKey }
+  | { readonly operator: "inSet"; readonly column: string; readonly set: string }
+  | { readonly operator: "nonEmpty"; readonly set: string }
+  | { readonly operator: "and" | "or"; readonly children: readonly VisibilityRowExpression[] }
+  | { readonly operator: "not"; readonly children: readonly [VisibilityRowExpression] };
+
 export type VisibilityExpression =
   | { readonly operator: "public" }
   | { readonly operator: "permission" | "role"; readonly value: string }
   | { readonly operator: "eq"; readonly column: string; readonly value: VisibilityLiteral }
   | { readonly operator: "eqContext"; readonly column: string; readonly context: VisibilityContextKey }
-  | { readonly operator: "inherits"; readonly column: string; readonly table: string; readonly key: string; readonly where?: readonly VisibilityLiteralConstraint[]; readonly onMissing?: VisibilityExpression }
-  | { readonly operator: "inheritsAny"; readonly column: string; readonly table: string; readonly key: string; readonly via: VisibilityVia; readonly where?: readonly VisibilityLiteralConstraint[] }
+  | { readonly operator: "inherits"; readonly column: string; readonly table: string; readonly key: string; readonly where?: readonly VisibilityLiteralConstraint[]; readonly predicate?: VisibilityRowExpression; readonly onMissing?: VisibilityExpression }
+  | { readonly operator: "inheritsAny"; readonly column: string; readonly table: string; readonly key: string; readonly via: VisibilityVia; readonly where?: readonly VisibilityLiteralConstraint[]; readonly predicate?: VisibilityRowExpression }
   | { readonly operator: "nonEmpty"; readonly set: string }
   | { readonly operator: "inSet"; readonly column: string; readonly set: string }
   | { readonly operator: "and" | "or"; readonly children: readonly VisibilityExpression[] }
@@ -907,7 +918,7 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
   sets,
   ancestors = new Set(),
 ) => {
-  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children", "table", "key", "onMissing", "where", "via"]);
+  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children", "table", "key", "onMissing", "where", "via", "predicate"]);
   if (ancestors.has(value)) throw new Error(`${path} contains a cycle`);
   const operator = value.operator;
   if (typeof operator !== "string" || !visibilityOperators.has(operator as VisibilityOperator)) {
@@ -937,7 +948,7 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
       return;
     case "inherits":
     case "inheritsAny":
-      validateExactObject(value, path, ["operator", "column", "table", "key", "where", ...(operator === "inheritsAny" ? ["via"] : ["onMissing"])]);
+      validateExactObject(value, path, ["operator", "column", "table", "key", "where", "predicate", ...(operator === "inheritsAny" ? ["via"] : ["onMissing"])]);
       requireVisibilityString(value.column, `${path}.column`);
       requireVisibilityString(value.table, `${path}.table`);
       requireVisibilityString(value.key, `${path}.key`);
@@ -953,6 +964,20 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
           requireVisibilityString(constraint.column, `${p}.column`);
           validateVisibilityLiteral(constraint.value, `${p}.value`);
         });
+      }
+      if (value.predicate !== undefined) {
+        const ancestors = new Set<object>();
+        const hasInheritance = (candidate: unknown): boolean => {
+          if (!isRecord(candidate)) return false;
+          if (ancestors.has(candidate)) throw new Error(`${path}.predicate contains a cycle`);
+          ancestors.add(candidate);
+          const result = candidate.operator === "inherits" || candidate.operator === "inheritsAny" ||
+            (Array.isArray(candidate.children) && candidate.children.some(hasInheritance));
+          ancestors.delete(candidate);
+          return result;
+        };
+        if (hasInheritance(value.predicate)) throw new Error(`${path}.predicate cannot inherit again`);
+        validateVisibilityExpression(value.predicate, `${path}.predicate`, sets, nested);
       }
       if (value.onMissing !== undefined) validateVisibilityExpression(value.onMissing, `${path}.onMissing`, sets, nested);
       return;
@@ -1142,6 +1167,7 @@ const freezeVisibilityExpression = (expression: VisibilityExpression): Visibilit
   freeze({
     ...expression,
     ...((expression.operator === "inherits" || expression.operator === "inheritsAny") && expression.where !== undefined ? { where: freeze(expression.where.map((constraint) => freeze({ ...constraint, value: freeze({ ...constraint.value }) }))) } : {}),
+    ...((expression.operator === "inherits" || expression.operator === "inheritsAny") && expression.predicate !== undefined ? { predicate: freezeVisibilityExpression(expression.predicate) } : {}),
     ...(expression.operator === "inheritsAny" ? { via: freeze({ ...expression.via }) } : {}),
     ...(expression.operator === "inherits" && expression.onMissing !== undefined ? { onMissing: freezeVisibilityExpression(expression.onMissing) } : {}),
     ...(expression.operator === "eq" ? { value: freeze({ ...expression.value }) } : {}),

@@ -162,6 +162,7 @@ export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 
 export type VisibilityExpression = {
   operator: VisibilityOperator;
+  predicate?: VisibilityExpression;
   where?: Array<{ column: string; value: { literal: JsonValue } }>;
   via?: { table: string; childColumn: string; parentColumn: string };
   onMissing?: VisibilityExpression;

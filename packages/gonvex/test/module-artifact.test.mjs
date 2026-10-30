@@ -694,3 +694,22 @@ test("codegen mirrors F1-F4 parent filters, permission self-reads, correlated de
   const b = { ...documents, table: "b", where: { ...documents.where, table: "a" } };
   await assert.rejects(build(t, [a, b]), /cycle/);
 });
+
+test("codegen F5 retains child-principal parent overrides and rejects nested inheritance", async (t) => {
+  const parent = { version: 2, table: "goals", key: "id", permissionTables: [], sets: {}, where: { operator: "role", value: "parent-only" } };
+  const seed = { kind: "grant", table: "goalParticipants", select: "goalId", joins: [], where: [{ table: "goalParticipants", column: "memberId", context: "member.id" }] };
+  const predicate = { operator: "or", children: [{ operator: "inSet", column: "id", set: "myGoals" }, { operator: "eqContext", column: "ownerId", context: "member.id" }] };
+  const build = async (t, plan) => {
+    const project = await moduleProject(t, `const visibility = x => x; export const goalsVisibility = visibility(${JSON.stringify(parent)}); export const updatesVisibility = visibility(${JSON.stringify(plan)});`);
+    return buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  };
+  for (const operator of ["inherits", "inheritsAny"]) {
+    const child = { version: 2, table: "goalUpdates", key: "id", permissionTables: [], sets: { myGoals: seed }, where: { operator, column: "goalId", table: "goals", key: "id", predicate, where: [{ column: "deletedAt", value: { literal: null } }], ...(operator === "inheritsAny" ? { via: { table: "goalLinks", childColumn: "updateId", parentColumn: "goalId" } } : {}) } };
+    assert.deepEqual((await build(t, child)).visibility.goalUpdates, child);
+    await assert.rejects(build(t, { ...child, where: { ...child.where, predicate: { operator: "inSet", column: "id", set: "parentOnly" } } }), /unknown child-plan set/);
+    const nested = { operator: "inherits", column: "id", table: "goals", key: "id" };
+    await assert.rejects(build(t, { ...child, where: { ...child.where, predicate: { operator: "not", children: [nested] } } }), /cannot inherit again/);
+    const nestedAny = { ...nested, operator: "inheritsAny", via: { table: "links", childColumn: "a", parentColumn: "b" } };
+    await assert.rejects(build(t, { ...child, where: { ...child.where, predicate: nestedAny } }), /cannot inherit again/);
+  }
+});

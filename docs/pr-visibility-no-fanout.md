@@ -44,7 +44,7 @@ The parent implementation owner reports these passing measurements at fc33b110 w
 
 ## Behavior preserved
 
-The client worker has mapped all 35 staging commits: 19 have reported dual-plan coverage, 7 have no literal source-plan delta, and 9 remain partial because 12 plans are unexpressible under the current contract. There are 311 complete draft masks; the deployed client manifest remains unchanged. These are client-reported fixture results, not a claim of SQL/delta agreement or independent real-tenant sign-off. Links to new tests use the client branch and must be pinned to its final head before PR publication.
+The client worker has mapped all 35 staging commits: 19 have reported dual-plan coverage, 7 have no literal source-plan delta, and 9 remained partial at that checkpoint because of 12 plan limits. F1–F5 now provide the additional capabilities; final client migration/parity results remain pending. The last client checkpoint reported 311 complete draft masks; F1–F5 completion results are still pending. The deployed client manifest remains unchanged. These are client-reported fixture results, not a claim of SQL/delta agreement or independent real-tenant sign-off. Links to new tests use the client branch and must be pinned to its final head before PR publication.
 
 | Source commit | Introduced behavior/change to preserve | Proving test / classification | Old/new result |
 |---|---|---|---|
@@ -88,7 +88,7 @@ Full raw inventory: `docs/visibility-history-inventory.txt`. Load the old plans 
 
 ### Remaining migration blockers
 
-F1–F4 are implemented and tested in Rust at `170c758c`; the SDK/CLI mirror is included in this branch. F5 is approved for independent parent ACL evaluation; its Rust implementation and subsequent SDK/CLI mirror are pending. No decision authorizes dropping access rules or relabeling frequently written data tables as permission inputs. The table below remains open until the landed runtime, SDK/CLI mirror and client parity demonstrate each replacement. No denormalization or Reducer changes are part of this approved extension.
+F1–F4 are implemented and tested in Rust at `170c758c`; the SDK/CLI mirror is included in this branch. F5 is implemented in Rust at `b6e65ad4` and mirrored in the SDK/CLI: independent parent ACL predicates use child-plan grants while child plugin/access gates remain outside. No decision authorizes dropping access rules or relabeling frequently written data tables as permission inputs. The table below remains open until the landed runtime, SDK/CLI mirror and client parity demonstrate each replacement. No denormalization or Reducer changes are part of this approved extension.
 
 Landed additions, with client migration/parity still to confirm:
 
@@ -96,24 +96,25 @@ Landed additions, with client migration/parity still to confirm:
 - F2: a principal set may read its source table when that table is explicitly in `permissionTables`; self-source grant rules remain unchanged.
 - F3: derived indexes map a token to every matching row, and derived filters accept a literal, member/account `context`, or `inSet` referencing a principal/grant set of the same plan.
 - F4: `inheritsAny`, with `via: { table, childColumn, parentColumn }`, parent `table`/`key`, and optional literal parent filtering.
+- F5: optional pure-row `predicate` on inherits/inheritsAny replaces the parent collection predicate and uses the child principal/sets. No inheritance is permitted inside it.
 
-Validation and JSON shapes follow Rust `170c758c`. The client worker is migrating the 12 plans. This draft does not treat a new schema capability as a parity sign-off.
+Validation and JSON shapes follow Rust `170c758c`. The client worker is migrating the 12 formerly blocked plans using F1–F5. This draft does not treat a new schema capability as a parity sign-off.
 
 | Plans | Previous gap and landed capability to validate |
 |---|---|
 | crmActivities, crmDeals | F1 adds an active-parent literal filter while preserving task visibility. Client parity pending. |
-| goalMilestones, goalParticipants, goalPeriods, goalUpdates | F1 cannot replace the parent plugin gate. Approved F5 parent-predicate overrides are pending implementation and client parity. |
+| goalMilestones, goalParticipants, goalPeriods, goalUpdates | F5 replaces the parent collection predicate with its pure row ACL evaluated using child-plan grants. Child powerup/access gates remain independent. Client parity pending. |
 | documents, messageReactions | F3 multimaps and F4 inheritsAny preserve multiple association/note/message rows. Client parity pending. |
 | spots | F2 permits explicit permission-source reads and joins for the spot tree. Client parity pending. |
 | workbenchShares | F3 multimaps/F4 association traversal are available; owner-only management must remain distinct from reader access. |
 | workspaceTeams, workspaces | F3 context/inSet row filters correlate contexts with pending approval tokens; F1 filters active parents. Client parity pending. |
 
-The client report is `apps/docs/content/docs/internal/visibility-derived-set-classification.md`; all 237 sets in the original 13 plans were classified, with 151 expressible and categories now complete. The client reports 52 tests passed across six existing visibility suites plus four metadata cases, retaining existing assertions. Nullable legacy flag parity selects a non-null key. Full migration and nine historical-rule rows remain blocked.
+The pre-F1–F5 client report is `apps/docs/content/docs/internal/visibility-derived-set-classification.md`; all 237 sets in the original 13 plans were classified, with 151 then expressible and categories complete. The client reports 52 tests passed across six existing visibility suites plus four metadata cases, retaining existing assertions. Nullable legacy flag parity selects a non-null key. Full migration and nine historical-rule rows await the client's post-F1–F5 parity results.
 
 ## Validation
 
 - Workspace package build passed. CLI typecheck passed after building workspace dependencies, including the previous src/index.ts:1317 unknown-type error. No type assertion was needed.
-- F1–F4 checks: 50 SDK/boundary tests and 22 targeted CLI checks passed. Repository scripts: 32 passed, one existing environment-dependent runtime/HMR check skipped. Workspace and SDK/CLI builds passed.
+- F1–F5 checks: 51 SDK/boundary tests and 23 targeted CLI checks passed. Repository scripts: 32 passed, one existing environment-dependent runtime/HMR check skipped. Workspace and SDK/CLI builds passed.
 - Metrics isolation/reset test passed; legacy deprecation-log test passed.
 - Fan-out integration test: parent reports passing at fc33b110 on disposable PostgreSQL with the counters above. **TODO: attach raw execution transcript.** Do not use staging/production databases.
 - **TODO:** final runtime unit/integration results, generator output, cycle comparison, CI URLs, client old/new parity, and independent real-tenant parity sign-off.
