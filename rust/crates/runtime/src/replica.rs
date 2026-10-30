@@ -430,7 +430,15 @@ impl Runtime {
             let (source_changed, dependency_changed) = table_change_relevance(
                 &subscription.definition.table,
                 &dependencies,
-                changes.iter(),
+                changes.iter().filter(|change| {
+                    change.table == subscription.definition.table
+                        || subscription.visibility.change_concerns_member(
+                            &subscription.resolved,
+                            &change.table,
+                            &change.old_value,
+                            &change.new_value,
+                        )
+                }),
             );
             // Budgets and progressive delivery only make a source-table or
             // visibility-dependency change window-sensitive. Re-running every

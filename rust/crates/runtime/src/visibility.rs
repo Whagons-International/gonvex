@@ -164,6 +164,82 @@ impl VisibilityPlan {
         self.dependency_columns_for_sets(Some(&sets))
     }
 
+    /// Conservative row routing for legacy declarations. A changed occurrence
+    /// can be skipped only when its own context constraint proves both old and
+    /// new rows belong to another principal. Joins without such an anchor keep
+    /// their dependency until migrated to permission-token reachability.
+    pub fn change_concerns_member(
+        &self,
+        resolved: &ResolvedVisibility,
+        table: &str,
+        old: &Value,
+        new: &Value,
+    ) -> bool {
+        if old.is_null() && new.is_null() {
+            return true;
+        }
+        if table == "members" {
+            for row in [old, new].into_iter().filter(|row| !row.is_null()) {
+                match row.get("id").and_then(Value::as_str) {
+                    Some(id)
+                        if Some(id) != resolved.direct.get("member.id").map(String::as_str) => {}
+                    _ => return true,
+                }
+            }
+        }
+        let mut active = BTreeSet::new();
+        active_visibility_sets(&self.predicate, &resolved.role, &mut active);
+        for name in active {
+            let set = &self.sets[&name];
+            let base = if set.alias.is_empty() {
+                set.table.as_str()
+            } else {
+                set.alias.as_str()
+            };
+            let occurrences =
+                std::iter::once((set.table.as_str(), base)).chain(set.joins.iter().map(|join| {
+                    (
+                        join.table.as_str(),
+                        if join.alias.is_empty() {
+                            join.table.as_str()
+                        } else {
+                            join.alias.as_str()
+                        },
+                    )
+                }));
+            for (_, alias) in occurrences.filter(|(source, _)| *source == table) {
+                let anchors = set
+                    .constraints
+                    .iter()
+                    .filter(|constraint| {
+                        (constraint.table == alias
+                            || (constraint.table.is_empty() && alias == base))
+                            && !constraint.context.is_empty()
+                    })
+                    .collect::<Vec<_>>();
+                if anchors.is_empty() {
+                    return true;
+                }
+                for row in [old, new].into_iter().filter(|row| !row.is_null()) {
+                    // A missing feed column is unknown, never evidence to skip.
+                    let excludes = anchors.iter().any(|anchor| {
+                        match (
+                            row.get(&anchor.column),
+                            resolved.direct.get(&anchor.context),
+                        ) {
+                            (Some(value), Some(expected)) => scalar(Some(value)) != *expected,
+                            _ => false,
+                        }
+                    });
+                    if !excludes {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn dependency_columns_for_sets(
         &self,
         active: Option<&BTreeSet<String>>,
@@ -1326,6 +1402,62 @@ mod tests {
             sets: BTreeMap::new(),
             fingerprint: String::new(),
         }
+    }
+
+    #[test]
+    fn anchored_dependency_routes_inserts_deletes_and_reassignments() {
+        let plan =
+            dependency_plan(serde_json::json!({"operator":"inSet","column":"id","set":"assigned"}));
+        let member = dependency_member("member");
+        let own = serde_json::json!({"userId":"member-1"});
+        let other = serde_json::json!({"userId":"member-2"});
+        for (old, new) in [
+            (Value::Null, other.clone()),
+            (other.clone(), Value::Null),
+            (other.clone(), other.clone()),
+        ] {
+            assert!(!plan.change_concerns_member(&member, "taskUsers", &old, &new));
+        }
+        for (old, new) in [
+            (Value::Null, own.clone()),
+            (own.clone(), Value::Null),
+            (own.clone(), other.clone()),
+            (other.clone(), own.clone()),
+        ] {
+            assert!(plan.change_concerns_member(&member, "taskUsers", &old, &new));
+        }
+        assert!(plan.change_concerns_member(
+            &member,
+            "taskUsers",
+            &Value::Null,
+            &serde_json::json!({})
+        ));
+        assert!(plan.change_concerns_member(&member, "taskUsers", &Value::Null, &Value::Null));
+        assert!(!plan.change_concerns_member(
+            &member,
+            "members",
+            &Value::Null,
+            &serde_json::json!({"id":"member-2"})
+        ));
+        assert!(plan.change_concerns_member(
+            &member,
+            "members",
+            &serde_json::json!({"id":"member-1"}),
+            &Value::Null
+        ));
+    }
+
+    #[test]
+    fn unanchored_join_dependencies_are_never_skipped() {
+        let mut plan =
+            dependency_plan(serde_json::json!({"operator":"inSet","column":"id","set":"assigned"}));
+        plan.sets.get_mut("assigned").unwrap().constraints.clear();
+        assert!(plan.change_concerns_member(
+            &dependency_member("member"),
+            "taskUsers",
+            &Value::Null,
+            &serde_json::json!({"userId":"member-2"})
+        ));
     }
 
     #[test]
