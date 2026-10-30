@@ -411,7 +411,7 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
       const permissions = new Set(permissionTables as string[]);
       const fail = (reason: string): never => { throw new Error(`visibility ${table} set ${name}: ${reason}; use a permission-only principal set, a single-source grant set, or inherits`); };
       if (kind !== "principal" && kind !== "grant") fail("kind must be principal or grant");
-      if (setTable === table || joins.some((join) => join.table === table)) fail("reads its own source table");
+      if ((kind !== "grant" && setTable === table) || joins.some((join) => join.table === table)) fail("reads its own source table");
       if (kind === "principal" && !permissions.has(setTable)) fail(`undeclared permission table ${setTable}`);
       for (const join of joins) if (!permissions.has(join.table)) fail(`joins data table ${join.table}`);
       if (kind === "grant" && !constraints.some((constraint) => constraint.context === "member.id" || constraint.context === "account.id")) fail("grant requires member.id or account.id anchor");

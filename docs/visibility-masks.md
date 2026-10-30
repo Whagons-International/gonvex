@@ -285,7 +285,7 @@ be a declared permission table. Grant constraints must anchor on `member.id` or
 `account.id`, directly or on a joined permission occurrence. The runtime derives
 member routing and reachable join keys from these equality joins and anchors.
 Principal sets without a member/account anchor are tenant-global and shared once
-per tenant. Neither kind may read or join its plan's own source table.
+per tenant. A principal set may not read its plan's own source table. An anchored grant set may read that source anywhere in the predicate, including outside `onMissing`. Neither kind may join the plan's source table.
 
 `nonEmpty` tests the resolved set's cardinality, independently of the current
 row. It has no `column` field. `inSet` compares a row column to set tokens.
@@ -364,3 +364,34 @@ This preserves orphan access without bypassing PERSONAL parent privacy. Apply
 fallbacks only to plans whose old behavior proves that grant. Parity fixtures
 must include a missing parent, a hidden existing PERSONAL parent, and a visible
 existing parent for every member role.
+
+### Approved self-source grant rule, 2026-10-29
+
+Rust commit `1a7187f3` is the reference rule. Anchored `kind: "grant"` sets
+may read their plan's own source table anywhere in the predicate. Principal
+sets may not read that source, and no set may join the plan's source table.
+There is no onMissing-only restriction. Grant rows are patched in memory and
+routed to their named members, so a source grant does not become a principal
+permission-table dependency.
+
+For example, the taskUsers plan may select `taskId` from `taskUsers` with
+`userId = member.id`, then test the current row's `taskId` against those tokens.
+This preserves the legacy sibling-row access of assigned orphan tasks. The
+same grant may appear directly in the predicate or inside `inherits.onMissing`.
+
+### Global existence rules: approved migration policy
+
+Grants remain anchored on member.id or account.id. There are no tenant-global
+grant semantics. A global-existence rule over an admin-edited, low-write
+configuration source may explicitly declare that source a permission table and
+use an unanchored tenant-global principal set. The permission declaration names
+the source table, not the set. For example, the reported `templateForms` set
+selects formId from `templates`; its source declaration would name `templates`.
+The runtime conservatively invalidates unanchored principal occurrences.
+
+A frequently written data source must not be relabeled a permission table to
+express global existence. Stop its migration and report the exact plan and
+source table to Gabriel. The likely replacement is a row column maintained in
+the same Reducer transaction as the existence-changing write. Check this policy
+for forms/formVersions templateForms, formSubmissions linkedSubmissions, centers,
+and every other inverse-existence plan before claiming parity or no fan-out.

@@ -176,7 +176,7 @@ test("version 2 freezes permission declarations and supports inherited masks", (
 test("version 2 rejects self-reading and data joins with a migration hint", () => {
   const make = (set) => ({ ...validPlan(), version: 2, permissionTables: ["members"], sets: { teams: set } });
   assert.throws(() => visibility(make({ ...validPlan().sets.teams, kind: "principal" })), /sets.teams.*permission.*inherits/);
-  assert.throws(() => visibility(make({ ...validPlan().sets.teams, kind: "grant", table: "tasks" })), /sets.teams.*own source.*inherits/);
+  assert.throws(() => visibility(make({ ...validPlan().sets.teams, kind: "principal", table: "tasks" })), /sets.teams.*own source.*inherits/);
   assert.throws(() => visibility(make({ ...validPlan().sets.teams, kind: "grant", joins: [{ table: "documents", leftColumn: "id", rightColumn: "id" }] })), /sets.teams.*data table documents.*inherits/);
 });
 
@@ -206,5 +206,18 @@ test("module manifests reject inheritance cycles and chains deeper than four edg
     for (let index = 0; index <= edges; index++) module.visibility(make(`t${index}`, index < edges ? `t${index + 1}` : undefined));
     if (edges === 4) assert.doesNotThrow(() => module.manifest());
     else assert.throws(() => module.manifest(), /inherits depth exceeds 4/);
+  }
+});
+
+
+test("anchored grants may read their source anywhere, but neither kind may join the plan source", () => {
+  const assigned = { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] };
+  const base = { version: 2, table: "taskUsers", key: "_id", permissionTables: [], sets: { assigned }, where: { operator: "inSet", column: "taskId", set: "assigned" } };
+  assert.equal(visibility(base).sets.assigned.table, "taskUsers");
+  const fallback = { ...base, where: { operator: "inherits", column: "taskId", table: "tasks", key: "_id", onMissing: base.where } };
+  assert.equal(visibility(fallback).where.onMissing.set, "assigned");
+  assert.throws(() => visibility({ ...base, sets: { assigned: { ...assigned, kind: "principal" } } }), /assigned.*own source/);
+  for (const kind of ["principal", "grant"]) {
+    assert.throws(() => visibility({ ...base, sets: { assigned: { ...assigned, kind, table: "memberTeams", joins: [{ table: "taskUsers", leftColumn: "memberId", rightColumn: "userId" }] } } }), /assigned.*own source/);
   }
 });

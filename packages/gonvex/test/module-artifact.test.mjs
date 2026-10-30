@@ -617,7 +617,7 @@ test("code generation rejects cyclic and overdeep inherited visibility", async (
 test("code generation rejects forbidden version 2 visibility sets with repairs", async (t) => {
   const grant = { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] };
   for (const [name, set, message] of [
-    ["self-source", { ...grant, table: "tasks", where: [{ table: "tasks", column: "createdBy", context: "member.id" }] }, /set assigned: reads its own source table.*inherits/],
+    ["self-source", { ...grant, kind: "principal", table: "tasks", where: [{ table: "tasks", column: "createdBy", context: "member.id" }] }, /set assigned: reads its own source table.*inherits/],
     ["principal-data", { ...grant, kind: "principal" }, /set assigned: undeclared permission table taskUsers.*inherits/],
     ["data-join", { ...grant, joins: [{ table: "documents", leftColumn: "taskId", rightColumn: "taskId" }] }, /set assigned: joins data table documents.*inherits/],
     ["unanchored-grant", { ...grant, where: [] }, /set assigned: grant requires member.id or account.id anchor/],
@@ -627,5 +627,19 @@ test("code generation rejects forbidden version 2 visibility sets with repairs",
       const project = await moduleProject(t, `const visibility = x => x; export const tasksVisibility = visibility(${JSON.stringify(plan)});`);
       await assert.rejects(buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }), message);
     });
+  }
+});
+
+
+test("code generation retains self-source grants outside orphan fallbacks", async (t) => {
+  const assigned = { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] };
+  const plan = { version: 2, table: "taskUsers", key: "_id", permissionTables: [], sets: { assigned }, where: { operator: "inSet", column: "taskId", set: "assigned" } };
+  const project = await moduleProject(t, `const visibility = x => x; export const taskUsersVisibility = visibility(${JSON.stringify(plan)});`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.visibility.taskUsers, plan);
+  for (const kind of ["principal", "grant"]) {
+    const joined = { ...plan, sets: { assigned: { ...assigned, kind, table: "memberTeams", joins: [{ table: "taskUsers", leftColumn: "memberId", rightColumn: "userId" }] } } };
+    const fixture = await moduleProject(t, `const visibility = x => x; export const taskUsersVisibility = visibility(${JSON.stringify(joined)});`);
+    await assert.rejects(buildModuleArtifact({ root: fixture.root, backendDir: fixture.backendDir, files: [fixture.entrypoint], migrations: [] }), /set assigned: reads its own source table/);
   }
 });

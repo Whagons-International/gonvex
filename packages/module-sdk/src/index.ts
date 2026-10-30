@@ -979,7 +979,7 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
       const permissions = new Set(value.permissionTables as string[]);
       const fix = "use a permission-only principal set, a single-source grant set, or inherits";
       if (candidate.kind !== "principal" && candidate.kind !== "grant") throw new Error(`${setPath}.kind must be principal or grant; ${fix}`);
-      if (candidate.table === value.table || joins.some((join) => join.table === value.table)) throw new Error(`${setPath} reads its own source table ${value.table}; ${fix}`);
+      if ((candidate.kind !== "grant" && candidate.table === value.table) || joins.some((join) => join.table === value.table)) throw new Error(`${setPath} reads its own source table ${value.table}; ${fix}`);
       if (candidate.kind === "principal" && !permissions.has(candidate.table as string)) throw new Error(`${setPath} reads undeclared permission table ${candidate.table}; ${fix}`);
       for (const join of joins) {
         if (!permissions.has(join.table)) throw new Error(`${setPath} joins data table ${join.table}; ${fix}`);
