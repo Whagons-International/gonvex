@@ -27,6 +27,7 @@ pub struct LiveQuerySubscription {
     pub plan: LiveQueryPlan,
     pub visibility: VisibilityPlan,
     pub visibility_dependencies: VisibilityDependencies,
+    pub resolved_visibility: ResolvedVisibility,
     pub related_dependencies: Vec<VisibilityDependencies>,
     pub required_revision: u64,
     pub computed_revision: u64,
@@ -50,6 +51,7 @@ fn change_affects_live_query(
 
 #[derive(Clone)]
 struct QuerySnapshot {
+    resolved_visibility: ResolvedVisibility,
     result: Value,
     revision: u64,
     epoch: String,
@@ -458,6 +460,7 @@ impl Runtime {
                 path,
                 args,
                 visibility_dependencies: visibility_plan.dependency_columns(),
+                resolved_visibility: snapshot.resolved_visibility,
                 related_dependencies: relation_tables(plan.predicate.as_ref())
                     .iter()
                     .filter_map(|table| module.visibility.get(table))
@@ -494,7 +497,14 @@ impl Runtime {
                             &subscription.plan.table,
                             &subscription.visibility_dependencies,
                             change,
-                        ) || subscription.plan.index_change_affects(&change.table)
+                        ) && (change.table == subscription.plan.table
+                            || subscription.visibility.change_concerns_member(
+                                &subscription.resolved_visibility,
+                                &change.table,
+                                &change.old_value,
+                                &change.new_value,
+                            ))
+                            || subscription.plan.index_change_affects(&change.table)
                             || subscription
                                 .related_dependencies
                                 .iter()
@@ -527,6 +537,7 @@ impl Runtime {
                     }
                     let changed = snapshot.result != subscription.last_result
                         || snapshot.epoch != subscription.epoch;
+                    subscription.resolved_visibility = snapshot.resolved_visibility;
                     subscription.computed_revision = snapshot.revision;
                     subscription.epoch = snapshot.epoch;
                     if changed {
@@ -629,6 +640,7 @@ impl Runtime {
         }
         transaction.commit().await?;
         let snapshot = QuerySnapshot {
+            resolved_visibility: resolved,
             result,
             epoch,
             revision,
