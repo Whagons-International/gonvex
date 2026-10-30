@@ -435,7 +435,7 @@ async fn run_visibility_fixture(legacy: bool) {
     let worked = deliver(&runtime, &mut connections, &event).await;
     if legacy {
         assert!(
-            worked.iter().any(|member| *member == 0),
+            worked.contains(&0),
             "legacy grant dependencies must reach unnamed member m0"
         );
         assert!(runtime.visibility_metrics().snapshot().collection_snapshots > 0);
