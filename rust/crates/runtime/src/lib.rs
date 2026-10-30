@@ -5664,3 +5664,6 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         assert!(matches!(&frames[0], ServerMessage::AuthError { .. }));
     }
 }
+
+#[cfg(test)]
+mod visibility_token_tests;

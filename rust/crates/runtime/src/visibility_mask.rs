@@ -30,10 +30,15 @@ pub(crate) fn match_expression(
             .and_then(|value| value.get("literal"))
             .is_some_and(|literal| row.get(&expression.column) == Some(literal)),
         "eqContext" => scalar(row.get(&expression.column)) == resolved.direct[&expression.context],
-        "inSet" => resolved
-            .sets
-            .get(&expression.set)
-            .is_some_and(|set| set.contains(&scalar(row.get(&expression.column)))),
+        "inSet" => row
+            .get(&expression.column)
+            .filter(|value| !value.is_null())
+            .is_some_and(|value| {
+                resolved
+                    .sets
+                    .get(&expression.set)
+                    .is_some_and(|set| set.contains(&scalar(Some(value))))
+            }),
         "inherits" => {
             let Some(parent) = resolved.inherited.get(&expression.table) else {
                 return false;

@@ -524,6 +524,7 @@ export type VisibilityPlan = {
   readonly where: VisibilityExpression;
 };
 
+/** V2 sets materialize non-null tokens only; nonEmpty never counts null/missing selections. */
 export type VisibilitySet = VisibilityRelationalSet | VisibilityDerivedSet;
 
 export type VisibilityDerivedSet = {

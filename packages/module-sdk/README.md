@@ -279,3 +279,40 @@ Reducer receives the same identity contract. Local evaluation remains provisiona
 authoritative replay verifies the live session. Applications own any policy that
 uses this metadata; Gonvex does not change the member's stored role or grant
 application-specific privileges.
+
+
+### Version 2 derived token sets
+
+Version 2 visibility plans declare permissionTables and classify sets as
+principal, grant or derived. A derived set maps an existing set's tokens through
+one row per key in a tenant-shared index:
+
+```ts
+const taskCategories = {
+  kind: "derived" as const,
+  from: "assignedTasks",
+  table: "tasks",
+  key: "id",
+  select: "categoryId",
+  where: [{ column: "deletedAt", value: { literal: null } }],
+};
+```
+
+The from set belongs to the same plan. Derived chains are acyclic and at most
+two derived sets deep. The indexed table differs from the plan's own table.
+Filters have column and literal value only, with no table or context field.
+There are no joins; omitted joins and an empty array are equivalent. A derived
+set is a keyed single-row mapping, not a foreign-key multimap or an intersection.
+
+All version 2 principal, grant and derived sets materialize non-null tokens only.
+Missing indexed rows and null/missing selected values contribute no token.
+nonEmpty means at least one non-null token, and inSet never admits a null/missing
+row column. If a legacy EXISTS flag counted rows with a nullable selection,
+select a non-null column such as the key for that flag and verify parity.
+
+Anchored grants may use the plan's own table as their base anywhere in the
+predicate. Principal sets may not, and no set may join the plan's own table.
+Grants remain anchored. Tenant-wide flags use unanchored principal sets over
+explicitly declared, low-write permission/configuration tables. Do not relabel
+frequently written data tables as permission tables to emulate global existence.
+See docs/visibility-masks.md in the repository for the complete wire contract.
