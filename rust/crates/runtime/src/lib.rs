@@ -35,6 +35,9 @@ mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
+pub mod visibility_index;
+mod visibility_mask;
+pub mod visibility_metrics;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -85,6 +88,8 @@ struct RuntimeInner {
     membership_projector: membership_projector::MembershipProjector,
     metrics: metrics::RuntimeMetrics,
     public_limiter: Arc<public_functions::PublicLimiter>,
+    visibility_metrics: visibility_metrics::VisibilityMetrics,
+    parent_acl: visibility::ParentAclRegistry,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -204,6 +209,11 @@ impl Runtime {
         Ok(tenant)
     }
 
+    /// Visibility statement and work counters for this runtime.
+    pub fn visibility_metrics(&self) -> &visibility_metrics::VisibilityMetrics {
+        &self.inner.visibility_metrics
+    }
+
     pub fn new(config: Config) -> Self {
         let module_host = ModuleHost::new(config.module_host.clone());
         let pools = PoolRegistry::new(PoolLimits {
@@ -235,6 +245,8 @@ impl Runtime {
                 membership_projector: membership_projector::MembershipProjector::default(),
                 metrics,
                 public_limiter: Arc::new(public_functions::PublicLimiter::default()),
+                visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
+                parent_acl: visibility::ParentAclRegistry::default(),
             }),
         }
     }
@@ -5652,3 +5664,6 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         assert!(matches!(&frames[0], ServerMessage::AuthError { .. }));
     }
 }
+
+#[cfg(test)]
+mod visibility_token_tests;

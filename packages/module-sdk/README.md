@@ -279,3 +279,60 @@ Reducer receives the same identity contract. Local evaluation remains provisiona
 authoritative replay verifies the live session. Applications own any policy that
 uses this metadata; Gonvex does not change the member's stored role or grant
 application-specific privileges.
+
+
+### Version 2 derived token sets
+
+Version 2 visibility plans declare permissionTables and classify sets as
+principal, grant or derived. A derived set maps an existing set's tokens through
+all rows per key in a tenant-shared index:
+
+```ts
+const taskCategories = {
+  kind: "derived" as const,
+  from: "assignedTasks",
+  table: "tasks",
+  key: "id",
+  select: "categoryId",
+  where: [{ column: "deletedAt", value: { literal: null } }],
+};
+```
+
+The from set belongs to the same plan. Derived chains are acyclic and at most
+two derived sets deep. The indexed table differs from the plan's own table.
+Filters have a column and exactly one of literal value, member/account context, or inSet naming a principal/grant set, with no table field.
+There are no joins; omitted joins and an empty array are equivalent. A derived
+set supports keyed one-to-many mapping and row-local correlation, rather than arbitrary relational queries.
+
+All version 2 principal, grant and derived sets materialize non-null tokens only.
+Missing indexed rows and null/missing selected values contribute no token.
+nonEmpty means at least one non-null token, and inSet never admits a null/missing
+row column. If a legacy EXISTS flag counted rows with a nullable selection,
+select a non-null column such as the key for that flag and verify parity.
+
+Anchored grants may use the plan's own table as their base anywhere in the
+predicate. Without an explicit permissionTables declaration for the plan source, principal sets may not read it and no set may join it.
+Grants remain anchored. Tenant-wide flags use unanchored principal sets over
+explicitly declared, low-write permission/configuration tables. Do not relabel
+frequently written data tables as permission tables to emulate global existence.
+See docs/visibility-masks.md in the repository for the complete wire contract.
+
+
+The F1–F4 contract adds literal parent-row `where` filters to `inherits`, and
+`inheritsAny` with `column`, parent `table`/`key`, and `via: {table, childColumn,
+parentColumn}`. inheritsAny follows all matching associations and admits the
+row when any linked parent is visible and satisfies the literal filters. It has
+no onMissing. Both operators participate in inheritance graph validation.
+Explicitly declared permission-source tables may be read and joined by their
+own principal plans, supporting bounded administrative spot trees. The source
+must be declared in permissionTables; frequently written data must not be
+relabeled a permission table to bypass visibility budgets.
+
+
+F5 adds an optional `predicate` to inherits and inheritsAny. It replaces the
+parent collection's predicate and evaluates the indexed parent row with the
+child plan's sets, role, permissions and context, together with parent literal
+where filters. It accepts pure row/principal operators and and/or/not, but no
+nested inherits/inheritsAny. Keep the child's plugin/access gates outside it.
+Without the override, parent visibility is unchanged. onMissing remains exclusive
+to inherits and applies only to an absent parent, never to a failing predicate.
