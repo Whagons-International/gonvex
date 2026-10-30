@@ -341,7 +341,7 @@ function parseVisibilityDefinitions(source: string): VisibilityPlan[] {
 
 function validateVisibilityInheritance(plans: Record<string, VisibilityPlan>): void {
   const references = (expression: VisibilityExpression): VisibilityExpression[] => [
-    ...(expression.operator === "inherits" ? [expression] : []),
+    ...(expression.operator === "inherits" || expression.operator === "inheritsAny" ? [expression] : []),
     ...(expression.children ?? []).flatMap(references),
     ...(expression.onMissing ? references(expression.onMissing) : []),
   ];
@@ -381,7 +381,7 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
     const rawWhere = readMember(candidate, "where");
     if (stringMember(candidate, "kind") === "derived") {
       const fail = (reason: string): never => { throw new Error(`visibility ${table} set ${name}: derived ${reason}`); };
-      if (!isJsonObject(candidate) || Object.keys(candidate).some((field) => !["kind", "from", "table", "key", "select", "joins", "where"].includes(field))) fail("allows only from, table, key, select and literal where");
+      if (!isJsonObject(candidate) || Object.keys(candidate).some((field) => !["kind", "from", "table", "key", "select", "joins", "where"].includes(field))) fail("allows only from, table, key, select and indexed-row where");
       const from = stringMember(candidate, "from");
       const derivedKey = stringMember(candidate, "key");
       if (version !== 2 || !setTable || !select || !from || !derivedKey) fail("requires version 2, from, table, key and select");
@@ -391,8 +391,21 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
       const constraints = (rawWhere as JsonValue[]).map((constraint) => {
         const column = stringMember(constraint, "column");
         const literal = readMember(constraint, "value");
-        if (!isJsonObject(constraint) || Object.keys(constraint).some((field) => !["column", "value"].includes(field)) || !column || !isJsonObject(literal) || Object.keys(literal).length !== 1 || !("literal" in literal)) fail("filters require column and literal value only");
-        return { column: column!, value: literal as { literal: JsonValue } };
+        if (!isJsonObject(constraint) || Object.keys(constraint).some((field) => !["column", "value", "context", "inSet"].includes(field)) || !column) fail("filters require indexed-row columns only");
+        const modes = ["value", "context", "inSet"].filter((field) => readMember(constraint, field) !== undefined);
+        if (modes.length !== 1) fail("filters require exactly one of value, context or inSet");
+        const context = stringMember(constraint, "context");
+        const inSet = stringMember(constraint, "inSet");
+        if (modes[0] === "value") {
+          if (!isJsonObject(literal) || Object.keys(literal).length !== 1 || !("literal" in literal)) fail("filters require a literal value");
+          return { column: column!, value: literal as { literal: JsonValue } };
+        }
+        if (modes[0] === "context") {
+          if (context !== "member.id" && context !== "account.id") fail("context must be member.id or account.id");
+          return { column: column!, context: context as "member.id" | "account.id" };
+        }
+        if (!inSet) fail("inSet must name a principal or grant set");
+        return { column: column!, inSet: inSet! };
       });
       sets[name] = { kind: "derived", from: from!, table: setTable!, key: derivedKey!, select: select!, where: constraints, ...(rawJoins === undefined ? {} : { joins: [] }) };
       continue;
@@ -405,6 +418,7 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
       leftColumn: stringMember(join, "leftColumn") ?? "",
       rightColumn: stringMember(join, "rightColumn") ?? "",
     }));
+    if (rawWhere.some((constraint) => readMember(constraint, "inSet") !== undefined)) throw new Error(`visibility ${table} set ${name}: inSet constraints are allowed only on derived sets`);
     const constraints = rawWhere.map((constraint) => ({
       table: stringMember(constraint, "table") ?? "",
       column: stringMember(constraint, "column") ?? "",
@@ -429,7 +443,7 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
       const permissions = new Set(permissionTables as string[]);
       const fail = (reason: string): never => { throw new Error(`visibility ${table} set ${name}: ${reason}; use a permission-only principal set, a single-source grant set, or inherits`); };
       if (kind !== "principal" && kind !== "grant") fail("kind must be principal or grant");
-      if ((kind !== "grant" && setTable === table) || joins.some((join) => join.table === table)) fail("reads its own source table");
+      if (!permissions.has(table) && ((kind !== "grant" && setTable === table) || joins.some((join) => join.table === table))) fail("reads its own source table");
       if (kind === "principal" && !permissions.has(setTable)) fail(`undeclared permission table ${setTable}`);
       for (const join of joins) if (!permissions.has(join.table)) fail(`joins data table ${join.table}`);
       if (kind === "grant" && !constraints.some((constraint) => constraint.context === "member.id" || constraint.context === "account.id")) fail("grant requires member.id or account.id anchor");
@@ -453,13 +467,17 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
     visitDerived(set.from!, [...path, name]);
   };
   for (const name of Object.keys(sets)) visitDerived(name, []);
+  for (const [name, set] of Object.entries(sets)) {
+    if (set.kind !== "derived") continue;
+    for (const constraint of set.where) if (constraint.inSet !== undefined && !["principal", "grant"].includes(sets[constraint.inSet]?.kind ?? "")) throw new Error(`visibility ${table} set ${name}: derived inSet ${constraint.inSet} must name a principal or grant set`);
+  }
   if (!visibilityExpressionSetsExist(where, sets)) return undefined;
   return { ...(version === 2 ? { version: 2 as const, permissionTables: permissionTables as string[] } : {}), table, key, sets, where };
 }
 
 function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpression | undefined {
   const operator = stringMember(value, "operator");
-  if (!operator || !["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "inherits", "and", "or", "not"].includes(operator)) return undefined;
+  if (!operator || !["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "inherits", "inheritsAny", "and", "or", "not"].includes(operator)) return undefined;
   const result: VisibilityExpression = { operator: operator as VisibilityExpression["operator"] };
   const column = stringMember(value, "column");
   const context = stringMember(value, "context");
@@ -473,10 +491,29 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
   const key = stringMember(value, "key");
   if (table) result.table = table;
   if (key) result.key = key;
+  const rawWhere = readMember(value, "where");
+  if (rawWhere !== undefined) {
+    if (!["inherits", "inheritsAny"].includes(operator) || !Array.isArray(rawWhere)) throw new Error(`visibility ${operator}: parent where must be literal filters`);
+    result.where = rawWhere.map((constraint) => {
+      const column = stringMember(constraint, "column");
+      const literal = readMember(constraint, "value");
+      if (!isJsonObject(constraint) || Object.keys(constraint).some((field) => !["column", "value"].includes(field)) || !column || !isJsonObject(literal) || Object.keys(literal).length !== 1 || !("literal" in literal)) throw new Error("visibility inherited parent filters require column and literal value only");
+      return { column, value: literal as { literal: JsonValue } };
+    });
+  }
+  const rawVia = readMember(value, "via");
+  if (operator === "inheritsAny") {
+    if (!isJsonObject(rawVia) || Object.keys(rawVia).some((field) => !["table", "childColumn", "parentColumn"].includes(field))) throw new Error("visibility inheritsAny requires via table, childColumn and parentColumn");
+    const table = stringMember(rawVia, "table");
+    const childColumn = stringMember(rawVia, "childColumn");
+    const parentColumn = stringMember(rawVia, "parentColumn");
+    if (!table || !childColumn || !parentColumn) throw new Error("visibility inheritsAny requires via table, childColumn and parentColumn");
+    result.via = { table, childColumn, parentColumn };
+  } else if (rawVia !== undefined) throw new Error("visibility via is allowed only on inheritsAny");
   const rawOnMissing = readMember(value, "onMissing");
   if (rawOnMissing !== undefined) {
     const onMissing = parseVisibilityExpression(rawOnMissing);
-    if (operator !== "inherits" || !onMissing) return undefined;
+    if (operator !== "inherits" || !onMissing) throw new Error("visibility onMissing is allowed only on inherits with a valid expression");
     result.onMissing = onMissing;
   }
   const rawChildren = readMember(value, "children");
@@ -491,7 +528,8 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
     case "role": return result.value ? result : undefined;
     case "eq": return result.column && typeof result.value === "object" ? result : undefined;
     case "nonEmpty": return result.set && !result.column ? result : undefined;
-    case "inherits": return result.column && result.table && result.key ? result : undefined;
+    case "inherits":
+    case "inheritsAny": return result.column && result.table && result.key ? result : undefined;
     case "eqContext": return result.column && result.context ? result : undefined;
     case "inSet": return result.column && result.set ? result : undefined;
     case "and":

@@ -234,43 +234,50 @@ format during rollout. Version 2 runtime execution is still being implemented;
 do not deploy a version 2 manifest before runtime integration is complete.
 
 ```ts
-type MaskPlan = {
-  version: 2;
+type Literal = { literal: JsonValue };
+type LiteralFilter = { column: string; value: Literal };
+type Context = "member.id" | "account.id";
+type RelationalSet = {
+  kind: "principal" | "grant";
   table: string;
-  key: string;
-  permissionTables: readonly string[];
-  sets: Readonly<Record<string, {
-    kind: "principal" | "grant";
-    table: string;
-    alias?: string;
-    select: string;
-    selectFrom?: string;
-    joins: readonly {
-      table: string;
-      alias?: string;
-      leftAlias?: string;
-      leftColumn: string;
-      rightColumn: string;
-    }[];
-    where: readonly {
-      table: string;
-      column: string;
-      context?: "member.id" | "account.id";
-      value?: { literal: JsonValue };
-    }[];
-  }>>;
-  where: MaskExpression;
+  alias?: string;
+  select: string;
+  selectFrom?: string;
+  joins: readonly {
+    table: string; alias?: string; leftAlias?: string;
+    leftColumn: string; rightColumn: string;
+  }[];
+  where: readonly ({ table: string; column: string } &
+    ({ context: Context; value?: never } | { value: Literal; context?: never }))[];
 };
+type DerivedFilter = { column: string } & (
+  | { value: Literal; context?: never; inSet?: never }
+  | { context: Context; value?: never; inSet?: never }
+  | { inSet: string; value?: never; context?: never }
+);
+type DerivedSet = {
+  kind: "derived"; from: string; table: string; key: string; select: string;
+  joins?: readonly []; where: readonly DerivedFilter[];
+};
+type Via = { table: string; childColumn: string; parentColumn: string };
 type MaskExpression =
   | { operator: "public" }
   | { operator: "role" | "permission"; value: string }
-  | { operator: "eq"; column: string; value: { literal: JsonValue } }
-  | { operator: "eqContext"; column: string; context: "member.id" | "account.id" }
+  | { operator: "eq"; column: string; value: Literal }
+  | { operator: "eqContext"; column: string; context: Context }
   | { operator: "inSet"; column: string; set: string }
   | { operator: "nonEmpty"; set: string }
-  | { operator: "inherits"; column: string; table: string; key: string; onMissing?: MaskExpression }
+  | { operator: "inherits"; column: string; table: string; key: string;
+      where?: readonly LiteralFilter[]; onMissing?: MaskExpression }
+  | { operator: "inheritsAny"; column: string; table: string; key: string;
+      via: Via; where?: readonly LiteralFilter[] }
   | { operator: "and" | "or"; children: readonly MaskExpression[] }
   | { operator: "not"; children: readonly [MaskExpression] };
+type MaskPlan = {
+  version: 2; table: string; key: string; permissionTables: readonly string[];
+  sets: Readonly<Record<string, RelationalSet | DerivedSet>>;
+  where: MaskExpression;
+};
 ```
 
 `permissionTables` is an explicit per-plan declaration, copied from the app's
@@ -461,3 +468,72 @@ principal sharing is an explicit follow-up, not an achieved part of V3 in this
 implementation. Tenant-shared parent/derived indexes remain implemented. Token-
 indexed connection routing is a separate follow-up; pure relevance checks may
 still visit unrelated connections in memory.
+
+## Current F1–F4 contract, runtime 170c758c
+
+This section supersedes earlier single-row, literal-only derived restrictions
+and the blanket permission-source self-read restriction. No nullable-token,
+grant-anchor, inheritance-cycle or depth limits are relaxed.
+
+### F1: parent literal filters
+
+`inherits` accepts `where: [{column, value:{literal:...}}]`. Every condition is
+ANDed with the inherited parent's normal visibility predicate. It does not
+replace that predicate or its powerup/privacy gates. Filters apply to the parent
+row, never to the child. A null literal also matches a missing parent-row column.
+If an existing parent fails a filter, access is denied; onMissing does not run.
+
+```json
+{"operator":"inherits","column":"taskId","table":"tasks","key":"_id","where":[{"column":"deletedAt","value":{"literal":null}}]}
+```
+
+### F2: explicitly declared permission-source reads
+
+A principal set may read its plan's own source when that source is explicitly
+in permissionTables. Rust also permits joins to that source in this case; alias
+and permission-table checks still apply. This supports administrative permission
+trees such as spots. Without the explicit source declaration, principals cannot
+read their source and no set may join it. Grants remain anchored and may use
+their source as a base. Derived sets must still map through another table.
+Never declare frequently written application data as a permission source to
+bypass these restrictions.
+
+### F3: multimap derived indexes and correlated row filters
+
+A derived index key need not be unique. Each from-token maps to every row whose
+key equals the token, rather than selecting an arbitrary row or overwriting
+siblings. Apply every where item to each mapped row, then union its non-null
+selected tokens. Each item has exactly one of:
+
+- `{column, value:{literal:...}}` for literal equality;
+- `{column, context:"member.id"}` or account.id for the current principal;
+- `{column, inSet:"name"}` for membership in a principal/grant set of this plan.
+
+There is no table field on a filter. inSet cannot reference another derived
+set or an unknown set. The from chain can still include at most two derived
+sets and must be acyclic. Multiple conditions are ANDed on the same row,
+preserving task/context correlation across a non-unique foreign key.
+
+```json
+{"kind":"derived","from":"pendingApprovals","table":"taskWorkspaceContexts","key":"taskId","select":"workspaceId","where":[{"column":"kind","value":{"literal":"approval"}},{"column":"targetUserId","context":"member.id"},{"column":"taskId","inSet":"pendingApprovals"}]}
+```
+
+### F4: existential parent visibility through an association
+
+inheritsAny checks whether any matching association leads to a visible parent.
+`row[column]` matches `via.childColumn` in `via.table`; each association's
+`via.parentColumn` names the parent by table/key. The association index is a
+multimap. Apply optional literal where filters to each parent row, then its
+normal visibility predicate. Association rows themselves have no implicit
+soft-delete/type filter. Preserve those policies through the appropriate
+source predicate rather than assuming a hidden filter.
+
+```json
+{"operator":"inheritsAny","column":"_id","table":"tasks","key":"_id","via":{"table":"documentAssociations","childColumn":"documentId","parentColumn":"taskId"},"where":[{"column":"deletedAt","value":{"literal":null}}]}
+```
+
+A null/missing child key, absent links, or no matching visible parent denies
+access. inheritsAny has no onMissing fallback. Its parent participates in the
+same module inheritance cycle, key-match and four-edge depth validation as
+inherits. Parent and association changes are maintained from the feed; the SDK
+schema does not authorize per-connection visibility re-querying.

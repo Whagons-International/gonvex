@@ -88,32 +88,32 @@ Full raw inventory: `docs/visibility-history-inventory.txt`. Load the old plans 
 
 ### Remaining migration blockers
 
-F1–F4 contract additions are approved and the parent is implementing them in Rust. No decision authorizes dropping access rules or relabeling frequently written data tables as permission inputs. The table below remains open until the landed runtime, SDK/CLI mirror and client parity demonstrate each replacement. No denormalization or Reducer changes are part of this approved extension.
+F1–F4 are implemented and tested in Rust at `170c758c`; the SDK/CLI mirror is included in this branch. F5 is approved for independent parent ACL evaluation; its Rust implementation and subsequent SDK/CLI mirror are pending. No decision authorizes dropping access rules or relabeling frequently written data tables as permission inputs. The table below remains open until the landed runtime, SDK/CLI mirror and client parity demonstrate each replacement. No denormalization or Reducer changes are part of this approved extension.
 
-Approved additions awaiting landed runtime commits and SDK/CLI mirroring:
+Landed additions, with client migration/parity still to confirm:
 
 - F1: optional literal-only parent-row `where` on `inherits`.
 - F2: a principal set may read its source table when that table is explicitly in `permissionTables`; self-source grant rules remain unchanged.
 - F3: derived indexes map a token to every matching row, and derived filters accept a literal, member/account `context`, or `inSet` referencing a principal/grant set of the same plan.
 - F4: `inheritsAny`, with `via: { table, childColumn, parentColumn }`, parent `table`/`key`, and optional literal parent filtering.
 
-Exact validation, index-update and inheritance-transition semantics must follow the landed Rust implementation. These pending additions are not yet part of the published SDK contract.
+Validation and JSON shapes follow Rust `170c758c`. The client worker is migrating the 12 plans. This draft does not treat a new schema capability as a parity sign-off.
 
-| Plans | Unsupported requirement |
+| Plans | Previous gap and landed capability to validate |
 |---|---|
-| crmActivities, crmDeals | Unanchored active-task universe; parent visibility does not enforce the separate task-active condition |
-| goalMilestones, goalParticipants, goalPeriods, goalUpdates | Unanchored goal ID sets; parent/child powerup gates differ |
-| documents, messageReactions | Reverse one-to-many association/note/message lookup; a single-row keyed index loses matching rows |
-| spots | Descendant levels 3/4 require forbidden same-source traversal |
-| workbenchShares | Owner-only management through multiple file pages per view; full reader inheritance broadens access |
-| workspaceTeams, workspaces | Same-task correlation of live targeted context, pending approval and active task |
+| crmActivities, crmDeals | F1 adds an active-parent literal filter while preserving task visibility. Client parity pending. |
+| goalMilestones, goalParticipants, goalPeriods, goalUpdates | F1 cannot replace the parent plugin gate. Approved F5 parent-predicate overrides are pending implementation and client parity. |
+| documents, messageReactions | F3 multimaps and F4 inheritsAny preserve multiple association/note/message rows. Client parity pending. |
+| spots | F2 permits explicit permission-source reads and joins for the spot tree. Client parity pending. |
+| workbenchShares | F3 multimaps/F4 association traversal are available; owner-only management must remain distinct from reader access. |
+| workspaceTeams, workspaces | F3 context/inSet row filters correlate contexts with pending approval tokens; F1 filters active parents. Client parity pending. |
 
 The client report is `apps/docs/content/docs/internal/visibility-derived-set-classification.md`; all 237 sets in the original 13 plans were classified, with 151 expressible and categories now complete. The client reports 52 tests passed across six existing visibility suites plus four metadata cases, retaining existing assertions. Nullable legacy flag parity selects a non-null key. Full migration and nine historical-rule rows remain blocked.
 
 ## Validation
 
 - Workspace package build passed. CLI typecheck passed after building workspace dependencies, including the previous src/index.ts:1317 unknown-type error. No type assertion was needed.
-- SDK visibility/boundary checks: 17 passed after the derived-set mirror. Targeted CLI derived/self-source checks: 9 passed. Workspace package build passed.
+- F1–F4 checks: 50 SDK/boundary tests and 22 targeted CLI checks passed. Repository scripts: 32 passed, one existing environment-dependent runtime/HMR check skipped. Workspace and SDK/CLI builds passed.
 - Metrics isolation/reset test passed; legacy deprecation-log test passed.
 - Fan-out integration test: parent reports passing at fc33b110 on disposable PostgreSQL with the counters above. **TODO: attach raw execution transcript.** Do not use staging/production databases.
 - **TODO:** final runtime unit/integration results, generator output, cycle comparison, CI URLs, client old/new parity, and independent real-tenant parity sign-off.

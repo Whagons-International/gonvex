@@ -243,10 +243,56 @@ test("derived rejects unknown sources, own-table mappings, joins, contexts, cycl
     [{ table: "tasks" }, /another table/],
     [{ key: "" }, /key/],
     [{ joins: [{ table: "members", leftColumn: "id", rightColumn: "id" }] }, /joins/],
-    [{ where: [{ column: "id", context: "member.id" }] }, /context/],
+    [{ where: [{ column: "id", context: "tenant.id" }] }, /context/],
     [{ where: [{ table: "teams", column: "id", value: { literal: null } }] }, /table/],
     [{ where: [{ column: "id", value: null }] }, /value/],
   ]) assert.throws(() => visibility(make({ mapped: { ...derived, ...patch } })), message);
   assert.throws(() => visibility(make({ a: { ...derived, from: "b" }, b: { ...derived, from: "a" } })), /cycle/);
   assert.throws(() => visibility(make({ a: { ...derived }, b: { ...derived, from: "a" }, c: { ...derived, from: "b" } })), /limited to two/);
+});
+
+test("F1/F4 inherit parent literal filters and association routing with frozen metadata", () => {
+  const base = { version: 2, table: "documents", key: "id", permissionTables: [], sets: {} };
+  for (const operator of ["inherits", "inheritsAny"]) {
+    const where = { operator, column: "taskId", table: "tasks", key: "id", where: [{ column: "deletedAt", value: { literal: null } }], ...(operator === "inheritsAny" ? { via: { table: "documentAssociations", childColumn: "documentId", parentColumn: "taskId" } } : {}) };
+    const plan = visibility({ ...base, where });
+    assert.deepEqual(JSON.parse(JSON.stringify(plan.where)), where);
+    assert.ok(Object.isFrozen(plan.where.where[0].value));
+    if (operator === "inheritsAny") assert.ok(Object.isFrozen(plan.where.via));
+    for (const filter of [{ column: "id", context: "member.id" }, { column: "id", inSet: "x" }, { column: "id", value: { literal: null }, table: "tasks" }]) {
+      assert.throws(() => visibility({ ...base, where: { ...where, where: [filter] } }), /where/);
+    }
+  }
+  const any = { operator: "inheritsAny", column: "id", table: "tasks", key: "id" };
+  assert.throws(() => visibility({ ...base, where: any }), /via/);
+  assert.throws(() => visibility({ ...base, where: { ...any, via: { table: "links", childColumn: "id" } } }), /parentColumn/);
+  assert.throws(() => visibility({ ...base, where: { ...any, via: { table: "links", childColumn: "id", parentColumn: "taskId" }, onMissing: { operator: "public" } } }), /onMissing/);
+});
+
+test("F2 permission sources can read/join themselves only with an explicit declaration", () => {
+  const set = { kind: "principal", table: "spots", alias: "child", select: "id", joins: [{ table: "spots", alias: "ancestor", leftColumn: "parentId", rightColumn: "id" }], where: [] };
+  const plan = { version: 2, table: "spots", key: "id", permissionTables: ["spots"], sets: { tree: set }, where: { operator: "inSet", column: "id", set: "tree" } };
+  assert.equal(visibility(plan).sets.tree.table, "spots");
+  assert.throws(() => visibility({ ...plan, permissionTables: [] }), /own source/);
+});
+
+test("F3 derived filters correlate non-unique keys with context and principal/grant tokens", () => {
+  const seed = { kind: "grant", table: "approvals", select: "taskId", joins: [], where: [{ table: "approvals", column: "memberId", context: "member.id" }] };
+  const mapped = { kind: "derived", from: "seed", table: "contexts", key: "taskId", select: "workspaceId", where: [{ column: "targetMemberId", context: "member.id" }, { column: "taskId", inSet: "seed" }] };
+  const base = { version: 2, table: "workspaces", key: "id", permissionTables: [], sets: { seed, mapped }, where: { operator: "inSet", column: "id", set: "mapped" } };
+  assert.equal(visibility(base).sets.mapped.key, "taskId");
+  for (const filter of [{ column: "x" }, { column: "x", value: { literal: 1 }, context: "member.id" }, { column: "x", context: "member.id", inSet: "seed" }, { column: "x", inSet: "missing" }, { column: "x", inSet: "mapped" }]) {
+    assert.throws(() => visibility({ ...base, sets: { seed, mapped: { ...mapped, where: [filter] } } }), /exactly one|principal or grant/);
+  }
+});
+
+test("inheritsAny participates in module inheritance cycle and parent-key validation", () => {
+  const make = (table, parent, key = "id") => ({ version: 2, table, key: "id", permissionTables: [], sets: {}, where: { operator: "inheritsAny", column: "id", table: parent, key, via: { table: "links", childColumn: "childId", parentColumn: "parentId" } } });
+  const module = createModule({ name: "cycle", version: "1" });
+  module.visibility(make("a", "b")); module.visibility(make("b", "a"));
+  assert.throws(() => module.manifest(), /cycle/);
+  const wrongKey = createModule({ name: "key", version: "1" });
+  wrongKey.visibility(make("a", "b", "wrong"));
+  wrongKey.visibility({ version: 2, table: "b", key: "id", permissionTables: [], sets: {}, where: { operator: "public" } });
+  assert.throws(() => wrongKey.manifest(), /key wrong differs/);
 });

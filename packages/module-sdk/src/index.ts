@@ -510,7 +510,7 @@ export type LiveQueryPlan = {
   readonly serverOnly?: boolean;
 };
 
-export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "inherits" | "and" | "or" | "not";
+export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "inherits" | "inheritsAny" | "and" | "or" | "not";
 export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 export type VisibilityLiteral = { readonly literal: JsonValue };
 
@@ -527,6 +527,13 @@ export type VisibilityPlan = {
 /** V2 sets materialize non-null tokens only; nonEmpty never counts null/missing selections. */
 export type VisibilitySet = VisibilityRelationalSet | VisibilityDerivedSet;
 
+export type VisibilityLiteralConstraint = { readonly column: string; readonly value: VisibilityLiteral };
+export type VisibilityDerivedConstraint =
+  | { readonly column: string; readonly value: VisibilityLiteral; readonly context?: never; readonly inSet?: never; readonly table?: never }
+  | { readonly column: string; readonly context: "member.id" | "account.id"; readonly value?: never; readonly inSet?: never; readonly table?: never }
+  | { readonly column: string; readonly inSet: string; readonly value?: never; readonly context?: never; readonly table?: never };
+export type VisibilityVia = { readonly table: string; readonly childColumn: string; readonly parentColumn: string };
+
 export type VisibilityDerivedSet = {
   readonly kind: "derived";
   readonly from: string;
@@ -536,7 +543,7 @@ export type VisibilityDerivedSet = {
   readonly joins?: readonly [];
   readonly alias?: never;
   readonly selectFrom?: never;
-  readonly where: readonly { readonly column: string; readonly value: VisibilityLiteral; readonly context?: never; readonly table?: never }[];
+  readonly where: readonly VisibilityDerivedConstraint[];
 };
 
 export type VisibilityRelationalSet = {
@@ -574,7 +581,8 @@ export type VisibilityExpression =
   | { readonly operator: "permission" | "role"; readonly value: string }
   | { readonly operator: "eq"; readonly column: string; readonly value: VisibilityLiteral }
   | { readonly operator: "eqContext"; readonly column: string; readonly context: VisibilityContextKey }
-  | { readonly operator: "inherits"; readonly column: string; readonly table: string; readonly key: string; readonly onMissing?: VisibilityExpression }
+  | { readonly operator: "inherits"; readonly column: string; readonly table: string; readonly key: string; readonly where?: readonly VisibilityLiteralConstraint[]; readonly onMissing?: VisibilityExpression }
+  | { readonly operator: "inheritsAny"; readonly column: string; readonly table: string; readonly key: string; readonly via: VisibilityVia; readonly where?: readonly VisibilityLiteralConstraint[] }
   | { readonly operator: "nonEmpty"; readonly set: string }
   | { readonly operator: "inSet"; readonly column: string; readonly set: string }
   | { readonly operator: "and" | "or"; readonly children: readonly VisibilityExpression[] }
@@ -854,7 +862,7 @@ const validateStructuredQueryPlan: (value: unknown, path: string) => asserts val
   }
 };
 
-const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "inherits", "and", "or", "not"]);
+const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "inherits", "inheritsAny", "and", "or", "not"]);
 const visibilityContexts = new Set<VisibilityContextKey>(["account.id", "member.id", "tenant.id"]);
 
 const validateExactObject: (
@@ -899,7 +907,7 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
   sets,
   ancestors = new Set(),
 ) => {
-  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children", "table", "key", "onMissing"]);
+  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children", "table", "key", "onMissing", "where", "via"]);
   if (ancestors.has(value)) throw new Error(`${path} contains a cycle`);
   const operator = value.operator;
   if (typeof operator !== "string" || !visibilityOperators.has(operator as VisibilityOperator)) {
@@ -928,10 +936,24 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
       validateVisibilityContext(value.context, `${path}.context`);
       return;
     case "inherits":
-      validateExactObject(value, path, ["operator", "column", "table", "key", "onMissing"]);
+    case "inheritsAny":
+      validateExactObject(value, path, ["operator", "column", "table", "key", "where", ...(operator === "inheritsAny" ? ["via"] : ["onMissing"])]);
       requireVisibilityString(value.column, `${path}.column`);
       requireVisibilityString(value.table, `${path}.table`);
       requireVisibilityString(value.key, `${path}.key`);
+      if (operator === "inheritsAny") {
+        validateExactObject(value.via, `${path}.via`, ["table", "childColumn", "parentColumn"]);
+        for (const field of ["table", "childColumn", "parentColumn"] as const) requireVisibilityString(value.via[field], `${path}.via.${field}`);
+      }
+      if (value.where !== undefined) {
+        if (!Array.isArray(value.where)) throw new Error(`${path}.where must be a literal-filter array`);
+        value.where.forEach((constraint, index) => {
+          const p = `${path}.where[${index}]`;
+          validateExactObject(constraint, p, ["column", "value"]);
+          requireVisibilityString(constraint.column, `${p}.column`);
+          validateVisibilityLiteral(constraint.value, `${p}.value`);
+        });
+      }
       if (value.onMissing !== undefined) validateVisibilityExpression(value.onMissing, `${path}.onMissing`, sets, nested);
       return;
     case "nonEmpty": {
@@ -992,9 +1014,13 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
       if (!Array.isArray(candidate.where)) throw new Error(`${setPath}.where must be an array`);
       candidate.where.forEach((constraint, index) => {
         const constraintPath = `${setPath}.where[${index}]`;
-        validateExactObject(constraint, constraintPath, ["column", "value"]);
+        validateExactObject(constraint, constraintPath, ["column", "value", "context", "inSet"]);
         requireVisibilityString(constraint.column, `${constraintPath}.column`);
-        validateVisibilityLiteral(constraint.value, `${constraintPath}.value`);
+        const modes = ["value", "context", "inSet"].filter((field) => constraint[field] !== undefined);
+        if (modes.length !== 1) throw new Error(`${constraintPath} requires exactly one of value, context or inSet`);
+        if (constraint.value !== undefined) validateVisibilityLiteral(constraint.value, `${constraintPath}.value`);
+        if (constraint.context !== undefined && !["member.id", "account.id"].includes(constraint.context as string)) throw new Error(`${constraintPath}.context must be member.id or account.id`);
+        if (constraint.inSet !== undefined) requireVisibilityString(constraint.inSet, `${constraintPath}.inSet`);
       });
       continue;
     }
@@ -1009,7 +1035,7 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
       const permissions = new Set(value.permissionTables as string[]);
       const fix = "use a permission-only principal set, a single-source grant set, or inherits";
       if (candidate.kind !== "principal" && candidate.kind !== "grant") throw new Error(`${setPath}.kind must be principal or grant; ${fix}`);
-      if ((candidate.kind !== "grant" && candidate.table === value.table) || joins.some((join) => join.table === value.table)) throw new Error(`${setPath} reads its own source table ${value.table}; ${fix}`);
+      if (!permissions.has(value.table as string) && ((candidate.kind !== "grant" && candidate.table === value.table) || joins.some((join) => join.table === value.table))) throw new Error(`${setPath} reads its own source table ${value.table}; ${fix}`);
       if (candidate.kind === "principal" && !permissions.has(candidate.table as string)) throw new Error(`${setPath} reads undeclared permission table ${candidate.table}; ${fix}`);
       for (const join of joins) {
         if (!permissions.has(join.table)) throw new Error(`${setPath} joins data table ${join.table}; ${fix}`);
@@ -1080,13 +1106,19 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
     visitDerived(set.from, [...pathNames, name]);
   };
   for (const name of Object.keys(derivedSets)) visitDerived(name, []);
+  for (const [name, set] of Object.entries(derivedSets)) {
+    if (set.kind !== "derived") continue;
+    for (const constraint of set.where) {
+      if (constraint.inSet !== undefined && !["principal", "grant"].includes(derivedSets[constraint.inSet]?.kind ?? "")) throw new Error(`${path}.sets.${name} derived inSet ${constraint.inSet} must name a principal or grant set`);
+    }
+  }
   validateVisibilityExpression(value.where, `${path}.where`, value.sets as Record<string, VisibilitySet>);
 };
 
 /** Validate inheritance after all declarations have been collected. */
 export function validateVisibilityGraph(plans: Readonly<Record<string, VisibilityPlan>>): void {
-  const references = (expression: VisibilityExpression): Extract<VisibilityExpression, { operator: "inherits" }>[] => {
-    const result = expression.operator === "inherits" ? [expression] : [];
+  const references = (expression: VisibilityExpression): Extract<VisibilityExpression, { operator: "inherits" | "inheritsAny" }>[] => {
+    const result = expression.operator === "inherits" || expression.operator === "inheritsAny" ? [expression] : [];
     if ("children" in expression) for (const child of expression.children) result.push(...references(child));
     if (expression.operator === "inherits" && expression.onMissing) result.push(...references(expression.onMissing));
     return result;
@@ -1109,6 +1141,8 @@ export function validateVisibilityGraph(plans: Readonly<Record<string, Visibilit
 const freezeVisibilityExpression = (expression: VisibilityExpression): VisibilityExpression =>
   freeze({
     ...expression,
+    ...((expression.operator === "inherits" || expression.operator === "inheritsAny") && expression.where !== undefined ? { where: freeze(expression.where.map((constraint) => freeze({ ...constraint, value: freeze({ ...constraint.value }) }))) } : {}),
+    ...(expression.operator === "inheritsAny" ? { via: freeze({ ...expression.via }) } : {}),
     ...(expression.operator === "inherits" && expression.onMissing !== undefined ? { onMissing: freezeVisibilityExpression(expression.onMissing) } : {}),
     ...(expression.operator === "eq" ? { value: freeze({ ...expression.value }) } : {}),
     ...("children" in expression

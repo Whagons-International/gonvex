@@ -658,9 +658,39 @@ test("code generation retains derived set shapes and rejects unsafe derivations"
     ["unknown", { mapped: { ...derived, from: "missing" } }, /unknown set/],
     ["own", { mapped: { ...derived, table: "tasks" } }, /another table/],
     ["joins", { mapped: { ...derived, joins: [{ table: "members", leftColumn: "id", rightColumn: "id" }] } }, /joins/],
-    ["context", { mapped: { ...derived, where: [{ column: "id", context: "member.id" }] } }, /literal/],
-    ["table", { mapped: { ...derived, where: [{ table: "teams", column: "id", value: { literal: null } }] } }, /literal/],
+    ["context", { mapped: { ...derived, where: [{ column: "id", context: "tenant.id" }] } }, /context/],
+    ["table", { mapped: { ...derived, where: [{ table: "teams", column: "id", value: { literal: null } }] } }, /indexed-row/],
     ["cycle", { mapped: { ...derived, from: "b" }, b: { ...derived, from: "mapped" } }, /cycle/],
     ["depth", { mapped: derived, b: { ...derived, from: "mapped" }, c: { ...derived, from: "b" } }, /limited to two/],
   ]) await t.test(name, async (t) => assert.rejects(build(t, make(sets)), message));
+});
+
+test("codegen mirrors F1-F4 parent filters, permission self-reads, correlated derived and inheritsAny", async (t) => {
+  const permissions = ["spots"];
+  const tasks = { version: 2, table: "tasks", key: "id", permissionTables: permissions, sets: {}, where: { operator: "public" } };
+  const seed = { kind: "grant", table: "approvals", select: "taskId", joins: [], where: [{ table: "approvals", column: "memberId", context: "member.id" }] };
+  const mapped = { kind: "derived", from: "seed", table: "contexts", key: "taskId", select: "workspaceId", where: [{ column: "kind", value: { literal: "approval" } }, { column: "targetMemberId", context: "member.id" }, { column: "taskId", inSet: "seed" }] };
+  const workspaces = { version: 2, table: "workspaces", key: "id", permissionTables: permissions, sets: { seed, mapped }, where: { operator: "inSet", column: "id", set: "mapped" } };
+  const documents = { version: 2, table: "documents", key: "id", permissionTables: permissions, sets: {}, where: { operator: "inheritsAny", column: "id", table: "tasks", key: "id", via: { table: "documentAssociations", childColumn: "documentId", parentColumn: "taskId" }, where: [{ column: "deletedAt", value: { literal: null } }] } };
+  const crm = { version: 2, table: "crmActivities", key: "id", permissionTables: permissions, sets: {}, where: { operator: "inherits", column: "taskId", table: "tasks", key: "id", where: [{ column: "deletedAt", value: { literal: null } }] } };
+  const spots = { version: 2, table: "spots", key: "id", permissionTables: permissions, sets: { tree: { kind: "principal", table: "spots", alias: "child", select: "id", joins: [{ table: "spots", alias: "ancestor", leftColumn: "parentId", rightColumn: "id" }], where: [] } }, where: { operator: "inSet", column: "id", set: "tree" } };
+  const build = async (t, plans) => {
+    const project = await moduleProject(t, "const visibility = x => x;\n" + plans.map((plan, i) => `export const p${i}Visibility = visibility(${JSON.stringify(plan)});`).join("\n"));
+    return buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  };
+  const plans = [tasks, workspaces, documents, crm, spots];
+  const artifact = await build(t, plans);
+  for (const plan of plans) assert.deepEqual(artifact.visibility[plan.table], plan);
+  for (const filter of [{ column: "x" }, { column: "x", context: "member.id", value: { literal: null } }, { column: "x", inSet: "missing" }, { column: "x", inSet: "mapped" }]) {
+    const invalid = { ...workspaces, sets: { seed, mapped: { ...mapped, where: [filter] } } };
+    await assert.rejects(build(t, [invalid]), /exactly one|principal or grant/);
+  }
+  for (const operator of ["inherits", "inheritsAny"]) {
+    const expression = { ...documents.where, operator, ...(operator === "inherits" ? { via: undefined } : {}), where: [{ column: "x", context: "member.id" }] };
+    await assert.rejects(build(t, [tasks, { ...documents, where: expression }]), /literal/);
+  }
+  await assert.rejects(build(t, [tasks, { ...documents, where: { ...documents.where, via: { table: "links", childColumn: "id" } } }]), /via/);
+  const a = { ...documents, table: "a", where: { ...documents.where, table: "b" } };
+  const b = { ...documents, table: "b", where: { ...documents.where, table: "a" } };
+  await assert.rejects(build(t, [a, b]), /cycle/);
 });

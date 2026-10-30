@@ -285,7 +285,7 @@ application-specific privileges.
 
 Version 2 visibility plans declare permissionTables and classify sets as
 principal, grant or derived. A derived set maps an existing set's tokens through
-one row per key in a tenant-shared index:
+all rows per key in a tenant-shared index:
 
 ```ts
 const taskCategories = {
@@ -300,9 +300,9 @@ const taskCategories = {
 
 The from set belongs to the same plan. Derived chains are acyclic and at most
 two derived sets deep. The indexed table differs from the plan's own table.
-Filters have column and literal value only, with no table or context field.
+Filters have a column and exactly one of literal value, member/account context, or inSet naming a principal/grant set, with no table field.
 There are no joins; omitted joins and an empty array are equivalent. A derived
-set is a keyed single-row mapping, not a foreign-key multimap or an intersection.
+set supports keyed one-to-many mapping and row-local correlation, rather than arbitrary relational queries.
 
 All version 2 principal, grant and derived sets materialize non-null tokens only.
 Missing indexed rows and null/missing selected values contribute no token.
@@ -311,8 +311,19 @@ row column. If a legacy EXISTS flag counted rows with a nullable selection,
 select a non-null column such as the key for that flag and verify parity.
 
 Anchored grants may use the plan's own table as their base anywhere in the
-predicate. Principal sets may not, and no set may join the plan's own table.
+predicate. Without an explicit permissionTables declaration for the plan source, principal sets may not read it and no set may join it.
 Grants remain anchored. Tenant-wide flags use unanchored principal sets over
 explicitly declared, low-write permission/configuration tables. Do not relabel
 frequently written data tables as permission tables to emulate global existence.
 See docs/visibility-masks.md in the repository for the complete wire contract.
+
+
+The F1–F4 contract adds literal parent-row `where` filters to `inherits`, and
+`inheritsAny` with `column`, parent `table`/`key`, and `via: {table, childColumn,
+parentColumn}`. inheritsAny follows all matching associations and admits the
+row when any linked parent is visible and satisfies the literal filters. It has
+no onMissing. Both operators participate in inheritance graph validation.
+Explicitly declared permission-source tables may be read and joined by their
+own principal plans, supporting bounded administrative spot trees. The source
+must be declared in permissionTables; frequently written data must not be
+relabeled a permission table to bypass visibility budgets.

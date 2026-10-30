@@ -151,16 +151,19 @@ export type VisibilityJoin = {
 export type VisibilityConstraint = {
   table?: string;
   column: string;
-  /** Exactly one of context or value. */
+  inSet?: string;
+  /** Exactly one of context/value, or inSet for derived filters. */
   context?: VisibilityContextKey;
   value?: { literal: JsonValue };
 };
 
-export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "inherits" | "and" | "or" | "not";
+export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "inherits" | "inheritsAny" | "and" | "or" | "not";
 export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 
 export type VisibilityExpression = {
   operator: VisibilityOperator;
+  where?: Array<{ column: string; value: { literal: JsonValue } }>;
+  via?: { table: string; childColumn: string; parentColumn: string };
   onMissing?: VisibilityExpression;
   column?: string;
   table?: string;
