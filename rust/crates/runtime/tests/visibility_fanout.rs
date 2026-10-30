@@ -16,7 +16,36 @@ use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::{prelude::*, Layer};
+
+#[derive(Clone)]
+struct SqlCapture(Arc<Mutex<Vec<String>>>);
+impl<S: tracing::Subscriber> Layer<S> for SqlCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != "sqlx::query" {
+            return;
+        }
+        struct Visitor(Vec<String>);
+        impl tracing::field::Visit for Visitor {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "db.statement" {
+                    self.0.push(value.to_owned());
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "db.statement" {
+                    self.0.push(format!("{value:?}"));
+                }
+            }
+        }
+        let mut visitor = Visitor(Vec::new());
+        event.record(&mut visitor);
+        self.0.lock().unwrap().extend(visitor.0);
+    }
+}
 
 fn scoped_url(base: &str, schema: &str) -> String {
     let separator = if base.contains('?') { '&' } else { '?' };
@@ -69,8 +98,9 @@ fn fixture_manifest() -> (Value, String) {
     let permissions = json!(["memberTeams"]);
     let tasks = json!({"version":2,"table":"tasks","key":"id","permissionTables":permissions,"sets":{
         "teams":{"kind":"principal","table":"memberTeams","select":"teamId","joins":[],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]},
-        "assigned":{"kind":"grant","table":"taskUsers","select":"taskId","joins":[],"where":[{"table":"taskUsers","column":"userId","context":"member.id"}]}
-    },"where":{"operator":"or","children":[{"operator":"inSet","column":"workspaceId","set":"teams"},{"operator":"inSet","column":"id","set":"assigned"}]}});
+        "assigned":{"kind":"grant","table":"taskUsers","select":"taskId","joins":[],"where":[{"table":"taskUsers","column":"userId","context":"member.id"}]},
+        "teamAssigned":{"kind":"grant","table":"taskUsers","select":"taskId","joins":[{"table":"memberTeams","leftColumn":"teamId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]}
+    },"where":{"operator":"or","children":[{"operator":"inSet","column":"workspaceId","set":"teams"},{"operator":"inSet","column":"id","set":"assigned"},{"operator":"inSet","column":"id","set":"teamAssigned"}]}});
     let notes = json!({"version":2,"table":"taskNotes","key":"id","permissionTables":permissions,"sets":{},"where":{"operator":"inherits","column":"taskId","table":"tasks","key":"id"}});
     let mut functions = json!({});
     for (path, table, columns) in [
@@ -184,7 +214,7 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         r#"
         CREATE TABLE tasks(id text PRIMARY KEY, "workspaceId" text, title text);
         CREATE TABLE "taskNotes"(id text PRIMARY KEY, "taskId" text, body text);
-        CREATE TABLE "taskUsers"(id text PRIMARY KEY, "taskId" text, "userId" text);
+        CREATE TABLE "taskUsers"(id text PRIMARY KEY, "taskId" text, "userId" text, "teamId" text);
         CREATE TABLE "memberTeams"(id text PRIMARY KEY, "memberId" text, "teamId" text);
         INSERT INTO tasks VALUES('hidden','private','Hidden'),('granted','private-grant','Granted');
         INSERT INTO "taskNotes" VALUES('hidden-note','hidden','Private note');
@@ -212,6 +242,14 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         .await
         .unwrap();
         sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$1,'team')")
+            .bind(format!("m{i}"))
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+    for i in 1..=3 {
+        sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$2,'grant-team')")
+            .bind(format!("grant-team-{i}"))
             .bind(format!("m{i}"))
             .execute(&db)
             .await
@@ -309,9 +347,20 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         "instrumentation must count production evaluator work"
     );
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"taskUsers\" VALUES('g1','granted','m1'),('g2','granted','m2'),('g3','granted','m3')").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')")
+        .execute(&db)
+        .await
+        .unwrap();
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
+    assert_eq!(
+        worked
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([1, 2, 3]),
+        "one team grant must affect exactly its three member recipients"
+    );
     assert!(
         worked.iter().all(|member| (1..=3).contains(member)),
         "grant work reached unnamed members: {worked:?}"
@@ -348,12 +397,39 @@ async fn visibility_fanout_stays_within_statement_budgets() {
         "two connections must share one principal rebuild"
     );
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0')")
+    sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)")
         .execute(&db)
         .await
         .unwrap();
     let event = committed(&pools, &route, &mut revision).await;
-    deliver(&runtime, &mut connections, &event).await;
+    for connection in &mut connections {
+        let statements = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(SqlCapture(statements.clone()));
+        runtime
+            .apply_feed_event(
+                &connection.session,
+                &mut connection.subscriptions,
+                event.clone(),
+            )
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        let child_fetches = statements
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sql| sql.contains("taskNotes") && sql.to_ascii_uppercase().contains("SELECT"))
+            .count();
+        if connection.member == 0 {
+            assert!(child_fetches > 0, "newly visible parent must execute a real targeted child fetch; SQLx query tracing must be enabled");
+        } else {
+            assert_eq!(
+                child_fetches, 0,
+                "child fetch reached unrelated member {}",
+                connection.member
+            );
+        }
+    }
     for connection in &connections {
         assert_eq!(
             connection.subscriptions["notes"]
