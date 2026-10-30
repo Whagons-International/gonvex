@@ -63,52 +63,108 @@ impl GrantIndex {
     }
 }
 
-/// Owned once per tenant and parent table. Connections borrow Arc projections.
+/// Owned once per tenant, table and key column. Connections borrow Arc rows.
+/// A key may name several rows (for example association rows by task), so rows
+/// are grouped by key and remembered by their own row id for removal.
 /// Admission must initialize this index at a consistent snapshot revision before
 /// registering it for feed delivery.
 #[derive(Default, Debug)]
 pub struct ParentAclIndex {
     revision: u64,
-    rows: BTreeMap<String, Arc<Value>>,
+    rows: BTreeMap<String, BTreeMap<String, Arc<Value>>>,
+    keys: BTreeMap<String, String>,
 }
 
 impl ParentAclIndex {
+    /// A unique-key index whose key is the row id.
     pub fn from_snapshot(revision: u64, rows: BTreeMap<String, Value>) -> Self {
-        Self {
+        Self::from_rows(
             revision,
-            rows: rows
-                .into_iter()
-                .map(|(key, row)| (key, Arc::new(row)))
-                .collect(),
+            rows.into_iter().map(|(key, row)| (key.clone(), key, row)),
+        )
+    }
+
+    /// Rows as (row id, key, projected row).
+    pub fn from_rows(
+        revision: u64,
+        rows: impl IntoIterator<Item = (String, String, Value)>,
+    ) -> Self {
+        let mut index = Self {
+            revision,
+            ..Self::default()
+        };
+        for (id, key, row) in rows {
+            index.insert(id, key, row);
+        }
+        index
+    }
+
+    fn insert(&mut self, id: String, key: String, row: Value) {
+        self.remove(&id);
+        self.rows
+            .entry(key.clone())
+            .or_default()
+            .insert(id.clone(), Arc::new(row));
+        self.keys.insert(id, key);
+    }
+
+    fn remove(&mut self, id: &str) {
+        if let Some(key) = self.keys.remove(id) {
+            if let Some(bucket) = self.rows.get_mut(&key) {
+                bucket.remove(id);
+                if bucket.is_empty() {
+                    self.rows.remove(&key);
+                }
+            }
         }
     }
 
-    /// Apply one complete transaction, once, even if many connections consume it.
-    /// None removes a deleted parent and immediately removes inherited access.
+    /// Apply one complete transaction to a unique-key index, once, even if many
+    /// connections consume it. None removes a deleted parent and immediately
+    /// removes inherited access.
     pub fn apply(
         &mut self,
         revision: u64,
         changes: impl IntoIterator<Item = (String, Option<Value>)>,
     ) -> bool {
+        self.apply_rows(
+            revision,
+            changes
+                .into_iter()
+                .map(|(key, row)| (key.clone(), row.map(|row| (key, row)))),
+        )
+    }
+
+    /// Apply one complete transaction as (row id, new (key, row) or None).
+    pub fn apply_rows(
+        &mut self,
+        revision: u64,
+        changes: impl IntoIterator<Item = (String, Option<(String, Value)>)>,
+    ) -> bool {
         if revision <= self.revision {
             return false;
         }
-        for (key, row) in changes {
+        for (id, row) in changes {
             match row {
-                Some(row) => {
-                    self.rows.insert(key, Arc::new(row));
-                }
-                None => {
-                    self.rows.remove(&key);
-                }
+                Some((key, row)) => self.insert(id, key, row),
+                None => self.remove(&id),
             }
         }
         self.revision = revision;
         true
     }
 
+    /// One row for a unique key (a parent), or None when it does not exist.
     pub fn get(&self, key: &str) -> Option<Arc<Value>> {
-        self.rows.get(key).cloned()
+        self.rows.get(key)?.values().next().cloned()
+    }
+
+    /// Every row with this key.
+    pub fn get_all(&self, key: &str) -> Vec<Arc<Value>> {
+        self.rows
+            .get(key)
+            .map(|bucket| bucket.values().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -149,6 +205,38 @@ mod tests {
         assert!(!index.contains("alice", "task-1"));
         assert!(index.contains("bob", "task-1"));
         assert!(index.replace("a".into(), grant("bob")).is_empty());
+    }
+
+    #[test]
+    fn non_unique_keys_group_rows_and_move_with_their_row() {
+        let mut index = ParentAclIndex::from_rows(
+            1,
+            [
+                (
+                    "c1".into(),
+                    "task-1".into(),
+                    serde_json::json!({"workspaceId": "a"}),
+                ),
+                (
+                    "c2".into(),
+                    "task-1".into(),
+                    serde_json::json!({"workspaceId": "b"}),
+                ),
+            ],
+        );
+        assert_eq!(index.get_all("task-1").len(), 2);
+        assert!(index.apply_rows(
+            2,
+            [(
+                "c2".into(),
+                Some(("task-2".into(), serde_json::json!({"workspaceId": "b"})))
+            )]
+        ));
+        assert_eq!(index.get_all("task-1").len(), 1);
+        assert_eq!(index.get_all("task-2").len(), 1);
+        assert!(index.apply_rows(3, [("c1".into(), None)]));
+        assert!(index.get_all("task-1").is_empty());
+        assert!(index.get("task-1").is_none());
     }
 
     #[test]

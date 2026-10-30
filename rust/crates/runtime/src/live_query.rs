@@ -110,6 +110,25 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
     {
         return true;
     }
+    for expression in visibility::inherits_any(plan) {
+        let (Some(via), Some(parent)) =
+            (&expression.via, resolved.inherited.get(&expression.table))
+        else {
+            continue;
+        };
+        if via.table == change.table
+            && [&change.old_value, &change.new_value]
+                .into_iter()
+                .any(|link| {
+                    link.get(&via.parent_column)
+                        .filter(|value| !value.is_null())
+                        .and_then(|value| parent.row(&crate::visibility_mask::scalar(Some(value))))
+                        .is_some_and(|row| plan.parent_admits(&expression.table, parent, &row))
+                })
+        {
+            return true;
+        }
+    }
     if let Some(parent) = resolved.inherited.get(&change.table) {
         return [&change.old_value, &change.new_value]
             .into_iter()

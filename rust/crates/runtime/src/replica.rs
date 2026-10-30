@@ -2357,6 +2357,7 @@ mod tests {
                     select_from: String::new(),
                     joins: Vec::new(),
                     constraints: vec![crate::visibility::VisibilityConstraint {
+                        in_set: String::new(),
                         table: String::new(),
                         column: "createdBy".to_owned(),
                         context: "member.id".to_owned(),
@@ -2366,6 +2367,8 @@ mod tests {
             )]),
             predicate: crate::visibility::VisibilityExpression {
                 on_missing: None,
+                parent_where: Vec::new(),
+                via: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "inSet".to_owned(),
@@ -2443,6 +2446,8 @@ mod tests {
                 sets: BTreeMap::new(),
                 predicate: crate::visibility::VisibilityExpression {
                     on_missing: None,
+                    parent_where: Vec::new(),
+                    via: None,
                     table: String::new(),
                     key: String::new(),
                     operator: "public".to_owned(),
@@ -2660,6 +2665,8 @@ mod tests {
             sets: BTreeMap::new(),
             predicate: crate::visibility::VisibilityExpression {
                 on_missing: None,
+                parent_where: Vec::new(),
+                via: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "public".to_owned(),

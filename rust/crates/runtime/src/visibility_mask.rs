@@ -48,14 +48,55 @@ pub(crate) fn match_expression(
                 Some(value) => scalar(Some(value)),
             };
             match parent.row(&key) {
-                Some(parent_row) => parent_row.as_object().is_some_and(|parent_row| {
-                    match_expression(&parent.plan.predicate, &parent.resolved, parent_row)
-                }),
+                Some(parent_row) => {
+                    crate::visibility::literal_constraints_hold(
+                        &expression.parent_where,
+                        &parent_row,
+                    ) && parent_row.as_object().is_some_and(|parent_row| {
+                        match_expression(&parent.plan.predicate, &parent.resolved, parent_row)
+                    })
+                }
                 None => expression
                     .on_missing
                     .as_ref()
                     .is_some_and(|fallback| match_expression(fallback, resolved, row)),
             }
+        }
+        "inheritsAny" => {
+            let (Some(parent), Some(via)) = (
+                resolved.inherited.get(&expression.table),
+                expression.via.as_ref(),
+            ) else {
+                return false;
+            };
+            let key = match row.get(&expression.column) {
+                None | Some(Value::Null) => return false,
+                Some(value) => scalar(Some(value)),
+            };
+            let Some(links) = resolved
+                .indexes
+                .get(&crate::visibility::via_index_name(via, &via.child_column))
+            else {
+                return false;
+            };
+            let Ok(links) = links.read() else {
+                return false;
+            };
+            let admitted = links.get_all(&key).into_iter().any(|link| {
+                let parent_key = match link.get(&via.parent_column) {
+                    None | Some(Value::Null) => return false,
+                    Some(value) => scalar(Some(value)),
+                };
+                parent.row(&parent_key).is_some_and(|parent_row| {
+                    crate::visibility::literal_constraints_hold(
+                        &expression.parent_where,
+                        &parent_row,
+                    ) && parent_row.as_object().is_some_and(|parent_row| {
+                        match_expression(&parent.plan.predicate, &parent.resolved, parent_row)
+                    })
+                })
+            });
+            admitted
         }
         "and" => expression
             .children

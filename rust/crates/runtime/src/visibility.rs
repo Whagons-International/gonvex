@@ -75,17 +75,27 @@ pub struct VisibilityConstraint {
     pub context: String,
     #[serde(default)]
     pub value: Option<Value>,
+    /// `derived` filters only: the indexed row's column must be one of this
+    /// member's tokens in the named principal or grant set of the same plan.
+    #[serde(default, rename = "inSet", skip_serializing_if = "String::is_empty")]
+    pub in_set: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisibilityExpression {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_missing: Option<Box<VisibilityExpression>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub table: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key: String,
+    /// `inherits`/`inheritsAny` only: literal filters on the parent row.
+    #[serde(default, rename = "where", skip_serializing_if = "Vec::is_empty")]
+    pub parent_where: Vec<VisibilityConstraint>,
+    /// `inheritsAny` only: the association rows linking a row to its parents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<VisibilityVia>,
     pub operator: String,
     #[serde(default)]
     pub column: String,
@@ -97,6 +107,29 @@ pub struct VisibilityExpression {
     pub value: Option<Value>,
     #[serde(default)]
     pub children: Vec<VisibilityExpression>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibilityVia {
+    pub table: String,
+    pub child_column: String,
+    pub parent_column: String,
+}
+
+/// Literal constraints on an indexed row: equality, or IS NULL for a null literal.
+pub fn literal_constraints_hold(constraints: &[VisibilityConstraint], row: &Value) -> bool {
+    constraints.iter().all(|constraint| {
+        let literal = constraint
+            .value
+            .as_ref()
+            .and_then(|value| value.get("literal"));
+        match (row.get(&constraint.column), literal) {
+            (Some(Value::Null) | None, Some(Value::Null)) => true,
+            (Some(value), Some(literal)) => value == literal,
+            _ => false,
+        }
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -181,7 +214,41 @@ pub fn index_columns(
             columns.extend(acl_columns(plan));
         }
     }
+    fn parent_filters(
+        expression: &VisibilityExpression,
+        table: &str,
+        columns: &mut BTreeSet<String>,
+    ) {
+        if matches!(expression.operator.as_str(), "inherits" | "inheritsAny")
+            && expression.table == table
+        {
+            columns.extend(
+                expression
+                    .parent_where
+                    .iter()
+                    .map(|constraint| constraint.column.clone()),
+            );
+        }
+        for child in &expression.children {
+            parent_filters(child, table, columns);
+        }
+        if let Some(fallback) = &expression.on_missing {
+            parent_filters(fallback, table, columns);
+        }
+    }
     for plan in plans.values() {
+        if plans.get(table).is_some_and(|parent| parent.key == key) {
+            parent_filters(&plan.predicate, table, &mut columns);
+        }
+        for expression in inherits_any(plan) {
+            let Some(via) = &expression.via else { continue };
+            if via.table == table && via.child_column == key {
+                columns.insert(via.parent_column.clone());
+            }
+            if via.table == table && via.parent_column == key {
+                columns.insert(via.child_column.clone());
+            }
+        }
         for set in plan.sets.values() {
             if set.kind == "derived" && set.table == table && set.key == key {
                 columns.insert(set.select.clone());
@@ -226,28 +293,32 @@ impl ParentAclRegistry {
             })
             .collect::<Result<Vec<_>, VisibilityError>>()?
             .join(", ");
+        let id_column = row_id_column(plans, table);
         let statement = format!(
-            "SELECT r.{}::text, jsonb_build_object({projection})::text FROM {} AS r",
+            "SELECT r.{}::text, r.{}::text, jsonb_build_object({projection})::text FROM {} AS r",
+            quote(&id_column)?,
             quote(key_column)?,
             quote(table)?
         );
         let rows = sqlx::query(&statement)
             .fetch_all(&mut **transaction.transaction())
             .await?;
-        let mut projected = BTreeMap::new();
+        let mut projected = Vec::new();
         for row in rows {
-            let key: Option<String> = row.try_get(0)?;
-            let value: String = row.try_get(1)?;
-            if let Some(key) = key {
-                projected.insert(
+            let id: Option<String> = row.try_get(0)?;
+            let key: Option<String> = row.try_get(1)?;
+            let value: String = row.try_get(2)?;
+            if let (Some(id), Some(key)) = (id, key) {
+                projected.push((
+                    id,
                     key,
                     serde_json::from_str(&value).map_err(|error| {
                         VisibilityError::Invalid(format!("parent ACL row: {error}"))
                     })?,
-                );
+                ));
             }
         }
-        let index = Arc::new(std::sync::RwLock::new(ParentAclIndex::from_snapshot(
+        let index = Arc::new(std::sync::RwLock::new(ParentAclIndex::from_rows(
             revision, projected,
         )));
         self.indexes
@@ -284,34 +355,31 @@ impl ParentAclRegistry {
                 .iter()
                 .filter(|change| change.table == table)
                 .map(|change| {
-                    let row = change.new_value.as_object().map(|row| {
-                        Value::Object(
-                            columns
-                                .iter()
-                                .map(|column| {
-                                    (
-                                        column.clone(),
-                                        row.get(column).cloned().unwrap_or(Value::Null),
-                                    )
-                                })
-                                .collect(),
-                        )
+                    let row = change.new_value.as_object().and_then(|row| {
+                        let key = match row.get(&key_column) {
+                            None | Some(Value::Null) => return None,
+                            Some(value) => scalar(Some(value)),
+                        };
+                        Some((
+                            key,
+                            Value::Object(
+                                columns
+                                    .iter()
+                                    .map(|column| {
+                                        (
+                                            column.clone(),
+                                            row.get(column).cloned().unwrap_or(Value::Null),
+                                        )
+                                    })
+                                    .collect(),
+                            ),
+                        ))
                     });
-                    let key = if plans.get(&table).is_some_and(|plan| plan.key == key_column) {
-                        change.row_id.clone()
-                    } else {
-                        change
-                            .new_value
-                            .get(&key_column)
-                            .or_else(|| change.old_value.get(&key_column))
-                            .map(|value| scalar(Some(value)))
-                            .unwrap_or_else(|| change.row_id.clone())
-                    };
-                    (key, row)
+                    (change.row_id.clone(), row)
                 })
                 .collect::<Vec<_>>();
             if let Ok(mut index) = index.write() {
-                index.apply(revision, updates);
+                index.apply_rows(revision, updates);
             }
         }
     }
@@ -324,6 +392,15 @@ impl ParentAclRegistry {
             .expect("parent ACL registry")
             .retain(|key, _| !key.starts_with(&prefix));
     }
+}
+
+/// The column the change feed uses as a table's row id: its plan key, or the
+/// Gonvex default `_id` for tables without a visibility plan.
+fn row_id_column(plans: &BTreeMap<String, VisibilityPlan>, table: &str) -> String {
+    plans
+        .get(table)
+        .map(|plan| plan.key.clone())
+        .unwrap_or_else(|| "_id".to_owned())
 }
 
 fn sql_text_literal(value: &str) -> String {
@@ -353,10 +430,33 @@ pub fn acl_columns(plan: &VisibilityPlan) -> BTreeSet<String> {
     columns
 }
 
+/// Index name of an `inheritsAny` association, keyed by one of its columns.
+pub fn via_index_name(via: &VisibilityVia, column: &str) -> String {
+    format!("via\u{0}{}\u{0}{}", via.table, column)
+}
+
+/// Every `inheritsAny` expression of a plan.
+pub fn inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
+    fn visit<'a>(expression: &'a VisibilityExpression, output: &mut Vec<&'a VisibilityExpression>) {
+        if expression.operator == "inheritsAny" {
+            output.push(expression);
+        }
+        for child in &expression.children {
+            visit(child, output);
+        }
+        if let Some(fallback) = &expression.on_missing {
+            visit(fallback, output);
+        }
+    }
+    let mut output = Vec::new();
+    visit(&plan.predicate, &mut output);
+    output
+}
+
 /// Tables a version 2 plan inherits from, directly (not transitively).
 pub fn inherited_tables(plan: &VisibilityPlan) -> BTreeSet<String> {
     fn visit(expression: &VisibilityExpression, tables: &mut BTreeSet<String>) {
-        if expression.operator == "inherits" {
+        if matches!(expression.operator.as_str(), "inherits" | "inheritsAny") {
             tables.insert(expression.table.clone());
         }
         for child in &expression.children {
@@ -453,15 +553,25 @@ impl VisibilityPlan {
                     if set.table == self.table {
                         return Err(invalid("a derived set maps through another table".into()));
                     }
-                    if !set.joins.is_empty()
-                        || set
-                            .constraints
-                            .iter()
-                            .any(|constraint| !constraint.context.is_empty())
-                    {
-                        return Err(invalid(
-                            "a derived set filters its indexed row by literals only".into(),
-                        ));
+                    if !set.joins.is_empty() {
+                        return Err(invalid("a derived set has no joins".into()));
+                    }
+                    for constraint in &set.constraints {
+                        if !constraint.table.is_empty() {
+                            return Err(invalid(
+                                "derived filters name indexed-row columns only".into(),
+                            ));
+                        }
+                        if !constraint.in_set.is_empty()
+                            && !self.sets.get(&constraint.in_set).is_some_and(|other| {
+                                other.kind == "principal" || other.kind == "grant"
+                            })
+                        {
+                            return Err(invalid(format!(
+                                "derived inSet {:?} must name a principal or grant set",
+                                constraint.in_set
+                            )));
+                        }
                     }
                 }
                 // A grant set may read its own source table (for example the
@@ -469,8 +579,14 @@ impl VisibilityPlan {
                 // are patched in memory and route only to the members they
                 // name. A principal set over its own source would make every
                 // source write a principal change, which is the fan-out V2 bans.
-                if (set.kind != "grant" && set.table == self.table)
-                    || set.joins.iter().any(|join| join.table == self.table)
+                // A source that is itself a declared permission table (for
+                // example spots, whose ancestry is its own tree) changes only
+                // by rare administrative writes, so its principal sets may
+                // read it.
+                let source_is_permission = permissions.contains(&self.table);
+                if !source_is_permission
+                    && ((set.kind != "grant" && set.table == self.table)
+                        || set.joins.iter().any(|join| join.table == self.table))
                 {
                     return Err(invalid("reads its own source table".into()));
                 }
@@ -728,6 +844,31 @@ impl VisibilityPlan {
             .collect()
     }
 
+    /// Does some `inherits` of this plan admit children of `row`, a row of the
+    /// inherited `table`: its parent filters hold and the parent is visible?
+    pub fn parent_admits(&self, table: &str, parent: &InheritedParent, row: &Value) -> bool {
+        fn visit(
+            expression: &VisibilityExpression,
+            table: &str,
+            parent: &InheritedParent,
+            row: &Value,
+        ) -> bool {
+            (matches!(expression.operator.as_str(), "inherits" | "inheritsAny")
+                && expression.table == table
+                && literal_constraints_hold(&expression.parent_where, row)
+                && row_matches(&parent.plan, &parent.resolved, row))
+                || expression
+                    .children
+                    .iter()
+                    .any(|child| visit(child, table, parent, row))
+                || expression
+                    .on_missing
+                    .as_ref()
+                    .is_some_and(|fallback| visit(fallback, table, parent, row))
+        }
+        !row.is_null() && visit(&self.predicate, table, parent, row)
+    }
+
     /// Child columns that reference each directly inherited parent table.
     pub fn inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
         fn visit(
@@ -952,8 +1093,20 @@ fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
     let mut pending = active.iter().cloned().collect::<Vec<_>>();
     while let Some(name) = pending.pop() {
         if let Some(set) = plan.sets.get(&name) {
-            if set.kind == "derived" && !set.from.is_empty() && active.insert(set.from.clone()) {
-                pending.push(set.from.clone());
+            if set.kind == "derived" {
+                let needed = std::iter::once(set.from.clone())
+                    .chain(
+                        set.constraints
+                            .iter()
+                            .map(|constraint| constraint.in_set.clone()),
+                    )
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>();
+                for name in needed {
+                    if active.insert(name.clone()) {
+                        pending.push(name);
+                    }
+                }
             }
         }
     }
@@ -1156,6 +1309,15 @@ pub fn resolve_with_parents<'a>(
                 },
             );
         }
+        for expression in inherits_any(plan) {
+            let Some(via) = &expression.via else { continue };
+            for column in [&via.child_column, &via.parent_column] {
+                let index = registry
+                    .get_or_load(transaction, session, plans, &via.table, column, revision)
+                    .await?;
+                resolved.indexes.insert(via_index_name(via, column), index);
+            }
+        }
         for name in active_sets(plan, &resolved.role) {
             let set = &plan.sets[&name];
             if set.kind != "derived" {
@@ -1191,20 +1353,29 @@ pub fn recompute_derived(
             let Ok(index) = index.read() else {
                 continue;
             };
+            let sets = &resolved.sets;
+            let direct = &resolved.direct;
             let next = source
                 .iter()
-                .filter_map(|token| index.get(token))
+                .flat_map(|token| index.get_all(token))
                 .filter(|row| {
                     set.constraints.iter().all(|constraint| {
-                        let literal = constraint
-                            .value
-                            .as_ref()
-                            .and_then(|value| value.get("literal"));
-                        match (row.get(&constraint.column), literal) {
-                            (Some(Value::Null) | None, Some(Value::Null)) => true,
-                            (Some(value), Some(literal)) => value == literal,
-                            _ => false,
+                        let value = row.get(&constraint.column);
+                        if !constraint.context.is_empty() {
+                            return value.is_some_and(|value| {
+                                !value.is_null()
+                                    && direct.get(&constraint.context) == Some(&scalar(Some(value)))
+                            });
                         }
+                        if !constraint.in_set.is_empty() {
+                            return value.is_some_and(|value| {
+                                !value.is_null()
+                                    && sets
+                                        .get(&constraint.in_set)
+                                        .is_some_and(|tokens| tokens.contains(&scalar(Some(value))))
+                            });
+                        }
+                        literal_constraints_hold(std::slice::from_ref(constraint), row)
                     })
                 })
                 .filter_map(|row| match row.get(&set.select) {
@@ -1310,6 +1481,7 @@ pub fn grant_join_set(set: &VisibilitySet) -> Option<VisibilitySet> {
             .iter()
             .filter(|constraint| !constraint.table.is_empty() && &constraint.table != base)
             .map(|constraint| VisibilityConstraint {
+                in_set: String::new(),
                 table: if constraint.table == first_alias {
                     String::new()
                 } else {
@@ -1470,14 +1642,25 @@ fn validate_set(set: &VisibilitySet) -> Result<(), VisibilityError> {
         }
         let has_context = !constraint.context.is_empty();
         let has_value = constraint.value.is_some();
-        if has_context == has_value {
+        let has_set = !constraint.in_set.is_empty();
+        if [has_context, has_value, has_set]
+            .into_iter()
+            .filter(|present| *present)
+            .count()
+            != 1
+        {
             return Err(VisibilityError::Invalid(
-                "visibility constraint requires exactly one of context or value".to_owned(),
+                "visibility constraint requires exactly one of context, value or inSet".to_owned(),
+            ));
+        }
+        if has_set && set.kind != "derived" {
+            return Err(VisibilityError::Invalid(
+                "inSet constraints are allowed only on derived sets".to_owned(),
             ));
         }
         if has_context {
             context_key(&constraint.context)?;
-        } else {
+        } else if has_value {
             visibility_literal(constraint.value.as_ref())?;
         }
     }
@@ -1511,10 +1694,27 @@ fn validate_expression(
             identifier(&expression.column)?;
             context_key(&expression.context)?;
         }
-        "inherits" => {
+        "inherits" | "inheritsAny" => {
             identifier(&expression.column)?;
+            if expression.operator == "inheritsAny" {
+                let via = expression.via.as_ref().ok_or_else(|| {
+                    VisibilityError::Invalid("inheritsAny requires via".to_owned())
+                })?;
+                identifier(&via.table)?;
+                identifier(&via.child_column)?;
+                identifier(&via.parent_column)?;
+            }
             identifier(&expression.table)?;
             identifier(&expression.key)?;
+            for constraint in &expression.parent_where {
+                identifier(&constraint.column)?;
+                if !constraint.context.is_empty() || constraint.value.is_none() {
+                    return Err(VisibilityError::Invalid(
+                        "inherited parent filters are literals only".to_owned(),
+                    ));
+                }
+                visibility_literal(constraint.value.as_ref())?;
+            }
         }
         "inSet" | "nonEmpty" => {
             if expression.operator == "inSet" {
@@ -1608,8 +1808,18 @@ fn compile_expression(
                 parameters,
                 account_parameter,
             )?;
+            let mut parent_filters = String::new();
+            for constraint in &expression.parent_where {
+                parent_filters.push_str(" AND ");
+                parent_filters.push_str(&compile_literal_equality(
+                    &alias,
+                    &constraint.column,
+                    visibility_literal(constraint.value.as_ref())?,
+                    parameters,
+                )?);
+            }
             let visible = format!(
-                "EXISTS (SELECT 1 FROM {table} AS {alias} WHERE {alias}.{key}::text = {row_alias}.{column}::text AND ({parent_predicate}))"
+                "EXISTS (SELECT 1 FROM {table} AS {alias} WHERE {alias}.{key}::text = {row_alias}.{column}::text{parent_filters} AND ({parent_predicate}))"
             );
             match &expression.on_missing {
                 None => visible,
@@ -1628,6 +1838,49 @@ fn compile_expression(
                     )
                 }
             }
+        }
+        "inheritsAny" => {
+            static VIA_ALIAS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let via = expression
+                .via
+                .as_ref()
+                .ok_or_else(|| VisibilityError::Invalid("inheritsAny requires via".to_owned()))?;
+            let parent = resolved.inherited.get(&expression.table).ok_or_else(|| {
+                VisibilityError::Invalid(format!(
+                    "inherited parent {:?} was not resolved",
+                    expression.table
+                ))
+            })?;
+            let suffix = VIA_ALIAS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let link = format!("_gonvex_via_{suffix}");
+            let alias = format!("_gonvex_any_parent_{suffix}");
+            let parent_predicate = compile_expression(
+                &parent.plan.predicate,
+                &parent.plan,
+                &parent.resolved,
+                &alias,
+                parameters,
+                account_parameter,
+            )?;
+            let mut parent_filters = String::new();
+            for constraint in &expression.parent_where {
+                parent_filters.push_str(" AND ");
+                parent_filters.push_str(&compile_literal_equality(
+                    &alias,
+                    &constraint.column,
+                    visibility_literal(constraint.value.as_ref())?,
+                    parameters,
+                )?);
+            }
+            format!(
+                "EXISTS (SELECT 1 FROM {} AS {link} JOIN {} AS {alias} ON {alias}.{}::text = {link}.{}::text WHERE {link}.{}::text = {row_alias}.{}::text{parent_filters} AND ({parent_predicate}))",
+                quote(&via.table)?,
+                quote(&expression.table)?,
+                quote(&expression.key)?,
+                quote(&via.parent_column)?,
+                quote(&via.child_column)?,
+                quote(&expression.column)?,
+            )
         }
         "nonEmpty" if plan.version == Some(2) => {
             let values = resolved.sets.get(&expression.set).ok_or_else(|| {
@@ -2573,6 +2826,7 @@ mod tests {
                 right_column: "teamId".to_owned(),
             }],
             constraints: vec![VisibilityConstraint {
+                in_set: String::new(),
                 table: "viewerTeams".to_owned(),
                 column: "memberId".to_owned(),
                 context: "member.id".to_owned(),
@@ -2608,6 +2862,7 @@ mod tests {
                 right_column: "id".to_owned(),
             }],
             constraints: vec![VisibilityConstraint {
+                in_set: String::new(),
                 table: "boards".to_owned(),
                 column: "visibility".to_owned(),
                 context: String::new(),
@@ -2627,6 +2882,8 @@ mod tests {
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
                 on_missing: None,
+                parent_where: Vec::new(),
+                via: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "eq".to_owned(),
@@ -2670,6 +2927,8 @@ mod tests {
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
                 on_missing: None,
+                parent_where: Vec::new(),
+                via: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "or".to_owned(),
@@ -2680,6 +2939,8 @@ mod tests {
                 children: vec![
                     VisibilityExpression {
                         on_missing: None,
+                        parent_where: Vec::new(),
+                        via: None,
                         table: String::new(),
                         key: String::new(),
                         operator: "role".to_owned(),
@@ -2691,6 +2952,8 @@ mod tests {
                     },
                     VisibilityExpression {
                         on_missing: None,
+                        parent_where: Vec::new(),
+                        via: None,
                         table: String::new(),
                         key: String::new(),
                         operator: "eqContext".to_owned(),
@@ -2751,6 +3014,7 @@ mod tests {
                         right_column: "audienceId".to_owned(),
                     }],
                     constraints: vec![VisibilityConstraint {
+                        in_set: String::new(),
                         table: "memberAudience".to_owned(),
                         column: "memberId".to_owned(),
                         context: "member.id".to_owned(),
@@ -2760,6 +3024,8 @@ mod tests {
             )]),
             predicate: VisibilityExpression {
                 on_missing: None,
+                parent_where: Vec::new(),
+                via: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "inSet".to_owned(),
@@ -3208,10 +3474,201 @@ mod mask_tests {
         assert!(with(unknown).validate().is_err());
         let mut context = base.clone();
         context["where"] = json!([{"column": "createdBy", "context": "member.id"}]);
+        with(context).validate().unwrap();
+        let mut joined = base.clone();
+        joined["where"] = json!([{"table": "other", "column": "x", "value": {"literal": 1}}]);
         assert!(
-            with(context).validate().is_err(),
-            "derived filters are literals only"
+            with(joined).validate().is_err(),
+            "derived filters name indexed-row columns only"
         );
+    }
+
+    #[test]
+    fn inherited_parent_filters_and_permission_self_reads() {
+        // F1: a soft-deleted parent hides children even if the parent plan
+        // itself would still admit it.
+        let child = plan(json!({
+            "version": 2, "table": "crmActivities", "key": "_id",
+            "permissionTables": ["memberTeams", "workspaceTeams"], "sets": {},
+            "where": {"operator": "inherits", "column": "taskId", "table": "tasks", "key": "_id",
+                      "where": [{"column": "deletedAt", "value": {"literal": null}}]}
+        }));
+        child.validate().unwrap();
+        let mut alice = member("alice", &[]);
+        alice.inherited.insert(
+            "tasks".to_owned(),
+            parent(&[
+                (
+                    "live",
+                    json!({"_id": "live", "workspaceId": "w1", "deletedAt": null}),
+                ),
+                (
+                    "gone",
+                    json!({"_id": "gone", "workspaceId": "w1", "deletedAt": 5}),
+                ),
+            ]),
+        );
+        assert!(row_matches(&child, &alice, &json!({"taskId": "live"})));
+        assert!(!row_matches(&child, &alice, &json!({"taskId": "gone"})));
+        let mut parameters = Vec::new();
+        let sql = compile_predicate(&child, &alice, "r", &mut parameters).unwrap();
+        assert!(sql.contains("\"deletedAt\" IS NULL"));
+        let parent = &alice.inherited["tasks"];
+        assert!(!child.parent_admits(
+            "tasks",
+            parent,
+            &json!({"_id": "gone", "workspaceId": "w1", "deletedAt": 5})
+        ));
+        // F2: a permission-table source may read its own tree; a data source may not.
+        let spots = |permission: &str| {
+            plan(json!({
+                "version": 2, "table": "spots", "key": "_id", "permissionTables": [permission, "memberSpots"],
+                "sets": {"tree": {"kind": "principal", "table": "spots", "alias": "child", "select": "_id",
+                    "joins": [{"table": "memberSpots", "leftColumn": "parentId", "rightColumn": "spotId"}],
+                    "where": [{"table": "memberSpots", "column": "memberId", "context": "member.id"}]}},
+                "where": {"operator": "inSet", "column": "_id", "set": "tree"}
+            }))
+        };
+        spots("spots").validate().unwrap();
+        assert!(spots("other").validate().is_err());
+    }
+
+    #[test]
+    fn derived_sets_correlate_rows_by_a_non_unique_key() {
+        // F3: workspaces of my live approval contexts on tasks I must approve.
+        let workspaces = plan(json!({
+            "version": 2, "table": "workspaces", "key": "_id",
+            "permissionTables": ["memberTeams"],
+            "sets": {
+                "teams": {"kind": "principal", "table": "memberTeams", "select": "teamId", "joins": [],
+                    "where": [{"table": "memberTeams", "column": "memberId", "context": "member.id"}]},
+                "pending": {"kind": "grant", "table": "taskApprovalInstances", "select": "taskId", "joins": [],
+                    "where": [{"table": "taskApprovalInstances", "column": "approverUserId", "context": "member.id"},
+                              {"table": "taskApprovalInstances", "column": "status", "value": {"literal": "pending"}}]},
+                "mine": {"kind": "derived", "from": "pending", "table": "taskWorkspaceContexts", "key": "taskId",
+                    "select": "workspaceId", "joins": [],
+                    "where": [{"column": "kind", "value": {"literal": "approval"}},
+                              {"column": "revokedAt", "value": {"literal": null}},
+                              {"column": "targetUserId", "context": "member.id"}]},
+                "team": {"kind": "derived", "from": "pending", "table": "taskWorkspaceContexts", "key": "taskId",
+                    "select": "workspaceId", "joins": [],
+                    "where": [{"column": "kind", "value": {"literal": "approval"}},
+                              {"column": "targetTeamId", "inSet": "teams"}]}
+            },
+            "where": {"operator": "or", "children": [
+                {"operator": "inSet", "column": "_id", "set": "mine"},
+                {"operator": "inSet", "column": "_id", "set": "team"}]}
+        }));
+        workspaces.validate().unwrap();
+        let mut alice = member("alice", &[("pending", &["t1"]), ("teams", &["approvers"])]);
+        let contexts = Arc::new(std::sync::RwLock::new(ParentAclIndex::from_rows(
+            1,
+            [
+                (
+                    "c1".to_owned(),
+                    "t1".to_owned(),
+                    json!({"kind": "approval", "revokedAt": null, "targetUserId": "alice", "workspaceId": "w-alice"}),
+                ),
+                (
+                    "c2".to_owned(),
+                    "t1".to_owned(),
+                    json!({"kind": "approval", "revokedAt": null, "targetUserId": "bob", "workspaceId": "w-bob"}),
+                ),
+                (
+                    "c3".to_owned(),
+                    "t1".to_owned(),
+                    json!({"kind": "approval", "targetTeamId": "approvers", "workspaceId": "w-team"}),
+                ),
+                (
+                    "c4".to_owned(),
+                    "t2".to_owned(),
+                    json!({"kind": "approval", "revokedAt": null, "targetUserId": "alice", "workspaceId": "w-other"}),
+                ),
+            ],
+        )));
+        alice.indexes.insert("mine".to_owned(), contexts.clone());
+        alice.indexes.insert("team".to_owned(), contexts);
+        recompute_derived(&workspaces, &mut alice);
+        assert_eq!(
+            alice.sets["mine"],
+            BTreeSet::from(["w-alice".to_owned()]),
+            "only my context on my pending task"
+        );
+        assert_eq!(
+            alice.sets["team"],
+            BTreeSet::from(["w-team".to_owned()]),
+            "team targets follow my teams"
+        );
+        let mut bad = workspaces.clone();
+        bad.sets.get_mut("team").unwrap().constraints[1].in_set = "mine".to_owned();
+        assert!(
+            bad.validate().is_err(),
+            "derived inSet names a principal or grant set"
+        );
+    }
+
+    #[test]
+    fn inherits_any_admits_rows_linked_to_any_visible_parent() {
+        // F4: a document is visible when any associated task is visible.
+        let documents = plan(json!({
+            "version": 2, "table": "documents", "key": "_id",
+            "permissionTables": ["memberTeams", "workspaceTeams"], "sets": {},
+            "where": {"operator": "inheritsAny", "column": "_id", "table": "tasks", "key": "_id",
+                "via": {"table": "documentAssociations", "childColumn": "documentId", "parentColumn": "taskId"}}
+        }));
+        documents.validate().unwrap();
+        let mut alice = member("alice", &[]);
+        alice.inherited.insert(
+            "tasks".to_owned(),
+            parent(&[
+                (
+                    "t-visible",
+                    json!({"_id": "t-visible", "workspaceId": "w1"}),
+                ),
+                ("t-hidden", json!({"_id": "t-hidden", "workspaceId": "w2"})),
+            ]),
+        );
+        let via = documents.predicate.via.clone().unwrap();
+        let rows = [
+            (
+                "a1".to_owned(),
+                json!({"documentId": "d-shared", "taskId": "t-hidden"}),
+            ),
+            (
+                "a2".to_owned(),
+                json!({"documentId": "d-shared", "taskId": "t-visible"}),
+            ),
+            (
+                "a3".to_owned(),
+                json!({"documentId": "d-private", "taskId": "t-hidden"}),
+            ),
+        ];
+        for column in [&via.child_column, &via.parent_column] {
+            let index = ParentAclIndex::from_rows(
+                1,
+                rows.iter()
+                    .map(|(id, row)| (id.clone(), scalar(row.get(column.as_str())), row.clone())),
+            );
+            alice.indexes.insert(
+                via_index_name(&via, column),
+                Arc::new(std::sync::RwLock::new(index)),
+            );
+        }
+        assert!(row_matches(&documents, &alice, &json!({"_id": "d-shared"})));
+        assert!(!row_matches(
+            &documents,
+            &alice,
+            &json!({"_id": "d-private"})
+        ));
+        assert!(!row_matches(
+            &documents,
+            &alice,
+            &json!({"_id": "d-unlinked"})
+        ));
+        let mut parameters = Vec::new();
+        let sql = compile_predicate(&documents, &alice, "r", &mut parameters).unwrap();
+        assert!(sql.contains("FROM \"documentAssociations\" AS _gonvex_via_"));
+        assert!(sql.contains(".\"documentId\"::text = r.\"_id\"::text"));
     }
 
     #[test]

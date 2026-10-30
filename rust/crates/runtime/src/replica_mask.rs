@@ -56,6 +56,26 @@ fn grant_delta(
     }
 }
 
+/// Child keys linked to one parent through an `inheritsAny` association.
+fn children_of(
+    resolved: &ResolvedVisibility,
+    via: &visibility::VisibilityVia,
+    parent: &str,
+) -> Vec<String> {
+    resolved
+        .indexes
+        .get(&visibility::via_index_name(via, &via.parent_column))
+        .and_then(|index| index.read().ok().map(|index| index.get_all(parent)))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|link| {
+            link.get(&via.child_column)
+                .filter(|value| !value.is_null())
+                .map(|value| crate::visibility_mask::scalar(Some(value)))
+        })
+        .collect()
+}
+
 /// Columns compared to a set by `inSet`, so newly granted tokens can be fetched.
 fn set_columns(expression: &VisibilityExpression, set: &str, output: &mut BTreeSet<String>) {
     if expression.operator == "inSet" && expression.set == set {
@@ -81,6 +101,18 @@ impl Runtime {
     ) -> Result<MaskStep, ReplicaError> {
         let metrics = &self.inner.visibility_metrics;
         let parents = subscription.visibility.inherited_columns();
+        // (child key column, association, parent table) per inheritsAny.
+        let any_parents = visibility::inherits_any(&subscription.visibility)
+            .into_iter()
+            .filter_map(|expression| {
+                Some((
+                    expression.column.clone(),
+                    expression.via.clone()?,
+                    expression.table.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut any_changes = Vec::new();
         let mut source = Vec::new();
         let mut parent_changes = Vec::new();
         // (scope table, set name, token): own plan or a directly inherited parent.
@@ -125,6 +157,12 @@ impl Runtime {
             if parents.contains_key(&change.table) {
                 parent_changes.push(change);
             }
+            if any_parents
+                .iter()
+                .any(|(_, via, table)| via.table == change.table || *table == change.table)
+            {
+                any_changes.push(change);
+            }
             match grant_delta(&subscription.visibility, &subscription.resolved, change) {
                 GrantDelta::Rebuild => return Ok(MaskStep::Rebuild),
                 GrantDelta::Added(tokens) => granted.extend(
@@ -146,7 +184,11 @@ impl Runtime {
                 }
             }
         }
-        if source.is_empty() && parent_changes.is_empty() && granted.is_empty() && !derived_touched
+        if source.is_empty()
+            && parent_changes.is_empty()
+            && any_changes.is_empty()
+            && granted.is_empty()
+            && !derived_touched
         {
             return Ok(MaskStep::Skip);
         }
@@ -170,7 +212,20 @@ impl Runtime {
                 for column in columns {
                     fetch.entry(column).or_default().insert(token.clone());
                 }
-            } else if let Some(parent) = subscription.resolved.inherited.get_mut(scope) {
+            } else {
+                let any_children = any_parents
+                    .iter()
+                    .filter(|(_, _, table)| table == scope)
+                    .map(|(column, via, _)| {
+                        (
+                            column.clone(),
+                            children_of(&subscription.resolved, via, token),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let Some(parent) = subscription.resolved.inherited.get_mut(scope) else {
+                    continue;
+                };
                 std::sync::Arc::make_mut(&mut parent.resolved)
                     .sets
                     .entry(name.clone())
@@ -178,6 +233,9 @@ impl Runtime {
                     .insert(token.clone());
                 let mut columns = BTreeSet::new();
                 set_columns(&parent.plan.predicate, name, &mut columns);
+                for (column, children) in any_children {
+                    fetch.entry(column).or_default().extend(children);
+                }
                 if columns.iter().any(|column| *column != parent.plan.key) {
                     // The token does not name parent keys; resolve this member.
                     return Ok(MaskStep::Rebuild);
@@ -215,7 +273,9 @@ impl Runtime {
                 continue;
             };
             let visible = |row: &Value| {
-                !row.is_null() && visibility::row_matches(&parent.plan, &parent.resolved, row)
+                subscription
+                    .visibility
+                    .parent_admits(&change.table, parent, row)
             };
             let (was, now) = (visible(&change.old_value), visible(&change.new_value));
             if was == now {
@@ -235,6 +295,57 @@ impl Runtime {
             }
         }
 
+        for change in &any_changes {
+            for (column, via, table) in &any_parents {
+                let Some(parent) = subscription.resolved.inherited.get(table) else {
+                    continue;
+                };
+                if via.table == change.table {
+                    // An association moved: re-check its child for this member
+                    // if the member sees a linked parent or already holds it.
+                    for link in [&change.old_value, &change.new_value] {
+                        let Some(child) = link
+                            .get(&via.child_column)
+                            .filter(|value| !value.is_null())
+                            .map(|value| crate::visibility_mask::scalar(Some(value)))
+                        else {
+                            continue;
+                        };
+                        let parent_seen = link
+                            .get(&via.parent_column)
+                            .filter(|value| !value.is_null())
+                            .and_then(|value| {
+                                parent.row(&crate::visibility_mask::scalar(Some(value)))
+                            })
+                            .is_some_and(|row| {
+                                subscription.visibility.parent_admits(table, parent, &row)
+                            });
+                        let held = subscription.rows.values().any(|row| {
+                            row.get(column)
+                                .map(|value| crate::visibility_mask::scalar(Some(value)))
+                                == Some(child.clone())
+                        });
+                        if parent_seen || held {
+                            fetch.entry(column.clone()).or_default().insert(child);
+                        }
+                    }
+                }
+                if *table == change.table {
+                    let was =
+                        subscription
+                            .visibility
+                            .parent_admits(table, parent, &change.old_value);
+                    let now =
+                        subscription
+                            .visibility
+                            .parent_admits(table, parent, &change.new_value);
+                    if was != now {
+                        let children = children_of(&subscription.resolved, via, &change.row_id);
+                        fetch.entry(column.clone()).or_default().extend(children);
+                    }
+                }
+            }
+        }
         let mut upserts = BTreeMap::new();
         let mut deleted = BTreeSet::new();
         let mut inserted = false;
