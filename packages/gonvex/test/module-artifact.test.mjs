@@ -596,7 +596,20 @@ test("TypeScript artifacts retain the frozen mask manifest contract", async (t) 
       { operator: "eq", column: "public", value: { literal: true } },
     ] },
   };
-  const project = await moduleProject(t, `const visibility = x => x; export const notesVisibility = visibility(${JSON.stringify(mask)});`);
+  const project = await moduleProject(t, `const visibility = x => x; export const tasksVisibility = visibility({version:2, table:"tasks",key:"id",permissionTables:["members"],sets:{},where:{operator:"public"}}); export const notesVisibility = visibility(${JSON.stringify(mask)});`);
   const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
   assert.deepEqual(artifact.visibility.taskNotes, mask);
+});
+
+test("code generation rejects cyclic and overdeep inherited visibility", async (t) => {
+  const plan = (table, parent) => ({ version: 2, table, key: "id", permissionTables: [], sets: {}, where: parent ? { operator: "inherits", column: "parentId", table: parent, key: "id" } : { operator: "public" } });
+  for (const [name, plans, error] of [
+    ["cycle", [plan("a", "b"), plan("b", "a")], /inherits cycle/],
+    ["deep", Array.from({ length: 6 }, (_, i) => plan(`t${i}`, i < 5 ? `t${i + 1}` : undefined)), /inherits depth exceeds 4/],
+  ]) {
+    await t.test(name, async (t) => {
+      const project = await moduleProject(t, "const visibility = x => x;\n" + plans.map((value, i) => `export const p${i}Visibility = visibility(${JSON.stringify(value)});`).join("\n"));
+      await assert.rejects(buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }), error);
+    });
+  }
 });

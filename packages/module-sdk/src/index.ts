@@ -1043,6 +1043,29 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
   validateVisibilityExpression(value.where, `${path}.where`, value.sets as Record<string, VisibilitySet>);
 };
 
+/** Validate inheritance after all declarations have been collected. */
+export function validateVisibilityGraph(plans: Readonly<Record<string, VisibilityPlan>>): void {
+  const references = (expression: VisibilityExpression): Extract<VisibilityExpression, { operator: "inherits" }>[] => {
+    const result = expression.operator === "inherits" ? [expression] : [];
+    if ("children" in expression) for (const child of expression.children) result.push(...references(child));
+    if (expression.operator === "inherits" && expression.onMissing) result.push(...references(expression.onMissing));
+    return result;
+  };
+  const visit = (table: string, path: string[]): void => {
+    if (path.includes(table)) throw new Error(`visibility inherits cycle: ${[...path, table].join(" -> ")}`);
+    if (path.length > 4) throw new Error(`visibility inherits depth exceeds 4: ${[...path, table].join(" -> ")}`);
+    const plan = plans[table]!;
+    for (const reference of references(plan.where)) {
+      const parent = plans[reference.table];
+      if (!parent) throw new Error(`visibility ${table} inherits unknown parent ${reference.table}`);
+      if (plan.version !== 2 || parent.version !== 2) throw new Error(`visibility ${table} inherits requires version 2 child and parent`);
+      if (reference.key !== parent.key) throw new Error(`visibility ${table} inherits key ${reference.key} differs from ${reference.table} key ${parent.key}`);
+      visit(reference.table, [...path, table]);
+    }
+  };
+  for (const table of Object.keys(plans)) visit(table, []);
+}
+
 const freezeVisibilityExpression = (expression: VisibilityExpression): VisibilityExpression =>
   freeze({
     ...expression,
@@ -1176,6 +1199,7 @@ export class ModuleManifestCollector {
     for (const path of [...this.entries.keys()].sort()) functions[path] = this.entries.get(path)!;
     const visibilityPlans: Record<string, VisibilityPlan> = {};
     for (const table of [...this.visibilityEntries.keys()].sort()) visibilityPlans[table] = this.visibilityEntries.get(table)!;
+    validateVisibilityGraph(visibilityPlans);
     const crons = [...this.cronEntries.values()].sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
     for (const spec of crons) {
       const target = this.entries.get(spec.function);

@@ -148,6 +148,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       invitationAcceptanceReducer = match[2];
     }
   }
+  validateVisibilityInheritance(visibilityPlans);
   // Versioned SQL migrations travel with the artifact so the runtime applies
   // the same schema changes as the source module.
   for (const file of [...options.migrations].sort()) {
@@ -336,6 +337,27 @@ function parseVisibilityDefinitions(source: string): VisibilityPlan[] {
     plans.push(plan);
   }
   return plans;
+}
+
+function validateVisibilityInheritance(plans: Record<string, VisibilityPlan>): void {
+  const references = (expression: VisibilityExpression): VisibilityExpression[] => [
+    ...(expression.operator === "inherits" ? [expression] : []),
+    ...(expression.children ?? []).flatMap(references),
+    ...(expression.onMissing ? references(expression.onMissing) : []),
+  ];
+  const visit = (table: string, path: string[]): void => {
+    if (path.includes(table)) throw new Error(`visibility inherits cycle: ${[...path, table].join(" -> ")}`);
+    if (path.length > 4) throw new Error(`visibility inherits depth exceeds 4: ${[...path, table].join(" -> ")}`);
+    const plan = plans[table]!;
+    for (const reference of references(plan.where)) {
+      const parent = plans[reference.table!];
+      if (!parent) throw new Error(`visibility ${table} inherits unknown parent ${reference.table}`);
+      if (plan.version !== 2 || parent.version !== 2) throw new Error(`visibility ${table} inherits requires version 2 child and parent`);
+      if (reference.key !== parent.key) throw new Error(`visibility ${table} inherits key ${reference.key} differs from ${reference.table} key ${parent.key}`);
+      visit(reference.table!, [...path, table]);
+    }
+  };
+  for (const table of Object.keys(plans)) visit(table, []);
 }
 
 function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | undefined {

@@ -194,3 +194,17 @@ test("inherits supports a frozen orphan-only fallback", () => {
   assert.ok(Object.isFrozen(plan.where.onMissing));
   assert.throws(() => visibility({ ...validPlan(), where: { ...where, onMissing: { operator: "unknown" } } }), /onMissing.operator/);
 });
+
+test("module manifests reject inheritance cycles and chains deeper than four edges", () => {
+  const make = (table, parent) => ({ version: 2, table, key: "id", permissionTables: [], sets: {}, where: parent ? { operator: "inherits", column: "parentId", table: parent, key: "id" } : { operator: "public" } });
+  const cycle = createModule({ name: "cycle", version: "1" });
+  cycle.visibility(make("a", "b"));
+  cycle.visibility(make("b", "a"));
+  assert.throws(() => cycle.manifest(), /inherits cycle:.*a.*b.*a/);
+  for (const edges of [4, 5]) {
+    const module = createModule({ name: "chain", version: "1" });
+    for (let index = 0; index <= edges; index++) module.visibility(make(`t${index}`, index < edges ? `t${index + 1}` : undefined));
+    if (edges === 4) assert.doesNotThrow(() => module.manifest());
+    else assert.throws(() => module.manifest(), /inherits depth exceeds 4/);
+  }
+});
