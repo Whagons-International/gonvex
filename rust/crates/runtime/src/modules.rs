@@ -1177,3 +1177,7 @@ mod offline_contract_tests {
         assert!(client_contract_from_module(module.as_object().unwrap()).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "visibility_deprecation_tests.rs"]
+mod visibility_deprecation_tests;
