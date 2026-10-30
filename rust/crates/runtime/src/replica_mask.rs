@@ -27,7 +27,11 @@ enum GrantDelta {
 
 /// Grant rows decided in memory. Additions patch the set; a removal may still
 /// be covered by another row of the member, so it re-resolves this member.
-fn grant_delta(plan: &VisibilityPlan, resolved: &ResolvedVisibility, change: &LogChange) -> GrantDelta {
+fn grant_delta(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    change: &LogChange,
+) -> GrantDelta {
     let mut added = Vec::new();
     for (name, set) in plan.active_grant_sets(resolved) {
         if set.table != change.table {
@@ -112,7 +116,9 @@ impl Runtime {
                 match grant_delta(&parent.plan, &parent.resolved, change) {
                     GrantDelta::Rebuild => return Ok(MaskStep::Rebuild),
                     GrantDelta::Added(tokens) => granted.extend(
-                        tokens.into_iter().map(|(name, token)| (table.clone(), name, token)),
+                        tokens
+                            .into_iter()
+                            .map(|(name, token)| (table.clone(), name, token)),
                     ),
                     GrantDelta::None => {}
                 }
@@ -154,7 +160,10 @@ impl Runtime {
                     return Ok(MaskStep::Rebuild);
                 }
                 for column in parents.get(scope).into_iter().flatten() {
-                    fetch.entry(column.clone()).or_default().insert(token.clone());
+                    fetch
+                        .entry(column.clone())
+                        .or_default()
+                        .insert(token.clone());
                 }
             }
         }
@@ -173,7 +182,10 @@ impl Runtime {
                 if now && !change.old_value.is_null() {
                     // Hidden → visible on an update: its children may already
                     // exist. A new parent has none yet beyond this transaction.
-                    fetch.entry(column.clone()).or_default().insert(change.row_id.clone());
+                    fetch
+                        .entry(column.clone())
+                        .or_default()
+                        .insert(change.row_id.clone());
                 } else if was {
                     hidden_parents.push((column.clone(), change.row_id.clone()));
                 }
@@ -196,7 +208,11 @@ impl Runtime {
             let children = subscription
                 .rows
                 .iter()
-                .filter(|(_, row)| row.get(column).map(|value| crate::visibility_mask::scalar(Some(value))) == Some(key.clone()))
+                .filter(|(_, row)| {
+                    row.get(column)
+                        .map(|value| crate::visibility_mask::scalar(Some(value)))
+                        == Some(key.clone())
+                })
                 .map(|(id, row)| (id.clone(), row.clone()))
                 .collect::<Vec<_>>();
             for (id, row) in children {
@@ -208,7 +224,15 @@ impl Runtime {
                     &subscription.visibility,
                     &subscription.resolved,
                 ) {
-                    self.mask_apply_row(subscription, &id, None, &[], entity_changes, &mut upserts, &mut deleted)?;
+                    self.mask_apply_row(
+                        subscription,
+                        &id,
+                        None,
+                        &[],
+                        entity_changes,
+                        &mut upserts,
+                        &mut deleted,
+                    )?;
                 }
             }
         }
@@ -246,7 +270,9 @@ impl Runtime {
                 .await
                 .clone()
                 .ok_or(ReplicaError::ModuleMissing)?;
-            let mut transaction = control.begin_tenant_transaction(&session.route, true).await?;
+            let mut transaction = control
+                .begin_tenant_transaction(&session.route, true)
+                .await?;
             for (column, values) in &fetch {
                 metrics.record_visibility_sql_statement();
                 let rows = query_rows_where(
@@ -263,7 +289,15 @@ impl Runtime {
                     let key = row_key(&row, &subscription.definition.key)?;
                     present.insert(key.clone());
                     inserted |= !subscription.rows.contains_key(&key);
-                    self.mask_apply_row(subscription, &key, Some(row), &[], entity_changes, &mut upserts, &mut deleted)?;
+                    self.mask_apply_row(
+                        subscription,
+                        &key,
+                        Some(row),
+                        &[],
+                        entity_changes,
+                        &mut upserts,
+                        &mut deleted,
+                    )?;
                 }
                 // A re-check of hidden parents: cached children it no longer returns go.
                 let stale = subscription
@@ -271,19 +305,34 @@ impl Runtime {
                     .iter()
                     .filter(|(id, row)| {
                         !present.contains(*id)
-                            && row
-                                .get(column)
-                                .is_some_and(|value| values.contains(&crate::visibility_mask::scalar(Some(value))))
+                            && row.get(column).is_some_and(|value| {
+                                values.contains(&crate::visibility_mask::scalar(Some(value)))
+                            })
                     })
                     .map(|(id, _)| id.clone())
                     .collect::<Vec<_>>();
                 for id in stale {
-                    self.mask_apply_row(subscription, &id, None, &[], entity_changes, &mut upserts, &mut deleted)?;
+                    self.mask_apply_row(
+                        subscription,
+                        &id,
+                        None,
+                        &[],
+                        entity_changes,
+                        &mut upserts,
+                        &mut deleted,
+                    )?;
                 }
             }
             transaction.commit().await?;
         }
-        if inserted && !self.mask_enforce_budget(subscription, entity_changes, &mut upserts, &mut deleted)? {
+        if inserted
+            && !self.mask_enforce_budget(
+                subscription,
+                entity_changes,
+                &mut upserts,
+                &mut deleted,
+            )?
+        {
             return Ok(MaskStep::Rebuild);
         }
         subscription.cursor.revision = revision;
@@ -377,7 +426,8 @@ impl Runtime {
                 .map(|row| serde_json::to_vec(row).unwrap_or_default().len() as i64)
                 .sum::<i64>()
         };
-        let over_bytes = definition.max_bytes > 0 && bytes(&subscription.rows) > definition.max_bytes;
+        let over_bytes =
+            definition.max_bytes > 0 && bytes(&subscription.rows) > definition.max_bytes;
         if !over_rows && !over_bytes {
             return Ok(true);
         }
@@ -389,7 +439,12 @@ impl Runtime {
         let mut ordered = subscription
             .rows
             .iter()
-            .map(|(id, row)| (id.clone(), row.get(&order_by).cloned().unwrap_or(Value::Null)))
+            .map(|(id, row)| {
+                (
+                    id.clone(),
+                    row.get(&order_by).cloned().unwrap_or(Value::Null),
+                )
+            })
             .collect::<Vec<_>>();
         ordered.sort_by(|(left_id, left), (right_id, right)| {
             let order = compare_json(left, right).then_with(|| left_id.cmp(right_id));
@@ -399,12 +454,18 @@ impl Runtime {
                 order
             }
         });
-        let max_rows = if definition.max_rows > 0 { definition.max_rows } else { usize::MAX };
+        let max_rows = if definition.max_rows > 0 {
+            definition.max_rows
+        } else {
+            usize::MAX
+        };
         let max_bytes = definition.max_bytes;
         let mut kept_bytes = 0i64;
         let mut evict = Vec::new();
         for (index, (id, _)) in ordered.iter().enumerate() {
-            let size = serde_json::to_vec(&subscription.rows[id]).unwrap_or_default().len() as i64;
+            let size = serde_json::to_vec(&subscription.rows[id])
+                .unwrap_or_default()
+                .len() as i64;
             if index >= max_rows || (max_bytes > 0 && kept_bytes + size > max_bytes) {
                 evict.push(id.clone());
             } else {
@@ -412,7 +473,15 @@ impl Runtime {
             }
         }
         for id in evict {
-            self.mask_apply_row(subscription, &id, None, &[], entity_changes, upserts, deleted)?;
+            self.mask_apply_row(
+                subscription,
+                &id,
+                None,
+                &[],
+                entity_changes,
+                upserts,
+                deleted,
+            )?;
         }
         subscription.truncated = true;
         Ok(true)

@@ -35,9 +35,9 @@ mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
-pub mod visibility_metrics;
 pub mod visibility_index;
 mod visibility_mask;
+pub mod visibility_metrics;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;

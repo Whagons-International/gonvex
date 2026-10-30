@@ -72,13 +72,17 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
         return true;
     }
     let names_member = |plan: &VisibilityPlan, resolved: &ResolvedVisibility| {
-        plan.active_grant_sets(resolved).into_iter().any(|(name, set)| {
-            set.table == change.table
-                && [&change.old_value, &change.new_value].into_iter().any(|row| {
-                    visibility::grant_contribution(name, set, resolved, row)
-                        != visibility::GrantContribution::None
-                })
-        })
+        plan.active_grant_sets(resolved)
+            .into_iter()
+            .any(|(name, set)| {
+                set.table == change.table
+                    && [&change.old_value, &change.new_value]
+                        .into_iter()
+                        .any(|row| {
+                            visibility::grant_contribution(name, set, resolved, row)
+                                != visibility::GrantContribution::None
+                        })
+            })
     };
     if names_member(plan, resolved)
         || resolved
@@ -89,14 +93,23 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
         return true;
     }
     if let Some(parent) = resolved.inherited.get(&change.table) {
-        return [&change.old_value, &change.new_value].into_iter().any(|row| {
-            !row.is_null() && visibility::row_matches(&parent.plan, &parent.resolved, row)
-        });
+        return [&change.old_value, &change.new_value]
+            .into_iter()
+            .any(|row| {
+                !row.is_null() && visibility::row_matches(&parent.plan, &parent.resolved, row)
+            });
     }
     subscription.plan.index_change_affects(&change.table)
-        || subscription.related_dependencies.iter().any(|dependencies| {
-            dependencies.change_affects(&change.table, &change.operation, &change.changed_columns)
-        })
+        || subscription
+            .related_dependencies
+            .iter()
+            .any(|dependencies| {
+                dependencies.change_affects(
+                    &change.table,
+                    &change.operation,
+                    &change.changed_columns,
+                )
+            })
 }
 
 #[derive(Clone)]
@@ -561,13 +574,16 @@ impl Runtime {
                                 &change.new_value,
                             ))
                             || subscription.plan.index_change_affects(&change.table)
-                            || subscription.related_dependencies.iter().any(|dependencies| {
-                                dependencies.change_affects(
-                                    &change.table,
-                                    &change.operation,
-                                    &change.changed_columns,
-                                )
-                            })
+                            || subscription
+                                .related_dependencies
+                                .iter()
+                                .any(|dependencies| {
+                                    dependencies.change_affects(
+                                        &change.table,
+                                        &change.operation,
+                                        &change.changed_columns,
+                                    )
+                                })
                     }
                 });
             if !relevant {
@@ -641,14 +657,18 @@ impl Runtime {
                 .await?;
         let epoch: String = clock.get("epoch");
         let revision = clock.get::<i64, _>("revision").max(0) as u64;
-        self.inner.visibility_metrics.record_visibility_sql_statement();
+        self.inner
+            .visibility_metrics
+            .record_visibility_sql_statement();
         let resolved = if visibility_plan.version == Some(2) {
             let module = self
                 .inner
                 .modules
                 .project(&session.identity.project_id)
                 .await
-                .ok_or_else(|| LiveQueryError::Invalid("project module is not loaded".to_owned()))?;
+                .ok_or_else(|| {
+                    LiveQueryError::Invalid("project module is not loaded".to_owned())
+                })?;
             visibility::resolve_with_parents(
                 &mut transaction,
                 session,

@@ -361,7 +361,9 @@ impl Runtime {
             .await?;
         let clock = clock_in_transaction(&mut transaction).await?;
         self.inner.visibility_metrics.record_collection_snapshot();
-        self.inner.visibility_metrics.record_visibility_sql_statement();
+        self.inner
+            .visibility_metrics
+            .record_visibility_sql_statement();
         let resolved = if plan.version == Some(2) {
             let module = self
                 .inner
@@ -448,7 +450,12 @@ impl Runtime {
         {
             // Parent ACL indexes advance once per transaction, before any
             // connection evaluates an inherited row against them.
-            if let Some(module) = self.inner.modules.project(&session.identity.project_id).await {
+            if let Some(module) = self
+                .inner
+                .modules
+                .project(&session.identity.project_id)
+                .await
+            {
                 self.inner
                     .parent_acl
                     .apply(session, &module.visibility, revision, &changes);
@@ -842,9 +849,11 @@ pub(super) async fn query_rows_where(
     args: &Value,
     filter: Option<(&str, &BTreeSet<String>)>,
 ) -> Result<Vec<Value>, ReplicaError> {
-    Ok(query_rows_filtered(transaction, definition, plan, resolved, args, filter)
-        .await?
-        .0)
+    Ok(
+        query_rows_filtered(transaction, definition, plan, resolved, args, filter)
+            .await?
+            .0,
+    )
 }
 
 async fn query_rows_filtered(
@@ -860,7 +869,9 @@ async fn query_rows_filtered(
     let visibility = visibility::compile_predicate(plan, resolved, "r", &mut parameters)?;
     let mut predicates = vec![visibility];
     if let Some((column, values)) = filter {
-        parameters.push(Value::Array(values.iter().cloned().map(Value::String).collect()));
+        parameters.push(Value::Array(
+            values.iter().cloned().map(Value::String).collect(),
+        ));
         predicates.push(format!(
             "r.{}::text = ANY(ARRAY(SELECT jsonb_array_elements_text(${}::jsonb)))",
             quote(column)?,
