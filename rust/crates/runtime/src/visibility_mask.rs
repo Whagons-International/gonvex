@@ -34,6 +34,24 @@ pub(crate) fn match_expression(
             .sets
             .get(&expression.set)
             .is_some_and(|set| set.contains(&scalar(row.get(&expression.column)))),
+        "inherits" => {
+            let Some(parent) = resolved.inherited.get(&expression.table) else {
+                return false;
+            };
+            let key = match row.get(&expression.column) {
+                None | Some(Value::Null) => return false,
+                Some(value) => scalar(Some(value)),
+            };
+            match parent.row(&key) {
+                Some(parent_row) => parent_row.as_object().is_some_and(|parent_row| {
+                    match_expression(&parent.plan.predicate, &parent.resolved, parent_row)
+                }),
+                None => expression
+                    .on_missing
+                    .as_ref()
+                    .is_some_and(|fallback| match_expression(fallback, resolved, row)),
+            }
+        }
         "and" => expression
             .children
             .iter()

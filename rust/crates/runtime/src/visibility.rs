@@ -1,6 +1,7 @@
 //! Centralized structured row visibility.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use gonvex_postgres::{DatabaseError, TenantSession, TenantTransaction};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use sqlx::Row;
 use thiserror::Error;
 
 use crate::sql_parameters::Parameters;
+use crate::visibility_index::ParentAclIndex;
 use crate::visibility_mask::{match_expression, scalar};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -101,6 +103,208 @@ pub struct ResolvedVisibility {
     pub permissions: Value,
     pub sets: BTreeMap<String, BTreeSet<String>>,
     pub fingerprint: String,
+    /// Version 2 `inherits` parents, keyed by parent table: the parent's plan,
+    /// this member's resolution of it, and the tenant-shared parent ACL index.
+    pub inherited: BTreeMap<String, InheritedParent>,
+}
+
+/// Everything an in-memory `inherits` check needs. Holds no database handle.
+#[derive(Clone)]
+pub struct InheritedParent {
+    pub plan: Arc<VisibilityPlan>,
+    pub resolved: Arc<ResolvedVisibility>,
+    pub index: Arc<std::sync::RwLock<ParentAclIndex>>,
+}
+
+impl InheritedParent {
+    /// The parent's projected ACL row, or None when the parent does not exist.
+    pub fn row(&self, key: &str) -> Option<Arc<Value>> {
+        self.index.read().ok()?.get(key)
+    }
+}
+
+impl std::fmt::Debug for InheritedParent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InheritedParent")
+            .field("table", &self.plan.table)
+            .field("resolved", &self.resolved)
+            .finish()
+    }
+}
+
+/// Grant-set join tokens live beside ordinary sets under this suffix, e.g. the
+/// member's team ids for a grant set joined to memberTeams.
+pub const GRANT_JOIN_SUFFIX: &str = "::join";
+
+/// Parent ACL indexes shared by every connection of a tenant database. Each
+/// index is loaded once and then advanced by feed transactions in revision
+/// order; applying a revision a second time is a no-op.
+#[derive(Default)]
+pub struct ParentAclRegistry {
+    indexes: std::sync::Mutex<BTreeMap<String, Arc<std::sync::RwLock<ParentAclIndex>>>>,
+    loading: tokio::sync::Mutex<()>,
+}
+
+fn parent_index_key(session: &TenantSession, table: &str) -> String {
+    format!(
+        "{}\u{0}{}\u{0}{}\u{0}{}",
+        session.route.project_id, session.route.tenant_id, session.route.database_url, table
+    )
+}
+
+impl ParentAclRegistry {
+    async fn get_or_load(
+        &self,
+        transaction: &mut TenantTransaction,
+        session: &TenantSession,
+        parent: &VisibilityPlan,
+        revision: u64,
+    ) -> Result<Arc<std::sync::RwLock<ParentAclIndex>>, VisibilityError> {
+        let key = parent_index_key(session, &parent.table);
+        if let Some(index) = self.indexes.lock().expect("parent ACL registry").get(&key) {
+            return Ok(index.clone());
+        }
+        let _loading = self.loading.lock().await;
+        if let Some(index) = self.indexes.lock().expect("parent ACL registry").get(&key) {
+            return Ok(index.clone());
+        }
+        let columns = acl_columns(parent);
+        let projection = columns
+            .iter()
+            .map(|column| Ok(format!("{}, r.{}", sql_text_literal(column), quote(column)?)))
+            .collect::<Result<Vec<_>, VisibilityError>>()?
+            .join(", ");
+        let statement = format!(
+            "SELECT r.{}::text, jsonb_build_object({projection})::text FROM {} AS r",
+            quote(&parent.key)?,
+            quote(&parent.table)?
+        );
+        let rows = sqlx::query(&statement)
+            .fetch_all(&mut **transaction.transaction())
+            .await?;
+        let mut projected = BTreeMap::new();
+        for row in rows {
+            let key: Option<String> = row.try_get(0)?;
+            let value: String = row.try_get(1)?;
+            if let Some(key) = key {
+                projected.insert(
+                    key,
+                    serde_json::from_str(&value).map_err(|error| {
+                        VisibilityError::Invalid(format!("parent ACL row: {error}"))
+                    })?,
+                );
+            }
+        }
+        let index = Arc::new(std::sync::RwLock::new(ParentAclIndex::from_snapshot(
+            revision, projected,
+        )));
+        self.indexes
+            .lock()
+            .expect("parent ACL registry")
+            .insert(key, index.clone());
+        Ok(index)
+    }
+
+    /// Advance every loaded parent index of this tenant database by one feed
+    /// transaction. Called by each connection; only the first call applies it.
+    pub fn apply(
+        &self,
+        session: &TenantSession,
+        plans: &BTreeMap<String, VisibilityPlan>,
+        revision: u64,
+        changes: &[crate::change_feed::LogChange],
+    ) {
+        let prefix = parent_index_key(session, "");
+        let indexes = self
+            .indexes
+            .lock()
+            .expect("parent ACL registry")
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(key, index)| (key[prefix.len()..].to_owned(), index.clone()))
+            .collect::<Vec<_>>();
+        for (table, index) in indexes {
+            let Some(plan) = plans.get(&table) else {
+                continue;
+            };
+            let columns = acl_columns(plan);
+            let updates = changes
+                .iter()
+                .filter(|change| change.table == table)
+                .map(|change| {
+                    let row = change.new_value.as_object().map(|row| {
+                        Value::Object(
+                            columns
+                                .iter()
+                                .map(|column| {
+                                    (column.clone(), row.get(column).cloned().unwrap_or(Value::Null))
+                                })
+                                .collect(),
+                        )
+                    });
+                    (change.row_id.clone(), row)
+                })
+                .collect::<Vec<_>>();
+            if let Ok(mut index) = index.write() {
+                index.apply(revision, updates);
+            }
+        }
+    }
+
+    /// A database reset invalidates every projection of that tenant database.
+    pub fn reset(&self, session: &TenantSession) {
+        let prefix = parent_index_key(session, "");
+        self.indexes
+            .lock()
+            .expect("parent ACL registry")
+            .retain(|key, _| !key.starts_with(&prefix));
+    }
+}
+
+fn sql_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Row columns a plan's predicate reads, including inherited foreign keys and
+/// the key itself. These are the only columns a parent ACL index projects.
+pub fn acl_columns(plan: &VisibilityPlan) -> BTreeSet<String> {
+    fn visit(expression: &VisibilityExpression, columns: &mut BTreeSet<String>) {
+        if matches!(
+            expression.operator.as_str(),
+            "eq" | "eqContext" | "inSet" | "inherits"
+        ) && !expression.column.is_empty()
+        {
+            columns.insert(expression.column.clone());
+        }
+        for child in &expression.children {
+            visit(child, columns);
+        }
+        if let Some(fallback) = &expression.on_missing {
+            visit(fallback, columns);
+        }
+    }
+    let mut columns = BTreeSet::from([plan.key.clone()]);
+    visit(&plan.predicate, &mut columns);
+    columns
+}
+
+/// Tables a version 2 plan inherits from, directly (not transitively).
+pub fn inherited_tables(plan: &VisibilityPlan) -> BTreeSet<String> {
+    fn visit(expression: &VisibilityExpression, tables: &mut BTreeSet<String>) {
+        if expression.operator == "inherits" {
+            tables.insert(expression.table.clone());
+        }
+        for child in &expression.children {
+            visit(child, tables);
+        }
+        if let Some(fallback) = &expression.on_missing {
+            visit(fallback, tables);
+        }
+    }
+    let mut tables = BTreeSet::new();
+    visit(&plan.predicate, &mut tables);
+    tables
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -620,6 +824,22 @@ async fn resolve_member(
             .filter_map(|row| row.try_get::<Option<String>, _>(0).ok().flatten())
             .collect();
         sets.insert(name.clone(), values);
+        if plan.version == Some(2) && set.kind == "grant" && !set.joins.is_empty() {
+            if let Some(join_set) = grant_join_set(set) {
+                let (statement, parameters) = compile_set(&join_set, &direct)?;
+                let parameters =
+                    Parameters::scalars(&parameters).map_err(VisibilityError::Invalid)?;
+                let statement_key = parameters.statement(&statement);
+                let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+                let rows = query.fetch_all(&mut **transaction.transaction()).await?;
+                sets.insert(
+                    format!("{name}{GRANT_JOIN_SUFFIX}"),
+                    rows.into_iter()
+                        .filter_map(|row| row.try_get::<Option<String>, _>(0).ok().flatten())
+                        .collect(),
+                );
+            }
+        }
     }
     let fingerprint = visibility_fingerprint(plan, &direct, &role, &permissions, &sets);
     Ok(ResolvedVisibility {
@@ -630,7 +850,166 @@ async fn resolve_member(
         permissions,
         sets,
         fingerprint,
+        inherited: BTreeMap::new(),
     })
+}
+
+/// Resolve a version 2 plan and, recursively, every plan it inherits from for
+/// the same member, attaching the tenant-shared parent ACL indexes. Legacy
+/// plans resolve exactly as before.
+pub fn resolve_with_parents<'a>(
+    transaction: &'a mut TenantTransaction,
+    session: &'a TenantSession,
+    plan: &'a VisibilityPlan,
+    revision: u64,
+    plans: &'a BTreeMap<String, VisibilityPlan>,
+    registry: &'a ParentAclRegistry,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<ResolvedVisibility, VisibilityError>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        let mut resolved = resolve_member(transaction, session, plan, revision, true).await?;
+        if plan.version != Some(2) {
+            return Ok(resolved);
+        }
+        for table in inherited_tables(plan) {
+            let parent = plans.get(&table).ok_or_else(|| {
+                VisibilityError::Invalid(format!("unknown inherited parent {table:?}"))
+            })?;
+            let parent_resolved =
+                resolve_with_parents(transaction, session, parent, revision, plans, registry)
+                    .await?;
+            let index = registry
+                .get_or_load(transaction, session, parent, revision)
+                .await?;
+            resolved.inherited.insert(
+                table,
+                InheritedParent {
+                    plan: Arc::new(parent.clone()),
+                    resolved: Arc::new(parent_resolved),
+                    index,
+                },
+            );
+        }
+        Ok(resolved)
+    })
+}
+
+/// For a grant set joined to permission tables, the permission side as its own
+/// principal set selecting the first join's key. None when a later join hangs
+/// off the grant row itself, which cannot be decided from permission tokens.
+pub fn grant_join_set(set: &VisibilitySet) -> Option<VisibilitySet> {
+    let base = if set.alias.is_empty() { &set.table } else { &set.alias };
+    let first = set.joins.first()?;
+    if !first.left_alias.is_empty() && &first.left_alias != base {
+        return None;
+    }
+    if set
+        .joins
+        .iter()
+        .skip(1)
+        .any(|join| &join.left_alias == base)
+    {
+        return None;
+    }
+    if !set.select_from.is_empty() && &set.select_from != base {
+        return None;
+    }
+    let first_alias = if first.alias.is_empty() { first.table.clone() } else { first.alias.clone() };
+    Some(VisibilitySet {
+        kind: "principal".to_owned(),
+        table: first.table.clone(),
+        alias: first.alias.clone(),
+        select: first.right_column.clone(),
+        select_from: String::new(),
+        joins: set
+            .joins
+            .iter()
+            .skip(1)
+            .map(|join| VisibilityJoin {
+                left_alias: if join.left_alias.is_empty() {
+                    String::new()
+                } else {
+                    join.left_alias.clone()
+                },
+                ..join.clone()
+            })
+            .collect(),
+        constraints: set
+            .constraints
+            .iter()
+            .filter(|constraint| !constraint.table.is_empty() && &constraint.table != base)
+            .map(|constraint| VisibilityConstraint {
+                table: if constraint.table == first_alias { String::new() } else { constraint.table.clone() },
+                ..constraint.clone()
+            })
+            .collect(),
+    })
+}
+
+/// How one grant-table row bears on a member's grant set.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GrantContribution {
+    /// The row grants this token to the member.
+    Token(String),
+    /// The row grants nothing to the member.
+    None,
+    /// The set's shape cannot be decided from the row; re-resolve it.
+    Unknown,
+}
+
+/// Decide in memory whether a grant row contributes to this member's set. Uses
+/// only the row, the member's direct context and its resolved join tokens.
+pub fn grant_contribution(
+    name: &str,
+    set: &VisibilitySet,
+    resolved: &ResolvedVisibility,
+    row: &Value,
+) -> GrantContribution {
+    let Some(row) = row.as_object() else {
+        return GrantContribution::None;
+    };
+    let base = if set.alias.is_empty() { &set.table } else { &set.alias };
+    if !set.select_from.is_empty() && &set.select_from != base {
+        return GrantContribution::Unknown;
+    }
+    for constraint in &set.constraints {
+        if !constraint.table.is_empty() && &constraint.table != base {
+            continue;
+        }
+        let Some(value) = row.get(&constraint.column) else {
+            return GrantContribution::Unknown;
+        };
+        let holds = if constraint.context.is_empty() {
+            match constraint.value.as_ref().and_then(|value| value.get("literal")) {
+                Some(literal) => value == literal,
+                None => return GrantContribution::Unknown,
+            }
+        } else {
+            match resolved.direct.get(&constraint.context) {
+                Some(expected) => scalar(Some(value)) == *expected,
+                None => return GrantContribution::Unknown,
+            }
+        };
+        if !holds {
+            return GrantContribution::None;
+        }
+    }
+    if let Some(first) = set.joins.first() {
+        let Some(tokens) = resolved.sets.get(&format!("{name}{GRANT_JOIN_SUFFIX}")) else {
+            return GrantContribution::Unknown;
+        };
+        match row.get(&first.left_column) {
+            Some(value) if tokens.contains(&scalar(Some(value))) => {}
+            Some(_) => return GrantContribution::None,
+            None => return GrantContribution::Unknown,
+        }
+    }
+    match row.get(&set.select) {
+        Some(Value::Null) => GrantContribution::None,
+        Some(value) => GrantContribution::Token(scalar(Some(value))),
+        None => GrantContribution::Unknown,
+    }
 }
 
 pub fn compile_predicate(
@@ -820,6 +1199,53 @@ fn compile_expression(
     };
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
+        "inherits" => {
+            static PARENT_ALIAS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let parent = resolved.inherited.get(&expression.table).ok_or_else(|| {
+                VisibilityError::Invalid(format!(
+                    "inherited parent {:?} was not resolved",
+                    expression.table
+                ))
+            })?;
+            let next = || {
+                format!(
+                    "_gonvex_parent_{}",
+                    PARENT_ALIAS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                )
+            };
+            let alias = next();
+            let column = quote(&expression.column)?;
+            let key = quote(&expression.key)?;
+            let table = quote(&expression.table)?;
+            let parent_predicate = compile_expression(
+                &parent.plan.predicate,
+                &parent.plan,
+                &parent.resolved,
+                &alias,
+                parameters,
+                account_parameter,
+            )?;
+            let visible = format!(
+                "EXISTS (SELECT 1 FROM {table} AS {alias} WHERE {alias}.{key}::text = {row_alias}.{column}::text AND ({parent_predicate}))"
+            );
+            match &expression.on_missing {
+                None => visible,
+                Some(fallback) => {
+                    let missing = next();
+                    let fallback = compile_expression(
+                        fallback,
+                        plan,
+                        resolved,
+                        row_alias,
+                        parameters,
+                        account_parameter,
+                    )?;
+                    format!(
+                        "({visible} OR ({row_alias}.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {table} AS {missing} WHERE {missing}.{key}::text = {row_alias}.{column}::text) AND ({fallback})))"
+                    )
+                }
+            }
+        }
         "nonEmpty" if plan.version == Some(2) => {
             let values = resolved.sets.get(&expression.set).ok_or_else(|| {
                 VisibilityError::Invalid(format!(
@@ -1250,6 +1676,7 @@ mod tests {
             expressions.push(serde_json::json!({"operator":operator, "children":[negate(status.clone()), enabled]}));
         }
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
@@ -1581,6 +2008,7 @@ mod tests {
 
     fn dependency_member(role: &str) -> ResolvedVisibility {
         ResolvedVisibility {
+            inherited: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-1".to_owned())]),
@@ -1821,6 +2249,7 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
@@ -1885,6 +2314,7 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([

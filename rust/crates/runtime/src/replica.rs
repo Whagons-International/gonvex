@@ -2340,6 +2340,7 @@ mod tests {
                 },
             },
             ResolvedVisibility {
+                inherited: Default::default(),
                 ephemeral_member: false,
                 revision: 1,
                 direct: BTreeMap::new(),
@@ -2555,6 +2556,7 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),

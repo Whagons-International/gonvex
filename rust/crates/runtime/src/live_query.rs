@@ -1660,6 +1660,7 @@ mod tests {
         .unwrap();
         visibility.validate().unwrap();
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("account.id".to_owned(), "account".to_owned())]),
@@ -1847,6 +1848,7 @@ mod tests {
             "table":"routing", "key":"id", "where":{"operator":"eqContext","column":"owner","context":"member.id"}
         })).unwrap();
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]),
@@ -2168,6 +2170,7 @@ mod tests {
                 }))
                 .unwrap();
                 let resolved = ResolvedVisibility {
+                    inherited: Default::default(),
                     ephemeral_member: false,
                     revision: 1,
                     direct: context.clone(),
