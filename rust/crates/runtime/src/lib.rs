@@ -89,6 +89,8 @@ struct RuntimeInner {
     metrics: metrics::RuntimeMetrics,
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     public_limiter: Arc<public_functions::PublicLimiter>,
+    visibility_metrics: visibility_metrics::VisibilityMetrics,
+    parent_acl: visibility::ParentAclRegistry,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -208,6 +210,11 @@ impl Runtime {
         Ok(tenant)
     }
 
+    /// Visibility statement and work counters for this runtime.
+    pub fn visibility_metrics(&self) -> &visibility_metrics::VisibilityMetrics {
+        &self.inner.visibility_metrics
+    }
+
     pub fn new(config: Config) -> Self {
         let module_host = ModuleHost::new(config.module_host.clone());
         let pools = PoolRegistry::new(PoolLimits {
@@ -240,6 +247,8 @@ impl Runtime {
                 metrics,
                 visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 public_limiter: Arc::new(public_functions::PublicLimiter::default()),
+                visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
+                parent_acl: visibility::ParentAclRegistry::default(),
             }),
         }
     }
