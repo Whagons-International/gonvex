@@ -26,5 +26,19 @@
     "lastFired": null,
     "measurement": "Measured node --test scripts/release-staging.test.mjs including startup; rejects wrong SHA, stable versions, dirty state and failed/pending CI",
     "retainedRules": "No existing rule removed; this guards the authorized release boundary."
+  },
+  {
+    "id": "G1-visibility-no-fanout",
+    "rule": "Count visibility SQL, snapshots and principal rebuilds in real multi-member Replica Collection feed scenarios",
+    "origin": "Whagons staging visibility fan-out incident, 2026-10-29; approvals.decideByTask pinned the Rust runtime for approximately 60 seconds",
+    "why": "Data-table visibility sets and budgeted-source invalidation made an ordinary task write rerun visibility SQL across unrelated connections",
+    "cost": {
+      "seconds": null,
+      "contextTokens": 0
+    },
+    "falsePositives": 0,
+    "lastFired": null,
+    "measurement": "No execution-time measurement yet. CI uses 200 fixture members plus one duplicate connection. Deterministic budgets require zero visibility SQL and snapshots for task inserts/updates/deletes, grant work restricted to named members, one principal rebuild for a single-member permission change, and inherited children delivered only to the newly authorized member. Test: rust/crates/runtime/tests/visibility_fanout.rs. Run with GONVEX_TEST_POSTGRES_URL and GONVEX_TEST_MODULE_HOST_BINARY. GONVEX_VIS_FANOUT_MEMBERS changes fixture size.",
+    "retainedRules": "No existing rule removed. Counts enforce the observed regression budget rather than wall-clock timing."
   }
 ]
