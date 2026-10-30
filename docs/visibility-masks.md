@@ -225,3 +225,123 @@ runtime budgets.
 Both repositories require ready, linked PRs against staging, local targeted
 validation, and explicit follow-ups for the legacy rejection flip and any
 omitted Verus proof. Neither PR may be merged or deployed under this task.
+
+## Frozen version 2 SDK and manifest contract
+
+The following is the client migration target. Fields use camelCase in both
+TypeScript and generated JSON. Existing unversioned plans remain the legacy
+format during rollout. Version 2 runtime execution is still being implemented;
+do not deploy a version 2 manifest before runtime integration is complete.
+
+```ts
+type MaskPlan = {
+  version: 2;
+  table: string;
+  key: string;
+  permissionTables: readonly string[];
+  sets: Readonly<Record<string, {
+    kind: "principal" | "grant";
+    table: string;
+    alias?: string;
+    select: string;
+    selectFrom?: string;
+    joins: readonly {
+      table: string;
+      alias?: string;
+      leftAlias?: string;
+      leftColumn: string;
+      rightColumn: string;
+    }[];
+    where: readonly {
+      table: string;
+      column: string;
+      context?: "member.id" | "account.id";
+      value?: { literal: JsonValue };
+    }[];
+  }>>;
+  where: MaskExpression;
+};
+type MaskExpression =
+  | { operator: "public" }
+  | { operator: "role" | "permission"; value: string }
+  | { operator: "eq"; column: string; value: { literal: JsonValue } }
+  | { operator: "eqContext"; column: string; context: "member.id" | "account.id" }
+  | { operator: "inSet"; column: string; set: string }
+  | { operator: "nonEmpty"; set: string }
+  | { operator: "inherits"; column: string; table: string; key: string }
+  | { operator: "and" | "or"; children: readonly MaskExpression[] }
+  | { operator: "not"; children: readonly [MaskExpression] };
+```
+
+`permissionTables` is an explicit per-plan declaration, copied from the app's
+canonical permission-table list. Runtime principal sharing keys include the
+canonical set declaration and tenant/member identity. Equivalent declarations
+across plans share token values. Permission-table declarations must agree
+across the module. A declaration never makes a table's rows public.
+
+A `principal` set's base table and every joined table must be declared permission
+tables. A `grant` set's base is its single grant source; every joined table must
+be a declared permission table. Grant constraints must anchor on `member.id` or
+`account.id`, directly or on a joined permission occurrence. The runtime derives
+member routing and reachable join keys from these equality joins and anchors.
+Principal sets without a member/account anchor are tenant-global and shared once
+per tenant. Neither kind may read or join its plan's own source table.
+
+`nonEmpty` tests the resolved set's cardinality, independently of the current
+row. It has no `column` field. `inSet` compares a row column to set tokens.
+`inherits` looks up `row[column]` in the declared parent table by `key`, and
+applies that table's visibility plan to the shared parent ACL projection.
+Missing/deleted parents and null foreign keys deny access. It is an expression,
+so independent access grants can be combined with it using `or`; multiple
+required parents can be combined with `and`. Parent `key` must equal the parent
+plan's declared key. The module validator rejects inheritance cycles and chains
+deeper than four edges. Four is a contract limit for this first implementation,
+not a measured performance threshold.
+
+The permission-table `where` constraints, join occurrence aliases, literal
+wrapping, and column names retain existing semantics. There is no implicit
+soft-delete filtering. Carry all existing `deletedAt`, `revokedAt`, status, and
+personal-space constraints into the replacement declarations.
+
+Example task mask and child plan, serialized exactly as JSON:
+
+```json
+{
+  "version": 2,
+  "table": "tasks",
+  "key": "_id",
+  "permissionTables": ["memberTeams", "workspaceTeams"],
+  "sets": {
+    "workspaces": {
+      "kind": "principal", "table": "workspaceTeams", "select": "workspaceId",
+      "joins": [{"table": "memberTeams", "leftColumn": "teamId", "rightColumn": "teamId"}],
+      "where": [{"table": "memberTeams", "column": "memberId", "context": "member.id"}]
+    },
+    "assigned": {
+      "kind": "grant", "table": "taskUsers", "select": "taskId", "joins": [],
+      "where": [{"table": "taskUsers", "column": "userId", "context": "member.id"}]
+    }
+  },
+  "where": {"operator": "or", "children": [
+    {"operator": "inSet", "column": "workspaceId", "set": "workspaces"},
+    {"operator": "inSet", "column": "_id", "set": "assigned"}
+  ]}
+}
+```
+
+```json
+{
+  "version": 2,
+  "table": "taskNotes",
+  "key": "_id",
+  "permissionTables": ["memberTeams", "workspaceTeams"],
+  "sets": {},
+  "where": {"operator": "inherits", "column": "taskId", "table": "tasks", "key": "_id"}
+}
+```
+
+These examples illustrate the wire format only. The client task mask must also
+preserve spot, personal-space, creator, reporter, approval, context, and share
+rules. A member flag uses, for example,
+`{"operator":"nonEmpty","set":"seeAllSpots"}`, where `seeAllSpots` is a
+permission-only principal set constrained to that flag's existing truth rule.

@@ -510,11 +510,14 @@ export type LiveQueryPlan = {
   readonly serverOnly?: boolean;
 };
 
-export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "and" | "or" | "not";
+export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "inherits" | "and" | "or" | "not";
 export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 export type VisibilityLiteral = { readonly literal: JsonValue };
 
 export type VisibilityPlan = {
+  /** Version 2 uses permission-only principal sets and single-source grant sets. */
+  readonly version?: 2;
+  readonly permissionTables?: readonly string[];
   readonly table: string;
   readonly key: string;
   readonly sets: Readonly<Record<string, VisibilitySet>>;
@@ -522,6 +525,8 @@ export type VisibilityPlan = {
 };
 
 export type VisibilitySet = {
+  /** Required for version 2; omitted only in legacy manifests. */
+  readonly kind?: "principal" | "grant";
   readonly table: string;
   /** Logical SQL name. Required when the same physical table occurs twice. */
   readonly alias?: string;
@@ -554,6 +559,7 @@ export type VisibilityExpression =
   | { readonly operator: "permission" | "role"; readonly value: string }
   | { readonly operator: "eq"; readonly column: string; readonly value: VisibilityLiteral }
   | { readonly operator: "eqContext"; readonly column: string; readonly context: VisibilityContextKey }
+  | { readonly operator: "inherits"; readonly column: string; readonly table: string; readonly key: string }
   | { readonly operator: "nonEmpty"; readonly set: string }
   | { readonly operator: "inSet"; readonly column: string; readonly set: string }
   | { readonly operator: "and" | "or"; readonly children: readonly VisibilityExpression[] }
@@ -833,7 +839,7 @@ const validateStructuredQueryPlan: (value: unknown, path: string) => asserts val
   }
 };
 
-const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "and", "or", "not"]);
+const visibilityOperators = new Set<VisibilityOperator>(["public", "permission", "role", "eq", "eqContext", "inSet", "nonEmpty", "inherits", "and", "or", "not"]);
 const visibilityContexts = new Set<VisibilityContextKey>(["account.id", "member.id", "tenant.id"]);
 
 const validateExactObject: (
@@ -878,7 +884,7 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
   sets,
   ancestors = new Set(),
 ) => {
-  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children"]);
+  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children", "table", "key"]);
   if (ancestors.has(value)) throw new Error(`${path} contains a cycle`);
   const operator = value.operator;
   if (typeof operator !== "string" || !visibilityOperators.has(operator as VisibilityOperator)) {
@@ -905,6 +911,12 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
       validateExactObject(value, path, ["operator", "column", "context"]);
       requireVisibilityString(value.column, `${path}.column`);
       validateVisibilityContext(value.context, `${path}.context`);
+      return;
+    case "inherits":
+      validateExactObject(value, path, ["operator", "column", "table", "key"]);
+      requireVisibilityString(value.column, `${path}.column`);
+      requireVisibilityString(value.table, `${path}.table`);
+      requireVisibilityString(value.key, `${path}.key`);
       return;
     case "nonEmpty": {
       validateExactObject(value, path, ["operator", "set"]);
@@ -938,21 +950,43 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
 };
 
 const validateVisibilityPlan: (value: unknown, path: string) => asserts value is VisibilityPlan = (value, path) => {
-  validateExactObject(value, path, ["table", "key", "sets", "where"]);
+  validateExactObject(value, path, ["version", "permissionTables", "table", "key", "sets", "where"]);
   requireVisibilityString(value.table, `${path}.table`);
   requireVisibilityString(value.key, `${path}.key`);
+  if (value.version !== undefined && value.version !== 2) throw new Error(`${path}.version must be 2`);
+  if (value.version === 2) {
+    if (!Array.isArray(value.permissionTables)) throw new Error(`${path}.permissionTables must declare permission tables`);
+    value.permissionTables.forEach((table, index) => requireVisibilityString(table, `${path}.permissionTables[${index}]`));
+    if (new Set(value.permissionTables).size !== value.permissionTables.length) throw new Error(`${path}.permissionTables contains duplicates`);
+  } else if (value.permissionTables !== undefined) {
+    throw new Error(`${path}.permissionTables requires version 2`);
+  }
+
   if (!isRecord(value.sets)) throw new Error(`${path}.sets must be an object`);
 
   for (const [name, candidate] of Object.entries(value.sets)) {
     requireVisibilityString(name, `${path}.sets key`);
     const setPath = `${path}.sets.${name}`;
-    validateExactObject(candidate, setPath, ["table", "alias", "select", "selectFrom", "joins", "where"]);
+    validateExactObject(candidate, setPath, ["kind", "table", "alias", "select", "selectFrom", "joins", "where"]);
     requireVisibilityString(candidate.table, `${setPath}.table`);
     if (candidate.alias !== undefined) requireVisibilityString(candidate.alias, `${setPath}.alias`);
     requireVisibilityString(candidate.select, `${setPath}.select`);
     if (candidate.selectFrom !== undefined) requireVisibilityString(candidate.selectFrom, `${setPath}.selectFrom`);
     if (!Array.isArray(candidate.joins)) throw new Error(`${setPath}.joins must be an array`);
     const joins = candidate.joins as unknown as VisibilityJoin[];
+    if (value.version === 2) {
+      const permissions = new Set(value.permissionTables as string[]);
+      const fix = "use a permission-only principal set, a single-source grant set, or inherits";
+      if (candidate.kind !== "principal" && candidate.kind !== "grant") throw new Error(`${setPath}.kind must be principal or grant; ${fix}`);
+      if (candidate.table === value.table || joins.some((join) => join.table === value.table)) throw new Error(`${setPath} reads its own source table ${value.table}; ${fix}`);
+      if (candidate.kind === "principal" && !permissions.has(candidate.table as string)) throw new Error(`${setPath} reads undeclared permission table ${candidate.table}; ${fix}`);
+      for (const join of joins) {
+        if (!permissions.has(join.table)) throw new Error(`${setPath} joins data table ${join.table}; ${fix}`);
+      }
+    } else if (candidate.kind !== undefined) {
+      throw new Error(`${setPath}.kind requires version 2`);
+    }
+
     joins.forEach((join, index) => {
       const joinPath = `${setPath}.joins[${index}]`;
       validateExactObject(join, joinPath, ["table", "alias", "leftAlias", "leftColumn", "rightColumn"]);
@@ -997,6 +1031,14 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
     });
   }
 
+  if (value.version === 2) {
+    for (const [name, set] of Object.entries(value.sets as Record<string, VisibilitySet>)) {
+      if (set.kind === "grant" && !set.where.some((constraint) => constraint.context === "member.id" || constraint.context === "account.id")) {
+        throw new Error(`${path}.sets.${name} grant requires a member.id or account.id anchor`);
+      }
+      if (set.where.some((constraint) => constraint.context === "tenant.id")) throw new Error(`${path}.sets.${name} version 2 does not accept tenant.id context`);
+    }
+  }
   validateVisibilityExpression(value.where, `${path}.where`, value.sets as Record<string, VisibilitySet>);
 };
 
@@ -1025,6 +1067,7 @@ const freezeVisibilityPlan = (plan: VisibilityPlan): VisibilityPlan => {
   return freeze({
     ...plan,
     sets: freeze(sets),
+    ...(plan.permissionTables === undefined ? {} : { permissionTables: freeze([...plan.permissionTables]) }),
     where: freezeVisibilityExpression(plan.where),
   });
 };

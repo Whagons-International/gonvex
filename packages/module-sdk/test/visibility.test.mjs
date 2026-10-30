@@ -165,3 +165,23 @@ test("visibility validates principal nonEmpty flags without a row column", () =>
   assert.throws(() => visibility({ ...validPlan(), where: { operator: "nonEmpty", set: "missing" } }), /unknown visibility set missing/);
   assert.throws(() => visibility({ ...validPlan(), where: { ...where, column: "teamId" } }), /column/);
 });
+
+
+test("version 2 freezes permission declarations and supports inherited masks", () => {
+  const plan = visibility({ ...validPlan(), version: 2, permissionTables: ["memberTeams", "members"], sets: { teams: { ...validPlan().sets.teams, kind: "principal" } }, where: { operator: "inherits", column: "taskId", table: "tasks", key: "id" } });
+  assert.ok(Object.isFrozen(plan.permissionTables));
+  assert.equal(plan.where.table, "tasks");
+});
+
+test("version 2 rejects self-reading and data joins with a migration hint", () => {
+  const make = (set) => ({ ...validPlan(), version: 2, permissionTables: ["members"], sets: { teams: set } });
+  assert.throws(() => visibility(make({ ...validPlan().sets.teams, kind: "principal" })), /sets.teams.*permission.*inherits/);
+  assert.throws(() => visibility(make({ ...validPlan().sets.teams, kind: "grant", table: "tasks" })), /sets.teams.*own source.*inherits/);
+  assert.throws(() => visibility(make({ ...validPlan().sets.teams, kind: "grant", joins: [{ table: "documents", leftColumn: "id", rightColumn: "id" }] })), /sets.teams.*data table documents.*inherits/);
+});
+
+test("version 2 accepts directly anchored grants and rejects global grants", () => {
+  const plan = { version: 2, table: "tasks", key: "id", permissionTables: [], sets: { assigned: { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] } }, where: { operator: "inSet", column: "id", set: "assigned" } };
+  assert.equal(visibility(plan).sets.assigned.kind, "grant");
+  assert.throws(() => visibility({ ...plan, sets: { assigned: { ...plan.sets.assigned, where: [] } } }), /assigned.*anchor/);
+});
