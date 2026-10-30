@@ -26,6 +26,7 @@ Document unresolved gaps rather than calling a subsystem fully verified.
 | SYNC-1 | Duplicate/stale frames cannot undo newer authorized data; reconnect eventually catches up under explicit progress assumptions. | Revision primitive proofs and storage/lifecycle regressions exist. Full merge, snapshot/epoch transitions and recovery protocol remain unproved. |
 | AUTH-1 | Old account/tenant/subscription operations cannot publish into a new owner. | Lifecycle regression coverage exists. Need source-linked ownership transitions and tests across every async boundary. Authorization-policy enforcement is separate from callback ownership. |
 | RES-1 | Resource permits, deadlines and credits remain correctly owned through cancellation and cleanup. | Smaller Rust policy/credit proofs exist. Need composition with actual lifetime/cleanup paths and failure tests. |
+| VIS-1 | Visibility feed checks are pure; ordinary data writes cause no visibility SQL or full snapshots; permission work is scoped and shared per affected member. | SDK/CLI schema guards, evaluator boundary checks, counters and a PostgreSQL fan-out fixture exist. Integrated budget measurements and a source-extracted Verus proof remain pending; see visibility-masks.md. No formal guarantee claimed. |
 | UPG-1 | Supported persisted/protocol versions recover without silently changing ordering or completeness. | Adapter/revision-upgrade tests exist. Need an explicit compatibility matrix, migration contracts and older-state restart evidence. |
 
 ## First end-to-end milestone
