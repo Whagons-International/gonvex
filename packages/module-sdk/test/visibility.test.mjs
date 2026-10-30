@@ -221,3 +221,32 @@ test("anchored grants may read their source anywhere, but neither kind may join 
     assert.throws(() => visibility({ ...base, sets: { assigned: { ...assigned, kind, table: "memberTeams", joins: [{ table: "taskUsers", leftColumn: "memberId", rightColumn: "userId" }] } } }), /assigned.*own source/);
   }
 });
+
+test("derived sets map a token set through a foreign keyed index and freeze literal filters", () => {
+  const base = validPlan();
+  const plan = visibility({ ...base, version: 2, permissionTables: ["memberTeams", "members"], sets: {
+    teams: { ...base.sets.teams, kind: "principal" },
+    mapped: { kind: "derived", from: "teams", table: "teams", key: "id", select: "workspaceId", where: [{ column: "deletedAt", value: { literal: null } }] },
+    twice: { kind: "derived", from: "mapped", table: "workspaces", key: "id", select: "categoryId", joins: [], where: [] },
+  }, where: { operator: "nonEmpty", set: "twice" } });
+  assert.equal(plan.sets.mapped.from, "teams");
+  assert.equal(plan.sets.mapped.joins, undefined);
+  assert.ok(Object.isFrozen(plan.sets.mapped.where[0].value));
+});
+
+test("derived rejects unknown sources, own-table mappings, joins, contexts, cycles and overdeep chains", () => {
+  const derived = { kind: "derived", from: "seed", table: "teams", key: "id", select: "workspaceId", where: [] };
+  const seed = { kind: "principal", table: "members", select: "id", joins: [], where: [] };
+  const make = (sets) => ({ version: 2, table: "tasks", key: "id", permissionTables: ["members"], sets: { seed, ...sets }, where: { operator: "public" } });
+  for (const [patch, message] of [
+    [{ from: "missing" }, /unknown set missing/],
+    [{ table: "tasks" }, /another table/],
+    [{ key: "" }, /key/],
+    [{ joins: [{ table: "members", leftColumn: "id", rightColumn: "id" }] }, /joins/],
+    [{ where: [{ column: "id", context: "member.id" }] }, /context/],
+    [{ where: [{ table: "teams", column: "id", value: { literal: null } }] }, /table/],
+    [{ where: [{ column: "id", value: null }] }, /value/],
+  ]) assert.throws(() => visibility(make({ mapped: { ...derived, ...patch } })), message);
+  assert.throws(() => visibility(make({ a: { ...derived, from: "b" }, b: { ...derived, from: "a" } })), /cycle/);
+  assert.throws(() => visibility(make({ a: { ...derived }, b: { ...derived, from: "a" }, c: { ...derived, from: "b" } })), /limited to two/);
+});

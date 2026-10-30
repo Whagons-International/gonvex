@@ -395,3 +395,69 @@ source table to Gabriel. The likely replacement is a row column maintained in
 the same Reducer transaction as the existence-changing write. Check this policy
 for forms/formVersions templateForms, formSubmissions linkedSubmissions, centers,
 and every other inverse-existence plan before claiming parity or no fan-out.
+
+## Approved derived sets, runtime 6b8c72e1
+
+Version 2 also accepts `kind: "derived"`. The exact shape is:
+
+```ts
+type VisibilityDerivedSet = {
+  kind: "derived";
+  from: string;
+  table: string;
+  key: string;
+  select: string;
+  joins?: readonly [];
+  where: readonly { column: string; value: { literal: JsonValue } }[];
+};
+```
+
+```json
+{
+  "kind": "derived",
+  "from": "assignedTasks",
+  "table": "tasks",
+  "key": "_id",
+  "select": "categoryId",
+  "where": [{"column":"deletedAt","value":{"literal":null}}]
+}
+```
+
+For each token in `sets[from]`, look up the indexed row in `table` whose `key`
+equals that token. Keep rows satisfying every literal `where` condition, then
+materialize their non-null `select` values. Missing indexed rows contribute
+nothing. `from` names another set in the same plan. Derived dependencies are
+acyclic and contain at most two derived sets on a chain; the seed may be a
+principal or anchored grant set. `table` must differ from the plan's source.
+There are no joins, member contexts, aliases or selectFrom in a derived set.
+An omitted joins field and `joins: []` are equivalent and supported.
+
+The tenant-shared index stores one projected row per key. Derived sets are
+single-row mappings, not foreign-key multimaps, joins, intersections or arbitrary
+inverse-existence queries. They require an existing token seed. Do not use them
+to invent an unanchored universe of frequently written data rows.
+
+### Non-null token semantics
+
+In version 2, every principal, grant and derived set contains materialized
+non-null tokens only. Null and missing selected values contribute nothing.
+`nonEmpty(set)` means there is at least one non-null token; `inSet` never matches
+a null or missing row column. Literal filters still compare null as documented,
+including matching a missing indexed-row column to `{literal:null}`. Filtering
+on null does not cause a null selected value to become a token.
+
+Client v2 evaluators must apply the same selection filtering. If a legacy EXISTS
+rule counted rows whose selected column could be null, choose a non-null column,
+usually the key, for that flag set and prove old/new parity. Do not silently
+reinterpret a row-existence flag as a nullable-token-existence flag.
+
+### Accepted principal-sharing follow-up
+
+The integrated feed head fc33b110 routes expensive work to the affected member's
+connections, but does not yet share principal rebuilds across those connections
+or across their subscriptions. With 201 connections, the two connections of m1
+rebuilt four collection principals for one membership change. Cross-connection
+principal sharing is an explicit follow-up, not an achieved part of V3 in this
+implementation. Tenant-shared parent/derived indexes remain implemented. Token-
+indexed connection routing is a separate follow-up; pure relevance checks may
+still visit unrelated connections in memory.

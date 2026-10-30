@@ -524,7 +524,21 @@ export type VisibilityPlan = {
   readonly where: VisibilityExpression;
 };
 
-export type VisibilitySet = {
+export type VisibilitySet = VisibilityRelationalSet | VisibilityDerivedSet;
+
+export type VisibilityDerivedSet = {
+  readonly kind: "derived";
+  readonly from: string;
+  readonly table: string;
+  readonly key: string;
+  readonly select: string;
+  readonly joins?: readonly [];
+  readonly alias?: never;
+  readonly selectFrom?: never;
+  readonly where: readonly { readonly column: string; readonly value: VisibilityLiteral; readonly context?: never; readonly table?: never }[];
+};
+
+export type VisibilityRelationalSet = {
   /** Required for version 2; omitted only in legacy manifests. */
   readonly kind?: "principal" | "grant";
   readonly table: string;
@@ -968,6 +982,21 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
   for (const [name, candidate] of Object.entries(value.sets)) {
     requireVisibilityString(name, `${path}.sets key`);
     const setPath = `${path}.sets.${name}`;
+    if (isRecord(candidate) && candidate.kind === "derived") {
+      validateExactObject(candidate, setPath, ["kind", "from", "table", "key", "select", "joins", "where"]);
+      if (value.version !== 2) throw new Error(`${setPath}.kind derived requires version 2`);
+      for (const field of ["from", "table", "key", "select"] as const) requireVisibilityString(candidate[field], `${setPath}.${field}`);
+      if (candidate.table === value.table) throw new Error(`${setPath} derived must map through another table`);
+      if (candidate.joins !== undefined && (!Array.isArray(candidate.joins) || candidate.joins.length !== 0)) throw new Error(`${setPath} derived does not allow joins`);
+      if (!Array.isArray(candidate.where)) throw new Error(`${setPath}.where must be an array`);
+      candidate.where.forEach((constraint, index) => {
+        const constraintPath = `${setPath}.where[${index}]`;
+        validateExactObject(constraint, constraintPath, ["column", "value"]);
+        requireVisibilityString(constraint.column, `${constraintPath}.column`);
+        validateVisibilityLiteral(constraint.value, `${constraintPath}.value`);
+      });
+      continue;
+    }
     validateExactObject(candidate, setPath, ["kind", "table", "alias", "select", "selectFrom", "joins", "where"]);
     requireVisibilityString(candidate.table, `${setPath}.table`);
     if (candidate.alias !== undefined) requireVisibilityString(candidate.alias, `${setPath}.alias`);
@@ -1040,6 +1069,16 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
       if (set.where.some((constraint) => constraint.context === "tenant.id")) throw new Error(`${path}.sets.${name} version 2 does not accept tenant.id context`);
     }
   }
+  const derivedSets = value.sets as Record<string, VisibilitySet>;
+  const visitDerived = (name: string, pathNames: string[]): void => {
+    if (pathNames.includes(name)) throw new Error(`${path}.sets.${name} derived cycle: ${[...pathNames, name].join(" -> ")}`);
+    const set = derivedSets[name];
+    if (!set) throw new Error(`${path}.sets derived from unknown set ${name}`);
+    if (set.kind !== "derived") return;
+    if (pathNames.length >= 2) throw new Error(`${path}.sets.${name} derived chains are limited to two sets`);
+    visitDerived(set.from, [...pathNames, name]);
+  };
+  for (const name of Object.keys(derivedSets)) visitDerived(name, []);
   validateVisibilityExpression(value.where, `${path}.where`, value.sets as Record<string, VisibilitySet>);
 };
 
@@ -1082,12 +1121,12 @@ const freezeVisibilityPlan = (plan: VisibilityPlan): VisibilityPlan => {
     const set = plan.sets[name]!;
     sets[name] = freeze({
       ...set,
-      joins: freeze(set.joins.map((join) => freeze({ ...join }))),
+      ...(set.joins === undefined ? {} : { joins: freeze(set.joins.map((join) => freeze({ ...join }))) }),
       where: freeze(set.where.map((constraint) => freeze({
         ...constraint,
         value: constraint.value === undefined ? undefined : freeze({ ...constraint.value }),
       }))),
-    });
+    } as VisibilitySet);
   }
   return freeze({
     ...plan,

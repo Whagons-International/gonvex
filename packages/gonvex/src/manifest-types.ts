@@ -129,12 +129,14 @@ export type VisibilityPlan = {
 };
 
 export type VisibilitySet = {
-  kind?: "principal" | "grant";
+  kind?: "principal" | "grant" | "derived";
+  from?: string;
+  key?: string;
   table: string;
   alias?: string;
   select: string;
   selectFrom?: string;
-  joins: VisibilityJoin[];
+  joins?: VisibilityJoin[];
   where: VisibilityConstraint[];
 };
 
@@ -147,7 +149,7 @@ export type VisibilityJoin = {
 };
 
 export type VisibilityConstraint = {
-  table: string;
+  table?: string;
   column: string;
   /** Exactly one of context or value. */
   context?: VisibilityContextKey;

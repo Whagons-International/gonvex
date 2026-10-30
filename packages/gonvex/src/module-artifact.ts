@@ -379,6 +379,24 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
     const selectFrom = stringMember(candidate, "selectFrom");
     const rawJoins = readMember(candidate, "joins");
     const rawWhere = readMember(candidate, "where");
+    if (stringMember(candidate, "kind") === "derived") {
+      const fail = (reason: string): never => { throw new Error(`visibility ${table} set ${name}: derived ${reason}`); };
+      if (!isJsonObject(candidate) || Object.keys(candidate).some((field) => !["kind", "from", "table", "key", "select", "joins", "where"].includes(field))) fail("allows only from, table, key, select and literal where");
+      const from = stringMember(candidate, "from");
+      const derivedKey = stringMember(candidate, "key");
+      if (version !== 2 || !setTable || !select || !from || !derivedKey) fail("requires version 2, from, table, key and select");
+      if (setTable === table) fail("must map through another table");
+      if (rawJoins !== undefined && (!Array.isArray(rawJoins) || rawJoins.length !== 0)) fail("does not allow joins");
+      if (!Array.isArray(rawWhere)) fail("where must be an array");
+      const constraints = (rawWhere as JsonValue[]).map((constraint) => {
+        const column = stringMember(constraint, "column");
+        const literal = readMember(constraint, "value");
+        if (!isJsonObject(constraint) || Object.keys(constraint).some((field) => !["column", "value"].includes(field)) || !column || !isJsonObject(literal) || Object.keys(literal).length !== 1 || !("literal" in literal)) fail("filters require column and literal value only");
+        return { column: column!, value: literal as { literal: JsonValue } };
+      });
+      sets[name] = { kind: "derived", from: from!, table: setTable!, key: derivedKey!, select: select!, where: constraints, ...(rawJoins === undefined ? {} : { joins: [] }) };
+      continue;
+    }
     if (!setTable || !select || !Array.isArray(rawJoins) || !Array.isArray(rawWhere)) return undefined;
     const joins = rawJoins.map((join) => ({
       table: stringMember(join, "table") ?? "",
@@ -426,6 +444,15 @@ function parseVisibilityPlan(value: JsonValue | undefined): VisibilityPlan | und
       where: constraints,
     };
   }
+  const visitDerived = (name: string, path: string[]): void => {
+    if (path.includes(name)) throw new Error(`visibility ${table} set ${name}: derived cycle`);
+    const set = sets[name];
+    if (!set) throw new Error(`visibility ${table}: derived from unknown set ${name}`);
+    if (set.kind !== "derived") return;
+    if (path.length >= 2) throw new Error(`visibility ${table} set ${name}: derived chains are limited to two sets`);
+    visitDerived(set.from!, [...path, name]);
+  };
+  for (const name of Object.keys(sets)) visitDerived(name, []);
   if (!visibilityExpressionSetsExist(where, sets)) return undefined;
   return { ...(version === 2 ? { version: 2 as const, permissionTables: permissionTables as string[] } : {}), table, key, sets, where };
 }

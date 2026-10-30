@@ -643,3 +643,24 @@ test("code generation retains self-source grants outside orphan fallbacks", asyn
     await assert.rejects(buildModuleArtifact({ root: fixture.root, backendDir: fixture.backendDir, files: [fixture.entrypoint], migrations: [] }), /set assigned: reads its own source table/);
   }
 });
+
+test("code generation retains derived set shapes and rejects unsafe derivations", async (t) => {
+  const seed = { kind: "principal", table: "members", select: "id", joins: [], where: [] };
+  const derived = { kind: "derived", from: "seed", table: "teams", key: "id", select: "workspaceId", where: [{ column: "deletedAt", value: { literal: null } }] };
+  const make = (sets) => ({ version: 2, table: "tasks", key: "id", permissionTables: ["members"], sets: { seed, ...sets }, where: { operator: "nonEmpty", set: "mapped" } });
+  const build = async (t, plan) => {
+    const project = await moduleProject(t, `const visibility = x => x; export const tasksVisibility = visibility(${JSON.stringify(plan)});`);
+    return buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  };
+  const valid = make({ mapped: derived, twice: { ...derived, from: "mapped", table: "workspaces", joins: [] } });
+  assert.deepEqual((await build(t, valid)).visibility.tasks, valid);
+  for (const [name, sets, message] of [
+    ["unknown", { mapped: { ...derived, from: "missing" } }, /unknown set/],
+    ["own", { mapped: { ...derived, table: "tasks" } }, /another table/],
+    ["joins", { mapped: { ...derived, joins: [{ table: "members", leftColumn: "id", rightColumn: "id" }] } }, /joins/],
+    ["context", { mapped: { ...derived, where: [{ column: "id", context: "member.id" }] } }, /literal/],
+    ["table", { mapped: { ...derived, where: [{ table: "teams", column: "id", value: { literal: null } }] } }, /literal/],
+    ["cycle", { mapped: { ...derived, from: "b" }, b: { ...derived, from: "mapped" } }, /cycle/],
+    ["depth", { mapped: derived, b: { ...derived, from: "mapped" }, c: { ...derived, from: "b" } }, /limited to two/],
+  ]) await t.test(name, async (t) => assert.rejects(build(t, make(sets)), message));
+});
