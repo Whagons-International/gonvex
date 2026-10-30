@@ -172,7 +172,13 @@ impl ParentAclRegistry {
         let columns = acl_columns(parent);
         let projection = columns
             .iter()
-            .map(|column| Ok(format!("{}, r.{}", sql_text_literal(column), quote(column)?)))
+            .map(|column| {
+                Ok(format!(
+                    "{}, r.{}",
+                    sql_text_literal(column),
+                    quote(column)?
+                ))
+            })
             .collect::<Result<Vec<_>, VisibilityError>>()?
             .join(", ");
         let statement = format!(
@@ -238,7 +244,10 @@ impl ParentAclRegistry {
                             columns
                                 .iter()
                                 .map(|column| {
-                                    (column.clone(), row.get(column).cloned().unwrap_or(Value::Null))
+                                    (
+                                        column.clone(),
+                                        row.get(column).cloned().unwrap_or(Value::Null),
+                                    )
                                 })
                                 .collect(),
                         )
@@ -370,7 +379,13 @@ impl VisibilityPlan {
                 if set.kind != "principal" && set.kind != "grant" {
                     return Err(invalid("kind must be principal or grant".into()));
                 }
-                if set.table == self.table || set.joins.iter().any(|join| join.table == self.table)
+                // A grant set may read its own source table (for example the
+                // assignment rows of tasks a member is assigned to): its rows
+                // are patched in memory and route only to the members they
+                // name. A principal set over its own source would make every
+                // source write a principal change, which is the fan-out V2 bans.
+                if (set.kind != "grant" && set.table == self.table)
+                    || set.joins.iter().any(|join| join.table == self.table)
                 {
                     return Err(invalid("reads its own source table".into()));
                 }
@@ -529,10 +544,17 @@ impl VisibilityPlan {
             let names_member = [old, new]
                 .into_iter()
                 .filter(|row| !row.is_null())
-                .any(|row| row.get("id").and_then(Value::as_str).is_none_or(|id| Some(id) == member));
+                .any(|row| {
+                    row.get("id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|id| Some(id) == member)
+                });
             let relevant = !operation.eq_ignore_ascii_case("update")
                 || changed_columns.iter().any(|column| {
-                    matches!(column.as_str(), "id" | "account_id" | "status" | "role" | "permissions")
+                    matches!(
+                        column.as_str(),
+                        "id" | "account_id" | "status" | "role" | "permissions"
+                    )
                 });
             if names_member && relevant {
                 return true;
@@ -542,7 +564,11 @@ impl VisibilityPlan {
         active_visibility_sets(&self.predicate, &resolved.role, &mut active);
         for name in &active {
             let set = &self.sets[name];
-            let base = if set.alias.is_empty() { set.table.as_str() } else { set.alias.as_str() };
+            let base = if set.alias.is_empty() {
+                set.table.as_str()
+            } else {
+                set.alias.as_str()
+            };
             let mut occurrences = Vec::new();
             if set.kind != "grant" {
                 occurrences.push((set.table.as_str(), base));
@@ -550,13 +576,18 @@ impl VisibilityPlan {
             for join in &set.joins {
                 occurrences.push((
                     join.table.as_str(),
-                    if join.alias.is_empty() { join.table.as_str() } else { join.alias.as_str() },
+                    if join.alias.is_empty() {
+                        join.table.as_str()
+                    } else {
+                        join.alias.as_str()
+                    },
                 ));
             }
             if !occurrences.iter().any(|(source, _)| *source == table) {
                 continue;
             }
-            let dependencies = self.dependency_columns_for_sets(Some(&BTreeSet::from([name.clone()])));
+            let dependencies =
+                self.dependency_columns_for_sets(Some(&BTreeSet::from([name.clone()])));
             if !dependencies.change_affects(table, operation, changed_columns) {
                 continue;
             }
@@ -578,7 +609,10 @@ impl VisibilityPlan {
                 }
                 for row in [old, new].into_iter().filter(|row| !row.is_null()) {
                     let excludes = anchors.iter().any(|anchor| {
-                        match (row.get(&anchor.column), resolved.direct.get(&anchor.context)) {
+                        match (
+                            row.get(&anchor.column),
+                            resolved.direct.get(&anchor.context),
+                        ) {
                             (Some(value), Some(expected)) => scalar(Some(value)) != *expected,
                             _ => false,
                         }
@@ -616,7 +650,10 @@ impl VisibilityPlan {
 
     /// Child columns that reference each directly inherited parent table.
     pub fn inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
-        fn visit(expression: &VisibilityExpression, output: &mut BTreeMap<String, BTreeSet<String>>) {
+        fn visit(
+            expression: &VisibilityExpression,
+            output: &mut BTreeMap<String, BTreeSet<String>>,
+        ) {
             if expression.operator == "inherits" {
                 output
                     .entry(expression.table.clone())
@@ -1023,7 +1060,11 @@ pub fn resolve_with_parents<'a>(
 /// principal set selecting the first join's key. None when a later join hangs
 /// off the grant row itself, which cannot be decided from permission tokens.
 pub fn grant_join_set(set: &VisibilitySet) -> Option<VisibilitySet> {
-    let base = if set.alias.is_empty() { &set.table } else { &set.alias };
+    let base = if set.alias.is_empty() {
+        &set.table
+    } else {
+        &set.alias
+    };
     let first = set.joins.first()?;
     if !first.left_alias.is_empty() && &first.left_alias != base {
         return None;
@@ -1039,7 +1080,11 @@ pub fn grant_join_set(set: &VisibilitySet) -> Option<VisibilitySet> {
     if !set.select_from.is_empty() && &set.select_from != base {
         return None;
     }
-    let first_alias = if first.alias.is_empty() { first.table.clone() } else { first.alias.clone() };
+    let first_alias = if first.alias.is_empty() {
+        first.table.clone()
+    } else {
+        first.alias.clone()
+    };
     Some(VisibilitySet {
         kind: "principal".to_owned(),
         table: first.table.clone(),
@@ -1064,7 +1109,11 @@ pub fn grant_join_set(set: &VisibilitySet) -> Option<VisibilitySet> {
             .iter()
             .filter(|constraint| !constraint.table.is_empty() && &constraint.table != base)
             .map(|constraint| VisibilityConstraint {
-                table: if constraint.table == first_alias { String::new() } else { constraint.table.clone() },
+                table: if constraint.table == first_alias {
+                    String::new()
+                } else {
+                    constraint.table.clone()
+                },
                 ..constraint.clone()
             })
             .collect(),
@@ -1093,7 +1142,11 @@ pub fn grant_contribution(
     let Some(row) = row.as_object() else {
         return GrantContribution::None;
     };
-    let base = if set.alias.is_empty() { &set.table } else { &set.alias };
+    let base = if set.alias.is_empty() {
+        &set.table
+    } else {
+        &set.alias
+    };
     if !set.select_from.is_empty() && &set.select_from != base {
         return GrantContribution::Unknown;
     }
@@ -1105,7 +1158,11 @@ pub fn grant_contribution(
             return GrantContribution::Unknown;
         };
         let holds = if constraint.context.is_empty() {
-            match constraint.value.as_ref().and_then(|value| value.get("literal")) {
+            match constraint
+                .value
+                .as_ref()
+                .and_then(|value| value.get("literal"))
+            {
                 Some(literal) => value == literal,
                 None => return GrantContribution::Unknown,
             }
@@ -1324,7 +1381,8 @@ fn compile_expression(
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
         "inherits" => {
-            static PARENT_ALIAS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static PARENT_ALIAS: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let parent = resolved.inherited.get(&expression.table).ok_or_else(|| {
                 VisibilityError::Invalid(format!(
                     "inherited parent {:?} was not resolved",
@@ -2554,5 +2612,299 @@ mod tests {
         assert_eq!(sql.matches("_gonvex_member.status = 'active'").count(), 4);
         assert!(sql.contains("_gonvex_member.role = $3"));
         assert!(sql.contains("permissions ->> $5::text"));
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn plan(value: Value) -> VisibilityPlan {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn member(id: &str, sets: &[(&str, &[&str])]) -> ResolvedVisibility {
+        ResolvedVisibility {
+            ephemeral_member: false,
+            revision: 1,
+            direct: BTreeMap::from([
+                ("member.id".to_owned(), id.to_owned()),
+                ("account.id".to_owned(), format!("acct-{id}")),
+                ("tenant.id".to_owned(), "t".to_owned()),
+            ]),
+            role: "member".to_owned(),
+            permissions: json!({}),
+            sets: sets
+                .iter()
+                .map(|(name, values)| {
+                    (
+                        name.to_string(),
+                        values.iter().map(|value| value.to_string()).collect(),
+                    )
+                })
+                .collect(),
+            fingerprint: String::new(),
+            inherited: BTreeMap::new(),
+        }
+    }
+
+    fn tasks_plan() -> VisibilityPlan {
+        plan(json!({
+            "version": 2, "table": "tasks", "key": "_id",
+            "permissionTables": ["memberTeams", "workspaceTeams"],
+            "sets": {
+                "workspaces": {"kind": "principal", "table": "workspaceTeams", "select": "workspaceId",
+                    "joins": [{"table": "memberTeams", "leftColumn": "teamId", "rightColumn": "teamId"}],
+                    "where": [{"table": "memberTeams", "column": "memberId", "context": "member.id"}]},
+                "assigned": {"kind": "grant", "table": "taskUsers", "select": "taskId", "joins": [],
+                    "where": [{"table": "taskUsers", "column": "userId", "context": "member.id"},
+                              {"table": "taskUsers", "column": "deletedAt", "value": {"literal": null}}]},
+                "teamContexts": {"kind": "grant", "table": "taskWorkspaceContexts", "select": "taskId",
+                    "joins": [{"table": "memberTeams", "leftColumn": "targetTeamId", "rightColumn": "teamId"}],
+                    "where": [{"table": "memberTeams", "column": "memberId", "context": "member.id"}]}
+            },
+            "where": {"operator": "or", "children": [
+                {"operator": "inSet", "column": "workspaceId", "set": "workspaces"},
+                {"operator": "inSet", "column": "_id", "set": "assigned"},
+                {"operator": "inSet", "column": "_id", "set": "teamContexts"}
+            ]}
+        }))
+    }
+
+    #[test]
+    fn grant_rows_are_decided_from_the_row_and_member_alone() {
+        let plan = tasks_plan();
+        let alice = member("alice", &[("teamContexts::join", &["team-a"])]);
+        let set = &plan.sets["assigned"];
+        let row = |user: &str| json!({"_id": "tu-1", "taskId": "task-1", "userId": user, "deletedAt": null});
+        assert_eq!(
+            grant_contribution("assigned", set, &alice, &row("alice")),
+            GrantContribution::Token("task-1".to_owned())
+        );
+        assert_eq!(
+            grant_contribution("assigned", set, &alice, &row("bob")),
+            GrantContribution::None
+        );
+        assert_eq!(
+            grant_contribution(
+                "assigned",
+                set,
+                &alice,
+                &json!({"_id": "tu-1", "taskId": "task-1", "userId": "alice", "deletedAt": 5})
+            ),
+            GrantContribution::None,
+            "a soft-deleted assignment grants nothing"
+        );
+        assert_eq!(
+            grant_contribution("assigned", set, &alice, &json!({"taskId": "task-1"})),
+            GrantContribution::Unknown,
+            "a missing constrained column is unknown, never evidence"
+        );
+        let team = &plan.sets["teamContexts"];
+        assert_eq!(
+            grant_contribution(
+                "teamContexts",
+                team,
+                &alice,
+                &json!({"taskId": "task-2", "targetTeamId": "team-a"})
+            ),
+            GrantContribution::Token("task-2".to_owned())
+        );
+        assert_eq!(
+            grant_contribution(
+                "teamContexts",
+                team,
+                &alice,
+                &json!({"taskId": "task-2", "targetTeamId": "team-b"})
+            ),
+            GrantContribution::None
+        );
+    }
+
+    #[test]
+    fn grant_join_set_selects_the_members_join_tokens() {
+        let plan = tasks_plan();
+        let join = grant_join_set(&plan.sets["teamContexts"]).unwrap();
+        assert_eq!(join.table, "memberTeams");
+        assert_eq!(join.select, "teamId");
+        assert!(join.joins.is_empty());
+        assert_eq!(join.constraints.len(), 1);
+        assert_eq!(join.constraints[0].context, "member.id");
+        let (sql, parameters) = compile_set(&join, &member("alice", &[]).direct).unwrap();
+        assert!(sql.starts_with("SELECT DISTINCT v0.\"teamId\"::text FROM \"memberTeams\" AS v0"));
+        assert_eq!(parameters, vec![json!("alice")]);
+    }
+
+    #[test]
+    fn only_permission_rows_naming_the_member_rebuild_its_principal() {
+        let plan = tasks_plan();
+        let alice = member("alice", &[]);
+        let concerns = |table: &str, operation: &str, old: Value, new: Value| {
+            plan.principal_change_concerns(&alice, table, operation, &[], &old, &new)
+        };
+        // Data and grant writes are never principal changes.
+        assert!(!concerns(
+            "tasks",
+            "insert",
+            Value::Null,
+            json!({"_id": "t", "workspaceId": "w"})
+        ));
+        assert!(!concerns(
+            "taskUsers",
+            "insert",
+            Value::Null,
+            json!({"userId": "alice", "taskId": "t"})
+        ));
+        // Another member's team membership is not Alice's principal.
+        assert!(!concerns(
+            "memberTeams",
+            "insert",
+            Value::Null,
+            json!({"memberId": "bob", "teamId": "x"})
+        ));
+        assert!(concerns(
+            "memberTeams",
+            "insert",
+            Value::Null,
+            json!({"memberId": "alice", "teamId": "x"})
+        ));
+        assert!(concerns(
+            "memberTeams",
+            "delete",
+            json!({"memberId": "alice", "teamId": "x"}),
+            Value::Null
+        ));
+        // Bob's own member row (role change) concerns only Bob.
+        let bob_row = json!({"id": "bob", "role": "admin"});
+        assert!(!plan.principal_change_concerns(
+            &alice,
+            "members",
+            "update",
+            &["role".to_owned()],
+            &bob_row,
+            &bob_row
+        ));
+        let alice_row = json!({"id": "alice", "role": "admin"});
+        assert!(plan.principal_change_concerns(
+            &alice,
+            "members",
+            "update",
+            &["role".to_owned()],
+            &alice_row,
+            &alice_row
+        ));
+        assert!(!plan.principal_change_concerns(
+            &alice,
+            "members",
+            "update",
+            &["lastSeenAt".to_owned()],
+            &alice_row,
+            &alice_row
+        ));
+    }
+
+    fn parent(rows: &[(&str, Value)]) -> InheritedParent {
+        InheritedParent {
+            plan: Arc::new(tasks_plan()),
+            resolved: Arc::new(member(
+                "alice",
+                &[
+                    ("workspaces", &["w1"]),
+                    ("assigned", &["t-assigned"]),
+                    ("teamContexts", &[]),
+                ],
+            )),
+            index: Arc::new(std::sync::RwLock::new(ParentAclIndex::from_snapshot(
+                1,
+                rows.iter()
+                    .map(|(key, row)| (key.to_string(), row.clone()))
+                    .collect(),
+            ))),
+        }
+    }
+
+    #[test]
+    fn inherited_rows_follow_the_parent_in_memory() {
+        let child = plan(json!({
+            "version": 2, "table": "taskNotes", "key": "_id",
+            "permissionTables": ["memberTeams", "workspaceTeams"], "sets": {},
+            "where": {"operator": "inherits", "column": "taskId", "table": "tasks", "key": "_id",
+                      "onMissing": {"operator": "role", "value": "system_admin"}}
+        }));
+        let mut alice = member("alice", &[]);
+        alice.inherited.insert(
+            "tasks".to_owned(),
+            parent(&[
+                (
+                    "t-visible",
+                    json!({"_id": "t-visible", "workspaceId": "w1"}),
+                ),
+                ("t-hidden", json!({"_id": "t-hidden", "workspaceId": "w2"})),
+                (
+                    "t-assigned",
+                    json!({"_id": "t-assigned", "workspaceId": "w2"}),
+                ),
+            ]),
+        );
+        let note = |task: Value| json!({"_id": "n", "taskId": task});
+        assert!(row_matches(&child, &alice, &note(json!("t-visible"))));
+        assert!(!row_matches(&child, &alice, &note(json!("t-hidden"))));
+        assert!(
+            row_matches(&child, &alice, &note(json!("t-assigned"))),
+            "a parent grant reaches its children"
+        );
+        assert!(
+            !row_matches(&child, &alice, &note(Value::Null)),
+            "a null foreign key denies"
+        );
+        assert!(
+            !row_matches(&child, &alice, &note(json!("t-gone"))),
+            "orphans need onMissing"
+        );
+        alice.role = "system_admin".to_owned();
+        assert!(
+            row_matches(&child, &alice, &note(json!("t-gone"))),
+            "onMissing admits orphans"
+        );
+        assert!(
+            !row_matches(&child, &alice, &note(json!("t-hidden"))),
+            "onMissing never overrides a hidden parent"
+        );
+        // Parent changes apply once and are seen by every child check.
+        alice.role = "member".to_owned();
+        alice.inherited["tasks"].index.write().unwrap().apply(
+            2,
+            [(
+                "t-hidden".to_owned(),
+                Some(json!({"_id": "t-hidden", "workspaceId": "w1"})),
+            )],
+        );
+        assert!(row_matches(&child, &alice, &note(json!("t-hidden"))));
+    }
+
+    #[test]
+    fn inherited_sql_mirrors_the_in_memory_rule() {
+        let child = plan(json!({
+            "version": 2, "table": "taskNotes", "key": "_id",
+            "permissionTables": ["memberTeams", "workspaceTeams"], "sets": {},
+            "where": {"operator": "inherits", "column": "taskId", "table": "tasks", "key": "_id",
+                      "onMissing": {"operator": "role", "value": "system_admin"}}
+        }));
+        let mut alice = member("alice", &[]);
+        alice.inherited.insert("tasks".to_owned(), parent(&[]));
+        let mut parameters = Vec::new();
+        let sql = compile_predicate(&child, &alice, "r", &mut parameters).unwrap();
+        assert!(sql.contains("EXISTS (SELECT 1 FROM \"tasks\" AS _gonvex_parent_"));
+        assert!(sql.contains("::text = r.\"taskId\"::text"));
+        assert!(sql.contains("r.\"taskId\" IS NOT NULL AND NOT EXISTS"));
+        assert!(
+            sql.contains("= ANY(ARRAY(SELECT jsonb_array_elements_text("),
+            "parent tokens bind as arrays"
+        );
+        assert!(
+            !sql.contains("\"memberTeams\""),
+            "no permission-table subqueries per row"
+        );
     }
 }
