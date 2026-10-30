@@ -2225,11 +2225,14 @@ mod tests {
 
     fn visibility_with_task_dependency(source: &str) -> VisibilityPlan {
         VisibilityPlan {
+            version: None,
+            permission_tables: Vec::new(),
             table: source.to_owned(),
             key: "id".to_owned(),
             sets: BTreeMap::from([(
                 "createdTasks".to_owned(),
                 crate::visibility::VisibilitySet {
+                    kind: String::new(),
                     table: "tasks".to_owned(),
                     alias: String::new(),
                     select: "id".to_owned(),
@@ -2244,6 +2247,8 @@ mod tests {
                 },
             )]),
             predicate: crate::visibility::VisibilityExpression {
+                table: String::new(),
+                key: String::new(),
                 operator: "inSet".to_owned(),
                 column: if source == "tasks" { "id" } else { "taskId" }.to_owned(),
                 context: String::new(),
@@ -2312,10 +2317,14 @@ mod tests {
     fn public_visibility() -> (VisibilityPlan, ResolvedVisibility) {
         (
             VisibilityPlan {
+                version: None,
+                permission_tables: Vec::new(),
                 table: "tasks".to_owned(),
                 key: "id".to_owned(),
                 sets: BTreeMap::new(),
                 predicate: crate::visibility::VisibilityExpression {
+                    table: String::new(),
+                    key: String::new(),
                     operator: "public".to_owned(),
                     column: String::new(),
                     context: String::new(),
@@ -2522,10 +2531,14 @@ mod tests {
             retention_ms: 0,
         };
         let plan = VisibilityPlan {
+            version: None,
+            permission_tables: Vec::new(),
             table: "tasks".to_owned(),
             key: "id".to_owned(),
             sets: BTreeMap::new(),
             predicate: crate::visibility::VisibilityExpression {
+                table: String::new(),
+                key: String::new(),
                 operator: "public".to_owned(),
                 column: String::new(),
                 context: String::new(),

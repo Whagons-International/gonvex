@@ -16,6 +16,10 @@ use crate::visibility_mask::{match_expression, scalar};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisibilityPlan {
+    #[serde(default)]
+    pub version: Option<u8>,
+    #[serde(default)]
+    pub permission_tables: Vec<String>,
     pub table: String,
     pub key: String,
     #[serde(default)]
@@ -27,6 +31,8 @@ pub struct VisibilityPlan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisibilitySet {
+    #[serde(default)]
+    pub kind: String,
     pub table: String,
     #[serde(default)]
     pub alias: String,
@@ -66,6 +72,10 @@ pub struct VisibilityConstraint {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisibilityExpression {
+    #[serde(default)]
+    pub table: String,
+    #[serde(default)]
+    pub key: String,
     pub operator: String,
     #[serde(default)]
     pub column: String,
@@ -130,7 +140,62 @@ impl VisibilityPlan {
     pub fn validate(&self) -> Result<(), VisibilityError> {
         identifier(&self.table)?;
         identifier(&self.key)?;
+        if self.version.is_some_and(|version| version != 2) {
+            return Err(VisibilityError::Invalid(
+                "visibility version must be 2".into(),
+            ));
+        }
+        let permissions: BTreeSet<_> = self.permission_tables.iter().collect();
+        for table in &self.permission_tables {
+            identifier(table)?;
+        }
+        if permissions.len() != self.permission_tables.len() {
+            return Err(VisibilityError::Invalid(
+                "permissionTables contains duplicates".into(),
+            ));
+        }
         for (name, set) in &self.sets {
+            if self.version == Some(2) {
+                let fix =
+                    "use a permission-only principal set, a single-source grant set, or inherits";
+                let invalid = |reason: String| {
+                    VisibilityError::Invalid(format!("set {name:?}: {reason}; {fix}"))
+                };
+                if set.kind != "principal" && set.kind != "grant" {
+                    return Err(invalid("kind must be principal or grant".into()));
+                }
+                if set.table == self.table || set.joins.iter().any(|join| join.table == self.table)
+                {
+                    return Err(invalid("reads its own source table".into()));
+                }
+                if set.kind == "principal" && !permissions.contains(&set.table) {
+                    return Err(invalid(format!(
+                        "undeclared permission table {:?}",
+                        set.table
+                    )));
+                }
+                for join in &set.joins {
+                    if !permissions.contains(&join.table) {
+                        return Err(invalid(format!("joins data table {:?}", join.table)));
+                    }
+                }
+                if set.kind == "grant"
+                    && !set.constraints.iter().any(|constraint| {
+                        matches!(constraint.context.as_str(), "member.id" | "account.id")
+                    })
+                {
+                    return Err(invalid(
+                        "grant requires member.id or account.id anchor".into(),
+                    ));
+                }
+                if set
+                    .constraints
+                    .iter()
+                    .any(|constraint| constraint.context == "tenant.id")
+                {
+                    return Err(invalid("tenant.id context is forbidden".into()));
+                }
+            }
             identifier(name)?;
             validate_set(set)?;
         }
@@ -317,6 +382,82 @@ impl VisibilityPlan {
         }
         VisibilityDependencies { columns }
     }
+}
+
+/// Validate cross-plan contracts once when admitting a module, before any
+/// connection can observe an incomplete inheritance chain.
+pub fn validate_manifest(plans: &BTreeMap<String, VisibilityPlan>) -> Result<(), VisibilityError> {
+    fn parents<'a>(
+        expression: &'a VisibilityExpression,
+        output: &mut Vec<&'a VisibilityExpression>,
+    ) {
+        if expression.operator == "inherits" {
+            output.push(expression);
+        }
+        for child in &expression.children {
+            parents(child, output);
+        }
+    }
+    fn visit(
+        name: &str,
+        plans: &BTreeMap<String, VisibilityPlan>,
+        path: &mut BTreeSet<String>,
+        depth: usize,
+    ) -> Result<(), VisibilityError> {
+        if depth > 4 {
+            return Err(VisibilityError::Invalid(format!(
+                "inheritance exceeds four edges at {name:?}"
+            )));
+        }
+        if !path.insert(name.to_owned()) {
+            return Err(VisibilityError::Invalid(format!(
+                "inheritance cycle at {name:?}"
+            )));
+        }
+        let plan = &plans[name];
+        let mut references = Vec::new();
+        parents(&plan.predicate, &mut references);
+        for reference in references {
+            let parent = plans.get(&reference.table).ok_or_else(|| {
+                VisibilityError::Invalid(format!(
+                    "plan {name:?} inherits unknown parent {:?}",
+                    reference.table
+                ))
+            })?;
+            if plan.version != Some(2) || parent.version != Some(2) {
+                return Err(VisibilityError::Invalid(format!(
+                    "plan {name:?}: inherits requires version 2 child and parent"
+                )));
+            }
+            if reference.key != parent.key {
+                return Err(VisibilityError::Invalid(format!(
+                    "plan {name:?}: inherited key {:?} differs from parent key {:?}",
+                    reference.key, parent.key
+                )));
+            }
+            visit(&reference.table, plans, path, depth + 1)?;
+        }
+        path.remove(name);
+        Ok(())
+    }
+    let mut declaration: Option<BTreeSet<&String>> = None;
+    for (name, plan) in plans {
+        plan.validate()?;
+        if plan.version == Some(2) {
+            let tables = plan.permission_tables.iter().collect::<BTreeSet<_>>();
+            if declaration
+                .as_ref()
+                .is_some_and(|expected| *expected != tables)
+            {
+                return Err(VisibilityError::Invalid(format!(
+                    "plan {name:?}: permissionTables must agree across version 2 plans"
+                )));
+            }
+            declaration = Some(tables);
+        }
+        visit(name, plans, &mut BTreeSet::new(), 0)?;
+    }
+    Ok(())
 }
 
 // Only constants and the already admitted role are evaluated here. Row values,
@@ -600,6 +741,11 @@ fn validate_expression(
         "eqContext" => {
             identifier(&expression.column)?;
             context_key(&expression.context)?;
+        }
+        "inherits" => {
+            identifier(&expression.column)?;
+            identifier(&expression.table)?;
+            identifier(&expression.key)?;
         }
         "inSet" | "nonEmpty" => {
             if expression.operator == "inSet" {
@@ -1558,6 +1704,7 @@ mod tests {
     #[test]
     fn self_join_requires_aliases_and_compiles_both_occurrences() {
         let set = VisibilitySet {
+            kind: String::new(),
             table: "memberTeams".to_owned(),
             alias: "viewerTeams".to_owned(),
             select: "memberId".to_owned(),
@@ -1590,6 +1737,7 @@ mod tests {
     #[test]
     fn literal_predicates_compile_for_source_and_joined_rows() {
         let set = VisibilitySet {
+            kind: String::new(),
             table: "boardMessages".to_owned(),
             alias: String::new(),
             select: "id".to_owned(),
@@ -1614,10 +1762,14 @@ mod tests {
         assert_eq!(parameters, vec![Value::String("public".to_owned())]);
 
         let plan = VisibilityPlan {
+            version: None,
+            permission_tables: Vec::new(),
             table: "boards".to_owned(),
             key: "id".to_owned(),
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
+                table: String::new(),
+                key: String::new(),
                 operator: "eq".to_owned(),
                 column: "deletedAt".to_owned(),
                 context: String::new(),
@@ -1650,10 +1802,14 @@ mod tests {
     #[test]
     fn composite_predicates_are_grouped_before_callers_append_filters() {
         let plan = VisibilityPlan {
+            version: None,
+            permission_tables: Vec::new(),
             table: "tasks".to_owned(),
             key: "id".to_owned(),
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
+                table: String::new(),
+                key: String::new(),
                 operator: "or".to_owned(),
                 column: String::new(),
                 context: String::new(),
@@ -1661,6 +1817,8 @@ mod tests {
                 value: None,
                 children: vec![
                     VisibilityExpression {
+                        table: String::new(),
+                        key: String::new(),
                         operator: "role".to_owned(),
                         column: String::new(),
                         context: String::new(),
@@ -1669,6 +1827,8 @@ mod tests {
                         children: Vec::new(),
                     },
                     VisibilityExpression {
+                        table: String::new(),
+                        key: String::new(),
                         operator: "eqContext".to_owned(),
                         column: "createdBy".to_owned(),
                         context: "member.id".to_owned(),
@@ -1703,11 +1863,14 @@ mod tests {
     #[test]
     fn dependency_columns_resolve_aliases_to_physical_tables() {
         let plan = VisibilityPlan {
+            version: None,
+            permission_tables: Vec::new(),
             table: "tasks".to_owned(),
             key: "id".to_owned(),
             sets: BTreeMap::from([(
                 "audienceTasks".to_owned(),
                 VisibilitySet {
+                    kind: String::new(),
                     table: "taskAudiences".to_owned(),
                     alias: "taskAudience".to_owned(),
                     select: "taskId".to_owned(),
@@ -1728,6 +1891,8 @@ mod tests {
                 },
             )]),
             predicate: VisibilityExpression {
+                table: String::new(),
+                key: String::new(),
                 operator: "inSet".to_owned(),
                 column: "id".to_owned(),
                 context: String::new(),
