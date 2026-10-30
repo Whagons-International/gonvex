@@ -123,7 +123,9 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
                     link.get(&via.parent_column)
                         .filter(|value| !value.is_null())
                         .and_then(|value| parent.row(&crate::visibility_mask::scalar(Some(value))))
-                        .is_some_and(|row| plan.parent_admits(&expression.table, parent, &row))
+                        .is_some_and(|row| {
+                            plan.parent_admits(resolved, &expression.table, parent, &row)
+                        })
                 })
         {
             return true;

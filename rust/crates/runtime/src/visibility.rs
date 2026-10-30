@@ -93,6 +93,10 @@ pub struct VisibilityExpression {
     /// `inherits`/`inheritsAny` only: literal filters on the parent row.
     #[serde(default, rename = "where", skip_serializing_if = "Vec::is_empty")]
     pub parent_where: Vec<VisibilityConstraint>,
+    /// `inherits`/`inheritsAny` only: evaluated on the parent row with the
+    /// child plan's principal, replacing the parent plan's predicate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<Box<VisibilityExpression>>,
     /// `inheritsAny` only: the association rows linking a row to its parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<VisibilityVia>,
@@ -228,6 +232,19 @@ pub fn index_columns(
                     .iter()
                     .map(|constraint| constraint.column.clone()),
             );
+            if let Some(predicate) = &expression.predicate {
+                fn read(expression: &VisibilityExpression, columns: &mut BTreeSet<String>) {
+                    if matches!(expression.operator.as_str(), "eq" | "eqContext" | "inSet")
+                        && !expression.column.is_empty()
+                    {
+                        columns.insert(expression.column.clone());
+                    }
+                    for nested in &expression.children {
+                        read(nested, columns);
+                    }
+                }
+                read(predicate, columns);
+            }
         }
         for child in &expression.children {
             parent_filters(child, table, columns);
@@ -846,9 +863,16 @@ impl VisibilityPlan {
 
     /// Does some `inherits` of this plan admit children of `row`, a row of the
     /// inherited `table`: its parent filters hold and the parent is visible?
-    pub fn parent_admits(&self, table: &str, parent: &InheritedParent, row: &Value) -> bool {
+    pub fn parent_admits(
+        &self,
+        child: &ResolvedVisibility,
+        table: &str,
+        parent: &InheritedParent,
+        row: &Value,
+    ) -> bool {
         fn visit(
             expression: &VisibilityExpression,
+            child: &ResolvedVisibility,
             table: &str,
             parent: &InheritedParent,
             row: &Value,
@@ -856,17 +880,22 @@ impl VisibilityPlan {
             (matches!(expression.operator.as_str(), "inherits" | "inheritsAny")
                 && expression.table == table
                 && literal_constraints_hold(&expression.parent_where, row)
-                && row_matches(&parent.plan, &parent.resolved, row))
+                && match &expression.predicate {
+                    Some(predicate) => row
+                        .as_object()
+                        .is_some_and(|row| match_expression(predicate, child, row)),
+                    None => row_matches(&parent.plan, &parent.resolved, row),
+                })
                 || expression
                     .children
                     .iter()
-                    .any(|child| visit(child, table, parent, row))
+                    .any(|nested| visit(nested, child, table, parent, row))
                 || expression
                     .on_missing
                     .as_ref()
-                    .is_some_and(|fallback| visit(fallback, table, parent, row))
+                    .is_some_and(|fallback| visit(fallback, child, table, parent, row))
         }
-        !row.is_null() && visit(&self.predicate, table, parent, row)
+        !row.is_null() && visit(&self.predicate, child, table, parent, row)
     }
 
     /// Child columns that reference each directly inherited parent table.
@@ -1129,6 +1158,9 @@ fn active_visibility_sets(
     }
     if let Some(fallback) = &expression.on_missing {
         active_visibility_sets(fallback, role, sets);
+    }
+    if let Some(predicate) = &expression.predicate {
+        active_visibility_sets(predicate, role, sets);
     }
 }
 
@@ -1706,6 +1738,18 @@ fn validate_expression(
             }
             identifier(&expression.table)?;
             identifier(&expression.key)?;
+            if let Some(predicate) = &expression.predicate {
+                fn nested_inheritance(expression: &VisibilityExpression) -> bool {
+                    matches!(expression.operator.as_str(), "inherits" | "inheritsAny")
+                        || expression.children.iter().any(nested_inheritance)
+                }
+                if nested_inheritance(predicate) {
+                    return Err(VisibilityError::Invalid(
+                        "an inherited parent predicate cannot inherit again".to_owned(),
+                    ));
+                }
+                validate_expression(predicate, sets)?;
+            }
             for constraint in &expression.parent_where {
                 identifier(&constraint.column)?;
                 if !constraint.context.is_empty() || constraint.value.is_none() {
@@ -1800,14 +1844,24 @@ fn compile_expression(
             let column = quote(&expression.column)?;
             let key = quote(&expression.key)?;
             let table = quote(&expression.table)?;
-            let parent_predicate = compile_expression(
-                &parent.plan.predicate,
-                &parent.plan,
-                &parent.resolved,
-                &alias,
-                parameters,
-                account_parameter,
-            )?;
+            let parent_predicate = match &expression.predicate {
+                Some(predicate) => compile_expression(
+                    predicate,
+                    plan,
+                    resolved,
+                    &alias,
+                    parameters,
+                    account_parameter,
+                )?,
+                None => compile_expression(
+                    &parent.plan.predicate,
+                    &parent.plan,
+                    &parent.resolved,
+                    &alias,
+                    parameters,
+                    account_parameter,
+                )?,
+            };
             let mut parent_filters = String::new();
             for constraint in &expression.parent_where {
                 parent_filters.push_str(" AND ");
@@ -1854,14 +1908,24 @@ fn compile_expression(
             let suffix = VIA_ALIAS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let link = format!("_gonvex_via_{suffix}");
             let alias = format!("_gonvex_any_parent_{suffix}");
-            let parent_predicate = compile_expression(
-                &parent.plan.predicate,
-                &parent.plan,
-                &parent.resolved,
-                &alias,
-                parameters,
-                account_parameter,
-            )?;
+            let parent_predicate = match &expression.predicate {
+                Some(predicate) => compile_expression(
+                    predicate,
+                    plan,
+                    resolved,
+                    &alias,
+                    parameters,
+                    account_parameter,
+                )?,
+                None => compile_expression(
+                    &parent.plan.predicate,
+                    &parent.plan,
+                    &parent.resolved,
+                    &alias,
+                    parameters,
+                    account_parameter,
+                )?,
+            };
             let mut parent_filters = String::new();
             for constraint in &expression.parent_where {
                 parent_filters.push_str(" AND ");
@@ -2882,6 +2946,7 @@ mod tests {
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
                 on_missing: None,
+                predicate: None,
                 parent_where: Vec::new(),
                 via: None,
                 table: String::new(),
@@ -2927,6 +2992,7 @@ mod tests {
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
                 on_missing: None,
+                predicate: None,
                 parent_where: Vec::new(),
                 via: None,
                 table: String::new(),
@@ -2939,6 +3005,7 @@ mod tests {
                 children: vec![
                     VisibilityExpression {
                         on_missing: None,
+                        predicate: None,
                         parent_where: Vec::new(),
                         via: None,
                         table: String::new(),
@@ -2952,6 +3019,7 @@ mod tests {
                     },
                     VisibilityExpression {
                         on_missing: None,
+                        predicate: None,
                         parent_where: Vec::new(),
                         via: None,
                         table: String::new(),
@@ -3024,6 +3092,7 @@ mod tests {
             )]),
             predicate: VisibilityExpression {
                 on_missing: None,
+                predicate: None,
                 parent_where: Vec::new(),
                 via: None,
                 table: String::new(),
@@ -3515,6 +3584,7 @@ mod mask_tests {
         assert!(sql.contains("\"deletedAt\" IS NULL"));
         let parent = &alice.inherited["tasks"];
         assert!(!child.parent_admits(
+            &alice,
             "tasks",
             parent,
             &json!({"_id": "gone", "workspaceId": "w1", "deletedAt": 5})
@@ -3669,6 +3739,63 @@ mod mask_tests {
         let sql = compile_predicate(&documents, &alice, "r", &mut parameters).unwrap();
         assert!(sql.contains("FROM \"documentAssociations\" AS _gonvex_via_"));
         assert!(sql.contains(".\"documentId\"::text = r.\"_id\"::text"));
+    }
+
+    #[test]
+    fn inherited_parent_predicate_uses_the_child_principal() {
+        // F5: a goal child checks the goal row with its own grants, not the
+        // goals collection's rule.
+        let child = plan(json!({
+            "version": 2, "table": "goalUpdates", "key": "_id",
+            "permissionTables": ["memberTeams", "workspaceTeams"],
+            "sets": {"myGoals": {"kind": "grant", "table": "goalParticipants", "select": "goalId", "joins": [],
+                "where": [{"table": "goalParticipants", "column": "memberId", "context": "member.id"}]}},
+            "where": {"operator": "inherits", "column": "goalId", "table": "tasks", "key": "_id",
+                "predicate": {"operator": "or", "children": [
+                    {"operator": "inSet", "column": "_id", "set": "myGoals"},
+                    {"operator": "eqContext", "column": "ownerId", "context": "member.id"}]}}
+        }));
+        child.validate().unwrap();
+        let mut alice = member("alice", &[("myGoals", &["g-joined"])]);
+        alice.inherited.insert(
+            "tasks".to_owned(),
+            parent(&[
+                (
+                    "g-joined",
+                    json!({"_id": "g-joined", "workspaceId": "w2", "ownerId": "bob"}),
+                ),
+                (
+                    "g-owned",
+                    json!({"_id": "g-owned", "workspaceId": "w2", "ownerId": "alice"}),
+                ),
+                (
+                    "g-workspace",
+                    json!({"_id": "g-workspace", "workspaceId": "w1", "ownerId": "bob"}),
+                ),
+            ]),
+        );
+        assert!(row_matches(&child, &alice, &json!({"goalId": "g-joined"})));
+        assert!(row_matches(&child, &alice, &json!({"goalId": "g-owned"})));
+        assert!(
+            !row_matches(&child, &alice, &json!({"goalId": "g-workspace"})),
+            "the override replaces the parent collection's rule"
+        );
+        let parent = &alice.inherited["tasks"];
+        assert!(child.parent_admits(
+            &alice,
+            "tasks",
+            parent,
+            &json!({"_id": "g-owned", "ownerId": "alice"})
+        ));
+        let mut parameters = Vec::new();
+        let sql = compile_predicate(&child, &alice, "r", &mut parameters).unwrap();
+        assert!(sql.contains("\"ownerId\" = $"));
+        let mut nested = child.clone();
+        nested.predicate.predicate = Some(Box::new(nested.predicate.clone()));
+        assert!(
+            nested.validate().is_err(),
+            "a parent predicate cannot inherit again"
+        );
     }
 
     #[test]

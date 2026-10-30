@@ -2367,6 +2367,7 @@ mod tests {
             )]),
             predicate: crate::visibility::VisibilityExpression {
                 on_missing: None,
+                predicate: None,
                 parent_where: Vec::new(),
                 via: None,
                 table: String::new(),
@@ -2446,6 +2447,7 @@ mod tests {
                 sets: BTreeMap::new(),
                 predicate: crate::visibility::VisibilityExpression {
                     on_missing: None,
+                    predicate: None,
                     parent_where: Vec::new(),
                     via: None,
                     table: String::new(),
@@ -2665,6 +2667,7 @@ mod tests {
             sets: BTreeMap::new(),
             predicate: crate::visibility::VisibilityExpression {
                 on_missing: None,
+                predicate: None,
                 parent_where: Vec::new(),
                 via: None,
                 table: String::new(),

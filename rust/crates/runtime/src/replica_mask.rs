@@ -273,9 +273,12 @@ impl Runtime {
                 continue;
             };
             let visible = |row: &Value| {
-                subscription
-                    .visibility
-                    .parent_admits(&change.table, parent, row)
+                subscription.visibility.parent_admits(
+                    &subscription.resolved,
+                    &change.table,
+                    parent,
+                    row,
+                )
             };
             let (was, now) = (visible(&change.old_value), visible(&change.new_value));
             if was == now {
@@ -318,7 +321,12 @@ impl Runtime {
                                 parent.row(&crate::visibility_mask::scalar(Some(value)))
                             })
                             .is_some_and(|row| {
-                                subscription.visibility.parent_admits(table, parent, &row)
+                                subscription.visibility.parent_admits(
+                                    &subscription.resolved,
+                                    table,
+                                    parent,
+                                    &row,
+                                )
                             });
                         let held = subscription.rows.values().any(|row| {
                             row.get(column)
@@ -331,14 +339,18 @@ impl Runtime {
                     }
                 }
                 if *table == change.table {
-                    let was =
-                        subscription
-                            .visibility
-                            .parent_admits(table, parent, &change.old_value);
-                    let now =
-                        subscription
-                            .visibility
-                            .parent_admits(table, parent, &change.new_value);
+                    let was = subscription.visibility.parent_admits(
+                        &subscription.resolved,
+                        table,
+                        parent,
+                        &change.old_value,
+                    );
+                    let now = subscription.visibility.parent_admits(
+                        &subscription.resolved,
+                        table,
+                        parent,
+                        &change.new_value,
+                    );
                     if was != now {
                         let children = children_of(&subscription.resolved, via, &change.row_id);
                         fetch.entry(column.clone()).or_default().extend(children);

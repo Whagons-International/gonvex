@@ -53,7 +53,14 @@ pub(crate) fn match_expression(
                         &expression.parent_where,
                         &parent_row,
                     ) && parent_row.as_object().is_some_and(|parent_row| {
-                        match_expression(&parent.plan.predicate, &parent.resolved, parent_row)
+                        match &expression.predicate {
+                            Some(predicate) => match_expression(predicate, resolved, parent_row),
+                            None => match_expression(
+                                &parent.plan.predicate,
+                                &parent.resolved,
+                                parent_row,
+                            ),
+                        }
                     })
                 }
                 None => expression
@@ -92,7 +99,14 @@ pub(crate) fn match_expression(
                         &expression.parent_where,
                         &parent_row,
                     ) && parent_row.as_object().is_some_and(|parent_row| {
-                        match_expression(&parent.plan.predicate, &parent.resolved, parent_row)
+                        match &expression.predicate {
+                            Some(predicate) => match_expression(predicate, resolved, parent_row),
+                            None => match_expression(
+                                &parent.plan.predicate,
+                                &parent.resolved,
+                                parent_row,
+                            ),
+                        }
                     })
                 })
             });
