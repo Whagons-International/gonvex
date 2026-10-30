@@ -106,9 +106,3 @@ mod tests {
     }
 }
 
-impl crate::Runtime {
-    /// Counters belong to this Runtime and are shared by all of its connections.
-    pub fn visibility_metrics(&self) -> &VisibilityMetrics {
-        &self.inner.visibility_metrics
-    }
-}
