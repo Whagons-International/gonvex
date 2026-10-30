@@ -78,7 +78,7 @@ fn test_config(database_url: String) -> Config {
             enabled: false,
             binary: None,
             endpoint: None,
-            start_timeout: Duration::from_secs(1),
+            start_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(1),
             max_frame_bytes: 1 << 20,
             max_concurrent_calls: 4,
@@ -114,7 +114,8 @@ fn fixture_manifest() -> (Value, String) {
     let mut module = json!({"generation":1,"language":"typescript","entrypoint":"test.js","files":{},"functions":functions,"visibility":{"tasks":tasks,"taskNotes":notes},"crons":[],"invitationAcceptanceReducer":"","javascript":{"path":"test.js","hash":javascript_hash}});
     // This fixture contains only integer JSON numbers, whose canonical encoding
     // agrees with serde_json's sorted-object serialization.
-    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&module).unwrap()));
+    let hash =
+        gonvex_runtime::modules::canonical_artifact_hash(module.as_object().unwrap()).unwrap();
     module["hash"] = json!(hash);
     module["javascript"]["code"] = json!(base64::engine::general_purpose::STANDARD.encode(code));
     (json!({"project":"fanout","module":module}), hash)

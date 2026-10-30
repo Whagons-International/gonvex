@@ -836,7 +836,8 @@ fn artifact_from_manifest(
     ))
 }
 
-pub(crate) fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, String> {
+#[doc(hidden)]
+pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, String> {
     let javascript = module
         .get("javascript")
         .and_then(Value::as_object)
