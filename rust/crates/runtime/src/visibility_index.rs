@@ -66,7 +66,7 @@ impl GrantIndex {
 /// Owned once per tenant and parent table. Connections borrow Arc projections.
 /// Admission must initialize this index at a consistent snapshot revision before
 /// registering it for feed delivery.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ParentAclIndex {
     revision: u64,
     rows: BTreeMap<String, Arc<Value>>,

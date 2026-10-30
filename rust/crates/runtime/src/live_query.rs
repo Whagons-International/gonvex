@@ -92,6 +92,24 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
     {
         return true;
     }
+    let derived = |plan: &VisibilityPlan, resolved: &ResolvedVisibility| {
+        visibility::derived_change_concerns(
+            plan,
+            resolved,
+            &change.table,
+            &change.row_id,
+            &change.old_value,
+            &change.new_value,
+        )
+    };
+    if derived(plan, resolved)
+        || resolved
+            .inherited
+            .values()
+            .any(|parent| derived(&parent.plan, &parent.resolved))
+    {
+        return true;
+    }
     if let Some(parent) = resolved.inherited.get(&change.table) {
         return [&change.old_value, &change.new_value]
             .into_iter()
@@ -1754,6 +1772,7 @@ mod tests {
         visibility.validate().unwrap();
         let resolved = ResolvedVisibility {
             inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("account.id".to_owned(), "account".to_owned())]),
@@ -1942,6 +1961,7 @@ mod tests {
         })).unwrap();
         let resolved = ResolvedVisibility {
             inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]),
@@ -2264,6 +2284,7 @@ mod tests {
                 .unwrap();
                 let resolved = ResolvedVisibility {
                     inherited: Default::default(),
+                    indexes: Default::default(),
                     ephemeral_member: false,
                     revision: 1,
                     direct: context.clone(),

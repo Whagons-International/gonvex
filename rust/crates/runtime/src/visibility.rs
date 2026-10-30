@@ -45,6 +45,12 @@ pub struct VisibilitySet {
     pub joins: Vec<VisibilityJoin>,
     #[serde(default, rename = "where")]
     pub constraints: Vec<VisibilityConstraint>,
+    /// `derived` only: the set whose tokens are mapped through `table`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    /// `derived` only: the indexed table's key column the tokens name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -106,6 +112,8 @@ pub struct ResolvedVisibility {
     /// Version 2 `inherits` parents, keyed by parent table: the parent's plan,
     /// this member's resolution of it, and the tenant-shared parent ACL index.
     pub inherited: BTreeMap<String, InheritedParent>,
+    /// Version 2 `derived` sets: the tenant-shared index each one maps through.
+    pub indexes: BTreeMap<String, Arc<std::sync::RwLock<ParentAclIndex>>>,
 }
 
 /// Everything an in-memory `inherits` check needs. Holds no database handle.
@@ -146,11 +154,46 @@ pub struct ParentAclRegistry {
     loading: tokio::sync::Mutex<()>,
 }
 
-fn parent_index_key(session: &TenantSession, table: &str) -> String {
+fn parent_index_key(session: &TenantSession, table: &str, key: &str) -> String {
     format!(
-        "{}\u{0}{}\u{0}{}\u{0}{}",
-        session.route.project_id, session.route.tenant_id, session.route.database_url, table
+        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+        session.route.project_id, session.route.tenant_id, session.route.database_url, table, key
     )
+}
+
+fn tenant_index_prefix(session: &TenantSession) -> String {
+    format!(
+        "{}\u{0}{}\u{0}{}\u{0}",
+        session.route.project_id, session.route.tenant_id, session.route.database_url
+    )
+}
+
+/// Columns a tenant index of `table` keyed by `key` projects: what the table's
+/// own plan reads when inherited, and what every derived set maps through.
+pub fn index_columns(
+    plans: &BTreeMap<String, VisibilityPlan>,
+    table: &str,
+    key: &str,
+) -> BTreeSet<String> {
+    let mut columns = BTreeSet::from([key.to_owned()]);
+    if let Some(plan) = plans.get(table) {
+        if plan.key == key {
+            columns.extend(acl_columns(plan));
+        }
+    }
+    for plan in plans.values() {
+        for set in plan.sets.values() {
+            if set.kind == "derived" && set.table == table && set.key == key {
+                columns.insert(set.select.clone());
+                columns.extend(
+                    set.constraints
+                        .iter()
+                        .map(|constraint| constraint.column.clone()),
+                );
+            }
+        }
+    }
+    columns
 }
 
 impl ParentAclRegistry {
@@ -158,10 +201,12 @@ impl ParentAclRegistry {
         &self,
         transaction: &mut TenantTransaction,
         session: &TenantSession,
-        parent: &VisibilityPlan,
+        plans: &BTreeMap<String, VisibilityPlan>,
+        table: &str,
+        key_column: &str,
         revision: u64,
     ) -> Result<Arc<std::sync::RwLock<ParentAclIndex>>, VisibilityError> {
-        let key = parent_index_key(session, &parent.table);
+        let key = parent_index_key(session, table, key_column);
         if let Some(index) = self.indexes.lock().expect("parent ACL registry").get(&key) {
             return Ok(index.clone());
         }
@@ -169,7 +214,7 @@ impl ParentAclRegistry {
         if let Some(index) = self.indexes.lock().expect("parent ACL registry").get(&key) {
             return Ok(index.clone());
         }
-        let columns = acl_columns(parent);
+        let columns = index_columns(plans, table, key_column);
         let projection = columns
             .iter()
             .map(|column| {
@@ -183,8 +228,8 @@ impl ParentAclRegistry {
             .join(", ");
         let statement = format!(
             "SELECT r.{}::text, jsonb_build_object({projection})::text FROM {} AS r",
-            quote(&parent.key)?,
-            quote(&parent.table)?
+            quote(key_column)?,
+            quote(table)?
         );
         let rows = sqlx::query(&statement)
             .fetch_all(&mut **transaction.transaction())
@@ -221,20 +266,20 @@ impl ParentAclRegistry {
         revision: u64,
         changes: &[crate::change_feed::LogChange],
     ) {
-        let prefix = parent_index_key(session, "");
+        let prefix = tenant_index_prefix(session);
         let indexes = self
             .indexes
             .lock()
             .expect("parent ACL registry")
             .iter()
             .filter(|(key, _)| key.starts_with(&prefix))
-            .map(|(key, index)| (key[prefix.len()..].to_owned(), index.clone()))
+            .filter_map(|(key, index)| {
+                let (table, key_column) = key[prefix.len()..].split_once('\u{0}')?;
+                Some((table.to_owned(), key_column.to_owned(), index.clone()))
+            })
             .collect::<Vec<_>>();
-        for (table, index) in indexes {
-            let Some(plan) = plans.get(&table) else {
-                continue;
-            };
-            let columns = acl_columns(plan);
+        for (table, key_column, index) in indexes {
+            let columns = index_columns(plans, &table, &key_column);
             let updates = changes
                 .iter()
                 .filter(|change| change.table == table)
@@ -252,7 +297,17 @@ impl ParentAclRegistry {
                                 .collect(),
                         )
                     });
-                    (change.row_id.clone(), row)
+                    let key = if plans.get(&table).is_some_and(|plan| plan.key == key_column) {
+                        change.row_id.clone()
+                    } else {
+                        change
+                            .new_value
+                            .get(&key_column)
+                            .or_else(|| change.old_value.get(&key_column))
+                            .map(|value| scalar(Some(value)))
+                            .unwrap_or_else(|| change.row_id.clone())
+                    };
+                    (key, row)
                 })
                 .collect::<Vec<_>>();
             if let Ok(mut index) = index.write() {
@@ -263,7 +318,7 @@ impl ParentAclRegistry {
 
     /// A database reset invalidates every projection of that tenant database.
     pub fn reset(&self, session: &TenantSession) {
-        let prefix = parent_index_key(session, "");
+        let prefix = tenant_index_prefix(session);
         self.indexes
             .lock()
             .expect("parent ACL registry")
@@ -376,8 +431,38 @@ impl VisibilityPlan {
                 let invalid = |reason: String| {
                     VisibilityError::Invalid(format!("set {name:?}: {reason}; {fix}"))
                 };
-                if set.kind != "principal" && set.kind != "grant" {
-                    return Err(invalid("kind must be principal or grant".into()));
+                if set.kind != "principal" && set.kind != "grant" && set.kind != "derived" {
+                    return Err(invalid("kind must be principal, grant or derived".into()));
+                }
+                if set.kind == "derived" {
+                    identifier(&set.key)?;
+                    let Some(source) = self.sets.get(&set.from) else {
+                        return Err(invalid(format!("derived from unknown set {:?}", set.from)));
+                    };
+                    if source.kind == "derived"
+                        && self
+                            .sets
+                            .get(&source.from)
+                            .is_some_and(|inner| inner.kind == "derived")
+                    {
+                        return Err(invalid("derived chains are limited to two sets".into()));
+                    }
+                    if set.from == *name || (source.kind == "derived" && source.from == *name) {
+                        return Err(invalid("derived sets must be acyclic".into()));
+                    }
+                    if set.table == self.table {
+                        return Err(invalid("a derived set maps through another table".into()));
+                    }
+                    if !set.joins.is_empty()
+                        || set
+                            .constraints
+                            .iter()
+                            .any(|constraint| !constraint.context.is_empty())
+                    {
+                        return Err(invalid(
+                            "a derived set filters its indexed row by literals only".into(),
+                        ));
+                    }
                 }
                 // A grant set may read its own source table (for example the
                 // assignment rows of tasks a member is assigned to): its rows
@@ -395,7 +480,7 @@ impl VisibilityPlan {
                         set.table
                     )));
                 }
-                for join in &set.joins {
+                for join in set.joins.iter().filter(|_| set.kind != "derived") {
                     if !permissions.contains(&join.table) {
                         return Err(invalid(format!("joins data table {:?}", join.table)));
                     }
@@ -436,8 +521,7 @@ impl VisibilityPlan {
     /// Row decisions need membership values only for branches not settled by
     /// the admitted role. SQL-only snapshots leave these values on the server.
     pub fn needs_materialized_sets(&self, resolved: &ResolvedVisibility) -> bool {
-        let mut sets = BTreeSet::new();
-        active_visibility_sets(&self.predicate, &resolved.role, &mut sets);
+        let sets = active_sets(self, &resolved.role);
         !sets.is_empty()
     }
 
@@ -445,8 +529,7 @@ impl VisibilityPlan {
         &self,
         resolved: &ResolvedVisibility,
     ) -> VisibilityDependencies {
-        let mut sets = BTreeSet::new();
-        active_visibility_sets(&self.predicate, &resolved.role, &mut sets);
+        let sets = active_sets(self, &resolved.role);
         self.dependency_columns_for_sets(Some(&sets))
     }
 
@@ -473,8 +556,7 @@ impl VisibilityPlan {
                 }
             }
         }
-        let mut active = BTreeSet::new();
-        active_visibility_sets(&self.predicate, &resolved.role, &mut active);
+        let active = active_sets(self, &resolved.role);
         for name in active {
             let set = &self.sets[&name];
             let base = if set.alias.is_empty() {
@@ -560,8 +642,7 @@ impl VisibilityPlan {
                 return true;
             }
         }
-        let mut active = BTreeSet::new();
-        active_visibility_sets(&self.predicate, &resolved.role, &mut active);
+        let active = active_sets(self, &resolved.role);
         for name in &active {
             let set = &self.sets[name];
             let base = if set.alias.is_empty() {
@@ -640,8 +721,7 @@ impl VisibilityPlan {
         &'a self,
         resolved: &ResolvedVisibility,
     ) -> Vec<(&'a String, &'a VisibilitySet)> {
-        let mut active = BTreeSet::new();
-        active_visibility_sets(&self.predicate, &resolved.role, &mut active);
+        let active = active_sets(self, &resolved.role);
         self.sets
             .iter()
             .filter(|(name, set)| set.kind == "grant" && active.contains(*name))
@@ -864,6 +944,22 @@ fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool
     }
 }
 
+/// Sets a predicate references for this role, plus every set a `derived`
+/// set maps from, transitively.
+fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
+    let mut active = BTreeSet::new();
+    active_visibility_sets(&plan.predicate, role, &mut active);
+    let mut pending = active.iter().cloned().collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        if let Some(set) = plan.sets.get(&name) {
+            if set.kind == "derived" && !set.from.is_empty() && active.insert(set.from.clone()) {
+                pending.push(set.from.clone());
+            }
+        }
+    }
+    active
+}
+
 fn active_visibility_sets(
     expression: &VisibilityExpression,
     role: &str,
@@ -969,10 +1065,10 @@ async fn resolve_member(
     let mut sets = BTreeMap::new();
     let mut active = BTreeSet::new();
     if materialize || plan.version == Some(2) {
-        active_visibility_sets(&plan.predicate, &role, &mut active);
+        active.extend(active_sets(plan, &role));
     }
     for (name, set) in &plan.sets {
-        if !active.contains(name) {
+        if !active.contains(name) || set.kind == "derived" {
             continue;
         }
         let (statement, parameters) = compile_set(set, &direct)?;
@@ -1012,6 +1108,7 @@ async fn resolve_member(
         sets,
         fingerprint,
         inherited: BTreeMap::new(),
+        indexes: BTreeMap::new(),
     })
 }
 
@@ -1041,7 +1138,14 @@ pub fn resolve_with_parents<'a>(
                 resolve_with_parents(transaction, session, parent, revision, plans, registry)
                     .await?;
             let index = registry
-                .get_or_load(transaction, session, parent, revision)
+                .get_or_load(
+                    transaction,
+                    session,
+                    plans,
+                    &parent.table,
+                    &parent.key,
+                    revision,
+                )
                 .await?;
             resolved.inherited.insert(
                 table,
@@ -1052,7 +1156,102 @@ pub fn resolve_with_parents<'a>(
                 },
             );
         }
+        for name in active_sets(plan, &resolved.role) {
+            let set = &plan.sets[&name];
+            if set.kind != "derived" {
+                continue;
+            }
+            let index = registry
+                .get_or_load(transaction, session, plans, &set.table, &set.key, revision)
+                .await?;
+            resolved.indexes.insert(name, index);
+        }
+        recompute_derived(plan, &mut resolved);
         Ok(resolved)
+    })
+}
+
+/// Recompute every derived set of a version 2 plan in memory from its source
+/// set and the tenant-shared index. Returns (set, added, removed) per change.
+pub fn recompute_derived(
+    plan: &VisibilityPlan,
+    resolved: &mut ResolvedVisibility,
+) -> Vec<(String, BTreeSet<String>, BTreeSet<String>)> {
+    let mut changes: Vec<(String, BTreeSet<String>, BTreeSet<String>)> = Vec::new();
+    // Chains are at most two deep: two passes reach a fixed point.
+    for _ in 0..2 {
+        for (name, set) in &plan.sets {
+            if set.kind != "derived" {
+                continue;
+            }
+            let Some(index) = resolved.indexes.get(name).cloned() else {
+                continue;
+            };
+            let source = resolved.sets.get(&set.from).cloned().unwrap_or_default();
+            let Ok(index) = index.read() else {
+                continue;
+            };
+            let next = source
+                .iter()
+                .filter_map(|token| index.get(token))
+                .filter(|row| {
+                    set.constraints.iter().all(|constraint| {
+                        let literal = constraint
+                            .value
+                            .as_ref()
+                            .and_then(|value| value.get("literal"));
+                        match (row.get(&constraint.column), literal) {
+                            (Some(Value::Null) | None, Some(Value::Null)) => true,
+                            (Some(value), Some(literal)) => value == literal,
+                            _ => false,
+                        }
+                    })
+                })
+                .filter_map(|row| match row.get(&set.select) {
+                    None | Some(Value::Null) => None,
+                    Some(value) => Some(scalar(Some(value))),
+                })
+                .collect::<BTreeSet<_>>();
+            let previous = resolved.sets.get(name).cloned().unwrap_or_default();
+            if previous != next {
+                let added = next.difference(&previous).cloned().collect::<BTreeSet<_>>();
+                let removed = previous.difference(&next).cloned().collect::<BTreeSet<_>>();
+                if let Some((_, all_added, all_removed)) =
+                    changes.iter_mut().find(|(changed, _, _)| changed == name)
+                {
+                    all_added.extend(added);
+                    all_removed.extend(removed);
+                } else {
+                    changes.push((name.clone(), added, removed));
+                }
+                resolved.sets.insert(name.clone(), next);
+            }
+        }
+    }
+    changes
+}
+
+/// Does a change to `table` touch a row some derived set maps one of its
+/// source tokens through? Only then can a derived set change in memory.
+pub fn derived_change_concerns(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    table: &str,
+    row_id: &str,
+    old: &Value,
+    new: &Value,
+) -> bool {
+    plan.sets.iter().any(|(name, set)| {
+        set.kind == "derived"
+            && set.table == table
+            && resolved.indexes.contains_key(name)
+            && resolved.sets.get(&set.from).is_some_and(|source| {
+                [old, new].into_iter().any(|row| {
+                    row.get(&set.key)
+                        .map(|value| scalar(Some(value)))
+                        .is_some_and(|key| source.contains(&key))
+                }) || source.contains(row_id)
+            })
     })
 }
 
@@ -1087,6 +1286,8 @@ pub fn grant_join_set(set: &VisibilitySet) -> Option<VisibilitySet> {
     };
     Some(VisibilitySet {
         kind: "principal".to_owned(),
+        from: String::new(),
+        key: String::new(),
         table: first.table.clone(),
         alias: first.alias.clone(),
         select: first.right_column.clone(),
@@ -1859,6 +2060,7 @@ mod tests {
         }
         let resolved = ResolvedVisibility {
             inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
@@ -2191,6 +2393,7 @@ mod tests {
     fn dependency_member(role: &str) -> ResolvedVisibility {
         ResolvedVisibility {
             inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-1".to_owned())]),
@@ -2356,6 +2559,8 @@ mod tests {
     fn self_join_requires_aliases_and_compiles_both_occurrences() {
         let set = VisibilitySet {
             kind: String::new(),
+            from: String::new(),
+            key: String::new(),
             table: "memberTeams".to_owned(),
             alias: "viewerTeams".to_owned(),
             select: "memberId".to_owned(),
@@ -2389,6 +2594,8 @@ mod tests {
     fn literal_predicates_compile_for_source_and_joined_rows() {
         let set = VisibilitySet {
             kind: String::new(),
+            from: String::new(),
+            key: String::new(),
             table: "boardMessages".to_owned(),
             alias: String::new(),
             select: "id".to_owned(),
@@ -2432,6 +2639,7 @@ mod tests {
         };
         let resolved = ResolvedVisibility {
             inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
@@ -2497,6 +2705,7 @@ mod tests {
         };
         let resolved = ResolvedVisibility {
             inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([
@@ -2528,6 +2737,8 @@ mod tests {
                 "audienceTasks".to_owned(),
                 VisibilitySet {
                     kind: String::new(),
+                    from: String::new(),
+                    key: String::new(),
                     table: "taskAudiences".to_owned(),
                     alias: "taskAudience".to_owned(),
                     select: "taskId".to_owned(),
@@ -2646,6 +2857,7 @@ mod mask_tests {
                 .collect(),
             fingerprint: String::new(),
             inherited: BTreeMap::new(),
+            indexes: BTreeMap::new(),
         }
     }
 
@@ -2881,6 +3093,125 @@ mod mask_tests {
             )],
         );
         assert!(row_matches(&child, &alice, &note(json!("t-hidden"))));
+    }
+
+    #[test]
+    fn derived_sets_map_grants_through_the_shared_index_in_memory() {
+        let categories = plan(json!({
+            "version": 2, "table": "categories", "key": "_id",
+            "permissionTables": ["memberTeams", "workspaceTeams"],
+            "sets": {
+                "assignedTasks": {"kind": "grant", "table": "taskUsers", "select": "taskId", "joins": [],
+                    "where": [{"table": "taskUsers", "column": "userId", "context": "member.id"}]},
+                "assignedTaskCategories": {"kind": "derived", "from": "assignedTasks", "table": "tasks",
+                    "key": "_id", "select": "categoryId", "joins": [],
+                    "where": [{"column": "deletedAt", "value": {"literal": null}}]}
+            },
+            "where": {"operator": "inSet", "column": "_id", "set": "assignedTaskCategories"}
+        }));
+        categories.validate().unwrap();
+        let mut alice = member("alice", &[("assignedTasks", &["t1", "t2"])]);
+        let index = Arc::new(std::sync::RwLock::new(ParentAclIndex::from_snapshot(
+            1,
+            BTreeMap::from([
+                (
+                    "t1".to_owned(),
+                    json!({"_id": "t1", "categoryId": "c1", "deletedAt": null}),
+                ),
+                (
+                    "t2".to_owned(),
+                    json!({"_id": "t2", "categoryId": "c2", "deletedAt": 7}),
+                ),
+                (
+                    "t3".to_owned(),
+                    json!({"_id": "t3", "categoryId": "c3", "deletedAt": null}),
+                ),
+            ]),
+        )));
+        alice
+            .indexes
+            .insert("assignedTaskCategories".to_owned(), index.clone());
+        let first = recompute_derived(&categories, &mut alice);
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            alice.sets["assignedTaskCategories"],
+            BTreeSet::from(["c1".to_owned()]),
+            "a soft-deleted granted task contributes no category"
+        );
+        assert!(row_matches(&categories, &alice, &json!({"_id": "c1"})));
+        assert!(
+            !row_matches(&categories, &alice, &json!({"_id": "c3"})),
+            "unassigned tasks grant nothing"
+        );
+        // A recategorised task moves the grant, and only for members holding it.
+        assert!(derived_change_concerns(
+            &categories,
+            &alice,
+            "tasks",
+            "t1",
+            &json!({"_id": "t1"}),
+            &json!({"_id": "t1"})
+        ));
+        assert!(!derived_change_concerns(
+            &categories,
+            &alice,
+            "tasks",
+            "t3",
+            &json!({"_id": "t3"}),
+            &json!({"_id": "t3"})
+        ));
+        index.write().unwrap().apply(
+            2,
+            [(
+                "t1".to_owned(),
+                Some(json!({"_id": "t1", "categoryId": "c9", "deletedAt": null})),
+            )],
+        );
+        let moved = recompute_derived(&categories, &mut alice);
+        assert_eq!(
+            moved,
+            vec![(
+                "assignedTaskCategories".to_owned(),
+                BTreeSet::from(["c9".to_owned()]),
+                BTreeSet::from(["c1".to_owned()])
+            )]
+        );
+        assert!(
+            recompute_derived(&categories, &mut alice).is_empty(),
+            "recompute is idempotent"
+        );
+    }
+
+    #[test]
+    fn derived_sets_reject_unsafe_shapes() {
+        let with = |set: Value| {
+            plan(json!({
+                "version": 2, "table": "categories", "key": "_id", "permissionTables": ["memberTeams"],
+                "sets": {
+                    "assignedTasks": {"kind": "grant", "table": "taskUsers", "select": "taskId", "joins": [],
+                        "where": [{"table": "taskUsers", "column": "userId", "context": "member.id"}]},
+                    "derived": set
+                },
+                "where": {"operator": "inSet", "column": "_id", "set": "derived"}
+            }))
+        };
+        let base = json!({"kind": "derived", "from": "assignedTasks", "table": "tasks", "key": "_id", "select": "categoryId", "joins": [], "where": []});
+        with(base.clone()).validate().unwrap();
+        let mut own = base.clone();
+        own["table"] = json!("categories");
+        assert!(
+            with(own).validate().is_err(),
+            "a derived set never maps through its own table"
+        );
+        let mut unknown = base.clone();
+        unknown["from"] = json!("missing");
+        assert!(with(unknown).validate().is_err());
+        let mut context = base.clone();
+        context["where"] = json!([{"column": "createdBy", "context": "member.id"}]);
+        assert!(
+            with(context).validate().is_err(),
+            "derived filters are literals only"
+        );
     }
 
     #[test]

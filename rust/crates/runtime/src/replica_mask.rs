@@ -85,6 +85,7 @@ impl Runtime {
         let mut parent_changes = Vec::new();
         // (scope table, set name, token): own plan or a directly inherited parent.
         let mut granted: Vec<(String, String, String)> = Vec::new();
+        let mut derived_touched = false;
         for change in changes {
             metrics.record_in_memory_row_check();
             if subscription.visibility.principal_change_concerns(
@@ -99,6 +100,27 @@ impl Runtime {
             }
             if change.table == subscription.definition.table {
                 source.push(change);
+            }
+            derived_touched |= visibility::derived_change_concerns(
+                &subscription.visibility,
+                &subscription.resolved,
+                &change.table,
+                &change.row_id,
+                &change.old_value,
+                &change.new_value,
+            );
+            if subscription.resolved.inherited.values().any(|parent| {
+                visibility::derived_change_concerns(
+                    &parent.plan,
+                    &parent.resolved,
+                    &change.table,
+                    &change.row_id,
+                    &change.old_value,
+                    &change.new_value,
+                )
+            }) {
+                // A parent's derived grant moved for this member only.
+                return Ok(MaskStep::Rebuild);
             }
             if parents.contains_key(&change.table) {
                 parent_changes.push(change);
@@ -124,7 +146,8 @@ impl Runtime {
                 }
             }
         }
-        if source.is_empty() && parent_changes.is_empty() && granted.is_empty() {
+        if source.is_empty() && parent_changes.is_empty() && granted.is_empty() && !derived_touched
+        {
             return Ok(MaskStep::Skip);
         }
 
@@ -164,6 +187,26 @@ impl Runtime {
                         .entry(column.clone())
                         .or_default()
                         .insert(token.clone());
+                }
+            }
+        }
+        if derived_touched
+            || granted
+                .iter()
+                .any(|(scope, _, _)| *scope == subscription.visibility.table)
+        {
+            // Derived sets follow their source set and the shared index in
+            // memory; only tokens that moved are fetched or re-checked.
+            for (name, added, removed) in
+                visibility::recompute_derived(&subscription.visibility, &mut subscription.resolved)
+            {
+                let mut columns = BTreeSet::new();
+                set_columns(&subscription.visibility.predicate, &name, &mut columns);
+                for column in columns {
+                    fetch
+                        .entry(column)
+                        .or_default()
+                        .extend(added.iter().chain(removed.iter()).cloned());
                 }
             }
         }

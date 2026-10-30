@@ -2349,6 +2349,8 @@ mod tests {
                 "createdTasks".to_owned(),
                 crate::visibility::VisibilitySet {
                     kind: String::new(),
+                    from: String::new(),
+                    key: String::new(),
                     table: "tasks".to_owned(),
                     alias: String::new(),
                     select: "id".to_owned(),
@@ -2453,6 +2455,7 @@ mod tests {
             },
             ResolvedVisibility {
                 inherited: Default::default(),
+                indexes: Default::default(),
                 ephemeral_member: false,
                 revision: 1,
                 direct: BTreeMap::new(),
@@ -2669,6 +2672,7 @@ mod tests {
         };
         let resolved = ResolvedVisibility {
             inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),
