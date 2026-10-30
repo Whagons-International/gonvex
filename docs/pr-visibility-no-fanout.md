@@ -89,7 +89,7 @@ Full raw inventory: `docs/visibility-history-inventory.txt`. Load the old plans 
 ## Validation
 
 - Workspace package build passed. CLI typecheck passed after building workspace dependencies, including the previous src/index.ts:1317 unknown-type error. No type assertion was needed.
-- SDK visibility tests and targeted CLI manifest/rejection tests: TODO refresh final counts after approved grant-rule mirror.
+- SDK visibility tests: 14 passed. Targeted CLI manifest/rejection tests: 13 passed after the approved grant-rule mirror.
 - Metrics isolation/reset test passed; legacy deprecation-log test passed.
 - Fan-out integration test: compiles; parent runs it on a disposable local PostgreSQL database. **TODO: attach execution transcript and counters.** Do not use staging/production databases.
 - **TODO:** final runtime unit/integration results, generator output, cycle comparison, CI URLs, client old/new parity, and independent real-tenant parity sign-off.
@@ -104,7 +104,7 @@ This implementation task authorizes neither merge nor deployment. The runtime st
 
 ## Follow-ups
 
-- Verus VIS-1 proof, extracted from an actual production feed-decision boundary with source hashes and failing negative controls. A separately maintained boolean model is not evidence for the async production feed path. No VIS-1 proof is claimed by this PR draft.
+- Verus VIS-1 proof, extracted from an actual production feed-decision boundary with source hashes and failing negative controls. A separately maintained boolean model is not evidence for the async production feed path. No VIS-1 proof is claimed by this PR draft. The pending guarantee and required source boundary/negative controls are recorded in `docs/verification/visibility-masks.md`.
 - Runtime legacy-plan rejection flip after the client migration is live.
 - Token-indexed connection routing to avoid checking unrelated member connections in memory while retaining the statement budgets.
 
