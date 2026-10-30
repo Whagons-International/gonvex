@@ -185,3 +185,12 @@ test("version 2 accepts directly anchored grants and rejects global grants", () 
   assert.equal(visibility(plan).sets.assigned.kind, "grant");
   assert.throws(() => visibility({ ...plan, sets: { assigned: { ...plan.sets.assigned, where: [] } } }), /assigned.*anchor/);
 });
+
+
+test("inherits supports a frozen orphan-only fallback", () => {
+  const where = { operator: "inherits", column: "taskId", table: "tasks", key: "id", onMissing: { operator: "role", value: "system_admin" } };
+  const plan = visibility({ ...validPlan(), where });
+  assert.deepEqual(plan.where, where);
+  assert.ok(Object.isFrozen(plan.where.onMissing));
+  assert.throws(() => visibility({ ...validPlan(), where: { ...where, onMissing: { operator: "unknown" } } }), /onMissing.operator/);
+});

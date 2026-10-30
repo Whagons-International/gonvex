@@ -73,6 +73,8 @@ pub struct VisibilityConstraint {
 #[serde(rename_all = "camelCase")]
 pub struct VisibilityExpression {
     #[serde(default)]
+    pub on_missing: Option<Box<VisibilityExpression>>,
+    #[serde(default)]
     pub table: String,
     #[serde(default)]
     pub key: String,
@@ -397,6 +399,9 @@ pub fn validate_manifest(plans: &BTreeMap<String, VisibilityPlan>) -> Result<(),
         for child in &expression.children {
             parents(child, output);
         }
+        if let Some(fallback) = &expression.on_missing {
+            parents(fallback, output);
+        }
     }
     fn visit(
         name: &str,
@@ -508,6 +513,9 @@ fn active_visibility_sets(
     for child in &expression.children {
         active_visibility_sets(child, role, sets);
     }
+    if let Some(fallback) = &expression.on_missing {
+        active_visibility_sets(fallback, role, sets);
+    }
 }
 
 pub async fn resolve(
@@ -595,7 +603,7 @@ async fn resolve_member(
     ]);
     let mut sets = BTreeMap::new();
     let mut active = BTreeSet::new();
-    if materialize {
+    if materialize || plan.version == Some(2) {
         active_visibility_sets(&plan.predicate, &role, &mut active);
     }
     for (name, set) in &plan.sets {
@@ -780,6 +788,14 @@ fn validate_expression(
     for child in &expression.children {
         validate_expression(child, sets)?;
     }
+    if let Some(fallback) = &expression.on_missing {
+        if expression.operator != "inherits" {
+            return Err(VisibilityError::Invalid(
+                "onMissing is allowed only on inherits".into(),
+            ));
+        }
+        validate_expression(fallback, sets)?;
+    }
     Ok(())
 }
 
@@ -804,6 +820,19 @@ fn compile_expression(
     };
     Ok(match expression.operator.as_str() {
         "public" => "TRUE".to_owned(),
+        "nonEmpty" if plan.version == Some(2) => {
+            let values = resolved.sets.get(&expression.set).ok_or_else(|| {
+                VisibilityError::Invalid(format!(
+                    "mask principal set {:?} was not resolved",
+                    expression.set
+                ))
+            })?;
+            if values.is_empty() {
+                "FALSE".to_owned()
+            } else {
+                "TRUE".to_owned()
+            }
+        }
         "nonEmpty" => {
             let set = plan.sets.get(&expression.set).ok_or_else(|| {
                 VisibilityError::Invalid(format!("unknown set {:?}", expression.set))
@@ -868,6 +897,18 @@ fn compile_expression(
             visibility_literal(expression.value.as_ref())?,
             parameters,
         )?,
+        "inSet" if plan.version == Some(2) => {
+            let column = quote(&expression.column)?;
+            let values = resolved.sets.get(&expression.set).ok_or_else(|| {
+                VisibilityError::Invalid(format!(
+                    "mask principal set {:?} was not resolved",
+                    expression.set
+                ))
+            })?;
+            let tokens = Value::Array(values.iter().cloned().map(Value::String).collect());
+            let parameter = argument(parameters, tokens);
+            format!("{row_alias}.{column}::text = ANY(ARRAY(SELECT jsonb_array_elements_text({parameter}::jsonb)))")
+        }
         "inSet" => {
             let column = quote(&expression.column)?;
             let set = plan.sets.get(&expression.set).ok_or_else(|| {
@@ -1768,6 +1809,7 @@ mod tests {
             key: "id".to_owned(),
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
+                on_missing: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "eq".to_owned(),
@@ -1808,6 +1850,7 @@ mod tests {
             key: "id".to_owned(),
             sets: BTreeMap::new(),
             predicate: VisibilityExpression {
+                on_missing: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "or".to_owned(),
@@ -1817,6 +1860,7 @@ mod tests {
                 value: None,
                 children: vec![
                     VisibilityExpression {
+                        on_missing: None,
                         table: String::new(),
                         key: String::new(),
                         operator: "role".to_owned(),
@@ -1827,6 +1871,7 @@ mod tests {
                         children: Vec::new(),
                     },
                     VisibilityExpression {
+                        on_missing: None,
                         table: String::new(),
                         key: String::new(),
                         operator: "eqContext".to_owned(),
@@ -1891,6 +1936,7 @@ mod tests {
                 },
             )]),
             predicate: VisibilityExpression {
+                on_missing: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "inSet".to_owned(),

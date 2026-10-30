@@ -424,6 +424,12 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
   const key = stringMember(value, "key");
   if (table) result.table = table;
   if (key) result.key = key;
+  const rawOnMissing = readMember(value, "onMissing");
+  if (rawOnMissing !== undefined) {
+    const onMissing = parseVisibilityExpression(rawOnMissing);
+    if (operator !== "inherits" || !onMissing) return undefined;
+    result.onMissing = onMissing;
+  }
   const rawChildren = readMember(value, "children");
   if (Array.isArray(rawChildren)) {
     const children = rawChildren.map(parseVisibilityExpression);
@@ -447,7 +453,7 @@ function parseVisibilityExpression(value: JsonValue | undefined): VisibilityExpr
 
 function visibilityExpressionSetsExist(expression: VisibilityExpression, sets: Record<string, VisibilitySet>): boolean {
   if ((expression.operator === "inSet" || expression.operator === "nonEmpty") && (!expression.set || !(expression.set in sets))) return false;
-  return (expression.children ?? []).every((child) => visibilityExpressionSetsExist(child, sets));
+  return (!expression.onMissing || visibilityExpressionSetsExist(expression.onMissing, sets)) && (expression.children ?? []).every((child) => visibilityExpressionSetsExist(child, sets));
 }
 
 /** Projects the artifact functions onto the language-neutral manifest shape. */

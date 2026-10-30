@@ -559,7 +559,7 @@ export type VisibilityExpression =
   | { readonly operator: "permission" | "role"; readonly value: string }
   | { readonly operator: "eq"; readonly column: string; readonly value: VisibilityLiteral }
   | { readonly operator: "eqContext"; readonly column: string; readonly context: VisibilityContextKey }
-  | { readonly operator: "inherits"; readonly column: string; readonly table: string; readonly key: string }
+  | { readonly operator: "inherits"; readonly column: string; readonly table: string; readonly key: string; readonly onMissing?: VisibilityExpression }
   | { readonly operator: "nonEmpty"; readonly set: string }
   | { readonly operator: "inSet"; readonly column: string; readonly set: string }
   | { readonly operator: "and" | "or"; readonly children: readonly VisibilityExpression[] }
@@ -884,7 +884,7 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
   sets,
   ancestors = new Set(),
 ) => {
-  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children", "table", "key"]);
+  validateExactObject(value, path, ["operator", "column", "context", "set", "value", "children", "table", "key", "onMissing"]);
   if (ancestors.has(value)) throw new Error(`${path} contains a cycle`);
   const operator = value.operator;
   if (typeof operator !== "string" || !visibilityOperators.has(operator as VisibilityOperator)) {
@@ -913,10 +913,11 @@ const validateVisibilityExpression: VisibilityExpressionValidator = (
       validateVisibilityContext(value.context, `${path}.context`);
       return;
     case "inherits":
-      validateExactObject(value, path, ["operator", "column", "table", "key"]);
+      validateExactObject(value, path, ["operator", "column", "table", "key", "onMissing"]);
       requireVisibilityString(value.column, `${path}.column`);
       requireVisibilityString(value.table, `${path}.table`);
       requireVisibilityString(value.key, `${path}.key`);
+      if (value.onMissing !== undefined) validateVisibilityExpression(value.onMissing, `${path}.onMissing`, sets, nested);
       return;
     case "nonEmpty": {
       validateExactObject(value, path, ["operator", "set"]);
@@ -1045,6 +1046,7 @@ const validateVisibilityPlan: (value: unknown, path: string) => asserts value is
 const freezeVisibilityExpression = (expression: VisibilityExpression): VisibilityExpression =>
   freeze({
     ...expression,
+    ...(expression.operator === "inherits" && expression.onMissing !== undefined ? { onMissing: freezeVisibilityExpression(expression.onMissing) } : {}),
     ...(expression.operator === "eq" ? { value: freeze({ ...expression.value }) } : {}),
     ...("children" in expression
       ? { children: freeze(expression.children.map(freezeVisibilityExpression)) }

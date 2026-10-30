@@ -357,7 +357,9 @@ impl Runtime {
             .begin_tenant_transaction(&session.route, true)
             .await?;
         let clock = clock_in_transaction(&mut transaction).await?;
-        let resolved = if definition.max_rows > 0 || definition.max_bytes > 0 {
+        let resolved = if plan.version != Some(2)
+            && (definition.max_rows > 0 || definition.max_bytes > 0)
+        {
             visibility::resolve_for_query(&mut transaction, session, plan, clock.revision).await?
         } else {
             visibility::resolve(&mut transaction, session, plan, clock.revision).await?
@@ -892,7 +894,9 @@ fn bounded_sql_visibility(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> bool {
-    (definition.max_rows > 0 || definition.max_bytes > 0) && plan.needs_materialized_sets(resolved)
+    plan.version != Some(2)
+        && (definition.max_rows > 0 || definition.max_bytes > 0)
+        && plan.needs_materialized_sets(resolved)
 }
 
 fn source_update_requires_snapshot<'a>(
@@ -2247,6 +2251,7 @@ mod tests {
                 },
             )]),
             predicate: crate::visibility::VisibilityExpression {
+                on_missing: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "inSet".to_owned(),
@@ -2323,6 +2328,7 @@ mod tests {
                 key: "id".to_owned(),
                 sets: BTreeMap::new(),
                 predicate: crate::visibility::VisibilityExpression {
+                    on_missing: None,
                     table: String::new(),
                     key: String::new(),
                     operator: "public".to_owned(),
@@ -2537,6 +2543,7 @@ mod tests {
             key: "id".to_owned(),
             sets: BTreeMap::new(),
             predicate: crate::visibility::VisibilityExpression {
+                on_missing: None,
                 table: String::new(),
                 key: String::new(),
                 operator: "public".to_owned(),

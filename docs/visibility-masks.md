@@ -268,7 +268,7 @@ type MaskExpression =
   | { operator: "eqContext"; column: string; context: "member.id" | "account.id" }
   | { operator: "inSet"; column: string; set: string }
   | { operator: "nonEmpty"; set: string }
-  | { operator: "inherits"; column: string; table: string; key: string }
+  | { operator: "inherits"; column: string; table: string; key: string; onMissing?: MaskExpression }
   | { operator: "and" | "or"; children: readonly MaskExpression[] }
   | { operator: "not"; children: readonly [MaskExpression] };
 ```
@@ -345,3 +345,22 @@ preserve spot, personal-space, creator, reporter, approval, context, and share
 rules. A member flag uses, for example,
 `{"operator":"nonEmpty","set":"seeAllSpots"}`, where `seeAllSpots` is a
 permission-only principal set constrained to that flag's existing truth rule.
+
+### Orphan child preservation, additive contract amendment
+
+`inherits` accepts optional `onMissing: MaskExpression`. Its default is deny.
+Evaluate it only when the referenced parent row does not exist in the shared
+parent ACL index, never when an existing parent fails its visibility predicate.
+A null foreign key still denies access. A soft-deleted row still present in the
+index is an existing parent and uses its normal predicate.
+
+The confirmed legacy taskNotes system_admin orphan grant is represented as:
+
+```json
+{"operator":"inherits","column":"taskId","table":"tasks","key":"_id","onMissing":{"operator":"role","value":"system_admin"}}
+```
+
+This preserves orphan access without bypassing PERSONAL parent privacy. Apply
+fallbacks only to plans whose old behavior proves that grant. Parity fixtures
+must include a missing parent, a hidden existing PERSONAL parent, and a visible
+existing parent for every member role.

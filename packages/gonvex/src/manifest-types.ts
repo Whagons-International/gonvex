@@ -159,6 +159,7 @@ export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 
 export type VisibilityExpression = {
   operator: VisibilityOperator;
+  onMissing?: VisibilityExpression;
   column?: string;
   table?: string;
   key?: string;
