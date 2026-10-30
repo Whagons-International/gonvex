@@ -105,4 +105,3 @@ mod tests {
         assert_eq!(first.snapshot().visibility_sql_statements, 1);
     }
 }
-
