@@ -9,11 +9,11 @@ Linked client PR: **TODO: client PR URL**. Runtime PR base: staging. Do not merg
 
 ## Review status
 
-This is PR-body draft text. Replace measured-value placeholders and resolve the readiness gaps below before opening a ready PR. Source references describe the integrated feed head `1a7187f3` plus the support branch. Client tests linked below are source-history evidence, not a claim that old/new parity has passed.
+This is PR-body draft text. Replace measured-value placeholders and resolve the readiness gaps below before opening a ready PR. Source references describe the integrated feed head `fc33b110` plus the support branch. Client tests linked below are source-history evidence, not a claim that old/new parity has passed.
 
 ## What changed
 
-- Version 2 declarations distinguish permission-only principal sets from anchored single-source grant sets. Both snapshot SQL and feed predicates use resolved tokens; nonEmpty represents member/tenant flags without data-table sets.
+- Version 2 declarations distinguish permission-only principal sets, anchored single-source grant sets, and derived token mappings through tenant-shared indexes. Both snapshot SQL and feed predicates use resolved tokens; nonEmpty represents member/tenant flags without data-table sets.
 - Anchored grant sets may read their plan's source table anywhere in the predicate. Principal sets cannot read that source, and no set may join it. Grants remain anchored; low-write configuration sources need explicit permission-table declarations for tenant-global principal sets. Frequently written inverse-existence sources require a reported plan-specific alternative, usually a Reducer-maintained column.
 - Inherits resolves a parent's ACL through a tenant-shared index. onMissing preserves proven orphan grants while existing hidden PERSONAL parents remain hidden. Module admission and code generation reject cycles, invalid parent keys, and chains over four edges.
 - The version 2 replica path patches rows and grants, targets newly admitted entity/child fetches, and evicts rows in memory for budgeted windows. Version 2 live queries check member relevance before rerunning. Legacy behavior remains available for the runtime-first rollout.
@@ -24,8 +24,8 @@ This is PR-body draft text. Replace measured-value placeholders and resolve the 
 | Invariant | Production boundary and enforcement | Evidence/status |
 |---|---|---|
 | V1: row visibility performs no I/O and uses row/principal values | `rust/crates/runtime/src/visibility_mask.rs:6` is the pure evaluator; `visibility_mask.rs:37` handles inherited ACL projections. `scripts/visibility-mask-boundary.test.mjs:7` rejects database/async imports and access. | Boundary test passed. SQL/in-memory corpus and complete parent/grant parity remain final validation gates. |
-| V2: a connection performs visibility work only for relevant principal/grant changes; ordinary task writes cause zero visibility SQL or full snapshots | `rust/crates/runtime/src/replica_mask.rs:73` implements Skip/Applied/Rebuild. `visibility.rs:533` routes principal changes. `replica.rs:471` selects the mask feed path before legacy rebuild logic. `live_query.rs:56` computes version 2 relevance. | `rust/crates/runtime/tests/visibility_fanout.rs` scenarios A–D are the acceptance gate. Distinguish allowed targeted data fetches from principal-resolution SQL when interpreting counters. Fill measured values below. |
-| V3: principal construction reads declared permission tables and rebuilds only affected members, shared across that member's connections | SDK `packages/module-sdk/src/index.ts:982` and CLI `packages/gonvex/src/module-artifact.ts:414` enforce set shapes. Runtime `visibility.rs:355` validates declarations, `visibility.rs:533` routes changed permission rows, and `visibility.rs:1021` resolves inherited principals. Tenant-shared parent loading starts at `visibility.rs:156`. | **Do not claim complete V3 yet:** verify a shared per-member principal cache and one rebuild for the fixture's duplicate connection. Unanchored permission occurrences remain conservative. The fixture requires exactly one rebuild in scenario C. |
+| V2: a connection performs visibility work only for relevant principal/grant changes; ordinary task writes cause zero visibility SQL or full snapshots | `rust/crates/runtime/src/replica_mask.rs:73` implements Skip/Applied/Rebuild. `visibility.rs:615` routes principal changes. `replica.rs:471` selects the mask feed path before legacy rebuild logic. `live_query.rs:56` computes version 2 relevance. | `rust/crates/runtime/tests/visibility_fanout.rs` scenarios A–D are the acceptance gate. Distinguish allowed targeted data fetches from principal-resolution SQL when interpreting counters. Measured values are recorded below. |
+| V3: principal construction reads declared permission tables and rebuilds only affected members, shared across that member's connections | SDK `packages/module-sdk/src/index.ts:1011` and CLI `packages/gonvex/src/module-artifact.ts:432` enforce set shapes. Runtime `visibility.rs:410` validates declarations, `visibility.rs:615` routes changed permission rows, and `visibility.rs:1118` resolves inherited principals. Tenant-shared parent loading starts at `visibility.rs:200`. | Member-scoped routing is measured. Cross-connection/subscription principal sharing is an accepted follow-up: m1's two connections rebuilt four collection principals, not one shared principal. Do not claim that part of V3 is achieved. Unanchored permission occurrences remain conservative. |
 
 Line numbers are pinned to the reviewed support/feed source and must be refreshed after final integration.
 
@@ -35,12 +35,12 @@ Fixture: CI default 200 members, two actual collections per connection, plus a d
 
 | Scenario | Before: measured statements/work | After: measured statements/work | Required budget |
 |---|---|---|---|
-| Task insert/update/delete | TODO parent measurement | TODO parent measurement | 0 visibility SQL; 0 full snapshots; 0 principal rebuilds |
-| One team grant naming 3 members | TODO parent measurement | TODO parent measurement | Work only for those 3 members, including the duplicate connection; rows delivered only to recipients |
-| memberTeams change for one member | TODO parent measurement | TODO parent measurement | Exactly 1 shared principal rebuild across both connections |
-| Parent newly visible to member 0 | TODO parent measurement | TODO parent measurement | Targeted child fetch for member 0 only; 0 full collection snapshots |
+| Task insert/update/delete | Not measured on legacy runtime | 0 SQL, 0 snapshots, 0 rebuilds for each operation | 0 visibility SQL; 0 full snapshots; 0 principal rebuilds |
+| One team grant naming 3 members | Not measured on legacy runtime | Only m1–m3; 8 targeted fetches | Expensive work only for named recipients, including m1's duplicate connection |
+| memberTeams change for one member | Not measured on legacy runtime | Only m1's 2 connections; 4 rebuilds | Work scoped to m1; sharing the 4 rebuilds is a follow-up |
+| Parent newly visible to member 0 | Not measured on legacy runtime | 2 targeted fetches for m0 only | Targeted parent/child fetches only for the newly authorized connection |
 
-The fixture records per-connection metric changes and captures actual SQLx child SELECT statements in scenario D. At the reviewed feed head, `replica_mask.rs:89` increments in-memory checks before relevance routing; the named-member-only work assertion may flag these checks. This is a static observation, not a measured test failure. Counter semantics and recipient routing must be reconciled before recording success.
+The parent implementation owner reports these passing measurements at fc33b110 with 201 connections. The fixture compares expensive work counters; in-memory routing checks are counted separately and do not classify an unrelated connection as doing SQL/snapshot/rebuild work. SQLx tracing checks child-fetch connection scope. Raw execution transcript: **TODO parent attachment**. The additional non-null membership guard has a separate Rust regression, whose result must be attached when its current run completes. No legacy statement baseline was measured, so no before-statement reduction ratio is claimed.
 
 ## Behavior preserved
 
@@ -89,9 +89,9 @@ Full raw inventory: `docs/visibility-history-inventory.txt`. Load the old plans 
 ## Validation
 
 - Workspace package build passed. CLI typecheck passed after building workspace dependencies, including the previous src/index.ts:1317 unknown-type error. No type assertion was needed.
-- SDK visibility tests: 14 passed. Targeted CLI manifest/rejection tests: 13 passed after the approved grant-rule mirror.
+- SDK visibility/boundary checks: 17 passed after the derived-set mirror. Targeted CLI derived/self-source checks: 9 passed. Workspace package build passed.
 - Metrics isolation/reset test passed; legacy deprecation-log test passed.
-- Fan-out integration test: compiles; parent runs it on a disposable local PostgreSQL database. **TODO: attach execution transcript and counters.** Do not use staging/production databases.
+- Fan-out integration test: parent reports passing at fc33b110 on disposable PostgreSQL with the counters above. **TODO: attach raw execution transcript.** Do not use staging/production databases.
 - **TODO:** final runtime unit/integration results, generator output, cycle comparison, CI URLs, client old/new parity, and independent real-tenant parity sign-off.
 
 ## Rollout order
@@ -105,6 +105,7 @@ This implementation task authorizes neither merge nor deployment. The runtime st
 ## Follow-ups
 
 - Verus VIS-1 proof, extracted from an actual production feed-decision boundary with source hashes and failing negative controls. A separately maintained boolean model is not evidence for the async production feed path. No VIS-1 proof is claimed by this PR draft. The pending guarantee and required source boundary/negative controls are recorded in `docs/verification/visibility-masks.md`.
+- Cross-connection and cross-subscription principal sharing. Member-scoped routing currently performs four rebuilds for m1's two connections.
 - Runtime legacy-plan rejection flip after the client migration is live.
 - Token-indexed connection routing to avoid checking unrelated member connections in memory while retaining the statement budgets.
 

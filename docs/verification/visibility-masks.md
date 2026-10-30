@@ -43,3 +43,18 @@ source write force a budgeted snapshot, and remove the grant refcount guard.
 Compiler errors do not count as failed-proof controls. Receipts must name the
 Verus version, source/extractor/harness hashes, proof boundaries and all controls,
 following call-budgets.md and verus.md. No Verus result is claimed here.
+
+## Measured integrated status at fc33b110
+
+The implementation owner reports the real-collection fixture passing with 201
+connections. Task insert/update/delete each caused zero SQL, snapshots and
+rebuilds. One team grant caused eight targeted fetches restricted to m1–m3.
+An m1 membership change caused four rebuilds on m1's two connections. A parent
+grant caused two targeted fetches for m0 only. These are owner-reported measured
+counts; the raw transcript belongs with the PR evidence.
+
+Cross-connection/subscription principal sharing is now an explicitly accepted
+follow-up. The four membership-change rebuilds must not be described as one
+shared rebuild or as establishing that portion of V3. The guarantee above remains
+intended and incomplete. Pure in-memory relevance checks are excluded from the
+fixture's definition of expensive per-connection work.
