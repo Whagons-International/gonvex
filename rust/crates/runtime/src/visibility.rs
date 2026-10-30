@@ -511,6 +511,130 @@ impl VisibilityPlan {
         false
     }
 
+    /// Version 2: does this change alter the member's principal, i.e. a
+    /// principal set, a grant set's permission join, or the member row itself?
+    /// Grant source rows are not principal inputs; they are patched in memory.
+    /// Inherited parents are checked recursively with their own resolution.
+    pub fn principal_change_concerns(
+        &self,
+        resolved: &ResolvedVisibility,
+        table: &str,
+        operation: &str,
+        changed_columns: &[String],
+        old: &Value,
+        new: &Value,
+    ) -> bool {
+        if table == "members" {
+            let member = resolved.direct.get("member.id").map(String::as_str);
+            let names_member = [old, new]
+                .into_iter()
+                .filter(|row| !row.is_null())
+                .any(|row| row.get("id").and_then(Value::as_str).is_none_or(|id| Some(id) == member));
+            let relevant = !operation.eq_ignore_ascii_case("update")
+                || changed_columns.iter().any(|column| {
+                    matches!(column.as_str(), "id" | "account_id" | "status" | "role" | "permissions")
+                });
+            if names_member && relevant {
+                return true;
+            }
+        }
+        let mut active = BTreeSet::new();
+        active_visibility_sets(&self.predicate, &resolved.role, &mut active);
+        for name in &active {
+            let set = &self.sets[name];
+            let base = if set.alias.is_empty() { set.table.as_str() } else { set.alias.as_str() };
+            let mut occurrences = Vec::new();
+            if set.kind != "grant" {
+                occurrences.push((set.table.as_str(), base));
+            }
+            for join in &set.joins {
+                occurrences.push((
+                    join.table.as_str(),
+                    if join.alias.is_empty() { join.table.as_str() } else { join.alias.as_str() },
+                ));
+            }
+            if !occurrences.iter().any(|(source, _)| *source == table) {
+                continue;
+            }
+            let dependencies = self.dependency_columns_for_sets(Some(&BTreeSet::from([name.clone()])));
+            if !dependencies.change_affects(table, operation, changed_columns) {
+                continue;
+            }
+            for (_, alias) in occurrences.iter().filter(|(source, _)| *source == table) {
+                let anchors = set
+                    .constraints
+                    .iter()
+                    .filter(|constraint| {
+                        !constraint.context.is_empty()
+                            && (constraint.table == *alias
+                                || (constraint.table.is_empty() && *alias == base))
+                    })
+                    .collect::<Vec<_>>();
+                // Unanchored permission occurrences (for example workspaceTeams
+                // reached through memberTeams) stay conservative: rare admin
+                // writes rebuild, ordinary data writes never reach this path.
+                if anchors.is_empty() {
+                    return true;
+                }
+                for row in [old, new].into_iter().filter(|row| !row.is_null()) {
+                    let excludes = anchors.iter().any(|anchor| {
+                        match (row.get(&anchor.column), resolved.direct.get(&anchor.context)) {
+                            (Some(value), Some(expected)) => scalar(Some(value)) != *expected,
+                            _ => false,
+                        }
+                    });
+                    if !excludes {
+                        return true;
+                    }
+                }
+            }
+        }
+        resolved.inherited.values().any(|parent| {
+            parent.plan.principal_change_concerns(
+                &parent.resolved,
+                table,
+                operation,
+                changed_columns,
+                old,
+                new,
+            )
+        })
+    }
+
+    /// Active grant sets of a version 2 plan, by name.
+    pub fn active_grant_sets<'a>(
+        &'a self,
+        resolved: &ResolvedVisibility,
+    ) -> Vec<(&'a String, &'a VisibilitySet)> {
+        let mut active = BTreeSet::new();
+        active_visibility_sets(&self.predicate, &resolved.role, &mut active);
+        self.sets
+            .iter()
+            .filter(|(name, set)| set.kind == "grant" && active.contains(*name))
+            .collect()
+    }
+
+    /// Child columns that reference each directly inherited parent table.
+    pub fn inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+        fn visit(expression: &VisibilityExpression, output: &mut BTreeMap<String, BTreeSet<String>>) {
+            if expression.operator == "inherits" {
+                output
+                    .entry(expression.table.clone())
+                    .or_default()
+                    .insert(expression.column.clone());
+            }
+            for child in &expression.children {
+                visit(child, output);
+            }
+            if let Some(fallback) = &expression.on_missing {
+                visit(fallback, output);
+            }
+        }
+        let mut output = BTreeMap::new();
+        visit(&self.predicate, &mut output);
+        output
+    }
+
     fn dependency_columns_for_sets(
         &self,
         active: Option<&BTreeSet<String>>,
