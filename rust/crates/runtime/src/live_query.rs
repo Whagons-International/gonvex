@@ -27,6 +27,7 @@ pub struct LiveQuerySubscription {
     pub plan: LiveQueryPlan,
     pub visibility: VisibilityPlan,
     pub visibility_dependencies: VisibilityDependencies,
+    pub resolved_visibility: ResolvedVisibility,
     pub related_dependencies: Vec<VisibilityDependencies>,
     pub required_revision: u64,
     pub computed_revision: u64,
@@ -48,8 +49,111 @@ fn change_affects_live_query(
         || dependencies.change_affects(&change.table, &change.operation, &change.changed_columns)
 }
 
+/// Version 2: a live query reruns only for a change this member can observe:
+/// a source row visible before or after, a principal or grant change naming
+/// the member, a parent whose visibility to the member matters, or the
+/// query's own ordering/relation tables. Invisible task writes are skipped.
+fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange) -> bool {
+    let resolved = &subscription.resolved_visibility;
+    let plan = &subscription.visibility;
+    if change.table == subscription.plan.table {
+        return [&change.old_value, &change.new_value]
+            .into_iter()
+            .any(|row| !row.is_null() && visibility::row_matches(plan, resolved, row));
+    }
+    if plan.principal_change_concerns(
+        resolved,
+        &change.table,
+        &change.operation,
+        &change.changed_columns,
+        &change.old_value,
+        &change.new_value,
+    ) {
+        return true;
+    }
+    let names_member = |plan: &VisibilityPlan, resolved: &ResolvedVisibility| {
+        plan.active_grant_sets(resolved)
+            .into_iter()
+            .any(|(name, set)| {
+                set.table == change.table
+                    && [&change.old_value, &change.new_value]
+                        .into_iter()
+                        .any(|row| {
+                            visibility::grant_contribution(name, set, resolved, row)
+                                != visibility::GrantContribution::None
+                        })
+            })
+    };
+    if names_member(plan, resolved)
+        || resolved
+            .inherited
+            .values()
+            .any(|parent| names_member(&parent.plan, &parent.resolved))
+    {
+        return true;
+    }
+    let derived = |plan: &VisibilityPlan, resolved: &ResolvedVisibility| {
+        visibility::derived_change_concerns(
+            plan,
+            resolved,
+            &change.table,
+            &change.row_id,
+            &change.old_value,
+            &change.new_value,
+        )
+    };
+    if derived(plan, resolved)
+        || resolved
+            .inherited
+            .values()
+            .any(|parent| derived(&parent.plan, &parent.resolved))
+    {
+        return true;
+    }
+    for expression in visibility::inherits_any(plan) {
+        let (Some(via), Some(parent)) =
+            (&expression.via, resolved.inherited.get(&expression.table))
+        else {
+            continue;
+        };
+        if via.table == change.table
+            && [&change.old_value, &change.new_value]
+                .into_iter()
+                .any(|link| {
+                    link.get(&via.parent_column)
+                        .filter(|value| !value.is_null())
+                        .and_then(|value| parent.row(&crate::visibility_mask::scalar(Some(value))))
+                        .is_some_and(|row| {
+                            plan.parent_admits(resolved, &expression.table, parent, &row)
+                        })
+                })
+        {
+            return true;
+        }
+    }
+    if let Some(parent) = resolved.inherited.get(&change.table) {
+        return [&change.old_value, &change.new_value]
+            .into_iter()
+            .any(|row| {
+                !row.is_null() && visibility::row_matches(&parent.plan, &parent.resolved, row)
+            });
+    }
+    subscription.plan.index_change_affects(&change.table)
+        || subscription
+            .related_dependencies
+            .iter()
+            .any(|dependencies| {
+                dependencies.change_affects(
+                    &change.table,
+                    &change.operation,
+                    &change.changed_columns,
+                )
+            })
+}
+
 #[derive(Clone)]
 struct QuerySnapshot {
+    resolved_visibility: ResolvedVisibility,
     result: Value,
     revision: u64,
     epoch: String,
@@ -458,6 +562,7 @@ impl Runtime {
                 path,
                 args,
                 visibility_dependencies: visibility_plan.dependency_columns(),
+                resolved_visibility: snapshot.resolved_visibility,
                 related_dependencies: relation_tables(plan.predicate.as_ref())
                     .iter()
                     .filter_map(|table| module.visibility.get(table))
@@ -487,14 +592,27 @@ impl Runtime {
         };
         let mut messages = Vec::new();
         for subscription in subscriptions.values_mut() {
-            if !reset
-                && (event_revision <= subscription.computed_revision
-                    || !changes.iter().any(|change| {
+            if !reset && event_revision <= subscription.computed_revision {
+                continue;
+            }
+            let relevant = reset
+                || changes.iter().any(|change| {
+                    self.inner.visibility_metrics.record_in_memory_row_check();
+                    if subscription.visibility.version == Some(2) {
+                        mask_change_relevant(subscription, change)
+                    } else {
                         change_affects_live_query(
                             &subscription.plan.table,
                             &subscription.visibility_dependencies,
                             change,
-                        ) || subscription.plan.index_change_affects(&change.table)
+                        ) && (change.table == subscription.plan.table
+                            || subscription.visibility.change_concerns_member(
+                                &subscription.resolved_visibility,
+                                &change.table,
+                                &change.old_value,
+                                &change.new_value,
+                            ))
+                            || subscription.plan.index_change_affects(&change.table)
                             || subscription
                                 .related_dependencies
                                 .iter()
@@ -505,10 +623,12 @@ impl Runtime {
                                         &change.changed_columns,
                                     )
                                 })
-                    }))
-            {
+                    }
+                });
+            if !relevant {
                 continue;
             }
+            self.inner.visibility_metrics.record_live_query_rerun();
             if !reset {
                 subscription.required_revision = subscription.required_revision.max(event_revision);
             }
@@ -527,6 +647,7 @@ impl Runtime {
                     }
                     let changed = snapshot.result != subscription.last_result
                         || snapshot.epoch != subscription.epoch;
+                    subscription.resolved_visibility = snapshot.resolved_visibility;
                     subscription.computed_revision = snapshot.revision;
                     subscription.epoch = snapshot.epoch;
                     if changed {
@@ -575,9 +696,31 @@ impl Runtime {
                 .await?;
         let epoch: String = clock.get("epoch");
         let revision = clock.get::<i64, _>("revision").max(0) as u64;
-        let resolved =
+        self.inner
+            .visibility_metrics
+            .record_visibility_sql_statement();
+        let resolved = if visibility_plan.version == Some(2) {
+            let module = self
+                .inner
+                .modules
+                .project(&session.identity.project_id)
+                .await
+                .ok_or_else(|| {
+                    LiveQueryError::Invalid("project module is not loaded".to_owned())
+                })?;
+            visibility::resolve_with_parents(
+                &mut transaction,
+                session,
+                visibility_plan,
+                revision,
+                &module.visibility,
+                &self.inner.parent_acl,
+            )
+            .await?
+        } else {
             visibility::resolve_for_query(&mut transaction, session, visibility_plan, revision)
-                .await?;
+                .await?
+        };
         let mut related = BTreeMap::new();
         let tables = relation_tables(plan.predicate.as_ref());
         if !tables.is_empty() {
@@ -629,6 +772,7 @@ impl Runtime {
         }
         transaction.commit().await?;
         let snapshot = QuerySnapshot {
+            resolved_visibility: resolved,
             result,
             epoch,
             revision,
@@ -1648,6 +1792,8 @@ mod tests {
         .unwrap();
         visibility.validate().unwrap();
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("account.id".to_owned(), "account".to_owned())]),
@@ -1835,6 +1981,8 @@ mod tests {
             "table":"routing", "key":"id", "where":{"operator":"eqContext","column":"owner","context":"member.id"}
         })).unwrap();
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::from([("member.id".to_owned(), "member-a".to_owned())]),
@@ -2156,6 +2304,8 @@ mod tests {
                 }))
                 .unwrap();
                 let resolved = ResolvedVisibility {
+                    inherited: Default::default(),
+                    indexes: Default::default(),
                     ephemeral_member: false,
                     revision: 1,
                     direct: context.clone(),

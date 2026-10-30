@@ -776,6 +776,15 @@ fn artifact_from_manifest(
         .transpose()
         .map_err(|error| invalid(format!("visibility plans: {error}")))?
         .unwrap_or_default();
+    crate::visibility::validate_manifest(&visibility)
+        .map_err(|error| invalid(error.to_string()))?;
+    let legacy = visibility
+        .values()
+        .filter(|plan| plan.version != Some(2))
+        .count();
+    if legacy > 0 {
+        tracing::warn!(legacy_plans = legacy, "DEPRECATED legacy visibility manifest: data-table dependencies can cause SQL fan-out; migrate to version 2 masks before legacy rejection is enabled");
+    }
     for (table, plan) in &visibility {
         if &plan.table != table {
             return Err(invalid(format!(
@@ -827,7 +836,8 @@ fn artifact_from_manifest(
     ))
 }
 
-pub(crate) fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, String> {
+#[doc(hidden)]
+pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, String> {
     let javascript = module
         .get("javascript")
         .and_then(Value::as_object)
@@ -1168,3 +1178,7 @@ mod offline_contract_tests {
         assert!(client_contract_from_module(module.as_object().unwrap()).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "visibility_deprecation_tests.rs"]
+mod visibility_deprecation_tests;

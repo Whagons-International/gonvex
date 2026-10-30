@@ -120,6 +120,8 @@ export type SchemaDefinition = {
 };
 
 export type VisibilityPlan = {
+  version?: 2;
+  permissionTables?: string[];
   table: string;
   key: string;
   sets: Record<string, VisibilitySet>;
@@ -127,11 +129,14 @@ export type VisibilityPlan = {
 };
 
 export type VisibilitySet = {
+  kind?: "principal" | "grant" | "derived";
+  from?: string;
+  key?: string;
   table: string;
   alias?: string;
   select: string;
   selectFrom?: string;
-  joins: VisibilityJoin[];
+  joins?: VisibilityJoin[];
   where: VisibilityConstraint[];
 };
 
@@ -144,22 +149,29 @@ export type VisibilityJoin = {
 };
 
 export type VisibilityConstraint = {
-  table: string;
+  table?: string;
   column: string;
-  /** Exactly one of context or value. */
+  inSet?: string;
+  /** Exactly one of context/value, or inSet for derived filters. */
   context?: VisibilityContextKey;
   value?: { literal: JsonValue };
 };
 
-export type VisibilityOperator = "public" | "permission" | "role" | "eqContext" | "inSet" | "and" | "or" | "not";
+export type VisibilityOperator = "public" | "permission" | "role" | "eq" | "eqContext" | "inSet" | "nonEmpty" | "inherits" | "inheritsAny" | "and" | "or" | "not";
 export type VisibilityContextKey = "account.id" | "member.id" | "tenant.id";
 
 export type VisibilityExpression = {
   operator: VisibilityOperator;
+  predicate?: VisibilityExpression;
+  where?: Array<{ column: string; value: { literal: JsonValue } }>;
+  via?: { table: string; childColumn: string; parentColumn: string };
+  onMissing?: VisibilityExpression;
   column?: string;
+  table?: string;
+  key?: string;
   context?: VisibilityContextKey;
   set?: string;
-  value?: string;
+  value?: string | { literal: JsonValue };
   children?: VisibilityExpression[];
 };
 

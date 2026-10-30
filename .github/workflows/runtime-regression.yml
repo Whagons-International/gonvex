@@ -113,6 +113,17 @@ jobs:
       - name: Build module host for required native receipt regressions
         working-directory: rust
         run: cargo build --locked -p gonvex-module-host --bin gonvex-module-host
+      # G1-visibility-no-fanout: statement budgets on real collections. Only
+      # this step sets the module host, so other module-host suites keep their
+      # existing CI scope.
+      - name: Enforce visibility fan-out budgets
+        working-directory: rust
+        run: cargo test --locked -p gonvex-runtime --test visibility_fanout -- --test-threads=1 --nocapture
+        env:
+          GONVEX_TEST_MODULE_HOST_BINARY: ${{ github.workspace }}/rust/target/debug/gonvex-module-host
+          GONVEX_VIS_FANOUT_REQUIRED: "1"
+          GONVEX_VIS_FANOUT_MEMBERS: "200"
+          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       - name: Test native receipt replay and rollback guarantees
         working-directory: rust
         shell: bash

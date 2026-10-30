@@ -582,3 +582,134 @@ test("artifact parser rejects unsafe public function declarations", async t => {
     await assert.rejects(buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }), /public.*(internal|interactive|one-shot|server-only)/);
   }
 });
+
+test("TypeScript artifacts retain the frozen mask manifest contract", async (t) => {
+  const mask = {
+    version: 2, table: "taskNotes", key: "id", permissionTables: ["members"],
+    sets: {
+      own: { kind: "principal", table: "members", select: "id", joins: [], where: [{ table: "members", column: "id", context: "member.id" }] },
+      grants: { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] },
+    },
+    where: { operator: "or", children: [
+      { operator: "inherits", column: "taskId", table: "tasks", key: "id" },
+      { operator: "nonEmpty", set: "own" },
+      { operator: "eq", column: "public", value: { literal: true } },
+    ] },
+  };
+  const project = await moduleProject(t, `const visibility = x => x; export const tasksVisibility = visibility({version:2, table:"tasks",key:"id",permissionTables:["members"],sets:{},where:{operator:"public"}}); export const notesVisibility = visibility(${JSON.stringify(mask)});`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.visibility.taskNotes, mask);
+});
+
+test("code generation rejects cyclic and overdeep inherited visibility", async (t) => {
+  const plan = (table, parent) => ({ version: 2, table, key: "id", permissionTables: [], sets: {}, where: parent ? { operator: "inherits", column: "parentId", table: parent, key: "id" } : { operator: "public" } });
+  for (const [name, plans, error] of [
+    ["cycle", [plan("a", "b"), plan("b", "a")], /inherits cycle/],
+    ["deep", Array.from({ length: 6 }, (_, i) => plan(`t${i}`, i < 5 ? `t${i + 1}` : undefined)), /inherits depth exceeds 4/],
+  ]) {
+    await t.test(name, async (t) => {
+      const project = await moduleProject(t, "const visibility = x => x;\n" + plans.map((value, i) => `export const p${i}Visibility = visibility(${JSON.stringify(value)});`).join("\n"));
+      await assert.rejects(buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }), error);
+    });
+  }
+});
+
+test("code generation rejects forbidden version 2 visibility sets with repairs", async (t) => {
+  const grant = { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] };
+  for (const [name, set, message] of [
+    ["self-source", { ...grant, kind: "principal", table: "tasks", where: [{ table: "tasks", column: "createdBy", context: "member.id" }] }, /set assigned: reads its own source table.*inherits/],
+    ["principal-data", { ...grant, kind: "principal" }, /set assigned: undeclared permission table taskUsers.*inherits/],
+    ["data-join", { ...grant, joins: [{ table: "documents", leftColumn: "taskId", rightColumn: "taskId" }] }, /set assigned: joins data table documents.*inherits/],
+    ["unanchored-grant", { ...grant, where: [] }, /set assigned: grant requires member.id or account.id anchor/],
+  ]) {
+    await t.test(name, async (t) => {
+      const plan = { version: 2, table: "tasks", key: "id", permissionTables: [], sets: { assigned: set }, where: { operator: "inSet", column: "id", set: "assigned" } };
+      const project = await moduleProject(t, `const visibility = x => x; export const tasksVisibility = visibility(${JSON.stringify(plan)});`);
+      await assert.rejects(buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] }), message);
+    });
+  }
+});
+
+
+test("code generation retains self-source grants outside orphan fallbacks", async (t) => {
+  const assigned = { kind: "grant", table: "taskUsers", select: "taskId", joins: [], where: [{ table: "taskUsers", column: "userId", context: "member.id" }] };
+  const plan = { version: 2, table: "taskUsers", key: "_id", permissionTables: [], sets: { assigned }, where: { operator: "inSet", column: "taskId", set: "assigned" } };
+  const project = await moduleProject(t, `const visibility = x => x; export const taskUsersVisibility = visibility(${JSON.stringify(plan)});`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.visibility.taskUsers, plan);
+  for (const kind of ["principal", "grant"]) {
+    const joined = { ...plan, sets: { assigned: { ...assigned, kind, table: "memberTeams", joins: [{ table: "taskUsers", leftColumn: "memberId", rightColumn: "userId" }] } } };
+    const fixture = await moduleProject(t, `const visibility = x => x; export const taskUsersVisibility = visibility(${JSON.stringify(joined)});`);
+    await assert.rejects(buildModuleArtifact({ root: fixture.root, backendDir: fixture.backendDir, files: [fixture.entrypoint], migrations: [] }), /set assigned: reads its own source table/);
+  }
+});
+
+test("code generation retains derived set shapes and rejects unsafe derivations", async (t) => {
+  const seed = { kind: "principal", table: "members", select: "id", joins: [], where: [] };
+  const derived = { kind: "derived", from: "seed", table: "teams", key: "id", select: "workspaceId", where: [{ column: "deletedAt", value: { literal: null } }] };
+  const make = (sets) => ({ version: 2, table: "tasks", key: "id", permissionTables: ["members"], sets: { seed, ...sets }, where: { operator: "nonEmpty", set: "mapped" } });
+  const build = async (t, plan) => {
+    const project = await moduleProject(t, `const visibility = x => x; export const tasksVisibility = visibility(${JSON.stringify(plan)});`);
+    return buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  };
+  const valid = make({ mapped: derived, twice: { ...derived, from: "mapped", table: "workspaces", joins: [] } });
+  assert.deepEqual((await build(t, valid)).visibility.tasks, valid);
+  for (const [name, sets, message] of [
+    ["unknown", { mapped: { ...derived, from: "missing" } }, /unknown set/],
+    ["own", { mapped: { ...derived, table: "tasks" } }, /another table/],
+    ["joins", { mapped: { ...derived, joins: [{ table: "members", leftColumn: "id", rightColumn: "id" }] } }, /joins/],
+    ["context", { mapped: { ...derived, where: [{ column: "id", context: "tenant.id" }] } }, /context/],
+    ["table", { mapped: { ...derived, where: [{ table: "teams", column: "id", value: { literal: null } }] } }, /indexed-row/],
+    ["cycle", { mapped: { ...derived, from: "b" }, b: { ...derived, from: "mapped" } }, /cycle/],
+    ["depth", { mapped: derived, b: { ...derived, from: "mapped" }, c: { ...derived, from: "b" } }, /limited to two/],
+  ]) await t.test(name, async (t) => assert.rejects(build(t, make(sets)), message));
+});
+
+test("codegen mirrors F1-F4 parent filters, permission self-reads, correlated derived and inheritsAny", async (t) => {
+  const permissions = ["spots"];
+  const tasks = { version: 2, table: "tasks", key: "id", permissionTables: permissions, sets: {}, where: { operator: "public" } };
+  const seed = { kind: "grant", table: "approvals", select: "taskId", joins: [], where: [{ table: "approvals", column: "memberId", context: "member.id" }] };
+  const mapped = { kind: "derived", from: "seed", table: "contexts", key: "taskId", select: "workspaceId", where: [{ column: "kind", value: { literal: "approval" } }, { column: "targetMemberId", context: "member.id" }, { column: "taskId", inSet: "seed" }] };
+  const workspaces = { version: 2, table: "workspaces", key: "id", permissionTables: permissions, sets: { seed, mapped }, where: { operator: "inSet", column: "id", set: "mapped" } };
+  const documents = { version: 2, table: "documents", key: "id", permissionTables: permissions, sets: {}, where: { operator: "inheritsAny", column: "id", table: "tasks", key: "id", via: { table: "documentAssociations", childColumn: "documentId", parentColumn: "taskId" }, where: [{ column: "deletedAt", value: { literal: null } }] } };
+  const crm = { version: 2, table: "crmActivities", key: "id", permissionTables: permissions, sets: {}, where: { operator: "inherits", column: "taskId", table: "tasks", key: "id", where: [{ column: "deletedAt", value: { literal: null } }] } };
+  const spots = { version: 2, table: "spots", key: "id", permissionTables: permissions, sets: { tree: { kind: "principal", table: "spots", alias: "child", select: "id", joins: [{ table: "spots", alias: "ancestor", leftColumn: "parentId", rightColumn: "id" }], where: [] } }, where: { operator: "inSet", column: "id", set: "tree" } };
+  const build = async (t, plans) => {
+    const project = await moduleProject(t, "const visibility = x => x;\n" + plans.map((plan, i) => `export const p${i}Visibility = visibility(${JSON.stringify(plan)});`).join("\n"));
+    return buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  };
+  const plans = [tasks, workspaces, documents, crm, spots];
+  const artifact = await build(t, plans);
+  for (const plan of plans) assert.deepEqual(artifact.visibility[plan.table], plan);
+  for (const filter of [{ column: "x" }, { column: "x", context: "member.id", value: { literal: null } }, { column: "x", inSet: "missing" }, { column: "x", inSet: "mapped" }]) {
+    const invalid = { ...workspaces, sets: { seed, mapped: { ...mapped, where: [filter] } } };
+    await assert.rejects(build(t, [invalid]), /exactly one|principal or grant/);
+  }
+  for (const operator of ["inherits", "inheritsAny"]) {
+    const expression = { ...documents.where, operator, ...(operator === "inherits" ? { via: undefined } : {}), where: [{ column: "x", context: "member.id" }] };
+    await assert.rejects(build(t, [tasks, { ...documents, where: expression }]), /literal/);
+  }
+  await assert.rejects(build(t, [tasks, { ...documents, where: { ...documents.where, via: { table: "links", childColumn: "id" } } }]), /via/);
+  const a = { ...documents, table: "a", where: { ...documents.where, table: "b" } };
+  const b = { ...documents, table: "b", where: { ...documents.where, table: "a" } };
+  await assert.rejects(build(t, [a, b]), /cycle/);
+});
+
+test("codegen F5 retains child-principal parent overrides and rejects nested inheritance", async (t) => {
+  const parent = { version: 2, table: "goals", key: "id", permissionTables: [], sets: {}, where: { operator: "role", value: "parent-only" } };
+  const seed = { kind: "grant", table: "goalParticipants", select: "goalId", joins: [], where: [{ table: "goalParticipants", column: "memberId", context: "member.id" }] };
+  const predicate = { operator: "or", children: [{ operator: "inSet", column: "id", set: "myGoals" }, { operator: "eqContext", column: "ownerId", context: "member.id" }] };
+  const build = async (t, plan) => {
+    const project = await moduleProject(t, `const visibility = x => x; export const goalsVisibility = visibility(${JSON.stringify(parent)}); export const updatesVisibility = visibility(${JSON.stringify(plan)});`);
+    return buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  };
+  for (const operator of ["inherits", "inheritsAny"]) {
+    const child = { version: 2, table: "goalUpdates", key: "id", permissionTables: [], sets: { myGoals: seed }, where: { operator, column: "goalId", table: "goals", key: "id", predicate, where: [{ column: "deletedAt", value: { literal: null } }], ...(operator === "inheritsAny" ? { via: { table: "goalLinks", childColumn: "updateId", parentColumn: "goalId" } } : {}) } };
+    assert.deepEqual((await build(t, child)).visibility.goalUpdates, child);
+    await assert.rejects(build(t, { ...child, where: { ...child.where, predicate: { operator: "inSet", column: "id", set: "parentOnly" } } }), /unknown child-plan set/);
+    const nested = { operator: "inherits", column: "id", table: "goals", key: "id" };
+    await assert.rejects(build(t, { ...child, where: { ...child.where, predicate: { operator: "not", children: [nested] } } }), /cannot inherit again/);
+    const nestedAny = { ...nested, operator: "inheritsAny", via: { table: "links", childColumn: "a", parentColumn: "b" } };
+    await assert.rejects(build(t, { ...child, where: { ...child.where, predicate: nestedAny } }), /cannot inherit again/);
+  }
+});

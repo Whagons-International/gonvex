@@ -1,5 +1,8 @@
 //! Replica Collection snapshots, resumable membership, and transaction routing.
 
+#[path = "replica_mask.rs"]
+mod mask;
+use mask::MaskStep;
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures_util::{Stream, StreamExt};
@@ -357,7 +360,27 @@ impl Runtime {
             .begin_tenant_transaction(&session.route, true)
             .await?;
         let clock = clock_in_transaction(&mut transaction).await?;
-        let resolved = if definition.max_rows > 0 || definition.max_bytes > 0 {
+        self.inner.visibility_metrics.record_collection_snapshot();
+        self.inner
+            .visibility_metrics
+            .record_visibility_sql_statement();
+        let resolved = if plan.version == Some(2) {
+            let module = self
+                .inner
+                .modules
+                .project(&session.identity.project_id)
+                .await
+                .ok_or(ReplicaError::ModuleMissing)?;
+            visibility::resolve_with_parents(
+                &mut transaction,
+                session,
+                plan,
+                clock.revision,
+                &module.visibility,
+                &self.inner.parent_acl,
+            )
+            .await?
+        } else if definition.max_rows > 0 || definition.max_bytes > 0 {
             visibility::resolve_for_query(&mut transaction, session, plan, clock.revision).await?
         } else {
             visibility::resolve(&mut transaction, session, plan, clock.revision).await?
@@ -409,6 +432,7 @@ impl Runtime {
             changes,
         } = event
         else {
+            self.inner.parent_acl.reset(session);
             return Ok(subscriptions
                 .values()
                 .map(|subscription| ServerMessage::ReplicaReset {
@@ -420,9 +444,60 @@ impl Runtime {
         };
         let mut messages = Vec::new();
         let mut entity_changes = BTreeMap::<(String, String), ReplicaChange>::new();
+        if subscriptions
+            .values()
+            .any(|subscription| subscription.visibility.version == Some(2))
+        {
+            // Parent ACL indexes advance once per transaction, before any
+            // connection evaluates an inherited row against them.
+            if let Some(module) = self
+                .inner
+                .modules
+                .project(&session.identity.project_id)
+                .await
+            {
+                self.inner
+                    .parent_acl
+                    .apply(session, &module.visibility, revision, &changes);
+            }
+        }
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
+            }
+            let mut force_snapshot = false;
+            if subscription.visibility.version == Some(2) {
+                match self
+                    .apply_mask_feed(
+                        session,
+                        subscription,
+                        revision,
+                        &changes,
+                        &mut entity_changes,
+                        &mut messages,
+                    )
+                    .await?
+                {
+                    MaskStep::Skip => {
+                        subscription.cursor.revision = revision;
+                        continue;
+                    }
+                    MaskStep::Applied => {
+                        messages.push(replica_ready(
+                            &subscription.id,
+                            &subscription.path,
+                            &subscription.definition,
+                            subscription.cursor.clone(),
+                            subscription_digest(subscription),
+                            subscription.truncated,
+                        ));
+                        continue;
+                    }
+                    MaskStep::Rebuild => {
+                        self.inner.visibility_metrics.record_principal_rebuild();
+                        force_snapshot = true;
+                    }
+                }
             }
             let dependencies = subscription
                 .visibility
@@ -430,14 +505,22 @@ impl Runtime {
             let (source_changed, dependency_changed) = table_change_relevance(
                 &subscription.definition.table,
                 &dependencies,
-                changes.iter(),
+                changes.iter().filter(|change| {
+                    change.table == subscription.definition.table
+                        || subscription.visibility.change_concerns_member(
+                            &subscription.resolved,
+                            &change.table,
+                            &change.old_value,
+                            &change.new_value,
+                        )
+                }),
             );
             // Budgets and progressive delivery only make a source-table or
             // visibility-dependency change window-sensitive. Re-running every
             // bounded collection for every unrelated transaction made one task
             // update queue full snapshots for the entire application replica,
             // leaving the changed task stale behind minutes of irrelevant SQL.
-            if !source_changed && !dependency_changed {
+            if !force_snapshot && !source_changed && !dependency_changed {
                 // Keep the server-side subscription cursor current for resume
                 // bookkeeping, but do not emit one `replica.ready` per open
                 // collection. The rows and visibility inputs did not change,
@@ -452,7 +535,8 @@ impl Runtime {
                 .iter()
                 .filter(|change| change.table == subscription.definition.table)
                 .collect::<Vec<_>>();
-            if dependency_changed
+            if force_snapshot
+                || dependency_changed
                 || bounded_sql_visibility(
                     &subscription.definition,
                     &subscription.visibility,
@@ -752,10 +836,48 @@ pub(super) async fn query_rows(
     resolved: &ResolvedVisibility,
     args: &Value,
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
+    query_rows_filtered(transaction, definition, plan, resolved, args, None).await
+}
+
+/// Visible rows of the collection whose `column` is one of `values`: the
+/// targeted fetch for rows a grant or parent newly revealed to one member.
+pub(super) async fn query_rows_where(
+    transaction: &mut TenantTransaction,
+    definition: &ReplicaCollectionDefinition,
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    args: &Value,
+    filter: Option<(&str, &BTreeSet<String>)>,
+) -> Result<Vec<Value>, ReplicaError> {
+    Ok(
+        query_rows_filtered(transaction, definition, plan, resolved, args, filter)
+            .await?
+            .0,
+    )
+}
+
+async fn query_rows_filtered(
+    transaction: &mut TenantTransaction,
+    definition: &ReplicaCollectionDefinition,
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    args: &Value,
+    filter: Option<(&str, &BTreeSet<String>)>,
+) -> Result<(Vec<Value>, bool), ReplicaError> {
     let args = args.as_object().ok_or(ReplicaError::InvalidArguments)?;
     let mut parameters = Vec::new();
     let visibility = visibility::compile_predicate(plan, resolved, "r", &mut parameters)?;
     let mut predicates = vec![visibility];
+    if let Some((column, values)) = filter {
+        parameters.push(Value::Array(
+            values.iter().cloned().map(Value::String).collect(),
+        ));
+        predicates.push(format!(
+            "r.{}::text = ANY(ARRAY(SELECT jsonb_array_elements_text(${}::jsonb)))",
+            quote(column)?,
+            parameters.len()
+        ));
+    }
     // Verified support principals have no persisted Member. Keep the live
     // membership check for ordinary sessions, including concurrent revocation.
     if !resolved.ephemeral_member {
@@ -884,7 +1006,9 @@ fn bounded_sql_visibility(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> bool {
-    (definition.max_rows > 0 || definition.max_bytes > 0) && plan.needs_materialized_sets(resolved)
+    plan.version != Some(2)
+        && (definition.max_rows > 0 || definition.max_bytes > 0)
+        && plan.needs_materialized_sets(resolved)
 }
 
 fn source_update_requires_snapshot<'a>(
@@ -2217,17 +2341,23 @@ mod tests {
 
     fn visibility_with_task_dependency(source: &str) -> VisibilityPlan {
         VisibilityPlan {
+            version: None,
+            permission_tables: Vec::new(),
             table: source.to_owned(),
             key: "id".to_owned(),
             sets: BTreeMap::from([(
                 "createdTasks".to_owned(),
                 crate::visibility::VisibilitySet {
+                    kind: String::new(),
+                    from: String::new(),
+                    key: String::new(),
                     table: "tasks".to_owned(),
                     alias: String::new(),
                     select: "id".to_owned(),
                     select_from: String::new(),
                     joins: Vec::new(),
                     constraints: vec![crate::visibility::VisibilityConstraint {
+                        in_set: String::new(),
                         table: String::new(),
                         column: "createdBy".to_owned(),
                         context: "member.id".to_owned(),
@@ -2236,6 +2366,12 @@ mod tests {
                 },
             )]),
             predicate: crate::visibility::VisibilityExpression {
+                on_missing: None,
+                predicate: None,
+                parent_where: Vec::new(),
+                via: None,
+                table: String::new(),
+                key: String::new(),
                 operator: "inSet".to_owned(),
                 column: if source == "tasks" { "id" } else { "taskId" }.to_owned(),
                 context: String::new(),
@@ -2304,10 +2440,18 @@ mod tests {
     fn public_visibility() -> (VisibilityPlan, ResolvedVisibility) {
         (
             VisibilityPlan {
+                version: None,
+                permission_tables: Vec::new(),
                 table: "tasks".to_owned(),
                 key: "id".to_owned(),
                 sets: BTreeMap::new(),
                 predicate: crate::visibility::VisibilityExpression {
+                    on_missing: None,
+                    predicate: None,
+                    parent_where: Vec::new(),
+                    via: None,
+                    table: String::new(),
+                    key: String::new(),
                     operator: "public".to_owned(),
                     column: String::new(),
                     context: String::new(),
@@ -2317,6 +2461,8 @@ mod tests {
                 },
             },
             ResolvedVisibility {
+                inherited: Default::default(),
+                indexes: Default::default(),
                 ephemeral_member: false,
                 revision: 1,
                 direct: BTreeMap::new(),
@@ -2514,10 +2660,18 @@ mod tests {
             retention_ms: 0,
         };
         let plan = VisibilityPlan {
+            version: None,
+            permission_tables: Vec::new(),
             table: "tasks".to_owned(),
             key: "id".to_owned(),
             sets: BTreeMap::new(),
             predicate: crate::visibility::VisibilityExpression {
+                on_missing: None,
+                predicate: None,
+                parent_where: Vec::new(),
+                via: None,
+                table: String::new(),
+                key: String::new(),
                 operator: "public".to_owned(),
                 column: String::new(),
                 context: String::new(),
@@ -2527,6 +2681,8 @@ mod tests {
             },
         };
         let resolved = ResolvedVisibility {
+            inherited: Default::default(),
+            indexes: Default::default(),
             ephemeral_member: false,
             revision: 1,
             direct: BTreeMap::new(),

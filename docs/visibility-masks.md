@@ -1,0 +1,583 @@
+# Visibility masks: permission checks without fan-out
+
+Status: design, 2026-10-29. Implementation and behavior parity remain required.
+
+## Problem
+
+Visibility plans today are a small query language. A set may select any column
+from any table through equality joins, and the feed treats every table a set
+reads as a permission input. One write to such a table makes every connected
+member re-run its sets in SQL and rebuild its collections. This is
+subscription invalidation, the behavior Gonvex exists to avoid.
+
+Observed on Whagons staging, 2026-10-29: two approvals pinned the runtime at
+about 110% CPU for about 60 seconds. Ordinary task writes caused 50–80% bursts.
+History:
+
+- 2026-08-29, gonvex `8a73c779`: dependency-table invalidation in the first
+  Rust replica runtime. Any insert or delete in a dependency table counts as a
+  change for every member (`visibility.rs` `change_affects`). A dependency
+  change rebuilds the collection (`replica.rs` `apply_feed_event`).
+- 2026-09-30, client #967: spot gating was expressed as task-id sets selected
+  from `tasks`, because the language had no member-flag operator. Every task
+  write became a permission change for every member.
+- 2026-10-19, gonvex #128: budgeted collections with materialized sets rebuild
+  on any change to their own source table (`bounded_sql_visibility`).
+- 2026-10-19 and 2026-10-23, client: more `tasks`-based sets (personal spaces,
+  `ownedFindingTasks`).
+
+Each change fixed a real correctness bug. None was checked for cost.
+
+## Invariant
+
+**V1. A permission check is a pure, linear, in-memory function of one row and
+one principal.**
+
+`visible(row, principal)` reads only the row's own columns and the member's
+principal. It performs no I/O. Its cost is O(|row ACL columns| + |rule|).
+
+**V2. A write never causes visibility SQL on a connection unless it changes
+that connection's own principal.**
+
+**V3. Principal construction reads only member-owned permission rows, and is
+rebuilt only when one of them changes for that member.**
+
+## Model
+
+### Row ACL
+
+Visibility reads only columns of the row itself:
+
+- scalar ACL columns, for example `workspaceId`, `spotId`, `createdBy`,
+  `reportedByUserId`, `reportedByTeamId`;
+- grant arrays, for example `grantMemberIds` and `grantTeamIds` (text[]), for
+  per-row grants such as assignment, approval, routing and sharing.
+
+The application keeps grant arrays current inside the same Reducer transaction
+as the grant itself, as the Reducer contract already requires for all
+consequences of one intent.
+
+Child tables (notes, attachments, logs) carry a copy of their parent's ACL
+columns. Copies are kept current by the same Reducer as the parent's change, or
+by a declared ACL inheritance the runtime maintains in that transaction. A child
+rule never joins its parent.
+
+### Principal
+
+Computed when the session is admitted, and again only when invariant V3 says so:
+
+- `member.id`, `account.id`, `role`, `permissions`;
+- token sets: `teams`, `workspaces`, `spots` (assigned spots and their
+  descendants, flattened), `personalWorkspaces`;
+- flags, for example `seeAllSpots`.
+
+The application declares how each token set is computed from member-owned
+permission tables. Each declaration is anchored on `member.id`. Its source
+tables are the principal inputs. They are permission tables, never data tables.
+
+### Rule language
+
+Operators allowed in a visibility rule:
+
+| Operator | Meaning |
+|---|---|
+| `public`, `role`, `permission`, `flag` | principal-only checks |
+| `eqPrincipal(column, key)` | `row.column = principal.key` |
+| `inTokens(column, tokenSet)` | `row.column ∈ principal.tokenSet` |
+| `overlaps(arrayColumn, tokenSet)` | `row.arrayColumn ∩ principal.tokenSet ≠ ∅` |
+| `eq(column, literal)`, `isNull(column)` | row-only checks |
+| `and`, `or`, `not` | composition |
+
+Not representable: sets over tables, joins, subqueries, and references to
+other rows. The manifest schema has no field for them, so a rule that needs them
+fails code generation.
+
+The same rule compiles to SQL for snapshots and windows, with token sets bound
+as array parameters (`column = ANY($n)`, `array && $n`), and to the in-memory
+evaluator for feed deltas. A shared test corpus checks that both always agree.
+
+## Feed path
+
+For each committed transaction and each connection:
+
+1. **A principal input row changed.** If it names this member (its anchor
+   column equals `member.id` in the old or new value), rebuild the principal
+   from SQL for this member only. Then re-check the cached rows in memory and
+   send inserts and deletes. Other connections skip the row.
+2. **Any other row changed.** Evaluate `visible(old)` and `visible(new)` and
+   send an insert, update or delete. No SQL.
+
+Budgets and windows never force a rebuild on a source change. A budgeted
+collection that receives a new visible row beyond its budget reports itself
+truncated, as initial delivery already does.
+
+Cost of a write: O(changed rows × connections) in-memory row checks, with zero
+SQL, plus one principal rebuild for each member it names. A later optimization
+can index connections by token (for example workspace → connections) to make it
+sub-linear in connections. Correctness doesn't depend on that.
+
+## Enforcement
+
+Four independent layers. Any one of them blocks a regression.
+
+1. **Schema (code generation).** The visibility manifest schema contains only
+   the operators above. The CLI rejects unknown operators and any table or join
+   reference. Principal declarations must have a `member.id` anchor and may name
+   only tables declared `permission`. A table can't be both a `permission` table
+   and a collection source with high write volume unless it is declared, and
+   that declaration is reviewed in the rule registry.
+2. **Code structure (runtime).** The feed visibility path takes no database
+   handle. `visible(row, principal)` lives in a module with no access to
+   `sqlx`, the pool or async runtimes. A CI check (cargo-deny or a crate
+   boundary) fails if that module gains one. Only `principal::build` may query,
+   and only through permission-table declarations.
+3. **Proof (Verus).** `visible` and the feed decision function (`skip`,
+   `row delta`, `rebuild principal`) are extracted from the production source,
+   as in the call-budget and generation proofs. Properties:
+   - `visible` is total and depends only on (row ACL, principal).
+   - The decision returns `rebuild principal` only if a changed principal-input
+     row names the member.
+   - For any change set without principal inputs, every connection's decision
+     is `skip` or `row delta`.
+   Negative controls must fail: letting a non-anchored change rebuild, dropping
+   the anchor check, letting a source change rebuild a budgeted collection.
+   Register this as guarantee **VIS-1** in `verification/guarantees.md`.
+4. **Fan-out budget (CI, deterministic).** A test opens 1,000 member
+   connections with realistic collections over a fixture tenant and counts
+   statements, not time:
+   - one task insert, update or delete: 0 visibility statements, and at most
+     changed rows × connections row checks;
+   - one grant change naming k members: principal rebuilds on exactly those k
+     connections;
+   - one team-membership change for one member: 1 principal rebuild.
+   Any increase fails CI. Add it to `docs/rules/registry.json` as
+   `G1-visibility-no-fanout`, citing the 2026-10-29 incident.
+
+## Migration
+
+1. Gonvex: rule schema, principal builder, evaluator, SQL compiler, feed path,
+   fan-out test, proof. The set and dependency path is removed, not kept beside
+   the new one.
+2. Whagons: add ACL columns and grant arrays with a backfill migration. Keep
+   them current in the existing grant Reducers (assignment, approval, workspace
+   context, share). Rewrite every visibility rule. A parity test proves each
+   member sees exactly the same rows under the old and new rules, across every
+   grant path and fixture tenant, before the old rules are deleted.
+3. Land before production moves to the staging runtime.
+
+## Required implementation decisions and acceptance gates
+
+The implementation uses permission-only principal sets, feed-maintained grant
+sets, and shared parent inheritance. These decisions supersede the grant-array
+and copied-child-ACL suggestions above. Those suggestions describe an alternative,
+not an application migration requirement.
+
+- Declare permission tables explicitly. A principal set may read only these
+  tables. Reject a set reading its own collection source or another data table
+  during SDK validation and code generation, naming the set and recommending
+  a principal set, grant set, or inheritance.
+- Grant sets read one grant table and may join permission token sets. Maintain
+  old/new row contributions with reference counts. Route changes only to the
+  members named by those contributions, without SQL.
+- Add `nonEmpty(set)` for flags. Compile principal tokens as SQL array
+  parameters and use the same semantics in the in-memory evaluator.
+- Inheritance resolves parent ACL columns through a tenant-shared index loaded
+  lazily and maintained once per feed transaction. Validate acyclic inheritance
+  and a bounded depth. Newly visible parents fetch children only for the
+  affected connection. Parent deletion removes inherited access.
+- Cache principals by tenant and member across connections. Deduplicate identical
+  sets. Route permission changes using old and new anchor/reachable join values,
+  including LEFT JOIN paths so missing links becoming present are observed.
+  Column filtering must retain every column used by routing and predicates.
+- Source-table writes must never force budgeted or progressive rebuilds. Live
+  queries reconsider only visible rows matching their filter, or a changed
+  principal. Preserve window ordering and truncation semantics.
+
+### Deployment compatibility
+
+The runtime must continue accepting existing manifests with a loud legacy-plan
+ deprecation log. The new SDK and CLI reject forbidden legacy shapes. Deploying
+ the runtime before the client must preserve current behavior. A separate small
+ follow-up enables runtime rejection only after the migrated client is live.
+ Do not alter the mobile compatibility bridge.
+
+### Behavior preservation
+
+Keep legacy and replacement plans loadable side by side from the same commit
+until the independent real-tenant parity review signs off. Export an explicit
+legacy plan map and document how to load it beside the generated mask manifest.
+Do not delete or weaken existing visibility tests.
+
+Inventory every visibility-changing client staging commit since 2026-09-27,
+including the commits named in the task. Record each introduced access rule and
+its proving test. Both PR descriptions must include that behavior table.
+Tests must exercise old and new plans for every fixture row, plan, and member
+role through SQL snapshots and in-memory deltas. Any disagreement fails the
+build. Preserve behavioral assertions when replacing tests of set internals.
+
+The deterministic runtime fan-out test must use real collections and count SQL
+statements. A task write requires zero visibility statements; a grant naming k
+members affects exactly those members; a membership change for one member
+rebuilds one shared principal. Register the incident and budget in the rule
+registry. A standalone decision-function simulation does not establish these
+runtime budgets.
+
+Both repositories require ready, linked PRs against staging, local targeted
+validation, and explicit follow-ups for the legacy rejection flip and any
+omitted Verus proof. Neither PR may be merged or deployed under this task.
+
+## Frozen version 2 SDK and manifest contract
+
+The following is the client migration target. Fields use camelCase in both
+TypeScript and generated JSON. Existing unversioned plans remain the legacy
+format during rollout. Version 2 runtime execution is still being implemented;
+do not deploy a version 2 manifest before runtime integration is complete.
+
+```ts
+type Literal = { literal: JsonValue };
+type LiteralFilter = { column: string; value: Literal };
+type Context = "member.id" | "account.id";
+type RelationalSet = {
+  kind: "principal" | "grant";
+  table: string;
+  alias?: string;
+  select: string;
+  selectFrom?: string;
+  joins: readonly {
+    table: string; alias?: string; leftAlias?: string;
+    leftColumn: string; rightColumn: string;
+  }[];
+  where: readonly ({ table: string; column: string } &
+    ({ context: Context; value?: never } | { value: Literal; context?: never }))[];
+};
+type DerivedFilter = { column: string } & (
+  | { value: Literal; context?: never; inSet?: never }
+  | { context: Context; value?: never; inSet?: never }
+  | { inSet: string; value?: never; context?: never }
+);
+type DerivedSet = {
+  kind: "derived"; from: string; table: string; key: string; select: string;
+  joins?: readonly []; where: readonly DerivedFilter[];
+};
+type Via = { table: string; childColumn: string; parentColumn: string };
+type RowMaskExpression =
+  | { operator: "public" }
+  | { operator: "role" | "permission"; value: string }
+  | { operator: "eq"; column: string; value: Literal }
+  | { operator: "eqContext"; column: string; context: Context }
+  | { operator: "inSet"; column: string; set: string }
+  | { operator: "nonEmpty"; set: string }
+  | { operator: "and" | "or"; children: readonly RowMaskExpression[] }
+  | { operator: "not"; children: readonly [RowMaskExpression] };
+type MaskExpression =
+  | { operator: "public" }
+  | { operator: "role" | "permission"; value: string }
+  | { operator: "eq"; column: string; value: Literal }
+  | { operator: "eqContext"; column: string; context: Context }
+  | { operator: "inSet"; column: string; set: string }
+  | { operator: "nonEmpty"; set: string }
+  | { operator: "inherits"; column: string; table: string; key: string;
+      where?: readonly LiteralFilter[]; predicate?: RowMaskExpression; onMissing?: MaskExpression }
+  | { operator: "inheritsAny"; column: string; table: string; key: string;
+      via: Via; where?: readonly LiteralFilter[]; predicate?: RowMaskExpression }
+  | { operator: "and" | "or"; children: readonly MaskExpression[] }
+  | { operator: "not"; children: readonly [MaskExpression] };
+type MaskPlan = {
+  version: 2; table: string; key: string; permissionTables: readonly string[];
+  sets: Readonly<Record<string, RelationalSet | DerivedSet>>;
+  where: MaskExpression;
+};
+```
+
+`permissionTables` is an explicit per-plan declaration, copied from the app's
+canonical permission-table list. Runtime principal sharing keys include the
+canonical set declaration and tenant/member identity. Equivalent declarations
+across plans share token values. Permission-table declarations must agree
+across the module. A declaration never makes a table's rows public.
+
+A `principal` set's base table and every joined table must be declared permission
+tables. A `grant` set's base is its single grant source; every joined table must
+be a declared permission table. Grant constraints must anchor on `member.id` or
+`account.id`, directly or on a joined permission occurrence. The runtime derives
+member routing and reachable join keys from these equality joins and anchors.
+Principal sets without a member/account anchor are tenant-global and shared once
+per tenant. A principal set may not read its plan's own source table. An anchored grant set may read that source anywhere in the predicate, including outside `onMissing`. Neither kind may join the plan's source table.
+
+`nonEmpty` tests the resolved set's cardinality, independently of the current
+row. It has no `column` field. `inSet` compares a row column to set tokens.
+`inherits` looks up `row[column]` in the declared parent table by `key`, and
+applies that table's visibility plan to the shared parent ACL projection.
+Missing/deleted parents and null foreign keys deny access. It is an expression,
+so independent access grants can be combined with it using `or`; multiple
+required parents can be combined with `and`. Parent `key` must equal the parent
+plan's declared key. The module validator rejects inheritance cycles and chains
+deeper than four edges. Four is a contract limit for this first implementation,
+not a measured performance threshold.
+
+The permission-table `where` constraints, join occurrence aliases, literal
+wrapping, and column names retain existing semantics. There is no implicit
+soft-delete filtering. Carry all existing `deletedAt`, `revokedAt`, status, and
+personal-space constraints into the replacement declarations.
+
+Example task mask and child plan, serialized exactly as JSON:
+
+```json
+{
+  "version": 2,
+  "table": "tasks",
+  "key": "_id",
+  "permissionTables": ["memberTeams", "workspaceTeams"],
+  "sets": {
+    "workspaces": {
+      "kind": "principal", "table": "workspaceTeams", "select": "workspaceId",
+      "joins": [{"table": "memberTeams", "leftColumn": "teamId", "rightColumn": "teamId"}],
+      "where": [{"table": "memberTeams", "column": "memberId", "context": "member.id"}]
+    },
+    "assigned": {
+      "kind": "grant", "table": "taskUsers", "select": "taskId", "joins": [],
+      "where": [{"table": "taskUsers", "column": "userId", "context": "member.id"}]
+    }
+  },
+  "where": {"operator": "or", "children": [
+    {"operator": "inSet", "column": "workspaceId", "set": "workspaces"},
+    {"operator": "inSet", "column": "_id", "set": "assigned"}
+  ]}
+}
+```
+
+```json
+{
+  "version": 2,
+  "table": "taskNotes",
+  "key": "_id",
+  "permissionTables": ["memberTeams", "workspaceTeams"],
+  "sets": {},
+  "where": {"operator": "inherits", "column": "taskId", "table": "tasks", "key": "_id"}
+}
+```
+
+These examples illustrate the wire format only. The client task mask must also
+preserve spot, personal-space, creator, reporter, approval, context, and share
+rules. A member flag uses, for example,
+`{"operator":"nonEmpty","set":"seeAllSpots"}`, where `seeAllSpots` is a
+permission-only principal set constrained to that flag's existing truth rule.
+
+### Orphan child preservation, additive contract amendment
+
+`inherits` accepts optional `onMissing: MaskExpression`. Its default is deny.
+Evaluate it only when the referenced parent row does not exist in the shared
+parent ACL index, never when an existing parent fails its visibility predicate.
+A null foreign key still denies access. A soft-deleted row still present in the
+index is an existing parent and uses its normal predicate.
+
+The confirmed legacy taskNotes system_admin orphan grant is represented as:
+
+```json
+{"operator":"inherits","column":"taskId","table":"tasks","key":"_id","onMissing":{"operator":"role","value":"system_admin"}}
+```
+
+This preserves orphan access without bypassing PERSONAL parent privacy. Apply
+fallbacks only to plans whose old behavior proves that grant. Parity fixtures
+must include a missing parent, a hidden existing PERSONAL parent, and a visible
+existing parent for every member role.
+
+### Approved self-source grant rule, 2026-10-29
+
+Rust commit `1a7187f3` is the reference rule. Anchored `kind: "grant"` sets
+may read their plan's own source table anywhere in the predicate. Principal
+sets may not read that source, and no set may join the plan's source table.
+There is no onMissing-only restriction. Grant rows are patched in memory and
+routed to their named members, so a source grant does not become a principal
+permission-table dependency.
+
+For example, the taskUsers plan may select `taskId` from `taskUsers` with
+`userId = member.id`, then test the current row's `taskId` against those tokens.
+This preserves the legacy sibling-row access of assigned orphan tasks. The
+same grant may appear directly in the predicate or inside `inherits.onMissing`.
+
+### Global existence rules: approved migration policy
+
+Grants remain anchored on member.id or account.id. There are no tenant-global
+grant semantics. A global-existence rule over an admin-edited, low-write
+configuration source may explicitly declare that source a permission table and
+use an unanchored tenant-global principal set. The permission declaration names
+the source table, not the set. For example, the reported `templateForms` set
+selects formId from `templates`; its source declaration would name `templates`.
+The runtime conservatively invalidates unanchored principal occurrences.
+
+A frequently written data source must not be relabeled a permission table to
+express global existence. Stop its migration and report the exact plan and
+source table to Gabriel. The likely replacement is a row column maintained in
+the same Reducer transaction as the existence-changing write. Check this policy
+for forms/formVersions templateForms, formSubmissions linkedSubmissions, centers,
+and every other inverse-existence plan before claiming parity or no fan-out.
+
+## Approved derived sets, runtime 6b8c72e1
+
+Version 2 also accepts `kind: "derived"`. The exact shape is:
+
+```ts
+type VisibilityDerivedSet = {
+  kind: "derived";
+  from: string;
+  table: string;
+  key: string;
+  select: string;
+  joins?: readonly [];
+  where: readonly { column: string; value: { literal: JsonValue } }[];
+};
+```
+
+```json
+{
+  "kind": "derived",
+  "from": "assignedTasks",
+  "table": "tasks",
+  "key": "_id",
+  "select": "categoryId",
+  "where": [{"column":"deletedAt","value":{"literal":null}}]
+}
+```
+
+For each token in `sets[from]`, look up the indexed row in `table` whose `key`
+equals that token. Keep rows satisfying every literal `where` condition, then
+materialize their non-null `select` values. Missing indexed rows contribute
+nothing. `from` names another set in the same plan. Derived dependencies are
+acyclic and contain at most two derived sets on a chain; the seed may be a
+principal or anchored grant set. `table` must differ from the plan's source.
+There are no joins, member contexts, aliases or selectFrom in a derived set.
+An omitted joins field and `joins: []` are equivalent and supported.
+
+The tenant-shared index stores one projected row per key. Derived sets are
+single-row mappings, not foreign-key multimaps, joins, intersections or arbitrary
+inverse-existence queries. They require an existing token seed. Do not use them
+to invent an unanchored universe of frequently written data rows.
+
+### Non-null token semantics
+
+In version 2, every principal, grant and derived set contains materialized
+non-null tokens only. Null and missing selected values contribute nothing.
+`nonEmpty(set)` means there is at least one non-null token; `inSet` never matches
+a null or missing row column. Literal filters still compare null as documented,
+including matching a missing indexed-row column to `{literal:null}`. Filtering
+on null does not cause a null selected value to become a token.
+
+Client v2 evaluators must apply the same selection filtering. If a legacy EXISTS
+rule counted rows whose selected column could be null, choose a non-null column,
+usually the key, for that flag set and prove old/new parity. Do not silently
+reinterpret a row-existence flag as a nullable-token-existence flag.
+
+### Accepted principal-sharing follow-up
+
+The integrated feed head fc33b110 routes expensive work to the affected member's
+connections, but does not yet share principal rebuilds across those connections
+or across their subscriptions. With 201 connections, the two connections of m1
+rebuilt four collection principals for one membership change. Cross-connection
+principal sharing is an explicit follow-up, not an achieved part of V3 in this
+implementation. Tenant-shared parent/derived indexes remain implemented. Token-
+indexed connection routing is a separate follow-up; pure relevance checks may
+still visit unrelated connections in memory.
+
+## Current F1–F4 contract, runtime 170c758c
+
+This section supersedes earlier single-row, literal-only derived restrictions
+and the blanket permission-source self-read restriction. No nullable-token,
+grant-anchor, inheritance-cycle or depth limits are relaxed.
+
+### F1: parent literal filters
+
+`inherits` accepts `where: [{column, value:{literal:...}}]`. Every condition is
+ANDed with the inherited parent's normal visibility predicate, or the explicit
+F5 predicate override when supplied. F1 filtering alone does not replace that
+predicate or its powerup/privacy gates. Filters apply to the parent
+row, never to the child. A null literal also matches a missing parent-row column.
+If an existing parent fails a filter, access is denied; onMissing does not run.
+
+```json
+{"operator":"inherits","column":"taskId","table":"tasks","key":"_id","where":[{"column":"deletedAt","value":{"literal":null}}]}
+```
+
+### F2: explicitly declared permission-source reads
+
+A principal set may read its plan's own source when that source is explicitly
+in permissionTables. Rust also permits joins to that source in this case; alias
+and permission-table checks still apply. This supports administrative permission
+trees such as spots. Without the explicit source declaration, principals cannot
+read their source and no set may join it. Grants remain anchored and may use
+their source as a base. Derived sets must still map through another table.
+Never declare frequently written application data as a permission source to
+bypass these restrictions.
+
+### F3: multimap derived indexes and correlated row filters
+
+A derived index key need not be unique. Each from-token maps to every row whose
+key equals the token, rather than selecting an arbitrary row or overwriting
+siblings. Apply every where item to each mapped row, then union its non-null
+selected tokens. Each item has exactly one of:
+
+- `{column, value:{literal:...}}` for literal equality;
+- `{column, context:"member.id"}` or account.id for the current principal;
+- `{column, inSet:"name"}` for membership in a principal/grant set of this plan.
+
+There is no table field on a filter. inSet cannot reference another derived
+set or an unknown set. The from chain can still include at most two derived
+sets and must be acyclic. Multiple conditions are ANDed on the same row,
+preserving task/context correlation across a non-unique foreign key.
+
+```json
+{"kind":"derived","from":"pendingApprovals","table":"taskWorkspaceContexts","key":"taskId","select":"workspaceId","where":[{"column":"kind","value":{"literal":"approval"}},{"column":"targetUserId","context":"member.id"},{"column":"taskId","inSet":"pendingApprovals"}]}
+```
+
+### F4: existential parent visibility through an association
+
+inheritsAny checks whether any matching association leads to a visible parent.
+`row[column]` matches `via.childColumn` in `via.table`; each association's
+`via.parentColumn` names the parent by table/key. The association index is a
+multimap. Apply optional literal where filters to each parent row, then its
+normal visibility predicate, or the F5 override. Association rows themselves have no implicit
+soft-delete/type filter. Preserve those policies through the appropriate
+source predicate rather than assuming a hidden filter.
+
+```json
+{"operator":"inheritsAny","column":"_id","table":"tasks","key":"_id","via":{"table":"documentAssociations","childColumn":"documentId","parentColumn":"taskId"},"where":[{"column":"deletedAt","value":{"literal":null}}]}
+```
+
+A null/missing child key, absent links, or no matching visible parent denies
+access. inheritsAny has no onMissing fallback. Its parent participates in the
+same module inheritance cycle, key-match and four-edge depth validation as
+inherits. Parent and association changes are maintained from the feed; the SDK
+schema does not authorize per-connection visibility re-querying.
+
+## F5: independent parent ACL predicate, runtime b6e65ad4
+
+Both inherits and inheritsAny accept optional `predicate: RowMaskExpression`.
+It replaces the parent collection's predicate. Evaluate it on the indexed parent
+row with the CHILD plan's principal: its declared sets, role, permissions and
+member/account context. AND it with any inherited parent `where` literals.
+Do not evaluate it with the parent's resolved sets or apply the parent's full
+collection rule as an additional gate. Without an override, existing inheritance
+semantics are unchanged.
+
+```json
+{"operator":"inherits","column":"goalId","table":"goals","key":"_id","where":[{"column":"deletedAt","value":{"literal":null}}],"predicate":{"operator":"or","children":[{"operator":"inSet","column":"_id","set":"myGoals"},{"operator":"eqContext","column":"ownerId","context":"member.id"}]}}
+```
+
+The predicate supports public, role, permission, eq, eqContext, inSet, nonEmpty,
+and/or/not. All set references resolve against the child plan and must exist
+there. Inheritance operators are forbidden anywhere inside the override,
+including beneath not/and/or. The parent index projects the override's columns;
+SQL snapshots, row evaluation and parent-change transitions use the same rule.
+The ordinary inheritance graph checks still require a declared parent and
+matching key and enforce cycles/depth independently of the override.
+
+For inherits, onMissing still runs only when the parent is absent, never when
+an existing parent fails the override or its where filters. inheritsAny still
+has no onMissing. Child-row plugin/access gates stay outside the inherited
+expression. This permits goal children to evaluate the parent's row ACL without
+accidentally imposing the goals collection's independent powerupSlug gate.
+The runtime regression is mask_tests::inherited_parent_predicate_uses_the_child_principal.
+
+The client worker must retain full old/new parity, including parent-only vs
+child-only grants, hidden existing parents, missing parents, literal parent
+filters and each child's independent plugin gates. No denormalized columns or
+Reducer changes are required by F5 itself.
