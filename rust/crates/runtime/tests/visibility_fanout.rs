@@ -202,6 +202,21 @@ async fn committed(pools: &PoolRegistry, route: &TenantRoute, after: &mut u64) -
     }
 }
 
+/// The fan-out budgets need the real module host. Outside the dedicated CI
+/// step (GONVEX_VIS_FANOUT_REQUIRED=1) a missing binary skips the test.
+fn module_host_binary() -> Option<String> {
+    match std::env::var("GONVEX_TEST_MODULE_HOST_BINARY") {
+        Ok(binary) => Some(binary),
+        Err(_) if std::env::var("GONVEX_VIS_FANOUT_REQUIRED").as_deref() == Ok("1") => {
+            panic!("GONVEX_VIS_FANOUT_REQUIRED is set but GONVEX_TEST_MODULE_HOST_BINARY is not")
+        }
+        Err(_) => {
+            eprintln!("GONVEX_TEST_MODULE_HOST_BINARY absent; fan-out budgets not measured here");
+            None
+        }
+    }
+}
+
 #[tokio::test]
 async fn visibility_fanout_stays_within_statement_budgets() {
     run_visibility_fixture(false).await;
@@ -218,8 +233,9 @@ async fn run_visibility_fixture(legacy: bool) {
         eprintln!("GONVEX_TEST_POSTGRES_URL absent; PostgreSQL fixture unavailable");
         return;
     };
-    let binary = std::env::var("GONVEX_TEST_MODULE_HOST_BINARY")
-        .expect("fan-out integration requires the real module-host binary");
+    let Some(binary) = module_host_binary() else {
+        return;
+    };
     let n: usize = std::env::var("GONVEX_VIS_FANOUT_MEMBERS")
         .unwrap_or_else(|_| "200".into())
         .parse()
