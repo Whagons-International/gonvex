@@ -2,7 +2,9 @@ import { StoreReducerOutbox } from '@proof/queue';
 import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
 import { ExpoSQLiteLocalReplicaStorage as BaselineReplica, ExpoSQLiteOutboxStore as BaselineOutbox } from './.work/sdk/baseline/index.ts';
-import { ExpoSQLiteLocalReplicaStorage as FixedReplica, ExpoSQLiteOutboxStore as FixedOutbox } from './.work/sdk/fixed/index.ts';
+import { ExpoSQLiteLocalReplicaStorage as FixedReplica, ExpoSQLiteOutboxStore as FixedOutbox, migrateLegacyOutbox as FixedMigrateLegacyOutbox } from './.work/sdk/fixed/index.ts';
+import { historicalPhase } from './historical.mjs';
+import { corruptJournalPhase } from './corrupt-journal.mjs';
 const base = {
   cursor: {
     epoch: 'e',
@@ -430,6 +432,10 @@ export async function execute(url, observe) {
     phase: config.phase,
     runId: config.runId
   });
+  if (config.phase.startsWith('historical-')) return historicalPhase(config, emit, {
+    SQLite, Replica: FixedReplica, Outbox: FixedOutbox, Queue: StoreReducerOutbox, migrateLegacyOutbox: FixedMigrateLegacyOutbox,
+  });
+  if (config.phase.startsWith('journal-corrupt-')) return corruptJournalPhase(config, emit, { SQLite, Outbox: FixedOutbox, Queue: StoreReducerOutbox });
   if (config.phase !== 'all') return crashPhase(config, emit);
   const cases = [];
   for (const [variant, functions] of [['baseline', [replicaOutbox, twoOutboxes, reader]], ['fixed', [replicaOutbox, twoOutboxes, reader, rejectedOwner, migrations, independent]]]) for (const run of functions) {

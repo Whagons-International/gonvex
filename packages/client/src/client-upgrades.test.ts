@@ -40,3 +40,18 @@ describe("client contract migrations", () => {
     expect(next.cursor).toBeUndefined();
   });
 });
+
+it.each(["pending", "inflight", "committed", "failed", "rejected"] as const)("upgrade preserves %s acceptance and journal identity across two versions", state => {
+  const original = { ...entry, state, scope: "alice/tenant-a", receiptPath: "original.receipt" };
+  const chain = migrationChain(1, 3, [
+    { from: 1, to: 2, intent: ({ args }) => ({ path: "tasks.v2", args }) },
+    { from: 2, to: 3, intent: ({ args }) => ({ path: "tasks.v3", args }) },
+  ]);
+  const result = migrateClientData({}, [original], chain).entries[0]!;
+  expect(result).toMatchObject({
+    id: original.id, scope: original.scope, idempotencyKey: original.idempotencyKey,
+    receiptPath: original.receiptPath, createdAt: original.createdAt, attempts: original.attempts,
+    path: "tasks.v3", state: state === "inflight" ? "pending" : state,
+  });
+  expect(original.state).toBe(state);
+});

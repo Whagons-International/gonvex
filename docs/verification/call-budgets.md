@@ -65,6 +65,15 @@ bodies conditional on the native adapters, not a proof of the whole production
 runtime. Verus, its SMT solver, vstd, the extractor/specification, and both Rust
 compiler toolchains remain trusted.
 
+The outer module-host root queue now has a separate
+[source-linked deadline and lifetime audit](resource-ownership.md#module-host-root-admission-and-reply-ownership).
+Its previous unbounded wait was reproduced through the actual framed host and
+V8 engine. The fixed caller uses the same minimum of request/context deadlines
+for admission and engine dispatch. That minimum and reply-ID allocation have
+their own extracted Verus checks; source bridges and native regressions bind
+them to the outer queue and cleanup paths. This does not extend the arithmetic
+proof above to clock accuracy or the whole asynchronous runtime.
+
 ## Run and integration
 
 Run `python3 verification/verus/verify_budgets.py --output /path/to/proof` with

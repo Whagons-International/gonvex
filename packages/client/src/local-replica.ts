@@ -501,6 +501,8 @@ export class LocalReplica implements LocalReplicaView {
     this.disposed = true;
     this.scopeLoaded = false;
     this.scopeActivationGeneration++;
+    this.scopeActivation = undefined;
+    this.scopeActivationName = undefined;
     for (const job of this.applicationJobs.splice(0)) job.cancel();
     this.releaseMemory();
   }
@@ -542,15 +544,22 @@ export class LocalReplica implements LocalReplicaView {
    * Pass restoreFromStorage=false for an empty, unauthorized partition.
    */
   activateScope(scope: ReplicaScope = defaultReplicaScope, forceReload = false, restoreFromStorage = true): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error("Local replica is closed"));
     const nextScope = normalizeReplicaScope(scope);
     if (!forceReload && this.scopeLoaded && this.scopeValue === nextScope) return this.application;
     if (this.scopeActivation && this.scopeActivationName === nextScope) return this.scopeActivation;
+    const generation = ++this.scopeActivationGeneration;
+    this.scopeActivation = undefined;
+    this.scopeActivationName = undefined;
     // Fail closed immediately while the async read is in flight. This keeps a
     // synchronous auth change from exposing the prior identity's rows.
     const wasLoaded = this.scopeLoaded;
     this.scopeLoaded = false;
     if (wasLoaded) { this.invalidateEntityVersions(); this.notify(true); }
-    const generation = ++this.scopeActivationGeneration;
+    if (!isTransactionRevision(generation)) return Promise.reject(new Error("Replica scope activation sequence exhausted."));
+    // Invalidation listeners can request another owner synchronously. The
+    // newer request keeps both its generation and its in-flight handle.
+    if (generation !== this.scopeActivationGeneration) return Promise.resolve();
     const activation = this.enqueueApplication(async () => {
       // A prior transaction may still be in the storage queue. Wait for it so
       // a same-scope activation cannot load a snapshot from before its commit.
@@ -565,8 +574,13 @@ export class LocalReplica implements LocalReplicaView {
         })
         : await this.storage?.load(nextScope);
       if (generation !== this.scopeActivationGeneration) return;
+      // A corrupt peer position cannot become the baseline for catch-up. Use
+      // the same nonnegative safe-integer domain as replica revisions before
+      // making any restored scope, row or checkpoint observable.
+      const storageSequence = snapshot?.storageSequence ?? 0;
+      if (!isReplicaRevision(storageSequence)) throw new Error("Invalid replica storage sequence.");
       this.scopeValue = nextScope;
-      this.storageSequence = snapshot?.storageSequence ?? 0;
+      this.storageSequence = storageSequence;
       this.scopeLoaded = true;
       this.recency.clear();
       this.entities = snapshot ? entitiesFromSnapshot(snapshot.entities, this.storage?.ownsWorkingSetRows) : new Map();
@@ -593,6 +607,12 @@ export class LocalReplica implements LocalReplicaView {
 
     this.scopeActivation = activation;
     this.scopeActivationName = nextScope;
+    const clearActivation = () => {
+      if (this.scopeActivation !== activation) return;
+      this.scopeActivation = undefined;
+      this.scopeActivationName = undefined;
+    };
+    void activation.then(clearActivation, clearActivation);
     return activation;
   }
 
@@ -1131,11 +1151,18 @@ export class LocalReplica implements LocalReplicaView {
         nextQueries.set(signature, advanced);
         changedWindows.push(advanced);
       }
-      if (changedWindows.length === 0) return;
-
       // Compute the shared floor exactly once from the complete next window
       // set. A watermark cannot outrun an older retained Replica Collection.
-      const nextCursor = replicaTransactionFloor(this.cursorValue, nextQueries);
+      const provenCursor = replicaTransactionFloor(this.cursorValue, nextQueries);
+      // Hydration can retain a conservative floor below every stored window.
+      // Checkpoint that progress even if no window cursor needs rewriting,
+      // without letting a lower watermark certify a newer global revision.
+      const nextCursor = provenCursor && provenCursor.revision > revision
+        ? { ...provenCursor, revision: Math.max(revision,
+          this.cursorValue?.epoch === provenCursor.epoch ? this.cursorValue.revision : 0) }
+        : provenCursor;
+      if (changedWindows.length === 0 && nextCursor?.epoch === this.cursorValue?.epoch
+        && nextCursor?.revision === this.cursorValue?.revision) return;
       const writeScope = this.scopeValue;
       if (this.storage?.advanceWatermark) {
         const receipt = await this.persist(() => this.storage!.advanceWatermark!(changedWindows, nextCursor, writeScope));
@@ -1726,7 +1753,9 @@ export class LocalReplica implements LocalReplicaView {
   /** A watermark reads only cursor/integrity presence, never copied IDs or hashes. */
   windowCanAdvance(signature: string, revision: number): boolean {
     const window = this.liveQueries.get(signature);
-    return Boolean(window?.cursor && window.cursor.revision < revision && window.hashes);
+    if (!window?.cursor || !window.hashes) return false;
+    return window.cursor.revision < revision || this.cursorValue?.epoch !== window.cursor.epoch
+      || this.cursorValue.revision < Math.min(revision, window.cursor.revision);
   }
 
   /** SDK watch snapshots share the immutable resident rows. */

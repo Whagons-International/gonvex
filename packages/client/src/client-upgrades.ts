@@ -1,3 +1,4 @@
+import { deliveryState } from "./outbox-policy.js";
 import type { JsonValue } from "@gonvex/protocol";
 import type { ReplicaSnapshot } from "./local-replica.js";
 import type { ReducerOutboxEntry } from "./outbox.js";
@@ -48,9 +49,9 @@ export function migrateClientData(
       if (!intent.path || intent.args === undefined) throw new Error("Client migration returned an invalid intent");
       return { ...entry, path: intent.path, args: intent.args,
         receiptPath: originalPath, patches: [],
-        // Committed responses awaiting a watermark must be reconciled by their original receipt too.
-        // Parked and rejected records wait for the user; an upgrade must not resend them.
-        state: entry.state === "failed" || entry.state === "rejected" ? entry.state : "pending", nextAttemptAt: 0 };
+        // An upgrade is recovery, never permission to resend an accepted intent.
+        // Reuse the production recovery policy proved for all queue states.
+        state: deliveryState(entry.state, "recover"), nextAttemptAt: 0 };
     });
   }
   return { snapshots: nextSnapshots, entries: nextEntries };

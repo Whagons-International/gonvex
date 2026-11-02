@@ -10,9 +10,9 @@ use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use gonvex_postgres::TenantSession;
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::config::SandboxConfig;
@@ -25,7 +25,7 @@ pub struct SandboxManager {
 
 struct Inner {
     config: SandboxConfig,
-    admission: Semaphore,
+    admission: Arc<Semaphore>,
     workspaces: Mutex<BTreeMap<String, Workspace>>,
 }
 
@@ -56,11 +56,117 @@ struct Execution {
     cancel: watch::Sender<bool>,
 }
 
+// Owns the workspace reservation across semaphore and worker awaits. Caller
+// cancellation drops the run future before its normal completion bookkeeping.
+struct ExecutionOwnership {
+    inner: Arc<Inner>,
+    sandbox_id: String,
+    execution_id: String,
+    runtime: tokio::runtime::Handle,
+    armed: bool,
+}
+
+fn execution_is_current(active: Option<&str>, expected: &str) -> bool {
+    match active {
+        Some(value) => value == expected,
+        None => false,
+    }
+}
+
+fn cancel_active_execution(
+    workspaces: &mut BTreeMap<String, Workspace>,
+    sandbox_id: &str,
+    execution_id: &str,
+) {
+    let Some(workspace) = workspaces.get_mut(sandbox_id) else {
+        return;
+    };
+    if !execution_is_current(workspace.active.as_deref(), execution_id) {
+        return;
+    }
+    workspace.active = None;
+    if let Some(execution) = workspace.executions.get_mut(execution_id) {
+        execution.status = "cancelled".to_owned();
+        execution.finished_at = Some(Utc::now());
+        execution.error = "sandbox execution cancelled".to_owned();
+    }
+}
+
+impl Drop for ExecutionOwnership {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let inner = self.inner.clone();
+        let sandbox_id = self.sandbox_id.clone();
+        let execution_id = self.execution_id.clone();
+        self.runtime.spawn(async move {
+            let mut workspaces = inner.workspaces.lock().await;
+            cancel_active_execution(&mut workspaces, &sandbox_id, &execution_id);
+        });
+    }
+}
+
+// Own the process and its capacity together, including while cancellation
+// drains a native child exit. A kill request alone does not certify retirement.
+struct SandboxChild {
+    state: Option<(Child, OwnedSemaphorePermit)>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl SandboxChild {
+    fn new(child: Child, permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            state: Some((child, permit)),
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    fn child(&mut self) -> &mut Child {
+        &mut self.state.as_mut().expect("owned sandbox child").0
+    }
+
+    fn reaped(&mut self) {
+        drop(self.state.take());
+    }
+}
+
+fn retirement_requires_closure(reaped: bool) -> bool {
+    !reaped
+}
+
+fn finish_child_retirement(
+    result: std::io::Result<std::process::ExitStatus>,
+    permit: OwnedSemaphorePermit,
+) {
+    // An unknown exit cannot authorize another worker. Wake queued callers
+    // with the existing closed-admission error instead of leaking a lease.
+    if retirement_requires_closure(result.is_ok()) {
+        permit.semaphore().close();
+    }
+    if let Err(error) = result {
+        tracing::error!(error = %error, "sandbox child retirement failed; admission closed");
+    }
+    drop(permit);
+}
+
+impl Drop for SandboxChild {
+    fn drop(&mut self) {
+        if let Some((mut child, permit)) = self.state.take() {
+            let _ = child.start_kill();
+            self.runtime.spawn(async move {
+                let result = child.wait().await;
+                finish_child_retirement(result, permit);
+            });
+        }
+    }
+}
+
 impl SandboxManager {
     pub fn new(config: SandboxConfig) -> Self {
         Self {
             inner: Arc::new(Inner {
-                admission: Semaphore::new(config.concurrency),
+                admission: Arc::new(Semaphore::new(config.concurrency)),
                 config,
                 workspaces: Mutex::new(BTreeMap::new()),
             }),
@@ -241,12 +347,20 @@ impl SandboxManager {
                 receiver,
             )
         };
-        let _permit = self
-            .inner
-            .admission
-            .acquire()
-            .await
-            .map_err(|_| "sandbox is shutting down".to_owned())?;
+        let mut ownership = ExecutionOwnership {
+            inner: self.inner.clone(),
+            sandbox_id: sandbox_id.clone(),
+            execution_id: execution_id.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            armed: true,
+        };
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.changed() => None,
+            permit = self.inner.admission.clone().acquire_owned() => {
+                Some(permit.map_err(|_| "sandbox is shutting down".to_owned())?)
+            }
+        };
         let request = serde_json::json!({
             "version":1,"root":root,"allowUnconfined":self.inner.config.allow_unconfined,
             "code":code,"duckdb":duckdb,"imports":imports,
@@ -259,7 +373,12 @@ impl SandboxManager {
             "timeoutMs":timeout_ms,"workerUid":self.inner.config.worker_uid,
             "workerGid":self.inner.config.worker_gid,
         });
-        let response = self.execute_worker(request, timeout, &mut cancel).await;
+        let response = if let Some(permit) = permit {
+            self.execute_worker(request, timeout, &mut cancel, permit)
+                .await
+        } else {
+            Err("sandbox execution cancelled".to_owned())
+        };
         let mut workspaces = self.inner.workspaces.lock().await;
         let workspace = owned_workspace(&mut workspaces, &scope, &sandbox_id)?;
         workspace.active = None;
@@ -299,6 +418,7 @@ impl SandboxManager {
                 execution.error = bounded(&error, 4_000);
             }
         }
+        ownership.armed = false;
         Ok(execution_json(&sandbox_id, &execution_id, execution))
     }
 
@@ -307,6 +427,7 @@ impl SandboxManager {
         request: Value,
         timeout: Duration,
         cancel: &mut watch::Receiver<bool>,
+        permit: OwnedSemaphorePermit,
     ) -> Result<Value, String> {
         let binary = self
             .inner
@@ -314,36 +435,47 @@ impl SandboxManager {
             .worker_binary
             .as_ref()
             .ok_or_else(|| "sandbox worker binary is not configured".to_owned())?;
-        let mut child = Command::new(binary)
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|error| format!("start sandbox worker: {error}"))?;
         let input = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "sandbox worker stdin is unavailable".to_owned())?;
-        stdin
-            .write_all(&input)
-            .await
-            .map_err(|error| error.to_string())?;
-        drop(stdin);
-        let output = child.wait_with_output();
+        // Keep request backpressure inside the same cancellation/watchdog
+        // boundary as response waiting. Retirement retains its owned permit.
+        let output = async move {
+            let child = Command::new(binary)
+                .kill_on_drop(true)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|error| format!("start sandbox worker: {error}"))?;
+            let mut child = SandboxChild::new(child, permit);
+            let mut stdin = child
+                .child()
+                .stdin
+                .take()
+                .ok_or_else(|| "sandbox worker stdin is unavailable".to_owned())?;
+            stdin
+                .write_all(&input)
+                .await
+                .map_err(|error| error.to_string())?;
+            drop(stdin);
+            let mut stdout = child
+                .child()
+                .stdout
+                .take()
+                .ok_or_else(|| "sandbox worker stdout is unavailable".to_owned())?;
+            let mut bytes = Vec::new();
+            tokio::try_join!(child.child().wait(), stdout.read_to_end(&mut bytes))
+                .map_err(|error| error.to_string())?;
+            child.reaped();
+            Ok::<_, String>(bytes)
+        };
         tokio::pin!(output);
         let bytes = tokio::select! {
-            result = &mut output => result.map_err(|error| error.to_string())?.stdout,
+            biased;
+            _ = cancel.changed() => return Err("sandbox execution cancelled".to_owned()),
             _ = tokio::time::sleep(timeout + Duration::from_secs(2)) => {
                 return Err("sandbox execution timed out".to_owned());
             }
-            changed = cancel.changed() => {
-                if changed.is_ok() && *cancel.borrow() {
-                    return Err("sandbox execution cancelled".to_owned());
-                }
-                return Err("sandbox execution cancelled".to_owned());
-            }
+            result = &mut output => result?,
         };
         if bytes.len() > self.inner.config.max_output_bytes {
             return Err("sandbox output exceeds runtime policy".to_owned());
@@ -718,3 +850,11 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }
+
+#[cfg(test)]
+#[path = "sandbox_cancellation_tests.rs"]
+mod cancellation_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "sandbox_retirement_tests.rs"]
+mod retirement_tests;

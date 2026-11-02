@@ -68,7 +68,8 @@ pub fn database_error_class(error: &DatabaseError) -> ReducerErrorClass {
         // that the user's intent is wrong, so never let them delete it.
         DatabaseError::ProjectNotFound(_)
         | DatabaseError::TenantNotFound { .. }
-        | DatabaseError::TenantDatabaseMissing { .. } => ReducerErrorClass::Transient,
+        | DatabaseError::TenantDatabaseMissing { .. }
+        | DatabaseError::AmbiguousReducerReceipts => ReducerErrorClass::Transient,
         // The account lost access: a durable, user-visible refusal.
         DatabaseError::MemberNotFound(_) | DatabaseError::NoTenantMembership => {
             ReducerErrorClass::Rejected

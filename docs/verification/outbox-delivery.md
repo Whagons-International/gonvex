@@ -60,6 +60,31 @@ uniqueness or the rest of the delivery protocol; public adapter regressions chec
 selected integration boundaries. Attempt-budget arithmetic, callback identity,
 deletion, admission coalescing and storage lifetime require separate contracts.
 
+## Acceptance and pending replica metadata
+
+`receipt-settlement.mjs` extends the delivery verifier with a closed AST
+translation of the actual `markAcceptedChange` and `markCommittedChange`
+functions in `outbox.ts`. It translates their early no-op return, conditional
+return, object spread, strict state comparisons, optional pending-replica marker
+and calls to the source-derived delivery policy. Unknown effects, identity
+reads/writes, spread sources, calls and coercions fail extraction.
+
+Seven solver laws establish that a new acceptance becomes committed and awaits
+replica completion; duplicate acceptance preserves its existing barrier; a
+completed acceptance stays completed; completion leaves committed state and
+clears the pending marker; and accepted records cannot start delivery. Four
+well-typed broken helpers must violate named laws. Twenty extractor checks pass,
+including eight checks for this extension. The parent required delivery verifier
+runs the extension and retains its nested `settlement` receipt and SMT files.
+
+This proof models optional true/undefined metadata as a Boolean on ordinary
+records. It assumes normal object spread and the closed state domain. It does
+not establish that a caller has authentic acceptance or durable replica evidence,
+or prove callback placement, deletion, storage transactions, SQL, asynchronous
+scheduling or the entire protocol. Native backend/SQLite tests separately cover
+those selected boundaries, including actual SDK process kills before and after
+the local acceptance commit. See [composed-sdk.md](composed-sdk.md).
+
 ## Reproduced defects and integration evidence
 
 On staging c9eed7ce, all 14 new public admission/recovery cases fail across

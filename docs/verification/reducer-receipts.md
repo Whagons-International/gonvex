@@ -38,6 +38,15 @@ barriers. Separate negative controls must produce named counterexamples for a
 new transport ID, pruning, premature receipt visibility and nonexclusive claims.
 These are finite protocol checks. They do not prove the Rust or SQL source.
 
+The [composed SDK fixture](composed-sdk.md#concurrent-delivery-and-receipt-initialization)
+also delivers one immutable intent from two authenticated SDKs with independent
+SQLite journals. It witnesses the actual PostgreSQL claim wait graph for commit
+and cancellation/rollback takeover, then checks both durable replica retirements.
+Receipt initialization uses a catalog check to avoid repeating index DDL on the
+initialized hot path. The composed concurrency cases do not establish
+coordination through a shared live journal. Cold initialization has separate
+native regressions below.
+
 `rust/crates/runtime/src/tests/receipt_guarantee_tests.rs` exercises the real
 module host, runtime transaction path and PostgreSQL. It covers changed
 transport IDs, actual feed pruning, unreadable clock, rollback, no-op replay,
@@ -70,3 +79,121 @@ authorization, native app filesystem behavior or correctness of snapshot
 delivery and watermark ordering. Those require separate checks in the guarantee
 register. Record native baseline and fixed-source results before declaring this
 change verified.
+
+## Receipt schema initialization and legacy history
+
+`ControlPlane::ensure_reducer_idempotency` inspects the routed connection's
+receipt tables and maintenance index. Coexisting current and legacy tables
+require explicit recovery before a new reducer can execute, matching the
+read-only receipt lookup policy. The initialized path uses catalog reads and
+does not repeat table or index DDL.
+
+Cold initialization takes a transaction-owned advisory lock, then rechecks the
+catalog. A waiter can therefore observe completed initialization without running
+DDL behind an already active business transaction. Legacy rename, table creation
+and index creation share that transaction. Legacy detection uses the same search
+path as the subsequent rename and receipt claim; it no longer assumes `public`.
+Dropping the transaction releases the advisory lock through PostgreSQL rollback.
+This assumes cooperating framework initializers and excludes concurrent external
+DDL that changes the receipt namespace during a business invocation.
+
+Five native tests exercise legacy replay through a new transport ID, refusal of
+ambiguous histories before business execution, missing-index repair plus schema
+reset on the same control object, and two cold initializers witnessed waiting on
+the schema lock before duplicate delivery, and task cancellation during that
+lock wait. The cancellation case checks subsequent lock acquisition, exact query
+admission capacity and a successful reducer after recovery. The required runtime workflow selects
+these cases explicitly and rejects missing, failed or ignored execution.
+
+The before-fix native run failed both history controls at their intended
+assertions. Legacy replay attempted the business insert again and encountered
+its original primary key. Ambiguous history allowed a new business row to
+commit. The index/reset control passed before the fix, retaining a positive
+control for the catalog-based initialized path. This schema evidence concerns
+the supported receipt table rename, not every historical application migration.
+
+The previous fixed native artifact passes the four schema initialization cases within thirteen
+receipt tests, with no ignored execution. Its real SDK composition also passes
+the account-switch, process-kill, browser-upgrade and competing-claim schedules
+and all nine negative controls. Both PostgreSQL process-crash boundaries also
+pass with that rebuilt artifact and durable database settings enabled. One
+earlier final-control attempt timed out in
+browser upgrade recovery before reaching its intended assertion. That attempt
+is excluded from passing evidence and retained for investigation. Additional
+failure-state capture was added without changing a deadline or safety assertion.
+
+Ambiguous history is classified as infrastructure failure by
+[`database_error_class`](../../rust/crates/runtime/src/error_class.rs).
+The reducer does not run, and the SDK can retain the intent for recovery rather
+than report a permanent business rejection. The native ambiguity test checks
+both this classification and unchanged business and receipt counts.
+
+## PostgreSQL process-crash experiment
+
+The added ignored test `receipt_recovery_after_postgres_process_crash` is driven
+explicitly by `verification/backend-receipts/check_restart.py`. Ordinary test
+runs cannot establish this experiment. The required runtime workflow builds the
+exact test artifact and runs the coordinator, which rejects a missing
+coordinator, zero-test output, ignored execution and absent crash-recovery logs.
+
+For one schedule, the runtime commits a reducer effect and receipt, discards its
+reply and signals the boundary. For the other, a tenant transaction holds both
+an uncommitted effect and receipt, and a different connection witnesses neither.
+The driver kills only its owned PostgreSQL container with SIGKILL, restarts the
+same container and data, and waits for PostgreSQL to report crash recovery. It
+then resumes the runtime, which clears its old database pool before retrying the
+same intent with a new transport ID. Both schedules require exactly one business
+effect and receipt, the expected payload, and a repeated replay with a sufficient
+revision barrier. The driver requires fsync, full-page writes and synchronous
+commit to be enabled.
+
+An evidence-integrity control deliberately deletes the committed business row
+after database recovery. Receipt replay must then fail the explicit business
+count assertion. This control tests the evidence check; it is not a production
+source mutant or a newly reproduced runtime defect.
+
+The local native run passed both witnessed crash boundaries, rejected the
+missing coordinator and failed the deleted-business-row control at its intended
+count assertion. Its receipt binds the driver, runtime and module-host binaries,
+relevant source files, PostgreSQL image and durable settings. Earlier coordinator
+errors and a host startup timeout are excluded from this passing evidence.
+These selected Linux PostgreSQL process-crash checks trust the storage engine
+and filesystem. They do not test machine power loss, automatic connection
+recovery, HTTP/WebSocket tenant admission or SDK replica persistence.
+
+## Read-only reconciliation of a known acceptance
+
+The framework-reserved tenant Query `__gonvex.reducerReceipt` accepts the original
+`idempotencyKey` and `receiptPath`. `Runtime::reducer_receipt_status` requires an
+authenticated account and verifies the physical tenant member is still active.
+Membership, receipt status and synchronization cursor come from one repeatable
+read, read-only transaction. The configured execution timeout bounds statements.
+A completed receipt returns `found: true` and the current database cursor.
+Missing or incomplete receipts return `found: false`. Cached business results
+are never returned, including after a permission change.
+
+The lookup performs no DDL, claim or application execution. It can read a legacy
+receipt table without renaming it. Coexisting current and legacy tables require
+explicit recovery. Invalid or unrepresentable cursors fail closed. The native
+lookup regression verifies missing history creates no table, account isolation,
+path mismatch, legacy reads, ambiguous history refusal and revoked membership,
+then checks that effects and receipts were not appended. All nine ordinary
+receipt tests and the dedicated receipt-watermark ordering test pass locally.
+
+The runtime advertises `reducerReceiptLookup: 1`. Its query result may synthesize
+a terminal watermark only after the connection's subscribed replica work has
+been sent through that cursor revision. Ordinary Queries and missing receipts
+cannot synthesize this watermark. SDK recovery and the composed real storage
+experiment are described in [composed-sdk.md](composed-sdk.md).
+
+
+## Composed SDK recovery through existing pools
+
+The supplemental [SDK PostgreSQL crash coordinator](composed-sdk.md#sdk-retirement-after-postgresql-process-crash)
+extends the committed lost-reply boundary through actual WebSocket admission,
+SQLite journal recovery, receipt lookup, replica persistence and retirement.
+The runtime process and pools survive the database SIGKILL. PostgreSQL witnesses
+one matching business row and receipt on both sides of recovery, and fresh SDK
+handles reconcile with one ordinary reducer call total. The earlier native
+coordinator still uses an explicit pool reset for its separate two-boundary test;
+this additional fixture records SQLx recovery through the existing pools.

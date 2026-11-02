@@ -224,3 +224,46 @@ it('holds the contract fence for an intent epoch while a migration is queued', a
   await next.ready;
   await expect(old.store.load('tenant')).rejects.toThrow('Reload');
 });
+
+it.each([false, true])("keeps accepted intents accepted through durable upgrade recovery, interrupted=%s", async interrupted => {
+  const old = await seed();
+  const [entry] = await old.store.load();
+  await old.store.put({ ...entry!, state: "committed" });
+  old.close();
+  let transforms = 0;
+  const changes = [{ ...migrations[0], intent: (intent: any) => {
+    transforms += 1;
+    return migrations[0]!.intent(intent);
+  } }];
+  if (interrupted) {
+    const original = IndexedDBLocalReplicaStorage.prototype.replaceSnapshot;
+    const failure = vi.spyOn(IndexedDBLocalReplicaStorage.prototype, "replaceSnapshot").mockImplementationOnce(async function(this: IndexedDBLocalReplicaStorage, ...args) {
+      await original.apply(this, args); throw new Error("Interrupted accepted upgrade");
+    });
+    const partial = open(2, changes);
+    await expect(partial.ready).rejects.toThrow("Interrupted accepted upgrade");
+    partial.close(); failure.mockRestore();
+  }
+  const upgraded = open(2, changes); await upgraded.ready;
+  expect(await upgraded.store.load()).toMatchObject([{
+    id: entry!.id, scope: entry!.scope, idempotencyKey: entry!.idempotencyKey,
+    state: "committed", receiptPath: "rename", path: "setName", args: { name: "World" },
+  }]);
+  expect(transforms).toBe(1);
+  upgraded.close();
+  const reopened = open(2, []); await reopened.ready;
+  expect((await reopened.store.load())[0]?.state).toBe("committed");
+});
+
+it.each([
+  ["pending", undefined, false], ["pending", false, false], ["committed", true, false], ["inflight", true, false], ["pending", true, true],
+] as const)("coalesces browser journal state %s with knownUnsent=%s only when proved fresh", async (state, knownUnsent, allowed) => {
+  const current = open(1); await current.ready;
+  const prior = { id: 1, scope: "owner", path: "tasks.set", args: { value: 1 }, idempotencyKey: "original", entityKeys: ["tasks:a"],
+    coalesceKey: "a", createdAt: 1, attempts: 0, nextAttemptAt: 0, state, ...(knownUnsent === undefined ? {} : { knownUnsent }) };
+  await current.store.put(prior);
+  const { id: _id, ...draft } = { ...prior, args: { value: 2 }, idempotencyKey: "later", state: "pending" as const, knownUnsent: true };
+  const next = await current.store.replacePending!(prior.id, draft);
+  expect(Boolean(next)).toBe(allowed);
+  expect(await current.store.load()).toEqual([allowed ? { ...draft, id: 1 } : prior]);
+});

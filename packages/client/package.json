@@ -26,7 +26,7 @@
     "bench:opfs": "tsc -p tsconfig.opfs.json && node bench/opfs/benchmark.mjs",
     "bench:opfs:browser": "tsc -p tsconfig.opfs.json && node bench/opfs/prepare-browser.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:browser-storage": "node --test test/browser-storage.check.mjs",
+    "test:browser-storage": "node --test --test-concurrency=1 test/browser-storage.check.mjs test/browser-upgrade-recovery.check.mjs",
     "bench:sync-engine:check": "node --test bench/sync-engine/statistics.checks.mjs"
   },
   "dependencies": {

@@ -39,6 +39,7 @@ it.each([
   const db = (initial as any).database;
   // Authentic legacy storage representation: authority is a structured clone,
   // while row values are JSON. IndexedDB preserves NaN in the former.
+  await db.transaction('rw', db.entities, db.meta, async () => {
   await db.entities.bulkPut([
     {scope: 'default', entity: 'tasks', id: 'a', value: JSON.stringify({id: 'a', value: 'old'}),
       lookupKeys: [], authority: {epoch: 'e', fields: {id: 1, value: NaN}}, sequence: 1},
@@ -47,6 +48,8 @@ it.each([
     {scope: 'default', entity: 'tasks', id: 'c', value: 'null', deleted: true,
       lookupKeys: [], authority: {epoch: 'e', fields: {}, deleted: NaN}, sequence: 1},
   ]);
+  await db.meta.put({ scope: 'default', key: 'sequence', value: '1' });
+  });
   initial.close();
   const reopened = new Adapter(name); stores.push(reopened);
   const reloaded = (reopened as any).database;

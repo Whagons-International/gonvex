@@ -1,0 +1,92 @@
+// Closed AST contract for cached Control Query state and notifications.
+class ControlWatchContract {
+  watchControlQuery<T extends JsonValue = JsonValue, Args extends JsonValue = JsonValue>(ref: FunctionReference<Args, T>, args: Args = {} as Args) {
+    if (ref.scope !== "control" || ref.kind !== "query" || ref.delivery !== "live") {
+      throw new GonvexClientError(`Query ${ref.path} is not a live Control Plane Query`, { code: "server", path: ref.path, operation: "query" });
+    }
+    const listeners = new Set<WatchUpdateHandler>();
+    let result: T | undefined;
+    let error: Error | undefined;
+    let version = 0;
+    let snapshot: Readonly<{ result: T | undefined; version: number }> = { result, version };
+    const captureOwner = () => this.capturePublicationOwner();
+    // Cached values belong to the account activation, independently of the
+    // socket that delivered them. Notifications also require their socket.
+    const captureSnapshotOwner = () => {
+      const scope = this.replicaScope;
+      const activation = this.sessionScopeGeneration;
+      const generation = this.outboxScopeGeneration;
+      return () => ownsCurrentScope(scope, this.replicaScope, activation,
+        this.sessionScopeGeneration, this.manuallyClosed) && generation === this.outboxScopeGeneration;
+    };
+    let ownsSnapshot = captureSnapshotOwner();
+    const clearSnapshot = () => {
+      result = undefined;
+      error = undefined;
+      version += 1;
+      snapshot = { result, version };
+      ownsSnapshot = captureSnapshotOwner();
+    };
+    const clearStaleSnapshot = () => {
+      if (!ownsSnapshot() && (result !== undefined || error !== undefined)) clearSnapshot();
+    };
+    const notify = (current = captureOwner()) => {
+      queueMicrotask(() => {
+        for (const listener of Array.from(listeners)) {
+          if (!current()) return;
+          if (listeners.has(listener)) listener();
+        }
+      });
+    };
+    let stop: (() => void) | undefined;
+    const start = () => {
+      if (stop) return;
+      clearStaleSnapshot();
+      const unsubscribeQuery = this.subscribeLiveQuery(ref, args, (message) => {
+        if (message.type === "query.result") {
+          ownsSnapshot = captureSnapshotOwner();
+          result = message.result as T;
+          error = undefined;
+          version += 1;
+          snapshot = { result, version };
+          notify();
+        } else if (message.type === "query.error") {
+          ownsSnapshot = captureSnapshotOwner();
+          error = new GonvexClientError(`Query ${ref.path} failed: ${message.error}`, { code: "server", path: ref.path, operation: "query" });
+          version += 1;
+          snapshot = { result, version };
+          notify();
+        }
+      });
+      const unsubscribeScope = this.onSessionScopeChange(() => {
+        clearSnapshot();
+        const activation = this.sessionScopeGeneration;
+        // Scope observers run before the new scope fields are installed. Clear
+        // notifications belong to the session even if its transport reconnects.
+        queueMicrotask(() => {
+          if (activation === this.sessionScopeGeneration && !this.manuallyClosed) notify(captureSnapshotOwner());
+        });
+      });
+      stop = () => { unsubscribeQuery(); unsubscribeScope(); stop = undefined; };
+    };
+    start();
+    return {
+      getSnapshot() {
+        clearStaleSnapshot();
+        if (error) throw error;
+        return snapshot;
+      },
+      onUpdate(listener: WatchUpdateHandler) {
+        start();
+        listeners.add(listener);
+        const current = captureOwner();
+        queueMicrotask(() => { if (current() && listeners.has(listener)) listener(); });
+        return () => {
+          listeners.delete(listener);
+          if (listeners.size === 0) stop?.();
+        };
+      },
+    };
+  }
+
+}

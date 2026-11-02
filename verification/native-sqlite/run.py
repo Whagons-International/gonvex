@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 import uuid
 
-from contract import TERMINAL, require, validate_phase
+from contract import TERMINAL, historical_transition, require, validate_phase
 
 PROJECT = Path(__file__).resolve().parent
 ROOT = PROJECT.parent.parent
@@ -222,6 +222,10 @@ def main():
             device.open(f"exp://127.0.0.1:{metro_port}")
             events = collector.wait(phase, start, metro)
             result = validate_phase(events, phase, run_id, source["bundleSha256"], tool)
+            if phase.startswith("historical-"):
+                historical_transition({name: value["result"] for name, value in receipt["phases"].items()}, phase, result)
+            if phase == "journal-corrupt-recover":
+                require(result["rows"] == receipt["phases"]["journal-corrupt-seed"]["result"]["rows"], "corrupt accepted journal bytes changed across process restart")
             current = device.pids()
             require(current and not current.intersection(old), "native phase reused a stopped process")
             receipt["phases"][phase] = {"pids": sorted(current), "result": result}
@@ -245,7 +249,7 @@ def main():
             receipt["complete"] = bool(receipt.get("testsPassed") and receipt.get("testAppRemoved"))
             (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     require(receipt["complete"] and receipt.get("testAppRemoved"), "native verification or cleanup incomplete")
-    print("Native SQLite: 3 counterexamples, 6 fixed cases, witnessed process recovery and restart passed")
+    print("Native SQLite: shared-handle, historical migration, corruption and process-recovery contracts passed")
 
 
 if __name__ == "__main__":

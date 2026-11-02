@@ -52,6 +52,35 @@ function fixture() {
   return { storage: new ExpoSQLiteLocalReplicaStorage(adapter), queries, adapter };
 }
 
+it.each(["full", "working"])("preserves NUL-delimited SDK window keys during %s hydration and later catch-up", async kind => {
+  const { storage } = fixture();
+  const signature = 'tasks.all\u0000{}\u0000{"scope":"tenant"}';
+  await storage.replaceWindow({ signature, kind: "replica", entity: "tasks", key: "_id", ids: ["a"],
+    hashes: { a: "hash-a" }, completeness: "complete", source: "server", cursor: { epoch: "e", revision: 5 } },
+    { entities: {}, liveQueries: {}, cursor: { epoch: "e", revision: 5 } }, "tenant", [{ _id: "a", name: "A" }]);
+  const loaded = kind === "full" ? await storage.load("tenant") : await storage.loadWorkingSet("tenant", { maxRows: 100, maxBytes: 100_000 });
+  expect(Object.keys(loaded!.liveQueries)).toEqual([signature]);
+  const replica = createReplica(storage);
+  await replica.activateScope("tenant");
+  await replica.applyWindowDelta({ signature, kind: "replica", entity: "tasks", key: "_id",
+    upserts: [{ _id: "b", name: "B" }], deleted: [], hashes: { a: "hash-a", b: "hash-b" },
+    completeness: "complete", source: "server", cursor: { epoch: "e", revision: 6 } });
+  expect(replica.listWindows()).toHaveLength(1);
+  expect(replica.cursor()).toEqual({ epoch: "e", revision: 6 });
+  expect((await storage.load("tenant"))?.cursor).toEqual({ epoch: "e", revision: 6 });
+});
+
+it.each(["simple", "with\u0000delimiter"])("refuses inconsistent indexed replica signatures without changing source: %s", async signature => {
+  const { storage, adapter } = fixture();
+  await storage.replaceWindow({ signature, kind: "replica", entity: "tasks", key: "_id", ids: [],
+    completeness: "complete", source: "server", cursor: { epoch: "e", revision: 5 } },
+    { entities: {}, liveQueries: {}, cursor: { epoch: "e", revision: 5 } }, "tenant", []);
+  const raw = JSON.stringify({ signature: "different", entity: "tasks", key: "_id", ids: [] });
+  await adapter.runAsync("UPDATE _gonvex_replica_queries SET value=? WHERE scope=? AND signature=?", raw, "tenant", signature);
+  await expect(storage.load("tenant")).rejects.toThrow(/signature|inconsistent/i);
+  expect(await adapter.getFirstAsync("SELECT value FROM _gonvex_replica_queries WHERE scope=? AND signature=?", "tenant", signature)).toEqual({ value: raw });
+});
+
 it("loads a bounded working set and reads one cold row through the SQLite primary key", async () => {
   const { storage, queries } = fixture();
   const tasks = Object.fromEntries(

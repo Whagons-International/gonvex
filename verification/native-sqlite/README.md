@@ -21,6 +21,44 @@ Process IDs must change across each stop. SQLite must report FULL synchronizatio
 and an on-disk journal. This is app-process failure evidence, not a power-loss,
 physical-phone, iOS or complete SDK protocol proof.
 
+The fixture also requires historical unscoped and scoped replica migration,
+accepted-intent import and corrupt-byte restart refusal. It seeds complete query
+membership, tombstones, NUL-bearing signatures and two owners, preserving the
+application's `user_version=700`. Separate process stops occur after a successful
+native row-copy statement and an accepted-intent insertion while their respective
+transactions remain open. Fresh processes must observe rollback, preserve the
+legacy journal's bytes until import commits, migrate all five delivery states, retain original receipt
+paths and order, and reopen complete indexed predicates. A corrupt accepted JSON
+record must block load, update, queue restoration and new work without modifying
+either it or the adjacent valid accepted record.
+
+The historical schedule uses the public `migrateLegacyOutbox` wrapper. Its source
+key must survive the interrupted transaction, disappear after a successful
+durable import, and remain absent on the next launch. A deliberate re-import of
+the saved original input must skip all six entries without changing their state
+or consuming another allocation position.
+
+`historical.mjs` and `corrupt-journal.mjs` are shared by Expo/Hermes and the Node
+SQLite runner. The Node runner passes these schedules with actual SQLite and two
+owned `SIGKILL`s. A separately compiled production `importLegacy` control re-arms
+committed entries and removes their unresolved marker. The independent validator
+must reject the resulting durable state. Node execution is not evidence that
+Expo, Hermes, iOS or a physical device executed these new phases. Fresh Android
+evidence for the extended fixture remains required.
+
+After building the workspace, run the shared schedules without a device:
+
+```sh
+python3 verification/native-sqlite/check_historical_node.py \
+  --output /mnt/data/work/historical-sqlite-result
+```
+
+The output directory must not exist. This test uses existing built workspace
+packages and frozen esbuild dependencies. Run it after package builds finish;
+concurrent replacement of `dist` is outside the fixture. The runtime workflow
+requires the positive schedules and the compiled negative control and uploads
+the receipt, native process boundaries and observed storage post-images.
+
 ## CI
 
 `runtime-regression.yml` calls `native-sqlite-verification.yml`. Changes to SDK
@@ -35,8 +73,9 @@ The Android job uses a fresh CI emulator, the checksum-pinned official Expo Go
 APK and a frozen fixture install. It uploads `receipt.json`, source/bundle hashes,
 native observations, process events and Metro/device logs. `complete: true`
 requires every phase and removal of the test app. Unit vectors exercise the host
-validator using earlier native observations; they do not substitute for Android
-execution.
+validator using earlier native observations and labeled Node SQLite historical
+post-images. Native platform envelopes in historical validator units are
+synthetic. Neither substitutes for Android execution.
 
 ## Run on a dedicated local emulator
 

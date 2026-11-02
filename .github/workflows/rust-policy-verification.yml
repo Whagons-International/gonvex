@@ -60,6 +60,28 @@ jobs:
           python3 verification/verus/verify_budgets.py \
             --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
             --output "$RUNNER_TEMP/budget-proof"
+      - name: Prove wire deadline selection and require the root-admission source bridge
+        run: |
+          python3 verification/verus/verify_host_deadlines.py \
+            --verus "$RUNNER_TEMP/verus-x86-linux/verus" \
+            --output "$RUNNER_TEMP/host-deadline-proof"
+      - name: Retain host deadline proof and broken-policy results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-deadline-proof
+          path: ${{ runner.temp }}/host-deadline-proof
+          if-no-files-found: ignore
+      - name: Prove sandbox cleanup identity and require its cancellation ownership bridge
+        run: |
+          python3 verification/verus/verify_sandbox_ownership.py             --verus "$RUNNER_TEMP/verus-x86-linux/verus"             --output "$RUNNER_TEMP/sandbox-ownership-proof"
+      - name: Retain sandbox ownership proof and controls
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-ownership-proof
+          path: ${{ runner.temp }}/sandbox-ownership-proof
+          if-no-files-found: ignore
       - name: Prove actual SQL key bytes and reject broken serializers
         run: |
           python3 verification/verus/verify_sql_statement_key.py \
@@ -79,6 +101,30 @@ jobs:
           python3 verification/tla/check_replica_durability.py \
             --jar "$RUNNER_TEMP/tla2tools.jar" \
             --output "$RUNNER_TEMP/replica-durability-model"
+      - name: Check async ownership schedules and reject missing await guards
+        run: |
+          python3 verification/tla/check_async_ownership.py \
+            --jar "$RUNNER_TEMP/tla2tools.jar" \
+            --output "$RUNNER_TEMP/async-ownership-model"
+      - name: Check native permit retirement composition and broken cleanup policies
+        run: |
+          python3 verification/tla/check_permit_retirement.py \
+            --jar "$RUNNER_TEMP/tla2tools.jar" \
+            --output "$RUNNER_TEMP/permit-retirement-model"
+      - name: Retain permit retirement model and counterexamples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: permit-retirement-model
+          path: ${{ runner.temp }}/permit-retirement-model
+          if-no-files-found: ignore
+      - name: Retain async ownership model and counterexamples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: async-ownership-model
+          path: ${{ runner.temp }}/async-ownership-model
+          if-no-files-found: ignore
       - name: Retain protocol model and negative counterexamples
         if: always()
         uses: actions/upload-artifact@v4
@@ -111,12 +157,36 @@ jobs:
           node verification/typescript/verify-revisions.mjs \
             --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
             --output "$RUNNER_TEMP/sdk-revision-proof"
-      - name: Prove delivery state invariants and reject broken transitions
+      - name: Prove delivery and receipt settlement invariants and reject broken transitions
         run: |
           node --test verification/typescript/verify-outbox.test.mjs
           node verification/typescript/verify-outbox.mjs \
             --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
             --output "$RUNNER_TEMP/sdk-delivery-proof"
+      - name: Prove actual SDK ownership guard and reject broken owner admission
+        run: |
+          node --test verification/typescript/verify-ownership.test.mjs verification/typescript/query-publication.test.mjs verification/typescript/control-watch-publication.test.mjs
+          node verification/typescript/verify-ownership.mjs \
+            --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
+            --output "$RUNNER_TEMP/sdk-ownership-proof"
+      - name: Prove recovered intent coalescing admission and reject broken provenance gates
+        run: |
+          node --test verification/typescript/verify-coalescing.test.mjs
+          node verification/typescript/verify-coalescing.mjs \
+            --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
+            --output "$RUNNER_TEMP/sdk-coalescing-proof"
+      - name: Prove deferred watermark guards and reject retained owner readiness
+        run: |
+          node --test verification/typescript/verify-opening-watermarks.test.mjs
+          node verification/typescript/verify-opening-watermarks.mjs \
+            --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
+            --output "$RUNNER_TEMP/sdk-opening-watermark-proof"
+      - name: Prove replica sequence admission and reject unsafe counter transitions
+        run: |
+          node --test verification/typescript/verify-replica-sequences.test.mjs
+          node verification/typescript/verify-replica-sequences.mjs \
+            --z3 "$RUNNER_TEMP/verus-x86-linux/z3" \
+            --output "$RUNNER_TEMP/sdk-replica-sequence-proof"
       - name: Retain SDK source and solver receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -125,6 +195,10 @@ jobs:
           path: |
             ${{ runner.temp }}/sdk-revision-proof
             ${{ runner.temp }}/sdk-delivery-proof
+            ${{ runner.temp }}/sdk-ownership-proof
+            ${{ runner.temp }}/sdk-coalescing-proof
+            ${{ runner.temp }}/sdk-opening-watermark-proof
+            ${{ runner.temp }}/sdk-replica-sequence-proof
           if-no-files-found: ignore
 
   receipt_fixture:
