@@ -71,25 +71,13 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
     ) {
         return true;
     }
-    let names_member = |plan: &VisibilityPlan, resolved: &ResolvedVisibility| {
-        plan.active_grant_sets(resolved)
-            .into_iter()
-            .any(|(name, set)| {
-                set.table == change.table
-                    && [&change.old_value, &change.new_value]
-                        .into_iter()
-                        .any(|row| {
-                            visibility::grant_contribution(name, set, resolved, row)
-                                != visibility::GrantContribution::None
-                        })
-            })
-    };
-    if names_member(plan, resolved)
-        || resolved
-            .inherited
-            .values()
-            .any(|parent| names_member(&parent.plan, &parent.resolved))
-    {
+    if visibility::grant_change_concerns(
+        plan,
+        resolved,
+        &change.table,
+        &change.old_value,
+        &change.new_value,
+    ) {
         return true;
     }
     let derived = |plan: &VisibilityPlan, resolved: &ResolvedVisibility| {
@@ -103,10 +91,13 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
         )
     };
     if derived(plan, resolved)
-        || resolved
-            .inherited
-            .values()
-            .any(|parent| derived(&parent.plan, &parent.resolved))
+        || visibility::ancestor_derived_change_concerns(
+            resolved,
+            &change.table,
+            &change.row_id,
+            &change.old_value,
+            &change.new_value,
+        )
     {
         return true;
     }
@@ -130,6 +121,14 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
         {
             return true;
         }
+    }
+    if visibility::ancestor_row_change_concerns(
+        resolved,
+        &change.table,
+        &change.old_value,
+        &change.new_value,
+    ) {
+        return true;
     }
     if let Some(parent) = resolved.inherited.get(&change.table) {
         return [&change.old_value, &change.new_value]
@@ -584,18 +583,36 @@ impl Runtime {
         subscriptions: &mut BTreeMap<String, LiveQuerySubscription>,
         event: &FeedEvent,
     ) -> Vec<ServerMessage> {
-        let (event_revision, changes, reset) = match event {
+        let (event_revision, event_epoch, changes, reset) = match event {
             FeedEvent::Transaction {
-                revision, changes, ..
-            } => (*revision, changes.as_slice(), false),
-            FeedEvent::Reset { .. } => (0, &[][..], true),
+                revision,
+                changes,
+                database_epoch,
+            } => (
+                *revision,
+                database_epoch.as_str(),
+                changes.as_slice(),
+                false,
+            ),
+            FeedEvent::Reset { .. } => (0, "", &[][..], true),
         };
         let mut messages = Vec::new();
         for subscription in subscriptions.values_mut() {
             if !reset && event_revision <= subscription.computed_revision {
                 continue;
             }
+            // v2 relevance reads the bound parent ACL indexes. If one cannot be
+            // proven complete through this revision, rerun (which rebinds).
+            let indexes_ready = reset
+                || subscription.visibility.version != Some(2)
+                || visibility::indexes_ready(
+                    &subscription.resolved_visibility,
+                    event_revision,
+                    event_epoch,
+                )
+                .await;
             let relevant = reset
+                || !indexes_ready
                 || changes.iter().any(|change| {
                     self.inner.visibility_metrics.record_in_memory_row_check();
                     if subscription.visibility.version == Some(2) {
@@ -687,6 +704,41 @@ impl Runtime {
             .await
             .clone()
             .ok_or_else(|| LiveQueryError::Invalid("Control Plane is unavailable".to_owned()))?;
+        let tables = relation_tables(plan.predicate.as_ref());
+        let module = if visibility_plan.version == Some(2) || !tables.is_empty() {
+            Some(
+                self.inner
+                    .modules
+                    .project(&session.identity.project_id)
+                    .await
+                    .ok_or_else(|| {
+                        LiveQueryError::Invalid("project module is not loaded".to_owned())
+                    })?,
+            )
+        } else {
+            None
+        };
+        // Parent ACL indexes load in their own transactions, before this
+        // snapshot holds a pool admission.
+        let acl = match &module {
+            Some(module) => {
+                let mut roots = vec![visibility_plan];
+                for table in &tables {
+                    roots.extend(module.visibility.get(table));
+                }
+                self.inner
+                    .parent_acl
+                    .ensure(
+                        &self.inner.change_feeds,
+                        &control,
+                        session,
+                        &module.visibility,
+                        &roots,
+                    )
+                    .await?
+            }
+            None => visibility::PreparedParentAcl::default(),
+        };
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
@@ -699,22 +751,18 @@ impl Runtime {
         self.inner
             .visibility_metrics
             .record_visibility_sql_statement();
-        let resolved = if visibility_plan.version == Some(2) {
-            let module = self
-                .inner
-                .modules
-                .project(&session.identity.project_id)
-                .await
-                .ok_or_else(|| {
-                    LiveQueryError::Invalid("project module is not loaded".to_owned())
-                })?;
+        let resolved = if let Some(module) = module
+            .as_ref()
+            .filter(|_| visibility_plan.version == Some(2))
+        {
             visibility::resolve_with_parents(
                 &mut transaction,
                 session,
                 visibility_plan,
                 revision,
                 &module.visibility,
-                &self.inner.parent_acl,
+                &acl,
+                &self.inner.visibility_metrics,
             )
             .await?
         } else {
@@ -722,16 +770,7 @@ impl Runtime {
                 .await?
         };
         let mut related = BTreeMap::new();
-        let tables = relation_tables(plan.predicate.as_ref());
-        if !tables.is_empty() {
-            let module = self
-                .inner
-                .modules
-                .project(&session.identity.project_id)
-                .await
-                .ok_or_else(|| {
-                    LiveQueryError::Invalid("project module is not loaded".to_owned())
-                })?;
+        if let Some(module) = module.as_ref().filter(|_| !tables.is_empty()) {
             for table in tables {
                 let related_plan = module
                     .visibility
@@ -744,7 +783,8 @@ impl Runtime {
                         related_plan,
                         revision,
                         &module.visibility,
-                        &self.inner.parent_acl,
+                        &acl,
+                        &self.inner.visibility_metrics,
                     )
                     .await?
                 } else {
