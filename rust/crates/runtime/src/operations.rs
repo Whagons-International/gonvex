@@ -131,6 +131,10 @@ enum Credential {
 }
 
 impl OperatorActor {
+    pub(crate) fn is_local(&self) -> bool {
+        self.credential == Credential::Local
+    }
+
     fn has(&self, permission: &str) -> bool {
         self.credential != Credential::PersonalAccessToken
             || self.permissions.iter().any(|granted| {
