@@ -98,7 +98,7 @@ initialization step explicitly selects its five named native cases, requires
 PostgreSQL and the module host, and rejects ignored or missing execution. Both
 configured Mergify queues require `CI` before merge.
 
-A read-only GitHub inspection on 2026-10-30 returned no branch protection or
+Read-only GitHub inspections on 2026-10-30 and 2026-11-02 returned no branch protection or
 rulesets for `staging`. The workflow and configured queues therefore enforce
 the checks in those paths, but direct-push enforcement is not established.
 Repository settings were not changed. A published-head CI run and completion

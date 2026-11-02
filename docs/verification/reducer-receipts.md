@@ -72,7 +72,13 @@ monotonic runtime metadata, PostgreSQL's transactional behavior and a durable
 deployment configuration. Reuse a key only for the same logical intent and
 arguments. Path mismatch is checked; argument equality is not checked. Effects
 outside the tenant transaction, anonymous calls and Actions have no such
-deduplication guarantee. Receipt retention is not promised as permanent.
+deduplication guarantee. The current runtime has no receipt TTL or automatic
+receipt-deletion task. Its hourly maintenance deletes old change-feed rows and
+transaction metadata, while retaining the receipt namespace. The created-at
+index does not expire receipts. This source review does not promise permanent
+retention across administrative deletion, database restore or a future policy
+change. Those operations need an explicit recovery contract before the same
+retry guarantee can span them.
 
 This evidence does not establish liveness, power-loss durability, tenant-routing
 authorization, native app filesystem behavior or correctness of snapshot

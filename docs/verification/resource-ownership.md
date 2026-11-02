@@ -56,8 +56,12 @@ a real backend waiting on the receipt-schema advisory lock and one active query
 admission permit. It aborts that initializer task and requires admission to
 return to zero. After releasing the fixture gate, another initializer must
 complete, a separate connection must acquire the same advisory lock, and a real
-reducer must commit. Saturating the configured admission capacity and refusing
-one additional admission checks that cancellation did not release capacity twice.
+reducer must commit. The test then saturates the routed database's local
+admission capacity and refuses another request. After releasing those permits,
+it saturates shared capacity using separate, intentionally unopened lazy pool
+configurations and refuses an additional request. Both limits return to zero
+after release. These checks detect duplicate release at either admission level;
+they do not open or claim to exercise additional physical databases.
 
 The lock is transaction-owned. The schedule allows SQLx's queued rollback to
 finish after the fixture gate is released; it does not claim that dropping a
