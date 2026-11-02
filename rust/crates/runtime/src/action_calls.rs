@@ -562,13 +562,21 @@ impl HostCallHandler for ActionHostCalls {
                 let run_at = chrono::Utc::now()
                     + chrono::Duration::milliseconds(i64::try_from(delay_ms).unwrap_or(i64::MAX));
                 self.runtime
-                    .enqueue_scheduled(&self.session, &function, args, run_at, &self.provenance)
+                    .enqueue_scheduled(
+                        &self.session,
+                        &function,
+                        args,
+                        run_at,
+                        &self.provenance,
+                        false,
+                    )
                     .await
             }
             HostCallFrame::ScheduleAt {
                 at_unix_ms,
                 function,
                 args,
+                coalesce,
             } => {
                 let at = i64::try_from(at_unix_ms)
                     .ok()
@@ -577,7 +585,14 @@ impl HostCallHandler for ActionHostCalls {
                         "scheduler atUnixMs is outside the supported range".to_owned()
                     })?;
                 self.runtime
-                    .enqueue_scheduled(&self.session, &function, args, at, &self.provenance)
+                    .enqueue_scheduled(
+                        &self.session,
+                        &function,
+                        args,
+                        at,
+                        &self.provenance,
+                        coalesce,
+                    )
                     .await
             }
             HostCallFrame::Storage { .. } if !self.capabilities.storage => {

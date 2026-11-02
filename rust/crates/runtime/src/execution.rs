@@ -1036,9 +1036,21 @@ impl Runtime {
             .unwrap_or_else(|_| {
                 direct_provenance(session, InvocationChannel::System, &claimed.id, "")
             });
-        self.enqueue_scheduled_with_id(session, job_id, function, args, run_at, &provenance)
-            .await
-            .map(|_| ())
+        let coalesce = object
+            .get("coalesce")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.enqueue_scheduled_with_id(
+            session,
+            job_id,
+            function,
+            args,
+            run_at,
+            &provenance,
+            coalesce,
+        )
+        .await
+        .map(|_| ())
     }
 
     pub(crate) async fn drain_all_action_outboxes(&self) {

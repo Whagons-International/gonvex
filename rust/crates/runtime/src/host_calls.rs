@@ -299,12 +299,13 @@ impl HostCallHandler for DatabaseHostCalls {
                 let run_at = Utc::now()
                     .checked_add_signed(chrono::Duration::milliseconds(delay))
                     .ok_or_else(|| "scheduler delayMs is outside the supported range".to_owned())?;
-                self.enqueue_scheduled(&function, args, run_at).await
+                self.enqueue_scheduled(&function, args, run_at, false).await
             }
             HostCallFrame::ScheduleAt {
                 at_unix_ms,
                 function,
                 args,
+                coalesce,
             } => {
                 self.require_write()?;
                 let run_at = i64::try_from(at_unix_ms)
@@ -313,7 +314,8 @@ impl HostCallHandler for DatabaseHostCalls {
                     .ok_or_else(|| {
                         "scheduler atUnixMs is outside the supported range".to_owned()
                     })?;
-                self.enqueue_scheduled(&function, args, run_at).await
+                self.enqueue_scheduled(&function, args, run_at, coalesce)
+                    .await
             }
             _ => Err(match self.capability {
                 DatabaseCapability::Query => {
@@ -334,6 +336,7 @@ impl DatabaseHostCalls {
         function: &str,
         args: Value,
         run_at: DateTime<Utc>,
+        coalesce: bool,
     ) -> Result<Value, String> {
         let function = function.trim();
         if !self.schedulable_functions.contains(function) {
@@ -347,6 +350,7 @@ impl DatabaseHostCalls {
             "function": function,
             "args": args,
             "runAtUnixMs": run_at.timestamp_millis(),
+            "coalesce": coalesce,
         });
         let account_id = self.actor_account_id.clone();
         let email = self.actor_email.clone();

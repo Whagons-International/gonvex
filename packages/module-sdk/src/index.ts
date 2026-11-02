@@ -235,6 +235,14 @@ export type ReducerActions = {
 export type Scheduler = {
   readonly runAfter: (delayMs: number, functionPath: string, args?: JsonValue) => Promise<string>;
   readonly runAt: (unixMs: number, functionPath: string, args?: JsonValue) => Promise<string>;
+  /**
+   * Run `functionPath` at `unixMs`, merged with this tenant's other wakes for
+   * the same function and args: at most one waits unclaimed, and a second wake
+   * only moves it earlier. A wake made while that run is in progress queues
+   * one more run. Cheap to call on every write that sets a due time; use it
+   * instead of an every-minute cron.
+   */
+  readonly wakeAt: (unixMs: number, functionPath: string, args?: JsonValue) => Promise<string>;
 };
 
 export type QueryContext = AuthContext & TenantContext & InvocationAware & { readonly db: ReadDB; readonly now: number };

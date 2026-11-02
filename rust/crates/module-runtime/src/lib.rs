@@ -364,6 +364,8 @@ pub enum HostCall {
         at_unix_ms: u64,
         function: String,
         args: Vec<u8>,
+        /// Merge with this tenant's unclaimed wake for the same function and args.
+        coalesce: bool,
     },
     Fetch {
         request: Vec<u8>,

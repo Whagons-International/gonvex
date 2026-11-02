@@ -383,6 +383,7 @@ export class LocalReducerRuntime {
             deferred.push({ id, kind: "schedule", path, args: clone(args), at });
             return id;
           },
+          wakeAt: async (at, path, args = {}) => context.scheduler.runAt(at, path, args),
         },
       };
       const result = clone(await definition.handler!(context, args));
