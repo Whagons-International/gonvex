@@ -61,6 +61,19 @@ async fn main() -> ExitCode {
         }
     };
     let addr = config.addr;
+    // One runtime process owns a data directory. Hold the exclusive lock for
+    // the life of the process; a second runtime on the same volume refuses to
+    // start instead of opening the SQLite files concurrently.
+    let _data_dir_lock = match config.data_dir() {
+        Some(data_dir) => match lock_data_dir(&data_dir) {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                error!(%error, data_dir = %data_dir.display(), "data directory is unavailable");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
     let runtime = Runtime::new(config);
     if let Err(error) = runtime.start().await {
         error!(%error, "Gonvex runtime startup failed");
@@ -94,6 +107,18 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Takes the store's exclusive `{data}/.gonvex.lock`, held until dropped.
+fn lock_data_dir(data_dir: &std::path::Path) -> Result<gonvex_store::DataDirLock, String> {
+    gonvex_store::DataDir::new(data_dir)
+        .lock()
+        .map_err(|error| match error {
+            gonvex_store::DatabaseError::DataDirLocked(path) => format!(
+                "another Gonvex runtime holds {path}; stop it before starting this one"
+            ),
+            other => other.to_string(),
+        })
+}
+
 fn disable_nagle(stream: &mut tokio::net::TcpStream) {
     // Protocol frames already batch their headers and payloads. Holding a
     // following small delta/ready frame for a delayed ACK adds a network stall.
@@ -105,6 +130,15 @@ fn disable_nagle(stream: &mut tokio::net::TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_runtime_cannot_lock_the_same_data_directory() {
+        let data = tempfile::tempdir().unwrap();
+        let first = lock_data_dir(data.path()).unwrap();
+        assert!(lock_data_dir(data.path()).is_err());
+        drop(first);
+        assert!(lock_data_dir(data.path()).is_ok());
+    }
 
     #[tokio::test]
     async fn accepted_connections_disable_nagle() {

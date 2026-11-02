@@ -7,13 +7,26 @@ use std::time::Duration;
 use thiserror::Error;
 
 const DEFAULT_ADDR: &str = "0.0.0.0:8080";
+const DEFAULT_DATA_DIR: &str = "./data";
+/// Postgres-era variables. Setting one now fails startup instead of silently
+/// running against an empty data directory.
+const REMOVED_DATABASE_VARIABLES: [&str; 2] = ["GONVEX_CONTROL_PLANE_DATABASE_URL", "DATABASE_URL"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub addr: SocketAddr,
+    /// `sqlite://{GONVEX_DATA_DIR}/control.db`. `None` runs without a Control
+    /// Plane.
     pub control_plane_database_url: Option<String>,
+    /// `sqlite://{GONVEX_DATA_DIR}` (absolute; default `./data`): the data
+    /// directory that holds every SQLite database and under which
+    /// runtime-created project and tenant files are provisioned. One runtime
+    /// process owns it at a time. `None` disables provisioning.
     pub default_database_url: Option<String>,
+    /// Explicit `sqlite://` overrides (`GONVEX_TENANT_DATABASE_URLS`), keyed by
+    /// tenant or `project:tenant`.
     pub tenant_database_urls: BTreeMap<String, String>,
+    /// Explicit `sqlite://` overrides (`GONVEX_PROJECT_DATABASE_URLS`).
     pub project_database_urls: BTreeMap<String, String>,
     pub require_auth: bool,
     pub websocket_compression: bool,
@@ -155,6 +168,12 @@ pub enum ConfigError {
     Integer { name: &'static str, value: String },
     #[error("{name} must be a JSON object of string values")]
     StringMap { name: &'static str },
+    #[error("{name} values must be sqlite:// database paths, got {value:?}")]
+    DatabaseRoute { name: &'static str, value: String },
+    #[error("{0} is no longer supported; databases are SQLite files under GONVEX_DATA_DIR")]
+    RemovedDatabaseVariable(&'static str),
+    #[error("GONVEX_DATA_DIR {0:?} cannot be resolved to an absolute path")]
+    DataDir(String),
     #[error("GONVEX_SERVICE_PRINCIPALS is invalid: {0}")]
     ServicePrincipals(String),
     #[error("trusted proxy variables must be comma-separated CIDRs or IP addresses")]
@@ -164,6 +183,13 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// The absolute data directory (`GONVEX_DATA_DIR`), when configured.
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        self.default_database_url
+            .as_deref()
+            .map(gonvex_store::database_path)
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|name| env::var(name).ok())
     }
@@ -179,15 +205,24 @@ impl Config {
             .or_else(|| non_empty(lookup("GONVEX_RUNTIME_VERSION")))
             .unwrap_or_else(|| "development".to_owned());
 
+        for name in REMOVED_DATABASE_VARIABLES {
+            if non_empty(lookup(name)).is_some() {
+                return Err(ConfigError::RemovedDatabaseVariable(name));
+            }
+        }
+        let data_dir = data_dir(lookup("GONVEX_DATA_DIR"))?;
+
         Ok(Self {
             addr,
-            control_plane_database_url: non_empty(lookup("GONVEX_CONTROL_PLANE_DATABASE_URL")),
-            default_database_url: non_empty(lookup("DATABASE_URL")),
-            tenant_database_urls: string_map(
+            control_plane_database_url: Some(gonvex_store::database_url(
+                &data_dir.join("control.db"),
+            )),
+            default_database_url: Some(gonvex_store::database_url(&data_dir)),
+            tenant_database_urls: sqlite_routes(
                 "GONVEX_TENANT_DATABASE_URLS",
                 lookup("GONVEX_TENANT_DATABASE_URLS"),
             )?,
-            project_database_urls: string_map(
+            project_database_urls: sqlite_routes(
                 "GONVEX_PROJECT_DATABASE_URLS",
                 lookup("GONVEX_PROJECT_DATABASE_URLS"),
             )?,
@@ -213,20 +248,23 @@ impl Config {
             dashboard_auth_project_id: non_empty(lookup("GONVEX_DASHBOARD_AUTH_PROJECT_ID")),
             google_client_id: non_empty(lookup("GONVEX_GOOGLE_CLIENT_ID")),
             google_client_secret: non_empty(lookup("GONVEX_GOOGLE_CLIENT_SECRET")),
+            // Concurrent SQL jobs across every database file (CPU fairness).
             database_max_total_connections: integer(
                 "GONVEX_DB_MAX_TOTAL_CONNS",
                 lookup("GONVEX_DB_MAX_TOTAL_CONNS"),
-                20,
+                64,
             )?,
+            // Read-only connections per database file; writes always use the
+            // file's single writer connection.
             database_max_connections: integer(
                 "GONVEX_DB_MAX_OPEN_CONNS",
                 lookup("GONVEX_DB_MAX_OPEN_CONNS"),
-                2,
+                4,
             )? as u32,
             database_max_idle_connections: integer_allow_zero(
                 "GONVEX_DB_MAX_IDLE_CONNS",
                 lookup("GONVEX_DB_MAX_IDLE_CONNS"),
-                2,
+                4,
             )? as u32,
             module_host: ModuleHostConfig {
                 enabled: boolean(
@@ -535,6 +573,41 @@ fn string_map(
         .collect())
 }
 
+/// Resolves `GONVEX_DATA_DIR` (default `./data`) to an absolute path.
+fn data_dir(value: Option<String>) -> Result<PathBuf, ConfigError> {
+    let raw = non_empty(value).unwrap_or_else(|| DEFAULT_DATA_DIR.to_owned());
+    let path = PathBuf::from(&raw);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map_err(|_| ConfigError::DataDir(raw.clone()))?
+            .join(path)
+    };
+    // Normalize `.` components so routes are stable across spellings.
+    Ok(path
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect())
+}
+
+/// A JSON object of `sqlite://` routes, normalized to absolute file paths.
+fn sqlite_routes(
+    name: &'static str,
+    value: Option<String>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    string_map(name, value)?
+        .into_iter()
+        .map(|(key, value)| {
+            if !value.starts_with("sqlite:") {
+                return Err(ConfigError::DatabaseRoute { name, value });
+            }
+            let route = gonvex_store::database_url(&gonvex_store::database_path(&value));
+            Ok((key, route))
+        })
+        .collect()
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServicePrincipalEntry {
@@ -738,12 +811,11 @@ mod tests {
     fn reads_the_existing_runtime_environment_contract() {
         let config = config(&[
             ("GONVEX_ADDR", ":9090"),
-            ("GONVEX_CONTROL_PLANE_DATABASE_URL", "postgres://control"),
-            ("DATABASE_URL", "postgres://default"),
+            ("GONVEX_DATA_DIR", "/var/lib/gonvex/data"),
             ("GONVEX_REQUIRE_AUTH", "true"),
             (
                 "GONVEX_TENANT_DATABASE_URLS",
-                r#"{"tenant-a":"postgres://a"}"#,
+                r#"{"tenant-a":"sqlite:///srv/a.db"}"#,
             ),
             ("GONVEX_MODULE_HOST_BINARY", "/bin/gonvex-module-host"),
             ("SOURCE_COMMIT", "0123456789abcdef0123456789abcdef01234567"),
@@ -751,17 +823,50 @@ mod tests {
         .expect("config");
 
         assert_eq!(config.addr, "0.0.0.0:9090".parse().unwrap());
+        assert_eq!(config.data_dir(), Some(PathBuf::from("/var/lib/gonvex/data")));
         assert_eq!(
             config.control_plane_database_url.as_deref(),
-            Some("postgres://control")
+            Some("sqlite:///var/lib/gonvex/data/control.db")
         );
-        assert_eq!(config.tenant_database_urls["tenant-a"], "postgres://a");
+        assert_eq!(
+            config.default_database_url.as_deref(),
+            Some("sqlite:///var/lib/gonvex/data")
+        );
+        assert_eq!(config.tenant_database_urls["tenant-a"], "sqlite:///srv/a.db");
         assert!(config.require_auth);
-        assert_eq!(config.database_max_total_connections, 20);
+        assert_eq!(config.database_max_total_connections, 64);
         assert_eq!(
             config.runtime_version,
             "0123456789abcdef0123456789abcdef01234567"
         );
+    }
+
+    #[test]
+    fn data_dir_defaults_to_an_absolute_data_directory() {
+        let data_dir = config(&[]).expect("config").data_dir().unwrap();
+        assert!(data_dir.is_absolute());
+        assert!(data_dir.ends_with("data"));
+        assert!(!data_dir.to_string_lossy().contains("/./"));
+        let relative = config(&[("GONVEX_DATA_DIR", "state/db")])
+            .expect("config")
+            .data_dir()
+            .unwrap();
+        assert!(relative.is_absolute());
+        assert!(relative.ends_with("state/db"));
+    }
+
+    #[test]
+    fn postgres_database_variables_fail_startup() {
+        for name in ["DATABASE_URL", "GONVEX_CONTROL_PLANE_DATABASE_URL"] {
+            assert_eq!(
+                config(&[(name, "postgres://example")]).unwrap_err(),
+                ConfigError::RemovedDatabaseVariable(name)
+            );
+        }
+        assert!(matches!(
+            config(&[("GONVEX_PROJECT_DATABASE_URLS", r#"{"p":"postgres://x"}"#)]).unwrap_err(),
+            ConfigError::DatabaseRoute { .. }
+        ));
     }
 
     #[test]

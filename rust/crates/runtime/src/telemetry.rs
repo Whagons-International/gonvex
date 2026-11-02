@@ -126,7 +126,7 @@ impl Runtime {
             // Telemetry has a hard retention bound and never participates in
             // application correctness.
             sqlx::query(
-                "DELETE FROM gonvex_performance_events WHERE project_id=$1 AND created_at<now()-interval '14 days'",
+                "DELETE FROM gonvex_performance_events WHERE project_id=$1 AND created_at<CAST(unixepoch('subsec')*1000 AS INTEGER)-1209600000",
             )
             .bind(&connection.project_id)
             .execute(&mut **transaction.transaction())
@@ -174,7 +174,7 @@ impl Runtime {
                          connection_id=EXCLUDED.connection_id,
                          release=CASE WHEN EXCLUDED.release<>'' THEN EXCLUDED.release ELSE gonvex_support_sessions.release END,
                          environment=CASE WHEN EXCLUDED.environment<>'' THEN EXCLUDED.environment ELSE gonvex_support_sessions.environment END,
-                         last_seen_at=now()"#,
+                         last_seen_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
                 )
                 .bind(&connection.connection_id)
                 .bind(&connection.project_id)
@@ -308,7 +308,7 @@ async fn persist_event(
     .bind(project)
     .bind(event_id)
     .bind(fingerprint)
-    .bind(occurred_at)
+    .bind(occurred_at.timestamp_millis())
     .bind(tenant)
     .bind(release)
     .bind(level)
@@ -321,10 +321,8 @@ async fn persist_event(
         transaction.rollback().await?;
         return Ok(false);
     }
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind(format!("{project}:{fingerprint}"))
-        .execute(&mut **transaction.transaction())
-        .await?;
+    // The group read-modify-write below runs on the database's single writer
+    // connection, so no other transaction can interleave with it.
     let existing = sqlx::query(
         r#"SELECT tenants,releases,environments,accounts,devices
            FROM gonvex_error_groups WHERE project_id=$1 AND fingerprint=$2"#,
@@ -376,7 +374,7 @@ async fn persist_event(
     .bind(title)
     .bind(culprit)
     .bind(level)
-    .bind(occurred_at)
+    .bind(occurred_at.timestamp_millis())
     .bind(Json(tenants))
     .bind(Json(releases))
     .bind(Json(environments))

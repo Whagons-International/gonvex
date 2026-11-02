@@ -128,7 +128,7 @@ pub enum RuntimeStartError {
     ModuleHost(#[from] module_host::ModuleHostError),
     #[error(transparent)]
     Database(#[from] gonvex_store::DatabaseError),
-    #[error("GONVEX_CONTROL_PLANE_DATABASE_URL or DATABASE_URL is required when authentication is enabled")]
+    #[error("a Control Plane database (GONVEX_DATA_DIR) is required when authentication is enabled")]
     MissingControlPlane,
     #[error(transparent)]
     Module(#[from] ModuleRegistryError),
@@ -142,7 +142,10 @@ struct Health {
     ok: bool,
     version: String,
     time: String,
-    postgres_set: bool,
+    /// The Control Plane SQLite database is configured.
+    database_set: bool,
+    /// Open SQLite databases, connections and SQL admission.
+    database: gonvex_store::PoolRegistrySnapshot,
     valkey_set: bool,
     rows_cache: bool,
     runtime_manifests: RuntimeManifestHealth,
@@ -177,7 +180,7 @@ impl Runtime {
             .config
             .default_database_url
             .as_deref()
-            .ok_or_else(|| "DATABASE_URL is not configured".to_owned())?;
+            .ok_or_else(|| "database provisioning is not configured".to_owned())?;
         let control = self
             .inner
             .control_plane
@@ -659,7 +662,7 @@ async fn create_project(
     let Some(base_url) = runtime.inner.config.default_database_url.clone() else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"DATABASE_URL is not configured"})),
+            Json(serde_json::json!({"error":"database provisioning is not configured"})),
         )
             .into_response();
     };
@@ -844,7 +847,7 @@ async fn delete_tenant_shard(
     let Some(base_url) = runtime.inner.config.default_database_url.as_deref() else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"DATABASE_URL is not configured"})),
+            Json(serde_json::json!({"error":"database provisioning is not configured"})),
         )
             .into_response();
     };
@@ -929,10 +932,8 @@ async fn provision_e2e_member(
     };
     let result = async {
         let mut control_tx = control.begin_control_transaction(false).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!("e2e-account:{project_id}:{email}"))
-            .execute(&mut **control_tx.transaction())
-            .await?;
+        // The Control Plane writer is one connection: this transaction already
+        // serializes concurrent creation of the same test account.
         let auth_mode = sqlx::query_scalar::<_, String>(
             "SELECT COALESCE(NULLIF(auth_mode,''),'gonvex-native') FROM gonvex_runtime_projects WHERE id=$1 AND status='active'",
         )
@@ -970,7 +971,7 @@ async fn provision_e2e_member(
                 requested_name
             };
             sqlx::query(
-                "INSERT INTO accounts(id,auth_realm_id,email,name,disabled_at,updated_at) VALUES($1,$2,$3,$4,NULL,now())",
+                "INSERT INTO accounts(id,auth_realm_id,email,name,disabled_at,updated_at) VALUES($1,$2,$3,$4,NULL,CAST(unixepoch('subsec')*1000 AS INTEGER))",
             )
             .bind(&account_id)
             .bind(project_id)
@@ -982,7 +983,7 @@ async fn provision_e2e_member(
                 sqlx::query(
                     r#"INSERT INTO account_identities
                        (project_id,account_id,provider,issuer,subject,email,verified_email,updated_at)
-                       VALUES($1,$2,'password',$1,$3,$3,TRUE,now())"#,
+                       VALUES($1,$2,'password',$1,$3,$3,1,CAST(unixepoch('subsec')*1000 AS INTEGER))"#,
                 )
                 .bind(project_id)
                 .bind(&account_id)
@@ -1029,10 +1030,11 @@ async fn provision_e2e_member(
         let revision = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO members
                (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-               VALUES($1,$2,'active',$3,$4,'admin','{"e2e":true}'::jsonb,now())
+               VALUES($1,$2,'active',$3,$4,'admin','{"e2e":true}',CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(id) DO UPDATE SET status='active',display_name=EXCLUDED.display_name,
-                 avatar_url=EXCLUDED.avatar_url,role='admin',permissions='{"e2e":true}'::jsonb,
-                 membership_revision=members.membership_revision+1,updated_at=now()
+                 avatar_url=EXCLUDED.avatar_url,role='admin',permissions='{"e2e":true}',
+                 membership_revision=members.membership_revision+1,
+                 updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                RETURNING membership_revision"#,
         )
         .bind(&member_id)
@@ -1047,10 +1049,12 @@ async fn provision_e2e_member(
         sqlx::query(
             r#"INSERT INTO account_tenant_index
                (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-               VALUES($1,$2,$3,'active',$4,now()) ON CONFLICT(account_id,tenant_id) DO UPDATE SET
+               VALUES($1,$2,$3,'active',$4,CAST(unixepoch('subsec')*1000 AS INTEGER))
+               ON CONFLICT(account_id,tenant_id) DO UPDATE SET
                  member_id=EXCLUDED.member_id,status='active',
-                 tenant_membership_revision=GREATEST(account_tenant_index.tenant_membership_revision,
-                                                     EXCLUDED.tenant_membership_revision),updated_at=now()"#,
+                 tenant_membership_revision=max(account_tenant_index.tenant_membership_revision,
+                                                EXCLUDED.tenant_membership_revision),
+                 updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&account_id)
         .bind(tenant_id)
@@ -1225,7 +1229,7 @@ async fn health(State(runtime): State<Runtime>) -> Response {
     let mut module_host = runtime.inner.module_host.status().await;
     let (active_projects, failed_projects) = runtime.inner.modules.counts().await;
     module_host.active_projects = active_projects;
-    let postgres_ready = runtime.inner.control_plane.read().await.is_some()
+    let database_ready = runtime.inner.control_plane.read().await.is_some()
         || runtime.inner.config.control_plane_database_url.is_none();
     let sandbox_ready = !runtime.inner.config.sandbox.enabled
         || runtime
@@ -1235,7 +1239,7 @@ async fn health(State(runtime): State<Runtime>) -> Response {
             .worker_binary
             .as_ref()
             .is_some_and(|path| path.is_file());
-    let ready = module_host.ready && postgres_ready && failed_projects == 0 && sandbox_ready;
+    let ready = module_host.ready && database_ready && failed_projects == 0 && sandbox_ready;
     let status = if ready {
         StatusCode::OK
     } else {
@@ -1247,8 +1251,9 @@ async fn health(State(runtime): State<Runtime>) -> Response {
             ok: ready,
             version: runtime.inner.config.runtime_version.clone(),
             time: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
-            postgres_set: runtime.inner.config.control_plane_database_url.is_some()
+            database_set: runtime.inner.config.control_plane_database_url.is_some()
                 || runtime.inner.config.default_database_url.is_some(),
+            database: runtime.inner.pools.snapshot().await,
             valkey_set: false,
             rows_cache: false,
             runtime_manifests: RuntimeManifestHealth {
@@ -4421,6 +4426,22 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    /// A fresh data directory under `GONVEX_TEST_DATA_DIR` when set (CI volume),
+    /// otherwise a system tempdir.
+    fn test_data_dir() -> tempfile::TempDir {
+        match std::env::var("GONVEX_TEST_DATA_DIR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(root) => {
+                std::fs::create_dir_all(&root).unwrap();
+                tempfile::tempdir_in(root).unwrap()
+            }
+            None => tempfile::tempdir().unwrap(),
+        }
+    }
+
     use crate::config::ModuleHostConfig;
 
     #[test]
@@ -4483,7 +4504,7 @@ mod tests {
         Config {
             addr: "127.0.0.1:0".parse().unwrap(),
             control_plane_database_url: None,
-            default_database_url: Some("postgres://example".to_owned()),
+            default_database_url: Some("sqlite:///nonexistent/gonvex-test-data".to_owned()),
             tenant_database_urls: BTreeMap::new(),
             project_database_urls: BTreeMap::new(),
             require_auth: true,
@@ -4529,20 +4550,12 @@ mod tests {
         use sha2::{Digest, Sha256};
         use sqlx::Row;
 
-        let Some(base) = std::env::var("GONVEX_TEST_POSTGRES_URL").ok() else {
-            return;
-        };
         let Some(binary) = std::env::var("GONVEX_TEST_MODULE_HOST_BINARY").ok() else {
             return;
         };
-        let schema = format!("public_functions_{}", uuid::Uuid::new_v4().simple());
-        let admin = sqlx::PgPool::connect(&base).await.unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if base.contains('?') { '&' } else { '?' };
-        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let data = test_data_dir();
+        let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+        let url = gonvex_store::database_url(&data.path().join("tenant.db"));
         let mut cfg = config(true);
         cfg.module_host.binary = Some(binary.into());
         cfg.module_host.execution_timeout = Duration::from_secs(45);
@@ -4557,12 +4570,15 @@ mod tests {
             public_base_url: "https://uploads.example.test".into(),
         };
         let runtime = Runtime::new(cfg);
-        let control = ControlPlane::connect(&url, runtime.inner.pools.clone(), BTreeMap::new())
-            .await
-            .unwrap();
-        let fixture = sqlx::PgPool::connect(&url).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('project','Project','multiTenant','active')").execute(&fixture).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('route','project','tenant-id','Tenant','careers',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        let control =
+            ControlPlane::connect(&control_url, runtime.inner.pools.clone(), BTreeMap::new())
+                .await
+                .unwrap();
+        // Control Plane rows and tenant rows live in separate database files.
+        let control_fixture = runtime.inner.pools.pool(&control_url).await.unwrap();
+        let fixture = runtime.inner.pools.pool(&url).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('project','Project','multiTenant','active')").execute(&control_fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('route','project','tenant-id','Tenant','careers',$1,'active')").bind(&url).execute(&control_fixture).await.unwrap();
         let route = TenantRoute {
             project_id: "project".into(),
             tenant_id: "tenant-id".into(),
@@ -4588,7 +4604,7 @@ export async function tool(ctx) { return ctx.tools.save({}); }
 export async function internal(ctx) { return identity(ctx); }
 export async function upload(ctx) { return ctx.storage.generateUploadUrl({ visibility: "public", ownerId: "spoofed", size: 3, contentType: "application/pdf" }); }
 export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.fileId); }
-export async function slow(ctx, args) { await ctx.db.query("SELECT 1 FROM pg_sleep(31)", []); return apply(ctx, args); }
+export async function slow(ctx, args) { await ctx.db.query("WITH RECURSIVE spin(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM spin WHERE n<20000000) SELECT count(*) FROM spin", []); return apply(ctx, args); }
 export async function slowAction(ctx) { await new Promise(resolve => setTimeout(resolve, 5000)); return identity(ctx); }
 "#;
         let mut functions = serde_json::json!({});
@@ -4840,8 +4856,8 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             .unwrap();
         });
         let socket_url = format!("ws://{address}/ws?public=1");
-        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('other','Other','multiTenant','active')").execute(&fixture).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('other-route','other','tenant-id','Other','other-careers',$1,'active'),('other-tenant','project','tenant-other','Other','other',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('other','Other','multiTenant','active')").execute(&control_fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('other-route','other','tenant-id','Other','other-careers',$1,'active'),('other-tenant','project','tenant-other','Other','other',$1,'active')").bind(&url).execute(&control_fixture).await.unwrap();
         for (project, tenant) in [("project", "tenant-other"), ("other", "tenant-id")] {
             let (mut socket, _) = connect_async(&socket_url).await.unwrap();
             read_socket(&mut socket).await;
@@ -4862,15 +4878,15 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"batch-auth","public":true,"project":"project","tenant":"careers"}).to_string().into())).await.unwrap();
         assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
         socket.send(WsMessage::Text(serde_json::json!({"type":"reducer.callMany","calls":[{"id":"slow-first","path":"slow","args":{"id":"before-revocation"}},{"id":"after","path":"apply","args":{"id":"after-revocation"}}]}).to_string().into())).await.unwrap();
-        // Wait until the first call is running before revoking its tenant.
+        // Wait until the first call holds its tenant transaction (SQL admission)
+        // before revoking its tenant.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let running: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE state='active' AND query = 'SELECT 1 FROM pg_sleep(31)')").fetch_one(&fixture).await.unwrap();
-                if running { break; }
+                if runtime.inner.pools.snapshot().await.admission_active > 0 { break; }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await.unwrap();
-        sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&fixture).await.unwrap();
+        sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&control_fixture).await.unwrap();
         let first = read_socket(&mut socket).await;
         assert_eq!(first["type"], "reducer.result");
         assert_eq!(first["id"], "slow-first");
@@ -4887,7 +4903,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         socket.close(None).await.ok();
         server.abort();
         sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled'")
-            .execute(&fixture)
+            .execute(&control_fixture)
             .await
             .unwrap();
         let (message, _) = authenticate(
@@ -4905,12 +4921,8 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         .await;
         assert!(matches!(message, ServerMessage::AuthError { .. }));
         runtime.inner.module_host.shutdown().await;
-        fixture.close().await;
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
+        drop((fixture, control_fixture));
+        runtime.inner.pools.close().await;
     }
 
     fn upload_signature(secret: &str, key: &str, expires: i64) -> String {
@@ -5094,7 +5106,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             ..TenantSession::anonymous(gonvex_store::TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
-                database_url: "postgres://tenant".to_owned(),
+                database_url: "sqlite:///nonexistent/tenant.db".to_owned(),
             })
         };
         let old = control::ControlConnection {
@@ -5348,7 +5360,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 .unwrap();
         assert_eq!(body["ok"], true);
         assert_eq!(body["version"], "0.4.1-test");
-        assert_eq!(body["postgresSet"], true);
+        assert_eq!(body["databaseSet"], true);
         assert_eq!(body["moduleHost"]["ready"], true);
     }
 
@@ -5366,7 +5378,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(body["postgresSet"], true);
+        assert_eq!(body["databaseSet"], true);
     }
 
     #[tokio::test]
@@ -5608,7 +5620,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             route: gonvex_store::TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
-                database_url: "postgres://tenant".to_owned(),
+                database_url: "sqlite:///nonexistent/tenant.db".to_owned(),
             },
             member: gonvex_store::Member {
                 id: "member".to_owned(),

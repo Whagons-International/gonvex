@@ -30,34 +30,35 @@ pub fn sql_error_is_transient(error: &sqlx::Error) -> bool {
         | sqlx::Error::BeginFailed => true,
         sqlx::Error::Database(database) => database
             .code()
-            .is_some_and(|code| sqlstate_is_transient(code.as_ref())),
+            .is_some_and(|code| sqlite_code_is_transient(code.as_ref())),
         _ => false,
     }
 }
 
-/// PostgreSQL SQLSTATE codes whose failure is about the server, not the data.
-pub fn sqlstate_is_transient(code: &str) -> bool {
-    // Class 08: connection exceptions. Class 53: insufficient resources
-    // (disk full, out of memory, too many connections). Class 58: system I/O.
-    if code.starts_with("08") || code.starts_with("53") || code.starts_with("58") {
-        return true;
-    }
+/// SQLite result codes (sqlx reports the extended code in decimal) whose
+/// failure is about the database file or process, not the data.
+pub fn sqlite_code_is_transient(code: &str) -> bool {
+    let Ok(extended) = code.trim().parse::<i64>() else {
+        return false;
+    };
     matches!(
-        code,
-        // serialization_failure, deadlock_detected
-        "40001" | "40P01"
-        // query_canceled (statement_timeout), lock_not_available (lock_timeout)
-        | "57014" | "55P03"
-        // admin_shutdown, crash_shutdown, cannot_connect_now
-        | "57P01" | "57P02" | "57P03"
-        // read_only_sql_transaction: a failover promoted/demoted the primary
-        | "25006"
+        extended & 0xff,
+        // SQLITE_BUSY, SQLITE_LOCKED: another connection holds the file.
+        5 | 6
+        // SQLITE_NOMEM, SQLITE_INTERRUPT (cancelled statement)
+        | 7 | 9
+        // SQLITE_IOERR, SQLITE_FULL (disk full), SQLITE_CANTOPEN, SQLITE_PROTOCOL
+        | 10 | 13 | 14 | 15
     )
 }
 
 pub fn database_error_class(error: &DatabaseError) -> ReducerErrorClass {
     match error {
-        DatabaseError::AdmissionTimeout => ReducerErrorClass::Transient,
+        DatabaseError::AdmissionTimeout
+        | DatabaseError::ListenerLagged
+        | DatabaseError::ListenerClosed
+        | DatabaseError::Io(_)
+        | DatabaseError::DataDirLocked(_) => ReducerErrorClass::Transient,
         DatabaseError::Sql(sql) if sql_error_is_transient(sql) => ReducerErrorClass::Transient,
         DatabaseError::MissingProject
         | DatabaseError::MissingTenant
@@ -74,7 +75,11 @@ pub fn database_error_class(error: &DatabaseError) -> ReducerErrorClass {
         DatabaseError::MemberNotFound(_) | DatabaseError::NoTenantMembership => {
             ReducerErrorClass::Rejected
         }
-        DatabaseError::IdempotencyPathMismatch { .. } | DatabaseError::Sql(_) => {
+        DatabaseError::IdempotencyPathMismatch { .. }
+        | DatabaseError::Decode(_)
+        | DatabaseError::ReferenceIntegrity(_)
+        | DatabaseError::TransactionAborted(_)
+        | DatabaseError::Sql(_) => {
             ReducerErrorClass::Rejected
         }
     }
@@ -187,14 +192,15 @@ mod tests {
 
     #[test]
     fn classifies_connection_and_resource_failures_as_transient() {
-        for code in [
-            "08000", "08006", "08P01", "40001", "40P01", "53300", "53200", "57014", "57P01",
-            "57P03", "55P03", "25006", "58030",
-        ] {
-            assert!(sqlstate_is_transient(code), "{code} should be transient");
+        // BUSY, BUSY_SNAPSHOT, LOCKED, NOMEM, INTERRUPT, IOERR, IOERR_WRITE,
+        // FULL, CANTOPEN, PROTOCOL.
+        for code in ["5", "517", "6", "7", "9", "10", "778", "13", "14", "15"] {
+            assert!(sqlite_code_is_transient(code), "{code} should be transient");
         }
-        for code in ["23505", "23503", "22P02", "42501", "P0001", "42P01"] {
-            assert!(!sqlstate_is_transient(code), "{code} should be rejected");
+        // ERROR (syntax, missing table), CONSTRAINT_UNIQUE, CONSTRAINT_FOREIGNKEY,
+        // CONSTRAINT_CHECK, MISMATCH, READONLY, a non-numeric code.
+        for code in ["1", "2067", "787", "275", "20", "8", "23505"] {
+            assert!(!sqlite_code_is_transient(code), "{code} should be rejected");
         }
         assert!(sql_error_is_transient(&sqlx::Error::PoolTimedOut));
         assert!(sql_error_is_transient(&sqlx::Error::PoolClosed));
