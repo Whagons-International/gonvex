@@ -80,3 +80,57 @@ Plan explicitly for migration previews and backfills, deployment/versioning and
 rollback, tenant fleet backups, scheduler retention/dead letters, identity and
 audit requirements, and operating the self-hosted runtime. No public managed
 Gonvex service is generally available yet.
+
+## PostgreSQL connection capacity
+
+`GONVEX_DB_MAX_TOTAL_CONNS` limits concurrent SQL jobs per runtime, with a default
+of 20 and a ceiling of 64. Waiting jobs for one database do not occupy the shared
+slots. This setting does not cap physical connections retained by idle pools.
+
+Query pools default to two connections per database and zero minimum connections.
+`GONVEX_DB_MAX_IDLE_CONNS` defaults to two and is enforced on release, including
+concurrent releases. The release check conservatively counts active connections,
+so a busy pool may close a released connection even before it becomes idle.
+Idle connections expire after one second; connection lifetime is 30 minutes.
+
+LISTEN sessions use dedicated connections outside SQL admission. Metrics include
+these in `openConnections` and report them separately as `listenerConnections`.
+The change-feed hub shares one listener per database URL across tenant routes.
+
+For 26 databases, two query connections and one listener each have a ceiling of
+78 server connections. Count control-plane connections, additional listeners,
+maintenance clients and every runtime replica separately. A 100-connection server
+has 22 slots left under that specific allocation. Adding databases or overriding
+the per-database limit requires a new capacity calculation. No process-wide
+physical-connection semaphore or cross-runtime capacity coordination is provided.
+
+### Local validation, 2026-11-02
+
+Postgres 16 on numeric loopback, max_connections=100; 26 synthetic databases,
+26 direct listeners, 300 concurrent writers and 3,000 SQL writes per mode.
+Admission uses 20 shared job slots and a 30-second deadline in every mode.
+Peaks include the monitor connection. Latency includes admission and SQL time.
+
+| Configuration | Peak server connections | Rejections | p50 / p95 / p99, ms |
+| --- | ---: | ---: | --- |
+| Baseline, open=16, idle limit unenforced | 83 | 0 | 224 / 1892 / 1919 |
+| Native open=2, idle=1 | 58 | 0 | 2020 / 2413 / 3194 |
+| Native open=1, idle=1 | 53 | 0 | 783 / 2996 / 3810 |
+| Native open=2, idle=2, selected default | 58 | 0 | 425 / 512 / 544 |
+| PgBouncer transaction pools, server pool=2 | 58 | 0 | 432 / 2145 / 2156 |
+
+Retaining both allowed connections for the one-second idle window avoids repeated
+connection creation under sustained load. The smaller idle limits remain available
+and enforced, but can increase connection churn. These are single local SQL runs
+on a shared host, not authenticated reducer or application-save measurements.
+Attempts stopped by the 5% host memory-pressure gate are excluded.
+
+The native limits are sufficient for this allocation and avoid another service.
+PgBouncer was tested at version 1.26.1 with max_user_connections=52,
+server_idle_timeout=1 and max_prepared_statements=200. Query pools used transaction
+mode; all LISTEN sessions connected directly. Its query cap plus 26 direct
+listeners allows 78 workload connections. Keep server-wide caps across database
+pools, and budget direct listeners separately. Transaction mode does not support
+LISTEN or SQL PREPARE; protocol prepared statements require a nonzero
+max_prepared_statements. See the [feature map](https://www.pgbouncer.org/features.html)
+and [configuration reference](https://www.pgbouncer.org/config.html).

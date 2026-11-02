@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use gonvex_postgres::{PoolRegistry, TenantRoute};
 use serde_json::Value;
-use sqlx::postgres::PgListener;
 use sqlx::Row;
 use tokio::sync::{broadcast, watch, RwLock};
 
@@ -70,7 +69,7 @@ impl ChangeFeedHub {
     }
 
     pub async fn subscribe(&self, route: &TenantRoute) -> broadcast::Receiver<FeedEvent> {
-        let key = format!("{}\0{}", route.project_id, route.tenant_id);
+        let key = route.database_url.clone();
         if let Some(sender) = self.feeds.read().await.get(&key) {
             return sender.subscribe();
         }
@@ -121,7 +120,7 @@ async fn run_feed(
         if *shutdown.borrow() {
             return;
         }
-        let mut listener = match PgListener::connect(&route.database_url).await {
+        let mut listener = match pools.listener(&route.database_url).await {
             Ok(listener) => listener,
             Err(error) => {
                 let _ = sender.send(FeedEvent::Reset {
