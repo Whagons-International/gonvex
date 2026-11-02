@@ -19,6 +19,10 @@ use crate::sql_parameters::Parameters;
 use crate::visibility::{self, ResolvedVisibility, VisibilityDependencies, VisibilityPlan};
 use crate::Runtime;
 
+#[path = "live_query_projection.rs"]
+mod projection;
+use projection::{ProjectionCatalog, ProjectionRouting};
+
 #[derive(Clone, Debug)]
 pub struct LiveQuerySubscription {
     pub id: String,
@@ -30,6 +34,7 @@ pub struct LiveQuerySubscription {
     pub resolved_visibility: ResolvedVisibility,
     pub related_dependencies: Vec<VisibilityDependencies>,
     pub related_visibility: Arc<BTreeMap<String, (VisibilityPlan, ResolvedVisibility)>>,
+    projection_routing: ProjectionRouting,
     pub required_revision: u64,
     pub computed_revision: u64,
     pub epoch: String,
@@ -54,7 +59,11 @@ fn change_affects_live_query(
 /// a source row visible before or after, a principal or grant change naming
 /// the member, a parent whose visibility to the member matters, or the
 /// query's own ordering/relation tables. Invisible task writes are skipped.
-fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange) -> bool {
+fn mask_change_relevant(
+    subscription: &LiveQuerySubscription,
+    changes: &ChangedRoots<'_>,
+    change: &LogChange,
+) -> bool {
     mask_visibility_change_relevant(
         &subscription.visibility,
         &subscription.resolved_visibility,
@@ -75,7 +84,9 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
                     )
             }
         })
-        || subscription.plan.projection_change_affects(&change.table)
+        || subscription
+            .projection_routing
+            .relevant(subscription, changes, change)
 }
 
 fn mask_visibility_change_relevant(
@@ -171,6 +182,7 @@ fn mask_visibility_change_relevant(
 struct QuerySnapshot {
     resolved_visibility: ResolvedVisibility,
     related_visibility: Arc<BTreeMap<String, (VisibilityPlan, ResolvedVisibility)>>,
+    projection_routing: ProjectionRouting,
     result: Value,
     revision: u64,
     epoch: String,
@@ -178,12 +190,14 @@ struct QuerySnapshot {
 
 #[derive(Clone, Default)]
 pub struct SharedLiveQueryCache {
+    projection_sources: Arc<ProjectionCatalog>,
     entries: Arc<tokio::sync::Mutex<BTreeMap<String, QuerySnapshot>>>,
     locks: Arc<tokio::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl SharedLiveQueryCache {
     pub async fn clear(&self) {
+        self.projection_sources.clear().await;
         self.entries.lock().await.clear();
         self.locks.lock().await.clear();
     }
@@ -586,6 +600,7 @@ impl Runtime {
                 visibility_dependencies: visibility_plan.dependency_columns(),
                 resolved_visibility: snapshot.resolved_visibility,
                 related_visibility: snapshot.related_visibility,
+                projection_routing: snapshot.projection_routing,
                 related_dependencies: relation_tables(plan.predicate.as_ref())
                     .iter()
                     .filter_map(|table| module.visibility.get(table))
@@ -620,6 +635,7 @@ impl Runtime {
             ),
             FeedEvent::Reset { .. } => (0, "", &[][..], true),
         };
+        let changed_roots = ChangedRoots::new(subscriptions, changes);
         let mut messages = Vec::new();
         for subscription in subscriptions.values_mut() {
             if !reset && event_revision <= subscription.computed_revision {
@@ -645,12 +661,18 @@ impl Runtime {
                     }
                 }
             }
+            indexes_ready = indexes_ready
+                && (reset
+                    || subscription
+                        .projection_routing
+                        .ready(event_revision, event_epoch)
+                        .await);
             let relevant = reset
                 || !indexes_ready
                 || changes.iter().any(|change| {
                     self.inner.visibility_metrics.record_in_memory_row_check();
                     if subscription.visibility.version == Some(2) {
-                        mask_change_relevant(subscription, change)
+                        mask_change_relevant(subscription, &changed_roots, change)
                     } else {
                         change_affects_live_query(
                             &subscription.plan.table,
@@ -700,6 +722,7 @@ impl Runtime {
                         || snapshot.epoch != subscription.epoch;
                     subscription.resolved_visibility = snapshot.resolved_visibility;
                     subscription.related_visibility = snapshot.related_visibility;
+                    subscription.projection_routing = snapshot.projection_routing;
                     subscription.computed_revision = snapshot.revision;
                     subscription.epoch = snapshot.epoch;
                     if changed {
@@ -753,6 +776,20 @@ impl Runtime {
         } else {
             None
         };
+        let projection_sources = projection_source_tables(plan);
+        let root_key = (plan.table.clone(), plan.key.clone());
+        let bind_root = if visibility_plan.version == Some(2) && !projection_sources.is_empty() {
+            match &module {
+                Some(module) => self
+                    .inner
+                    .live_query_cache
+                    .projection_sources
+                    .root_required(&module.artifact_hash, &module.visibility, &root_key)?,
+                None => false,
+            }
+        } else {
+            false
+        };
         // Parent ACL indexes load in their own transactions, before this
         // snapshot holds a pool admission.
         let acl = match &module {
@@ -761,14 +798,21 @@ impl Runtime {
                 for table in &tables {
                     roots.extend(module.visibility.get(table));
                 }
+                let mut needed = BTreeSet::new();
+                for root in roots {
+                    needed.extend(visibility::required_indexes(&module.visibility, root)?);
+                }
+                if bind_root {
+                    needed.insert(root_key.clone());
+                }
                 self.inner
                     .parent_acl
-                    .ensure(
+                    .ensure_needed(
                         &self.inner.change_feeds,
                         &control,
                         session,
                         &module.visibility,
-                        &roots,
+                        needed,
                     )
                     .await?
             }
@@ -828,6 +872,31 @@ impl Runtime {
                 related.insert(table, (related_plan.clone(), related_resolved));
             }
         }
+        let mut projection_routing = ProjectionRouting::default();
+        if bind_root {
+            let module = module.as_ref().expect("root projection requires a module");
+            let sources = module
+                .functions
+                .values()
+                .filter_map(|function| function.live_query_plan.as_ref())
+                .flat_map(projection_source_tables)
+                .collect();
+            let tracked = self
+                .inner
+                .live_query_cache
+                .projection_sources
+                .tracked(
+                    &mut transaction,
+                    session,
+                    &epoch,
+                    &module.artifact_hash,
+                    &sources,
+                    &self.inner.visibility_metrics,
+                )
+                .await?;
+            projection_routing.tracked = projection_sources.is_subset(&tracked);
+            projection_routing.root_index = Some(acl.get(&plan.table, &plan.key)?);
+        }
         let fingerprint = std::iter::once(resolved.fingerprint.as_str())
             .chain(related.values().map(|(_, item)| item.fingerprint.as_str()))
             .collect::<Vec<_>>()
@@ -857,10 +926,12 @@ impl Runtime {
                 "live query result exceeds the 32 MiB limit".to_owned(),
             ));
         }
+        projection_routing.remember_result(plan, &result);
         transaction.commit().await?;
         let snapshot = QuerySnapshot {
             resolved_visibility: resolved,
             related_visibility: Arc::new(related),
+            projection_routing,
             result,
             epoch,
             revision,
@@ -1852,6 +1923,7 @@ mod tests {
                 (notes, resolved.clone()),
             )])),
             resolved_visibility: resolved,
+            projection_routing: ProjectionRouting::default(),
             visibility,
             required_revision: 1,
             computed_revision: 1,
@@ -1878,9 +1950,13 @@ mod tests {
     #[test]
     fn related_rows_only_wake_members_who_can_observe_them() {
         let subscription = related_subscription();
-        assert!(mask_change_relevant(&subscription, &note_change("alice")));
+        assert!(mask_change_relevant(
+            &subscription,
+            &ChangedRoots::default(),
+            &note_change("alice")
+        ));
         assert!(
-            !mask_change_relevant(&subscription, &note_change("bob")),
+            !mask_change_relevant(&subscription, &ChangedRoots::default(), &note_change("bob")),
             "hidden related rows must not schedule visibility SQL"
         );
     }
@@ -1894,7 +1970,11 @@ mod tests {
             }))
             .unwrap(),
         );
-        assert!(mask_change_relevant(&subscription, &note_change("bob")));
+        assert!(mask_change_relevant(
+            &subscription,
+            &ChangedRoots::default(),
+            &note_change("bob")
+        ));
         subscription.plan.index = None;
         subscription.plan.search = Some(
             serde_json::from_value(serde_json::json!({
@@ -1904,7 +1984,122 @@ mod tests {
             }))
             .unwrap(),
         );
-        assert!(mask_change_relevant(&subscription, &note_change("bob")));
+        assert!(mask_change_relevant(
+            &subscription,
+            &ChangedRoots::default(),
+            &note_change("bob")
+        ));
+    }
+
+    fn projection_subscription() -> LiveQuerySubscription {
+        let mut subscription = related_subscription();
+        subscription.related_visibility = Arc::new(BTreeMap::new());
+        subscription.visibility = serde_json::from_value(serde_json::json!({
+            "version":2,"permissionTables":[],"table":"tasks","key":"id","sets":{},
+            "where":{"operator":"eqContext","column":"memberId","context":"member.id"}
+        }))
+        .unwrap();
+        subscription.plan.index = Some(
+            serde_json::from_value(serde_json::json!({
+                "table":"projectionRows","key":"taskId","columns":["id"],"dependencies":["hints"]
+            }))
+            .unwrap(),
+        );
+        subscription.projection_routing.tracked = true;
+        subscription.projection_routing.root_index = Some(Arc::new(std::sync::RwLock::new(
+            crate::visibility_index::ParentAclIndex::from_snapshot(
+                1,
+                BTreeMap::from([
+                    (
+                        "visible".into(),
+                        serde_json::json!({"id":"visible","memberId":"alice"}),
+                    ),
+                    (
+                        "hidden".into(),
+                        serde_json::json!({"id":"hidden","memberId":"bob"}),
+                    ),
+                ]),
+            ),
+        )));
+        subscription
+    }
+
+    fn projection_change(task: &str) -> LogChange {
+        let mut change = note_change("bob");
+        change.table = "projectionRows".into();
+        change.row_id = "a-composite-key-prefix-is-not-the-task-id".into();
+        change.new_value = serde_json::json!({"taskId":task});
+        change
+    }
+
+    #[test]
+    fn projection_wakes_follow_root_ids_and_both_sides_of_moves() {
+        let subscription = projection_subscription();
+        let roots = ChangedRoots::default();
+        assert!(!mask_change_relevant(
+            &subscription,
+            &roots,
+            &projection_change("hidden")
+        ));
+        assert!(mask_change_relevant(
+            &subscription,
+            &roots,
+            &projection_change("visible")
+        ));
+        let mut moved = projection_change("hidden");
+        moved.old_value = serde_json::json!({"taskId":"visible"});
+        assert!(mask_change_relevant(&subscription, &roots, &moved));
+        moved.new_value = serde_json::json!({});
+        assert!(mask_change_relevant(&subscription, &roots, &moved));
+    }
+
+    #[test]
+    fn proven_projection_hints_do_not_wake_queries_but_untracked_sources_keep_waking() {
+        let mut subscription = projection_subscription();
+        let mut hint = projection_change("visible");
+        hint.table = "hints".into();
+        let roots = ChangedRoots::default();
+        assert!(!mask_change_relevant(&subscription, &roots, &hint));
+        subscription.projection_routing.tracked = false;
+        assert!(mask_change_relevant(&subscription, &roots, &hint));
+    }
+
+    #[test]
+    fn source_rows_from_the_same_event_take_precedence_over_an_ahead_index() {
+        let subscription = projection_subscription();
+        let mut root = projection_change("visible");
+        root.table = "tasks".into();
+        root.new_value = serde_json::json!({"id":"visible","memberId":"bob"});
+        root.old_value = root.new_value.clone();
+        let events = [root];
+        let subscriptions = BTreeMap::from([("query".into(), subscription)]);
+        let roots = ChangedRoots::new(&subscriptions, &events);
+        assert!(!mask_change_relevant(
+            &subscriptions["query"],
+            &roots,
+            &projection_change("visible")
+        ));
+    }
+
+    #[test]
+    fn hidden_related_search_text_still_affects_a_visible_root() {
+        let mut subscription = projection_subscription();
+        subscription.related_visibility = related_subscription().related_visibility;
+        subscription.plan.search = Some(
+            serde_json::from_value(serde_json::json!({
+                "argument":"search","columns":[],"sources":[{
+                    "table":"taskNotes","key":"taskId","column":"body"
+                }]
+            }))
+            .unwrap(),
+        );
+        let mut change = note_change("bob");
+        change.new_value["taskId"] = serde_json::json!("visible");
+        assert!(mask_change_relevant(
+            &subscription,
+            &ChangedRoots::default(),
+            &change
+        ));
     }
 
     #[test]
@@ -1915,7 +2110,11 @@ mod tests {
             .unwrap()
             .0
             .version = None;
-        assert!(mask_change_relevant(&subscription, &note_change("bob")));
+        assert!(mask_change_relevant(
+            &subscription,
+            &ChangedRoots::default(),
+            &note_change("bob")
+        ));
     }
 
     #[tokio::test]
@@ -2617,5 +2816,154 @@ mod tests {
             ),
             serde_json::json!({"page":{"rows":[{"id":"task-1"}],"total":10,"offset":2,"limit":3}})
         );
+    }
+}
+
+fn projection_source_tables(plan: &LiveQueryPlan) -> BTreeSet<String> {
+    plan.index
+        .iter()
+        .map(|index| index.table.clone())
+        .chain(
+            plan.search
+                .iter()
+                .flat_map(|search| search.sources.iter().map(|source| source.table.clone())),
+        )
+        .collect()
+}
+
+impl ProjectionRouting {
+    pub fn remember_result(&mut self, plan: &LiveQueryPlan, result: &Value) {
+        let rows = plan
+            .result_path
+            .iter()
+            .try_fold(result, |value, key| value.get(key));
+        self.held_ids = Arc::new(
+            rows.and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row.get(&plan.key))
+                .filter(|key| !key.is_null())
+                .map(|key| crate::visibility_mask::scalar(Some(key)))
+                .collect(),
+        );
+    }
+
+    pub fn relevant(
+        &self,
+        subscription: &LiveQuerySubscription,
+        changes: &ChangedRoots<'_>,
+        change: &LogChange,
+    ) -> bool {
+        let plan = &subscription.plan;
+        if !plan.projection_change_affects(&change.table) {
+            return false;
+        }
+        let Some(index) = self.root_index.as_ref().filter(|_| self.tracked) else {
+            return true;
+        };
+        let keys = plan
+            .index
+            .iter()
+            .filter(|source| source.table == change.table)
+            .map(|source| source.key.as_str())
+            .chain(
+                plan.search
+                    .iter()
+                    .flat_map(|search| &search.sources)
+                    .filter(|source| source.table == change.table)
+                    .map(|source| source.key.as_str()),
+            );
+        for key in keys {
+            for row in [&change.old_value, &change.new_value]
+                .into_iter()
+                .filter(|row| !row.is_null())
+            {
+                // Unknown payload shapes must never suppress a real SQL input.
+                let Some(value) = row.get(key) else {
+                    return true;
+                };
+                if value.is_null() {
+                    continue;
+                }
+                let id = crate::visibility_mask::scalar(Some(value));
+                if self.held_ids.contains(&id) {
+                    return true;
+                }
+                if let Some(roots) = changes
+                    .rows
+                    .get(&(plan.table.clone(), plan.key.clone()))
+                    .and_then(|rows| rows.get(&id))
+                {
+                    if roots.iter().any(|row| {
+                        visibility::row_matches(
+                            &subscription.visibility,
+                            &subscription.resolved_visibility,
+                            row,
+                        )
+                    }) {
+                        return true;
+                    }
+                    continue;
+                }
+                let Ok(index) = index.read() else {
+                    return true;
+                };
+                if index.get(&id).is_some_and(|row| {
+                    visibility::row_matches(
+                        &subscription.visibility,
+                        &subscription.resolved_visibility,
+                        &row,
+                    )
+                }) {
+                    return true;
+                }
+            }
+        }
+        // A hint is not a SQL input. Every proven tracked projection effect
+        // appears separately in this same transaction's change feed.
+        false
+    }
+}
+
+/// Borrow and index root payloads once for every member's routing check.
+#[derive(Default)]
+struct ChangedRoots<'a> {
+    rows: BTreeMap<(String, String), BTreeMap<String, Vec<&'a Value>>>,
+}
+
+impl<'a> ChangedRoots<'a> {
+    pub fn new(
+        subscriptions: &BTreeMap<String, LiveQuerySubscription>,
+        changes: &'a [LogChange],
+    ) -> Self {
+        let keys = subscriptions
+            .values()
+            .filter(|subscription| subscription.projection_routing.tracked)
+            .map(|subscription| {
+                (
+                    subscription.plan.table.clone(),
+                    subscription.plan.key.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let mut rows = BTreeMap::new();
+        for (table, key) in keys {
+            let mut roots: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+            for row in changes
+                .iter()
+                .filter(|change| change.table == table)
+                .flat_map(|change| [&change.old_value, &change.new_value])
+                .filter(|row| !row.is_null())
+            {
+                if let Some(value) = row.get(&key).filter(|value| !value.is_null()) {
+                    roots
+                        .entry(crate::visibility_mask::scalar(Some(value)))
+                        .or_default()
+                        .push(row);
+                }
+            }
+            rows.insert((table, key), roots);
+        }
+        Self { rows }
     }
 }
