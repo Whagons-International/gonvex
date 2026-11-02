@@ -29,6 +29,7 @@ pub struct LiveQuerySubscription {
     pub visibility_dependencies: VisibilityDependencies,
     pub resolved_visibility: ResolvedVisibility,
     pub related_dependencies: Vec<VisibilityDependencies>,
+    pub related_visibility: Arc<BTreeMap<String, (VisibilityPlan, ResolvedVisibility)>>,
     pub required_revision: u64,
     pub computed_revision: u64,
     pub epoch: String,
@@ -54,9 +55,35 @@ fn change_affects_live_query(
 /// the member, a parent whose visibility to the member matters, or the
 /// query's own ordering/relation tables. Invisible task writes are skipped.
 fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange) -> bool {
-    let resolved = &subscription.resolved_visibility;
-    let plan = &subscription.visibility;
-    if change.table == subscription.plan.table {
+    mask_visibility_change_relevant(
+        &subscription.visibility,
+        &subscription.resolved_visibility,
+        change,
+    ) || subscription
+        .related_visibility
+        .values()
+        .any(|(plan, resolved)| {
+            if plan.version == Some(2) {
+                mask_visibility_change_relevant(plan, resolved, change)
+            } else {
+                // Mixed manifests retain the legacy dependency wake.
+                change.table == plan.table
+                    || plan.dependency_columns().change_affects(
+                        &change.table,
+                        &change.operation,
+                        &change.changed_columns,
+                    )
+            }
+        })
+        || subscription.plan.projection_change_affects(&change.table)
+}
+
+fn mask_visibility_change_relevant(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    change: &LogChange,
+) -> bool {
+    if change.table == plan.table {
         return [&change.old_value, &change.new_value]
             .into_iter()
             .any(|row| !row.is_null() && visibility::row_matches(plan, resolved, row));
@@ -137,22 +164,13 @@ fn mask_change_relevant(subscription: &LiveQuerySubscription, change: &LogChange
                 !row.is_null() && visibility::row_matches(&parent.plan, &parent.resolved, row)
             });
     }
-    subscription.plan.index_change_affects(&change.table)
-        || subscription
-            .related_dependencies
-            .iter()
-            .any(|dependencies| {
-                dependencies.change_affects(
-                    &change.table,
-                    &change.operation,
-                    &change.changed_columns,
-                )
-            })
+    false
 }
 
 #[derive(Clone)]
 struct QuerySnapshot {
     resolved_visibility: ResolvedVisibility,
+    related_visibility: Arc<BTreeMap<String, (VisibilityPlan, ResolvedVisibility)>>,
     result: Value,
     revision: u64,
     epoch: String,
@@ -336,22 +354,27 @@ pub enum LiveQueryError {
 impl LiveQueryPlan {
     fn index_change_affects(&self, table: &str) -> bool {
         relation_tables(self.predicate.as_ref()).contains(table)
-            || self.index.as_ref().is_some_and(|index| {
-                index.table == table
-                    || index
+            || self.projection_change_affects(table)
+    }
+
+    // Projection/search inputs remain relevant even when the same table is
+    // also a hidden relation: SQL reads these inputs without their own mask.
+    fn projection_change_affects(&self, table: &str) -> bool {
+        self.index.as_ref().is_some_and(|index| {
+            index.table == table
+                || index
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency == table)
+        }) || self.search.as_ref().is_some_and(|search| {
+            search.sources.iter().any(|source| {
+                source.table == table
+                    || source
                         .dependencies
                         .iter()
                         .any(|dependency| dependency == table)
             })
-            || self.search.as_ref().is_some_and(|search| {
-                search.sources.iter().any(|source| {
-                    source.table == table
-                        || source
-                            .dependencies
-                            .iter()
-                            .any(|dependency| dependency == table)
-                })
-            })
+        })
     }
 
     pub fn validate(&self) -> Result<(), LiveQueryError> {
@@ -562,6 +585,7 @@ impl Runtime {
                 args,
                 visibility_dependencies: visibility_plan.dependency_columns(),
                 resolved_visibility: snapshot.resolved_visibility,
+                related_visibility: snapshot.related_visibility,
                 related_dependencies: relation_tables(plan.predicate.as_ref())
                     .iter()
                     .filter_map(|table| module.visibility.get(table))
@@ -603,7 +627,7 @@ impl Runtime {
             }
             // v2 relevance reads the bound parent ACL indexes. If one cannot be
             // proven complete through this revision, rerun (which rebinds).
-            let indexes_ready = reset
+            let mut indexes_ready = reset
                 || subscription.visibility.version != Some(2)
                 || visibility::indexes_ready(
                     &subscription.resolved_visibility,
@@ -611,6 +635,16 @@ impl Runtime {
                     event_epoch,
                 )
                 .await;
+            if !reset && indexes_ready {
+                for (plan, resolved) in subscription.related_visibility.values() {
+                    if plan.version == Some(2)
+                        && !visibility::indexes_ready(resolved, event_revision, event_epoch).await
+                    {
+                        indexes_ready = false;
+                        break;
+                    }
+                }
+            }
             let relevant = reset
                 || !indexes_ready
                 || changes.iter().any(|change| {
@@ -665,6 +699,7 @@ impl Runtime {
                     let changed = snapshot.result != subscription.last_result
                         || snapshot.epoch != subscription.epoch;
                     subscription.resolved_visibility = snapshot.resolved_visibility;
+                    subscription.related_visibility = snapshot.related_visibility;
                     subscription.computed_revision = snapshot.revision;
                     subscription.epoch = snapshot.epoch;
                     if changed {
@@ -825,6 +860,7 @@ impl Runtime {
         transaction.commit().await?;
         let snapshot = QuerySnapshot {
             resolved_visibility: resolved,
+            related_visibility: Arc::new(related),
             result,
             epoch,
             revision,
@@ -1775,6 +1811,112 @@ fn require_name(value: &str, label: &str) -> Result<(), LiveQueryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn related_subscription() -> LiveQuerySubscription {
+        let plan = serde_json::from_value(serde_json::json!({
+            "table":"tasks","key":"id","columns":["id"],
+            "where":{"operator":"inRelation","column":"id",
+                "relation":{"table":"taskNotes","column":"taskId"}}
+        }))
+        .unwrap();
+        let visibility: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "version":2,"permissionTables":[],"table":"tasks","key":"id",
+            "sets":{},"where":{"operator":"public"}
+        }))
+        .unwrap();
+        let notes: VisibilityPlan = serde_json::from_value(serde_json::json!({
+            "version":2,"permissionTables":[],"table":"taskNotes","key":"id",
+            "sets":{},"where":{"operator":"eqContext","column":"memberId","context":"member.id"}
+        }))
+        .unwrap();
+        let resolved = ResolvedVisibility {
+            ephemeral_member: false,
+            revision: 1,
+            direct: BTreeMap::from([("member.id".into(), "alice".into())]),
+            role: "member".into(),
+            permissions: serde_json::json!({}),
+            sets: BTreeMap::new(),
+            fingerprint: "alice".into(),
+            inherited: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+        };
+        LiveQuerySubscription {
+            id: "related".into(),
+            path: "tasks.withNotes".into(),
+            args: serde_json::json!({}),
+            plan,
+            visibility_dependencies: visibility.dependency_columns(),
+            related_dependencies: vec![notes.dependency_columns()],
+            related_visibility: Arc::new(BTreeMap::from([(
+                "taskNotes".into(),
+                (notes, resolved.clone()),
+            )])),
+            resolved_visibility: resolved,
+            visibility,
+            required_revision: 1,
+            computed_revision: 1,
+            epoch: "epoch".into(),
+            last_result: serde_json::json!([]),
+        }
+    }
+
+    fn note_change(member: &str) -> LogChange {
+        LogChange {
+            revision: 2,
+            ordinal: 0,
+            origin_command_id: String::new(),
+            table: "taskNotes".into(),
+            row_id: "note".into(),
+            operation: "insert".into(),
+            changed_columns: vec![],
+            old_value: Value::Null,
+            new_value: serde_json::json!({"id":"note","memberId":member,"taskId":"task"}),
+            provenance: Default::default(),
+        }
+    }
+
+    #[test]
+    fn related_rows_only_wake_members_who_can_observe_them() {
+        let subscription = related_subscription();
+        assert!(mask_change_relevant(&subscription, &note_change("alice")));
+        assert!(
+            !mask_change_relevant(&subscription, &note_change("bob")),
+            "hidden related rows must not schedule visibility SQL"
+        );
+    }
+
+    #[test]
+    fn hidden_relation_cannot_suppress_projection_or_search_inputs() {
+        let mut subscription = related_subscription();
+        subscription.plan.index = Some(
+            serde_json::from_value(serde_json::json!({
+                "table":"taskNotes","key":"taskId","columns":["taskId"]
+            }))
+            .unwrap(),
+        );
+        assert!(mask_change_relevant(&subscription, &note_change("bob")));
+        subscription.plan.index = None;
+        subscription.plan.search = Some(
+            serde_json::from_value(serde_json::json!({
+                "argument":"search","columns":[],"sources":[{
+                    "table":"taskNotes","key":"taskId","column":"body"
+                }]
+            }))
+            .unwrap(),
+        );
+        assert!(mask_change_relevant(&subscription, &note_change("bob")));
+    }
+
+    #[test]
+    fn legacy_related_plans_keep_their_conservative_wake() {
+        let mut subscription = related_subscription();
+        Arc::make_mut(&mut subscription.related_visibility)
+            .get_mut("taskNotes")
+            .unwrap()
+            .0
+            .version = None;
+        assert!(mask_change_relevant(&subscription, &note_change("bob")));
+    }
 
     #[tokio::test]
     async fn exact_count_parameter_type_changes_match_rows_on_one_connection() {

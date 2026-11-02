@@ -706,6 +706,96 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     if !legacy {
+        // All 201 Live Query connections consume only this feed path. Hidden
+        // relation writes must not turn a table-name dependency into SQL for
+        // every member, while grants must still change exact query results.
+        let mut related_windows = Vec::new();
+        for connection in &connections {
+            let opened = runtime
+                .open_live_query(
+                    &connection.session,
+                    "related-window".into(),
+                    "tasks.withNotes".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            related_windows.push((
+                connection.member,
+                connection.session.clone(),
+                BTreeMap::from([("related-window".to_owned(), opened.subscription)]),
+            ));
+        }
+        for (statement, recipient) in [
+            (
+                "INSERT INTO tasks VALUES('lq-hidden','never-visible','Hidden relation')",
+                None,
+            ),
+            (
+                "INSERT INTO \"taskNotes\" VALUES('lq-hidden-note','lq-hidden','Before')",
+                None,
+            ),
+            (
+                "UPDATE \"taskNotes\" SET body='After' WHERE id='lq-hidden-note'",
+                None,
+            ),
+            ("DELETE FROM \"taskNotes\" WHERE id='lq-hidden-note'", None),
+            (
+                "BEGIN; INSERT INTO tasks VALUES('lq-granted','lq-private','Granted relation'); \
+              INSERT INTO \"taskNotes\" VALUES('lq-granted-note','lq-granted','Shared note'); \
+              INSERT INTO \"taskUsers\" VALUES('lq-grant','lq-granted','m6',NULL); COMMIT",
+                Some(6),
+            ),
+            ("DELETE FROM \"taskUsers\" WHERE id='lq-grant'", Some(6)),
+            (
+                "UPDATE \"taskNotes\" SET body='Revoked' WHERE id='lq-granted-note'",
+                None,
+            ),
+            ("DELETE FROM \"taskNotes\" WHERE id='lq-granted-note'", None),
+        ] {
+            sqlx::raw_sql(statement).execute(&db).await.unwrap();
+            let event = committed(&pools, &route, &mut revision).await;
+            runtime.visibility_metrics().reset_for_test();
+            let mut worked = Vec::new();
+            for (member, session, queries) in &mut related_windows {
+                let before = runtime.visibility_metrics().snapshot().live_query_reruns;
+                runtime
+                    .apply_live_query_feed_event(session, queries, &event)
+                    .await;
+                if runtime.visibility_metrics().snapshot().live_query_reruns != before {
+                    worked.push(*member);
+                }
+                if statement.starts_with("BEGIN") || statement.contains("WHERE id='lq-grant'") {
+                    let present = queries["related-window"].last_result["rows"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["id"] == "lq-granted");
+                    assert_eq!(
+                        present,
+                        statement.starts_with("BEGIN") && *member == 6,
+                        "Live Query grant/revocation must match the SQL-visible result"
+                    );
+                }
+            }
+            assert_eq!(
+                worked,
+                recipient.into_iter().collect::<Vec<_>>(),
+                "related Live Query writes must wake only their observable member: {statement}"
+            );
+            if recipient.is_none() {
+                assert_eq!(
+                    runtime
+                        .visibility_metrics()
+                        .snapshot()
+                        .visibility_sql_statements,
+                    0,
+                    "hidden relation writes must issue no visibility SQL for 201 connections"
+                );
+            }
+        }
+    }
+    if !legacy {
         // Parent ACL index maintenance must not depend on who consumes the
         // feed. Only a Live Query connection sees this parent move; no Replica
         // connection receives it. Before the single-writer applier, only
