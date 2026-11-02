@@ -23,6 +23,22 @@ const COMPLETED_JOB_RETENTION: ChronoDuration = ChronoDuration::days(7);
 const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
 const PRUNE_BATCH: i64 = 5_000;
 const PRUNE_MAX_BATCHES: usize = 20;
+const CLAIM_BATCH: i64 = 16;
+/// Longest idle sleep. Bounds how late the scheduler notices jobs inserted by
+/// another runtime replica or leases that expired after a crash.
+const MAX_IDLE_SLEEP: std::time::Duration = std::time::Duration::from_secs(30);
+/// Reducers drain their own outbox right after commit; this sweep only picks up
+/// retries and work abandoned by a crashed runtime.
+const OUTBOX_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Earliest unclaimed run time. One probe per partial index, never a table scan.
+const NEXT_DUE_SQL: &str = r#"SELECT LEAST(
+                 (SELECT run_at FROM gonvex_scheduled_jobs
+                  WHERE status='pending' AND cron_name='' AND claim_token=''
+                  ORDER BY run_at,id LIMIT 1),
+                 (SELECT run_at FROM gonvex_scheduled_jobs
+                  WHERE status='pending' AND cron_name<>'' AND claim_token=''
+                  ORDER BY run_at,id LIMIT 1))"#;
 
 const CLAIM_DUE_SQL: &str = r#"WITH candidates AS (
                  SELECT id FROM gonvex_scheduled_jobs
@@ -113,15 +129,18 @@ impl Scheduler {
         let outbox_scans = async {
             loop {
                 runtime.drain_all_action_outboxes().await;
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(OUTBOX_SWEEP_INTERVAL).await;
             }
         };
         tokio::pin!(outbox_scans);
         let mut last_prune: Option<std::time::Instant> = None;
+        // Sleep until the next job is due instead of polling. Enqueues, cron
+        // syncs and finished cron runs wake the loop early through `wake`.
+        let mut idle = std::time::Duration::ZERO;
         loop {
             tokio::select! {
                 _ = &mut outbox_scans => break,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                _ = tokio::time::sleep(idle) => {}
                 _ = self.inner.wake.notified() => {}
                 changed = stop.changed() => {
                     if changed.is_err() || *stop.borrow() { break; }
@@ -134,12 +153,18 @@ impl Scheduler {
                 last_prune = Some(std::time::Instant::now());
                 self.prune_completed(&runtime).await;
             }
-            let jobs = match self.claim_due(&runtime, 16).await {
+            let jobs = match self.claim_due(&runtime, CLAIM_BATCH).await {
                 Ok(jobs) => jobs,
                 Err(error) => {
                     tracing::error!(error = %error, "claim scheduled work");
+                    idle = std::time::Duration::from_secs(1);
                     continue;
                 }
+            };
+            idle = if jobs.len() as i64 == CLAIM_BATCH {
+                std::time::Duration::ZERO
+            } else {
+                self.until_next_due(&runtime).await
             };
             for job in jobs {
                 let scheduler = self.clone();
@@ -230,6 +255,27 @@ impl Scheduler {
             .await
             .map_err(|error| error.to_string())?;
         Ok(jobs)
+    }
+
+    async fn until_next_due(&self, runtime: &Runtime) -> std::time::Duration {
+        let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+            return MAX_IDLE_SLEEP;
+        };
+        let next = match control.begin_control_transaction(true).await {
+            Ok(mut transaction) => {
+                let next = next_due_at(transaction.transaction()).await;
+                let _ = transaction.rollback().await;
+                next
+            }
+            Err(error) => Err(sqlx::Error::Protocol(error.to_string())),
+        };
+        match next {
+            Ok(next) => idle_sleep(next, Utc::now()),
+            Err(error) => {
+                tracing::error!(error = %error, "find next scheduled work");
+                std::time::Duration::from_secs(1)
+            }
+        }
     }
 
     async fn prune_completed(&self, runtime: &Runtime) {
@@ -438,7 +484,9 @@ impl Scheduler {
         transaction
             .commit()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        self.inner.wake.notify_one();
+        Ok(())
     }
 
     async fn next_cron_occurrence(
@@ -683,6 +731,24 @@ async fn prune_completed_jobs(
     Ok(result.rows_affected())
 }
 
+async fn next_due_at(
+    connection: &mut sqlx::PgConnection,
+) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    sqlx::query_scalar(NEXT_DUE_SQL).fetch_one(connection).await
+}
+
+/// How long the scheduler may sleep before `next` is due, capped so work from
+/// other replicas and expired leases are still noticed.
+fn idle_sleep(next: Option<DateTime<Utc>>, now: DateTime<Utc>) -> std::time::Duration {
+    let Some(next) = next else {
+        return MAX_IDLE_SLEEP;
+    };
+    (next - now)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO)
+        .min(MAX_IDLE_SLEEP)
+}
+
 /// The run after `scheduled_for`, or the first one after `now` when the
 /// scheduler fell behind. Missed runs are skipped, never replayed.
 fn next_cron_run(
@@ -777,6 +843,24 @@ mod tests {
         let six_days_late = now - ChronoDuration::days(6);
         let next = next_cron_run(&spec, six_days_late, now).unwrap().unwrap();
         assert!(next > now && next <= now + ChronoDuration::minutes(1));
+    }
+
+    #[test]
+    fn the_scheduler_sleeps_until_the_next_job_but_never_past_the_idle_cap() {
+        let now = Utc::now();
+        assert_eq!(
+            idle_sleep(Some(now + ChronoDuration::seconds(7)), now),
+            std::time::Duration::from_secs(7)
+        );
+        assert_eq!(
+            idle_sleep(Some(now - ChronoDuration::seconds(7)), now),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            idle_sleep(Some(now + ChronoDuration::hours(6)), now),
+            MAX_IDLE_SLEEP
+        );
+        assert_eq!(idle_sleep(None, now), MAX_IDLE_SLEEP);
     }
 
     struct ControlFixture {
@@ -930,6 +1014,18 @@ mod tests {
             !plan.contains("Seq Scan on gonvex_scheduled_jobs"),
             "claim scans the job table:\n{plan}"
         );
+
+        let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {NEXT_DUE_SQL}"))
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+        let plan = plan.join("\n");
+        assert!(
+            !plan.contains("Seq Scan on gonvex_scheduled_jobs"),
+            "next-due lookup scans the job table:\n{plan}"
+        );
+        let next = next_due_at(&mut connection).await.unwrap().unwrap();
+        assert!(next <= Utc::now() - ChronoDuration::seconds(59));
 
         let claimed = claim_due_jobs(&mut connection, "owner", 16).await.unwrap();
         assert_eq!(claimed.len(), 16);
