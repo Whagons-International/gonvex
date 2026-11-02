@@ -1082,7 +1082,8 @@ pub fn validate_manifest(plans: &BTreeMap<String, VisibilityPlan>) -> Result<(),
 
 // Only constants and the already admitted role are evaluated here. Row values,
 // set contents and permissions stay unknown; their dependencies are retained.
-// This never changes the SQL predicate or the row visibility decision.
+// SQL compilation uses the same pruning for v2 masks so it never asks for a
+// set that the resolver deliberately omitted.
 fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool> {
     match expression.operator.as_str() {
         "public" => Some(true),
@@ -1190,6 +1191,11 @@ pub fn resolve_related_query(
     member: &ResolvedVisibility,
 ) -> Result<ResolvedVisibility, VisibilityError> {
     plan.validate()?;
+    if plan.version == Some(2) {
+        return Err(VisibilityError::Invalid(
+            "related mask plans require their own resolved principal and parents".into(),
+        ));
+    }
     let mut resolved = member.clone();
     resolved.sets.clear();
     resolved.fingerprint = visibility_fingerprint(
@@ -1415,6 +1421,9 @@ pub fn recompute_derived(
                     Some(value) => Some(scalar(Some(value))),
                 })
                 .collect::<BTreeSet<_>>();
+            // An empty resolved set still has to exist. SQL compilation must
+            // distinguish "no grants" from a principal that was never loaded.
+            resolved.sets.entry(name.clone()).or_default();
             let previous = resolved.sets.get(name).cloned().unwrap_or_default();
             if previous != next {
                 let added = next.difference(&previous).cloned().collect::<BTreeSet<_>>();
@@ -1812,6 +1821,11 @@ fn compile_expression(
     parameters: &mut Vec<Value>,
     account_parameter: &mut Option<usize>,
 ) -> Result<String, VisibilityError> {
+    if plan.version == Some(2) {
+        if let Some(value) = role_only_value(expression, &resolved.role) {
+            return Ok(if value { "TRUE" } else { "FALSE" }.to_owned());
+        }
+    }
     let account_argument = |parameters: &mut Vec<Value>, slot: &mut Option<usize>| {
         let index = *slot.get_or_insert_with(|| {
             parameters.push(Value::String(resolved.direct["account.id"].clone()));
@@ -3165,6 +3179,96 @@ mod tests {
 mod mask_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mask_sql_compiles_role_pruned_sets_without_resolving_them() {
+        let cases = [
+            (
+                json!({"operator":"or","children":[
+                    {"operator":"role","value":"admin"},
+                    {"operator":"inSet","column":"workspaceId","set":"workspaces"}
+                ]}),
+                true,
+            ),
+            (
+                json!({"operator":"and","children":[
+                    {"operator":"role","value":"member"},
+                    {"operator":"nonEmpty","set":"workspaces"}
+                ]}),
+                false,
+            ),
+            (
+                json!({"operator":"not","children":[
+                    {"operator":"and","children":[
+                        {"operator":"role","value":"member"},
+                        {"operator":"inSet","column":"workspaceId","set":"workspaces"}
+                    ]}
+                ]}),
+                true,
+            ),
+        ];
+        for (predicate, expected) in cases {
+            let mut plan = tasks_plan();
+            plan.predicate = serde_json::from_value(predicate).unwrap();
+            plan.validate().unwrap();
+            let mut resolved = member("alice", &[]);
+            resolved.role = "admin".into();
+            assert!(active_sets(&plan, &resolved.role).is_empty());
+            let mut parameters = Vec::new();
+            let sql = compile_predicate(&plan, &resolved, "r", &mut parameters)
+                .expect("SQL must not require a principal the resolver deliberately pruned");
+            assert_eq!(sql, if expected { "TRUE" } else { "FALSE" });
+            assert_eq!(
+                row_matches(&plan, &resolved, &json!({"workspaceId":"private"})),
+                expected
+            );
+            assert!(parameters.is_empty());
+        }
+    }
+
+    #[test]
+    fn mask_sql_still_rejects_an_unresolved_active_set() {
+        let plan = tasks_plan();
+        let resolved = member("alice", &[]);
+        assert!(active_sets(&plan, &resolved.role).contains("workspaces"));
+        let error = compile_predicate(&plan, &resolved, "r", &mut Vec::new()).unwrap_err();
+        assert!(error.to_string().contains("was not resolved"));
+    }
+
+    #[test]
+    fn mask_empty_derived_set_is_resolved_even_without_grants() {
+        let plan = plan(json!({
+            "version":2,"table":"categories","key":"_id","permissionTables":[],
+            "sets":{
+                "assigned":{"kind":"grant","table":"taskUsers","select":"taskId",
+                    "where":[{"table":"taskUsers","column":"memberId","context":"member.id"}]},
+                "assignedCategories":{"kind":"derived","from":"assigned","table":"tasks",
+                    "key":"_id","select":"categoryId"}
+            },
+            "where":{"operator":"inSet","column":"_id","set":"assignedCategories"}
+        }));
+        plan.validate().unwrap();
+        let mut resolved = member("alice", &[("assigned", &[])]);
+        resolved.indexes.insert(
+            "assignedCategories".into(),
+            Arc::new(std::sync::RwLock::new(ParentAclIndex::from_snapshot(
+                1,
+                BTreeMap::new(),
+            ))),
+        );
+        assert!(recompute_derived(&plan, &mut resolved).is_empty());
+        assert_eq!(
+            resolved.sets.get("assignedCategories"),
+            Some(&BTreeSet::new()),
+            "resolved empty is different from not resolved"
+        );
+        compile_predicate(&plan, &resolved, "r", &mut Vec::new()).unwrap();
+        assert!(!row_matches(
+            &plan,
+            &resolved,
+            &json!({"_id":"private-category"})
+        ));
+    }
 
     fn plan(value: Value) -> VisibilityPlan {
         serde_json::from_value(value).unwrap()
