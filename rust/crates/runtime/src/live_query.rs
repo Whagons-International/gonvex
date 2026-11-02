@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use gonvex_postgres::{TenantSession, TenantTransaction};
+use gonvex_store::{TenantSession, TenantTransaction};
 use gonvex_protocol::{ServerMessage, SubscriptionRevision};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -327,7 +327,7 @@ pub enum LiveQueryError {
     #[error("invalid structured query: {0}")]
     Invalid(String),
     #[error(transparent)]
-    Database(#[from] gonvex_postgres::DatabaseError),
+    Database(#[from] gonvex_store::DatabaseError),
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
     #[error(transparent)]
@@ -1738,7 +1738,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_count_parameter_type_changes_match_rows_on_one_connection() {
-        use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
+        use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
         use sqlx::{postgres::PgPoolOptions, Connection};
 
         let Ok(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {

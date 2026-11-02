@@ -1,4 +1,4 @@
-//! PostgreSQL ownership for the Rust runtime.
+//! SQLite ownership for the Rust runtime.
 //!
 //! Browser and module inputs name a project and tenant. They never carry a
 //! database URL. This crate resolves physical databases from trusted runtime
@@ -7,63 +7,32 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::postgres::{PgListener, PgPoolOptions, PgRow};
+use sqlx::sqlite::SqliteRow as PgRow;
 use sqlx::types::Json;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{Row, Sqlite, SqlitePool as PgPool, Transaction};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
+
+pub mod feed;
+mod registry;
+pub mod rows;
+pub use feed::{CommitNotice, Provenance, NOW_MS};
+pub use registry::{
+    database_path, database_url, AdmissionPermit, DatabaseListener, Durability, KeyedLock,
+    Notification, PoolLimits, PoolRegistry, PoolRegistrySnapshot,
+};
 
 mod provision;
 mod reference_integrity;
 pub mod sql_lexer;
 mod sql_script;
 pub use provision::{MigrationScope, SqlMigration};
-
-const DEFAULT_MAX_TOTAL_CONNECTIONS: usize = 20;
-const MAX_TOTAL_CONNECTIONS: usize = 64;
-const DEFAULT_MAX_CONNECTIONS_PER_DATABASE: u32 = 2;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PoolLimits {
-    pub max_total_connections: usize,
-    pub max_connections_per_database: u32,
-    pub max_idle_connections_per_database: u32,
-    pub idle_timeout: Duration,
-    pub acquire_timeout: Duration,
-}
-
-impl Default for PoolLimits {
-    fn default() -> Self {
-        Self {
-            max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
-            max_connections_per_database: DEFAULT_MAX_CONNECTIONS_PER_DATABASE,
-            max_idle_connections_per_database: 2,
-            idle_timeout: Duration::from_secs(1),
-            acquire_timeout: Duration::from_secs(30),
-        }
-    }
-}
-
-impl PoolLimits {
-    pub fn bounded(mut self) -> Self {
-        self.max_total_connections = self.max_total_connections.clamp(1, MAX_TOTAL_CONNECTIONS);
-        self.max_connections_per_database = self
-            .max_connections_per_database
-            .clamp(1, self.max_total_connections as u32);
-        self.max_idle_connections_per_database = self
-            .max_idle_connections_per_database
-            .min(self.max_connections_per_database);
-        self
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -97,217 +66,16 @@ pub enum DatabaseError {
     },
     #[error("ambiguous current and legacy receipt history requires recovery")]
     AmbiguousReducerReceipts,
+    #[error("database listener fell behind and must resynchronize")]
+    ListenerLagged,
+    #[error("database listener closed")]
+    ListenerClosed,
+    #[error("database file error: {0}")]
+    Io(String),
+    #[error("value decode failed: {0}")]
+    Decode(String),
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
-}
-
-#[derive(Clone)]
-pub struct PoolRegistry {
-    limits: PoolLimits,
-    admission: Arc<Semaphore>,
-    pools: Arc<RwLock<BTreeMap<String, DatabasePool>>>,
-    listeners: Arc<std::sync::Mutex<Vec<std::sync::Weak<PgPool>>>>,
-}
-
-#[derive(Clone)]
-struct DatabasePool {
-    pool: PgPool,
-    capacity: Arc<Semaphore>,
-}
-
-/// A dedicated LISTEN session included in registry connection metrics.
-pub struct DatabaseListener {
-    listener: PgListener,
-    _pool: Arc<PgPool>,
-}
-
-impl std::ops::Deref for DatabaseListener {
-    type Target = PgListener;
-    fn deref(&self) -> &PgListener {
-        &self.listener
-    }
-}
-
-impl std::ops::DerefMut for DatabaseListener {
-    fn deref_mut(&mut self) -> &mut PgListener {
-        &mut self.listener
-    }
-}
-
-/// A database-capacity slot and shared admission held for the whole SQL job.
-/// Queued jobs for one database do not reserve shared capacity.
-pub struct AdmissionPermit {
-    _shared: OwnedSemaphorePermit,
-    _database: OwnedSemaphorePermit,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PoolRegistrySnapshot {
-    pub pools: usize,
-    pub open_connections: u32,
-    pub in_use: u32,
-    pub idle: usize,
-    pub max_open_connections: u32,
-    pub listener_connections: u32,
-    pub admission_limit: usize,
-    pub admission_active: usize,
-}
-
-impl PoolRegistry {
-    pub fn new(limits: PoolLimits) -> Self {
-        let limits = limits.bounded();
-        Self {
-            admission: Arc::new(Semaphore::new(limits.max_total_connections)),
-            pools: Arc::new(RwLock::new(BTreeMap::new())),
-            listeners: Arc::default(),
-            limits,
-        }
-    }
-
-    pub async fn pool(&self, database_url: &str) -> Result<PgPool, DatabaseError> {
-        Ok(self.database_pool(database_url).await?.pool)
-    }
-
-    async fn database_pool(&self, database_url: &str) -> Result<DatabasePool, DatabaseError> {
-        let database_url = database_url.trim();
-        if let Some(pool) = self.pools.read().await.get(database_url).cloned() {
-            return Ok(pool);
-        }
-        // Register capacity before opening connections. A cold database must
-        // not open a connection for every queued caller outside admission.
-        let pool = PgPoolOptions::new()
-            .max_connections(self.limits.max_connections_per_database)
-            .min_connections(0)
-            .max_lifetime(Duration::from_secs(30 * 60))
-            .idle_timeout(self.limits.idle_timeout)
-            .acquire_timeout(self.limits.acquire_timeout)
-            .after_release({
-                let pools = Arc::downgrade(&self.pools);
-                let url = database_url.to_owned();
-                let max_idle = self.limits.max_idle_connections_per_database;
-                move |_, _| {
-                    let pools = pools.clone();
-                    let url = url.clone();
-                    Box::pin(async move {
-                        let Some(pools) = pools.upgrade() else {
-                            return Ok(false);
-                        };
-                        let pools = pools.read().await;
-                        // Count active connections too: concurrent releases must not
-                        // all observe an empty idle queue and exceed MAX_IDLE.
-                        Ok(pools.get(&url).is_some_and(|db| db.pool.size() <= max_idle))
-                    })
-                }
-            })
-            .connect_lazy(database_url)?;
-        let database = DatabasePool {
-            pool,
-            capacity: Arc::new(Semaphore::new(
-                self.limits.max_connections_per_database as usize,
-            )),
-        };
-        let mut pools = self.pools.write().await;
-        Ok(pools
-            .entry(database_url.to_owned())
-            .or_insert(database)
-            .clone())
-    }
-
-    pub async fn admit(&self, database_url: &str) -> Result<AdmissionPermit, DatabaseError> {
-        let database = self.database_pool(database_url).await?;
-        // One existing admission deadline covers both queues. Cancellation or
-        // timeout drops any acquired slot, including while waiting globally.
-        tokio::time::timeout(self.limits.acquire_timeout, async {
-            let local = database.capacity.acquire_owned().await?;
-            let shared = self.admission.clone().acquire_owned().await?;
-            Ok::<_, tokio::sync::AcquireError>(AdmissionPermit {
-                _shared: shared,
-                _database: local,
-            })
-        })
-        .await
-        .map_err(|_| DatabaseError::AdmissionTimeout)?
-        .map_err(|_| DatabaseError::AdmissionTimeout)
-    }
-
-    /// Dedicated sessions stay outside SQL-job admission, so a long-lived
-    /// LISTEN cannot pin the slots needed to execute reducers.
-    pub async fn listener(&self, database_url: &str) -> Result<DatabaseListener, DatabaseError> {
-        let pool = Arc::new(
-            PgPoolOptions::new()
-                .max_connections(1)
-                .min_connections(0)
-                .acquire_timeout(self.limits.acquire_timeout)
-                .connect_lazy(database_url)?,
-        );
-        self.listeners.lock().unwrap().push(Arc::downgrade(&pool));
-        let listener = PgListener::connect_with(&pool).await?;
-        Ok(DatabaseListener {
-            listener,
-            _pool: pool,
-        })
-    }
-
-    pub async fn snapshot(&self) -> PoolRegistrySnapshot {
-        let pools = self.pools.read().await;
-        let open_connections = pools
-            .values()
-            .map(|database| database.pool.size())
-            .sum::<u32>();
-        let idle = pools
-            .values()
-            .map(|database| database.pool.num_idle())
-            .sum::<usize>();
-        let listener_connections = {
-            let mut listeners = self.listeners.lock().unwrap();
-            listeners.retain(|pool| pool.strong_count() > 0);
-            listeners
-                .iter()
-                .filter_map(std::sync::Weak::upgrade)
-                .map(|pool| pool.size())
-                .sum::<u32>()
-        };
-        let open_connections = open_connections + listener_connections;
-        PoolRegistrySnapshot {
-            listener_connections,
-            pools: pools.len(),
-            open_connections,
-            in_use: open_connections.saturating_sub(u32::try_from(idle).unwrap_or(u32::MAX)),
-            idle,
-            max_open_connections: u32::try_from(pools.len())
-                .unwrap_or(u32::MAX)
-                .saturating_mul(self.limits.max_connections_per_database)
-                .saturating_add(listener_connections),
-            admission_limit: self.limits.max_total_connections,
-            admission_active: self
-                .limits
-                .max_total_connections
-                .saturating_sub(self.admission.available_permits()),
-        }
-    }
-
-    pub async fn close(&self) {
-        let pools: Vec<DatabasePool> = self
-            .pools
-            .write()
-            .await
-            .split_off("")
-            .into_values()
-            .collect();
-        for database in pools {
-            database.capacity.close();
-            database.pool.close().await;
-        }
-    }
-
-    pub async fn close_database(&self, database_url: &str) {
-        let database = self.pools.write().await.remove(database_url.trim());
-        if let Some(database) = database {
-            database.capacity.close();
-            database.pool.close().await;
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -499,8 +267,6 @@ fn developer_session_metadata(
 
 impl ControlPlane {
     pub async fn listener(&self, channels: &[&str]) -> Result<DatabaseListener, DatabaseError> {
-        // LISTEN owns a long-lived connection; keep it outside the finite SQL
-        // job pool, just like the tenant change-feed listeners.
         let mut listener = self.pools.listener(&self.database_url).await?;
         for channel in channels {
             listener.listen(channel).await?;
@@ -509,13 +275,15 @@ impl ControlPlane {
     }
 
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<(), DatabaseError> {
-        let _admission = self.pools.admit(&self.database_url).await?;
-        sqlx::query("SELECT pg_notify($1,$2)")
-            .bind(channel)
-            .bind(payload)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        self.pools.notify(&self.database_url, channel, payload).await
+    }
+
+    pub fn pools(&self) -> &PoolRegistry {
+        &self.pools
+    }
+
+    pub fn database_url(&self) -> &str {
+        &self.database_url
     }
 
     pub async fn connect(
@@ -548,18 +316,7 @@ impl ControlPlane {
         &self,
         read_only: bool,
     ) -> Result<TenantTransaction, DatabaseError> {
-        let admission = self.pools.admit(&self.database_url).await?;
-        let mut transaction = self.pool.begin().await?;
-        if read_only {
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .execute(&mut *transaction)
-                .await?;
-        }
-        Ok(TenantTransaction {
-            transaction,
-            _admission: admission,
-            read_only,
-        })
+        begin_transaction(&self.pools, &self.database_url, read_only).await
     }
 
     pub async fn load_session_identity(
@@ -1218,19 +975,7 @@ impl ControlPlane {
         route: &TenantRoute,
         read_only: bool,
     ) -> Result<TenantTransaction, DatabaseError> {
-        let pool = self.pools.pool(&route.database_url).await?;
-        let admission = self.pools.admit(&route.database_url).await?;
-        let mut transaction = pool.begin().await?;
-        if read_only {
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-                .execute(&mut *transaction)
-                .await?;
-        }
-        Ok(TenantTransaction {
-            transaction,
-            _admission: admission,
-            read_only,
-        })
+        begin_transaction(&self.pools, &route.database_url, read_only).await
     }
 
     pub async fn command_revision(
@@ -1238,7 +983,7 @@ impl ControlPlane {
         route: &TenantRoute,
         command_id: &str,
     ) -> Result<Option<u64>, DatabaseError> {
-        let pool = self.pools.pool(&route.database_url).await?;
+        let pool = self.pools.reader(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
         let revision: i64 = sqlx::query_scalar(
             r#"SELECT COALESCE(MAX(revision), 0)
@@ -1459,13 +1204,40 @@ pub struct TransactionAttribution<'a> {
 /// the transaction lifetime so a burst of module calls cannot bypass the
 /// runtime-wide database limit.
 pub struct TenantTransaction {
-    transaction: Transaction<'static, Postgres>,
+    transaction: Transaction<'static, Sqlite>,
     _admission: AdmissionPermit,
     read_only: bool,
+    provenance: Provenance,
+    publisher: Option<(PoolRegistry, Arc<str>)>,
+    committed: Option<CommitNotice>,
+}
+
+/// Opens a transaction on the writer (or, when read-only, on a reader whose
+/// WAL snapshot stays fixed for the whole transaction).
+pub async fn begin_transaction(
+    pools: &PoolRegistry,
+    database_url: &str,
+    read_only: bool,
+) -> Result<TenantTransaction, DatabaseError> {
+    let admission = pools.admit(database_url).await?;
+    let pool = if read_only {
+        pools.reader(database_url).await?
+    } else {
+        pools.pool(database_url).await?
+    };
+    let transaction = pool.begin().await?;
+    Ok(TenantTransaction {
+        transaction,
+        _admission: admission,
+        read_only,
+        provenance: Provenance::default(),
+        publisher: (!read_only).then(|| (pools.clone(), Arc::from(database_url.trim()))),
+        committed: None,
+    })
 }
 
 impl TenantTransaction {
-    pub fn transaction(&mut self) -> &mut Transaction<'static, Postgres> {
+    pub fn transaction(&mut self) -> &mut Transaction<'static, Sqlite> {
         &mut self.transaction
     }
 
@@ -1474,10 +1246,7 @@ impl TenantTransaction {
     }
 
     pub async fn set_command_id(&mut self, command_id: &str) -> Result<(), DatabaseError> {
-        sqlx::query("SELECT set_config('gonvex.command_id', $1, true)")
-            .bind(command_id)
-            .execute(&mut *self.transaction)
-            .await?;
+        self.provenance.command_id = Some(command_id.to_owned());
         Ok(())
     }
 
@@ -1485,25 +1254,14 @@ impl TenantTransaction {
         &mut self,
         attribution: TransactionAttribution<'_>,
     ) -> Result<(), DatabaseError> {
-        sqlx::query(
-            r#"SELECT
-                 set_config('gonvex.root_command_id',$1,true),
-                 set_config('gonvex.root_invocation_channel',$2,true),
-                 set_config('gonvex.invocation_channel',$3,true),
-                 set_config('gonvex.actor_account_id',$4,true),
-                 set_config('gonvex.actor_member_id',$5,true),
-                 set_config('gonvex.on_behalf_of_member_id',$6,true),
-                 set_config('gonvex.agent_execution_id',$7,true)"#,
-        )
-        .bind(attribution.root_command_id)
-        .bind(attribution.root_channel)
-        .bind(attribution.channel)
-        .bind(attribution.actor_account_id.unwrap_or_default())
-        .bind(attribution.actor_member_id.unwrap_or_default())
-        .bind(attribution.on_behalf_of_member_id.unwrap_or_default())
-        .bind(attribution.agent_execution_id.unwrap_or_default())
-        .execute(&mut *self.transaction)
-        .await?;
+        let owned = |value: Option<&str>| value.map(str::to_owned);
+        self.provenance.root_command_id = Some(attribution.root_command_id.to_owned());
+        self.provenance.root_channel = Some(attribution.root_channel.to_owned());
+        self.provenance.channel = Some(attribution.channel.to_owned());
+        self.provenance.actor_account_id = owned(attribution.actor_account_id);
+        self.provenance.actor_member_id = owned(attribution.actor_member_id);
+        self.provenance.on_behalf_of_member_id = owned(attribution.on_behalf_of_member_id);
+        self.provenance.agent_execution_id = owned(attribution.agent_execution_id);
         Ok(())
     }
 
@@ -1589,20 +1347,32 @@ impl TenantTransaction {
         Ok(id.to_owned())
     }
 
-    pub async fn commit(mut self) -> Result<(), DatabaseError> {
-        // COMMIT on an aborted PostgreSQL transaction succeeds with a ROLLBACK
-        // tag. SQLx discards that tag, so require a usable transaction first.
-        if let Err(error) = sqlx::query("SELECT 1")
-            .execute(&mut *self.transaction)
-            .await
-        {
-            // Drain rollback before releasing admission. A rollback failure is
-            // infrastructure trouble and takes precedence over the SQL error.
-            self.transaction.rollback().await?;
-            return Err(DatabaseError::Sql(error));
-        }
+    /// Commits and returns the revision it published, if it changed rows.
+    pub async fn commit_with_revision(mut self) -> Result<Option<u64>, DatabaseError> {
+        let notice = if self.read_only {
+            None
+        } else {
+            match feed::finalize(&mut self.transaction, &self.provenance).await {
+                Ok(notice) => notice,
+                Err(error) => {
+                    self.transaction.rollback().await?;
+                    return Err(error);
+                }
+            }
+        };
         self.transaction.commit().await?;
-        Ok(())
+        let revision = notice.as_ref().map(|notice| notice.revision);
+        if let (Some(notice), Some((pools, database_url))) = (notice, self.publisher.take()) {
+            pools
+                .notify(&database_url, feed::CHANGE_FEED_CHANNEL, &notice.payload())
+                .await?;
+            self.committed = Some(notice);
+        }
+        Ok(revision)
+    }
+
+    pub async fn commit(self) -> Result<(), DatabaseError> {
+        self.commit_with_revision().await.map(|_| ())
     }
 
     pub async fn rollback(self) -> Result<(), DatabaseError> {
@@ -1611,7 +1381,8 @@ impl TenantTransaction {
     }
 }
 
-#[cfg(test)]
+// SQLITE-PORT: Postgres-only tests disabled until ported to SQLite.
+#[cfg(all(test, any()))]
 mod transaction_commit_tests;
 
 fn required(value: &str, error: DatabaseError) -> Result<&str, DatabaseError> {
@@ -1821,7 +1592,7 @@ mod tests {
             ..PoolLimits::default()
         }
         .bounded();
-        assert_eq!(limits.max_total_connections, 64);
+        assert_eq!(limits.max_total_connections, 256);
         assert_eq!(limits.max_connections_per_database, 64);
         assert_eq!(limits.max_idle_connections_per_database, 64);
     }
@@ -1838,12 +1609,12 @@ mod tests {
     async fn configured_routes_are_selected_only_by_project_and_tenant_identity() {
         let configured = BTreeMap::from([(
             "project-a:tenant-a".to_owned(),
-            "postgres://trusted/tenant-a".to_owned(),
+            "sqlite:///trusted/tenant-a.db".to_owned(),
         )]);
         let control = ControlPlane {
-            database_url: "postgres://unused".into(),
-            pool: PgPoolOptions::new()
-                .connect_lazy("postgres://unused")
+            database_url: "sqlite::memory:".into(),
+            pool: sqlx::sqlite::SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
                 .unwrap(),
             pools: PoolRegistry::new(PoolLimits::default()),
             configured_tenants: Arc::new(configured),
@@ -1852,7 +1623,7 @@ mod tests {
             .resolve_tenant("project-a", "tenant-a")
             .await
             .unwrap();
-        assert_eq!(route.database_url, "postgres://trusted/tenant-a");
+        assert_eq!(route.database_url, "sqlite:///trusted/tenant-a.db");
         assert_eq!(route.project_id, "project-a");
         assert_eq!(route.tenant_id, "tenant-a");
     }

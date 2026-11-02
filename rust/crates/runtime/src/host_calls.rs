@@ -14,7 +14,7 @@ use base64::Engine as _;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use gonvex_module_host::protocol::HostCallFrame;
-use gonvex_postgres::TenantTransaction;
+use gonvex_store::TenantTransaction;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgRow;
@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::error_class::TransientFault;
 use crate::module_host::HostCallHandler;
 use crate::sql_admission::require_invocation_statement;
-use gonvex_postgres::sql_lexer as sql_statement_lexer;
+use gonvex_store::sql_lexer as sql_statement_lexer;
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
@@ -71,7 +71,7 @@ pub enum DatabaseCapability {
 }
 
 pub struct DatabaseHostCalls {
-    storage_context: Option<(crate::Runtime, gonvex_postgres::TenantSession)>,
+    storage_context: Option<(crate::Runtime, gonvex_store::TenantSession)>,
     transaction: Option<TenantTransaction>,
     capability: DatabaseCapability,
     schema: Value,
@@ -108,7 +108,7 @@ impl DatabaseHostCalls {
     pub fn with_storage(
         mut self,
         runtime: crate::Runtime,
-        session: gonvex_postgres::TenantSession,
+        session: gonvex_store::TenantSession,
     ) -> Self {
         self.storage_context = Some((runtime, session));
         self
@@ -933,7 +933,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry};
+    use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry};
     use sqlx::postgres::PgPoolOptions;
 
     fn scoped_url(base: &str, schema: &str) -> String {

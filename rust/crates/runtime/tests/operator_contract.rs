@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
 use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
 use gonvex_runtime::Runtime;
 use serde_json::Value;

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use gonvex_module_host::protocol::HostCallFrame;
-use gonvex_postgres::TenantSession;
+use gonvex_store::TenantSession;
 use reqwest::redirect::{Attempt, Policy};
 use serde::Deserialize;
 use serde_json::Value;

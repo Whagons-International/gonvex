@@ -1,5 +1,5 @@
 //! Disposable numeric-loopback fixture only. SQL admission tests stay unchanged.
-use gonvex_postgres::{PoolLimits, PoolRegistry};
+use gonvex_store::{PoolLimits, PoolRegistry};
 use std::time::Duration;
 fn local_url() -> Option<String> {
     let value = std::env::var("GONVEX_TEST_POSTGRES_URL").ok()?;

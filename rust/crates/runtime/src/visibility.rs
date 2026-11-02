@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use gonvex_postgres::{DatabaseError, TenantSession, TenantTransaction};
+use gonvex_store::{DatabaseError, TenantSession, TenantTransaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2437,7 +2437,7 @@ mod tests {
 
     #[tokio::test]
     async fn developer_visibility_without_membership_preserves_admission() {
-        use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
+        use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
         use sqlx::postgres::PgPoolOptions;
         use std::time::{SystemTime, UNIX_EPOCH};
 

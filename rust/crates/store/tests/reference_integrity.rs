@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, time::SystemTime};
 
-use gonvex_postgres::{
+use gonvex_store::{
     ControlPlane, MigrationScope, PoolLimits, PoolRegistry, SqlMigration, TenantRoute,
 };
 use sqlx::{postgres::PgPoolOptions, PgPool};

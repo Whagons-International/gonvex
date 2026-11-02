@@ -83,7 +83,7 @@ fn next_delay(previous: Duration, projected: bool) -> Duration {
     }
 }
 
-async fn drain_all(runtime: &Runtime) -> Result<bool, gonvex_postgres::DatabaseError> {
+async fn drain_all(runtime: &Runtime) -> Result<bool, gonvex_store::DatabaseError> {
     let mut projected = false;
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
         return Ok(false);
@@ -122,9 +122,9 @@ async fn drain_all(runtime: &Runtime) -> Result<bool, gonvex_postgres::DatabaseE
 
 #[doc(hidden)]
 pub async fn project_membership_outbox_once(
-    control: &gonvex_postgres::ControlPlane,
-    route: &gonvex_postgres::TenantRoute,
-) -> Result<bool, gonvex_postgres::DatabaseError> {
+    control: &gonvex_store::ControlPlane,
+    route: &gonvex_store::TenantRoute,
+) -> Result<bool, gonvex_store::DatabaseError> {
     let mut projected = false;
     loop {
         let mut tenant = control.begin_tenant_transaction(route, true).await?;

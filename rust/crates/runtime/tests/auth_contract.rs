@@ -6,7 +6,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use gonvex_postgres::{
+use gonvex_store::{
     token_hash, Account, ControlPlane, Member, PoolLimits, PoolRegistry, SessionIdentity,
     TenantRoute, TenantSession,
 };

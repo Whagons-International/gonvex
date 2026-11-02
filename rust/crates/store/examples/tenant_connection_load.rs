@@ -7,7 +7,7 @@
 //! pool_size=2, max_user_connections=52, and max_prepared_statements=200.
 //! Each successful run removes its 26 synthetic databases. Pressure-aborted runs
 //! leave budget_synthetic_0..25 for the fixture owner to clean before retrying.
-use gonvex_postgres::{PoolLimits, PoolRegistry};
+use gonvex_store::{PoolLimits, PoolRegistry};
 use sqlx::postgres::{PgListener, PgPoolOptions};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

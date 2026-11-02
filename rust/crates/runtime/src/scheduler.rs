@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use cron::Schedule;
 use gonvex_module_runtime::{InvocationChannel, InvocationProvenance};
-use gonvex_postgres::{TenantRoute, TenantSession};
+use gonvex_store::{TenantRoute, TenantSession};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::types::Json;
@@ -987,8 +987,8 @@ mod tests {
             .unwrap();
         let separator = if base.contains('?') { '&' } else { '?' };
         let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
-        let pools = gonvex_postgres::PoolRegistry::new(gonvex_postgres::PoolLimits::default());
-        gonvex_postgres::ControlPlane::connect(&url, pools, Default::default())
+        let pools = gonvex_store::PoolRegistry::new(gonvex_store::PoolLimits::default());
+        gonvex_store::ControlPlane::connect(&url, pools, Default::default())
             .await
             .unwrap();
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -1322,8 +1322,8 @@ mod tests {
         let base = std::env::var("GONVEX_TEST_POSTGRES_URL").unwrap();
         let separator = if base.contains('?') { '&' } else { '?' };
         let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
-        let pools = gonvex_postgres::PoolRegistry::new(gonvex_postgres::PoolLimits::default());
-        gonvex_postgres::ControlPlane::connect(&url, pools, Default::default())
+        let pools = gonvex_store::PoolRegistry::new(gonvex_store::PoolLimits::default());
+        gonvex_store::ControlPlane::connect(&url, pools, Default::default())
             .await
             .unwrap();
         let survivors: Vec<String> = sqlx::query_scalar(

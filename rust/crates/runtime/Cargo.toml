@@ -25,7 +25,7 @@ ipnet.workspace = true
 gonvex-module-host = { path = "../module-host" }
 gonvex-module-runtime = { path = "../module-runtime" }
 gonvex-protocol = { path = "../protocol" }
-gonvex-postgres = { path = "../postgres" }
+gonvex-store = { path = "../store" }
 serde.workspace = true
 serde_json.workspace = true
 ryu-js.workspace = true

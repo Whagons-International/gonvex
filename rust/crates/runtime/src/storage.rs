@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::config::StorageConfig;
 use crate::Runtime;
-use gonvex_postgres::TenantSession;
+use gonvex_store::TenantSession;
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const MAX_DIRECT_STORE_BYTES: usize = 128 << 20;
@@ -544,7 +544,7 @@ impl StorageManager {
 
     async fn ensure_table(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         session: &TenantSession,
     ) -> Result<(), String> {
         let mut transaction = control
@@ -569,7 +569,7 @@ impl StorageManager {
 
     async fn metadata(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         session: &TenantSession,
         file_id: &str,
         finalize: bool,
@@ -594,7 +594,7 @@ impl StorageManager {
     pub(crate) async fn reducer_metadata(
         &self,
         session: &TenantSession,
-        transaction: &mut gonvex_postgres::TenantTransaction,
+        transaction: &mut gonvex_store::TenantTransaction,
         file_id: &str,
     ) -> Result<Value, String> {
         self.require_configured()?;
@@ -607,7 +607,7 @@ impl StorageManager {
     async fn metadata_in_transaction(
         &self,
         session: &TenantSession,
-        transaction: &mut gonvex_postgres::TenantTransaction,
+        transaction: &mut gonvex_store::TenantTransaction,
         file_id: &str,
         finalize: bool,
     ) -> Result<FileMetadata, String> {
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_uploads_are_single_use_and_metadata_binds_immutable_bytes() {
-        use gonvex_postgres::{ControlPlane, TenantRoute};
+        use gonvex_store::{ControlPlane, TenantRoute};
         let (Ok(base), Ok(endpoint)) = (
             std::env::var("GONVEX_TEST_POSTGRES_URL"),
             std::env::var("GONVEX_TEST_STORAGE_ENDPOINT"),

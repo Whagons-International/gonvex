@@ -12,7 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use gonvex_postgres::{
+use gonvex_store::{
     Member, SessionIdentity, TenantSession, TenantTransaction, TransactionAttribution,
 };
 use gonvex_protocol::ServerMessage;
@@ -127,7 +127,7 @@ pub enum ControlError {
         detail: String,
     },
     #[error(transparent)]
-    Database(#[from] gonvex_postgres::DatabaseError),
+    Database(#[from] gonvex_store::DatabaseError),
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
     #[error(transparent)]
@@ -168,7 +168,7 @@ impl Runtime {
 
     pub(crate) async fn broadcast_support_command(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         project_id: &str,
         command_id: &str,
     ) -> Result<(), ControlError> {
@@ -183,7 +183,7 @@ impl Runtime {
 
     pub(crate) async fn deliver_support_command(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         project_id: &str,
         command_id: &str,
     ) -> Result<(), ControlError> {
@@ -368,7 +368,7 @@ impl Runtime {
 
     async fn execute_auth_action(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         path: &str,
         args: &Value,
@@ -569,7 +569,7 @@ impl Runtime {
 
     async fn reset_member_password(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         args: &Value,
         idempotency_key: &str,
@@ -668,7 +668,7 @@ impl Runtime {
 
     async fn provision_member_login(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         args: &Value,
         idempotency_key: &str,
@@ -865,7 +865,7 @@ impl Runtime {
 
     async fn change_developer_membership(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         path: &str,
         args: &Value,
@@ -994,7 +994,7 @@ impl Runtime {
 
     async fn create_support_impersonation(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         args: &Value,
         idempotency_key: &str,
@@ -1062,7 +1062,7 @@ impl Runtime {
 
     async fn create_tenant(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         args: &Value,
         idempotency_key: &str,
@@ -1223,7 +1223,7 @@ impl Runtime {
             .execute(&mut **directory_tx.transaction())
             .await?;
         directory_tx.commit().await?;
-        let route = gonvex_postgres::TenantRoute {
+        let route = gonvex_store::TenantRoute {
             project_id: connection.project_id.clone(),
             tenant_id: tenant_id.clone(),
             database_url,
@@ -1322,7 +1322,7 @@ impl Runtime {
 
     async fn create_demo_account(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         args: &Value,
         idempotency_key: &str,
@@ -1491,7 +1491,7 @@ impl Runtime {
 
     async fn delete_demo_account(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         args: &Value,
         idempotency_key: &str,
@@ -1580,7 +1580,7 @@ impl Runtime {
 
     async fn accept_invitation(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         connection: &ControlConnection,
         args: &Value,
         idempotency_key: &str,
@@ -2097,7 +2097,7 @@ impl Runtime {
 
     async fn control_query(
         &self,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         transaction: &mut TenantTransaction,
         connection: &ControlConnection,
         path: &str,
@@ -2383,7 +2383,7 @@ impl Runtime {
                             let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM members WHERE status='active'")
                                 .fetch_one(&mut **tenant_tx.transaction()).await?;
                             tenant_tx.commit().await?;
-                            Ok::<_, gonvex_postgres::DatabaseError>(count)
+                            Ok::<_, gonvex_store::DatabaseError>(count)
                         }.await;
                         if let Err(error) = &count {
                             tracing::warn!(project = %connection.project_id, tenant = %tenant_id, %error, "could not read tenant member count");
@@ -3261,7 +3261,7 @@ impl Runtime {
         }
     }
 
-    async fn control_plane(&self) -> Result<gonvex_postgres::ControlPlane, ControlError> {
+    async fn control_plane(&self) -> Result<gonvex_store::ControlPlane, ControlError> {
         self.inner
             .control_plane
             .read()
@@ -3274,7 +3274,7 @@ impl Runtime {
 }
 
 async fn list_account_tenants(
-    control: &gonvex_postgres::ControlPlane,
+    control: &gonvex_store::ControlPlane,
     connection: &ControlConnection,
     ids_only: bool,
 ) -> Result<Value, ControlError> {
@@ -3336,7 +3336,7 @@ async fn list_account_tenants(
 }
 
 async fn member_auth_providers(
-    control: &gonvex_postgres::ControlPlane,
+    control: &gonvex_store::ControlPlane,
     connection: &ControlConnection,
     args: &Value,
 ) -> Result<Value, ControlError> {
@@ -3980,7 +3980,7 @@ pub(crate) async fn revoke_family(
 }
 
 pub(crate) async fn session_result_from_directory(
-    control: &gonvex_postgres::ControlPlane,
+    control: &gonvex_store::ControlPlane,
     transaction: &mut TenantTransaction,
     project: &str,
     grant: &SessionGrant,
@@ -4757,7 +4757,7 @@ mod invitation_authority_tests {
 
 // Only release after a confirmed rollback, never after an uncertain commit.
 async fn release_invitation_claim(
-    control: &gonvex_postgres::ControlPlane,
+    control: &gonvex_store::ControlPlane,
     project: &str,
     invitation: &str,
     account: &str,

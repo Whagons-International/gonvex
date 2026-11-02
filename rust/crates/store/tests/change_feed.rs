@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gonvex_postgres::{
+use gonvex_store::{
     ControlPlane, MigrationScope, PoolLimits, PoolRegistry, SqlMigration, TenantRoute,
 };
 use serde_json::Value;

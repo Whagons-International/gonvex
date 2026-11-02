@@ -115,7 +115,7 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 async fn admit(
     runtime: &Runtime,
     database_url: &str,
-) -> Result<gonvex_postgres::AdmissionPermit, Response> {
+) -> Result<gonvex_store::AdmissionPermit, Response> {
     runtime
         .inner
         .pools

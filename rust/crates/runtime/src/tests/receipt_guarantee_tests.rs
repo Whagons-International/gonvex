@@ -1,7 +1,7 @@
 //! Native receipt/commit composition, using an owned PostgreSQL fixture and host.
 use super::*;
 use base64::Engine as _;
-use gonvex_postgres::{MigrationScope, RuntimeManifestRecord, SqlMigration, TenantRoute};
+use gonvex_store::{MigrationScope, RuntimeManifestRecord, SqlMigration, TenantRoute};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Row as _;
@@ -282,12 +282,12 @@ export function all() { throw new Error("replica collections must use the server
         sqlx::query("INSERT INTO accounts(id,auth_realm_id,email,name) VALUES ('account','project','receipt@example.test','Receipt fixture')")
             .execute(&self.pool).await.unwrap();
         sqlx::query("INSERT INTO gonvex_auth_sessions(token_hash,project_id,account_id,expires_at) VALUES ($1,'project','account',now()+interval '1 hour')")
-            .bind(gonvex_postgres::token_hash("gvx_session_receipt_sdk_fixture")).execute(&self.pool).await.unwrap();
+            .bind(gonvex_store::token_hash("gvx_session_receipt_sdk_fixture")).execute(&self.pool).await.unwrap();
         sqlx::query("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('member','account','active','manager','{}')")
             .execute(&self.pool).await.unwrap();
         sqlx::query("INSERT INTO accounts(id,auth_realm_id,email,name) VALUES ('bob','project','bob@example.test','Bob fixture')").execute(&self.pool).await.unwrap();
         sqlx::query("INSERT INTO gonvex_auth_sessions(token_hash,project_id,account_id,expires_at) VALUES ($1,'project','bob',now()+interval '1 hour')")
-            .bind(gonvex_postgres::token_hash("gvx_session_receipt_sdk_bob")).execute(&self.pool).await.unwrap();
+            .bind(gonvex_store::token_hash("gvx_session_receipt_sdk_bob")).execute(&self.pool).await.unwrap();
         sqlx::query("INSERT INTO members(id,account_id,status,role,permissions) VALUES ('bob-member','bob','active','manager','{}')").execute(&self.pool).await.unwrap();
         let admitted = self
             .control

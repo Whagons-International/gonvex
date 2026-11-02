@@ -9,7 +9,7 @@ use base64::Engine as _;
 use gonvex_module_host::protocol::{
     ActivateRequest, FunctionWire, JavaScriptWire, LoadRequest, ModuleArtifactWire, ResponsePayload,
 };
-use gonvex_postgres::RuntimeManifestRecord;
+use gonvex_store::RuntimeManifestRecord;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -86,7 +86,7 @@ pub struct ProjectModule {
     pub schema: Value,
     pub visibility: BTreeMap<String, crate::visibility::VisibilityPlan>,
     pub invitation_acceptance_reducer: String,
-    pub migrations: Vec<gonvex_postgres::SqlMigration>,
+    pub migrations: Vec<gonvex_store::SqlMigration>,
     pub crons: Vec<CronSpec>,
 }
 
@@ -335,7 +335,7 @@ fn crons_from_module(
 
 pub(crate) fn validate_manifest_record(
     record: &RuntimeManifestRecord,
-) -> Result<Vec<gonvex_postgres::SqlMigration>, ModuleRegistryError> {
+) -> Result<Vec<gonvex_store::SqlMigration>, ModuleRegistryError> {
     let project = record.project_id.clone();
     let module = record
         .manifest
@@ -375,7 +375,7 @@ pub fn verify_standalone_module_artifact(module: Value) -> Result<String, Module
 
 fn migrations_from_module(
     module: &Map<String, Value>,
-) -> Result<Vec<gonvex_postgres::SqlMigration>, String> {
+) -> Result<Vec<gonvex_store::SqlMigration>, String> {
     let Some(files) = module.get("files").and_then(Value::as_object) else {
         return Ok(Vec::new());
     };
@@ -425,8 +425,8 @@ fn migrations_from_module(
             let directive = directive.trim();
             if let Some(value) = directive.strip_prefix("gonvex:scope") {
                 scope = Some(match value.trim() {
-                    "tenant" => gonvex_postgres::MigrationScope::Tenant,
-                    "control-plane" => gonvex_postgres::MigrationScope::ControlPlane,
+                    "tenant" => gonvex_store::MigrationScope::Tenant,
+                    "control-plane" => gonvex_store::MigrationScope::ControlPlane,
                     value => return Err(format!("migration {name}: invalid scope {value:?}")),
                 });
             } else if directive == "gonvex:no-transaction" {
@@ -438,7 +438,7 @@ fn migrations_from_module(
                 "migration {name}: missing required -- gonvex:scope tenant|control-plane directive"
             )
         })?;
-        migrations.push(gonvex_postgres::SqlMigration::new(
+        migrations.push(gonvex_store::SqlMigration::new(
             name.to_owned(),
             scope,
             no_transaction,

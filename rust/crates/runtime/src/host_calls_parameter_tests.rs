@@ -1,6 +1,6 @@
 //! Ordinary Rust regressions for bugs found during the Bend experiment.
 use super::*;
-use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry};
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 struct Fixture {
@@ -362,7 +362,7 @@ struct SyncFixture {
     admin: PgPool,
     pools: PoolRegistry,
     control: Option<ControlPlane>,
-    route: gonvex_postgres::TenantRoute,
+    route: gonvex_store::TenantRoute,
     schema: String,
 }
 
@@ -402,7 +402,7 @@ impl SyncFixture {
             admin,
             pools,
             control: None,
-            route: gonvex_postgres::TenantRoute {
+            route: gonvex_store::TenantRoute {
                 project_id: schema.clone(),
                 tenant_id: schema.clone(),
                 database_url: String::new(),

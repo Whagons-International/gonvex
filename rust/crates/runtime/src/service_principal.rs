@@ -31,7 +31,7 @@
 
 use chrono::Utc;
 use gonvex_module_runtime::InvocationChannel;
-use gonvex_postgres::{
+use gonvex_store::{
     Account, DelegationActor, Member, SessionIdentity, TenantRoute, TenantSession,
     SERVICE_PRINCIPAL_ACTOR_PREFIX,
 };
@@ -115,7 +115,7 @@ pub(crate) fn find_principal<'a>(
     if !token.starts_with(TOKEN_PREFIX) {
         return None;
     }
-    let digest = gonvex_postgres::token_hash(token);
+    let digest = gonvex_store::token_hash(token);
     let mut found = None;
     for principal in principals {
         if bool::from(digest.as_bytes().ct_eq(principal.token_sha256.as_bytes())) {
@@ -655,7 +655,7 @@ impl Runtime {
         )
         .bind(&grant_id)
         .bind(&grant.route.project_id)
-        .bind(gonvex_postgres::token_hash(&token))
+        .bind(gonvex_store::token_hash(&token))
         .bind(grant.actor())
         .bind(account_id)
         .bind(&grant.route.tenant_id)
@@ -752,7 +752,7 @@ mod tests {
     fn principal(id: &str, token: &str) -> ServicePrincipalConfig {
         ServicePrincipalConfig {
             id: id.to_owned(),
-            token_sha256: gonvex_postgres::token_hash(token),
+            token_sha256: gonvex_store::token_hash(token),
             projects: vec!["project".to_owned()],
             functions: vec!["keys.authenticate".to_owned()],
             max_delegation: Duration::from_secs(900),
@@ -1154,7 +1154,7 @@ mod tests {
     async fn delegated_sessions_are_member_scoped_single_use_and_revocable() {
         use axum::body::{to_bytes, Body};
         use axum::http::{Request, StatusCode};
-        use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry};
+        use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry};
         use sqlx::postgres::PgPoolOptions;
         use tower::ServiceExt;
 
@@ -1307,7 +1307,7 @@ mod tests {
             stored.3.map(|actor| actor.0),
             Some(json!({"kind": "api_key", "name": "CI key", "reference": "key_1"}))
         );
-        let expected_delegation = gonvex_postgres::SessionDelegation {
+        let expected_delegation = gonvex_store::SessionDelegation {
             principal: "gateway".to_owned(),
             actor: Some(DelegationActor {
                 kind: "api_key".to_owned(),
@@ -1405,7 +1405,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             unattributed_session.tenant.delegation,
-            Some(gonvex_postgres::SessionDelegation {
+            Some(gonvex_store::SessionDelegation {
                 principal: "gateway".to_owned(),
                 actor: None,
             })
@@ -1419,7 +1419,7 @@ mod tests {
                (id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at)
                VALUES('imp_support','project',$1,$2,$3,'tenant','support',now()+interval '5 minutes')"#,
         )
-        .bind(gonvex_postgres::token_hash(support_token))
+        .bind(gonvex_store::token_hash(support_token))
         .bind(&other_account)
         .bind(&account)
         .execute(&fixture)
@@ -1442,7 +1442,7 @@ mod tests {
                VALUES('svcdel_tampered','project',$1,'service:gateway',$2,'tenant','service:gateway: x',
                       now()+interval '5 minutes','{"kind":"api_key"}')"#,
         )
-        .bind(gonvex_postgres::token_hash(tampered_token))
+        .bind(gonvex_store::token_hash(tampered_token))
         .bind(&account)
         .execute(&fixture)
         .await

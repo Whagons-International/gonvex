@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use gonvex_postgres::{PoolRegistry, TenantRoute};
+use gonvex_store::{PoolRegistry, TenantRoute};
 use serde_json::Value;
 use sqlx::Row;
 use tokio::sync::{broadcast, watch, RwLock};
@@ -228,7 +228,7 @@ async fn run_feed(
 pub(crate) async fn prune_retained(
     pools: &PoolRegistry,
     route: &TenantRoute,
-) -> Result<(), gonvex_postgres::DatabaseError> {
+) -> Result<(), gonvex_store::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
     let _admission = pools.admit(&route.database_url).await?;
     let mut transaction = pool.begin().await?;
@@ -274,7 +274,7 @@ async fn deliver_committed(
     route: &TenantRoute,
     after: u64,
     sender: &broadcast::Sender<FeedEvent>,
-) -> Result<u64, gonvex_postgres::DatabaseError> {
+) -> Result<u64, gonvex_store::DatabaseError> {
     let clock = read_clock(pools, route).await?;
     if after < clock.retained_revision {
         let _ = sender.send(FeedEvent::Reset {
@@ -312,7 +312,7 @@ async fn deliver_committed(
 pub async fn read_clock(
     pools: &PoolRegistry,
     route: &TenantRoute,
-) -> Result<ReplicaClock, gonvex_postgres::DatabaseError> {
+) -> Result<ReplicaClock, gonvex_store::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
     let _admission = pools.admit(&route.database_url).await?;
     let row = sqlx::query(
@@ -334,7 +334,7 @@ pub async fn read_changes(
     route: &TenantRoute,
     after: u64,
     through: u64,
-) -> Result<Vec<LogChange>, gonvex_postgres::DatabaseError> {
+) -> Result<Vec<LogChange>, gonvex_store::DatabaseError> {
     let pool = pools.pool(&route.database_url).await?;
     let _admission = pools.admit(&route.database_url).await?;
     let rows = sqlx::query(

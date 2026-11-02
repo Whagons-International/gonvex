@@ -51,7 +51,7 @@ use axum::routing::{get, post};
 use axum::{body, body::Body, Json, Router};
 use chrono::{SecondsFormat, Utc};
 use futures_util::{Stream, StreamExt};
-use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_protocol::{
     ClientMessage, ExecutionScope, ReducerCallRequest, ReducerErrorClass, ReplicaOpenRequest,
     ServerCapabilities, ServerMessage, PROTOCOL_VERSION,
@@ -127,7 +127,7 @@ pub enum RuntimeStartError {
     #[error(transparent)]
     ModuleHost(#[from] module_host::ModuleHostError),
     #[error(transparent)]
-    Database(#[from] gonvex_postgres::DatabaseError),
+    Database(#[from] gonvex_store::DatabaseError),
     #[error("GONVEX_CONTROL_PLANE_DATABASE_URL or DATABASE_URL is required when authentication is enabled")]
     MissingControlPlane,
     #[error(transparent)]
@@ -1059,7 +1059,7 @@ async fn provision_e2e_member(
         .execute(&mut **finish.transaction())
         .await?;
         finish.commit().await?;
-        Ok::<_, gonvex_postgres::DatabaseError>(serde_json::json!({
+        Ok::<_, gonvex_store::DatabaseError>(serde_json::json!({
             "projectId":project_id,"tenantId":tenant_id,
             "accountId":account_id,"memberId":member_id,
         }))
@@ -1067,7 +1067,7 @@ async fn provision_e2e_member(
     .await;
     match result {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
-        Err(gonvex_postgres::DatabaseError::Sql(sqlx::Error::RowNotFound)) => (
+        Err(gonvex_store::DatabaseError::Sql(sqlx::Error::RowNotFound)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error":"test actor account not found"})),
         )
@@ -1166,7 +1166,7 @@ async fn apply_dev_sync(
         .unwrap_or("")
         .trim()
         .to_owned();
-    let record = gonvex_postgres::RuntimeManifestRecord {
+    let record = gonvex_store::RuntimeManifestRecord {
         project_id: project.clone(),
         module_hash,
         manifest: manifest.clone(),
@@ -3098,7 +3098,7 @@ async fn revalidate_connection(runtime: &Runtime, connection: &control::ControlC
 }
 
 impl Runtime {
-    async fn start_control_event_listener(&self) -> Result<(), gonvex_postgres::DatabaseError> {
+    async fn start_control_event_listener(&self) -> Result<(), gonvex_store::DatabaseError> {
         let Some(control) = self.inner.control_plane.read().await.clone() else {
             return Ok(());
         };
@@ -3420,8 +3420,8 @@ async fn own_membership_changed(runtime: &Runtime, session: Option<&TenantSessio
 
 /// The columns `membership_affects` treats as an access change.
 fn member_access_changed(
-    admitted: &gonvex_postgres::Member,
-    current: Option<&gonvex_postgres::Member>,
+    admitted: &gonvex_store::Member,
+    current: Option<&gonvex_store::Member>,
 ) -> bool {
     let Some(current) = current else {
         return true;
@@ -3537,8 +3537,8 @@ struct AuthMode {
     public: bool,
 }
 
-fn database_auth_error_code(error: &gonvex_postgres::DatabaseError) -> &'static str {
-    use gonvex_postgres::DatabaseError;
+fn database_auth_error_code(error: &gonvex_store::DatabaseError) -> &'static str {
+    use gonvex_store::DatabaseError;
     match error {
         DatabaseError::InvalidSession | DatabaseError::SessionProjectMismatch => {
             "credential_rejected"
@@ -4393,7 +4393,7 @@ mod tests {
 
     #[test]
     fn cached_startup_auth_error_codes() {
-        use gonvex_postgres::DatabaseError;
+        use gonvex_store::DatabaseError;
         assert_eq!(
             super::database_auth_error_code(&DatabaseError::InvalidSession),
             "credential_rejected"
@@ -4459,7 +4459,7 @@ mod tests {
 
     #[test]
     fn control_telemetry_tenant_control_keeps_authority_without_data() {
-        let mut session = TenantSession::anonymous(gonvex_postgres::TenantRoute {
+        let mut session = TenantSession::anonymous(gonvex_store::TenantRoute {
             project_id: "project".into(),
             tenant_id: "tenant".into(),
             database_url: "unused".into(),
@@ -4525,7 +4525,7 @@ mod tests {
     async fn public_tenant_auth_and_execution_contract() {
         use base64::Engine as _;
         use futures_util::SinkExt;
-        use gonvex_postgres::{RuntimeManifestRecord, TenantRoute};
+        use gonvex_store::{RuntimeManifestRecord, TenantRoute};
         use sha2::{Digest, Sha256};
         use sqlx::Row;
 
@@ -5069,9 +5069,9 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     #[test]
     fn sdk_resume_token_rotation_preserves_only_identical_authorization_scope() {
         let session = TenantSession {
-            identity: gonvex_postgres::SessionIdentity {
+            identity: gonvex_store::SessionIdentity {
                 project_id: "project".to_owned(),
-                account: gonvex_postgres::Account {
+                account: gonvex_store::Account {
                     id: "account".to_owned(),
                     email: "account@example.test".to_owned(),
                     email_verified: true,
@@ -5080,7 +5080,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                     provider: "firebase".to_owned(),
                 },
             },
-            member: gonvex_postgres::Member {
+            member: gonvex_store::Member {
                 id: "member".to_owned(),
                 account_id: "account".to_owned(),
                 status: "active".to_owned(),
@@ -5091,7 +5091,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 membership_revision: 1,
             },
             admission_revision: 5,
-            ..TenantSession::anonymous(gonvex_postgres::TenantRoute {
+            ..TenantSession::anonymous(gonvex_store::TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
                 database_url: "postgres://tenant".to_owned(),
@@ -5594,9 +5594,9 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     #[test]
     fn membership_replay_before_the_admission_snapshot_does_not_revoke_a_new_socket() {
         let session = TenantSession {
-            identity: gonvex_postgres::SessionIdentity {
+            identity: gonvex_store::SessionIdentity {
                 project_id: "project".to_owned(),
-                account: gonvex_postgres::Account {
+                account: gonvex_store::Account {
                     id: "account".to_owned(),
                     email: "account@example.test".to_owned(),
                     email_verified: true,
@@ -5605,12 +5605,12 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                     provider: "firebase".to_owned(),
                 },
             },
-            route: gonvex_postgres::TenantRoute {
+            route: gonvex_store::TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
                 database_url: "postgres://tenant".to_owned(),
             },
-            member: gonvex_postgres::Member {
+            member: gonvex_store::Member {
                 id: "member".to_owned(),
                 account_id: "account".to_owned(),
                 status: "active".to_owned(),
@@ -5655,7 +5655,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
 
     #[test]
     fn member_access_change_detection_matches_the_feed_columns() {
-        let admitted = gonvex_postgres::Member {
+        let admitted = gonvex_store::Member {
             id: "member".to_owned(),
             account_id: "account".to_owned(),
             status: "active".to_owned(),
@@ -5666,7 +5666,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             membership_revision: 3,
         };
         // Profile edits do not revoke the session.
-        let renamed = gonvex_postgres::Member {
+        let renamed = gonvex_store::Member {
             display_name: "After".to_owned(),
             avatar_url: "https://example.test/a.png".to_owned(),
             ..admitted.clone()
@@ -5676,23 +5676,23 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         // A removed Member or any access column change does.
         assert!(member_access_changed(&admitted, None));
         for changed in [
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 permissions: serde_json::json!({ "view-tasks": true, "create-tasks": true }),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 role: "admin".to_owned(),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 status: "suspended".to_owned(),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 account_id: "other".to_owned(),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 membership_revision: 4,
                 ..admitted.clone()
             },

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry};
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 

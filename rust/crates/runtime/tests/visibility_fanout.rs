@@ -1,6 +1,6 @@
 //! Production Replica Collection feed budgets, measured after admission.
 use base64::Engine as _;
-use gonvex_postgres::{
+use gonvex_store::{
     Account, ControlPlane, Member, PoolLimits, PoolRegistry, RuntimeManifestRecord,
     SessionIdentity, TenantRoute, TenantSession,
 };

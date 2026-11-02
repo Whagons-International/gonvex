@@ -3,7 +3,7 @@ use std::future::Future;
 use std::task::{Context, Waker};
 use std::time::Duration;
 
-use gonvex_postgres::{ControlPlane, DatabaseError, PoolLimits, PoolRegistry, TenantRoute};
+use gonvex_store::{ControlPlane, DatabaseError, PoolLimits, PoolRegistry, TenantRoute};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 struct Fixture {
@@ -69,7 +69,7 @@ impl Fixture {
         &self,
         index: usize,
         read_only: bool,
-    ) -> Result<gonvex_postgres::TenantTransaction, DatabaseError> {
+    ) -> Result<gonvex_store::TenantTransaction, DatabaseError> {
         self.control
             .begin_tenant_transaction(&self.routes[index], read_only)
             .await

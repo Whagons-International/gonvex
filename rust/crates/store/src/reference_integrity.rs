@@ -3,7 +3,7 @@
 
 use crate::{sql_script::split_statements, DatabaseError};
 
-pub(crate) async fn install(connection: &mut sqlx::PgConnection) -> Result<(), DatabaseError> {
+pub(crate) async fn install(connection: &mut sqlx::SqliteConnection) -> Result<(), DatabaseError> {
     let mut transaction = connection.begin().await?;
     for source in [
         include_str!("reference_integrity/schema.sql"),
@@ -24,7 +24,7 @@ pub(crate) async fn install(connection: &mut sqlx::PgConnection) -> Result<(), D
 /// Applications opting into coverage must classify schema additions in the
 /// same migration, so an unregistered storage field cannot commit unnoticed.
 pub(crate) async fn check_coverage(
-    connection: &mut sqlx::PgConnection,
+    connection: &mut sqlx::SqliteConnection,
 ) -> Result<(), DatabaseError> {
     sqlx::query("SELECT gonvex_check_reference_coverage(declaration) FROM _gonvex_reference_catalog WHERE declaration ? 'exclusions'")
         .execute(connection).await?;

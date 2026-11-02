@@ -12,7 +12,7 @@ use gonvex_module_runtime::{
     validate_portable_schema, AccountIdentity, InvocationChannel, InvocationDelegation,
     InvocationDelegationActor, InvocationProvenance, MemberIdentity, TenantIdentity,
 };
-use gonvex_postgres::{
+use gonvex_store::{
     Account, Member, SessionIdentity, TenantRoute, TenantSession, TransactionAttribution,
 };
 use serde_json::Value;
@@ -42,7 +42,7 @@ pub enum ExecutionError {
     #[error("internal function {0:?} cannot be called by a client")]
     InternalFunction(String),
     #[error(transparent)]
-    Database(#[from] gonvex_postgres::DatabaseError),
+    Database(#[from] gonvex_store::DatabaseError),
     #[error(transparent)]
     ModuleHost(#[from] crate::module_host::ModuleHostError),
     #[error("module database capability failed: {0}")]
@@ -177,18 +177,18 @@ impl Runtime {
             ))
             .execute(&mut **transaction.transaction())
             .await
-            .map_err(gonvex_postgres::DatabaseError::from)?;
+            .map_err(gonvex_store::DatabaseError::from)?;
         let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM members WHERE id=$1 AND account_id=$2 AND status='active')")
             .bind(&session.member.id).bind(&session.identity.account.id)
-            .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_postgres::DatabaseError::from)?;
+            .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_store::DatabaseError::from)?;
         if !active {
-            return Err(gonvex_postgres::DatabaseError::MemberNotFound(
+            return Err(gonvex_store::DatabaseError::MemberNotFound(
                 session.identity.account.id.clone(),
             )
             .into());
         }
         let tables = sqlx::query("SELECT to_regclass('_gonvex_reducer_idempotency') IS NOT NULL AS current, to_regclass('_gonvex_mutation_idempotency') IS NOT NULL AS legacy")
-            .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_postgres::DatabaseError::from)?;
+            .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_store::DatabaseError::from)?;
         let current: bool = tables.get("current");
         let legacy: bool = tables.get("legacy");
         if current && legacy {
@@ -209,14 +209,14 @@ impl Runtime {
             .bind(key)
             .fetch_optional(&mut **transaction.transaction())
             .await
-            .map_err(gonvex_postgres::DatabaseError::from)?;
+            .map_err(gonvex_store::DatabaseError::from)?;
         let Some(receipt) = receipt else {
             transaction.commit().await?;
             return Ok(serde_json::json!({"found":false}));
         };
         let stored_path: String = receipt.get("path");
         if stored_path != path {
-            return Err(gonvex_postgres::DatabaseError::IdempotencyPathMismatch {
+            return Err(gonvex_store::DatabaseError::IdempotencyPathMismatch {
                 key: key.into(),
                 stored_path,
                 requested_path: path.into(),
@@ -231,7 +231,7 @@ impl Runtime {
             sqlx::query("SELECT epoch,revision FROM _gonvex_sync_clock WHERE singleton=true")
                 .fetch_one(&mut **transaction.transaction())
                 .await
-                .map_err(gonvex_postgres::DatabaseError::from)?;
+                .map_err(gonvex_store::DatabaseError::from)?;
         let epoch: String = clock.get("epoch");
         let revision: i64 = clock.get("revision");
         if epoch.is_empty() || !(0..=9_007_199_254_740_991).contains(&revision) {
@@ -1011,7 +1011,7 @@ impl Runtime {
     async fn promote_scheduled_outbox(
         &self,
         session: &TenantSession,
-        claimed: &gonvex_postgres::ClaimedAction,
+        claimed: &gonvex_store::ClaimedAction,
     ) -> Result<(), String> {
         let object = claimed
             .args
@@ -1384,7 +1384,7 @@ fn require_interactive_target<'a>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use gonvex_postgres::{Account, Member, SessionIdentity, TenantRoute};
+    use gonvex_store::{Account, Member, SessionIdentity, TenantRoute};
     use serde_json::json;
 
     use super::*;
@@ -1507,9 +1507,9 @@ mod tests {
 
     fn delegated_session() -> TenantSession {
         TenantSession {
-            delegation: Some(gonvex_postgres::SessionDelegation {
+            delegation: Some(gonvex_store::SessionDelegation {
                 principal: "gateway".to_owned(),
-                actor: Some(gonvex_postgres::DelegationActor {
+                actor: Some(gonvex_store::DelegationActor {
                     kind: "api_key".to_owned(),
                     name: "CI key".to_owned(),
                     reference: Some("key_1".to_owned()),

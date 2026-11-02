@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gonvex_module_host::protocol::codes;
-use gonvex_postgres::DatabaseError;
+use gonvex_store::DatabaseError;
 pub use gonvex_protocol::ReducerErrorClass;
 
 use crate::control::ControlError;

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
   "crates/admin-cli",
   "crates/protocol",
-  "crates/postgres",
+  "crates/store",
   "crates/runtime",
   "crates/websocket",
   "crates/module-runtime",
@@ -36,7 +36,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 ryu-js = "1"
 sha2 = "0.10"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json", "chrono", "uuid", "bigdecimal"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "sqlite", "json", "chrono", "uuid", "bigdecimal"] }
 bigdecimal = "0.4"
 calamine = "0.36.1"
 uuid = { version = "1", features = ["v4", "serde"] }

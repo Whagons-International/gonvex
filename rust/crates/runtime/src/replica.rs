@@ -6,7 +6,7 @@ use mask::MaskStep;
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures_util::{Stream, StreamExt};
-use gonvex_postgres::{TenantSession, TenantTransaction};
+use gonvex_store::{TenantSession, TenantTransaction};
 use gonvex_protocol::replica_digest::ReplicaSetDigest;
 use gonvex_protocol::{
     PublicInvocationProvenance, ReplicaChange, ReplicaCursor, ReplicaOpenRequest, ServerMessage,
@@ -44,7 +44,7 @@ pub enum ReplicaError {
     #[error("replica SQL identifier {0:?} is invalid")]
     InvalidIdentifier(String),
     #[error(transparent)]
-    Database(#[from] gonvex_postgres::DatabaseError),
+    Database(#[from] gonvex_store::DatabaseError),
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
     #[error(transparent)]

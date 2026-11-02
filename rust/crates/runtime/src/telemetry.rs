@@ -274,12 +274,12 @@ impl Runtime {
 }
 
 async fn persist_event(
-    control: &gonvex_postgres::ControlPlane,
+    control: &gonvex_store::ControlPlane,
     event: &Value,
     event_id: &str,
     fingerprint: &str,
     occurred_at: DateTime<Utc>,
-) -> Result<bool, gonvex_postgres::DatabaseError> {
+) -> Result<bool, gonvex_store::DatabaseError> {
     let project = string_field(event, "project");
     let tenant = string_field(event, "tenant");
     let release = string_field(event, "release");
@@ -556,9 +556,9 @@ mod tests {
         let connection = ControlConnection {
             connection_id: "connection-real".to_owned(),
             project_id: "project-real".to_owned(),
-            identity: Some(gonvex_postgres::SessionIdentity {
+            identity: Some(gonvex_store::SessionIdentity {
                 project_id: "project-real".to_owned(),
-                account: gonvex_postgres::Account {
+                account: gonvex_store::Account {
                     id: "account-real".to_owned(),
                     email: String::new(),
                     email_verified: true,
