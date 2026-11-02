@@ -1042,6 +1042,7 @@ async fn provision_e2e_member(
         .fetch_one(&mut **tenant_tx.transaction())
         .await?;
         tenant_tx.commit().await?;
+        runtime.inner.membership_projector.wake();
         let mut finish = control.begin_control_transaction(false).await?;
         sqlx::query(
             r#"INSERT INTO account_tenant_index

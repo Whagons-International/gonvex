@@ -589,6 +589,7 @@ impl Runtime {
                         ExecutionError::HostCall(error)
                     }
                 })?;
+                self.inner.membership_projector.wake();
                 let committed_revision =
                     control.command_revision(&session.route, command_id).await?;
                 if let Some(tracker) = committed_revisions {

@@ -1091,7 +1091,7 @@ async fn delete_project_auth_membership(
         };
         match sqlx::query("UPDATE members SET status='revoked',membership_revision=membership_revision+1,updated_at=now() WHERE id=$1")
             .bind(query.member.trim()).execute(&pool).await {
-            Ok(result) if result.rows_affected() > 0 => {}
+            Ok(result) if result.rows_affected() > 0 => runtime.inner.membership_projector.wake(),
             Ok(_) => return error(StatusCode::BAD_REQUEST, "member was not found"),
             Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
         }
