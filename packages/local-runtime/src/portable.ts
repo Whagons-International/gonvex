@@ -470,6 +470,10 @@ export class PortableReducerRuntime {
           deferred.push({ id, kind: "schedule", path, args: copy(args), at });
           return id;
         },
+        // Local runs never reach the server scheduler; the authoritative
+        // runtime coalesces wakes when the Reducer commits there.
+        wakeAt: async (at, path, args = {}) =>
+          context.scheduler.runAt(at, path, args),
       },
     };
     const result = copy(await definition.handler(context, copy(args)));

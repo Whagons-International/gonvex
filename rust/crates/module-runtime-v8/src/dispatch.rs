@@ -168,6 +168,8 @@ pub(crate) enum HostCallRequest {
         function: String,
         #[serde(default)]
         args: serde_json::Value,
+        #[serde(default)]
+        coalesce: bool,
     },
     FetchRead {
         stream: u64,
@@ -268,10 +270,12 @@ impl HostCallRequest {
                 at_unix_ms,
                 function,
                 args,
+                coalesce,
             } => HostCall::ScheduleAt {
                 at_unix_ms,
                 function,
                 args: encode(args)?,
+                coalesce,
             },
             Self::FetchRead { stream } => HostCall::FetchRead { stream },
             Self::FetchCancel { stream } => HostCall::FetchCancel { stream },
@@ -441,6 +445,30 @@ mod tests {
             call,
             HostCall::ScheduleAfter { delay_ms: 2500, function, .. }
                 if function == "reports.generate"
+        ));
+    }
+
+    #[test]
+    fn wake_requests_keep_their_coalesce_flag_and_run_at_defaults_to_plain() {
+        let lower = |value: serde_json::Value| {
+            serde_json::from_value::<HostCallRequest>(value)
+                .expect("scheduleAt request should decode")
+                .into_host_call()
+                .expect("scheduleAt request should lower")
+        };
+        let wake = lower(serde_json::json!({
+            "kind": "scheduleAt", "atUnixMs": 1_000, "function": "cleaning.tick", "args": {}, "coalesce": true
+        }));
+        assert!(matches!(wake, HostCall::ScheduleAt { coalesce: true, .. }));
+        let run_at = lower(serde_json::json!({
+            "kind": "scheduleAt", "atUnixMs": 1_000, "function": "cleaning.tick", "args": {}
+        }));
+        assert!(matches!(
+            run_at,
+            HostCall::ScheduleAt {
+                coalesce: false,
+                ..
+            }
         ));
     }
 

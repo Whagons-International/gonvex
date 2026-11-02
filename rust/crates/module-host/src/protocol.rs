@@ -524,6 +524,8 @@ pub enum HostCallFrame {
         at_unix_ms: u64,
         function: String,
         args: serde_json::Value,
+        #[serde(default)]
+        coalesce: bool,
     },
     Fetch {
         request: serde_json::Value,
@@ -624,10 +626,12 @@ impl HostCallFrame {
                 at_unix_ms,
                 function,
                 args,
+                coalesce,
             } => Self::ScheduleAt {
                 at_unix_ms,
                 function,
                 args: decode(args, "args")?,
+                coalesce,
             },
             HostCall::Fetch { request } => Self::Fetch {
                 request: decode(request, "request")?,

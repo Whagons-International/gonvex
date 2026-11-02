@@ -85,6 +85,9 @@ struct ScheduleRequest {
     args: Value,
     run_at: DateTime<Utc>,
     provenance: Value,
+    /// `scheduler.wakeAt`: merge with the tenant's unclaimed wake for the same
+    /// function and args, keeping the earlier time.
+    coalesce: bool,
 }
 
 impl Scheduler {
@@ -188,6 +191,7 @@ impl Scheduler {
             args,
             run_at,
             provenance,
+            coalesce,
         } = request;
         let module = runtime
             .inner
@@ -215,22 +219,19 @@ impl Scheduler {
             .execute(&mut **transaction.transaction())
             .await
             .map_err(|error| error.to_string())?;
-        sqlx::query(
-            r#"INSERT INTO gonvex_scheduled_jobs
-               (id,project_id,tenant_id,function_path,args,run_at,scheduled_for,provenance)
-               VALUES($1,$2,$3,$4,$5,$6,$6,$7)
-               ON CONFLICT(id) DO NOTHING"#,
-        )
-        .bind(&id)
-        .bind(&session.identity.project_id)
-        .bind(&session.route.tenant_id)
-        .bind(function.trim())
-        .bind(Json(args))
-        .bind(run_at)
-        .bind(Json(provenance))
-        .execute(&mut **transaction.transaction())
-        .await
-        .map_err(|error| error.to_string())?;
+        let job = OneShotJob {
+            id: &id,
+            project_id: &session.identity.project_id,
+            tenant_id: &session.route.tenant_id,
+            function: function.trim(),
+            args,
+            run_at,
+            provenance,
+            coalesce,
+        };
+        let id = insert_one_shot_job(transaction.transaction(), job)
+            .await
+            .map_err(|error| error.to_string())?;
         transaction
             .commit()
             .await
@@ -612,6 +613,7 @@ impl Runtime {
         args: Value,
         run_at: DateTime<Utc>,
         provenance: &InvocationProvenance,
+        coalesce: bool,
     ) -> Result<Value, String> {
         self.inner
             .scheduler
@@ -624,12 +626,15 @@ impl Runtime {
                     args,
                     run_at,
                     provenance: serde_json::to_value(provenance).unwrap_or(Value::Null),
+                    coalesce,
                 },
             )
             .await
             .map(Value::String)
     }
 
+    // Mirrors the scheduled-outbox payload field for field.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn enqueue_scheduled_with_id(
         &self,
         session: &TenantSession,
@@ -638,6 +643,7 @@ impl Runtime {
         args: Value,
         run_at: DateTime<Utc>,
         provenance: &InvocationProvenance,
+        coalesce: bool,
     ) -> Result<Value, String> {
         self.inner
             .scheduler
@@ -650,11 +656,103 @@ impl Runtime {
                     args,
                     run_at,
                     provenance: serde_json::to_value(provenance).unwrap_or(Value::Null),
+                    coalesce,
                 },
             )
             .await
             .map(Value::String)
     }
+}
+
+struct OneShotJob<'a> {
+    id: &'a str,
+    project_id: &'a str,
+    tenant_id: &'a str,
+    function: &'a str,
+    args: Value,
+    run_at: DateTime<Utc>,
+    provenance: Value,
+    coalesce: bool,
+}
+
+/// Inserts a `runAt`/`runAfter` job, or for `wakeAt` merges it into the
+/// tenant's unclaimed wake for the same function and args (earlier time wins).
+/// Returns the id of the job that will run. Re-promoting an outbox entry whose
+/// job already exists is a no-op, whatever state that job is in.
+async fn insert_one_shot_job(
+    connection: &mut sqlx::PgConnection,
+    job: OneShotJob<'_>,
+) -> Result<String, sqlx::Error> {
+    let wake_key = if job.coalesce {
+        wake_key(job.function, &job.args)
+    } else {
+        String::new()
+    };
+    let inserted: Option<String> = sqlx::query_scalar(
+        r#"INSERT INTO gonvex_scheduled_jobs
+           (id,project_id,tenant_id,function_path,args,run_at,scheduled_for,provenance,wake_key)
+           SELECT $1,$2,$3,$4,$5,$6,$6,$7,$8
+           WHERE NOT EXISTS (SELECT 1 FROM gonvex_scheduled_jobs WHERE id=$1)
+           ON CONFLICT (project_id,tenant_id,wake_key)
+             WHERE status='pending' AND claim_token='' AND wake_key<>''
+           DO UPDATE SET run_at=LEAST(gonvex_scheduled_jobs.run_at,EXCLUDED.run_at),
+                         scheduled_for=LEAST(gonvex_scheduled_jobs.scheduled_for,EXCLUDED.scheduled_for),
+                         updated_at=now()
+           RETURNING id"#,
+    )
+    .bind(job.id)
+    .bind(job.project_id)
+    .bind(job.tenant_id)
+    .bind(job.function)
+    .bind(Json(job.args))
+    .bind(job.run_at)
+    .bind(Json(job.provenance))
+    .bind(wake_key)
+    .fetch_optional(connection)
+    .await?;
+    Ok(inserted.unwrap_or_else(|| job.id.to_owned()))
+}
+
+/// Identity of a wake: function plus args with object keys sorted, so the same
+/// logical args always coalesce.
+fn wake_key(function: &str, args: &Value) -> String {
+    fn canonical(value: &Value, out: &mut String) {
+        match value {
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&Value::String(key.clone()).to_string());
+                    out.push(':');
+                    canonical(&map[key], out);
+                }
+                out.push('}');
+            }
+            Value::Array(items) => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    canonical(item, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut source = format!("{function}\0");
+    canonical(args, &mut source);
+    let digest = Sha256::digest(source.as_bytes());
+    let suffix = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("wake_{suffix}")
 }
 
 /// Inserts the next run of a cron. A run that is already pending for the same
@@ -1079,6 +1177,121 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(left, ["pending", "recent"]);
+    }
+
+    #[test]
+    fn wake_keys_ignore_object_key_order_but_not_values() {
+        let a = serde_json::json!({"tenant": "t", "ids": [1, 2]});
+        let b: Value = serde_json::from_str(r#"{"ids":[1,2],"tenant":"t"}"#).unwrap();
+        assert_eq!(wake_key("cleaning.tick", &a), wake_key("cleaning.tick", &b));
+        assert_ne!(
+            wake_key("cleaning.tick", &a),
+            wake_key(
+                "cleaning.tick",
+                &serde_json::json!({"tenant": "t", "ids": [2, 1]})
+            )
+        );
+        assert_ne!(
+            wake_key("cleaning.tick", &a),
+            wake_key("agents.dispatch", &a)
+        );
+    }
+
+    fn wake<'a>(id: &'a str, run_at: DateTime<Utc>, coalesce: bool) -> OneShotJob<'a> {
+        OneShotJob {
+            id,
+            project_id: "project",
+            tenant_id: "tenant-a",
+            function: "cleaning.tick",
+            args: serde_json::json!({}),
+            run_at,
+            provenance: Value::Null,
+            coalesce,
+        }
+    }
+
+    async fn pending_wakes(pool: &sqlx::PgPool) -> Vec<(String, DateTime<Utc>)> {
+        sqlx::query_as(
+            "SELECT id,run_at FROM gonvex_scheduled_jobs WHERE status='pending' AND function_path='cleaning.tick' ORDER BY run_at",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// The building block that replaces every-minute crons: every write may wake
+    /// a due-work handler, yet at most one run waits per tenant.
+    #[tokio::test]
+    async fn wakes_coalesce_to_one_pending_run_at_the_earliest_time() {
+        let Some(fixture) = control_fixture("wake").await else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping scheduler wake test");
+            return;
+        };
+        let mut connection = fixture.pool.acquire().await.unwrap();
+        let base = DateTime::parse_from_rfc3339("2030-01-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let first = insert_one_shot_job(&mut connection, wake("job_1", base, true))
+            .await
+            .unwrap();
+        assert_eq!(first, "job_1");
+        // A later wake does not postpone; an earlier one pulls the run forward.
+        for (id, minutes) in [("job_2", 30), ("job_3", -20), ("job_4", 5)] {
+            let kept = insert_one_shot_job(
+                &mut connection,
+                wake(id, base + ChronoDuration::minutes(minutes), true),
+            )
+            .await
+            .unwrap();
+            assert_eq!(kept, "job_1", "wake {id} joins the pending run");
+        }
+        assert_eq!(
+            pending_wakes(&fixture.pool).await,
+            [("job_1".to_owned(), base - ChronoDuration::minutes(20))]
+        );
+
+        // Plain runAt jobs never coalesce.
+        insert_one_shot_job(&mut connection, wake("job_plain", base, false))
+            .await
+            .unwrap();
+        assert_eq!(pending_wakes(&fixture.pool).await.len(), 2);
+        sqlx::query("DELETE FROM gonvex_scheduled_jobs WHERE id='job_plain'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        // While job_1 runs, a new wake queues exactly one more run.
+        sqlx::query("UPDATE gonvex_scheduled_jobs SET claim_token='owner:1',lease_until=now()+interval '2 minutes' WHERE id='job_1'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        for id in ["job_5", "job_6"] {
+            insert_one_shot_job(&mut connection, wake(id, base, true))
+                .await
+                .unwrap();
+        }
+        let waiting: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM gonvex_scheduled_jobs WHERE status='pending' AND claim_token='' ORDER BY id",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(waiting, ["job_5"]);
+
+        // Replaying an outbox promotion for a job that already ran is a no-op.
+        sqlx::query("UPDATE gonvex_scheduled_jobs SET status='completed',completed_at=now(),claim_token='' WHERE id='job_1'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let replayed = insert_one_shot_job(&mut connection, wake("job_1", base, true))
+            .await
+            .unwrap();
+        assert_eq!(replayed, "job_1");
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM gonvex_scheduled_jobs")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(total, 2, "job_1 completed, job_5 waiting");
     }
 
     /// Databases that already piled up copies must still accept the unique index.

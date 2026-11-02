@@ -300,6 +300,12 @@ DELETE FROM gonvex_scheduled_jobs WHERE id IN (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS gonvex_scheduled_jobs_one_pending_cron
   ON gonvex_scheduled_jobs(project_id,tenant_id,cron_name) WHERE status='pending' AND cron_name<>'';
+-- scheduler.wakeAt keeps one unclaimed wake per tenant, function and args. A
+-- claimed wake leaves this index, so a wake that arrives mid-run queues one more.
+ALTER TABLE gonvex_scheduled_jobs ADD COLUMN IF NOT EXISTS wake_key text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS gonvex_scheduled_jobs_one_pending_wake
+  ON gonvex_scheduled_jobs(project_id,tenant_id,wake_key)
+  WHERE status='pending' AND claim_token='' AND wake_key<>'';
 CREATE TABLE IF NOT EXISTS gonvex_impersonation_grants (
   id text PRIMARY KEY, project_id text NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
   token_hash text NOT NULL UNIQUE, actor_account_id text NOT NULL,

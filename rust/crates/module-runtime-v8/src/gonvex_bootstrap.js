@@ -633,6 +633,13 @@
           function: text("scheduled function", name),
           args: optional(args),
         }),
+        wakeAt: (atUnixMs, name, args) => hostCall({
+          kind: "scheduleAt",
+          atUnixMs: nonNegativeInteger("scheduler atUnixMs", atUnixMs),
+          function: text("scheduled function", name),
+          args: optional(args),
+          coalesce: true,
+        }),
       });
     }
     if (granted.network) {
