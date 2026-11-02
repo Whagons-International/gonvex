@@ -156,3 +156,21 @@ test("dashboard retains runtime tokens and revalidates cookies without password 
   assert.equal((await session()).status, 401);
   assert.equal((await login()).status, 401);
 });
+
+test("serves frame and MIME protection on health, redirects, errors and SPA responses", async (t) => {
+  const previous = process.env.DASHBOARD_AUTH_ENABLED;
+  process.env.DASHBOARD_AUTH_ENABLED = "false";
+  const { createDashboardServer } = await import(`./server.mjs?headers=${Date.now()}`);
+  if (previous === undefined) delete process.env.DASHBOARD_AUTH_ENABLED;
+  else process.env.DASHBOARD_AUTH_ENABLED = previous;
+  const server = createDashboardServer();
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  for (const path of ["/healthz", "/", "/projects", "/assets/missing.js", "/api/dashboard/missing"]) {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${path}`, { redirect: "manual" });
+    assert.equal(response.headers.get("content-security-policy"), "frame-ancestors 'none'", path);
+    assert.equal(response.headers.get("x-frame-options"), "DENY", path);
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff", path);
+    if (path === "/healthz") assert.equal(await response.text(), "ok\n");
+  }
+});

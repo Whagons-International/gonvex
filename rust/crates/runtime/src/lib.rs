@@ -1221,7 +1221,7 @@ async fn apply_dev_sync(
     }))
 }
 
-async fn health(State(runtime): State<Runtime>) -> Response {
+async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response {
     let mut module_host = runtime.inner.module_host.status().await;
     let (active_projects, failed_projects) = runtime.inner.modules.counts().await;
     module_host.active_projects = active_projects;
@@ -1241,8 +1241,23 @@ async fn health(State(runtime): State<Runtime>) -> Response {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
+    // Detailed diagnostics require an explicit operator credential even when
+    // local development permits unauthenticated operator routes.
+    let diagnostics = headers.contains_key(axum::http::header::AUTHORIZATION)
+        && operations::authorize(&runtime, &headers, "admin:projects")
+            .await
+            .is_ok_and(|actor| actor.role == "admin" && !actor.is_local());
+    if !diagnostics {
+        return (
+            status,
+            [("cache-control", "no-store"), ("vary", "Authorization")],
+            Json(serde_json::json!({"ok": ready})),
+        )
+            .into_response();
+    }
     (
         status,
+        [("cache-control", "no-store"), ("vary", "Authorization")],
         Json(Health {
             ok: ready,
             version: runtime.inner.config.runtime_version.clone(),
@@ -5389,7 +5404,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     }
 
     #[tokio::test]
-    async fn health_matches_the_existing_contract() {
+    async fn health_public_response_does_not_disclose_deployment() {
         let runtime = Runtime::new(config(false));
         let response = runtime
             .router()
@@ -5400,10 +5415,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(body["ok"], true);
-        assert_eq!(body["version"], "0.4.1-test");
-        assert_eq!(body["postgresSet"], true);
-        assert_eq!(body["moduleHost"]["ready"], true);
+        assert_eq!(body, serde_json::json!({"ok": true}));
     }
 
     #[tokio::test]
@@ -5420,7 +5432,34 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        assert_eq!(body["postgresSet"], true);
+        assert_eq!(body, serde_json::json!({"ok": false}));
+    }
+
+    #[tokio::test]
+    async fn health_authenticated_diagnostics_preserve_version_and_topology() {
+        let runtime = Runtime::new(config(false));
+        for (token, detailed) in [("test-admin-key", true), ("invalid", false)] {
+            let response = runtime
+                .router()
+                .oneshot(
+                    Request::get("/healthz")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            if detailed {
+                assert_eq!(body["version"], "0.4.1-test");
+                assert_eq!(body["moduleHost"]["ready"], true);
+            } else {
+                assert_eq!(body, serde_json::json!({"ok": true}));
+            }
+        }
     }
 
     #[tokio::test]

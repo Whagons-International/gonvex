@@ -123,6 +123,9 @@ function proxyHeaders(headers, targetHost) {
 
 function proxyResponseHeaders(headers) {
   const next = { ...headers };
+  next["content-security-policy"] = [next["content-security-policy"], "frame-ancestors 'none'"].filter(Boolean).join(", ");
+  next["x-frame-options"] = "DENY";
+  next["x-content-type-options"] = "nosniff";
   for (const header of hopByHopHeaders) delete next[header];
   return next;
 }
@@ -312,6 +315,9 @@ export function createDashboardServer() {
     throw new Error("DASHBOARD_SESSION_SECRET is required.");
   }
   const server = createServer((request, response) => {
+    response.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+    response.setHeader("X-Frame-Options", "DENY");
+    response.setHeader("X-Content-Type-Options", "nosniff");
     handleRequest(request, response).catch((error) => {
       console.error(error);
       if (response.headersSent) response.destroy(error);
