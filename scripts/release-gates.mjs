@@ -79,6 +79,7 @@ export async function verifyPromotionCandidate({
   runtimeApplicationUUID,
   dashboardApplicationUUID,
   runtimeHealthURL,
+  runtimeToken,
   fetchImpl = fetch,
 }) {
   const githubHeaders = {
@@ -98,7 +99,7 @@ export async function verifyPromotionCandidate({
     getJSON(fetchImpl, `${githubAPI}/repos/${repository}/commits/${sha}/check-runs?filter=latest&per_page=100`, githubHeaders),
     getJSON(fetchImpl, `${coolify}/applications/${encodeURIComponent(runtimeApplicationUUID)}`, coolifyHeaders),
     getJSON(fetchImpl, `${coolify}/applications/${encodeURIComponent(dashboardApplicationUUID)}`, coolifyHeaders),
-    getJSON(fetchImpl, new URL("/healthz", runtimeHealthURL), {}),
+    getJSON(fetchImpl, new URL("/healthz", runtimeHealthURL), { Authorization: `Bearer ${runtimeToken}` }),
   ]);
   assertPromotionCandidate({
     sha,
@@ -111,9 +112,9 @@ export async function verifyPromotionCandidate({
   });
 }
 
-export async function verifyDeployedEndpoints({ runtimeURL, dashboardURL, sha, fetchImpl = fetch }) {
+export async function verifyDeployedEndpoints({ runtimeURL, dashboardURL, sha, runtimeToken, fetchImpl = fetch }) {
   const [runtimeResponse, dashboardResponse] = await Promise.all([
-    fetchImpl(new URL("/healthz", runtimeURL)),
+    fetchImpl(new URL("/healthz", runtimeURL), { headers: { Authorization: `Bearer ${runtimeToken}` } }),
     fetchImpl(new URL("/healthz", dashboardURL)),
   ]);
   if (!runtimeResponse.ok) throw new Error(`runtime health request failed (${runtimeResponse.status})`);
@@ -134,6 +135,7 @@ async function main() {
       coolifyToken: requiredEnvironment("COOLIFY_API_TOKEN"),
       runtimeApplicationUUID: requiredEnvironment("COOLIFY_RUNTIME_APPLICATION_UUID"),
       dashboardApplicationUUID: requiredEnvironment("COOLIFY_DASHBOARD_APPLICATION_UUID"),
+      runtimeToken: requiredEnvironment("GONVEX_RUNTIME_OPERATOR_TOKEN"),
       runtimeHealthURL: requiredEnvironment("GONVEX_RUNTIME_HEALTH_URL"),
     });
     console.log(`Promotion candidate ${process.env.GONVEX_DEPLOY_SHA} passed CI, ancestry, and dev gates`);
@@ -141,6 +143,7 @@ async function main() {
   }
   if (mode === "deployment") {
     await verifyDeployedEndpoints({
+      runtimeToken: requiredEnvironment("GONVEX_RUNTIME_OPERATOR_TOKEN"),
       runtimeURL: requiredEnvironment("GONVEX_RUNTIME_HEALTH_URL"),
       dashboardURL: requiredEnvironment("GONVEX_DASHBOARD_HEALTH_URL"),
       sha: requiredEnvironment("GONVEX_DEPLOY_SHA"),

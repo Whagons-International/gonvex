@@ -62,6 +62,7 @@ jobs:
           COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
           COOLIFY_RUNTIME_APPLICATION_UUID: ${{ vars.COOLIFY_RUNTIME_APPLICATION_UUID }}
           COOLIFY_DASHBOARD_APPLICATION_UUID: ${{ vars.COOLIFY_DASHBOARD_APPLICATION_UUID }}
+          GONVEX_RUNTIME_OPERATOR_TOKEN: ${{ secrets.GONVEX_RUNTIME_OPERATOR_TOKEN }}
           GONVEX_RUNTIME_HEALTH_URL: ${{ vars.GONVEX_RUNTIME_HEALTH_URL }}
 
   deploy:
@@ -101,6 +102,7 @@ jobs:
         run: node scripts/release-gates.mjs deployment
         env:
           GONVEX_DEPLOY_SHA: ${{ inputs.sha }}
+          GONVEX_RUNTIME_OPERATOR_TOKEN: ${{ secrets.GONVEX_RUNTIME_OPERATOR_TOKEN }}
           GONVEX_RUNTIME_HEALTH_URL: ${{ vars.GONVEX_RUNTIME_HEALTH_URL }}
           GONVEX_DASHBOARD_HEALTH_URL: ${{ vars.GONVEX_DASHBOARD_HEALTH_URL }}
       - name: Atomically record the release branch and immutable tag
