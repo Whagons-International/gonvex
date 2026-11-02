@@ -37,6 +37,8 @@ pub enum ReplicaError {
     DigestNotNegotiated,
     #[error("replica arguments must be an object")]
     InvalidArguments,
+    #[error("targeted replica fetch advanced beyond its resolved principal")]
+    SnapshotAdvanced,
     #[error("replica row is missing key {0:?}")]
     MissingKey(String),
     #[error("replica returned duplicate key {0:?}")]
@@ -356,6 +358,34 @@ impl Runtime {
             .await
             .clone()
             .ok_or(ReplicaError::ModuleMissing)?;
+        // Parent ACL indexes load in their own transactions, before this
+        // snapshot holds a pool admission.
+        let module = if plan.version == Some(2) {
+            Some(
+                self.inner
+                    .modules
+                    .project(&session.identity.project_id)
+                    .await
+                    .ok_or(ReplicaError::ModuleMissing)?,
+            )
+        } else {
+            None
+        };
+        let acl = match &module {
+            Some(module) => {
+                self.inner
+                    .parent_acl
+                    .ensure(
+                        &self.inner.change_feeds,
+                        &control,
+                        session,
+                        &module.visibility,
+                        &[plan],
+                    )
+                    .await?
+            }
+            None => visibility::PreparedParentAcl::default(),
+        };
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
@@ -364,20 +394,15 @@ impl Runtime {
         self.inner
             .visibility_metrics
             .record_visibility_sql_statement();
-        let resolved = if plan.version == Some(2) {
-            let module = self
-                .inner
-                .modules
-                .project(&session.identity.project_id)
-                .await
-                .ok_or(ReplicaError::ModuleMissing)?;
+        let resolved = if let Some(module) = &module {
             visibility::resolve_with_parents(
                 &mut transaction,
                 session,
                 plan,
                 clock.revision,
                 &module.visibility,
-                &self.inner.parent_acl,
+                &acl,
+                &self.inner.visibility_metrics,
             )
             .await?
         } else if definition.max_rows > 0 || definition.max_bytes > 0 {
@@ -432,7 +457,8 @@ impl Runtime {
             changes,
         } = event
         else {
-            self.inner.parent_acl.reset(session);
+            // Parent ACL appliers poison their own indexes on Reset; a
+            // connection never resets shared state another one may hold.
             return Ok(subscriptions
                 .values()
                 .map(|subscription| ServerMessage::ReplicaReset {
@@ -444,29 +470,21 @@ impl Runtime {
         };
         let mut messages = Vec::new();
         let mut entity_changes = BTreeMap::<(String, String), ReplicaChange>::new();
-        if subscriptions
-            .values()
-            .any(|subscription| subscription.visibility.version == Some(2))
-        {
-            // Parent ACL indexes advance once per transaction, before any
-            // connection evaluates an inherited row against them.
-            if let Some(module) = self
-                .inner
-                .modules
-                .project(&session.identity.project_id)
-                .await
-            {
-                self.inner
-                    .parent_acl
-                    .apply(session, &module.visibility, revision, &changes);
-            }
-        }
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
             }
             let mut force_snapshot = false;
-            if subscription.visibility.version == Some(2) {
+            // In-memory mask evaluation needs every bound parent ACL index to
+            // be complete through this revision. A poisoned or foreign-epoch
+            // index cannot be: re-snapshot, which rebinds through `ensure`.
+            let indexes_ready = subscription.visibility.version != Some(2)
+                || visibility::indexes_ready(&subscription.resolved, revision, &database_epoch)
+                    .await;
+            if !indexes_ready {
+                self.inner.visibility_metrics.record_consistency_rebuild();
+                force_snapshot = true;
+            } else if subscription.visibility.version == Some(2) {
                 match self
                     .apply_mask_feed(
                         session,
@@ -495,6 +513,10 @@ impl Runtime {
                     }
                     MaskStep::Rebuild => {
                         self.inner.visibility_metrics.record_principal_rebuild();
+                        force_snapshot = true;
+                    }
+                    MaskStep::Refresh => {
+                        self.inner.visibility_metrics.record_consistency_rebuild();
                         force_snapshot = true;
                     }
                 }
@@ -836,7 +858,7 @@ pub(super) async fn query_rows(
     resolved: &ResolvedVisibility,
     args: &Value,
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
-    query_rows_filtered(transaction, definition, plan, resolved, args, None).await
+    query_rows_filtered(transaction, definition, plan, resolved, args, None, None).await
 }
 
 /// Visible rows of the collection whose `column` is one of `values`: the
@@ -848,12 +870,19 @@ pub(super) async fn query_rows_where(
     resolved: &ResolvedVisibility,
     args: &Value,
     filter: Option<(&str, &BTreeSet<String>)>,
+    revision: u64,
 ) -> Result<Vec<Value>, ReplicaError> {
-    Ok(
-        query_rows_filtered(transaction, definition, plan, resolved, args, filter)
-            .await?
-            .0,
+    Ok(query_rows_filtered(
+        transaction,
+        definition,
+        plan,
+        resolved,
+        args,
+        filter,
+        Some(revision),
     )
+    .await?
+    .0)
 }
 
 async fn query_rows_filtered(
@@ -863,6 +892,7 @@ async fn query_rows_filtered(
     resolved: &ResolvedVisibility,
     args: &Value,
     filter: Option<(&str, &BTreeSet<String>)>,
+    expected_revision: Option<u64>,
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
     let args = args.as_object().ok_or(ReplicaError::InvalidArguments)?;
     let mut parameters = Vec::new();
@@ -925,17 +955,34 @@ async fn query_rows_filtered(
         statement.push_str(&format!(" LIMIT ${}", parameters.len()));
     }
     statement.push_str(") AS _gonvex_visible_row");
+    if expected_revision.is_some() {
+        // A left join keeps the clock even when no visible rows match, without
+        // adding a round trip or allocating the collection as a JSON aggregate.
+        statement = format!("SELECT _rows._value, _clock.revision FROM _gonvex_sync_clock AS _clock LEFT JOIN LATERAL ({statement}) AS _rows(_value) ON TRUE WHERE _clock.singleton = true");
+    }
     let parameters = Parameters::scalars(&parameters).map_err(ReplicaError::InvalidIdentifier)?;
     let statement_key = parameters.statement(&statement);
     let query = parameters.bind(sqlx::query(statement_key.as_ref()));
     // Decode and admit one row at a time. SQL still uses maxRows + 1;
     // a byte-limited source must not first allocate its entire SQL result.
-    let rows = query.fetch(&mut **transaction.transaction()).map(|row| {
-        let row = row?;
-        let raw: String = row.get(0);
-        serde_json::from_str(&raw)
-            .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
-    });
+    let rows = query
+        .fetch(&mut **transaction.transaction())
+        .map(|row| {
+            let row = row?;
+            if let Some(expected) = expected_revision {
+                let revision: i64 = row.try_get(1)?;
+                if revision.max(0) as u64 != expected {
+                    return Err(ReplicaError::SnapshotAdvanced);
+                }
+            }
+            let raw: Option<String> = row.try_get(0)?;
+            raw.map(|raw| {
+                serde_json::from_str(&raw)
+                    .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
+            })
+            .transpose()
+        })
+        .filter_map(|row| std::future::ready(row.transpose()));
     collect_snapshot_rows(rows, definition).await
 }
 
