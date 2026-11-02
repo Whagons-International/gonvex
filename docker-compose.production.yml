@@ -106,7 +106,7 @@ services:
       # a future environment override from turning lock contention into an outage.
       GONVEX_DB_MAX_TOTAL_CONNS: "20"
       GONVEX_DB_MAX_OPEN_CONNS: "2"
-      GONVEX_DB_MAX_IDLE_CONNS: "1"
+      GONVEX_DB_MAX_IDLE_CONNS: "2"
       GONVEX_ENVIRONMENT: production
       GONVEX_REQUIRE_AUTH: "true"
       GONVEX_AGENT_ACTIONS_ENABLED: ${GONVEX_AGENT_ACTIONS_ENABLED:-false}
