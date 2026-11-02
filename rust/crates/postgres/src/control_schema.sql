@@ -282,6 +282,24 @@ CREATE INDEX IF NOT EXISTS gonvex_scheduled_jobs_due_cron
   ON gonvex_scheduled_jobs(run_at,id) WHERE status='pending' AND cron_name<>'';
 CREATE INDEX IF NOT EXISTS gonvex_scheduled_jobs_completed
   ON gonvex_scheduled_jobs(completed_at,id) WHERE status='completed';
+-- Claims take one-shot jobs before crons, then the oldest first. Neither partial
+-- index above serves that order, so without this one every claim scanned the
+-- whole table, completed history included.
+CREATE INDEX IF NOT EXISTS gonvex_scheduled_jobs_claim_order
+  ON gonvex_scheduled_jobs((cron_name<>''),run_at,id) WHERE status='pending';
+-- A cron has at most one pending run per tenant. A scheduler that falls behind
+-- then skips missed runs instead of piling up stale copies. Older duplicates are
+-- dropped first so databases that already accumulated a backlog can upgrade.
+DELETE FROM gonvex_scheduled_jobs WHERE id IN (
+  SELECT id FROM (
+    SELECT id, row_number() OVER (
+      PARTITION BY project_id,tenant_id,cron_name ORDER BY run_at DESC,id DESC
+    ) AS newest
+    FROM gonvex_scheduled_jobs WHERE status='pending' AND cron_name<>''
+  ) ranked WHERE newest>1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS gonvex_scheduled_jobs_one_pending_cron
+  ON gonvex_scheduled_jobs(project_id,tenant_id,cron_name) WHERE status='pending' AND cron_name<>'';
 CREATE TABLE IF NOT EXISTS gonvex_impersonation_grants (
   id text PRIMARY KEY, project_id text NOT NULL REFERENCES gonvex_runtime_projects(id) ON DELETE CASCADE,
   token_hash text NOT NULL UNIQUE, actor_account_id text NOT NULL,
