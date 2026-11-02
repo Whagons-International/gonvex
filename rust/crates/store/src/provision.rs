@@ -920,6 +920,9 @@ pub(crate) fn apply_migrations<'a>(
         let (applied, notices) =
             apply_migrations_locked(&mut connection, &migrations, scope).await?;
         drop(connection);
+        if !applied.is_empty() {
+            crate::rows::clear_result_column_kinds();
+        }
         publish(pools, database_url, notices).await?;
         Ok(applied)
     })

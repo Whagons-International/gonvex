@@ -299,20 +299,32 @@ impl ParentAclRegistry {
             return Ok(index.clone());
         }
         let columns = index_columns(plans, table, key_column);
+        // Declared types keep JSON and BOOLEAN columns typed in the projection.
+        let kinds = gonvex_store::rows::table_columns(&mut **transaction.transaction(), table)
+            .await?
+            .into_iter()
+            .map(|column| (column.name.clone(), column.kind()))
+            .collect::<BTreeMap<_, _>>();
         let projection = columns
             .iter()
             .map(|column| {
                 Ok(format!(
-                    "{}, r.{}",
+                    "{}, {}",
                     sql_text_literal(column),
-                    quote(column)?
+                    gonvex_store::rows::json_value_expr(
+                        &format!("r.{}", quote(column)?),
+                        kinds
+                            .get(column)
+                            .copied()
+                            .unwrap_or(gonvex_store::rows::JsonKind::Text),
+                    )
                 ))
             })
             .collect::<Result<Vec<_>, VisibilityError>>()?
             .join(", ");
         let id_column = row_id_column(plans, table);
         let statement = format!(
-            "SELECT r.{}::text, r.{}::text, jsonb_build_object({projection})::text FROM {} AS r",
+            "SELECT CAST(r.{} AS TEXT), CAST(r.{} AS TEXT), json_object({projection}) FROM {} AS r",
             quote(&id_column)?,
             quote(key_column)?,
             quote(table)?
@@ -1264,8 +1276,7 @@ async fn resolve_member(
         }
         let (statement, parameters) = compile_set(set, &direct)?;
         let parameters = Parameters::scalars(&parameters).map_err(VisibilityError::Invalid)?;
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+        let query = parameters.bind(sqlx::query(&statement));
         let rows = query.fetch_all(&mut **transaction.transaction()).await?;
         let values = rows
             .into_iter()
@@ -1277,8 +1288,7 @@ async fn resolve_member(
                 let (statement, parameters) = compile_set(&join_set, &direct)?;
                 let parameters =
                     Parameters::scalars(&parameters).map_err(VisibilityError::Invalid)?;
-                let statement_key = parameters.statement(&statement);
-                let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+                let query = parameters.bind(sqlx::query(&statement));
                 let rows = query.fetch_all(&mut **transaction.transaction()).await?;
                 sets.insert(
                     format!("{name}{GRANT_JOIN_SUFFIX}"),
@@ -1887,7 +1897,7 @@ fn compile_expression(
                 )?);
             }
             let visible = format!(
-                "EXISTS (SELECT 1 FROM {table} AS {alias} WHERE {alias}.{key}::text = {row_alias}.{column}::text{parent_filters} AND ({parent_predicate}))"
+                "EXISTS (SELECT 1 FROM {table} AS {alias} WHERE {alias}.{key} = {row_alias}.{column}{parent_filters} AND ({parent_predicate}))"
             );
             match &expression.on_missing {
                 None => visible,
@@ -1902,7 +1912,7 @@ fn compile_expression(
                         account_parameter,
                     )?;
                     format!(
-                        "({visible} OR ({row_alias}.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {table} AS {missing} WHERE {missing}.{key}::text = {row_alias}.{column}::text) AND ({fallback})))"
+                        "({visible} OR ({row_alias}.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {table} AS {missing} WHERE {missing}.{key} = {row_alias}.{column}) AND ({fallback})))"
                     )
                 }
             }
@@ -1951,7 +1961,7 @@ fn compile_expression(
                 )?);
             }
             format!(
-                "EXISTS (SELECT 1 FROM {} AS {link} JOIN {} AS {alias} ON {alias}.{}::text = {link}.{}::text WHERE {link}.{}::text = {row_alias}.{}::text{parent_filters} AND ({parent_predicate}))",
+                "EXISTS (SELECT 1 FROM {} AS {link} JOIN {} AS {alias} ON {alias}.{} = {link}.{} WHERE {link}.{} = {row_alias}.{}{parent_filters} AND ({parent_predicate}))",
                 quote(&via.table)?,
                 quote(&expression.table)?,
                 quote(&expression.key)?,
@@ -2003,7 +2013,7 @@ fn compile_expression(
                 ),
             );
             format!(
-                "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = {account} AND _gonvex_member.status = 'active' AND lower(COALESCE(_gonvex_member.permissions ->> {permission}::text, '')) IN ('true', '1'))"
+                "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = {account} AND _gonvex_member.status = 'active' AND lower(COALESCE((SELECT CAST(value AS TEXT) FROM json_each(_gonvex_member.permissions) WHERE key = {permission} LIMIT 1), '')) IN ('true', '1'))"
             )
         }
         "role" => {
@@ -2047,7 +2057,7 @@ fn compile_expression(
             })?;
             let tokens = Value::Array(values.iter().cloned().map(Value::String).collect());
             let parameter = argument(parameters, tokens);
-            format!("{row_alias}.{column}::text = ANY(ARRAY(SELECT jsonb_array_elements_text({parameter}::jsonb)))")
+            format!("{row_alias}.{column} IN (SELECT value FROM json_each({parameter}))")
         }
         "inSet" => {
             let column = quote(&expression.column)?;
@@ -2170,7 +2180,7 @@ fn compile_set_with_parameters(
         .get(select_from)
         .ok_or_else(|| VisibilityError::Invalid(format!("unknown select alias {select_from:?}")))?;
     let mut query = format!(
-        "SELECT DISTINCT {selected_alias}.{}::text FROM {from}",
+        "SELECT DISTINCT CAST({selected_alias}.{} AS TEXT) FROM {from}",
         quote(&set.select)?
     );
     let mut predicates = Vec::new();
@@ -2339,34 +2349,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nullable_negation_matches_postgres_admission() {
-        use sqlx::postgres::PgPoolOptions;
+    async fn nullable_negation_matches_sql_admission() {
+        use gonvex_store::rows::{row_to_object, JsonKind};
+        use sqlx::Connection;
 
-        let Ok(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping nullable visibility test");
-            return;
-        };
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
             .await
             .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::raw_sql(
-            "CREATE TEMP TABLE visibility_negation_values ON COMMIT DROP AS \
-             SELECT row_number() OVER ()::text AS id, s.status, e.enabled \
-             FROM (VALUES (NULL::text), ('blocked'), ('allowed')) AS s(status) \
-             CROSS JOIN (VALUES (NULL::boolean), (false), (true)) AS e(enabled)",
-        )
-        .execute(&mut *tx)
+        let mut tx = connection.begin().await.unwrap();
+        gonvex_store::execute_script(&mut tx, "CREATE TEMP TABLE visibility_negation_values (id TEXT, status TEXT, enabled BOOLEAN); \
+             INSERT INTO visibility_negation_values \
+             SELECT CAST(row_number() OVER () AS TEXT), s.column1, e.column1 \
+             FROM (VALUES (NULL), ('blocked'), ('allowed')) AS s \
+             CROSS JOIN (VALUES (NULL), (0), (1)) AS e")
         .await
         .unwrap();
-        let rows: Vec<Json<Value>> = sqlx::query_scalar(
-            "SELECT to_jsonb(r) FROM visibility_negation_values AS r ORDER BY id",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
+        let rows: Vec<Json<Value>> =
+            sqlx::query("SELECT id, status, enabled FROM visibility_negation_values ORDER BY id")
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    Json(Value::Object(
+                        row_to_object(row, |name| {
+                            (name == "enabled").then_some(JsonKind::Boolean)
+                        })
+                        .unwrap(),
+                    ))
+                })
+                .collect();
+        assert_eq!(rows.len(), 9);
         let status =
             serde_json::json!({"operator":"eq", "column":"status", "value":{"literal":"blocked"}});
         let enabled =
@@ -2417,9 +2430,8 @@ mod tests {
                 "SELECT r.id FROM visibility_negation_values AS r WHERE {predicate} ORDER BY r.id"
             );
             let parameters = Parameters::scalars(&values).unwrap();
-            let key = parameters.statement(&statement);
             let actual: Vec<String> = parameters
-                .bind(sqlx::query(&key))
+                .bind(sqlx::query(&statement))
                 .fetch_all(&mut *tx)
                 .await
                 .unwrap()
@@ -2432,66 +2444,35 @@ mod tests {
             );
         }
         tx.rollback().await.unwrap();
-        pool.close().await;
     }
 
     #[tokio::test]
     async fn developer_visibility_without_membership_preserves_admission() {
-        use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
-        use sqlx::postgres::PgPoolOptions;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use gonvex_store::{begin_transaction, Durability, PoolLimits, PoolRegistry, TenantRoute};
 
-        let Some(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL").ok() else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping visibility contract test");
-            return;
-        };
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("gonvex_developer_visibility_{nonce}");
-        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if database_url.contains('?') { '&' } else { '?' };
-        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let pools = PoolRegistry::new(PoolLimits::default());
-        let control = ControlPlane::connect(&scoped_url, pools.clone(), BTreeMap::new())
-            .await
-            .unwrap();
-        let fixture = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&scoped_url)
-            .await
-            .unwrap();
-        sqlx::raw_sql(
-            r#"
-            CREATE TABLE members(id text PRIMARY KEY, account_id text, status text,
-                                 role text, permissions jsonb);
+        let directory = tempfile::tempdir().unwrap();
+        let database_url = gonvex_store::database_url(&directory.path().join("tenant.db"));
+        let pools = PoolRegistry::with_durability(PoolLimits::default(), Durability::Normal);
+        let fixture = pools.pool(&database_url).await.unwrap();
+        gonvex_store::execute_script(&mut fixture.acquire().await.unwrap(), r#"
+            CREATE TABLE members(id TEXT PRIMARY KEY, account_id TEXT, status TEXT,
+                                 role TEXT, permissions JSON);
             INSERT INTO members VALUES('revoked-member','developer-account','revoked','owner','{}');
-        "#,
-        )
-        .execute(&fixture)
+        "#)
         .await
         .unwrap();
-        let before: Value =
-            sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM members m")
-                .fetch_one(&fixture)
-                .await
-                .unwrap();
+        const MEMBERS_JSON: &str = "SELECT json_group_array(json_object('id',id,'account_id',account_id,'status',status,'role',role,'permissions',json(permissions))) FROM (SELECT * FROM members ORDER BY id)";
+        let before: String = sqlx::query_scalar(MEMBERS_JSON)
+            .fetch_one(&fixture)
+            .await
+            .unwrap();
 
         // Host-owned result of verified grant admission; token/authority checks
-        // are covered by postgres tenant_isolation and runtime auth_contract.
+        // are covered by the store tenant_isolation and runtime auth_contract tests.
         let route = TenantRoute {
             project_id: "project".to_owned(),
             tenant_id: "tenant".to_owned(),
-            database_url: scoped_url,
+            database_url,
         };
         let mut session = TenantSession::anonymous(route.clone());
         session.identity.account.id = "developer-account".to_owned();
@@ -2507,8 +2488,7 @@ mod tests {
         .unwrap();
 
         for materialize in [true, false] {
-            let mut tx = control
-                .begin_tenant_transaction(&route, true)
+            let mut tx = begin_transaction(&pools, &route.database_url, true)
                 .await
                 .unwrap();
             let resolved = if materialize {
@@ -2562,8 +2542,7 @@ mod tests {
                 1 => denied.member.id = "revoked-member".to_owned(),
                 _ => denied.member.account_id = "other-account".to_owned(),
             }
-            let mut tx = control
-                .begin_tenant_transaction(&route, true)
+            let mut tx = begin_transaction(&pools, &route.database_url, true)
                 .await
                 .unwrap();
             assert!(matches!(
@@ -2572,11 +2551,10 @@ mod tests {
             ));
             tx.rollback().await.unwrap();
         }
-        let after: Value =
-            sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM members m")
-                .fetch_one(&fixture)
-                .await
-                .unwrap();
+        let after: String = sqlx::query_scalar(MEMBERS_JSON)
+            .fetch_one(&fixture)
+            .await
+            .unwrap();
         assert_eq!(
             before, after,
             "visibility must not create or reactivate members"
@@ -2586,8 +2564,7 @@ mod tests {
             .execute(&fixture)
             .await
             .unwrap();
-        let mut tx = control
-            .begin_tenant_transaction(&route, true)
+        let mut tx = begin_transaction(&pools, &route.database_url, true)
             .await
             .unwrap();
         let resolved = resolve(&mut tx, &session, &plan, 8).await.unwrap();
@@ -2613,8 +2590,7 @@ mod tests {
             "table":"members", "key":"id", "where":{"operator":"public"}
         }))
         .unwrap();
-        let mut tx = control
-            .begin_tenant_transaction(&route, false)
+        let mut tx = begin_transaction(&pools, &route.database_url, false)
             .await
             .unwrap();
         let ordinary = resolve(&mut tx, &session, &public, 8).await.unwrap();
@@ -2626,13 +2602,7 @@ mod tests {
             .unwrap();
         assert_read_visibility(&mut tx, &public, &ordinary, false).await;
         tx.rollback().await.unwrap();
-        fixture.close().await;
         pools.close().await;
-        sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
     }
 
     async fn assert_sql_visibility(
@@ -2645,8 +2615,7 @@ mod tests {
         let predicate = compile_predicate(plan, resolved, "r", &mut parameters).unwrap();
         let statement = format!("SELECT r.id FROM members AS r WHERE {predicate} ORDER BY r.id");
         let parameters = Parameters::scalars(&parameters).unwrap();
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+        let query = parameters.bind(sqlx::query(&statement));
         let rows = query.fetch_all(&mut **tx.transaction()).await.unwrap();
         assert_eq!(
             rows.iter()
@@ -3171,7 +3140,7 @@ mod tests {
         assert_eq!(sql.matches("_gonvex_member.account_id = $2").count(), 4);
         assert_eq!(sql.matches("_gonvex_member.status = 'active'").count(), 4);
         assert!(sql.contains("_gonvex_member.role = $3"));
-        assert!(sql.contains("permissions ->> $5::text"));
+        assert!(sql.contains("json_each(_gonvex_member.permissions) WHERE key = $5"));
     }
 }
 
@@ -3383,7 +3352,7 @@ mod mask_tests {
         assert_eq!(join.constraints.len(), 1);
         assert_eq!(join.constraints[0].context, "member.id");
         let (sql, parameters) = compile_set(&join, &member("alice", &[]).direct).unwrap();
-        assert!(sql.starts_with("SELECT DISTINCT v0.\"teamId\"::text FROM \"memberTeams\" AS v0"));
+        assert!(sql.starts_with("SELECT DISTINCT CAST(v0.\"teamId\" AS TEXT) FROM \"memberTeams\" AS v0"));
         assert_eq!(parameters, vec![json!("alice")]);
     }
 
@@ -3842,7 +3811,7 @@ mod mask_tests {
         let mut parameters = Vec::new();
         let sql = compile_predicate(&documents, &alice, "r", &mut parameters).unwrap();
         assert!(sql.contains("FROM \"documentAssociations\" AS _gonvex_via_"));
-        assert!(sql.contains(".\"documentId\"::text = r.\"_id\"::text"));
+        assert!(sql.contains(".\"documentId\" = r.\"_id\""));
     }
 
     #[test]
@@ -3915,10 +3884,10 @@ mod mask_tests {
         let mut parameters = Vec::new();
         let sql = compile_predicate(&child, &alice, "r", &mut parameters).unwrap();
         assert!(sql.contains("EXISTS (SELECT 1 FROM \"tasks\" AS _gonvex_parent_"));
-        assert!(sql.contains("::text = r.\"taskId\"::text"));
+        assert!(sql.contains(" = r.\"taskId\""));
         assert!(sql.contains("r.\"taskId\" IS NOT NULL AND NOT EXISTS"));
         assert!(
-            sql.contains("= ANY(ARRAY(SELECT jsonb_array_elements_text("),
+            sql.contains(" IN (SELECT value FROM json_each("),
             "parent tokens bind as arrays"
         );
         assert!(

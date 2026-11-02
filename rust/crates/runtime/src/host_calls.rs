@@ -9,28 +9,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine as _;
-use bigdecimal::BigDecimal;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Utc};
 use gonvex_module_host::protocol::HostCallFrame;
+use gonvex_store::rows::{self, JsonKind};
 use gonvex_store::TenantTransaction;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgRow;
-use sqlx::types::Json;
-#[cfg(test)]
-use sqlx::{postgres::PgArguments, query::Query, Postgres};
-use sqlx::{Column, Either, Executor, Row, Statement, TypeInfo, ValueRef};
+use sqlx::sqlite::SqliteRow;
+use sqlx::{Column, Row, TypeInfo};
 use uuid::Uuid;
 
 use crate::error_class::TransientFault;
 use crate::module_host::HostCallHandler;
-use crate::sql_admission::require_invocation_statement;
-use gonvex_store::sql_lexer as sql_statement_lexer;
+use crate::sql_admission::{admit_statement, AdmittedStatement};
+use crate::sql_parameters::{Parameter, Parameters};
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
+const ABORTED: &str = "current transaction is aborted, commands ignored until end of transaction block";
 
 // Same seed and UUID layout as module-sdk reducerRowId.
 fn intent_deferred_id(
@@ -60,8 +56,18 @@ fn intent_deferred_id(
 #[derive(Clone, Debug)]
 struct TableKey {
     column: String,
+    /// Declared SQLite type of the key column.
     data_type: Option<String>,
     database_generated: bool,
+}
+
+impl TableKey {
+    /// Gonvex allocates omitted keys only for text-like key columns.
+    fn text_key(&self) -> bool {
+        self.data_type.as_deref().is_some_and(|declared| {
+            JsonKind::from_declared(declared) == JsonKind::Text && !declared.trim().is_empty()
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +81,7 @@ pub struct DatabaseHostCalls {
     transaction: Option<TenantTransaction>,
     capability: DatabaseCapability,
     schema: Value,
-    table_keys: BTreeMap<String, TableKey>,
+    tables: BTreeMap<String, Arc<TableCatalog>>,
     schedulable_functions: BTreeSet<String>,
     actor_account_id: String,
     actor_email: String,
@@ -84,6 +90,10 @@ pub struct DatabaseHostCalls {
     intent_command: String,
     deferred_ordinals: BTreeMap<String, u64>,
     fault: Arc<TransientFault>,
+    /// Set by a failed SQL statement. SQLite rolls back only the failing
+    /// statement; like PostgreSQL, the invocation treats the transaction as
+    /// aborted until `ROLLBACK TO` a savepoint, and never commits it.
+    aborted: bool,
 }
 
 impl DatabaseHostCalls {
@@ -93,7 +103,7 @@ impl DatabaseHostCalls {
             transaction: Some(transaction),
             capability,
             schema: Value::Null,
-            table_keys: BTreeMap::new(),
+            tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
             actor_account_id: String::new(),
             actor_email: String::new(),
@@ -102,6 +112,7 @@ impl DatabaseHostCalls {
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
             fault: Arc::default(),
+            aborted: false,
         }
     }
 
@@ -168,21 +179,35 @@ impl DatabaseHostCalls {
         self
     }
 
-    pub async fn finish(mut self, success: bool) -> Result<(), String> {
+    pub async fn finish(self, success: bool) -> Result<(), String> {
+        self.finish_with_revision(success).await.map(|_| ())
+    }
+
+    /// Commits (Reducer success) or rolls back, returning the revision the
+    /// commit published, if it changed tracked rows.
+    pub async fn finish_with_revision(mut self, success: bool) -> Result<Option<u64>, String> {
         let transaction = self
             .transaction
             .take()
             .ok_or_else(|| "the invocation transaction is already closed".to_owned())?;
         let fault = self.fault.clone();
+        if self.capability == DatabaseCapability::Reducer && success && self.aborted {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| fault.database(error))?;
+            return Err(ABORTED.to_owned());
+        }
         if self.capability == DatabaseCapability::Reducer && success {
             transaction
-                .commit()
+                .commit_with_revision()
                 .await
                 .map_err(|error| fault.database(error))
         } else {
             transaction
                 .rollback()
                 .await
+                .map(|_| None)
                 .map_err(|error| fault.database(error))
         }
     }
@@ -197,6 +222,26 @@ impl DatabaseHostCalls {
         self.transaction
             .as_mut()
             .expect("invocation transaction stays open until finish")
+    }
+
+    /// Refuses further SQL after a failed statement (see `aborted`).
+    fn require_open(&self) -> Result<(), String> {
+        if self.aborted {
+            Err(ABORTED.to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn sql_failure(&mut self, error: sqlx::Error) -> String {
+        let message = self.fault.sql(error);
+        self.aborted = true;
+        // The store refuses to commit a transaction marked failed, so a
+        // caught SQL error can never become a partial commit.
+        if let Some(transaction) = self.transaction.as_mut() {
+            transaction.mark_failed(message.clone());
+        }
+        message
     }
 
     fn require_write(&self) -> Result<(), String> {
@@ -260,6 +305,7 @@ impl HostCallHandler for DatabaseHostCalls {
             }
             HostCallFrame::ActionEnqueue { function, args } => {
                 self.require_write()?;
+                self.require_open()?;
                 let function = function.trim();
                 if function.is_empty() {
                     return Err("actions.enqueue requires an Action path".to_owned());
@@ -338,6 +384,7 @@ impl DatabaseHostCalls {
         run_at: DateTime<Utc>,
         coalesce: bool,
     ) -> Result<Value, String> {
+        self.require_open()?;
         let function = function.trim();
         if !self.schedulable_functions.contains(function) {
             return Err(format!(
@@ -372,59 +419,55 @@ impl DatabaseHostCalls {
     async fn query(&mut self, statement: &str, parameters: Value) -> Result<Value, String> {
         let admitted = require_single_statement(statement)?;
         if self.capability == DatabaseCapability::Query {
-            require_read_head(admitted.first_word.unwrap_or_default())?;
+            require_read_head(&admitted.first_word)?;
+        }
+        // Admission refuses a bare ROLLBACK, so this is ROLLBACK TO.
+        let recovers = admitted.first_word == "rollback";
+        if !recovers {
+            self.require_open()?;
         }
         let parameters = match parameters {
             Value::Null => Vec::new(),
             Value::Array(values) => values,
             _ => return Err("query parameters must be an array".to_owned()),
         };
-        let parameter_types = if parameters.iter().any(Value::is_array) {
-            let fault = self.fault.clone();
-            let description_key = crate::sql_statement_key::description(statement.trim());
-            // Only parameter types are needed. describe() additionally infers
-            // output nullability with catalog queries and EXPLAIN EXECUTE on
-            // every call, even for an already cached statement.
-            let description = (&mut **self.transaction()?.transaction())
-                .prepare(description_key.as_str())
-                .await
-                .map_err(|error| {
-                    format!(
-                        "could not resolve PostgreSQL parameter types: {}",
-                        fault.sql(error)
-                    )
-                })?;
-            match description.parameters() {
-                Some(Either::Left(types)) => types
-                    .iter()
-                    .map(|type_info| type_info.name().to_owned())
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        };
+        // SQLite binds by value: arrays and objects arrive as JSON text that
+        // module SQL reads with json_each($n) / json_extract($n, …).
         let parameters = parameters
             .iter()
             .enumerate()
             .map(|(index, value)| {
-                crate::sql_parameters::Parameter::for_query(
-                    value,
-                    parameter_types.get(index).map(String::as_str),
-                )
-                .map_err(|error| format!("parameter ${}: {error}", index + 1))
+                Parameter::scalar(value).map_err(|error| format!("parameter ${}: {error}", index + 1))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let parameters = crate::sql_parameters::Parameters::new(parameters);
-        let statement_key = parameters.statement(statement.trim());
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
-        let fault = self.fault.clone();
+        // `INSERT/UPDATE/DELETE … RETURNING` columns carry no reliable declared
+        // type, so decode them with the target table's pragma_table_info kinds.
+        let target = match write_target(statement) {
+            Some(table) if quote_identifier(&table).is_ok() => {
+                Some(self.catalog_table(&table).await?)
+            }
+            _ => None,
+        };
+        let query = Parameters::new(parameters).bind(sqlx::query(statement.trim()));
         let transaction = self.transaction()?.transaction();
-        let rows = query
-            .fetch_all(&mut **transaction)
+        // Exact declared types of the result columns (sqlx reports `JSON` as
+        // NULL). A statement that fails to prepare fails again below with the
+        // real error, so a describe failure only means "unknown".
+        let kinds = rows::result_column_kinds(&mut **transaction, statement.trim())
             .await
-            .map_err(|error| fault.sql(error))?;
-        rows_to_json(rows)
+            .ok();
+        let rows = query.fetch_all(&mut **transaction).await;
+        let rows = rows.map_err(|error| self.sql_failure(error))?;
+        if recovers {
+            self.aborted = false;
+            if let Some(transaction) = self.transaction.as_mut() {
+                transaction.clear_failure();
+            }
+        }
+        rows.iter()
+            .map(|row| query_row_to_json(row, target.as_deref(), kinds.as_deref().map(Vec::as_slice)))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array)
     }
 
     async fn insert(
@@ -433,25 +476,22 @@ impl DatabaseHostCalls {
         row: Value,
         generated_id: Option<String>,
     ) -> Result<Value, String> {
+        self.require_open()?;
         let row = object(row, "row")?;
         if row.is_empty() {
             return Err("an insert requires at least one column".to_owned());
         }
         let mut values: BTreeMap<String, Value> = row.into_iter().collect();
-        let key = self.catalog_table_key(table).await?;
+        let catalog = self.catalog_table(table).await?;
+        let key = catalog.key.clone();
         if !values.contains_key(&key.column) {
-            if let Some(id) = generated_id.filter(|_| {
-                matches!(
-                    key.data_type.as_deref(),
-                    Some("text" | "character varying" | "character" | "uuid")
-                )
-            }) {
+            if let Some(id) = generated_id.filter(|_| key.text_key()) {
                 values.insert(key.column.clone(), Value::String(id));
             }
         }
         if !values.contains_key(&key.column) && !key.database_generated {
             match key.data_type.as_deref() {
-                Some("text" | "character varying" | "character") => {
+                Some(_) if key.text_key() => {
                     values.insert(
                         key.column.clone(),
                         Value::String(Uuid::new_v4().to_string()),
@@ -466,34 +506,28 @@ impl DatabaseHostCalls {
                 None => {}
             }
         }
-        let table = quote_identifier(table)?;
+        let quoted_table = quote_identifier(table)?;
         let columns = values
             .keys()
             .map(|column| quote_identifier(column))
             .collect::<Result<Vec<_>, _>>()?;
-        let select_columns = columns
-            .iter()
-            .map(|column| format!("input.{column}"))
+        let placeholders = (1..=values.len())
+            .map(|index| format!("${index}"))
             .collect::<Vec<_>>();
         let statement = format!(
-            "INSERT INTO {table} ({}) SELECT {} FROM jsonb_populate_record(NULL::{table}, $1::jsonb) AS input RETURNING *",
+            "INSERT INTO {quoted_table} ({}) VALUES ({}) RETURNING *",
             columns.join(", "),
-            select_columns.join(", ")
+            placeholders.join(", ")
         );
-        let payload = Value::Object(values.into_iter().collect());
-        let parameters =
-            crate::sql_parameters::Parameters::new(vec![crate::sql_parameters::Parameter::Jsonb(
-                payload,
-            )]);
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
-        let fault = self.fault.clone();
+        let parameters = values
+            .iter()
+            .map(|(column, value)| catalog.parameter(column, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let query = Parameters::new(parameters).bind(sqlx::query(&statement));
         let transaction = self.transaction()?.transaction();
-        let row = query
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|error| fault.sql(error))?;
-        row.map(row_to_json)
+        let row = query.fetch_optional(&mut **transaction).await;
+        let row = row.map_err(|error| self.sql_failure(error))?;
+        row.map(|row| catalog.row_to_json(&row))
             .transpose()
             .map(|row| row.unwrap_or(Value::Null))
     }
@@ -505,60 +539,54 @@ impl DatabaseHostCalls {
         id: Value,
         patch: Value,
     ) -> Result<Value, String> {
+        self.require_open()?;
         let key = self.resolve_table_key(table, key).await?;
-        let table = quote_identifier(table)?;
         require_row_id(&id)?;
         let values: BTreeMap<String, Value> = object(patch, "patch")?.into_iter().collect();
         if values.is_empty() {
             return Err("an update requires at least one column".to_owned());
         }
+        let catalog = self.catalog_table(table).await?;
+        let quoted_table = quote_identifier(table)?;
         let assignments = values
             .keys()
-            .map(|column| {
-                let column = quote_identifier(column)?;
-                Ok(format!("{column} = input.{column}"))
-            })
+            .enumerate()
+            .map(|(index, column)| Ok(format!("{} = ${}", quote_identifier(column)?, index + 1)))
             .collect::<Result<Vec<_>, String>>()?;
         let statement = format!(
-            "UPDATE {table} AS target SET {} FROM jsonb_populate_record(NULL::{table}, $1::jsonb) AS input WHERE target.{key} = $2 RETURNING target.*",
-            assignments.join(", ")
+            "UPDATE {quoted_table} SET {} WHERE {key} = ${} RETURNING *",
+            assignments.join(", "),
+            values.len() + 1
         );
-        let payload = Value::Object(values.into_iter().collect());
-        let parameters = crate::sql_parameters::Parameters::new(vec![
-            crate::sql_parameters::Parameter::Jsonb(payload),
-            crate::sql_parameters::Parameter::scalar(&id)?,
-        ]);
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
-        let fault = self.fault.clone();
+        let mut parameters = values
+            .iter()
+            .map(|(column, value)| catalog.parameter(column, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        parameters.push(Parameter::scalar(&id)?);
+        let query = Parameters::new(parameters).bind(sqlx::query(&statement));
         let transaction = self.transaction()?.transaction();
-        let row = query
-            .fetch_optional(&mut **transaction)
-            .await
-            .map_err(|error| fault.sql(error))?;
-        row.map(row_to_json)
+        let row = query.fetch_optional(&mut **transaction).await;
+        let row = row.map_err(|error| self.sql_failure(error))?;
+        row.map(|row| catalog.row_to_json(&row))
             .transpose()
             .map(|row| row.unwrap_or(Value::Null))
     }
 
     async fn delete(&mut self, table: &str, key: &str, id: Value) -> Result<Value, String> {
+        self.require_open()?;
         let key = self.resolve_table_key(table, key).await?;
         let table = quote_identifier(table)?;
         require_row_id(&id)?;
         let statement = format!("DELETE FROM {table} WHERE {key} = $1");
-        let parameters = crate::sql_parameters::Parameters::scalars(std::iter::once(&id))?;
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
-        let fault = self.fault.clone();
+        let query = Parameters::scalars(std::iter::once(&id))?.bind(sqlx::query(&statement));
         let transaction = self.transaction()?.transaction();
-        let result = query
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| fault.sql(error))?;
+        let result = query.execute(&mut **transaction).await;
+        let result = result.map_err(|error| self.sql_failure(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
     }
 
     async fn delete_many(&mut self, table: &str, key: &str, ids: Value) -> Result<Value, String> {
+        self.require_open()?;
         let ids = ids
             .as_array()
             .ok_or_else(|| "deleteMany ids must be an array".to_owned())?;
@@ -573,20 +601,16 @@ impl DatabaseHostCalls {
         }
         let key = self.resolve_table_key(table, key).await?;
         let table = quote_identifier(table)?;
-        let parameters = (1..=ids.len())
-            .map(|index| format!("${index}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let statement = format!("DELETE FROM {table} WHERE {key} IN ({parameters})");
-        let parameters = crate::sql_parameters::Parameters::scalars(ids)?;
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
-        let fault = self.fault.clone();
+        // One JSON array parameter instead of up to 10,000 placeholders
+        // (SQLite's default variable limit is 32,766).
+        let statement = format!(
+            "DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))"
+        );
+        let query = Parameters::new(vec![Parameter::Json(Value::Array(ids.clone()).to_string())])
+            .bind(sqlx::query(&statement));
         let transaction = self.transaction()?.transaction();
-        let result = query
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| fault.sql(error))?;
+        let result = query.execute(&mut **transaction).await;
+        let result = result.map_err(|error| self.sql_failure(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
     }
 
@@ -608,53 +632,57 @@ impl DatabaseHostCalls {
         if let Some(declared) = declared {
             return quote_identifier(&declared);
         }
-        if let Some(cached) = self.table_keys.get(table) {
-            return quote_identifier(&cached.column);
+        if let Some(cached) = self.tables.get(table) {
+            return quote_identifier(&cached.key.column);
         }
 
-        let key = self.catalog_table_key(table).await?;
-        quote_identifier(&key.column)
+        let catalog = self.catalog_table(table).await?;
+        quote_identifier(&catalog.key.column)
     }
 
-    async fn catalog_table_key(&mut self, table: &str) -> Result<TableKey, String> {
-        if let Some(cached) = self.table_keys.get(table) {
+    /// Columns and primary key of `table`, read once per invocation
+    /// transaction from `pragma_table_info`.
+    async fn catalog_table(&mut self, table: &str) -> Result<Arc<TableCatalog>, String> {
+        if let Some(cached) = self.tables.get(table) {
             return Ok(cached.clone());
         }
-
         let (schema_name, table_name) = table_catalog_parts(table)?;
-        let statement = r#"
-            SELECT
-              attribute.attname,
-              format_type(attribute.atttypid, attribute.atttypmod),
-              (attribute.attidentity <> '' OR attribute.atthasdef)
-            FROM pg_catalog.pg_index AS index
-            JOIN pg_catalog.pg_class AS relation ON relation.oid = index.indrelid
-            JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
-            JOIN unnest(index.indkey) WITH ORDINALITY AS key(attnum, position) ON TRUE
-            JOIN pg_catalog.pg_attribute AS attribute
-              ON attribute.attrelid = relation.oid AND attribute.attnum = key.attnum
-            WHERE namespace.nspname = COALESCE($1, current_schema())
-              AND relation.relname = $2
-              AND index.indisprimary
-            ORDER BY key.position
-        "#;
-        let fault = self.fault.clone();
-        let keys = sqlx::query_as::<_, (String, String, bool)>(statement)
-            .bind(schema_name)
-            .bind(table_name)
-            .fetch_all(&mut **self.transaction()?.transaction())
-            .await
-            .map_err(|error| fault.sql(error))?;
+        self.require_open()?;
+        let rows = sqlx::query(
+            r#"SELECT name, type, pk, dflt_value IS NOT NULL AS has_default
+               FROM pragma_table_info($1, COALESCE($2, 'main'))
+               ORDER BY cid"#,
+        )
+        .bind(table_name)
+        .bind(schema_name)
+        .fetch_all(&mut **self.transaction()?.transaction())
+        .await;
+        let rows = rows.map_err(|error| self.sql_failure(error))?;
+        let mut columns = BTreeMap::new();
+        let mut keys = Vec::new();
+        for row in &rows {
+            let name: String = row.try_get("name").map_err(db_decode)?;
+            let declared: String = row.try_get("type").map_err(db_decode)?;
+            let position: i64 = row.try_get("pk").map_err(db_decode)?;
+            let has_default: bool = row.try_get("has_default").map_err(db_decode)?;
+            columns.insert(name.clone(), JsonKind::from_declared(&declared));
+            if position > 0 {
+                keys.push((position, name, declared, has_default));
+            }
+        }
+        keys.sort();
         let key = match keys.as_slice() {
             [] => TableKey {
                 column: DEFAULT_KEY.to_owned(),
                 data_type: None,
                 database_generated: true,
             },
-            [(column, data_type, database_generated)] => TableKey {
+            [(_, column, declared, has_default)] => TableKey {
                 column: column.clone(),
-                data_type: Some(data_type.clone()),
-                database_generated: *database_generated,
+                data_type: Some(declared.clone()),
+                // INTEGER PRIMARY KEY aliases the rowid, which SQLite assigns.
+                database_generated: *has_default
+                    || declared.trim().eq_ignore_ascii_case("INTEGER"),
             },
             _ => {
                 return Err(format!(
@@ -662,133 +690,124 @@ impl DatabaseHostCalls {
                 ));
             }
         };
-        self.table_keys.insert(table.to_owned(), key.clone());
-        Ok(key)
+        let catalog = Arc::new(TableCatalog { key, columns });
+        self.tables.insert(table.to_owned(), catalog.clone());
+        Ok(catalog)
     }
 }
 
-#[cfg(test)]
-fn bind_query_value<'query>(
-    query: Query<'query, Postgres, PgArguments>,
-    value: &Value,
-    postgres_type: Option<&str>,
-) -> Result<Query<'query, Postgres, PgArguments>, String> {
-    Ok(crate::sql_parameters::Parameter::for_query(value, postgres_type)?.bind(query))
+/// Declared column kinds and primary key of one application table.
+#[derive(Debug)]
+struct TableCatalog {
+    key: TableKey,
+    columns: BTreeMap<String, JsonKind>,
 }
 
-fn rows_to_json(rows: Vec<PgRow>) -> Result<Value, String> {
-    rows.into_iter()
-        .map(row_to_json)
-        .collect::<Result<Vec<_>, _>>()
-        .map(Value::Array)
+impl TableCatalog {
+    fn parameter(&self, column: &str, value: &Value) -> Result<Parameter, String> {
+        match self.columns.get(column) {
+            Some(kind) => Parameter::column(value, *kind),
+            None => Parameter::scalar(value),
+        }
+        .map_err(|error| format!("column {column:?}: {error}"))
+    }
+
+    fn row_to_json(&self, row: &SqliteRow) -> Result<Value, String> {
+        rows::row_to_object(row, |name| self.columns.get(name).copied())
+            .map(Value::Object)
+            .map_err(|error| error.to_string())
+    }
 }
 
-fn row_to_json(row: PgRow) -> Result<Value, String> {
+/// Decodes a module query row by each column's declared type: the write
+/// target's catalog for `RETURNING`, else the statement's exact declared
+/// result types (`sqlite3_column_decltype`). Only expression columns, which
+/// have no declared type, fall back to the storage class, where TEXT that is
+/// unambiguously a JSON value (object, array, quoted string, `true`/`false`)
+/// is decoded as JSON because SQL builds JSON there (`json_object`,
+/// `json_group_array`). Columns declared TEXT are never reinterpreted.
+fn query_row_to_json(
+    row: &SqliteRow,
+    target: Option<&TableCatalog>,
+    kinds: Option<&[Option<JsonKind>]>,
+) -> Result<Value, String> {
     let mut result = Map::new();
     for (index, column) in row.columns().iter().enumerate() {
-        result.insert(
-            column.name().to_owned(),
-            cell_to_json(&row, index, column.type_info().name())?,
-        );
+        let declared = column.type_info().name();
+        let raw = row.try_get_raw(index).map_err(db_decode)?;
+        let known = target
+            .and_then(|table| table.columns.get(column.name()).copied())
+            .or_else(|| kinds.and_then(|kinds| kinds.get(index).copied().flatten()));
+        let value = if let Some(kind) = known {
+            rows::decode_value(raw, kind).map_err(|error| error.to_string())?
+        } else if declared.eq_ignore_ascii_case("NULL") {
+            match rows::decode_value(raw, JsonKind::Text).map_err(|error| error.to_string())? {
+                Value::String(text) if json_shaped(&text) => {
+                    serde_json::from_str(&text).unwrap_or(Value::String(text))
+                }
+                value => value,
+            }
+        } else {
+            rows::decode_value(raw, JsonKind::from_declared(declared))
+                .map_err(|error| error.to_string())?
+        };
+        result.insert(column.name().to_owned(), value);
     }
     Ok(Value::Object(result))
 }
 
-fn cell_to_json(row: &PgRow, index: usize, type_name: &str) -> Result<Value, String> {
-    if row
-        .try_get_raw(index)
-        .map_err(|error| error.to_string())?
-        .is_null()
-    {
-        return Ok(Value::Null);
+/// The table a single-table `INSERT INTO t`, `UPDATE t` or `DELETE FROM t`
+/// statement writes, when its head is that simple (leading comments allowed).
+fn write_target(statement: &str) -> Option<String> {
+    let mut rest = statement.trim_start_matches(|ch: char| ch.is_whitespace() || ch == ';');
+    loop {
+        if let Some(comment) = rest.strip_prefix("--") {
+            rest = comment.split_once('\n').map_or("", |(_, tail)| tail);
+        } else if let Some(comment) = rest.strip_prefix("/*") {
+            rest = comment.split_once("*/")?.1;
+        } else {
+            break;
+        }
+        rest = rest.trim_start();
     }
-    let value = match type_name {
-        "BOOL" => Value::Bool(row.try_get::<bool, _>(index).map_err(db_decode)?),
-        "INT2" => Value::from(row.try_get::<i16, _>(index).map_err(db_decode)?),
-        "INT4" => Value::from(row.try_get::<i32, _>(index).map_err(db_decode)?),
-        "INT8" => Value::from(row.try_get::<i64, _>(index).map_err(db_decode)?),
-        "FLOAT4" => json_float(row.try_get::<f32, _>(index).map_err(db_decode)? as f64)?,
-        "FLOAT8" => json_float(row.try_get::<f64, _>(index).map_err(db_decode)?)?,
-        "NUMERIC" => Value::String(
-            row.try_get::<BigDecimal, _>(index)
-                .map_err(db_decode)?
-                .to_string(),
-        ),
-        "JSON" | "JSONB" => row.try_get::<Json<Value>, _>(index).map_err(db_decode)?.0,
-        "UUID" => Value::String(
-            row.try_get::<Uuid, _>(index)
-                .map_err(db_decode)?
-                .to_string(),
-        ),
-        "TIMESTAMPTZ" => Value::String(
-            row.try_get::<DateTime<Utc>, _>(index)
-                .map_err(db_decode)?
-                .to_rfc3339(),
-        ),
-        "TIMESTAMP" => Value::String(
-            row.try_get::<NaiveDateTime, _>(index)
-                .map_err(db_decode)?
-                .format("%Y-%m-%dT%H:%M:%S%.f")
-                .to_string(),
-        ),
-        "DATE" => Value::String(
-            row.try_get::<NaiveDate, _>(index)
-                .map_err(db_decode)?
-                .to_string(),
-        ),
-        "TIME" => Value::String(
-            row.try_get::<NaiveTime, _>(index)
-                .map_err(db_decode)?
-                .to_string(),
-        ),
-        "BYTEA" => {
-            Value::String(STANDARD.encode(row.try_get::<Vec<u8>, _>(index).map_err(db_decode)?))
+    let mut words = rest.split_whitespace();
+    let first = words.next()?.to_ascii_lowercase();
+    let mut target = match first.as_str() {
+        "insert" | "delete" => {
+            let into = words.next()?.to_ascii_lowercase();
+            if into != if first == "insert" { "into" } else { "from" } {
+                return None;
+            }
+            words.next()?
         }
-        "_TEXT" | "_VARCHAR" | "_BPCHAR" | "TEXT[]" | "VARCHAR[]" | "CHAR[]" => {
-            serde_json::to_value(row.try_get::<Vec<String>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        "_BOOL" | "BOOL[]" | "BOOLEAN[]" => {
-            serde_json::to_value(row.try_get::<Vec<bool>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        "_INT2" | "INT2[]" | "SMALLINT[]" => {
-            serde_json::to_value(row.try_get::<Vec<i16>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        "_INT4" | "INT4[]" | "INTEGER[]" => {
-            serde_json::to_value(row.try_get::<Vec<i32>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        "_INT8" | "INT8[]" | "BIGINT[]" => {
-            serde_json::to_value(row.try_get::<Vec<i64>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        "_FLOAT4" | "FLOAT4[]" | "REAL[]" => {
-            serde_json::to_value(row.try_get::<Vec<f32>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        "_FLOAT8" | "FLOAT8[]" | "DOUBLE PRECISION[]" => {
-            serde_json::to_value(row.try_get::<Vec<f64>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        "_UUID" | "UUID[]" => {
-            serde_json::to_value(row.try_get::<Vec<Uuid>, _>(index).map_err(db_decode)?)
-                .map_err(|error| error.to_string())?
-        }
-        _ => Value::String(row.try_get::<String, _>(index).map_err(db_decode)?),
+        "update" => words.next()?,
+        _ => return None,
     };
-    Ok(value)
+    // Strip a trailing column list or alias punctuation: `"tasks"(` → tasks.
+    if let Some(index) = target.find('(') {
+        target = &target[..index];
+    }
+    let unquoted = target
+        .split('.')
+        .map(|part| {
+            part.strip_prefix('"')
+                .and_then(|part| part.strip_suffix('"'))
+                .unwrap_or(part)
+        })
+        .collect::<Vec<_>>()
+        .join(".");
+    (!unquoted.is_empty()).then_some(unquoted)
+}
+
+fn json_shaped(text: &str) -> bool {
+    let trimmed = text.trim();
+    matches!(trimmed.as_bytes().first(), Some(b'{' | b'[' | b'"'))
+        || trimmed == "true"
+        || trimmed == "false"
 }
 
 fn db_decode(error: sqlx::Error) -> String {
     error.to_string()
-}
-
-fn json_float(value: f64) -> Result<Value, String> {
-    serde_json::Number::from_f64(value)
-        .map(Value::Number)
-        .ok_or_else(|| "PostgreSQL returned a non-finite float".to_owned())
 }
 
 fn object(value: Value, name: &str) -> Result<Map<String, Value>, String> {
@@ -876,7 +895,7 @@ fn valid_identifier(name: &str) -> bool {
 }
 
 fn require_read_head(head: &str) -> Result<(), String> {
-    if ["select", "with", "values", "table", "explain", "show"]
+    if ["select", "with", "values", "explain"]
         .iter()
         .any(|keyword| head.eq_ignore_ascii_case(keyword))
     {
@@ -892,25 +911,11 @@ fn require_read_head(head: &str) -> Result<(), String> {
 #[cfg(test)]
 fn require_read_statement(statement: &str) -> Result<(), String> {
     let admitted = require_single_statement(statement)?;
-    require_read_head(admitted.first_word.unwrap_or_default())
+    require_read_head(&admitted.first_word)
 }
 
-fn require_single_statement(
-    statement: &str,
-) -> Result<sql_statement_lexer::StatementInfo<'_>, String> {
-    let statement = statement.trim();
-    if statement.is_empty() {
-        return Err("a database statement is required".to_owned());
-    }
-    require_invocation_statement(statement)?;
-    let admitted = sql_statement_lexer::analyze(statement).map_err(|error| match error {
-        sql_statement_lexer::LexError::Nul => "a database statement may not contain NUL".to_owned(),
-        _ => "a database statement contains an unterminated literal or comment".to_owned(),
-    })?;
-    if admitted.count > 1 {
-        return Err("a database statement may not contain more than one statement".to_owned());
-    }
-    Ok(admitted)
+fn require_single_statement(statement: &str) -> Result<AdmittedStatement, String> {
+    admit_statement(statement)
 }
 
 #[cfg(test)]
@@ -931,41 +936,40 @@ mod tests {
         );
     }
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry};
-    use sqlx::postgres::PgPoolOptions;
+    use gonvex_store::{Durability, PoolLimits, PoolRegistry};
 
-    fn scoped_url(base: &str, schema: &str) -> String {
-        let separator = if base.contains('?') { '&' } else { '?' };
-        format!("{base}{separator}options=-csearch_path%3D{schema}")
+    /// A file-backed SQLite database in a temporary directory.
+    pub(super) struct TestDatabase {
+        _directory: tempfile::TempDir,
+        pub(super) pools: PoolRegistry,
+        pub(super) url: String,
     }
 
-    #[test]
-    fn query_arrays_accept_postgres_driver_type_names() {
-        for name in ["INT2[]", "INT4[]", "INT8[]", "FLOAT4[]", "FLOAT8[]"] {
-            assert!(
-                bind_query_value(
-                    sqlx::query("SELECT $1"),
-                    &serde_json::json!([1, 2]),
-                    Some(name)
-                )
-                .is_ok(),
-                "{name}"
-            );
+    impl TestDatabase {
+        pub(super) async fn new(ddl: &str) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let url = gonvex_store::database_url(&directory.path().join("tenant.db"));
+            let pools = PoolRegistry::with_durability(PoolLimits::default(), Durability::Normal);
+            let pool = pools.pool(&url).await.unwrap();
+            gonvex_store::execute_script(&mut pool.acquire().await.unwrap(), ddl).await.unwrap();
+            Self {
+                _directory: directory,
+                pools,
+                url,
+            }
         }
-        assert!(bind_query_value(
-            sqlx::query("SELECT $1"),
-            &serde_json::json!([true, false]),
-            Some("BOOL[]")
-        )
-        .is_ok());
-        assert!(bind_query_value(
-            sqlx::query("SELECT $1"),
-            &serde_json::json!([2147483648_i64]),
-            Some("INT4[]")
-        )
-        .is_err());
+
+        pub(super) async fn calls(&self, capability: DatabaseCapability) -> DatabaseHostCalls {
+            let transaction = gonvex_store::begin_transaction(
+                &self.pools,
+                &self.url,
+                capability == DatabaseCapability::Query,
+            )
+            .await
+            .unwrap();
+            DatabaseHostCalls::new(transaction, capability)
+        }
     }
 
     #[test]
@@ -1008,7 +1012,7 @@ mod tests {
             transaction: None,
             capability: DatabaseCapability::Reducer,
             schema,
-            table_keys: BTreeMap::new(),
+            tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
             actor_account_id: String::new(),
             actor_email: String::new(),
@@ -1017,6 +1021,7 @@ mod tests {
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
             fault: Default::default(),
+            aborted: false,
         };
         let mut calls = calls;
         assert_eq!(
@@ -1041,7 +1046,7 @@ mod tests {
             transaction: None,
             capability: DatabaseCapability::Reducer,
             schema,
-            table_keys: BTreeMap::new(),
+            tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
             actor_account_id: String::new(),
             actor_email: String::new(),
@@ -1050,6 +1055,7 @@ mod tests {
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
             fault: Default::default(),
+            aborted: false,
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());
@@ -1057,52 +1063,23 @@ mod tests {
 
     #[tokio::test]
     async fn binds_values_by_destination_column_type_and_deletes_many_rows() {
-        let Some(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping array binding test");
-            return;
-        };
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("gonvex_array_parameters_{nonce}");
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&base_url)
-            .await
-            .unwrap();
-        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-            .execute(&admin)
-            .await
-            .unwrap();
-        sqlx::query(&format!(
-            r#"CREATE TABLE "{schema}"."tasks" ("_id" text PRIMARY KEY, "title" text NOT NULL, "metadata" jsonb, "tags" text[], "score" integer)"#
-        ))
-        .execute(&admin)
-        .await
-        .unwrap();
-        let database_url = scoped_url(&base_url, &schema);
-        let control = ControlPlane::connect(
-            &database_url,
-            PoolRegistry::new(PoolLimits::default()),
-            BTreeMap::new(),
+        let database = TestDatabase::new(
+            r#"CREATE TABLE "tasks" ("_id" TEXT PRIMARY KEY, "title" TEXT NOT NULL, "metadata" JSON, "tags" JSON, "score" INTEGER, "done" BOOLEAN)"#,
         )
-        .await
-        .unwrap();
-        let transaction = control.begin_control_transaction(false).await.unwrap();
-        let mut calls = DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
+        .await;
+        let mut calls = database
+            .calls(DatabaseCapability::Reducer)
+            .await
             .with_schema(&serde_json::json!({
                 "tables": {
                     "tasks": {
                         "columns": {
                             "_id": {"type": "text", "nullable": false, "primaryKey": true},
                             "title": {"type": "text", "nullable": false, "primaryKey": false},
-                            "metadata": {"type": "jsonb", "nullable": true, "primaryKey": false},
-                            "tags": {"type": "text[]", "nullable": true, "primaryKey": false},
-                            "score": {"type": "integer", "nullable": true, "primaryKey": false}
+                            "metadata": {"type": "json", "nullable": true, "primaryKey": false},
+                            "tags": {"type": "json", "nullable": true, "primaryKey": false},
+                            "score": {"type": "integer", "nullable": true, "primaryKey": false},
+                            "done": {"type": "boolean", "nullable": true, "primaryKey": false}
                         }
                     }
                 }
@@ -1110,7 +1087,7 @@ mod tests {
 
         let array_rows = calls
             .query(
-                "SELECT value FROM unnest($1::text[]) AS value ORDER BY value",
+                "SELECT value FROM json_each($1) ORDER BY value",
                 serde_json::json!([["second", "first"]]),
             )
             .await
@@ -1119,14 +1096,6 @@ mod tests {
             array_rows,
             serde_json::json!([{"value":"first"},{"value":"second"}])
         );
-        let json_row = calls
-            .query(
-                "SELECT $1::jsonb AS value",
-                serde_json::json!([["second", "first"]]),
-            )
-            .await
-            .unwrap();
-        assert_eq!(json_row, serde_json::json!([{"value":["second","first"]}]));
         let inserted = calls
             .insert(
                 "tasks",
@@ -1135,7 +1104,8 @@ mod tests {
                     "title": "first",
                     "metadata": "created",
                     "tags": ["one", "two"],
-                    "score": 1
+                    "score": 1,
+                    "done": true
                 }),
                 None,
             )
@@ -1144,15 +1114,17 @@ mod tests {
         assert_eq!(inserted["metadata"], serde_json::json!("created"));
         assert_eq!(inserted["tags"], serde_json::json!(["one", "two"]));
         assert_eq!(inserted["score"], serde_json::json!(1));
+        assert_eq!(inserted["done"], serde_json::json!(true));
+        // Module queries decode declared JSON and BOOLEAN columns too.
         assert_eq!(
             calls
                 .query(
-                    "SELECT \"_id\" FROM \"tasks\" WHERE \"score\" = ANY($1)",
+                    "SELECT \"_id\", \"metadata\", \"tags\", \"done\" FROM \"tasks\" WHERE \"score\" IN (SELECT value FROM json_each($1))",
                     serde_json::json!([[1, 2, 3]]),
                 )
                 .await
                 .unwrap(),
-            serde_json::json!([{"_id":"first"}])
+            serde_json::json!([{"_id":"first","metadata":"created","tags":["one","two"],"done":true}])
         );
 
         let allocated = calls
@@ -1166,6 +1138,15 @@ mod tests {
         assert_eq!(allocated["_id"], "intent-owned");
         calls
             .delete("tasks", "", serde_json::json!("intent-owned"))
+            .await
+            .unwrap();
+        let generated = calls
+            .insert("tasks", serde_json::json!({"title": "generated"}), None)
+            .await
+            .unwrap();
+        assert!(Uuid::parse_str(generated["_id"].as_str().unwrap()).is_ok());
+        calls
+            .delete("tasks", "", generated["_id"].clone())
             .await
             .unwrap();
         let explicit = calls
@@ -1190,7 +1171,8 @@ mod tests {
                 serde_json::json!({
                     "metadata": false,
                     "tags": ["updated"],
-                    "score": 2
+                    "score": 2,
+                    "done": false
                 }),
             )
             .await
@@ -1198,6 +1180,7 @@ mod tests {
         assert_eq!(updated["metadata"], serde_json::json!(false));
         assert_eq!(updated["tags"], serde_json::json!(["updated"]));
         assert_eq!(updated["score"], serde_json::json!(2));
+        assert_eq!(updated["done"], serde_json::json!(false));
 
         for id in ["second", "third"] {
             calls
@@ -1223,11 +1206,105 @@ mod tests {
             serde_json::json!([{"_id": "second"}])
         );
         calls.finish(false).await.unwrap();
+    }
 
-        sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-            .execute(&admin)
+    #[tokio::test]
+    async fn sdk_write_statements_decode_returning_rows_by_declared_type() {
+        let database = TestDatabase::new(
+            r#"CREATE TABLE "tasks" ("_id" TEXT PRIMARY KEY, "meta" JSON, "done" BOOLEAN, "n" INTEGER)"#,
+        )
+        .await;
+        let mut calls = database.calls(DatabaseCapability::Reducer).await;
+        for statement in [
+            "SAVEPOINT gonvex_data_writes",
+            "RELEASE gonvex_data_writes",
+            "SAVEPOINT gonvex_data_writes",
+        ] {
+            calls.query(statement, Value::Null).await.unwrap();
+        }
+        let inserted = calls
+            .query(
+                r#"INSERT INTO "tasks" ("_id", "meta", "done", "n") SELECT json_extract(value, '$._id'), json(json_extract(value, '$.meta')), json_extract(value, '$.done'), json_extract(value, '$.n') FROM json_each($1) RETURNING *"#,
+                serde_json::json!([[{"_id": "a", "meta": {"x": [1]}, "done": true, "n": 3}]]),
+            )
             .await
             .unwrap();
+        assert_eq!(
+            inserted,
+            serde_json::json!([{"_id": "a", "meta": {"x": [1]}, "done": true, "n": 3}])
+        );
+        let updated = calls
+            .query(
+                r#"UPDATE "tasks" SET "done" = 0 FROM json_each($1) AS input WHERE "tasks"."_id" = input.value RETURNING *"#,
+                serde_json::json!([["a"]]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated[0]["done"], serde_json::json!(false));
+        calls
+            .query("ROLLBACK TO gonvex_data_writes", Value::Null)
+            .await
+            .unwrap();
+        calls
+            .query("RELEASE gonvex_data_writes", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(
+            calls
+                .query("SELECT count(*) AS n FROM tasks", Value::Null)
+                .await
+                .unwrap(),
+            serde_json::json!([{"n": 0}])
+        );
+        assert_eq!(write_target("/* x */ INSERT INTO \"tasks\"(a) VALUES (1)").as_deref(), Some("tasks"));
+        assert_eq!(write_target("update main.tasks SET a=1").as_deref(), Some("main.tasks"));
+        assert_eq!(write_target("SELECT 1"), None);
+        let mut query = database.calls(DatabaseCapability::Query).await;
+        assert!(query
+            .query("SAVEPOINT gonvex_data_writes", Value::Null)
+            .await
+            .unwrap_err()
+            .contains("may only read"));
+        calls.finish(false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn primary_keys_come_from_pragma_table_info() {
+        let database = TestDatabase::new(
+            r#"CREATE TABLE numbered (id INTEGER PRIMARY KEY, title TEXT);
+               CREATE TABLE coded (code TEXT PRIMARY KEY, title TEXT);
+               CREATE TABLE pair (a TEXT, b TEXT, PRIMARY KEY (a, b));"#,
+        )
+        .await;
+        let mut calls = database.calls(DatabaseCapability::Reducer).await;
+        let numbered = calls
+            .insert(
+                "numbered",
+                serde_json::json!({"title": "n"}),
+                Some("unused".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(numbered, serde_json::json!({"id": 1, "title": "n"}));
+        assert_eq!(
+            calls.resolve_table_key("coded", "").await.unwrap(),
+            "\"code\""
+        );
+        let coded = calls
+            .insert(
+                "coded",
+                serde_json::json!({"title": "c"}),
+                Some("given".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(coded["code"], "given");
+        assert!(calls
+            .resolve_table_key("pair", "")
+            .await
+            .unwrap_err()
+            .contains("composite primary key"));
+        calls.finish(false).await.unwrap();
     }
 }
 

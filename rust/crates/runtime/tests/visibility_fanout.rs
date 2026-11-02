@@ -13,7 +13,7 @@ use gonvex_runtime::{
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::{Sqlite, SqliteArguments};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -47,9 +47,18 @@ impl<S: tracing::Subscriber> Layer<S> for SqlCapture {
     }
 }
 
-fn scoped_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}")
+/// Fixture writes commit through a TenantTransaction so the change feed
+/// assigns their revision, exactly like a Reducer commit.
+async fn write<'q>(
+    pools: &PoolRegistry,
+    url: &str,
+    query: sqlx::query::Query<'q, Sqlite, SqliteArguments<'q>>,
+) {
+    let mut transaction = gonvex_store::begin_transaction(pools, url, false)
+        .await
+        .unwrap();
+    query.execute(&mut **transaction.transaction()).await.unwrap();
+    transaction.commit().await.unwrap();
 }
 
 fn test_config(database_url: String) -> Config {
@@ -252,10 +261,6 @@ async fn visibility_fanout_legacy_baseline() {
 
 async fn run_visibility_fixture(legacy: bool) {
     let mode = if legacy { "legacy" } else { "v2" };
-    let Ok(base) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL absent; PostgreSQL fixture unavailable");
-        return;
-    };
     let Some(binary) = module_host_binary() else {
         return;
     };
@@ -267,41 +272,31 @@ async fn run_visibility_fixture(legacy: bool) {
         n >= 4,
         "fixture needs three grant recipients and one unrelated member"
     );
-    let schema = format!("visibility_fanout_{}", uuid::Uuid::new_v4().simple());
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let url = scoped_url(&base, &schema);
+    let directory = tempfile::tempdir().unwrap();
+    // One SQLite file holds both the Control Plane and the tenant tables.
+    let url = gonvex_store::database_url(&directory.path().join("fanout.db"));
     let pools = PoolRegistry::new(PoolLimits::default());
     let control = ControlPlane::connect(&url, pools.clone(), BTreeMap::new())
         .await
         .unwrap();
-    let db = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
+    write(&pools, &url, sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('fanout','Fanout','multiTenant','active')")).await;
+    write(&pools, &url, sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status) VALUES('fanout','fanout','tenant','Tenant',$1,'active')").bind(&url)).await;
+    {
+        let mut transaction = gonvex_store::begin_transaction(&pools, &url, false)
+            .await
+            .unwrap();
+        gonvex_store::execute_script(&mut **transaction.transaction(), r#"
+            CREATE TABLE tasks(id TEXT PRIMARY KEY, "workspaceId" TEXT, title TEXT);
+            CREATE TABLE "taskNotes"(id TEXT PRIMARY KEY, "taskId" TEXT, body TEXT);
+            CREATE TABLE "taskUsers"(id TEXT PRIMARY KEY, "taskId" TEXT, "userId" TEXT, "teamId" TEXT);
+            CREATE TABLE "memberTeams"(id TEXT PRIMARY KEY, "memberId" TEXT, "teamId" TEXT);
+            INSERT INTO tasks VALUES('hidden','private','Hidden'),('granted','private-grant','Granted');
+            INSERT INTO "taskNotes" VALUES('hidden-note','hidden','Private note');
+        "#)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('fanout','Fanout','multiTenant','active')").execute(&db).await.unwrap();
-    sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status) VALUES('fanout','fanout','tenant','Tenant',$1,'active')").bind(&url).execute(&db).await.unwrap();
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE tasks(id text PRIMARY KEY, "workspaceId" text, title text);
-        CREATE TABLE "taskNotes"(id text PRIMARY KEY, "taskId" text, body text);
-        CREATE TABLE "taskUsers"(id text PRIMARY KEY, "taskId" text, "userId" text, "teamId" text);
-        CREATE TABLE "memberTeams"(id text PRIMARY KEY, "memberId" text, "teamId" text);
-        INSERT INTO tasks VALUES('hidden','private','Hidden'),('granted','private-grant','Granted');
-        INSERT INTO "taskNotes" VALUES('hidden-note','hidden','Private note');
-    "#,
-    )
-    .execute(&db)
-    .await
-    .unwrap();
+        transaction.commit().await.unwrap();
+    }
     let route = TenantRoute {
         project_id: "fanout".into(),
         tenant_id: "tenant".into(),
@@ -313,26 +308,17 @@ async fn run_visibility_fixture(legacy: bool) {
         .await
         .unwrap();
     for i in 0..n {
-        sqlx::query(
+        write(&pools, &url, sqlx::query(
             "INSERT INTO members(id,account_id,status,display_name) VALUES($1,$1,'active',$1)",
         )
-        .bind(format!("m{i}"))
-        .execute(&db)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$1,'team')")
-            .bind(format!("m{i}"))
-            .execute(&db)
-            .await
-            .unwrap();
+        .bind(format!("m{i}"))).await;
+        write(&pools, &url, sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$1,'team')")
+            .bind(format!("m{i}"))).await;
     }
     for i in 1..=3 {
-        sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$2,'grant-team')")
+        write(&pools, &url, sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$2,'grant-team')")
             .bind(format!("grant-team-{i}"))
-            .bind(format!("m{i}"))
-            .execute(&db)
-            .await
-            .unwrap();
+            .bind(format!("m{i}"))).await;
     }
     let (manifest, hash) = fixture_manifest(legacy);
     control
@@ -412,8 +398,7 @@ async fn run_visibility_fixture(legacy: bool) {
         "hidden related rows must never make a task visible"
     );
     if !legacy {
-        sqlx::query("INSERT INTO members(id,account_id,status,display_name,role) VALUES('admin','admin','active','Admin','admin')")
-            .execute(&db).await.unwrap();
+        write(&pools, &url, sqlx::query("INSERT INTO members(id,account_id,status,display_name,role) VALUES('admin','admin','active','Admin','admin')")).await;
         let mut admin_session = connections[0].session.clone();
         admin_session.identity.account.id = "admin".into();
         admin_session.member.id = "admin".into();
@@ -438,7 +423,7 @@ async fn run_visibility_fixture(legacy: bool) {
         "DELETE FROM tasks WHERE id='changed'",
     ] {
         runtime.visibility_metrics().reset_for_test();
-        sqlx::query(statement).execute(&db).await.unwrap();
+        write(&pools, &url, sqlx::query(statement)).await;
         let event = committed(&pools, &route, &mut revision).await;
         let worked = deliver(&runtime, &mut connections, &event).await;
         let counters = runtime.visibility_metrics().snapshot();
@@ -480,10 +465,7 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')")
-        .execute(&db)
-        .await
-        .unwrap();
+    write(&pools, &url, sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')")).await;
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
     if legacy {
@@ -536,10 +518,7 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"memberTeams\" VALUES('extra','m1','extra')")
-        .execute(&db)
-        .await
-        .unwrap();
+    write(&pools, &url, sqlx::query("INSERT INTO \"memberTeams\" VALUES('extra','m1','extra')")).await;
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
     assert!(
@@ -572,10 +551,7 @@ async fn run_visibility_fixture(legacy: bool) {
     );
     }
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)")
-        .execute(&db)
-        .await
-        .unwrap();
+    write(&pools, &url, sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)")).await;
     let event = committed(&pools, &route, &mut revision).await;
     if legacy {
         let worked = deliver(&runtime, &mut connections, &event).await;
@@ -658,11 +634,5 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     runtime.shutdown().await;
-    db.close().await;
     pools.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
 }

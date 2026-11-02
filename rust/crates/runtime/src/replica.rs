@@ -785,40 +785,51 @@ async fn resume_changes(
     through: u64,
     tables: BTreeSet<String>,
 ) -> Result<Vec<LogChange>, ReplicaError> {
+    let tables = serde_json::to_string(&tables.into_iter().collect::<Vec<_>>())
+        .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?;
     let rows = sqlx::query(
             "SELECT revision, ordinal, table_name, row_id, operation, changed_columns, old_value, new_value
              FROM _gonvex_sync_changes
-             WHERE revision > $1 AND revision <= $2 AND table_name = ANY($3)
+             WHERE revision > $1 AND revision <= $2 AND table_name IN (SELECT value FROM json_each($3))
              ORDER BY revision, ordinal",
-        ).bind(after as i64).bind(through as i64).bind(tables.into_iter().collect::<Vec<_>>()).fetch_all(&mut **transaction.transaction()).await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| LogChange {
-            revision: row.get::<i64, _>("revision") as u64,
-            ordinal: row.get("ordinal"),
-            table: row.get("table_name"),
-            row_id: row.get("row_id"),
-            operation: row.get("operation"),
-            changed_columns: row
-                .get::<Option<Vec<String>>, _>("changed_columns")
-                .unwrap_or_default(),
-            old_value: row
-                .get::<Option<Value>, _>("old_value")
-                .unwrap_or(Value::Null),
-            new_value: row
-                .get::<Option<Value>, _>("new_value")
-                .unwrap_or(Value::Null),
-            origin_command_id: String::new(),
-            provenance: Default::default(),
+        ).bind(after as i64).bind(through as i64).bind(tables).fetch_all(&mut **transaction.transaction()).await?;
+    // Row images and changed columns are JSON text written by the triggers.
+    let json = |row: &sqlx::sqlite::SqliteRow, column: &str| -> Result<Value, ReplicaError> {
+        match row.try_get::<Option<String>, _>(column)? {
+            Some(text) => serde_json::from_str(&text)
+                .map_err(|error| ReplicaError::InvalidIdentifier(format!("{column}: {error}"))),
+            None => Ok(Value::Null),
+        }
+    };
+    rows.iter()
+        .map(|row| {
+            Ok(LogChange {
+                revision: row.try_get::<i64, _>("revision")?.max(0) as u64,
+                ordinal: row.try_get::<Option<i64>, _>("ordinal")?.unwrap_or(0) as i32,
+                table: row.try_get("table_name")?,
+                row_id: row.try_get("row_id")?,
+                operation: row.try_get("operation")?,
+                changed_columns: match json(row, "changed_columns")? {
+                    Value::Array(values) => values
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned))
+                        .collect(),
+                    _ => Vec::new(),
+                },
+                old_value: json(row, "old_value")?,
+                new_value: json(row, "new_value")?,
+                origin_command_id: String::new(),
+                provenance: Default::default(),
+            })
         })
-        .collect())
+        .collect()
 }
 
 async fn clock_in_transaction(
     transaction: &mut TenantTransaction,
 ) -> Result<ReplicaClock, ReplicaError> {
     let row = sqlx::query(
-        "SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = true",
+        "SELECT epoch, revision, retained_revision FROM _gonvex_sync_clock WHERE singleton = 1",
     )
     .fetch_one(&mut **transaction.transaction())
     .await?;
@@ -873,7 +884,7 @@ async fn query_rows_filtered(
             values.iter().cloned().map(Value::String).collect(),
         ));
         predicates.push(format!(
-            "r.{}::text = ANY(ARRAY(SELECT jsonb_array_elements_text(${}::jsonb)))",
+            "r.{} IN (SELECT value FROM json_each(${}))",
             quote(column)?,
             parameters.len()
         ));
@@ -898,14 +909,34 @@ async fn query_rows_filtered(
         parameters.push(value);
         predicates.push(format!("r.{} = ${}", quote(column)?, parameters.len()));
     }
+    for column in &definition.columns {
+        quote(column)?;
+    }
+    // Declared types decide how each column is encoded (JSON, BOOLEAN).
+    let declared = gonvex_store::rows::table_columns(
+        &mut **transaction.transaction(),
+        &definition.table,
+    )
+    .await?
+    .into_iter()
+    .map(|column| (column.name.clone(), column.kind()))
+    .collect::<BTreeMap<_, _>>();
     let columns = definition
         .columns
         .iter()
-        .map(|column| quote(column).map(|quoted| format!("r.{quoted} AS {quoted}")))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|column| {
+            (
+                column.clone(),
+                declared
+                    .get(column)
+                    .copied()
+                    .unwrap_or(gonvex_store::rows::JsonKind::Text),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut statement = format!(
-        "SELECT row_to_json(_gonvex_visible_row)::text FROM (SELECT {} FROM {} AS r WHERE {}",
-        columns.join(", "),
+        "SELECT {} FROM {} AS r WHERE {}",
+        gonvex_store::rows::json_object_expr("r", &columns),
         quote(&definition.table)?,
         predicates.join(" AND ")
     );
@@ -924,10 +955,8 @@ async fn query_rows_filtered(
         parameters.push(Value::from((definition.max_rows + 1) as u64));
         statement.push_str(&format!(" LIMIT ${}", parameters.len()));
     }
-    statement.push_str(") AS _gonvex_visible_row");
     let parameters = Parameters::scalars(&parameters).map_err(ReplicaError::InvalidIdentifier)?;
-    let statement_key = parameters.statement(&statement);
-    let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+    let query = parameters.bind(sqlx::query(&statement));
     // Decode and admit one row at a time. SQL still uses maxRows + 1;
     // a byte-limited source must not first allocate its entire SQL result.
     let rows = query.fetch(&mut **transaction.transaction()).map(|row| {
@@ -1000,7 +1029,7 @@ fn row_in_collection(
 /// incremental row changes. A complete collection remains complete when the
 /// projected post-transaction rows fit its budgets, including for progressive
 /// delivery. Once a collection is truncated, its missing rows are unknown and
-/// the next source change must rebuild the window from PostgreSQL.
+/// the next source change must rebuild the window from the database.
 fn bounded_sql_visibility(
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,

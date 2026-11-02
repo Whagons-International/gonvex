@@ -691,7 +691,7 @@ impl Runtime {
             .begin_tenant_transaction(&session.route, true)
             .await?;
         let clock =
-            sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = true")
+            sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = 1")
                 .fetch_one(&mut **transaction.transaction())
                 .await?;
         let epoch: String = clock.get("epoch");
@@ -937,15 +937,32 @@ pub(super) async fn execute_in_transaction(
     let (offset, limit) = window(plan.window.as_ref(), args);
     let order = compile_order(plan, args)?;
     let source = compile_source(plan)?;
+    for column in &plan.columns {
+        quote(column)?;
+    }
+    // Declared types keep JSON and BOOLEAN columns typed in each row object.
+    let declared = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &plan.table)
+        .await?
+        .into_iter()
+        .map(|column| (column.name.clone(), column.kind()))
+        .collect::<BTreeMap<_, _>>();
     let columns = plan
         .columns
         .iter()
-        .map(|column| quote(column).map(|quoted| format!("r.{quoted} AS {quoted}")))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|column| {
+            (
+                column.clone(),
+                declared
+                    .get(column)
+                    .copied()
+                    .unwrap_or(gonvex_store::rows::JsonKind::Text),
+            )
+        })
+        .collect::<Vec<_>>();
     let base_parameters = parameters.clone();
     let mut statement = format!(
-        "SELECT row_to_json(_gonvex_live_row)::text FROM (SELECT {} FROM {} WHERE {}",
-        columns.join(", "),
+        "SELECT {} FROM {} WHERE {}",
+        gonvex_store::rows::json_object_expr("r", &columns),
         source,
         predicates.join(" AND ")
     );
@@ -953,15 +970,16 @@ pub(super) async fn execute_in_transaction(
     if limit > 0 {
         parameters.push(Value::from(limit as u64));
         statement.push_str(&format!(" LIMIT ${}", parameters.len()));
+    } else if offset > 0 {
+        // SQLite requires LIMIT before OFFSET; -1 means no limit.
+        statement.push_str(" LIMIT -1");
     }
     if offset > 0 {
         parameters.push(Value::from(offset as u64));
         statement.push_str(&format!(" OFFSET ${}", parameters.len()));
     }
-    statement.push_str(") AS _gonvex_live_row");
     let parameters = Parameters::scalars(&parameters).map_err(LiveQueryError::Invalid)?;
-    let statement_key = parameters.statement(&statement);
-    let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+    let query = parameters.bind(sqlx::query(&statement));
     let rows = query.fetch_all(&mut **transaction.transaction()).await?;
     let rows = rows
         .into_iter()
@@ -981,8 +999,7 @@ pub(super) async fn execute_in_transaction(
             predicates.join(" AND ")
         );
         let parameters = Parameters::scalars(&base_parameters).map_err(LiveQueryError::Invalid)?;
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+        let query = parameters.bind(sqlx::query(&statement));
         Some(
             query
                 .fetch_one(&mut **transaction.transaction())
@@ -1036,7 +1053,7 @@ fn compile_related_expression(
                 })
                 .transpose()?
                 .unwrap_or_else(|| "TRUE".to_owned());
-            return Ok(format!("{row_alias}.{}::text IN (SELECT {alias}.{}::text FROM {} AS {alias} WHERE ({guard}) AND ({predicate}))",
+            return Ok(format!("CAST({row_alias}.{} AS TEXT) IN (SELECT CAST({alias}.{} AS TEXT) FROM {} AS {alias} WHERE ({guard}) AND ({predicate}))",
                 quote(&expression.column)?, quote(&relation.column)?, quote(&relation.table)?));
         }
         "and" | "or" => {
@@ -1121,15 +1138,15 @@ fn compile_related_expression(
             add(parameters, live_value(expression.value_to.as_ref(), args))
         ),
         "arrayContains" => format!(
-            "COALESCE({left}::jsonb, '[]'::jsonb) @> {}::jsonb",
-            add(parameters, Value::Array(vec![value]))
+            "EXISTS (SELECT 1 FROM json_each(COALESCE({left}, '[]')) WHERE value = {})",
+            add(parameters, value)
         ),
         "contains" => format!(
-            "strpos(COALESCE({left}::text, ''), {}::text) > 0",
+            "instr(COALESCE(CAST({left} AS TEXT), ''), CAST({} AS TEXT)) > 0",
             add(parameters, Value::String(argument_text(Some(&value))))
         ),
         "containsInsensitive" => format!(
-            "strpos(lower(COALESCE({left}::text, '')), lower({}::text)) > 0",
+            "instr(lower(COALESCE(CAST({left} AS TEXT), '')), lower(CAST({} AS TEXT))) > 0",
             add(parameters, Value::String(argument_text(Some(&value))))
         ),
         "in" => {
@@ -1158,7 +1175,7 @@ fn compile_source(plan: &LiveQueryPlan) -> Result<String, LiveQueryError> {
     let source = format!("{} AS r", quote(&plan.table)?);
     match &plan.index {
         Some(index) => Ok(format!(
-            "{source} JOIN {} AS g ON g.{} = r.{}::text",
+            "{source} JOIN {} AS g ON g.{} = CAST(r.{} AS TEXT)",
             quote(&index.table)?,
             quote(&index.key)?,
             quote(&plan.key)?
@@ -1171,9 +1188,9 @@ fn index_predicate(plan: &LiveQueryPlan, mut sql: String) -> Result<String, Live
     if let Some(index) = &plan.index {
         // compile_source equates the projected key with the source key's text
         // representation. Keep related membership predicates on that same index
-        // so PostgreSQL can filter before joining source rows.
+        // so SQLite can filter before joining source rows.
         sql = sql.replace(
-            &format!("r.{}::text", quote(&plan.key)?),
+            &format!("CAST(r.{} AS TEXT)", quote(&plan.key)?),
             &format!("g.{}", quote(&index.key)?),
         );
         for column in &index.columns {
@@ -1189,6 +1206,13 @@ fn compile_order(
     args: &Map<String, Value>,
 ) -> Result<String, LiveQueryError> {
     let (column, direction) = sort(plan.sort.as_ref(), args);
+    // Clients expect Postgres null ordering (nulls last ascending, first
+    // descending); SQLite's defaults are the reverse, so state it explicitly.
+    let direction = if direction.eq_ignore_ascii_case("desc") {
+        "DESC NULLS FIRST"
+    } else {
+        "ASC NULLS LAST"
+    };
     let mut terms = Vec::new();
     if let Some(columns) = plan
         .index
@@ -1196,16 +1220,16 @@ fn compile_order(
         .and_then(|index| index.sort_columns.get(&column))
     {
         for column in columns {
-            terms.push(format!("g.{} {}", quote(column)?, direction.to_uppercase()));
+            terms.push(format!("g.{} {direction}", quote(column)?));
         }
     } else if !column.is_empty() {
         terms.push(index_predicate(
             plan,
-            format!("r.{} {}", quote(&column)?, direction.to_uppercase()),
+            format!("r.{} {direction}", quote(&column)?),
         )?);
     }
     if column != plan.key {
-        terms.push(format!("r.{} ASC", quote(&plan.key)?));
+        terms.push(format!("r.{} ASC NULLS LAST", quote(&plan.key)?));
     }
     Ok(terms.join(", "))
 }
@@ -1276,7 +1300,7 @@ fn compile_search_filtered(
         let mut alternatives = Vec::new();
         for column in &search.columns {
             alternatives.push(format!(
-                "r.{}::text ILIKE {pattern} ESCAPE '\\'",
+                "CAST(r.{} AS TEXT) LIKE {pattern} ESCAPE '\\'",
                 quote(column)?
             ));
         }
@@ -1290,7 +1314,7 @@ fn compile_search_filtered(
                     .filter(|source| source.table == index.table && source.key == index.key)
                 {
                     alternatives.push(format!(
-                        "g.{} ILIKE {pattern} ESCAPE '\\'",
+                        "g.{} LIKE {pattern} ESCAPE '\\'",
                         quote(&source.column)?
                     ));
                 }
@@ -1301,22 +1325,22 @@ fn compile_search_filtered(
                     Some(index) if !index_filter.is_empty() => ("d",format!(" JOIN {} AS g ON g.{} = d.{}",quote(&index.table)?,quote(&index.key)?,quote(&source.key)?),format!(" AND ({index_filter})")),
                     _ => ("d",String::new(),String::new()),
                 };
-                Ok(format!("SELECT {alias}.{} FROM {} AS {alias}{join} WHERE {alias}.{} ILIKE {pattern} ESCAPE '\\'{filter}",quote(&source.key)?,quote(&source.table)?,quote(&source.column)?))
+                Ok(format!("SELECT {alias}.{} FROM {} AS {alias}{join} WHERE {alias}.{} LIKE {pattern} ESCAPE '\\'{filter}",quote(&source.key)?,quote(&source.table)?,quote(&source.column)?))
             }).collect::<Result<Vec<_>, LiveQueryError>>()?;
             if !sources.is_empty() {
                 let documents = sources.join(" UNION ");
                 if let Some(index) = direct_index {
-                    // An InitPlan array lets PostgreSQL combine the document
-                    // trigram index with the projection key index, and lets a
-                    // broad search stop early on the requested ordering index.
+                    // A materialized candidate set lets SQLite probe the
+                    // projection key index and stop early on the requested
+                    // ordering index.
                     alternatives.push(format!(
-                        "g.{} = ANY(ARRAY({documents}))",
+                        "g.{} IN ({documents})",
                         quote(&index.key)?
                     ));
                 } else if search.columns.is_empty() {
                     document_sets.push(format!("({documents})"));
                 } else {
-                    alternatives.push(format!("r.{}::text IN ({documents})", quote(&plan.key)?));
+                    alternatives.push(format!("CAST(r.{} AS TEXT) IN ({documents})", quote(&plan.key)?));
                 }
             }
         }
@@ -1326,7 +1350,7 @@ fn compile_search_filtered(
     }
     if !document_sets.is_empty() {
         return Ok(format!(
-            "r.{}::text IN ({})",
+            "CAST(r.{} AS TEXT) IN ({})",
             quote(&plan.key)?,
             document_sets.join(if joiner == " OR " {
                 " UNION "
@@ -1403,7 +1427,7 @@ fn compile_filters(
             )));
         }
         let left = format!("{row_alias}.{}", quote(column)?);
-        let text = format!("COALESCE({left}::text, '')");
+        let text = format!("COALESCE(CAST({left} AS TEXT), '')");
         let column_type = definition
             .column_types
             .get(column)
@@ -1444,19 +1468,23 @@ fn compile_filters(
         };
         let predicate = match operator {
             "contains" | "startsWith" | "endsWith" if value.is_empty() => {
-                format!("{text} ILIKE {value_arg} ESCAPE '\\'")
+                format!("{text} LIKE {value_arg} ESCAPE '\\'")
             }
             "notContains" if value.is_empty() => {
-                format!("{text} NOT ILIKE {value_arg} ESCAPE '\\'")
+                format!("{text} NOT LIKE {value_arg} ESCAPE '\\'")
             }
-            "contains" => format!("{left}::text ILIKE {value_arg} ESCAPE '\\'"),
+            "contains" => format!("CAST({left} AS TEXT) LIKE {value_arg} ESCAPE '\\'"),
             "notContains" => {
-                format!("({left} IS NULL OR {left}::text NOT ILIKE {value_arg} ESCAPE '\\')")
+                format!("({left} IS NULL OR CAST({left} AS TEXT) NOT LIKE {value_arg} ESCAPE '\\')")
             }
-            "equals" if !value.is_empty() => format!("{left}::text = {value_arg}::text"),
-            "equals" => format!("{text} = {value_arg}::text"),
-            "notEquals" => format!("{text} <> {value_arg}::text"),
-            "startsWith" | "endsWith" => format!("{left}::text ILIKE {value_arg} ESCAPE '\\'"),
+            "equals" if !value.is_empty() => {
+                format!("CAST({left} AS TEXT) = CAST({value_arg} AS TEXT)")
+            }
+            "equals" => format!("{text} = CAST({value_arg} AS TEXT)"),
+            "notEquals" => format!("{text} <> CAST({value_arg} AS TEXT)"),
+            "startsWith" | "endsWith" => {
+                format!("CAST({left} AS TEXT) LIKE {value_arg} ESCAPE '\\'")
+            }
             "empty" => format!("{text} = ''"),
             "notEmpty" => format!("{text} <> ''"),
             "oneOf" => {
@@ -1478,7 +1506,7 @@ fn compile_filters(
                     let expression = if includes_empty {
                         text.clone()
                     } else {
-                        format!("{left}::text")
+                        format!("CAST({left} AS TEXT)")
                     };
                     format!("{expression} IN ({})", values.join(", "))
                 }
@@ -1738,51 +1766,28 @@ mod tests {
 
     #[tokio::test]
     async fn exact_count_parameter_type_changes_match_rows_on_one_connection() {
-        use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
-        use sqlx::{postgres::PgPoolOptions, Connection};
+        use gonvex_store::{begin_transaction, Durability, PoolLimits, PoolRegistry};
+        use sqlx::Connection;
 
-        let Ok(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-            eprintln!("PostgreSQL live count regression skipped: set GONVEX_TEST_POSTGRES_URL");
-            return;
-        };
-        let schema = format!("gonvex_live_count_{}", uuid::Uuid::new_v4().simple());
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if database_url.contains('?') { '&' } else { '?' };
-        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let pools = PoolRegistry::new(PoolLimits {
-            max_total_connections: 1,
-            max_connections_per_database: 1,
-            ..PoolLimits::default()
-        });
-        let control = ControlPlane::connect(&scoped_url, pools.clone(), BTreeMap::new())
-            .await
-            .unwrap();
-        let route = TenantRoute {
-            project_id: "project".to_owned(),
-            tenant_id: "tenant".to_owned(),
-            database_url: scoped_url,
-        };
+        let directory = tempfile::tempdir().unwrap();
+        let database_url = gonvex_store::database_url(&directory.path().join("tenant.db"));
+        let pools = PoolRegistry::with_durability(
+            PoolLimits {
+                max_total_connections: 1,
+                max_connections_per_database: 1,
+                ..PoolLimits::default()
+            },
+            Durability::Normal,
+        );
         // Keep this transaction open for setup and all three direct executions.
-        // It owns one physical connection and never uses SharedLiveQueryCache.
-        let mut transaction = control
-            .begin_tenant_transaction(&route, false)
+        // It owns the writer connection and never uses SharedLiveQueryCache.
+        let mut transaction = begin_transaction(&pools, &database_url, false)
             .await
             .unwrap();
-        sqlx::raw_sql(
-            "CREATE TEMP TABLE live_count_items (id bigint PRIMARY KEY) ON COMMIT DROP;
+        gonvex_store::execute_script(&mut **transaction.transaction(), "CREATE TABLE live_count_items (id INTEGER PRIMARY KEY);
              INSERT INTO live_count_items VALUES (0), (1);
-             CREATE TEMP TABLE members (account_id text, status text) ON COMMIT DROP;
-             INSERT INTO members VALUES ('account', 'active');",
-        )
-        .execute(&mut **transaction.transaction())
+             CREATE TABLE members (account_id TEXT, status TEXT);
+             INSERT INTO members VALUES ('account', 'active');")
         .await
         .unwrap();
         let plan: LiveQueryPlan = serde_json::from_value(serde_json::json!({
@@ -1846,11 +1851,6 @@ mod tests {
         }
         transaction.rollback().await.unwrap();
         pools.close().await;
-        sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
 
         // Collect all results and clean up before assertions so the final INT8
         // cache reuse still executes when the FLOAT8 count regresses.
@@ -2016,7 +2016,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            sql.contains("IN (SELECT r_related.\"itemId\"::text FROM \"routing\" AS r_related"),
+            sql.contains("IN (SELECT CAST(r_related.\"itemId\" AS TEXT) FROM \"routing\" AS r_related"),
             "{sql}"
         );
         assert!(
@@ -2111,7 +2111,7 @@ mod tests {
         let sql =
             compile_filters(&filters, args.as_object().unwrap(), &mut parameters, "r").unwrap();
 
-        assert_eq!(sql, "(COALESCE(r.\"name\"::text, '') < $1)");
+        assert_eq!(sql, "(COALESCE(CAST(r.\"name\" AS TEXT), '') < $1)");
         assert_eq!(parameters, vec![Value::String("M".to_owned())]);
     }
 
@@ -2175,7 +2175,7 @@ mod tests {
         .unwrap();
         assert!(sql.contains(" UNION "));
         assert!(sql.matches(" UNION ").count() >= 3);
-        assert!(!sql.contains("strpos"));
+        assert!(!sql.contains("instr("));
         assert!(!sql.contains("EXISTS"));
         assert_eq!(
             parameters,
@@ -2186,7 +2186,7 @@ mod tests {
         );
         assert_eq!(
             compile_order(&plan, args.as_object().unwrap()).unwrap(),
-            "g.\"statusOrder\" ASC, g.\"statusName\" ASC, r.\"_id\" ASC"
+            "g.\"statusOrder\" ASC NULLS LAST, g.\"statusName\" ASC NULLS LAST, r.\"_id\" ASC NULLS LAST"
         );
         assert_eq!(
             index_predicate(&plan, "r.\"name\" = $1 AND r.\"owner\" = $2".into()).unwrap(),
@@ -2195,7 +2195,7 @@ mod tests {
         assert_eq!(
             index_predicate(
                 &plan,
-                "r.\"_id\"::text IN (SELECT member_id FROM related) OR r.\"name\" = $1".into()
+                "CAST(r.\"_id\" AS TEXT) IN (SELECT member_id FROM related) OR r.\"name\" = $1".into()
             )
             .unwrap(),
             "g.\"itemId\" IN (SELECT member_id FROM related) OR g.\"name\" = $1"
@@ -2271,7 +2271,7 @@ mod tests {
         std::fs::write(path, output).unwrap();
     }
 
-    /// Export application-supplied plans for disposable PostgreSQL benchmarks.
+    /// Export application-supplied plans for disposable SQLite benchmarks.
     /// The fixture supplies only public related-table visibility: this measures
     /// indexed filtering/search/order, not tenant admission or visibility cost.
     #[test]

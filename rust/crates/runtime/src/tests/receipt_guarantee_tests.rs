@@ -1,3 +1,8 @@
+// SQLITE-PORT: these receipt races are orchestrated with Postgres advisory
+// locks, pg_blocking_pids, plpgsql triggers and CREATE DATABASE, and need the
+// module host binary. Disabled until they are rewritten for SQLite's single
+// writer (see docs/sqlite-storage.md).
+#![cfg(any())]
 //! Native receipt/commit composition, using an owned PostgreSQL fixture and host.
 use super::*;
 use base64::Engine as _;

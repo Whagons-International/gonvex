@@ -206,3 +206,132 @@ mod tests {
         assert!(!expr.contains("json_patch"));
     }
 }
+
+/// Declared kinds of a statement's result columns, read with
+/// `sqlite3_column_decltype` on a separately prepared copy of the statement.
+/// sqlx parses declared types into its own enum and reports unknown names
+/// such as `JSON` as NULL, which loses the JSON/boolean distinction; this
+/// reads them verbatim. `None` marks an expression column (no declared type).
+pub async fn result_column_kinds(
+    connection: &mut sqlx::SqliteConnection,
+    sql: &str,
+) -> Result<std::sync::Arc<Vec<Option<JsonKind>>>, DatabaseError> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<(usize, u64, String), Arc<Vec<Option<JsonKind>>>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let mut handle = connection.lock_handle().await?;
+    let raw = handle.as_raw_handle();
+    let epoch = RESULT_KINDS_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+    let key = (raw.as_ptr() as usize, epoch, sql.to_owned());
+    if let Some(kinds) = cache.lock().unwrap().get(&key).cloned() {
+        return Ok(kinds);
+    }
+    let kinds = unsafe { declared_kinds(raw.as_ptr(), sql) }?;
+    let kinds = Arc::new(kinds);
+    let mut cache = cache.lock().unwrap();
+    if cache.len() > 4096 {
+        cache.clear();
+    }
+    cache.insert(key, kinds.clone());
+    Ok(kinds)
+}
+
+/// Invalidates cached result kinds; called after migrations change columns.
+pub fn clear_result_column_kinds() {
+    RESULT_KINDS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+static RESULT_KINDS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+unsafe fn declared_kinds(
+    db: *mut libsqlite3_sys::sqlite3,
+    sql: &str,
+) -> Result<Vec<Option<JsonKind>>, DatabaseError> {
+    use libsqlite3_sys as ffi;
+    let mut stmt: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
+    let rc = ffi::sqlite3_prepare_v2(
+        db,
+        sql.as_ptr().cast(),
+        i32::try_from(sql.len()).map_err(|_| DatabaseError::Decode("statement too long".into()))?,
+        &mut stmt,
+        std::ptr::null_mut(),
+    );
+    if rc != ffi::SQLITE_OK || stmt.is_null() {
+        let message = std::ffi::CStr::from_ptr(ffi::sqlite3_errmsg(db))
+            .to_string_lossy()
+            .into_owned();
+        if !stmt.is_null() {
+            ffi::sqlite3_finalize(stmt);
+        }
+        return Err(DatabaseError::Decode(format!("describe statement: {message}")));
+    }
+    let count = ffi::sqlite3_column_count(stmt);
+    let mut kinds = Vec::with_capacity(count.max(0) as usize);
+    for index in 0..count {
+        let declared = ffi::sqlite3_column_decltype(stmt, index);
+        kinds.push(if declared.is_null() {
+            None
+        } else {
+            Some(JsonKind::from_declared(
+                &std::ffi::CStr::from_ptr(declared).to_string_lossy(),
+            ))
+        });
+    }
+    ffi::sqlite3_finalize(stmt);
+    Ok(kinds)
+}
+
+#[cfg(test)]
+mod result_kind_tests {
+    use super::*;
+    use sqlx::Connection;
+
+    #[tokio::test]
+    async fn result_columns_keep_json_and_boolean_declared_types() {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(r#"CREATE TABLE t (id TEXT PRIMARY KEY, meta JSON, done BOOLEAN, n BIGINT, note TEXT)"#)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let kinds = result_column_kinds(
+            &mut connection,
+            r#"SELECT id, meta, done, n, note, n + 1 AS expr FROM t AS r WHERE id = $1"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            kinds.as_slice(),
+            &[
+                Some(JsonKind::Text),
+                Some(JsonKind::Json),
+                Some(JsonKind::Boolean),
+                Some(JsonKind::Integer),
+                Some(JsonKind::Text),
+                None
+            ]
+        );
+        let returning = result_column_kinds(
+            &mut connection,
+            r#"INSERT INTO t (id, meta) VALUES ($1, $2) RETURNING *"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(returning.get(1).copied().flatten(), Some(JsonKind::Json));
+        // A JSON-looking TEXT column stays text.
+        sqlx::query(r#"INSERT INTO t (id, note) VALUES ('a', '{"not":"json"}')"#)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT note FROM t WHERE id = 'a'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        let kinds = result_column_kinds(&mut connection, "SELECT note FROM t WHERE id = 'a'")
+            .await
+            .unwrap();
+        let value = decode_value(sqlx::Row::try_get_raw(&row, 0).unwrap(), kinds[0].unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!(r#"{"not":"json"}"#));
+    }
+}

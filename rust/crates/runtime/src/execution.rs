@@ -170,14 +170,9 @@ impl Runtime {
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
-        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
-            .bind(format!(
-                "{}ms",
-                self.inner.config.module_host.execution_timeout.as_millis()
-            ))
-            .execute(&mut **transaction.transaction())
-            .await
-            .map_err(gonvex_store::DatabaseError::from)?;
+        // SQLite has no statement_timeout. These are point reads on a WAL
+        // snapshot (readers never wait on the writer); Reducer deadlines are
+        // enforced in Rust by the module host's execution timeout.
         let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM members WHERE id=$1 AND account_id=$2 AND status='active')")
             .bind(&session.member.id).bind(&session.identity.account.id)
             .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_store::DatabaseError::from)?;
@@ -187,7 +182,7 @@ impl Runtime {
             )
             .into());
         }
-        let tables = sqlx::query("SELECT to_regclass('_gonvex_reducer_idempotency') IS NOT NULL AS current, to_regclass('_gonvex_mutation_idempotency') IS NOT NULL AS legacy")
+        let tables = sqlx::query("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_reducer_idempotency') AS current, EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_mutation_idempotency') AS legacy")
             .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_store::DatabaseError::from)?;
         let current: bool = tables.get("current");
         let legacy: bool = tables.get("legacy");
@@ -228,7 +223,7 @@ impl Runtime {
             return Ok(serde_json::json!({"found":false}));
         }
         let clock =
-            sqlx::query("SELECT epoch,revision FROM _gonvex_sync_clock WHERE singleton=true")
+            sqlx::query("SELECT epoch,revision FROM _gonvex_sync_clock WHERE singleton=1")
                 .fetch_one(&mut **transaction.transaction())
                 .await
                 .map_err(gonvex_store::DatabaseError::from)?;
@@ -580,7 +575,7 @@ impl Runtime {
                         .store_reducer_result(&session.identity.account.id, key, &value)
                         .await?;
                 }
-                handler.finish(true).await.map_err(|error| {
+                let committed_revision = handler.finish_with_revision(true).await.map_err(|error| {
                     // A commit lost to the connection is retried under the same
                     // idempotency key: if it did commit, the retry replays it.
                     if fault.observed() {
@@ -590,8 +585,6 @@ impl Runtime {
                     }
                 })?;
                 self.inner.membership_projector.wake();
-                let committed_revision =
-                    control.command_revision(&session.route, command_id).await?;
                 if let Some(tracker) = committed_revisions {
                     tracker.observe(committed_revision);
                 }
@@ -761,10 +754,10 @@ impl Runtime {
             })?;
         let mut transaction = control.begin_control_transaction(true).await?;
         let rows = sqlx::query(
-            "SELECT name,value FROM gonvex_project_env WHERE project_id=$1 AND name=ANY($2)",
+            "SELECT name,value FROM gonvex_project_env WHERE project_id=$1 AND name IN (SELECT value FROM json_each($2))",
         )
         .bind(project_id)
-        .bind(names)
+        .bind(serde_json::to_string(names).unwrap_or_else(|_| "[]".to_owned()))
         .fetch_all(&mut **transaction.transaction())
         .await
         .map_err(|error| ExecutionError::HostCall(error.to_string()))?;
@@ -1487,7 +1480,7 @@ mod tests {
             route: TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
-                database_url: "postgres://tenant".to_owned(),
+                database_url: "sqlite:///tmp/gonvex-tenant.db".to_owned(),
             },
             member: Member {
                 id: "member".to_owned(),
