@@ -50,6 +50,7 @@ def run_case(directory, adapter=None):
                 result = json.loads(event_path.read_text())
                 require(result["type"] == TERMINAL[phase], "wrong historical boundary")
                 require(result["runtime"]["node"].startswith("v") and len(result["runtime"]["sqlite"]) == 1, "real Node SQLite version witness required")
+                require(result["runtime"]["textBindings"] == ("nul-truncation-fault-model" if env.get("GONVEX_HISTORICAL_TRUNCATE_BINDINGS") == "1" else "native-Node"), "wrong Node binding mode")
                 if phase.endswith("-held"):
                     require(child.poll() is None, "held historical transaction exited before kill")
                     child.kill()
@@ -106,7 +107,7 @@ def main():
         raise AssertionError("historical accepted-state source control escaped")
     for name, expected in sources.items():
         require(digest(ROOT / name) == expected, "historical input changed: " + name)
-    receipt = {"sources": sources, "positive": positive, "sourceAcceptedStateControlRejected": True, "mutation": mutation,
+    receipt = {"textBindings": "nul-truncation-fault-model" if os.environ.get("GONVEX_HISTORICAL_TRUNCATE_BINDINGS") == "1" else "native-Node", "sources": sources, "positive": positive, "sourceAcceptedStateControlRejected": True, "mutation": mutation,
                "boundary": "Actual Node SQLite, real SDK adapters and StoreReducerOutbox. Shared historical schedule also wired into required Expo/Android fixture. Two owned Node processes SIGKILLed during native SQL transactions. This receipt does not prove Expo/Hermes, iOS, physical-device or power-loss behavior."}
     (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print("Historical SQLite schemas, two transaction process kills, accepted-state recovery, corrupt-byte restart refusal and compiled acceptance control passed")

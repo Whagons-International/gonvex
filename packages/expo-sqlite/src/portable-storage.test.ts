@@ -18,25 +18,29 @@ afterEach(() => {
   for (const replica of replicas.splice(0)) replica.dispose();
   for (const db of databases.splice(0)) db.close();
 });
-function fixture() {
+function fixture(truncateTextBindings = false) {
   const db = new DatabaseSync(":memory:");
   databases.push(db);
   const queries: Array<{ sql: string; params: unknown[] }> = [];
+  // Reproduce the bound TEXT bytes observed in Expo Go 54.0.8 Android CI.
+  // SQLite itself remains real; this fault model is not native-device evidence.
+  const bind = (params: unknown[]) => params.map(value => truncateTextBindings && typeof value === "string"
+    ? value.split("\0", 1)[0] : value);
   const adapter: ExpoSQLiteDatabase = {
     async execAsync(sql) {
       db.exec(sql);
     },
     async runAsync(sql, ...params) {
       queries.push({ sql, params });
-      return db.prepare(sql).run(...(params as any[]));
+      return db.prepare(sql).run(...(bind(params) as any[]));
     },
     async getAllAsync<T>(sql: string, ...params: unknown[]) {
       queries.push({ sql, params });
-      return db.prepare(sql).all(...(params as any[])) as T[];
+      return db.prepare(sql).all(...(bind(params) as any[])) as T[];
     },
     async getFirstAsync<T>(sql: string, ...params: unknown[]) {
       queries.push({ sql, params });
-      return (db.prepare(sql).get(...(params as any[])) as T) ?? null;
+      return (db.prepare(sql).get(...(bind(params) as any[])) as T) ?? null;
     },
     async withTransactionAsync(task) {
       db.exec("BEGIN");
@@ -702,4 +706,73 @@ it.each([false, true])("checkpoints a window-only epoch without treating its col
   expect(cold.snapshot().cursor).toEqual({ epoch: "new", revision: 1 });
   expect(Object.keys(cold.snapshot().liveQueries)).toEqual(["a", "b", "c"]);
   expect(cold.snapshot().entities.tasks).toEqual(loaded.entities.tasks);
+});
+
+
+it.each(["replaceWindow", "replaceSnapshot", "applyTransaction", "advanceWatermark"] as const)(
+  "preserves distinct NUL window keys through C-string bindings using %s", async mode => {
+    const { storage, adapter } = fixture(true);
+    const signatures = ['tasks.all\0{}', 'tasks.all\0{"owner":"B"}'];
+    const cursor = { epoch: "nul", revision: 5 };
+    const rows = [{ _id: "a", name: "A" }, { _id: "b", name: "B" }];
+    const windows: ReplicaWindow[] = signatures.map((signature, i) => ({
+      signature, kind: "replica", entity: "tasks", key: "_id", ids: [rows[i]._id],
+      cursor, completeness: "complete", source: "server",
+    }));
+    const snapshot = { entities: { tasks: { a: rows[0], b: rows[1] } },
+      liveQueries: Object.fromEntries(windows.map(window => [window.signature, window])), cursor };
+    if (mode === "replaceSnapshot") await storage.replaceSnapshot(snapshot, "tenant");
+    else if (mode === "replaceWindow") {
+      for (const window of windows) await storage.replaceWindow(window, snapshot, "tenant");
+    } else {
+      await storage.applyTransaction({ cursor, changes: rows.map(row => ({
+        entity: "tasks", id: row._id, operation: "insert" as const, newValue: row,
+      })), ...(mode === "applyTransaction" ? { memberships: windows } : {}) }, snapshot, "tenant");
+      if (mode === "advanceWatermark") await storage.advanceWatermark(windows, cursor, "tenant");
+    }
+    const full = await storage.load("tenant");
+    const working = await storage.loadWorkingSet("tenant", { maxRows: 100, maxBytes: 100_000 });
+    expect(Object.keys(full!.liveQueries).sort()).toEqual([...signatures].sort());
+    expect(working!.liveQueries).toEqual(full!.liveQueries);
+    const cold = new ExpoSQLiteLocalReplicaStorage(adapter);
+    for (let i = 0; i < windows.length; i++) {
+      expect(await cold.loadWindowRows("tenant", signatures[i])).toMatchObject({
+        window: { signature: signatures[i], ids: [rows[i]._id] }, rows: [rows[i]],
+      });
+    }
+    expect(await adapter.getAllAsync("SELECT hex(signature) AS bytes FROM _gonvex_replica_queries ORDER BY signature"))
+      .toEqual([...signatures].sort().map(signature => ({ bytes: Buffer.from(signature).toString("hex").toUpperCase() })));
+  });
+
+it("updates, advances and removes one NUL window without aliasing its prefix peer", async () => {
+  const { storage } = fixture(true);
+  const signatures = ["tasks\0a", "tasks\0b"];
+  const replica = createReplica(storage);
+  await replica.activateScope("tenant");
+  for (const [i, signature] of signatures.entries()) await replica.applyWindowDelta({
+    signature, kind: "replica", entity: "tasks", key: "_id", upserts: [{ _id: String(i) }], deleted: [],
+    completeness: "complete", source: "server", cursor: { epoch: "nul", revision: 1 },
+  });
+  await replica.applyWindowDelta({ signature: signatures[0], kind: "replica", entity: "tasks", key: "_id",
+    upserts: [{ _id: "next" }], deleted: ["0"], completeness: "complete", source: "server", cursor: { epoch: "nul", revision: 2 } });
+  expect((await storage.loadWindowRows("tenant", signatures[0]))?.window.ids).toEqual(["next"]);
+  expect((await storage.loadWindowRows("tenant", signatures[1]))?.window.ids).toEqual(["1"]);
+  await replica.applyTransaction({ cursor: { epoch: "nul", revision: 3 }, changes: [
+    { entity: "tasks", id: "next", operation: "delete" }, { entity: "tasks", id: "1", operation: "delete" },
+  ] });
+  expect(Object.values((await storage.load("tenant"))!.liveQueries).map(window => window.ids)).toEqual([[], []]);
+  await storage.advanceWatermark(replica.listWindows(), { epoch: "nul", revision: 4 }, "tenant");
+  await storage.removeWindow(signatures[0], (await storage.load("tenant"))!, "tenant");
+  expect(Object.keys((await storage.load("tenant"))!.liveQueries)).toEqual([signatures[1]]);
+});
+
+it("refuses an already-truncated historical signature without guessing from its JSON payload", async () => {
+  const { storage, adapter } = fixture();
+  const signature = "tasks\0full";
+  await storage.replaceWindow({ signature, kind: "replica", entity: "tasks", key: "_id", ids: [],
+    completeness: "complete", source: "server" }, { entities: {}, liveQueries: {} }, "tenant", []);
+  await adapter.runAsync("UPDATE _gonvex_replica_queries SET signature='tasks'");
+  const before = await adapter.getAllAsync("SELECT hex(signature) AS bytes,value FROM _gonvex_replica_queries");
+  await expect(new ExpoSQLiteLocalReplicaStorage(adapter).load("tenant")).rejects.toThrow(/signature/);
+  expect(await adapter.getAllAsync("SELECT hex(signature) AS bytes,value FROM _gonvex_replica_queries")).toEqual(before);
 });

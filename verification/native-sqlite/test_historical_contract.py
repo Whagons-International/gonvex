@@ -79,6 +79,24 @@ class HistoricalContractTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "original journal bytes"):
             historical_transition(PHASES, "historical-recover", result)
 
+    def test_native_key_writer_observations_cannot_drop_suffixes_or_alias_peers(self):
+        for mutate in [
+            lambda value: value["modes"].pop(),
+            lambda value: value["modes"][0]["full"].__setitem__(0, "tasks"),
+            lambda value: value["modes"][1]["indexed"][0].update(bytes="7461736B73"),
+            lambda value: value["modes"][2]["points"][1]["window"].update(signature="tasks"),
+            lambda value: value["beforeRemove"]["liveQueries"]["tasks\x00b"].update(ids=[]),
+            lambda value: value["afterRemove"].update(liveQueries={}),
+        ]:
+            result = copy.deepcopy(PHASES["historical-recover"])
+            mutate(result["cases"][0]["windowBindings"])
+            with self.assertRaises(AssertionError):
+                historical_result(result, "historical-recover")
+        result = copy.deepcopy(PHASES["historical-seed"])
+        result["cases"][0]["raw"]["tables"]["queries"][0]["signature"] = "7461736B732E616C6C"
+        with self.assertRaisesRegex(AssertionError, "seed key bytes"):
+            historical_result(result, "historical-seed")
+
     def test_fresh_reopen_cannot_silently_reinitialize_import_or_allocation(self):
         for mutate in [lambda c: c.update(imported={"imported": 6, "skipped": 0, "invalid": 0}),
                        lambda c: c.update(nextId=7)]:

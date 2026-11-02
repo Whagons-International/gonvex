@@ -408,9 +408,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     let result: { window: ReplicaWindow; rows: ReplicaRow[] } | undefined;
     await this.database.withTransactionAsync(async () => {
       const record = await this.database.getFirstAsync<QueryRecord>(
-        `SELECT scope, json_quote(signature) AS signature, value FROM _gonvex_replica_queries WHERE scope = ? AND _gonvex_replica_queries.signature = ?`,
+        `SELECT scope, json_quote(signature) AS signature, value FROM _gonvex_replica_queries WHERE scope = ? AND _gonvex_replica_queries.signature = json_extract(?, '$')`,
         scope,
-        signature,
+        JSON.stringify(signature),
       );
       if (!record) return;
       const window = readWindowRecord(record);
@@ -613,10 +613,10 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
       }
       for (const membership of transaction.memberships ?? []) {
         await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)
            ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
           scope,
-          membership.signature,
+          JSON.stringify(membership.signature),
           JSON.stringify(membership),
         );
       }
@@ -637,8 +637,8 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
             if (ids.length !== window.ids.length) {
               window = { ...window, ids };
               await this.database.runAsync(
-                `UPDATE _gonvex_replica_queries SET value=? WHERE scope=? AND signature=?`,
-                JSON.stringify(window), scope, window.signature);
+                `UPDATE _gonvex_replica_queries SET value=? WHERE scope=? AND signature=json_extract(?, '$')`,
+                JSON.stringify(window), scope, JSON.stringify(window.signature));
             }
           }
           postImages.windows[window.signature] = window;
@@ -667,10 +667,10 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     await this.database.withTransactionAsync(async () => {
       for (const window of windows) {
         await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)
            ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
           scope,
-          window.signature,
+          JSON.stringify(window.signature),
           JSON.stringify(normalizeWindow(window)),
         );
       }
@@ -720,9 +720,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         snapshot.liveQueries,
       )) {
         await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)`,
+          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)`,
           scope,
-          signature,
+          JSON.stringify(signature),
           JSON.stringify(membership),
         );
       }
@@ -832,9 +832,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         ? { epoch: window.cursor.epoch, revision: 0 } : snapshot.cursor;
       await this.resetForEpoch(scope, checkpoint);
       const oldRecord = await this.database.getFirstAsync<QueryRecord>(
-        `SELECT scope,json_quote(signature) AS signature,value FROM _gonvex_replica_queries WHERE scope=? AND _gonvex_replica_queries.signature=?`,
+        `SELECT scope,json_quote(signature) AS signature,value FROM _gonvex_replica_queries WHERE scope=? AND _gonvex_replica_queries.signature=json_extract(?, '$')`,
         scope,
-        window.signature,
+        JSON.stringify(window.signature),
       );
       const oldWindow: ReplicaWindow | undefined = oldRecord
         ? readWindowRecord(oldRecord)
@@ -864,10 +864,10 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         window.cursor,
       );
       await this.database.runAsync(
-        `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+        `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)
          ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
         scope,
-        window.signature,
+        JSON.stringify(window.signature),
         JSON.stringify(normalizeWindow(window)),
       );
       postImages.windows[window.signature] = normalizeWindow(window);
@@ -933,9 +933,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     await this.initialize();
     await this.database.withTransactionAsync(async () => {
       await this.database.runAsync(
-        `DELETE FROM _gonvex_replica_queries WHERE scope = ? AND _gonvex_replica_queries.signature = ?`,
+        `DELETE FROM _gonvex_replica_queries WHERE scope = ? AND _gonvex_replica_queries.signature = json_extract(?, '$')`,
         scope,
-        signature,
+        JSON.stringify(signature),
       );
       if (snapshot.cursor) {
         await this.database.runAsync(
@@ -976,6 +976,8 @@ export function expoSQLite(database: ExpoSQLiteDatabase): LocalReplicaStorage {
 }
 
 function readWindowRecord(record: QueryRecord): ReplicaWindow {
+  // Bind keys as JSON and decode them in SQL: some native bridges truncate
+  // bound TEXT at NUL too. Stored keys retain their historical TEXT format.
   // Drivers can truncate an ordinary TEXT column at an embedded NUL. Read
   // its JSON-quoted representation and verify the payload uses that full key.
   const signature: unknown = JSON.parse(record.signature);

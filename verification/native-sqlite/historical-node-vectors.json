@@ -5,12 +5,13 @@
       "node": "v22.23.4",
       "sqlite": [
         "3.53.4"
-      ]
+      ],
+      "textBindings": "native-Node"
     },
     "sourceSha256": {
-      "verification/native-sqlite/historical.mjs": "6b45cd1a03f84ae9f7b1f399e413132b379cc8da209376807a03034ceebce438",
-      "verification/native-sqlite/historical-node.mjs": "e330a896e10cc1460b32c9285c26a8014b4e0d964e067c2fcadcb87ac0291a36",
-      "packages/expo-sqlite/src/index.ts": "4cb46e2f7f28ef89e61e243225a6f5dc63b17f3a890d06ea8dee4590ee0ad19b",
+      "verification/native-sqlite/historical.mjs": "83f17a4ca4860486f6eb7f57c82abb8fc7d9c7d026be581c3fbcb65f0309027a",
+      "verification/native-sqlite/historical-node.mjs": "a2e19ead0661ad2d98140ea5e0a10710831877cf73c75e69ecd2b05fda5623b4",
+      "packages/expo-sqlite/src/index.ts": "c2b870dcfde414bde3735b52b27e6064bfe006cd4772633c1390c638f107ca2f",
       "packages/expo-sqlite/src/outbox.ts": "23ed2495c73957d252b23ec0ed6a69ea4eb8fc58c98de0203a9fe6b5c6ed19bd",
       "packages/client/src/outbox.ts": "82f80923898053cae7d5f4aa890db141aeae357fccdb62add277b77f53955df8"
     }
@@ -208,7 +209,8 @@
         "node": "v22.23.4",
         "sqlite": [
           "3.53.4"
-        ]
+        ],
+        "textBindings": "native-Node"
       }
     },
     "historical-replica-held": {
@@ -309,7 +311,8 @@
         "node": "v22.23.4",
         "sqlite": [
           "3.53.4"
-        ]
+        ],
+        "textBindings": "native-Node"
       }
     },
     "historical-journal-held": {
@@ -482,7 +485,8 @@
         "node": "v22.23.4",
         "sqlite": [
           "3.53.4"
-        ]
+        ],
+        "textBindings": "native-Node"
       }
     },
     "historical-recover": {
@@ -820,6 +824,343 @@
               }
             ]
           },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
           "tombstones": [
             {
               "scope": "default",
@@ -1231,6 +1572,343 @@
               }
             ]
           },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
           "tombstones": [
             {
               "scope": "alice",
@@ -1284,7 +1962,8 @@
         "node": "v22.23.4",
         "sqlite": [
           "3.53.4"
-        ]
+        ],
+        "textBindings": "native-Node"
       }
     },
     "historical-reopen": {
@@ -1622,6 +2301,343 @@
               }
             ]
           },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
           "tombstones": [
             {
               "scope": "default",
@@ -2165,6 +3181,343 @@
               }
             ]
           },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
           "tombstones": [
             {
               "scope": "alice",
@@ -2350,7 +3703,8 @@
         "node": "v22.23.4",
         "sqlite": [
           "3.53.4"
-        ]
+        ],
+        "textBindings": "native-Node"
       }
     }
   }

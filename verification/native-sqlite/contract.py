@@ -69,6 +69,23 @@ def historical_entries(raw):
     return [dict(entry, state="pending" if entry["state"] == "inflight" else entry["state"], knownUnsent=False) for entry in entries]
 
 
+def window_binding_result(value):
+    signatures = ["tasks\x00a", "tasks\x00b"]
+    require([v["mode"] for v in value["modes"]] == ["replaceWindow", "replaceSnapshot", "applyTransaction", "advanceWatermark"], "missing native key writer")
+    for mode in value["modes"]:
+        require(mode["full"] == mode["working"] == signatures, "native key writer lost NUL suffix or aliased its peer")
+        require(mode["indexed"] == [{"bytes": s.encode().hex().upper()} for s in signatures], "native indexed key bytes were truncated")
+        require(len(mode["points"]) == 2, "missing native point lookup")
+        for i, point in enumerate(mode["points"]):
+            row_id = "bind-a" if i == 0 else "bind-b"
+            require(point and point["window"]["signature"] == signatures[i] and point["window"]["ids"] == [row_id]
+                    and point["rows"] == [{"id": row_id}], "native point lookup crossed its indexed key")
+    before, after = value["beforeRemove"], value["afterRemove"]
+    require(before["liveQueries"][signatures[0]]["ids"] == [] and before["liveQueries"][signatures[1]]["ids"] == ["bind-b"], "native membership delete aliased its peer")
+    require(list(after["liveQueries"]) == [signatures[1]] and after["liveQueries"][signatures[1]]["ids"] == ["bind-b"], "native window removal aliased its peer")
+    require(before["cursor"] == after["cursor"] == {"epoch": "bindings", "revision": 6}, "native key mutation lost its checkpoint")
+
+
 def historical_result(result, phase):
     if phase in ("historical-replica-held", "historical-journal-held"):
         require(result["variant"] == "unscoped", "held historical database changed")
@@ -97,10 +114,14 @@ def historical_result(result, phase):
             require(raw["appVersion"] == {"user_version": 700}, "historical application version missing")
             require(set(raw["tables"]) == {"entities", "queries", "meta"}, "historical raw schema incomplete")
             require(len(raw["schema"]) == 6, "historical tables or primary-key indexes missing")
+            signature = 'tasks.all\x00{"parentId":"p"}'.encode().hex().upper()
+            require(len(raw["tables"]["queries"]) == (1 if case["variant"] == "unscoped" else 2)
+                    and all(row["signature"] == signature for row in raw["tables"]["queries"]), "historical seed key bytes were truncated")
             require(len(raw["tables"]["entities"]) == (2 if case["variant"] == "unscoped" else 4), "historical owner rows or tombstones missing")
             continue
         require(case["appVersion"] == {"user_version": 700} and case["checkpoint"] == [{"id": 1, "version": 3}], "historical upgrade changed application version or replica checkpoint")
         require(case["integrity"] == {"integrity_check": "ok"}, "historical SQLite integrity failed")
+        window_binding_result(case["windowBindings"])
         require(case["tombstones"] == [{"scope": owner, "entity": "tasks", "id": "gone", "value": "null"}
                                        for owner in (["default"] if case["variant"] == "unscoped" else ["alice", "bob"])], "historical tombstones were lost or crossed owner scope")
         require(case["entries"] == expected, "historical import changed accepted intent identity or state")

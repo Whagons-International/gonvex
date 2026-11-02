@@ -79,7 +79,14 @@ indexed collection signature at its embedded NUL, creating an old alias in RAM
 alongside the correctly keyed current window. SQLite reads now JSON-quote the
 indexed signature, compare it with the payload and restore the full map key.
 Four real SQLite controls reproduce truncated hydration and inconsistent
-index/payload acceptance. A conservative hydrated global floor can also lag an
+index/payload acceptance. Android/Hermes CI then exposed a distinct input
+boundary: its native TEXT binder stored only the prefix before the signature's
+NUL. Window writes and indexed predicates now bind JSON-encoded parameters and
+decode them within SQL. This preserves the existing raw-key format; already
+truncated index/payload disagreements still refuse recovery. The historical
+fixture seeds intact keys through the same SQL transport, independently checks
+their raw hex bytes, and exercises all four production window writers, full and
+bounded hydration, point lookup, membership deletion and peer-safe removal. A conservative hydrated global floor can also lag an
 already current window; a metadata-only watermark now checkpoints that progress
 without certifying a revision above the incoming watermark. Its two controls
 include failed persistence and retry.

@@ -51,7 +51,13 @@ async function seed(database, variant) {
       ['entities', [...prefix, 'tasks', 'gone', 'null']],
       ['queries', [...prefix, signature, JSON.stringify(window)]],
       ['meta', [...prefix, 'cursor', JSON.stringify(cursor)]],
-    ]) await database.runAsync(`INSERT INTO _gonvex_replica_${table} VALUES(${values.map(() => '?').join(',')})`, ...values);
+    ]) {
+      // Seed intact historical bytes even when the native TEXT binder truncates
+      // at NUL. Corrupt prefix-only keys are a separate refusal control.
+      const key = table === 'queries' ? prefix.length : -1;
+      await database.runAsync(`INSERT INTO _gonvex_replica_${table} VALUES(${values.map((_, i) => i === key ? "json_extract(?, '$')" : '?').join(',')})`,
+        ...values.map((value, i) => i === key ? JSON.stringify(value) : value));
+    }
   }
   await database.runAsync('INSERT INTO _historical_legacy VALUES(1,?)', JSON.stringify(entries()));
   await database.runAsync('INSERT INTO _historical_expected VALUES(1,?)', JSON.stringify(await raw(database)));
@@ -77,12 +83,49 @@ async function views(database, Replica, Outbox, Queue, variant) {
   try { restored = { alice: await queue.loadAll('alice'), bob: await queue.loadAll('bob') }; }
   finally { queue.dispose?.(); }
   return { variant, owners, entries: await store.load(), restored,
+    windowBindings: await windowBindings(database, Replica),
     tombstones: await database.getAllAsync("SELECT scope,entity,id,value FROM _gonvex_replica_entities WHERE value='null' ORDER BY scope,id"),
     legacy: (await database.getFirstAsync('SELECT value FROM _historical_expected WHERE id=2')).value,
     appVersion: await database.getFirstAsync('PRAGMA user_version'),
     checkpoint: await database.getAllAsync('SELECT id,version FROM _gonvex_replica_schema'),
     integrity: await database.getFirstAsync('PRAGMA integrity_check'),
     sync: await database.getFirstAsync('PRAGMA synchronous'), journal: await database.getFirstAsync('PRAGMA journal_mode') };
+}
+
+// Exercise production key writers and lookups on both actual native drivers.
+// The oracle is in contract.py, separate from this adapter-driving schedule.
+async function windowBindings(database, Replica) {
+  const storage = new Replica(database), scope = 'window-binding-proof';
+  const signatures = ['tasks\0a', 'tasks\0b'];
+  const rows = [{ id: 'bind-a' }, { id: 'bind-b' }];
+  const cursor = { epoch: 'bindings', revision: 5 };
+  const windows = signatures.map((signature, i) => ({ signature, kind: 'replica', entity: 'tasks', key: 'id',
+    ids: [rows[i].id], cursor, completeness: 'complete', source: 'server' }));
+  const snapshot = { entities: { tasks: Object.fromEntries(rows.map(row => [row.id, row])) },
+    liveQueries: Object.fromEntries(windows.map(window => [window.signature, window])), cursor };
+  const modes = [];
+  for (const mode of ['replaceWindow', 'replaceSnapshot', 'applyTransaction', 'advanceWatermark']) {
+    await storage.clear(scope);
+    if (mode === 'replaceWindow') for (const window of windows) await storage.replaceWindow(window, snapshot, scope);
+    else if (mode === 'replaceSnapshot') await storage.replaceSnapshot(snapshot, scope);
+    else {
+      await storage.applyTransaction({ cursor, changes: rows.map(row => ({ entity: 'tasks', id: row.id, operation: 'insert', newValue: row })),
+        ...(mode === 'applyTransaction' ? { memberships: windows } : {}) }, snapshot, scope);
+      if (mode === 'advanceWatermark') await storage.advanceWatermark(windows, cursor, scope);
+    }
+    const full = await storage.load(scope), working = await storage.loadWorkingSet(scope, { maxRows: 100, maxBytes: 100_000 });
+    const cold = new Replica(database), points = [];
+    for (const signature of signatures) points.push(await cold.loadWindowRows(scope, signature));
+    modes.push({ mode, full: Object.keys(full.liveQueries).sort(), working: Object.keys(working.liveQueries).sort(), points,
+      indexed: await database.getAllAsync('SELECT hex(signature) AS bytes FROM _gonvex_replica_queries WHERE scope=? ORDER BY signature', scope) });
+  }
+  await storage.applyTransaction({ cursor: { epoch: 'bindings', revision: 6 },
+    changes: [{ entity: 'tasks', id: 'bind-a', operation: 'delete' }] }, snapshot, scope);
+  const beforeRemove = await storage.load(scope);
+  await storage.removeWindow(signatures[0], beforeRemove, scope);
+  const afterRemove = await storage.load(scope);
+  await storage.clear(scope);
+  return { modes, beforeRemove, afterRemove };
 }
 
 export async function historicalPhase(config, emit, { SQLite, Replica, Outbox, Queue, migrateLegacyOutbox }) {

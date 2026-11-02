@@ -55,12 +55,16 @@ if (args.get('--build-mutant') === 'yes') {
     async openDatabaseAsync(name) {
       assert(/^gonvex-historical-[a-zA-Z0-9_-]+\.db$/.test(name));
       const db = new DatabaseSync(resolve(directory, name));
+      // A targeted fault model for the bound bytes observed on Android. This
+      // does not claim native execution; native CI runs the same schedule.
+      const bind = params => params.map(value => process.env.GONVEX_HISTORICAL_TRUNCATE_BINDINGS === '1' && typeof value === 'string'
+        ? value.split('\0', 1)[0] : value);
       versions.add(db.prepare('SELECT sqlite_version() AS version').get().version);
       return {
         async execAsync(sql) { db.exec(sql); },
-        async runAsync(sql, ...params) { return db.prepare(sql).run(...params); },
-        async getAllAsync(sql, ...params) { return db.prepare(sql).all(...params); },
-        async getFirstAsync(sql, ...params) { return db.prepare(sql).get(...params) ?? null; },
+        async runAsync(sql, ...params) { return db.prepare(sql).run(...bind(params)); },
+        async getAllAsync(sql, ...params) { return db.prepare(sql).all(...bind(params)); },
+        async getFirstAsync(sql, ...params) { return db.prepare(sql).get(...bind(params)) ?? null; },
         async withTransactionAsync(run) {
           db.exec('BEGIN');
           try { await run(); db.exec('COMMIT'); } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -76,7 +80,7 @@ if (args.get('--build-mutant') === 'yes') {
     const execute = phase.startsWith('journal-corrupt-') ? corruptJournalPhase : historicalPhase;
     await execute({ phase, runId }, async event => {
       const path = resolve(directory, phase + '.json');
-      writeFileSync(path + '.tmp', JSON.stringify({ ...event, runtime: { node: process.version, sqlite: [...versions] } }) + '\n');
+      writeFileSync(path + '.tmp', JSON.stringify({ ...event, runtime: { node: process.version, sqlite: [...versions], textBindings: process.env.GONVEX_HISTORICAL_TRUNCATE_BINDINGS === '1' ? 'nul-truncation-fault-model' : 'native-Node' } }) + '\n');
       renameSync(path + '.tmp', path);
     }, { SQLite, Replica: ExpoSQLiteLocalReplicaStorage, Outbox: ExpoSQLiteOutboxStore, Queue: StoreReducerOutbox, migrateLegacyOutbox });
   } finally { clearInterval(keepAlive); }

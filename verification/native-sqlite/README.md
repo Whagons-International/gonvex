@@ -114,3 +114,13 @@ bundles the actual queue source and records all bundle input hashes. Generated
 files live in ignored `.work/`. Native versions and the old baseline are pinned
 in `toolchain.json`. Change those pins with fresh native evidence and review
 the validator expectations when intentionally upgrading the engine.
+
+
+The historical recovery/reopen phases also exercise NUL-delimited window keys
+through four production writers, point lookups, membership deletion and removal.
+The host checks exact indexed bytes and distinct same-prefix memberships. The
+seed decodes JSON parameters within SQL so it creates intact historical keys on
+native bridges that truncate bound TEXT at NUL. Already-truncated stored keys
+remain a recovery error. `GONVEX_HISTORICAL_TRUNCATE_BINDINGS=1` enables a targeted
+Node driver fault model for that observed Android input boundary; its receipt
+continues to identify itself as Node execution, not Expo/Hermes evidence.
