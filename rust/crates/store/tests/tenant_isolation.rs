@@ -1,58 +1,38 @@
 use std::collections::BTreeMap;
-use std::env;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use gonvex_store::{
-    token_hash, ControlPlane, DatabaseError, MigrationScope, PoolLimits, PoolRegistry,
-    SqlMigration, TenantRoute, TransactionAttribution,
+    token_hash, ControlPlane, DataDir, DatabaseError, MigrationScope, PoolLimits, PoolRegistry,
+    SqlMigration, TenantRoute, TransactionAttribution, NOW_MS,
 };
-use sqlx::{postgres::PgPoolOptions, Row};
+use sqlx::Row;
 
-fn test_database_url() -> Option<String> {
-    let url = env::var("GONVEX_TEST_POSTGRES_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    assert!(
-        url.is_some() || env::var_os("GONVEX_TENANT_ISOLATION_REQUIRE_NATIVE").is_none(),
-        "tenant isolation test requires PostgreSQL"
-    );
-    url
+/// A unique data directory under the system temp dir, removed on drop.
+struct TestDir(std::path::PathBuf);
+
+impl TestDir {
+    fn new(prefix: &str) -> Self {
+        let path = std::env::var_os("GONVEX_TEST_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("{prefix}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
 }
 
-fn scoped_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}")
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[tokio::test]
 async fn tenant_database_is_the_final_membership_authority() {
-    let Some(base_url) = test_database_url() else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping PostgreSQL isolation test");
-        return;
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let control_schema = format!("gonvex_rust_control_{nonce}");
-    let tenant_a_schema = format!("gonvex_rust_tenant_a_{nonce}");
-    let tenant_b_schema = format!("gonvex_rust_tenant_b_{nonce}");
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base_url)
-        .await
-        .expect("connect test PostgreSQL");
-
-    for schema in [&control_schema, &tenant_a_schema, &tenant_b_schema] {
-        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-            .execute(&admin)
-            .await
-            .expect("create isolated schema");
-    }
-    let control_url = scoped_url(&base_url, &control_schema);
-    let tenant_a_url = scoped_url(&base_url, &tenant_a_schema);
-    let tenant_b_url = scoped_url(&base_url, &tenant_b_schema);
+    let dir = TestDir::new("gonvex-isolation");
+    let data = DataDir::new(&dir.0);
+    let control_url = data.control_url();
+    let tenant_a_url = data.tenant_url("project", "tenant-a").unwrap();
+    let tenant_b_url = data.tenant_url("project", "tenant-b").unwrap();
     let pools = PoolRegistry::new(PoolLimits::default());
     let control = ControlPlane::connect(
         &control_url,
@@ -86,18 +66,14 @@ async fn tenant_database_is_the_final_membership_authority() {
             .await
             .unwrap();
     }
-    let fixture = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&control_url)
-        .await
-        .unwrap();
+    let fixture = pools.pool(&control_url).await.unwrap();
     sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,environment,database_mode,status,auth_mode) VALUES ('project', 'Project', 'test', 'multiTenant', 'active', 'firebase')")
         .execute(&fixture).await.unwrap();
     sqlx::query("INSERT INTO gonvex_runtime_tenants (relationship_id,project_id, tenant_id, name, status, database_url) VALUES ('tenant-a','project', 'tenant-a', 'A', 'active', $1), ('tenant-b','project', 'tenant-b', 'B', 'active', $2)")
         .bind(&tenant_a_url).bind(&tenant_b_url).execute(&fixture).await.unwrap();
     sqlx::query("INSERT INTO accounts (id,auth_realm_id,email,name) VALUES ('account-1','project','member@example.test','Member')")
         .execute(&fixture).await.unwrap();
-    sqlx::query("INSERT INTO account_identities(account_id,project_id,provider,issuer,subject,email,verified_email) VALUES ('account-1','project','firebase','https://securetoken.google.com/project','firebase-uid','member@example.test',TRUE)")
+    sqlx::query("INSERT INTO account_identities(account_id,project_id,provider,issuer,subject,email,verified_email) VALUES ('account-1','project','firebase','https://securetoken.google.com/project','firebase-uid','member@example.test',1)")
         .execute(&fixture)
         .await
         .unwrap();
@@ -108,30 +84,19 @@ async fn tenant_database_is_the_final_membership_authority() {
     .execute(&fixture)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO gonvex_auth_sessions (token_hash,project_id,account_id,expires_at) VALUES ($1,'project','account-1',now()+interval '1 hour')")
+    sqlx::query(&format!("INSERT INTO gonvex_auth_sessions (token_hash,project_id,account_id,expires_at) VALUES ($1,'project','account-1',{NOW_MS}+3600000)"))
         .bind(token_hash("gvx_session_rust_test")).execute(&fixture).await.unwrap();
-    fixture.close().await;
 
-    let tenant_a = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&tenant_a_url)
-        .await
-        .unwrap();
+    let tenant_a = pools.pool(&tenant_a_url).await.unwrap();
     sqlx::query("INSERT INTO members (id, account_id, status, role, permissions) VALUES ('member-a', 'account-1', 'active', 'manager', '{\"tasks.read\":true}')")
         .execute(&tenant_a).await.unwrap();
-    tenant_a.close().await;
-    let tenant_b = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&tenant_b_url)
-        .await
-        .unwrap();
+    let tenant_b = pools.pool(&tenant_b_url).await.unwrap();
     sqlx::query(
         "INSERT INTO members (id, account_id, status) VALUES ('member-b', 'account-1', 'revoked')",
     )
     .execute(&tenant_b)
     .await
     .unwrap();
-    tenant_b.close().await;
 
     let (_, member, _) = control
         .admit_member("project", "tenant-a", "account-1")
@@ -168,11 +133,7 @@ async fn tenant_database_is_the_final_membership_authority() {
 
     // A self developer grant can browse B without reactivating its revoked
     // membership. The ordinary session and support impersonation stay denied.
-    let grants = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&control_url)
-        .await
-        .unwrap();
+    let grants = pools.pool(&control_url).await.unwrap();
     sqlx::query("INSERT INTO gonvex_project_members(project_id,email,role) VALUES('project','member@example.test','dev')")
         .execute(&grants).await.unwrap();
     for (id, token, tenant) in [
@@ -180,7 +141,7 @@ async fn tenant_database_is_the_final_membership_authority() {
         ("imp_nonmember", "gvx_imp_support", "tenant-b"),
         ("devmode_member", "gvx_imp_member", "tenant-a"),
     ] {
-        sqlx::query("INSERT INTO gonvex_impersonation_grants(id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at) VALUES($1,'project',$2,'account-1','account-1',$3,'developer mode',now()+interval '5 minutes')")
+        sqlx::query(&format!("INSERT INTO gonvex_impersonation_grants(id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at) VALUES($1,'project',$2,'account-1','account-1',$3,'developer mode',{NOW_MS}+300000)"))
             .bind(id).bind(token_hash(token)).bind(tenant).execute(&grants).await.unwrap();
     }
     assert!(control
@@ -248,11 +209,7 @@ async fn tenant_database_is_the_final_membership_authority() {
         .unwrap();
     assert_eq!(member_grant.tenant.member.id, "member-a");
     assert_eq!(member_grant.tenant.member.role, "manager");
-    let tenant_b = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&tenant_b_url)
-        .await
-        .unwrap();
+    let tenant_b = pools.pool(&tenant_b_url).await.unwrap();
     let row = sqlx::query(
         "SELECT count(*) AS total, count(*) FILTER (WHERE status='active') AS active FROM members",
     )
@@ -279,8 +236,6 @@ async fn tenant_database_is_the_final_membership_authority() {
         .validate_impersonation_session(&reloaded.reconnect_token, "project", "tenant-b", "reload")
         .await
         .is_err());
-    grants.close().await;
-    tenant_b.close().await;
 
     control
         .ensure_reducer_idempotency(&tenant_session.route)
@@ -332,11 +287,7 @@ async fn tenant_database_is_the_final_membership_authority() {
     // Tenant B was denied above while its member was revoked. Admit the same
     // session only after the physical tenant membership is activated, then use
     // the identical account, intent key and business row ID in its own route.
-    let tenant_b = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&tenant_b_url)
-        .await
-        .unwrap();
+    let tenant_b = pools.pool(&tenant_b_url).await.unwrap();
     sqlx::query("UPDATE members SET status='active' WHERE id='member-b'")
         .execute(&tenant_b)
         .await
@@ -394,7 +345,6 @@ async fn tenant_database_is_the_final_membership_authority() {
             .unwrap(),
         "Tenant B only"
     );
-    tenant_b.close().await;
 
     let mut attributed = control
         .begin_tenant_transaction(&tenant_session.route, false)
@@ -419,20 +369,16 @@ async fn tenant_database_is_the_final_membership_authority() {
         .unwrap();
     attributed.commit().await.unwrap();
 
-    let tenant_a = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&tenant_a_url)
-        .await
-        .unwrap();
+    let tenant_a = pools.pool(&tenant_a_url).await.unwrap();
     let metadata = sqlx::query(
-        r#"SELECT transaction.root_command_id,transaction.origin_command_id,
-                  transaction.root_invocation_channel,
-                  transaction.invocation_channel,transaction.actor_account_id,
-                  transaction.actor_member_id,transaction.on_behalf_of_member_id,
-                  transaction.agent_execution_id
-           FROM _gonvex_sync_transactions transaction
-           JOIN _gonvex_sync_changes change ON change.revision=transaction.revision
-           WHERE change.table_name='tasks' AND change.row_id='task-agent'"#,
+        r#"SELECT tx.root_command_id,tx.origin_command_id,
+                  tx.root_invocation_channel,
+                  tx.invocation_channel,tx.actor_account_id,
+                  tx.actor_member_id,tx.on_behalf_of_member_id,
+                  tx.agent_execution_id
+           FROM _gonvex_sync_transactions tx
+           JOIN _gonvex_sync_changes ch ON ch.revision=tx.revision
+           WHERE ch.table_name='tasks' AND ch.row_id='task-agent'"#,
     )
     .fetch_one(&tenant_a)
     .await
@@ -499,7 +445,6 @@ async fn tenant_database_is_the_final_membership_authority() {
         .unwrap(),
         0
     );
-    tenant_a.close().await;
 
     let mut outbox = control
         .begin_tenant_transaction(&tenant_session.route, false)
@@ -533,8 +478,13 @@ async fn tenant_database_is_the_final_membership_authority() {
     assert_eq!(claimed.provenance["actorMemberId"], "member-a");
     // Simulate a long-running delivery. A heartbeat refreshes an otherwise
     // expired claim, while a stale attempt cannot renew it.
-    sqlx::query(&format!(r#"UPDATE "{tenant_a_schema}"._gonvex_action_outbox SET locked_at = now() - interval '6 minutes' WHERE id = $1"#))
-        .bind(&claimed.id).execute(&admin).await.unwrap();
+    sqlx::query(&format!(
+        "UPDATE _gonvex_action_outbox SET locked_at = {NOW_MS} - 360000 WHERE id = $1"
+    ))
+    .bind(&claimed.id)
+    .execute(&pools.pool(&tenant_a_url).await.unwrap())
+    .await
+    .unwrap();
     assert!(!control
         .renew_action(&tenant_session.route, &claimed.id, claimed.attempts + 1)
         .await
@@ -553,12 +503,51 @@ async fn tenant_database_is_the_final_membership_authority() {
         .await
         .unwrap();
 
+    // A retried delivery becomes due again only after its backoff.
+    let mut outbox = control
+        .begin_tenant_transaction(&tenant_session.route, false)
+        .await
+        .unwrap();
+    let retried = outbox
+        .enqueue_action(
+            "notifications.send",
+            &serde_json::json!({}),
+            "",
+            "",
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+    outbox.commit().await.unwrap();
+    let claimed = control
+        .claim_action(&tenant_session.route)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, retried);
+    assert_eq!(claimed.attempts, 1);
+    assert_eq!(claimed.actor_account_id, "");
+    control
+        .retry_action(
+            &tenant_session.route,
+            &claimed.id,
+            claimed.attempts,
+            "failed",
+        )
+        .await
+        .unwrap();
+    assert!(control
+        .claim_action(&tenant_session.route)
+        .await
+        .unwrap()
+        .is_none());
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let again = control
+        .claim_action(&tenant_session.route)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((again.id.as_str(), again.attempts), (retried.as_str(), 2));
+
     pools.close().await;
-    for schema in [&tenant_b_schema, &tenant_a_schema, &control_schema] {
-        sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-            .execute(&admin)
-            .await
-            .expect("drop isolated schema");
-    }
-    admin.close().await;
 }

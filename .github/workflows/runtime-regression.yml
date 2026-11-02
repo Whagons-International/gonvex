@@ -24,20 +24,6 @@ jobs:
     name: Runtime tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -92,12 +78,6 @@ jobs:
       # Some script contracts import built package output (packages/*/dist).
       - name: Validate repository script contracts
         run: node --test scripts/*.test.mjs
-      - name: Test PostgreSQL stall recorder against a real lock
-        run: |
-          test -n "$GONVEX_STALL_TEST_CONTAINER"
-          python3 scripts/postgres-stall-recorder.test.py -v
-        env:
-          GONVEX_STALL_TEST_CONTAINER: ${{ job.services.postgres.id }}
       - name: Test JavaScript workspace
         run: pnpm -r test
       - name: Require post-storage watermark and readiness ownership and reject compiled stale completion controls
@@ -172,11 +152,9 @@ jobs:
           found = {line.split()[0] for line in tree.splitlines() if line.split()} & forbidden
           assert not found, f"Default build includes analysis dependencies: {found}"
           PY
-      - name: Test Rust runtime with PostgreSQL
+      - name: Test Rust runtime with SQLite
         working-directory: rust
         run: cargo test --locked --workspace --all-targets -- --test-threads=1
-        env:
-          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       - name: Require native root-admission deadlines, nested progress and exact permit capacity
         working-directory: rust
         shell: bash
@@ -223,9 +201,8 @@ jobs:
       - name: Require real tenant membership and receipt namespace isolation
         working-directory: rust
         env:
-          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
           GONVEX_TENANT_ISOLATION_REQUIRE_NATIVE: "1"
-        run: cargo test --locked -p gonvex-postgres --test tenant_isolation -- --test-threads=1
+        run: cargo test --locked -p gonvex-store --test tenant_isolation -- --test-threads=1
       - name: Build module host for required native receipt regressions
         working-directory: rust
         run: cargo build --locked -p gonvex-module-host --bin gonvex-module-host
@@ -239,12 +216,10 @@ jobs:
           GONVEX_TEST_MODULE_HOST_BINARY: ${{ github.workspace }}/rust/target/debug/gonvex-module-host
           GONVEX_VIS_FANOUT_REQUIRED: "1"
           GONVEX_VIS_FANOUT_MEMBERS: "200"
-          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
       - name: Test native receipt replay and rollback guarantees
         working-directory: rust
         shell: bash
         env:
-          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
           GONVEX_TEST_MODULE_HOST_BINARY: ${{ github.workspace }}/rust/target/debug/gonvex-module-host
           GONVEX_RECEIPT_TEST_REQUIRE_NATIVE: "1"
         run: |
@@ -252,7 +227,7 @@ jobs:
           test -x "$GONVEX_TEST_MODULE_HOST_BINARY"
           cargo test --locked -p gonvex-runtime --lib tests::receipt_guarantee_tests -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/native-receipts.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-receipts.log"
-      - name: Build exact runtime artifact for PostgreSQL crash recovery
+      - name: Build exact runtime artifact for process crash recovery
         working-directory: rust
         shell: bash
         run: |
@@ -262,7 +237,6 @@ jobs:
         working-directory: rust
         shell: bash
         env:
-          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
           GONVEX_TEST_MODULE_HOST_BINARY: ${{ github.workspace }}/rust/target/debug/gonvex-module-host
           GONVEX_RECEIPT_TEST_REQUIRE_NATIVE: "1"
         run: |
@@ -286,7 +260,7 @@ jobs:
             ${{ runner.temp }}/snapshot-pool-progress.log
             ${{ runner.temp }}/snapshot-task-cancellation.log
           if-no-files-found: error
-      - name: Require receipt and business effects across PostgreSQL process crashes
+      - name: Require receipt and business effects across runtime process crashes
         run: |
           python3 verification/backend-receipts/check_restart.py \
             --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
@@ -318,34 +292,7 @@ jobs:
           name: sdk-module-upgrade
           path: ${{ runner.temp }}/sdk-module-upgrade
           if-no-files-found: error
-      - name: Require SDK recovery through existing runtime pools after PostgreSQL SIGKILL
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 verification/backend-receipts/check_sdk_postgres_crash.py \
-            --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
-            --module-host rust/target/debug/gonvex-module-host \
-            --output "$RUNNER_TEMP/sdk-postgres-crash"
-          if python3 verification/backend-receipts/check_sdk_postgres_crash.py \
-            --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
-            --module-host rust/target/debug/gonvex-module-host \
-            --output "$RUNNER_TEMP/sdk-postgres-crash-control" \
-            --missing-effect-control > "$RUNNER_TEMP/sdk-postgres-crash-control.log" 2>&1; then
-            echo "Missing committed business effect was accepted after PostgreSQL crash"
-            exit 1
-          fi
-          grep -F "PostgreSQL crash recovery lost committed business/receipt witness" "$RUNNER_TEMP/sdk-postgres-crash-control.log"
-      - name: Retain SDK PostgreSQL crash evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sdk-postgres-crash
-          path: |
-            ${{ runner.temp }}/sdk-postgres-crash
-            ${{ runner.temp }}/sdk-postgres-crash-control
-            ${{ runner.temp }}/sdk-postgres-crash-control.log
-          if-no-files-found: ignore
-      - name: Retain PostgreSQL crash-recovery evidence
+      - name: Retain runtime crash-recovery evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -1,4 +1,8 @@
+//! Control Plane schema, database file provisioning, migrations and change
+//! capture installation on SQLite.
+
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::time::Instant;
 
@@ -6,11 +10,20 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use sqlx::Row;
-use url::Url;
+use sqlx::{Connection, Row, SqliteConnection};
 
-use super::sql_script::split_statements;
-use super::{ControlPlane, DatabaseError, TenantRoute};
+use super::data_dir::DataDir;
+use super::feed::{self, CommitNotice, Provenance, SYNC_INFRASTRUCTURE_SQL};
+use super::registry::database_path;
+use super::rows::{quote_identifier, table_columns};
+use super::{ControlPlane, DatabaseError, PoolRegistry, TenantRoute};
+
+/// Keyed lock (see [`PoolRegistry::lock`]) that serializes schema changes on
+/// one database: migrations, change-capture installation and reference
+/// declarations.
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub(crate) const SCHEMA_LOCK: &str = "gonvex_sql_migrations";
 
 fn project_key(project_id: &str) -> String {
     let mut secret = [0_u8; 32];
@@ -70,13 +83,229 @@ impl SqlMigration {
     }
 }
 
+/// Columns added to Control Plane tables after the table first shipped.
+/// SQLite cannot `ADD COLUMN IF NOT EXISTS` or add a column with an
+/// expression default, so older files receive these definitions (constant
+/// defaults) before `control_schema.sql` runs.
+const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "gonvex_runtime_projects",
+        "test_tab",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    ),
+    (
+        "gonvex_runtime_projects",
+        "error_tracking_enabled",
+        "BOOLEAN NOT NULL DEFAULT 0",
+    ),
+    (
+        "gonvex_runtime_projects",
+        "database_mode",
+        "TEXT NOT NULL DEFAULT 'single'",
+    ),
+    (
+        "gonvex_runtime_projects",
+        "owner_email",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_runtime_projects",
+        "auth_mode",
+        "TEXT NOT NULL DEFAULT 'gonvex-native'",
+    ),
+    (
+        "account_identities",
+        "sign_in_provider",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_runtime_tenants",
+        "timezone",
+        "TEXT NOT NULL DEFAULT 'UTC'",
+    ),
+    (
+        "gonvex_runtime_tenants",
+        "profile",
+        "JSON NOT NULL DEFAULT '{}'",
+    ),
+    ("gonvex_runtime_tenants", "seat_limit", "INTEGER"),
+    ("gonvex_runtime_tenants", "deleted_at", "INTEGER"),
+    ("gonvex_runtime_tenants", "deletion_idempotency_key", "TEXT"),
+    (
+        "gonvex_project_invitations",
+        "token_hash",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_providers",
+        "signup_mode",
+        "TEXT NOT NULL DEFAULT 'personal'",
+    ),
+    (
+        "gonvex_auth_providers",
+        "azure_tenant_id",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_providers",
+        "client_id",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    ("gonvex_auth_providers", "client_secret_encrypted", "BLOB"),
+    (
+        "gonvex_auth_providers",
+        "issuer",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_providers",
+        "audience",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_providers",
+        "jwks_url",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_providers",
+        "firebase_project_id",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_providers",
+        "firebase_tenant_id",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_providers",
+        "admin_credentials_encrypted",
+        "BLOB",
+    ),
+    (
+        "gonvex_auth_transactions",
+        "provider",
+        "TEXT NOT NULL DEFAULT 'google'",
+    ),
+    // Expression defaults cannot be added; new rows always set expires_at.
+    (
+        "gonvex_auth_membership_invitations",
+        "expires_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    ("gonvex_auth_membership_invitations", "id", "TEXT"),
+    ("gonvex_auth_membership_invitations", "token_hash", "TEXT"),
+    (
+        "gonvex_auth_membership_invitations",
+        "revoked_at",
+        "INTEGER",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "accepted_at",
+        "INTEGER",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "accepted_account_id",
+        "TEXT",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "accepted_idempotency_key",
+        "TEXT",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "team_ids",
+        "JSON NOT NULL DEFAULT '[]'",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "allowed_auth_providers",
+        "JSON NOT NULL DEFAULT '[]'",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "application_payload",
+        "JSON NOT NULL DEFAULT '{}'",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "handoff_state",
+        "TEXT NOT NULL DEFAULT 'pending'",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "handoff_command_id",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "completed_at",
+        "INTEGER",
+    ),
+    (
+        "gonvex_auth_membership_invitations",
+        "updated_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "gonvex_tenant_provisioning",
+        "domain",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "gonvex_scheduled_jobs",
+        "provenance",
+        "JSON NOT NULL DEFAULT '{}'",
+    ),
+    (
+        "gonvex_scheduled_jobs",
+        "wake_key",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    ("gonvex_impersonation_grants", "delegation_actor", "JSON"),
+];
+
+pub(crate) async fn table_exists(
+    connection: &mut SqliteConnection,
+    name: &str,
+) -> Result<bool, DatabaseError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=$1)",
+    )
+    .bind(name)
+    .fetch_one(connection)
+    .await?)
+}
+
+pub(crate) async fn column_exists(
+    connection: &mut SqliteConnection,
+    table: &str,
+    column: &str,
+) -> Result<bool, DatabaseError> {
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info($1) WHERE name=$2)")
+            .bind(table)
+            .bind(column)
+            .fetch_one(connection)
+            .await?,
+    )
+}
+
+fn protocol(message: impl Into<String>) -> DatabaseError {
+    sqlx::Error::Protocol(message.into()).into()
+}
+
 impl ControlPlane {
     pub(crate) async fn prepare_identity_schema_upgrade(&self) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit(&self.database_url).await?;
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gonvex:identity-schema-upgrade'))")
-            .execute(&mut *transaction)
+        let _schema = self
+            .pools
+            .lock(&self.database_url, "identity-schema-upgrade")
             .await?;
+        let mut transaction = self.pool.begin().await?;
 
         let mut legacy_tables = Vec::new();
         for table in [
@@ -84,25 +313,12 @@ impl ControlPlane {
             "gonvex_auth_sessions",
             "gonvex_auth_refresh_tokens",
         ] {
-            let has_legacy_user_id: bool = sqlx::query_scalar(
-                r#"SELECT EXISTS(SELECT 1 FROM information_schema.columns
-                   WHERE table_schema=current_schema() AND table_name=$1 AND column_name='user_id')"#,
-            )
-            .bind(table)
-            .fetch_one(&mut *transaction)
-            .await?;
-            if has_legacy_user_id {
+            if column_exists(&mut transaction, table, "user_id").await? {
                 legacy_tables.push(table);
             }
         }
         for table in ["gonvex_auth_memberships", "gonvex_auth_users"] {
-            let exists: bool = sqlx::query_scalar(
-                "SELECT to_regclass(format('%I.%I',current_schema(),$1)) IS NOT NULL",
-            )
-            .bind(table)
-            .fetch_one(&mut *transaction)
-            .await?;
-            if exists {
+            if table_exists(&mut transaction, table).await? {
                 legacy_tables.push(table);
             }
         }
@@ -117,10 +333,9 @@ impl ControlPlane {
                     .fetch_one(&mut *transaction)
                     .await?;
             if populated {
-                return Err(sqlx::Error::Protocol(format!(
+                return Err(protocol(format!(
                     "legacy identity table {table} contains data; run `gonvex-admin migrate identity-v2` before starting this runtime"
-                ))
-                .into());
+                )));
             }
         }
 
@@ -147,73 +362,87 @@ impl ControlPlane {
 
     pub(crate) async fn ensure_control_schema(&self) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit(&self.database_url).await?;
-        execute_script_pool(&self.pool, include_str!("control_schema.sql")).await
-    }
-
-    pub async fn create_database(
-        &self,
-        base_url: &str,
-        database_name: &str,
-    ) -> Result<String, DatabaseError> {
-        if !database_name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-            || database_name.is_empty()
-            || database_name.len() > 63
+        let _schema = self.pools.lock(&self.database_url, SCHEMA_LOCK).await?;
+        let mut transaction = self.pool.begin().await?;
+        // Older layouts: renamed objects first, then additive columns, so the
+        // canonical script's indexes and updates find what they reference.
+        if column_exists(&mut transaction, "gonvex_runtime_manifests", "bundle_hash").await?
+            && !column_exists(&mut transaction, "gonvex_runtime_manifests", "module_hash").await?
         {
-            return Err(sqlx::Error::Protocol("invalid generated database name".to_owned()).into());
-        }
-        let mut maintenance_url = Url::parse(base_url)
-            .map_err(|error| sqlx::Error::Protocol(format!("invalid database URL: {error}")))?;
-        maintenance_url.set_path("/postgres");
-        let pool = self.pools.pool(maintenance_url.as_str()).await?;
-        let _admission = self.pools.admit(maintenance_url.as_str()).await?;
-        let owner: String = sqlx::query_scalar("SELECT current_user")
-            .fetch_one(&pool)
+            sqlx::query(
+                "ALTER TABLE gonvex_runtime_manifests RENAME COLUMN bundle_hash TO module_hash",
+            )
+            .execute(&mut *transaction)
             .await?;
-        if !owner
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            return Err(sqlx::Error::Protocol("invalid database owner".to_owned()).into());
         }
-        let statement = format!("CREATE DATABASE \"{database_name}\" OWNER \"{owner}\"");
-        if let Err(error) = sqlx::query(&statement).execute(&pool).await {
-            if error
-                .as_database_error()
-                .and_then(|error| error.code())
-                .as_deref()
-                != Some("42P04")
+        if table_exists(&mut transaction, "gonvex_runtime_mutation_logs").await?
+            && !table_exists(&mut transaction, "gonvex_runtime_reducer_logs").await?
+        {
+            sqlx::query(
+                "ALTER TABLE gonvex_runtime_mutation_logs RENAME TO gonvex_runtime_reducer_logs",
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+        for (table, column, definition) in ADDITIVE_COLUMNS {
+            if table_exists(&mut transaction, table).await?
+                && !column_exists(&mut transaction, table, column).await?
             {
-                return Err(error.into());
+                sqlx::query(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {} {definition}",
+                    quote_identifier(column)
+                ))
+                .execute(&mut *transaction)
+                .await?;
             }
         }
-        let mut result = Url::parse(base_url)
-            .map_err(|error| sqlx::Error::Protocol(format!("invalid database URL: {error}")))?;
-        result.set_path(&format!("/{database_name}"));
-        Ok(result.to_string())
+        crate::execute_script(&mut *transaction, include_str!("control_schema.sql")).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Creates (or opens) a project's own database file and returns its URL.
+    /// `data_dir` is the data directory path or `sqlite://` URL.
+    pub async fn create_project_database(
+        &self,
+        data_dir: &str,
+        project_id: &str,
+    ) -> Result<String, DatabaseError> {
+        let url = DataDir::parse(data_dir).project_url(project_id)?;
+        self.pools.pool(&url).await?;
+        Ok(url)
+    }
+
+    /// Creates (or opens) a tenant shard file and returns its URL.
+    pub async fn create_tenant_database(
+        &self,
+        data_dir: &str,
+        project_id: &str,
+        tenant_id: &str,
+    ) -> Result<String, DatabaseError> {
+        let url = DataDir::parse(data_dir).tenant_url(project_id, tenant_id)?;
+        self.pools.pool(&url).await?;
+        Ok(url)
     }
 
     pub async fn create_runtime_project(
         &self,
-        base_url: &str,
+        data_dir: &str,
         name: &str,
         database_mode: &str,
         owner_email: &str,
     ) -> Result<serde_json::Value, DatabaseError> {
         if !matches!(database_mode, "single" | "multiTenant") {
-            return Err(sqlx::Error::Protocol(
-                "databaseMode must be single or multiTenant".to_owned(),
-            )
-            .into());
+            return Err(protocol("databaseMode must be single or multiTenant"));
         }
         let name = name.trim();
         if name.is_empty() || name.len() > 120 {
-            return Err(sqlx::Error::Protocol("project name is required".to_owned()).into());
+            return Err(protocol("project name is required"));
         }
         let project_id = uuid::Uuid::new_v4().to_string();
-        let database_name = format!("gonvex_{}", uuid::Uuid::new_v4().simple());
-        let database_url = self.create_database(base_url, &database_name).await?;
+        let data = DataDir::parse(data_dir);
+        let database_name = relative_name(&data, &data.project_path(&project_id)?);
+        let database_url = self.create_project_database(data_dir, &project_id).await?;
         let project_key = project_key(&project_id);
         let mut transaction = self.begin_control_transaction(false).await?;
         sqlx::query(
@@ -221,7 +450,7 @@ impl ControlPlane {
                (id,name,environment,database_name,database_mode,database_url,storage_bucket,
                 status,description,project_key,provisioned,runtime_created,owner_email)
                VALUES($1,$2,'development',$3,$4,$5,$6,'active','Runtime-created project database.',
-                      $7,TRUE,TRUE,$8)"#,
+                      $7,1,1,$8)"#,
         )
         .bind(&project_id)
         .bind(name)
@@ -249,7 +478,7 @@ impl ControlPlane {
                 r#"INSERT INTO gonvex_runtime_tenants
                    (relationship_id,project_id,tenant_id,name,database_alias,database_name,
                     database_url,status,description,provisioned,runtime_created)
-                   VALUES($1,$1,$1,$2,'default',$3,$4,'active','Single-database tenant.',TRUE,TRUE)"#,
+                   VALUES($1,$1,$1,$2,'default',$3,$4,'active','Single-database tenant.',1,1)"#,
             )
             .bind(&project_id)
             .bind(name)
@@ -314,74 +543,61 @@ impl ControlPlane {
         Ok(key)
     }
 
+    /// Deletes a runtime-created project and its database files. Only files
+    /// inside `{data}/projects/{project}` are removed.
     pub async fn delete_runtime_project(
         &self,
-        base_url: &str,
+        data_dir: &str,
         project_id: &str,
     ) -> Result<(), DatabaseError> {
+        let data = DataDir::parse(data_dir);
+        let project_dir = data.project_dir(project_id)?;
         let mut transaction = self.begin_control_transaction(false).await?;
         let project = sqlx::query(
-            r#"SELECT runtime_created,database_name,database_url FROM gonvex_runtime_projects
-               WHERE id=$1 AND status NOT IN('deleted','disabled') FOR UPDATE"#,
+            r#"SELECT runtime_created,database_url FROM gonvex_runtime_projects
+               WHERE id=$1 AND status NOT IN('deleted','disabled')"#,
         )
         .bind(project_id)
         .fetch_optional(&mut **transaction.transaction())
         .await?
         .ok_or_else(|| DatabaseError::ProjectNotFound(project_id.to_owned()))?;
         if !project.get::<bool, _>("runtime_created") {
-            return Err(sqlx::Error::Protocol(
-                "only runtime-created projects may be deleted through this operation".to_owned(),
-            )
-            .into());
+            return Err(protocol(
+                "only runtime-created projects may be deleted through this operation",
+            ));
         }
-        let mut databases = sqlx::query_as::<_, (String, String)>(
-            r#"SELECT database_name,database_url FROM gonvex_runtime_tenants
-               WHERE project_id=$1 AND runtime_created=TRUE AND database_name<>''"#,
+        let mut databases = sqlx::query_scalar::<_, String>(
+            r#"SELECT database_url FROM gonvex_runtime_tenants
+               WHERE project_id=$1 AND runtime_created=1 AND database_url<>''"#,
         )
         .bind(project_id)
         .fetch_all(&mut **transaction.transaction())
         .await?;
-        let project_database = (
-            project.get::<String, _>("database_name"),
-            project.get::<String, _>("database_url"),
-        );
-        if !project_database.0.is_empty() {
+        let project_database: String = project.get("database_url");
+        if !project_database.is_empty() {
             databases.push(project_database);
         }
         databases.sort();
         databases.dedup();
-        for (name, _) in &databases {
-            if !name.starts_with("gonvex_")
-                || !name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-            {
-                return Err(sqlx::Error::Protocol(
-                    "refusing to delete a database not owned by the Gonvex runtime".to_owned(),
-                )
-                .into());
-            }
+        for url in &databases {
+            owned_database_file(&project_dir, url)?;
         }
-        sqlx::query(
-            "UPDATE gonvex_runtime_projects SET status='deleting',updated_at=now() WHERE id=$1",
-        )
+        sqlx::query(&format!(
+            "UPDATE gonvex_runtime_projects SET status='deleting',updated_at={} WHERE id=$1",
+            feed::NOW_MS
+        ))
         .bind(project_id)
         .execute(&mut **transaction.transaction())
         .await?;
         transaction.commit().await?;
 
-        let mut maintenance_url = Url::parse(base_url)
-            .map_err(|error| sqlx::Error::Protocol(format!("invalid database URL: {error}")))?;
-        maintenance_url.set_path("/postgres");
-        let maintenance = self.pools.pool(maintenance_url.as_str()).await?;
-        for (name, url) in &databases {
+        for url in &databases {
             self.pools.close_database(url).await;
-            sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()")
-                .bind(name)
-                .execute(&maintenance)
-                .await?;
-            let statement = format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)");
-            sqlx::query(&statement).execute(&maintenance).await?;
+        }
+        match std::fs::remove_dir_all(&project_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DatabaseError::Io(error.to_string())),
         }
         let mut finish = self.begin_control_transaction(false).await?;
         sqlx::query("DELETE FROM gonvex_runtime_projects WHERE id=$1 AND status='deleting'")
@@ -430,7 +646,7 @@ impl ControlPlane {
 
     pub async fn create_runtime_tenant(
         &self,
-        base_url: &str,
+        data_dir: &str,
         project_id: &str,
         requested_tenant_id: Option<&str>,
         name: &str,
@@ -438,9 +654,7 @@ impl ControlPlane {
         let project_id = project_id.trim();
         let name = name.trim();
         if project_id.is_empty() || name.is_empty() || name.len() > 120 {
-            return Err(
-                sqlx::Error::Protocol("projectId and tenant name are required".to_owned()).into(),
-            );
+            return Err(protocol("projectId and tenant name are required"));
         }
         let tenant_id = requested_tenant_id
             .map(str::trim)
@@ -452,7 +666,7 @@ impl ControlPlane {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
-            return Err(sqlx::Error::Protocol("tenantId is invalid".to_owned()).into());
+            return Err(protocol("tenantId is invalid"));
         }
         let mut lookup = self.begin_control_transaction(true).await?;
         let mode = sqlx::query_scalar::<_, String>(
@@ -463,10 +677,9 @@ impl ControlPlane {
         .await?
         .ok_or_else(|| DatabaseError::ProjectNotFound(project_id.to_owned()))?;
         if mode != "multiTenant" {
-            return Err(sqlx::Error::Protocol(
-                "additional tenant shards require a multiTenant project".to_owned(),
-            )
-            .into());
+            return Err(protocol(
+                "additional tenant shards require a multiTenant project",
+            ));
         }
         if let Some(row) = sqlx::query(
             "SELECT database_url,database_name,database_alias FROM gonvex_runtime_tenants WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL",
@@ -492,18 +705,21 @@ impl ControlPlane {
         }
         lookup.commit().await?;
 
-        let database_name = format!("gonvex_{}", uuid::Uuid::new_v4().simple());
+        let data = DataDir::parse(data_dir);
+        let database_name = relative_name(&data, &data.tenant_path(project_id, &tenant_id)?);
         let database_alias = format!(
             "tenant_{}",
             &uuid::Uuid::new_v4().simple().to_string()[..12]
         );
-        let database_url = self.create_database(base_url, &database_name).await?;
+        let database_url = self
+            .create_tenant_database(data_dir, project_id, &tenant_id)
+            .await?;
         let mut transaction = self.begin_control_transaction(false).await?;
         sqlx::query(
             r#"INSERT INTO gonvex_runtime_tenants
                (relationship_id,project_id,tenant_id,name,database_alias,database_name,
                 database_url,status,description,provisioned,runtime_created)
-               VALUES($1,$2,$1,$3,$4,$5,$6,'active','Runtime-created tenant shard.',FALSE,TRUE)
+               VALUES($1,$2,$1,$3,$4,$5,$6,'active','Runtime-created tenant shard.',0,1)
                ON CONFLICT(project_id,tenant_id) DO NOTHING"#,
         )
         .bind(&tenant_id)
@@ -534,9 +750,10 @@ impl ControlPlane {
         tenant_id: &str,
     ) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit(&self.database_url).await?;
-        sqlx::query(
-            "UPDATE gonvex_runtime_tenants SET provisioned=TRUE,updated_at=now() WHERE project_id=$1 AND tenant_id=$2",
-        )
+        sqlx::query(&format!(
+            "UPDATE gonvex_runtime_tenants SET provisioned=1,updated_at={} WHERE project_id=$1 AND tenant_id=$2",
+            feed::NOW_MS
+        ))
         .bind(project_id)
         .bind(tenant_id)
         .execute(&self.pool)
@@ -544,21 +761,22 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Deletes a runtime-created tenant shard and its file. Only a file inside
+    /// `{data}/projects/{project}` is removed.
     pub async fn delete_runtime_tenant(
         &self,
-        base_url: &str,
+        data_dir: &str,
         project_id: &str,
         tenant_id: &str,
     ) -> Result<(), DatabaseError> {
+        let project_dir = DataDir::parse(data_dir).project_dir(project_id)?;
         let mut transaction = self.begin_control_transaction(false).await?;
         let row = sqlx::query(
-            r#"SELECT tenant.runtime_created,tenant.database_name,tenant.database_url,
-                      project.database_mode
+            r#"SELECT tenant.runtime_created,tenant.database_url,project.database_mode
                FROM gonvex_runtime_tenants tenant
                JOIN gonvex_runtime_projects project ON project.id=tenant.project_id
                WHERE tenant.project_id=$1 AND tenant.tenant_id=$2
-                 AND tenant.deleted_at IS NULL AND tenant.status NOT IN('deleted','disabled')
-               FOR UPDATE"#,
+                 AND tenant.deleted_at IS NULL AND tenant.status NOT IN('deleted','disabled')"#,
         )
         .bind(project_id)
         .bind(tenant_id)
@@ -571,49 +789,24 @@ impl ControlPlane {
         if !row.get::<bool, _>("runtime_created")
             || row.get::<String, _>("database_mode") != "multiTenant"
         {
-            return Err(sqlx::Error::Protocol(
-                "only runtime-created multi-tenant shards may be deleted through this operation"
-                    .to_owned(),
-            )
-            .into());
+            return Err(protocol(
+                "only runtime-created multi-tenant shards may be deleted through this operation",
+            ));
         }
-        let database_name = row.get::<String, _>("database_name");
         let database_url = row.get::<String, _>("database_url");
-        if !database_name.starts_with("gonvex_")
-            || !database_name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-        {
-            return Err(sqlx::Error::Protocol(
-                "refusing to delete a database not owned by the Gonvex runtime".to_owned(),
-            )
-            .into());
-        }
-        sqlx::query(
-            "UPDATE gonvex_runtime_tenants SET status='deleting',updated_at=now() WHERE project_id=$1 AND tenant_id=$2",
-        )
+        let file = owned_database_file(&project_dir, &database_url)?;
+        sqlx::query(&format!(
+            "UPDATE gonvex_runtime_tenants SET status='deleting',updated_at={} WHERE project_id=$1 AND tenant_id=$2",
+            feed::NOW_MS
+        ))
         .bind(project_id)
         .bind(tenant_id)
         .execute(&mut **transaction.transaction())
         .await?;
         transaction.commit().await?;
 
-        let mut maintenance_url = Url::parse(base_url)
-            .map_err(|error| sqlx::Error::Protocol(format!("invalid database URL: {error}")))?;
-        maintenance_url.set_path("/postgres");
-        let maintenance = self.pools.pool(maintenance_url.as_str()).await?;
         self.pools.close_database(&database_url).await;
-        sqlx::query(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()",
-        )
-        .bind(&database_name)
-        .execute(&maintenance)
-        .await?;
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{database_name}\" WITH (FORCE)"
-        ))
-        .execute(&maintenance)
-        .await?;
+        remove_database_file(&file)?;
 
         let mut finish = self.begin_control_transaction(false).await?;
         sqlx::query(
@@ -633,11 +826,19 @@ impl ControlPlane {
         migrations: Vec<SqlMigration>,
     ) -> Pin<Box<dyn Future<Output = Result<(), DatabaseError>> + Send + 'static>> {
         Box::pin(async move {
-            let pool = self.pools.pool(&route.database_url).await?;
-            let _admission = self.pools.admit(&route.database_url).await?;
-            execute_script_pool(&pool, TENANT_IDENTITY_SQL).await?;
-            apply_migrations(pool.clone(), migrations, MigrationScope::Tenant).await?;
-            install_change_feed(pool).await?;
+            let database_url = route.database_url.trim().to_owned();
+            let pool = self.pools.pool(&database_url).await?;
+            let _admission = self.pools.admit(&database_url).await?;
+            let _schema = self.pools.lock(&database_url, SCHEMA_LOCK).await?;
+            let mut connection = pool.acquire().await?;
+            install_tenant_identity(&mut connection).await?;
+            let notices =
+                apply_migrations_locked(&mut connection, &migrations, MigrationScope::Tenant)
+                    .await?
+                    .1;
+            install_change_feed_locked(&mut connection).await?;
+            drop(connection);
+            publish(&self.pools, &database_url, notices).await?;
             Ok(())
         })
     }
@@ -648,365 +849,325 @@ impl ControlPlane {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DatabaseError>> + Send + 'static>> {
         Box::pin(async move {
             let _admission = self.pools.admit(&self.database_url).await?;
-            apply_migrations(self.pool.clone(), migrations, MigrationScope::ControlPlane).await
+            apply_migrations(
+                &self.pools,
+                &self.database_url,
+                migrations,
+                MigrationScope::ControlPlane,
+            )
+            .await
         })
     }
 }
 
-async fn apply_migrations(
-    pool: sqlx::SqlitePool,
-    migrations: Vec<SqlMigration>,
-    scope: MigrationScope,
-) -> Result<Vec<String>, DatabaseError> {
-    let mut connection = pool.acquire().await?;
-    sqlx::query(
-        "SELECT pg_advisory_lock(hashtext('gonvex_sql_migrations:' || current_database()))",
-    )
-    .execute(&mut *connection)
-    .await?;
-    let result = apply_migrations_locked(&mut connection, &migrations, scope).await;
-    let _ = sqlx::query(
-        "SELECT pg_advisory_unlock(hashtext('gonvex_sql_migrations:' || current_database()))",
-    )
-    .execute(&mut *connection)
-    .await;
-    result
+fn relative_name(data: &DataDir, path: &Path) -> String {
+    data.relative(path)
+        .unwrap_or_else(|| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
-async fn apply_migrations_locked(
-    connection: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
-    migrations: &[SqlMigration],
-    scope: MigrationScope,
-) -> Result<Vec<String>, DatabaseError> {
-    if scope == MigrationScope::Tenant {
-        super::reference_integrity::install(connection).await?;
+/// The database file behind `url`, refused unless it lies inside `project_dir`.
+fn owned_database_file(project_dir: &Path, url: &str) -> Result<std::path::PathBuf, DatabaseError> {
+    let file = DataDir::new(database_path(url)).root().to_path_buf();
+    if file.starts_with(project_dir) && file != project_dir {
+        Ok(file)
+    } else {
+        Err(protocol(
+            "refusing to delete a database not owned by the Gonvex runtime",
+        ))
     }
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS gonvex_migrations (
-             name text PRIMARY KEY,
-             checksum text NOT NULL,
-             applied_at timestamptz NOT NULL DEFAULT now(),
-             duration_ms bigint NOT NULL
-           )"#,
-    )
-    .execute(&mut **connection)
-    .await?;
-    let mut applied = Vec::new();
-    for migration in migrations
-        .iter()
-        .filter(|migration| migration.scope == scope)
-    {
-        let recorded =
-            sqlx::query_scalar::<_, String>("SELECT checksum FROM gonvex_migrations WHERE name=$1")
-                .bind(&migration.name)
-                .fetch_optional(&mut **connection)
-                .await?;
-        if let Some(recorded) = recorded {
-            if recorded != migration.checksum {
-                return Err(sqlx::Error::Protocol(format!(
-                    "migration {} checksum mismatch: database has {}, artifact has {}",
-                    migration.name, recorded, migration.checksum
-                ))
-                .into());
-            }
-            continue;
+}
+
+fn remove_database_file(file: &Path) -> Result<(), DatabaseError> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = file.as_os_str().to_owned();
+        name.push(suffix);
+        match std::fs::remove_file(&name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DatabaseError::Io(error.to_string())),
         }
-        let started = Instant::now();
-        if migration.no_transaction {
-            execute_script_connection(connection, &migration.sql).await?;
-            if scope == MigrationScope::Tenant {
-                super::reference_integrity::check_coverage(connection).await?;
-            }
-            sqlx::query(
-                "INSERT INTO gonvex_migrations(name,checksum,duration_ms) VALUES($1,$2,$3)",
+    }
+    Ok(())
+}
+
+async fn publish(
+    pools: &PoolRegistry,
+    database_url: &str,
+    notices: Vec<CommitNotice>,
+) -> Result<(), DatabaseError> {
+    for notice in notices {
+        pools
+            .notify(database_url, feed::CHANGE_FEED_CHANNEL, &notice.payload())
+            .await?;
+    }
+    Ok(())
+}
+
+/// Applies `migrations` of `scope` on the database's writer under the schema
+/// lock and returns the names applied by this call.
+pub(crate) fn apply_migrations<'a>(
+    pools: &'a PoolRegistry,
+    database_url: &'a str,
+    migrations: Vec<SqlMigration>,
+    scope: MigrationScope,
+) -> BoxFuture<'a, Result<Vec<String>, DatabaseError>> {
+    Box::pin(async move {
+        let pool = pools.pool(database_url).await?;
+        let _schema = pools.lock(database_url, SCHEMA_LOCK).await?;
+        let mut connection = pool.acquire().await?;
+        let (applied, notices) =
+            apply_migrations_locked(&mut connection, &migrations, scope).await?;
+        drop(connection);
+        publish(pools, database_url, notices).await?;
+        Ok(applied)
+    })
+}
+
+fn apply_migrations_locked<'a>(
+    connection: &'a mut SqliteConnection,
+    migrations: &'a [SqlMigration],
+    scope: MigrationScope,
+) -> BoxFuture<'a, Result<(Vec<String>, Vec<CommitNotice>), DatabaseError>> {
+    Box::pin(async move {
+        if scope == MigrationScope::Tenant {
+            super::reference_integrity::install(connection).await?;
+        }
+        crate::execute_script(
+            &mut *connection,
+            &format!(
+                r#"CREATE TABLE IF NOT EXISTS gonvex_migrations (
+             name TEXT PRIMARY KEY,
+             checksum TEXT NOT NULL,
+             applied_at INTEGER NOT NULL DEFAULT ({}),
+             duration_ms INTEGER NOT NULL
+           )"#,
+                feed::NOW_MS
+            ),
+        )
+        .await?;
+        let mut applied = Vec::new();
+        let mut notices = Vec::new();
+        for migration in migrations
+            .iter()
+            .filter(|migration| migration.scope == scope)
+        {
+            let recorded = sqlx::query_scalar::<_, String>(
+                "SELECT checksum FROM gonvex_migrations WHERE name=$1",
             )
             .bind(&migration.name)
-            .bind(&migration.checksum)
-            .bind(started.elapsed().as_millis() as i64)
-            .execute(&mut **connection)
+            .fetch_optional(&mut *connection)
             .await?;
-        } else {
-            sqlx::query("BEGIN").execute(&mut **connection).await?;
-            let applied_result = async {
-                execute_script_connection(connection, &migration.sql).await?;
-                if scope == MigrationScope::Tenant {
-                    super::reference_integrity::check_coverage(connection).await?;
+            if let Some(recorded) = recorded {
+                if recorded != migration.checksum {
+                    return Err(protocol(format!(
+                        "migration {} checksum mismatch: database has {}, artifact has {}",
+                        migration.name, recorded, migration.checksum
+                    )));
                 }
+                continue;
+            }
+            let started = Instant::now();
+            let provenance = Provenance {
+                command_id: Some(format!("migration:{}", migration.name)),
+                channel: Some("system".to_owned()),
+                ..Provenance::default()
+            };
+            if migration.no_transaction {
+                // `-- gonvex:no-transaction`: each statement commits on its own.
+                crate::execute_script(&mut *connection, &migration.sql).await?;
+            }
+            let mut transaction = connection.begin().await?;
+            let finished = async {
+                if !migration.no_transaction {
+                    crate::execute_script(&mut *transaction, &migration.sql).await?;
+                }
+                if scope == MigrationScope::Tenant {
+                    super::reference_integrity::after_migration(&mut transaction).await?;
+                }
+                let notice = feed::finalize(&mut transaction, &provenance).await?;
                 sqlx::query(
                     "INSERT INTO gonvex_migrations(name,checksum,duration_ms) VALUES($1,$2,$3)",
                 )
                 .bind(&migration.name)
                 .bind(&migration.checksum)
                 .bind(started.elapsed().as_millis() as i64)
-                .execute(&mut **connection)
+                .execute(&mut *transaction)
                 .await?;
-                Ok::<(), DatabaseError>(())
+                Ok::<_, DatabaseError>(notice)
             }
             .await;
-            if let Err(error) = applied_result {
-                let _ = sqlx::query("ROLLBACK").execute(&mut **connection).await;
-                return Err(error);
+            match finished {
+                Ok(notice) => {
+                    transaction.commit().await?;
+                    notices.extend(notice);
+                }
+                Err(error) => {
+                    let _ = transaction.rollback().await;
+                    return Err(error);
+                }
             }
-            sqlx::query("COMMIT").execute(&mut **connection).await?;
+            applied.push(migration.name.clone());
         }
-        applied.push(migration.name.clone());
-    }
-    Ok(applied)
+        Ok((applied, notices))
+    })
 }
 
-async fn install_change_feed(pool: sqlx::SqlitePool) -> Result<(), DatabaseError> {
-    // Share the migration lock so neither another bootstrap nor a migration can
-    // change the schema between catalog inspection and trigger installation.
-    // Keep DDL and its receipt atomic: a failed install must never become a cache hit.
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        "SELECT pg_advisory_xact_lock(hashtext('gonvex_sql_migrations:' || current_database()))",
+fn install_tenant_identity(
+    connection: &mut SqliteConnection,
+) -> BoxFuture<'_, Result<(), DatabaseError>> {
+    Box::pin(async move {
+        let mut transaction = connection.begin().await?;
+        if column_exists(&mut transaction, "members", "user_id").await? {
+            return Err(protocol(
+                "identity-v2 migration required: tenant members still use user_id",
+            ));
+        }
+        crate::execute_script(&mut *transaction, TENANT_IDENTITY_SQL).await?;
+        transaction.commit().await?;
+        Ok(())
+    })
+}
+
+/// Installs sync infrastructure and change capture on every application
+/// table. Must run under [`SCHEMA_LOCK`].
+pub(crate) fn install_change_feed_locked(
+    connection: &mut SqliteConnection,
+) -> BoxFuture<'_, Result<(), DatabaseError>> {
+    Box::pin(async move {
+        // Keep DDL and its receipt atomic: a failed install must never become a cache hit.
+        let mut tx = connection.begin().await?;
+        sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _gonvex_sync_bootstrap (name TEXT PRIMARY KEY, digest TEXT NOT NULL)",
     )
     .execute(&mut *tx)
     .await?;
-    let metadata_exists: bool = sqlx::query_scalar(
-        "SELECT to_regclass(format('%I._gonvex_sync_bootstrap', current_schema())) IS NOT NULL",
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    if !metadata_exists {
-        sqlx::query(
-            "CREATE TABLE _gonvex_sync_bootstrap (name text PRIMARY KEY, digest text NOT NULL)",
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
-    let infrastructure_present: bool = sqlx::query_scalar(
-        r#"SELECT NOT EXISTS (
-            SELECT FROM unnest(ARRAY['_gonvex_sync_clock', '_gonvex_sync_changes',
-                '_gonvex_sync_transactions', '_gonvex_action_outbox',
-                'gonvex_sync_changes_revision', 'gonvex_sync_changes_created_at',
-                'gonvex_sync_changes_transaction', 'gonvex_sync_changes_command',
-                '_gonvex_action_outbox_pending']) AS required(name)
-            WHERE to_regclass(format('%I.%I', current_schema(), name)) IS NULL
-        ) AND to_regprocedure(format('%I.gonvex_sync_finalize_transaction()', current_schema())) IS NOT NULL"#,
-    ).fetch_one(&mut *tx).await?;
-    if !bootstrap_matches(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?
-        || !infrastructure_present
-        || !function_bodies_match(&mut tx, SYNC_INFRASTRUCTURE_SQL).await?
-    {
-        execute_script_transaction(&mut tx, SYNC_INFRASTRUCTURE_SQL).await?;
-        record_bootstrap(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?;
-    }
-    let tables = sqlx::query(
-        r#"SELECT table_name FROM information_schema.tables
-           WHERE table_schema=current_schema() AND table_type='BASE TABLE'
-             AND table_name NOT LIKE '\_gonvex%' ESCAPE '\'
-             AND table_name NOT LIKE 'gonvex\_%' ESCAPE '\'
-           ORDER BY table_name"#,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    for table in tables {
-        let table: String = table.get("table_name");
-        let columns = sqlx::query(
-            r#"SELECT column_name FROM information_schema.columns
-               WHERE table_schema=current_schema() AND table_name=$1 ORDER BY ordinal_position"#,
-        )
-        .bind(&table)
-        .fetch_all(&mut *tx)
-        .await?
-        .into_iter()
-        .map(|row| row.get::<String, _>("column_name"))
-        .collect::<Vec<_>>();
-        let key = sqlx::query_scalar::<_, String>(
-            r#"SELECT attribute.attname
-               FROM pg_index index
-               JOIN pg_class relation ON relation.oid=index.indrelid
-               JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
-               JOIN pg_attribute attribute ON attribute.attrelid=relation.oid
-                AND attribute.attnum=ANY(index.indkey)
-               WHERE namespace.nspname=current_schema() AND relation.relname=$1
-                 AND index.indisprimary ORDER BY attribute.attnum LIMIT 1"#,
-        )
-        .bind(&table)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| {
-            sqlx::Error::Protocol(format!("change-feed table {table:?} has no primary key"))
-        })?;
-        install_table_trigger(&mut tx, &table, &key, &columns).await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-/// PostgreSQL functions take at most 100 arguments, so a change-feed row image
-/// is built from one `jsonb_build_object` per 50 columns, concatenated.
-const JSONB_BUILD_OBJECT_COLUMNS: usize = 50;
-
-async fn install_table_trigger(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    table: &str,
-    key: &str,
-    columns: &[String],
-) -> Result<(), DatabaseError> {
-    for identifier in std::iter::once(table)
-        .chain(std::iter::once(key))
-        .chain(columns.iter().map(String::as_str))
-    {
-        if !identifier
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        if !bootstrap_matches(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?
+            || !infrastructure_present(&mut tx).await?
         {
-            return Err(sqlx::Error::Protocol(format!(
-                "invalid change-feed identifier {identifier:?}"
-            ))
-            .into());
+            crate::execute_script(&mut *tx, SYNC_INFRASTRUCTURE_SQL).await?;
+            record_bootstrap(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?;
         }
-    }
-    let artifact = |suffix: &str| {
-        let full = format!("gonvex_sync_{table}_{suffix}");
-        if full.len() <= 63 {
-            full
-        } else {
-            let hash = Sha256::digest(full.as_bytes());
-            let suffix = hash[..6]
+        for table in application_tables(&mut tx).await? {
+            let columns = table_columns(&mut tx, &table).await?;
+            let key = columns
                 .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            format!("{}_{suffix}", &full[..50])
+                .find(|column| column.primary_key)
+                .map(|column| column.name.clone())
+                .ok_or_else(|| {
+                    protocol(format!("change-feed table {table:?} has no primary key"))
+                })?;
+            let script = feed::capture_triggers_sql(&table, &key, &columns);
+            let receipt = format!("table:{table}");
+            if !bootstrap_matches(&mut tx, &receipt, &script).await?
+                || !installed_triggers_match(&mut tx, &table, &script).await?
+            {
+                crate::execute_script(&mut *tx, &script).await?;
+                record_bootstrap(&mut tx, &receipt, &script).await?;
+            }
         }
-    };
-    let quote = |identifier: &str| format!("\"{identifier}\"");
-    let literal = |value: &str| format!("'{}'", value.replace('\'', "''"));
-    let projection = |alias: &str| {
-        let objects = columns
-            .chunks(JSONB_BUILD_OBJECT_COLUMNS)
-            .map(|chunk| {
-                let pairs = chunk
-                    .iter()
-                    .map(|column| format!("{},{}.{}", literal(column), alias, quote(column)))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("jsonb_build_object({pairs})")
-            })
-            .collect::<Vec<_>>();
-        if objects.is_empty() {
-            "jsonb_build_object()".to_owned()
-        } else {
-            objects.join("||")
-        }
-    };
-    let stage_function = quote(&artifact("stage"));
-    let stage_trigger = quote(&artifact("stage_trigger"));
-    let finalize_trigger = quote(&artifact("finalize_trigger"));
-    let table_ident = quote(table);
-    let key_ident = quote(key);
-    let statement = format!(
-        r#"CREATE OR REPLACE FUNCTION {stage_function}() RETURNS trigger AS $$
-DECLARE old_data jsonb; new_data jsonb; changed_columns text[]; row_key text;
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM _gonvex_sync_transactions WHERE transaction_id=txid_current()::bigint
-  ) THEN
-    RAISE EXCEPTION USING ERRCODE='55000',
-      MESSAGE='tracked writes are not allowed after sync finalization',
-      HINT='Keep sync constraints deferred until all tracked writes finish, or roll back to a savepoint before finalization.';
-  END IF;
-  IF TG_OP='INSERT' THEN
-    old_data:=NULL; new_data:={new_projection};
-    row_key:=NEW.{key_ident}::text; changed_columns:=ARRAY(SELECT jsonb_object_keys(new_data));
-  ELSIF TG_OP='DELETE' THEN
-    old_data:={old_projection}; new_data:=NULL;
-    row_key:=OLD.{key_ident}::text; changed_columns:=ARRAY(SELECT jsonb_object_keys(old_data));
-  ELSE
-    old_data:={old_projection}; new_data:={new_projection};
-    row_key:=NEW.{key_ident}::text;
-    changed_columns:=ARRAY(SELECT key FROM jsonb_object_keys(old_data||new_data) changed(key)
-                           WHERE old_data->key IS DISTINCT FROM new_data->key ORDER BY key);
-  END IF;
-  INSERT INTO _gonvex_sync_changes
-    (transaction_id,table_name,row_id,operation,old_value,new_value,changed_columns)
-  VALUES(txid_current()::bigint,{table_literal},row_key,lower(TG_OP),old_data,new_data,changed_columns);
-  RETURN NULL;
-END; $$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS {stage_trigger} ON {table_ident};
-DROP TRIGGER IF EXISTS {finalize_trigger} ON {table_ident};
-CREATE TRIGGER {stage_trigger} AFTER INSERT OR UPDATE OR DELETE ON {table_ident}
-  FOR EACH ROW EXECUTE FUNCTION {stage_function}();
-CREATE CONSTRAINT TRIGGER {finalize_trigger} AFTER INSERT OR UPDATE OR DELETE ON {table_ident}
-  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION gonvex_sync_finalize_transaction();"#,
-        old_projection = projection("OLD"),
-        new_projection = projection("NEW"),
-        table_literal = literal(table),
-    );
-    let present: bool = sqlx::query_scalar(
-        r#"SELECT to_regprocedure(format('%I.%I()', current_schema(), $2)) IS NOT NULL
-          AND EXISTS (SELECT FROM pg_trigger
-            WHERE tgrelid=to_regclass(format('%I.%I',current_schema(),$1))
-              AND tgname=$3 AND tgenabled='O' AND tgtype=29
-              AND tgfoid=to_regprocedure(format('%I.%I()',current_schema(),$2)))
-          AND EXISTS (SELECT FROM pg_trigger
-            WHERE tgrelid=to_regclass(format('%I.%I',current_schema(),$1))
-              AND tgname=$4 AND tgenabled='O' AND tgtype=29
-              AND tgdeferrable AND tginitdeferred
-              AND tgfoid=to_regprocedure(format('%I.gonvex_sync_finalize_transaction()',current_schema())))
-          AND (SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc
-            WHERE oid=to_regprocedure(format('%I.%I()', current_schema(), $2)))=$5"#,
-    ).bind(table).bind(artifact("stage")).bind(artifact("stage_trigger"))
-        .bind(artifact("finalize_trigger")).bind(stage_body_digest(&statement)?)
-        .fetch_one(&mut **tx).await?;
-    let receipt = format!("table:{table}");
-    if !present || !bootstrap_matches(tx, &receipt, &statement).await? {
-        execute_script_transaction(tx, &statement).await?;
-        record_bootstrap(tx, &receipt, &statement).await?;
-    }
-    Ok(())
+        tx.commit().await?;
+        Ok(())
+    })
 }
 
-/// `CREATE OR REPLACE FUNCTION <name>() ... AS $$<body>$$` definitions in a script, as (name, body).
-/// PostgreSQL keeps the dollar-quoted body verbatim in `pg_proc.prosrc`.
-fn function_bodies(script: &str) -> Vec<(&str, &str)> {
-    const CREATE: &str = "CREATE OR REPLACE FUNCTION ";
+/// Ordinary application tables: not framework (`_gonvex*`, `gonvex_*`),
+/// SQLite-internal, virtual (FTS5) tables or their shadow tables
+/// (`<vt>_data/_idx/_content/_docsize/_config`). Applications keep FTS in sync
+/// with their own triggers; the change feed captures only base tables.
+pub(crate) async fn application_tables(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<String>, DatabaseError> {
+    Ok(sqlx::query_scalar(
+        r#"SELECT list.name FROM pragma_table_list list
+           WHERE list.schema='main' AND list.type='table'
+             AND list.name NOT LIKE '\_gonvex%' ESCAPE '\'
+             AND list.name NOT LIKE 'gonvex\_%' ESCAPE '\'
+             AND list.name NOT LIKE 'sqlite\_%' ESCAPE '\'
+             AND NOT EXISTS (
+               SELECT 1 FROM sqlite_schema virtual
+               WHERE virtual.type='table' AND virtual.sql LIKE 'CREATE VIRTUAL TABLE%'
+                 AND list.name IN (virtual.name, virtual.name||'_data', virtual.name||'_idx',
+                   virtual.name||'_content', virtual.name||'_docsize', virtual.name||'_config'))
+           ORDER BY list.name"#,
+    )
+    .fetch_all(connection)
+    .await?)
+}
+
+async fn infrastructure_present(connection: &mut SqliteConnection) -> Result<bool, DatabaseError> {
+    const REQUIRED: &[(&str, &str)] = &[
+        ("table", "_gonvex_sync_clock"),
+        ("table", "_gonvex_sync_changes"),
+        ("table", "_gonvex_sync_transactions"),
+        ("table", "_gonvex_action_outbox"),
+        ("index", "gonvex_sync_changes_revision"),
+        ("index", "gonvex_sync_changes_pending"),
+        ("index", "gonvex_sync_changes_created_at"),
+        ("index", "gonvex_sync_changes_command"),
+        ("index", "_gonvex_action_outbox_pending"),
+    ];
+    for (kind, name) in REQUIRED {
+        let present: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type=$1 AND name=$2)",
+        )
+        .bind(kind)
+        .bind(name)
+        .fetch_one(&mut *connection)
+        .await?;
+        if !present {
+            return Ok(false);
+        }
+    }
+    Ok(
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _gonvex_sync_clock WHERE singleton=1)")
+            .fetch_one(connection)
+            .await?,
+    )
+}
+
+/// `CREATE TRIGGER … END` statements in an install script, as SQLite stores
+/// them in `sqlite_schema.sql` (without the terminating semicolon).
+fn trigger_statements(script: &str) -> Vec<&str> {
+    const CREATE: &str = "CREATE TRIGGER ";
+    const END: &str = "\nEND;";
     let mut found = Vec::new();
     let mut rest = script;
     while let Some(start) = rest.find(CREATE) {
-        rest = &rest[start + CREATE.len()..];
-        let Some(open) = rest.find("()") else { break };
-        let name = rest[..open].trim_matches('"');
-        let Some(body_start) = rest.find("AS $$") else {
+        let candidate = &rest[start..];
+        let Some(end) = candidate.find(END) else {
             break;
         };
-        let body = &rest[body_start + 5..];
-        let Some(body_end) = body.find("$$") else {
-            break;
-        };
-        found.push((name, &body[..body_end]));
-        rest = &body[body_end + 2..];
+        found.push(&candidate[..end + END.len() - 1]);
+        rest = &candidate[end + END.len()..];
     }
     found
 }
 
-fn stage_body_digest(statement: &str) -> Result<String, DatabaseError> {
-    match function_bodies(statement).as_slice() {
-        [(_, body)] => Ok(bootstrap_digest(body)),
-        _ => Err(
-            sqlx::Error::Protocol("change-feed trigger must define one function".to_owned()).into(),
-        ),
-    }
-}
-
-/// A matching receipt only proves what this runtime last installed. Another writer (an older runtime build during a
-/// rollback, or a manual edit) can replace a function afterwards, so the installed bodies must still match too.
-async fn function_bodies_match(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+/// A matching receipt only proves what this runtime last installed. Another
+/// writer (an older runtime build during a rollback, or a manual edit) can
+/// drop or replace a trigger afterwards, so the installed definitions must
+/// still match the script too.
+async fn installed_triggers_match(
+    connection: &mut SqliteConnection,
+    table: &str,
     script: &str,
 ) -> Result<bool, DatabaseError> {
-    for (name, body) in function_bodies(script) {
+    let expected = trigger_statements(script);
+    let names = feed::capture_trigger_names(table);
+    if expected.len() != names.len() {
+        return Ok(false);
+    }
+    for (name, statement) in names.iter().zip(expected) {
         let installed: Option<String> = sqlx::query_scalar(
-            r#"SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc
-               WHERE oid=to_regprocedure(format('%I.%I()', current_schema(), $1))"#,
+            "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=$1 AND tbl_name=$2",
         )
         .bind(name)
-        .fetch_optional(&mut **tx)
+        .bind(table)
+        .fetch_optional(&mut *connection)
         .await?;
-        if installed.as_deref() != Some(bootstrap_digest(body).as_str()) {
+        if installed.as_deref() != Some(statement) {
             return Ok(false);
         }
     }
@@ -1018,507 +1179,76 @@ fn bootstrap_digest(source: &str) -> String {
 }
 
 async fn bootstrap_matches(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    connection: &mut SqliteConnection,
     name: &str,
     source: &str,
 ) -> Result<bool, DatabaseError> {
     let recorded: Option<String> =
         sqlx::query_scalar("SELECT digest FROM _gonvex_sync_bootstrap WHERE name=$1")
             .bind(name)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(connection)
             .await?;
     Ok(recorded.as_deref() == Some(bootstrap_digest(source).as_str()))
 }
 
 async fn record_bootstrap(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    connection: &mut SqliteConnection,
     name: &str,
     source: &str,
 ) -> Result<(), DatabaseError> {
     sqlx::query("INSERT INTO _gonvex_sync_bootstrap(name,digest) VALUES($1,$2) ON CONFLICT(name) DO UPDATE SET digest=excluded.digest")
-        .bind(name).bind(bootstrap_digest(source)).execute(&mut **tx).await?;
+        .bind(name).bind(bootstrap_digest(source)).execute(connection).await?;
     Ok(())
 }
 
-async fn execute_script_transaction(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    source: &str,
-) -> Result<(), DatabaseError> {
-    for statement in split_statements(source)? {
-        sqlx::query(&statement).execute(&mut **tx).await?;
-    }
-    Ok(())
-}
-
-async fn execute_script_pool(pool: &sqlx::SqlitePool, source: &str) -> Result<(), DatabaseError> {
-    for statement in split_statements(source)? {
-        sqlx::query(&statement).execute(pool).await?;
-    }
-    Ok(())
-}
-
-async fn execute_script_connection(
-    connection: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
-    source: &str,
-) -> Result<(), DatabaseError> {
-    for statement in split_statements(source)? {
-        sqlx::query(&statement).execute(&mut **connection).await?;
-    }
-    Ok(())
-}
-
+/// Tenant-local Member identity and the Control Plane membership outbox. A
+/// deleted Member projects as `revoked` one revision past its last row.
 const TENANT_IDENTITY_SQL: &str = r#"
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='members' AND column_name='user_id') THEN
-    RAISE EXCEPTION 'identity-v2 migration required: tenant members still use user_id';
-  END IF;
-END $$;
 CREATE TABLE IF NOT EXISTS members (
-  id text PRIMARY KEY, account_id text NOT NULL UNIQUE, status text NOT NULL DEFAULT 'active',
-  display_name text NOT NULL DEFAULT '', avatar_url text NOT NULL DEFAULT '',
-  role text NOT NULL DEFAULT 'member', permissions jsonb NOT NULL DEFAULT '{}'::jsonb,
-  membership_revision bigint NOT NULL DEFAULT 1,
-  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'active',
+  display_name TEXT NOT NULL DEFAULT '', avatar_url TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'member', permissions JSON NOT NULL DEFAULT '{}',
+  membership_revision INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 );
 CREATE INDEX IF NOT EXISTS members_by_role ON members(role);
 CREATE INDEX IF NOT EXISTS members_by_status ON members(status,id);
 CREATE TABLE IF NOT EXISTS _gonvex_control_plane_membership_outbox (
-  account_id text PRIMARY KEY, member_id text NOT NULL, status text NOT NULL,
-  membership_revision bigint NOT NULL, updated_at timestamptz NOT NULL DEFAULT now()
+  account_id TEXT PRIMARY KEY, member_id TEXT NOT NULL, status TEXT NOT NULL,
+  membership_revision INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
 );
-CREATE OR REPLACE FUNCTION _gonvex_queue_control_plane_membership() RETURNS trigger AS $$
-DECLARE projected_account_id text; projected_member_id text; projected_status text; projected_revision bigint;
-BEGIN
-  IF TG_OP='DELETE' THEN
-    projected_account_id:=OLD.account_id; projected_member_id:=OLD.id;
-    projected_status:='revoked'; projected_revision:=OLD.membership_revision+1;
-  ELSE
-    projected_account_id:=NEW.account_id; projected_member_id:=NEW.id;
-    projected_status:=NEW.status; projected_revision:=NEW.membership_revision;
-  END IF;
+DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership_insert;
+DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership_update;
+DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership_delete;
+CREATE TRIGGER gonvex_queue_control_plane_membership_insert AFTER INSERT ON members BEGIN
   INSERT INTO _gonvex_control_plane_membership_outbox(account_id,member_id,status,membership_revision,updated_at)
-  VALUES(projected_account_id,projected_member_id,projected_status,projected_revision,now())
-  ON CONFLICT(account_id) DO UPDATE SET member_id=EXCLUDED.member_id,status=EXCLUDED.status,
-    membership_revision=EXCLUDED.membership_revision,updated_at=now()
-  WHERE EXCLUDED.membership_revision>=_gonvex_control_plane_membership_outbox.membership_revision;
-  IF TG_OP='DELETE' THEN RETURN OLD; END IF; RETURN NEW;
-END; $$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS gonvex_queue_control_plane_membership ON members;
-CREATE TRIGGER gonvex_queue_control_plane_membership AFTER INSERT OR UPDATE OR DELETE ON members
-  FOR EACH ROW EXECUTE FUNCTION _gonvex_queue_control_plane_membership();
+  VALUES(NEW.account_id,NEW.id,NEW.status,NEW.membership_revision,CAST(unixepoch('subsec') * 1000 AS INTEGER))
+  ON CONFLICT(account_id) DO UPDATE SET member_id=excluded.member_id,status=excluded.status,
+    membership_revision=excluded.membership_revision,updated_at=excluded.updated_at
+  WHERE excluded.membership_revision>=_gonvex_control_plane_membership_outbox.membership_revision;
+END;
+CREATE TRIGGER gonvex_queue_control_plane_membership_update AFTER UPDATE ON members BEGIN
+  INSERT INTO _gonvex_control_plane_membership_outbox(account_id,member_id,status,membership_revision,updated_at)
+  VALUES(NEW.account_id,NEW.id,NEW.status,NEW.membership_revision,CAST(unixepoch('subsec') * 1000 AS INTEGER))
+  ON CONFLICT(account_id) DO UPDATE SET member_id=excluded.member_id,status=excluded.status,
+    membership_revision=excluded.membership_revision,updated_at=excluded.updated_at
+  WHERE excluded.membership_revision>=_gonvex_control_plane_membership_outbox.membership_revision;
+END;
+CREATE TRIGGER gonvex_queue_control_plane_membership_delete AFTER DELETE ON members BEGIN
+  INSERT INTO _gonvex_control_plane_membership_outbox(account_id,member_id,status,membership_revision,updated_at)
+  VALUES(OLD.account_id,OLD.id,'revoked',OLD.membership_revision+1,CAST(unixepoch('subsec') * 1000 AS INTEGER))
+  ON CONFLICT(account_id) DO UPDATE SET member_id=excluded.member_id,status=excluded.status,
+    membership_revision=excluded.membership_revision,updated_at=excluded.updated_at
+  WHERE excluded.membership_revision>=_gonvex_control_plane_membership_outbox.membership_revision;
+END;
 "#;
 
-const SYNC_INFRASTRUCTURE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS _gonvex_sync_clock (
-  singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), epoch text NOT NULL,
-  revision bigint NOT NULL DEFAULT 0, retained_revision bigint NOT NULL DEFAULT 0
-);
-INSERT INTO _gonvex_sync_clock(singleton,epoch,revision)
-VALUES(true,md5(random()::text||clock_timestamp()::text),0) ON CONFLICT(singleton) DO NOTHING;
-CREATE TABLE IF NOT EXISTS _gonvex_sync_changes (
-  event_id bigserial PRIMARY KEY, transaction_id bigint NOT NULL, revision bigint, ordinal integer,
-  command_id text, table_name text NOT NULL, row_id text NOT NULL, operation text NOT NULL,
-  old_value jsonb, new_value jsonb, changed_columns text[] NOT NULL DEFAULT ARRAY[]::text[],
-  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
-);
-CREATE INDEX IF NOT EXISTS gonvex_sync_changes_revision ON _gonvex_sync_changes(revision,ordinal)
-  WHERE revision IS NOT NULL;
-CREATE INDEX IF NOT EXISTS gonvex_sync_changes_created_at ON _gonvex_sync_changes(created_at);
-CREATE INDEX IF NOT EXISTS gonvex_sync_changes_transaction ON _gonvex_sync_changes(transaction_id);
-CREATE INDEX IF NOT EXISTS gonvex_sync_changes_command ON _gonvex_sync_changes(command_id,revision)
-  WHERE command_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS _gonvex_sync_transactions (
-  revision bigint PRIMARY KEY, transaction_id bigint NOT NULL UNIQUE,
-  root_command_id text NOT NULL, origin_command_id text NOT NULL,
-  root_invocation_channel text NOT NULL DEFAULT 'system', invocation_channel text NOT NULL,
-  actor_account_id text, actor_member_id text, on_behalf_of_member_id text,
-  agent_execution_id text, created_at timestamptz NOT NULL DEFAULT clock_timestamp()
-);
-ALTER TABLE _gonvex_sync_transactions ADD COLUMN IF NOT EXISTS root_invocation_channel text NOT NULL DEFAULT 'system';
-CREATE TABLE IF NOT EXISTS _gonvex_action_outbox (
-  id text PRIMARY KEY, action_path text NOT NULL, args jsonb NOT NULL, actor_user_id text,
-  actor_email text, provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
-  status text NOT NULL DEFAULT 'pending' CHECK(status IN('pending','processing')),
-  attempts integer NOT NULL DEFAULT 0, available_at timestamptz NOT NULL DEFAULT now(),
-  locked_at timestamptz, last_error text, created_at timestamptz NOT NULL DEFAULT now()
-);
-ALTER TABLE _gonvex_action_outbox ADD COLUMN IF NOT EXISTS provenance jsonb NOT NULL DEFAULT '{}'::jsonb;
-CREATE INDEX IF NOT EXISTS _gonvex_action_outbox_pending ON _gonvex_action_outbox(available_at,created_at)
-  WHERE status='pending';
-CREATE OR REPLACE FUNCTION gonvex_sync_finalize_transaction() RETURNS trigger AS $$
-DECLARE next_revision bigint; current_epoch text; changed_tables text[]; notify_payload jsonb;
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM _gonvex_sync_transactions WHERE transaction_id=txid_current()::bigint
-  ) THEN
-    RETURN NULL;
-  END IF;
-    UPDATE _gonvex_sync_clock SET revision=revision+1 WHERE singleton=true
-      RETURNING revision,epoch INTO next_revision,current_epoch;
-    WITH ranked AS (
-      SELECT event_id,row_number() OVER(ORDER BY event_id)::integer row_ordinal
-      FROM _gonvex_sync_changes WHERE transaction_id=txid_current()::bigint AND revision IS NULL
-    ) UPDATE _gonvex_sync_changes changes SET revision=next_revision,ordinal=ranked.row_ordinal,
-      command_id=NULLIF(current_setting('gonvex.command_id',true),'')
-      FROM ranked WHERE changes.event_id=ranked.event_id;
-    SELECT array_agg(DISTINCT table_name ORDER BY table_name) INTO changed_tables
-      FROM _gonvex_sync_changes WHERE transaction_id=txid_current()::bigint AND revision=next_revision;
-    INSERT INTO _gonvex_sync_transactions
-      (revision,transaction_id,root_command_id,origin_command_id,root_invocation_channel,invocation_channel,
-       actor_account_id,actor_member_id,on_behalf_of_member_id,agent_execution_id)
-    VALUES(
-      next_revision,txid_current()::bigint,
-      COALESCE(NULLIF(current_setting('gonvex.root_command_id',true),''),NULLIF(current_setting('gonvex.command_id',true),''),''),
-      COALESCE(NULLIF(current_setting('gonvex.command_id',true),''),''),
-      COALESCE(NULLIF(current_setting('gonvex.root_invocation_channel',true),''),NULLIF(current_setting('gonvex.invocation_channel',true),''),'system'),
-      COALESCE(NULLIF(current_setting('gonvex.invocation_channel',true),''),'system'),
-      NULLIF(current_setting('gonvex.actor_account_id',true),''),
-      NULLIF(current_setting('gonvex.actor_member_id',true),''),
-      NULLIF(current_setting('gonvex.on_behalf_of_member_id',true),''),
-      NULLIF(current_setting('gonvex.agent_execution_id',true),'')
-    ) ON CONFLICT(revision) DO NOTHING;
-    notify_payload:=jsonb_build_object('epoch',current_epoch,'revision',next_revision,'tables',changed_tables);
-    IF octet_length(notify_payload::text)>7000 THEN
-      notify_payload:=jsonb_build_object('epoch',current_epoch,'revision',next_revision);
-    END IF;
-    PERFORM pg_notify('gonvex_change_feed',notify_payload::text);
-  RETURN NULL;
-END; $$ LANGUAGE plpgsql;
-"#;
-
-// SQLITE-PORT: Postgres-only tests disabled until ported to SQLite.
-#[cfg(all(test, any()))]
-mod sync_bootstrap_tests {
-    use super::*;
-    use sqlx::postgres::PgPoolOptions;
-
-    #[tokio::test]
-    async fn migrations_keep_postgres_lexical_boundaries_in_both_transaction_modes() {
-        let Ok(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping migration lexer test");
-            return;
-        };
-        let schema = format!("migration_lex_{}", uuid::Uuid::new_v4().simple());
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&base_url)
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let mut url = Url::parse(&base_url).unwrap();
-        url.query_pairs_mut()
-            .append_pair("options", &format!("-csearch_path={schema}"));
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(url.as_str())
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE migration_values (name text, value text)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut migrations = Vec::new();
-        let mut expected = Vec::new();
-        for no_transaction in [false, true] {
-            for (case, literal, value, comment) in [
-                ("cr", "'first'", "first", " -- comment\r"),
-                ("escape", r"E'a\';b'", "a';b", ""),
-                ("unicode", "$é$semi;colon$é$", "semi;colon", ""),
-            ] {
-                let name = format!("{case}_{no_transaction}");
-                migrations.push(SqlMigration::new(
-                    name.clone(),
-                    MigrationScope::ControlPlane,
-                    no_transaction,
-                    format!(
-                        "INSERT INTO migration_values VALUES ('{name}', {literal}){comment}; \
-                         INSERT INTO migration_values VALUES ('{name}', 'second');"
-                    ),
-                ));
-                expected.push((name.clone(), value.to_owned()));
-                expected.push((name, "second".to_owned()));
-            }
-        }
-        let applied = apply_migrations(
-            pool.clone(),
-            migrations.clone(),
-            MigrationScope::ControlPlane,
-        )
-        .await
-        .unwrap();
-        assert_eq!(applied.len(), migrations.len());
-        assert!(
-            apply_migrations(pool.clone(), migrations, MigrationScope::ControlPlane)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT name,value FROM migration_values ORDER BY name,value")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        expected.sort();
-        assert_eq!(rows, expected, "replay must not execute migrations twice");
-        pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
-    }
-
-    // Use the same opt-in PostgreSQL harness as the crate's integration tests.
-    // ddl_command_end records actual executed DDL, including CREATE OR REPLACE
-    // on an existing function whose OID would otherwise remain unchanged.
-    #[tokio::test]
-    async fn sync_bootstrap_caches_repairs_and_commits_atomically() {
-        let Ok(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping PostgreSQL bootstrap test");
-            return;
-        };
-        let schema = format!("sync_boot_{}", uuid::Uuid::new_v4().simple());
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&base_url)
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let mut url = Url::parse(&base_url).unwrap();
-        url.query_pairs_mut()
-            .append_pair("options", &format!("-csearch_path={schema}"));
-        let pool = PgPoolOptions::new()
-            .max_connections(3)
-            .connect(url.as_str())
-            .await
-            .unwrap();
-        execute_script_pool(
-            &pool,
-            &format!(
-                r#"
-            CREATE TABLE gonvex_ddl_audit (tag text, identity text);
-            CREATE FUNCTION {schema}.audit_ddl() RETURNS event_trigger AS $$
-            BEGIN
-                INSERT INTO {schema}.gonvex_ddl_audit
-                SELECT command_tag, object_identity FROM pg_event_trigger_ddl_commands() AS command
-                WHERE schema_name='{schema}' OR (
-                    command.classid='pg_trigger'::regclass AND EXISTS (
-                        SELECT FROM pg_trigger AS trigger
-                        JOIN pg_class AS relation ON relation.oid=trigger.tgrelid
-                        JOIN pg_namespace AS namespace ON namespace.oid=relation.relnamespace
-                        WHERE trigger.oid=command.objid AND namespace.nspname='{schema}'
-                    )
-                );
-            END; $$ LANGUAGE plpgsql;
-            CREATE EVENT TRIGGER {schema} ON ddl_command_end EXECUTE FUNCTION {schema}.audit_ddl();
-            CREATE TABLE tasks (id text PRIMARY KEY, title text);
-            CREATE TABLE notes (id text PRIMARY KEY, body text);
-            INSERT INTO tasks SELECT n::text, 'task ' || n FROM generate_series(1,31000) n;
-        "#
-            ),
-        )
-        .await
-        .unwrap();
-        clear_audit(&pool).await;
-        let started = Instant::now();
-        install_change_feed(pool.clone()).await.unwrap();
-        eprintln!(
-            "31k-row fixture cold sync bootstrap: {:?}",
-            started.elapsed()
-        );
-        let initial = audit(&pool).await;
-        assert_eq!(
-            initial
-                .iter()
-                .filter(|(tag, _)| tag == "CREATE TRIGGER")
-                .count(),
-            4
-        );
-        assert_eq!(
-            initial
-                .iter()
-                .filter(|(tag, _)| tag == "CREATE FUNCTION")
-                .count(),
-            3
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_sync_bootstrap")
-                .fetch_one(&pool)
-                .await
-                .unwrap(),
-            3
-        );
-        assert_change(&pool, "first", false).await;
-
-        clear_audit(&pool).await;
-        let started = Instant::now();
-        install_change_feed(pool.clone()).await.unwrap();
-        eprintln!(
-            "31k-row fixture warm sync bootstrap: {:?}",
-            started.elapsed()
-        );
-        assert!(
-            audit(&pool).await.is_empty(),
-            "warm boot must execute zero DDL"
-        );
-        assert_change(&pool, "warm", false).await;
-
-        sqlx::query("ALTER TABLE tasks ADD COLUMN extra text")
-            .execute(&pool)
-            .await
-            .unwrap();
-        clear_audit(&pool).await;
-        install_change_feed(pool.clone()).await.unwrap();
-        let changed = audit(&pool).await;
-        assert_eq!(
-            changed.len(),
-            3,
-            "one function and two triggers: {changed:?}"
-        );
-        assert!(changed
-            .iter()
-            .all(|(_, name)| name.contains("gonvex_sync_tasks_")));
-        assert_change(&pool, "changed", true).await;
-
-        sqlx::query("DROP TRIGGER gonvex_sync_tasks_stage_trigger ON tasks")
-            .execute(&pool)
-            .await
-            .unwrap();
-        clear_audit(&pool).await;
-        install_change_feed(pool.clone()).await.unwrap();
-        assert_eq!(audit(&pool).await.len(), 3);
-        assert_change(&pool, "repaired", true).await;
-
-        // Repair disabled triggers and missing functions too, even with matching receipts.
-        sqlx::query("ALTER TABLE tasks DISABLE TRIGGER gonvex_sync_tasks_finalize_trigger")
-            .execute(&pool)
-            .await
-            .unwrap();
-        install_change_feed(pool.clone()).await.unwrap();
-        assert_change(&pool, "enabled", true).await;
-        sqlx::query("DROP FUNCTION gonvex_sync_notes_stage() CASCADE")
-            .execute(&pool)
-            .await
-            .unwrap();
-        install_change_feed(pool.clone()).await.unwrap();
-        sqlx::query("INSERT INTO notes VALUES ('note', 'restored')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_sync_changes WHERE table_name='notes' AND revision IS NOT NULL").fetch_one(&pool).await.unwrap(), 1);
-
-        // A later invalid table rolls back earlier table repairs and their receipts.
-        let receipt: String = sqlx::query_scalar(
-            "SELECT digest FROM _gonvex_sync_bootstrap WHERE name='table:tasks'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        sqlx::query("ALTER TABLE tasks ADD COLUMN another text")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE z_invalid (value text)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        clear_audit(&pool).await;
-        assert!(install_change_feed(pool.clone()).await.is_err());
-        assert!(audit(&pool).await.is_empty());
-        assert_eq!(
-            sqlx::query_scalar::<_, String>(
-                "SELECT digest FROM _gonvex_sync_bootstrap WHERE name='table:tasks'"
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-            receipt
-        );
-        sqlx::query("DROP TABLE z_invalid")
-            .execute(&pool)
-            .await
-            .unwrap();
-        install_change_feed(pool.clone()).await.unwrap();
-
-        // Concurrent cold installers must not race metadata creation or duplicate DDL.
-        sqlx::query("DROP TABLE _gonvex_sync_bootstrap")
-            .execute(&pool)
-            .await
-            .unwrap();
-        clear_audit(&pool).await;
-        let (a, b) = tokio::join!(
-            install_change_feed(pool.clone()),
-            install_change_feed(pool.clone())
-        );
-        a.unwrap();
-        b.unwrap();
-        assert_eq!(
-            audit(&pool)
-                .await
-                .iter()
-                .filter(|(tag, _)| tag == "CREATE FUNCTION")
-                .count(),
-            3
-        );
-        assert_change(&pool, "concurrent", true).await;
-
-        sqlx::query(&format!("DROP EVENT TRIGGER {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        pool.close().await;
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
-    }
-
-    async fn clear_audit(pool: &sqlx::SqlitePool) {
-        sqlx::query("DELETE FROM gonvex_ddl_audit")
-            .execute(pool)
-            .await
-            .unwrap();
-    }
-
-    async fn audit(pool: &sqlx::SqlitePool) -> Vec<(String, String)> {
-        sqlx::query_as("SELECT tag, identity FROM gonvex_ddl_audit ORDER BY tag, identity")
-            .fetch_all(pool)
-            .await
-            .unwrap()
-    }
-
-    async fn assert_change(pool: &sqlx::SqlitePool, id: &str, extra: bool) {
-        let sql = if extra {
-            "INSERT INTO tasks(id,title,extra) VALUES($1,'test','new column')"
-        } else {
-            "INSERT INTO tasks(id,title) VALUES($1,'test')"
-        };
-        sqlx::query(sql).bind(id).execute(pool).await.unwrap();
-        let row = sqlx::query("SELECT revision, new_value FROM _gonvex_sync_changes WHERE table_name='tasks' AND row_id=$1")
-            .bind(id).fetch_one(pool).await.unwrap();
-        assert!(row.get::<Option<i64>, _>("revision").is_some());
-        let value: serde_json::Value = row.get("new_value");
-        assert_eq!(value["title"], "test");
-        if extra {
-            assert_eq!(value["extra"], "new column");
-        }
-    }
-}
-
-// SQLITE-PORT: Postgres-only tests disabled until ported to SQLite.
-#[cfg(all(test, any()))]
+#[cfg(test)]
 #[path = "provision_upgrade_tests.rs"]
 mod sync_bootstrap_upgrade_tests;
 
-// SQLITE-PORT: Postgres-only tests disabled until ported to SQLite.
-#[cfg(all(test, any()))]
+#[cfg(test)]
 #[path = "provision_foreign_writer_tests.rs"]
 mod sync_bootstrap_foreign_writer_tests;

@@ -1,68 +1,71 @@
+//! SQLite registry semantics: shared admission, one writer per file, readers
+//! that see a snapshot and never wait for the writer, in-process
+//! notifications, keyed locks and the data-directory lock.
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::task::{Context, Waker};
 use std::time::Duration;
 
-use gonvex_store::{ControlPlane, DatabaseError, PoolLimits, PoolRegistry, TenantRoute};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use gonvex_store::{ControlPlane, DataDir, DatabaseError, PoolLimits, PoolRegistry, TenantRoute};
+
+struct TestDir(std::path::PathBuf);
+
+impl TestDir {
+    fn new(prefix: &str) -> Self {
+        let path = std::env::var_os("GONVEX_TEST_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("{prefix}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 struct Fixture {
+    _dir: TestDir,
     control: ControlPlane,
     pools: PoolRegistry,
-    admin: PgPool,
-    schemas: Vec<String>,
     routes: Vec<TenantRoute>,
 }
 
 impl Fixture {
-    async fn new() -> Option<Self> {
-        let base = std::env::var("GONVEX_TEST_POSTGRES_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())?;
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&base)
-            .await
-            .unwrap();
-        let nonce = uuid::Uuid::new_v4().simple().to_string();
-        let schemas = (0..4)
-            .map(|i| format!("admission_{nonce}_{i}"))
-            .collect::<Vec<_>>();
-        let mut urls = Vec::new();
-        for schema in &schemas {
-            sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
-                .execute(&admin)
-                .await
-                .unwrap();
-            let separator = if base.contains('?') { '&' } else { '?' };
-            urls.push(format!("{base}{separator}options=-csearch_path%3D{schema}"));
-        }
+    async fn new() -> Self {
+        let dir = TestDir::new("gonvex-admission");
+        let data = DataDir::new(&dir.0);
         let pools = PoolRegistry::new(PoolLimits {
             max_total_connections: 2,
-            max_connections_per_database: 1,
-            acquire_timeout: Duration::from_millis(500),
+            max_connections_per_database: 2,
+            acquire_timeout: Duration::from_millis(300),
             ..PoolLimits::default()
         });
-        let control = ControlPlane::connect(&urls[0], pools.clone(), BTreeMap::new())
+        let control = ControlPlane::connect(&data.control_url(), pools.clone(), BTreeMap::new())
             .await
             .unwrap();
-        let routes = urls
-            .into_iter()
-            .skip(1)
-            .enumerate()
-            .map(|(i, database_url)| TenantRoute {
+        let mut routes = Vec::new();
+        for index in 0..3 {
+            let route = TenantRoute {
                 project_id: "project".to_owned(),
-                tenant_id: format!("tenant-{i}"),
-                database_url,
-            })
-            .collect();
-        Some(Self {
+                tenant_id: format!("tenant-{index}"),
+                database_url: data
+                    .tenant_url("project", &format!("tenant-{index}"))
+                    .unwrap(),
+            };
+            sqlx::query("CREATE TABLE records(id INTEGER PRIMARY KEY)")
+                .execute(&pools.pool(&route.database_url).await.unwrap())
+                .await
+                .unwrap();
+            routes.push(route);
+        }
+        Self {
+            _dir: dir,
             control,
             pools,
-            admin,
-            schemas,
             routes,
-        })
+        }
     }
 
     async fn begin(
@@ -74,115 +77,74 @@ impl Fixture {
             .begin_tenant_transaction(&self.routes[index], read_only)
             .await
     }
-
-    async fn close(self) {
-        self.pools.close().await;
-        for schema in self.schemas {
-            sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
-                .execute(&self.admin)
-                .await
-                .unwrap();
-        }
-        self.admin.close().await;
-    }
 }
 
 #[tokio::test]
-async fn busy_tenant_waiters_leave_shared_capacity_for_other_tenants_and_control() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    let held = fixture.begin(0, true).await.unwrap();
-    let mut waiters = Vec::new();
-    for _ in 0..8 {
-        let mut waiter = Box::pin(tokio::task::unconstrained(fixture.begin(0, true)));
-        assert!(waiter
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-            .is_pending());
-        waiters.push(waiter);
-    }
-    assert_eq!(
-        fixture.pools.snapshot().await.admission_active,
-        1,
-        "requests waiting for a tenant slot must not reserve shared capacity"
-    );
-    let mut healthy = fixture.begin(1, true).await.unwrap();
-    assert_eq!(
-        sqlx::query_scalar::<_, i32>("SELECT 42")
-            .fetch_one(&mut **healthy.transaction())
-            .await
-            .unwrap(),
-        42
-    );
-    healthy.rollback().await.unwrap();
-    fixture.control.ping().await.unwrap();
-    drop(waiters);
-    held.rollback().await.unwrap();
-    assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn cancelling_a_shared_queue_waiter_releases_its_database_slot() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    let first = fixture.begin(0, true).await.unwrap();
-    let second = fixture.begin(1, true).await.unwrap();
-    let mut waiting = Box::pin(tokio::task::unconstrained(fixture.begin(2, true)));
-    assert!(waiting
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
+async fn shared_admission_timeout_does_not_leak_capacity() {
+    let fixture = Fixture::new().await;
+    let first = fixture.begin(0, false).await.unwrap();
+    let second = fixture.begin(1, false).await.unwrap();
     assert_eq!(fixture.pools.snapshot().await.admission_active, 2);
-    assert_eq!(
-        fixture
-            .pools
-            .pool(&fixture.routes[2].database_url)
-            .await
-            .unwrap()
-            .size(),
-        0,
-        "waiting for shared admission must not open more physical connections"
-    );
-    drop(waiting);
+    let result = fixture.begin(2, true).await;
+    assert!(matches!(result, Err(DatabaseError::AdmissionTimeout)));
+    assert_eq!(fixture.pools.snapshot().await.admission_active, 2);
     first.rollback().await.unwrap();
-    let third = fixture.begin(2, true).await.unwrap();
-    assert_eq!(fixture.pools.snapshot().await.admission_active, 2);
-    third.commit().await.unwrap();
+    let recovered = fixture.begin(2, true).await.unwrap();
+    recovered.rollback().await.unwrap();
     second.rollback().await.unwrap();
     assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
-    fixture.close().await;
 }
 
 #[tokio::test]
-async fn database_queue_timeout_does_not_leak_shared_or_database_capacity() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    let held = fixture.begin(0, false).await.unwrap();
-    let result = fixture.begin(0, true).await;
-    assert!(matches!(result, Err(DatabaseError::AdmissionTimeout)));
+async fn a_second_writer_waits_while_readers_proceed_on_a_snapshot() {
+    let fixture = Fixture::new().await;
+    let mut writer = fixture.begin(0, false).await.unwrap();
+    sqlx::query("INSERT INTO records VALUES (1)")
+        .execute(&mut **writer.transaction())
+        .await
+        .unwrap();
+    // The only writer connection is busy: a second write transaction times
+    // out and returns its admission permit.
+    let blocked = fixture.begin(0, false).await;
+    assert!(
+        matches!(blocked, Err(DatabaseError::Sql(sqlx::Error::PoolTimedOut))),
+        "{:?}",
+        blocked.err()
+    );
     assert_eq!(fixture.pools.snapshot().await.admission_active, 1);
-    held.rollback().await.unwrap();
-    let recovered = fixture.begin(0, true).await.unwrap();
-    recovered.commit().await.unwrap();
+    // A reader is admitted and sees only committed state.
+    let mut reader = fixture.begin(0, true).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
+        .fetch_one(&mut **reader.transaction())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    reader.rollback().await.unwrap();
+    writer.commit().await.unwrap();
+    let mut reader = fixture.begin(0, true).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
+        .fetch_one(&mut **reader.transaction())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    reader.commit().await.unwrap();
     assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
-    fixture.close().await;
 }
 
 #[tokio::test]
-async fn control_listener_does_not_occupy_the_only_sql_connection() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
+async fn control_listener_receives_in_process_notifications() {
+    let fixture = Fixture::new().await;
     let mut listener = fixture
         .control
         .listener(&["pool_admission_test"])
         .await
         .unwrap();
     fixture.control.ping().await.unwrap();
+    fixture
+        .control
+        .notify("ignored_channel", "nope")
+        .await
+        .unwrap();
     fixture
         .control
         .notify("pool_admission_test", "ready")
@@ -192,83 +154,79 @@ async fn control_listener_does_not_occupy_the_only_sql_connection() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(notification.channel(), "pool_admission_test");
     assert_eq!(notification.payload(), "ready");
     assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
-    drop(listener);
-    fixture.close().await;
+    // Notifications are per database file.
+    let mut tenant = fixture
+        .pools
+        .listener(&fixture.routes[0].database_url)
+        .await
+        .unwrap();
+    tenant.listen("pool_admission_test").await.unwrap();
+    fixture
+        .control
+        .notify("pool_admission_test", "control only")
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), tenant.recv())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
-async fn shared_queue_timeout_returns_the_reserved_database_slot() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    let first = fixture.begin(0, false).await.unwrap();
-    let second = fixture.begin(1, false).await.unwrap();
-    let result = fixture.begin(2, true).await;
-    assert!(matches!(result, Err(DatabaseError::AdmissionTimeout)));
-    assert_eq!(fixture.pools.snapshot().await.admission_active, 2);
-    first.rollback().await.unwrap();
-    let recovered = fixture.begin(2, true).await.unwrap();
-    recovered.rollback().await.unwrap();
-    second.rollback().await.unwrap();
-    assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn closing_one_database_cancels_its_queue_without_locking_other_pools() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    let held = fixture.begin(0, true).await.unwrap();
-    let mut waiter = Box::pin(tokio::task::unconstrained(fixture.begin(0, true)));
-    assert!(waiter
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
-    let mut closing = Box::pin(tokio::task::unconstrained(
-        fixture
-            .pools
-            .close_database(&fixture.routes[0].database_url),
-    ));
-    assert!(closing
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
-    assert!(matches!(waiter.await, Err(DatabaseError::AdmissionTimeout)));
-    let healthy = fixture.begin(1, true).await.unwrap();
-    healthy.rollback().await.unwrap();
-    held.rollback().await.unwrap();
-    closing.await;
-    assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
-    fixture.close().await;
-}
-
-#[tokio::test]
-async fn closing_a_database_with_a_shared_waiter_does_not_reopen_its_pool() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    let first = fixture.begin(0, true).await.unwrap();
-    let second = fixture.begin(1, true).await.unwrap();
-    let mut waiting = Box::pin(tokio::task::unconstrained(fixture.begin(2, true)));
-    assert!(waiting
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
+async fn keyed_locks_serialize_one_key_on_one_database() {
+    let fixture = Fixture::new().await;
+    let url = &fixture.routes[0].database_url;
+    let held = fixture.pools.lock(url, "schema").await.unwrap();
+    // Other keys and other databases are independent.
+    fixture.pools.lock(url, "other").await.unwrap();
     fixture
         .pools
-        .close_database(&fixture.routes[2].database_url)
-        .await;
-    let registered = fixture.pools.snapshot().await.pools;
-    first.rollback().await.unwrap();
-    assert!(matches!(
-        waiting.await,
-        Err(DatabaseError::Sql(sqlx::Error::PoolClosed))
-    ));
-    assert_eq!(fixture.pools.snapshot().await.pools, registered);
-    second.rollback().await.unwrap();
-    assert_eq!(fixture.pools.snapshot().await.admission_active, 0);
-    fixture.close().await;
+        .lock(&fixture.routes[1].database_url, "schema")
+        .await
+        .unwrap();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(100),
+        fixture.pools.lock(url, "schema")
+    )
+    .await
+    .is_err());
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(1), fixture.pools.lock(url, "schema"))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn closing_a_database_releases_it_and_reopening_works() {
+    let fixture = Fixture::new().await;
+    let url = fixture.routes[2].database_url.clone();
+    let before = fixture.pools.snapshot().await.pools;
+    fixture.pools.close_database(&url).await;
+    assert_eq!(fixture.pools.snapshot().await.pools, before - 1);
+    let mut transaction = fixture.begin(2, false).await.unwrap();
+    sqlx::query("INSERT INTO records VALUES (5)")
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(fixture.pools.snapshot().await.pools, before);
+}
+
+#[tokio::test]
+async fn the_data_directory_has_one_owner() {
+    let dir = TestDir::new("gonvex-lock");
+    let data = DataDir::new(dir.0.join("data"));
+    let lock = data.lock().unwrap();
+    assert_eq!(lock.path(), dir.0.join("data").join(".gonvex.lock"));
+    assert!(matches!(data.lock(), Err(DatabaseError::DataDirLocked(_))));
+    drop(lock);
+    let again = data.lock().unwrap();
+    assert!(std::fs::read_to_string(again.path())
+        .unwrap()
+        .contains(&std::process::id().to_string()));
 }

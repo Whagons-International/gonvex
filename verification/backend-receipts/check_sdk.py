@@ -6,10 +6,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
-import uuid
+import tempfile
 
-from check_restart import command, postgres_ready, require
+from check_restart import require
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST = "tests::receipt_guarantee_tests::authenticated_sdk_receipt_replica_composition"
@@ -52,26 +53,20 @@ def main():
     environment.pop("GONVEX_SDK_UPGRADE_DAMAGE", None)
     environment.pop("GONVEX_SDK_CONCURRENCY_DAMAGE", None)
     environment.pop("GONVEX_SDK_OWNER_ORDER", None)
-    environment.pop("GONVEX_SDK_PG_CRASH_COORDINATION", None)
     missing = subprocess.run([str(binary), TEST, "--ignored", "--exact", "--nocapture"],
                              env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
     (output / "missing-coordinator.log").write_text(missing.stdout)
     require(missing.returncode != 0 and "requires its coordinator" in missing.stdout,
             "missing SDK coordinator did not fail explicitly")
-    container = None
+    data_dir = None
     process = None
     try:
-        container = command(["docker", "run", "--detach", "--name", "gonvex-sdk-receipt-" + uuid.uuid4().hex[:12],
-                             "--memory", "512m", "--cpus", "1", "--pids-limit", "128", "--shm-size", "64m",
-                             "-p", "127.0.0.1::5432", "-e", "POSTGRES_PASSWORD=fixture", "-e", "POSTGRES_DB=postgres", "postgres:16-alpine"])
-        postgres_ready(container)
-        image = command(["docker", "inspect", container, "--format", "{{.Image}}"])
-        settings = command(["docker", "exec", container, "psql", "-h", "127.0.0.1", "-U", "postgres", "-Atc",
-                            "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('fsync','full_page_writes','synchronous_commit') ORDER BY name"]).splitlines()
-        require(settings == ["fsync=on", "full_page_writes=on", "synchronous_commit=on"], "durable PostgreSQL settings required")
-        port = command(["docker", "port", container, "5432/tcp"]).rsplit(":", 1)[1]
+        # The runtime owns its SQLite files; an owned temporary data directory
+        # replaces the former database container.
+        data_dir = Path(tempfile.mkdtemp(prefix="gonvex-sdk-receipt-"))
+        settings = {"engine": "sqlite", "synchronous": "full"}
         environment.update(GONVEX_RECEIPT_TEST_REQUIRE_NATIVE="1", GONVEX_TEST_MODULE_HOST_BINARY=str(host),
-                           GONVEX_TEST_POSTGRES_URL=f"postgres://postgres:fixture@127.0.0.1:{port}/postgres?sslmode=disable",
+                           GONVEX_TEST_DATA_DIR=str(data_dir), GONVEX_SQLITE_SYNCHRONOUS="full",
                            GONVEX_SDK_RECEIPT_SCRIPT=str(ROOT / "verification/backend-receipts/sdk_composition.mjs"),
                            GONVEX_SDK_RECEIPT_OUTPUT=str(output / "sdk"), GONVEX_SDK_RECEIPT_HOLD_REPLICA="1")
         with (output / "native.log").open("w") as log:
@@ -265,7 +260,7 @@ def main():
                  "rust/crates/runtime/src/lib.rs", "rust/crates/runtime/src/execution.rs", "rust/crates/runtime/src/error_class.rs", "rust/crates/runtime/src/host_calls.rs",
                  "rust/crates/runtime/src/replica.rs", "rust/crates/runtime/src/replica_open_queue.rs", "rust/crates/runtime/src/visibility.rs",
                  "rust/crates/runtime/src/change_feed.rs", "rust/crates/runtime/src/snapshot_delivery.rs",
-                 "rust/crates/runtime/src/modules.rs", "rust/crates/postgres/src/lib.rs", "rust/Cargo.lock",
+                 "rust/crates/runtime/src/modules.rs", "rust/crates/store/src/lib.rs", "rust/Cargo.lock",
                  "pnpm-lock.yaml", "packages/client/package.json", "packages/expo-sqlite/package.json"]
         # Bind all actual built package inputs used by the native Node process.
         packages = ["client", "expo-sqlite", "protocol", "local-runtime", "module-sdk"]
@@ -278,7 +273,7 @@ def main():
                    "sources": {path: digest(ROOT / path) for path in paths},
                    "builtJavaScript": {str(path.relative_to(ROOT)): digest(path) for path in built},
                    "typescriptSources": {str(path.relative_to(ROOT)): digest(path) for path in typescript},
-                   "postgresImage": image, "postgresSettings": settings, "missingCoordinatorRejected": True,
+                   "storageSettings": settings, "missingCoordinatorRejected": True,
                    "missingReplicaControlRejected": True,
                    "sourceBarrierControlRejected": True,
                    "sourceAcceptanceControlRejected": True,
@@ -295,7 +290,7 @@ def main():
                    "ownerSourceMutation": json.loads((output / "owner-mutant/receipt.json").read_text()),
                    "sourceBarrierMutation": json.loads((output / "sdk-mutant/receipt.json").read_text()),
                    "cases": cases,
-                   "boundary": "Production authenticated WebSocket admission, real SDK/runtime/V8/PostgreSQL, independent file-backed Node SQLite journals/replicas, actual SDK process kills, account rotation and witnessed competing claims. Chromium runs the production legacy IndexedDB browser contract upgrade after a PostgreSQL rollback witness. Native Expo/Hermes, other browser engines/adapters, automatic same-instance reconnection and power-loss durability remain outside this fixture."}
+                   "boundary": "Production authenticated WebSocket admission, real SDK/runtime/V8/SQLite storage, independent file-backed Node SQLite journals/replicas, actual SDK process kills, account rotation and witnessed competing claims. Chromium runs the production legacy IndexedDB browser contract upgrade after a server rollback witness. Native Expo/Hermes, other browser engines/adapters, automatic same-instance reconnection and power-loss durability remain outside this fixture."}
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print("Authenticated SDK/backend/storage composition, process kills, browser rollback/upgrade recovery, account and tenant switches, witnessed concurrency and all eleven negative controls passed")
     finally:
@@ -309,8 +304,8 @@ def main():
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait(timeout=5)
-        if container:
-            subprocess.run(["docker", "rm", "--force", "--volumes", container], check=True, stdout=subprocess.DEVNULL, timeout=20)
+        if data_dir:
+            shutil.rmtree(data_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

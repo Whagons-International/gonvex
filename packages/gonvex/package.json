@@ -36,7 +36,6 @@
     "@gonvex/react": "workspace:*",
     "rolldown": "^1.2.3",
     "@gonvex/local-runtime": "workspace:*",
-    "@electric-sql/pglite": "0.5.8",
     "typescript-api": "npm:typescript@6.0.3"
   },
   "devDependencies": {

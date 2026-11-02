@@ -9,9 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use sqlx::sqlite::{
-    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 use tokio::sync::{broadcast, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 
@@ -222,6 +220,8 @@ impl PoolRegistry {
             .busy_timeout(Duration::from_secs(5))
             .pragma("cache_size", "-65536")
             .pragma("temp_store", "MEMORY")
+            // Module SQL may use `col REGEXP $n` (Rust `regex` syntax).
+            .with_regexp()
             .statement_cache_capacity(512);
         Ok(options)
     }
@@ -237,7 +237,8 @@ impl PoolRegistry {
         }
         let path = PathBuf::from(&key);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| DatabaseError::Io(error.to_string()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| DatabaseError::Io(error.to_string()))?;
         }
         // The writer creates the file and switches it to WAL before any reader
         // opens it; a read-only connection cannot change the journal mode.
@@ -279,11 +280,14 @@ impl PoolRegistry {
 
     pub async fn admit(&self, database_url: &str) -> Result<AdmissionPermit, DatabaseError> {
         let _ = database_url;
-        tokio::time::timeout(self.limits.acquire_timeout, self.admission.clone().acquire_owned())
-            .await
-            .map_err(|_| DatabaseError::AdmissionTimeout)?
-            .map(|shared| AdmissionPermit { _shared: shared })
-            .map_err(|_| DatabaseError::AdmissionTimeout)
+        tokio::time::timeout(
+            self.limits.acquire_timeout,
+            self.admission.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| DatabaseError::AdmissionTimeout)?
+        .map(|shared| AdmissionPermit { _shared: shared })
+        .map_err(|_| DatabaseError::AdmissionTimeout)
     }
 
     pub async fn listener(&self, database_url: &str) -> Result<DatabaseListener, DatabaseError> {

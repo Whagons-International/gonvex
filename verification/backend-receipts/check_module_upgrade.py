@@ -5,10 +5,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
-import uuid
+import tempfile
 
-from check_restart import command, postgres_ready, require
+from check_restart import require
 from check_sdk import digest, ROOT
 
 TEST = 'tests::receipt_guarantee_tests::authenticated_sdk_module_upgrade_recovery'
@@ -38,7 +39,7 @@ def main():
              'verification/backend-receipts/check_sdk.py', 'verification/backend-receipts/sdk_module_upgrade.mjs',
              'verification/backend-receipts/browser_module_upgrade_entry.mjs', '.github/workflows/runtime-regression.yml',
              'rust/crates/runtime/src/tests/receipt_guarantee_tests.rs', 'rust/crates/runtime/src/lib.rs',
-             'rust/crates/runtime/src/execution.rs', 'rust/crates/runtime/src/modules.rs', 'rust/crates/postgres/src/lib.rs',
+             'rust/crates/runtime/src/execution.rs', 'rust/crates/runtime/src/modules.rs', 'rust/crates/store/src/lib.rs',
              'rust/Cargo.lock', 'pnpm-lock.yaml']
     paths += [str(path.relative_to(ROOT)) for path in (ROOT / 'packages/client/src').glob('*.ts') if not path.name.endswith('.test.ts')]
     paths += [str(path.relative_to(ROOT)) for package in ['client', 'protocol', 'module-sdk', 'local-runtime']
@@ -53,18 +54,13 @@ def main():
     (output / 'missing-coordinator.log').write_text(missing.stdout)
     require(missing.returncode != 0 and 'module upgrade requires its coordinator' in missing.stdout,
             'missing coordinator must fail explicitly')
-    container = process = None
+    data_dir = process = None
     try:
-        container = command(['docker', 'run', '--detach', '--name', 'gonvex-module-upgrade-' + uuid.uuid4().hex[:12],
-                             '--memory', '512m', '--cpus', '1', '--pids-limit', '128', '--shm-size', '64m',
-                             '-p', '127.0.0.1::5432', '-e', 'POSTGRES_PASSWORD=fixture', '-e', 'POSTGRES_DB=postgres', 'postgres:16-alpine'])
-        postgres_ready(container)
-        port = command(['docker', 'port', container, '5432/tcp']).rsplit(':', 1)[1]
-        settings = command(['docker', 'exec', container, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-Atc',
-                            "SELECT name || '=' || setting FROM pg_settings WHERE name IN ('fsync','full_page_writes','synchronous_commit') ORDER BY name"]).splitlines()
-        require(settings == ['fsync=on', 'full_page_writes=on', 'synchronous_commit=on'], 'durable PostgreSQL settings required')
+        # The runtime owns its SQLite files in an owned temporary data directory.
+        data_dir = Path(tempfile.mkdtemp(prefix='gonvex-module-upgrade-'))
+        settings = {'engine': 'sqlite', 'synchronous': 'full'}
         env.update(GONVEX_RECEIPT_TEST_REQUIRE_NATIVE='1', GONVEX_TEST_MODULE_HOST_BINARY=str(host),
-                   GONVEX_TEST_POSTGRES_URL=f'postgres://postgres:fixture@127.0.0.1:{port}/postgres?sslmode=disable',
+                   GONVEX_TEST_DATA_DIR=str(data_dir), GONVEX_SQLITE_SYNCHRONOUS='full',
                    GONVEX_SDK_MODULE_UPGRADE_SCRIPT=str(ROOT / 'verification/backend-receipts/sdk_module_upgrade.mjs'))
         cases = [
             ('positive', 'lost-reply', None),
@@ -154,8 +150,7 @@ def main():
         for name, expected in sources.items():
             require(digest(ROOT / name) == expected, 'source changed during module upgrade: ' + name)
         require(digest(binary) == native['runtime'] and digest(host) == native['moduleHost'], 'native artifacts changed')
-        receipt = {'nativeArtifacts': native, 'sources': sources, 'postgresSettings': settings,
-                   'postgresImage': command(['docker', 'inspect', container, '--format', '{{.Image}}']),
+        receipt = {'nativeArtifacts': native, 'sources': sources, 'storageSettings': settings,
                    'positive': positive, 'counterFailure': counter_failure,
                    'sourceReceiptIdentityControlRejected': True, 'sourceMutation': mutation,
                    'sourceReplicaBarrierControlRejected': True, 'replicaBarrierMutation': barrier_mutation,
@@ -170,8 +165,8 @@ def main():
             except ProcessLookupError:
                 pass
             process.wait(timeout=5)
-        if container:
-            subprocess.run(['docker', 'rm', '--force', '--volumes', container], check=True, stdout=subprocess.DEVNULL, timeout=20)
+        if data_dir:
+            shutil.rmtree(data_dir, ignore_errors=True)
 
 
 if __name__ == '__main__':

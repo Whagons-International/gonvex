@@ -1,5 +1,5 @@
 import { validateValue } from "../src/validation.js";
-import { PGlite, type Transaction, type PGliteOptions } from "@electric-sql/pglite";
+import { DatabaseSync } from "node:sqlite";
 import { reducerRowId } from "@gonvex/module-sdk";
 import type { JsonObject, JsonValue, ReducerContext, ReducerDefinition } from "@gonvex/module-sdk";
 import type { LocalSchema } from "../src/schema.js";
@@ -33,14 +33,8 @@ export type LocalTransactionResult = {
   readTables: string[];
 };
 export type LocalRuntimeOptions = {
-  /** Empty engine cluster, produced with the pinned PGlite version. */
-  databaseTemplate?: Blob;
-  /** Optional disposable engine filesystem; never the application replica. */
-  filesystem?: PGliteOptions["fs"];
   /** Worker RPC already owns its structured-cloned messages. Native/direct callers keep the default copy. */
   ownsSnapshots?: boolean;
-  /** Prebundled engines let native hosts start without any network access. */
-  engine?: { pgliteWasmModule: WebAssembly.Module; initdbWasmModule: WebAssembly.Module; fsBundle: Blob };
   tables?: LocalTables;
   schema?: LocalSchema;
   reducers: Readonly<Record<string, ReducerDefinition<any, any>>>;
@@ -63,31 +57,92 @@ export class IncompleteReplicaError extends Error {
 const quote = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
 const columnTypes = new Set<LocalColumnType>(["text", "boolean", "bigint", "integer", "double precision", "jsonb", "uuid"]);
 const clone = <T>(value: T): T => structuredClone(value);
-const parseInteger = (value: string) => {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw new Error("Local reducer read an integer outside the JSON safe range");
-  return parsed;
+
+/** Bind a JSON parameter the way the runtime does: booleans as 0/1, arrays and
+ * objects as JSON text, everything else unchanged. */
+const bindValue = (value: JsonValue | undefined): null | number | string => {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "object") return JSON.stringify(value);
+  return value;
 };
-const queryOptions = { parsers: { 20: parseInteger } };
+/** Decode one column by its declared type (docs/sqlite-storage.md). */
+const decodeValue = (declared: string | null, value: unknown): JsonValue => {
+  if (value === null || value === undefined) return null;
+  const type = (declared ?? "").toUpperCase();
+  if (type.includes("JSON") && typeof value === "string") return JSON.parse(value) as JsonValue;
+  if (type.includes("BOOL") && typeof value === "number") return value !== 0;
+  return value as JsonValue;
+};
+
+type Rows<T> = { rows: T[] };
+/** The reference's transaction handle: `$n` numbered parameters, rows decoded
+ * by declared type, exactly like the runtime's tenant connection. */
+export class SqliteTransaction {
+  constructor(private readonly db: DatabaseSync) {}
+  query<T = JsonObject>(statement: string, parameters: readonly JsonValue[] = []): Promise<Rows<T>> {
+    try {
+      const prepared = this.db.prepare(statement);
+      prepared.setAllowUnknownNamedParameters(true);
+      const named = Object.fromEntries(parameters.map((value, index) => [`$${index + 1}`, bindValue(value)]));
+      const columns = prepared.columns();
+      if (!columns.length) { prepared.run(named); return Promise.resolve({ rows: [] }); }
+      const rows = prepared.all(named).map((row) => Object.fromEntries(columns.map(({ name, type }) => [name, decodeValue(type, (row as Record<string, unknown>)[name])])));
+      return Promise.resolve({ rows: rows as T[] });
+    } catch (error) { return Promise.reject(error); }
+  }
+  /** Tables a statement opens for reading and for writing, from its bytecode.
+   * This covers joins, subqueries, CTEs and `DELETE` without a WHERE. */
+  tables(statement: string): { read: Set<string>; written: Set<string> } {
+    const pages = new Map(this.db.prepare("SELECT rootpage, tbl_name FROM sqlite_schema WHERE rootpage > 0").all().map((row) => [Number(row.rootpage), String(row.tbl_name)]));
+    const read = new Set<string>(), written = new Set<string>();
+    for (const op of this.db.prepare(`EXPLAIN ${statement}`).all() as { opcode: string; p1: number; p2: number; p3: number }[]) {
+      const table = op.opcode === "Clear" ? pages.get(op.p1) : (op.opcode === "OpenRead" || op.opcode === "OpenWrite") && op.p3 === 0 ? pages.get(op.p2) : undefined;
+      if (!table) continue;
+      read.add(table);
+      if (op.opcode !== "OpenRead") written.add(table);
+    }
+    return { read, written };
+  }
+}
+
+/** One in-memory SQLite workspace, rolled back after every execution. */
+export class SqliteWorkspace {
+  readonly db = new DatabaseSync(":memory:");
+  constructor() {
+    // The runtime registers the same function (SQLite's REGEXP operator).
+    this.db.function("regexp", { deterministic: true }, (pattern, value) => value == null ? null : new RegExp(String(pattern)).test(String(value)) ? 1 : 0);
+  }
+  exec(sql: string): void { this.db.exec(sql); }
+  async transaction<T>(run: (tx: SqliteTransaction & { rollback(): Promise<void> }) => Promise<T>): Promise<T> {
+    this.db.exec("BEGIN");
+    let open = true;
+    const tx = Object.assign(new SqliteTransaction(this.db), {
+      rollback: async () => { if (open) { open = false; this.db.exec("ROLLBACK"); } },
+    });
+    try { return await run(tx); }
+    finally { if (open) { open = false; this.db.exec("ROLLBACK"); } }
+  }
+  close(): void { this.db.close(); }
+}
+type Transaction = SqliteTransaction;
 
 /**
- * Executes an existing module reducer against an isolated PostgreSQL workspace.
+ * Executes an existing module reducer against an isolated SQLite workspace,
+ * the same engine and SQL dialect the runtime uses for tenant databases.
  * This database is disposable execution memory, never a second durable cache.
  * The caller supplies one immutable Local Replica snapshot. Only a successful
  * execution returns a transaction for the SDK's existing outbox/overlay path.
  */
 export class LocalReducerRuntime {
   private readonly schema: LocalSchema;
-  private readonly database: PGlite;
+  private readonly database: SqliteWorkspace;
   private readonly ready: Promise<void>;
   private tail: Promise<unknown> = Promise.resolve();
   private closed = false;
 
   constructor(private readonly options: LocalRuntimeOptions) {
-    // One connection, disposable transactions, and lazily seeded tables do
-    // not need PostgreSQL's server-sized 128 MB shared buffer pool. Let the
-    // engine grow execution memory on demand without reserving that pool.
-    this.database = new PGlite({ ...options.engine, fs: options.filesystem, loadDataDir: options.databaseTemplate, initDbStartParams: ["--wal-segsize=1"], postgresqlconf: ["shared_buffers=1MB", "max_connections=1", "superuser_reserved_connections=0", "max_wal_senders=0", "max_worker_processes=0", "max_parallel_workers=0"] });
+    this.database = new SqliteWorkspace();
     this.schema = clone(options.schema ?? Object.fromEntries(Object.entries(options.tables ?? {}).map(([table, columns]) => [table, {
       key: "_id", columns: Object.fromEntries(Object.entries(columns).map(([name, type]) => [name, { type, nullable: name !== "_id" }])),
     }])));
@@ -167,7 +222,7 @@ export class LocalReducerRuntime {
     this.closed = true;
     await this.tail;
     await this.ready.catch(() => undefined);
-    await this.database.close();
+    this.database.close();
   }
 
   private async initialize(): Promise<void> {
@@ -178,7 +233,7 @@ export class LocalReducerRuntime {
         // Types/defaults come only from the generated, build-time schema.
         return `${quote(column)} ${spec.type}${column === key ? " PRIMARY KEY" : ""}${spec.default ? ` DEFAULT ${spec.default}` : ""}`;
       });
-      await this.database.exec(`CREATE TABLE ${quote(table)} (${definitions.join(", ")})`);
+      this.database.exec(`CREATE TABLE ${quote(table)} (${definitions.join(", ")})`);
     }
   }
 
@@ -250,29 +305,34 @@ export class LocalReducerRuntime {
         reads.add(table);
         requireColumns(table);
         await seedRow(table, id);
-        const result = await tx.query<JsonObject>(`SELECT * FROM ${quote(table)} WHERE ${quote(this.schema[table]!.key)} = $1`, [id], queryOptions);
+        const result = await tx.query<JsonObject>(`SELECT * FROM ${quote(table)} WHERE ${quote(this.schema[table]!.key)} = $1`, [id]);
         if (!result.rows.length && !snapshot.tables[table]?.complete) throw new IncompleteReplicaError(table);
         return result.rows[0];
       };
+      // Savepoints (applyDataWrites) roll back their own patches too.
+      // Seeding inside a savepoint is rolled back with it, so forget it too.
+      const savepoints = new Map<string, { patches: number; seeded: Set<string>; rows: Map<string, Set<string>> }>();
       const query = async <T>(statement: string, parameters: readonly JsonValue[] = []): Promise<readonly T[]> => {
-        // PostgreSQL parses the actual statement and reports every scanned
-        // relation, including joins/subqueries. Never infer completeness using
-        // a regex that could silently miss a nested relation.
-        const explain = await tx.query<Record<string, any>>(`EXPLAIN (FORMAT JSON) ${statement}`, [...parameters], queryOptions);
-        const tables = new Set<string>();
-        const written = new Set<string>();
-        const inspect = (value: unknown): void => {
-          if (Array.isArray(value)) { value.forEach(inspect); return; }
-          if (!value || typeof value !== "object") return;
-          const node = value as Record<string, unknown>;
-          if (node["Node Type"] === "ModifyTable" && typeof node["Relation Name"] === "string") written.add(node["Relation Name"]);
-          if (typeof node["Relation Name"] === "string") { tables.add(node["Relation Name"]); }
-          Object.values(node).forEach(inspect);
-        };
-        inspect(explain.rows);
+        const savepoint = /^\s*(SAVEPOINT|ROLLBACK\s+TO|RELEASE)\s+(\w+)\s*;?\s*$/i.exec(statement);
+        if (savepoint) {
+          const [, command, name] = savepoint;
+          const mark = savepoints.get(name!);
+          if (/^SAVEPOINT$/i.test(command!)) savepoints.set(name!, { patches: patches.length, seeded: new Set(seeded.keys()), rows: new Map([...rowSeeds].map(([table, rows]) => [table, new Set(rows.keys())])) });
+          else if (/^ROLLBACK/i.test(command!) && mark) {
+            patches.length = mark.patches;
+            for (const table of [...seeded.keys()]) if (!mark.seeded.has(table)) seeded.delete(table);
+            for (const [table, rows] of rowSeeds) for (const id of [...rows.keys()]) if (!mark.rows.get(table)?.has(id)) rows.delete(id);
+          } else if (!/^ROLLBACK/i.test(command!)) savepoints.delete(name!);
+          await tx.query(statement);
+          return [];
+        }
+        // SQLite compiles the actual statement; its bytecode opens every
+        // table it reads or writes, including joins/subqueries. Never infer
+        // completeness using a regex that could silently miss a relation.
+        const { read: tables, written } = tx.tables(statement);
         for (const table of tables) {
           // Only a proven primary-key lookup can use a partial collection.
-          // PostgreSQL still discovers all relations above; joins, counts,
+          // SQLite still discovers all relations above; joins, counts,
           // subqueries and range reads must have complete input coverage.
           const key = this.schema[table]?.key;
           const exact = /^SELECT (?:\*|"[A-Za-z_][A-Za-z0-9_]*"(?:,\s*"[A-Za-z_][A-Za-z0-9_]*")*) FROM "([A-Za-z_][A-Za-z0-9_]*)" WHERE "([A-Za-z_][A-Za-z0-9_]*)" = \$(\d+)(?: AND "deletedAt" IS NULL)?(?: LIMIT 1)?\s*;?$/i.exec(statement.trim());
@@ -285,16 +345,15 @@ export class LocalReducerRuntime {
         }
         const before = new Map<string, Map<string, JsonObject>>();
         for (const table of written) {
-          const rows = (await tx.query<JsonObject>(`SELECT * FROM ${quote(table)}`, [], queryOptions)).rows;
+          const rows = (await tx.query<JsonObject>(`SELECT * FROM ${quote(table)}`, [])).rows;
           before.set(table, new Map(rows.map(row => [String(row[this.schema[table]!.key]), row])));
         }
-        const result = await tx.query<T>(statement, [...parameters], queryOptions);
-        // Reducer SQL (including data-modifying CTEs) is part of the same
-        // transaction. Capture its row delta just like typed database writes.
+        const result = await tx.query<T>(statement, [...parameters]);
+        // Reducer SQL is part of the same transaction. Capture its row delta just like typed database writes.
         for (const table of written) {
           const prior = before.get(table)!;
           const key = this.schema[table]!.key;
-          for (const row of (await tx.query<JsonObject>(`SELECT * FROM ${quote(table)}`, [], queryOptions)).rows) {
+          for (const row of (await tx.query<JsonObject>(`SELECT * FROM ${quote(table)}`, [])).rows) {
             const id = String(row[key]);
             const old = prior.get(id); prior.delete(id);
             if (!old) patches.push({ entity: table, rowId: id, op: "insert", fields: clone(row) });
@@ -345,7 +404,7 @@ export class LocalReducerRuntime {
             if (!keys.length) return clone(before) as T;
             const updated = await tx.query<JsonObject>(
               `UPDATE ${quote(table)} SET ${keys.map((key, index) => `${quote(key)} = $${index + 1}`).join(", ")} WHERE ${quote(key)} = $${keys.length + 1} RETURNING *`,
-              [...keys.map((key) => patch[key]), id], queryOptions,
+              [...keys.map((key) => patch[key]), id],
             );
             patches.push({ entity: table, rowId: id, op: "patch", fields: clone(patch) });
             return clone(updated.rows[0]) as T;
@@ -396,7 +455,7 @@ export class LocalReducerRuntime {
   private async seedRows(tx: Transaction, table: string, rows: readonly JsonObject[]): Promise<void> {
     const columns = this.schema[table]!.columns;
     // Bound both parameter count and transient SQL size. Missing columns keep
-    // PostgreSQL DEFAULT semantics; JSON values remain bound parameters.
+    // SQL DEFAULT semantics; JSON values remain bound parameters.
     for (let offset = 0; offset < rows.length;) {
       const first = rows[offset]!;
       const keys = Object.keys(first).filter(key => !!columns[key]);
@@ -426,7 +485,7 @@ export class LocalReducerRuntime {
     if (!keys.length) throw new Error("Cannot insert an empty local row");
     const result = await tx.query<JsonObject>(
       `INSERT INTO ${quote(table)} (${keys.map(quote).join(", ")}) VALUES (${keys.map((_, index) => `$${index + 1}`).join(", ")}) RETURNING *`,
-      keys.map((key) => row[key]), queryOptions,
+      keys.map((key) => row[key]),
     );
     const value = result.rows[0]!;
     if (!seed) for (const [name, column] of Object.entries(columns)) {

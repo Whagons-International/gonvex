@@ -1,6 +1,8 @@
-//! PostgreSQL lexical boundaries shared by migration scripts and runtime admission.
-//! This scans lexical boundaries, not SQL grammar. Ordinary strings assume
-//! standard_conforming_strings=on; E strings always process backslash escapes.
+//! SQLite lexical boundaries shared by runtime statement admission and tests.
+//! This scans lexical boundaries, not SQL grammar: `'…'` strings and
+//! `"…"`, `` `…` `` and `[…]` identifiers (doubled quotes escape), `--` and
+//! non-nesting `/* */` comments, and `CREATE TRIGGER … BEGIN … END` bodies,
+//! whose inner semicolons do not end the statement.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StatementInfo<'a> {
     pub count: usize,
@@ -12,7 +14,6 @@ pub struct StatementInfo<'a> {
 pub enum LexError {
     Nul,
     UnterminatedQuote,
-    UnterminatedDollarQuote,
     UnterminatedComment,
 }
 
@@ -22,79 +23,22 @@ fn word_start(byte: u8) -> bool {
 fn word_part(byte: u8) -> bool {
     word_start(byte) || byte.is_ascii_digit() || byte == b'$'
 }
-fn quoted(source: &str, mut index: usize, quote: u8, escapes: bool) -> Result<usize, LexError> {
-    let bytes = source.as_bytes();
-    while index < bytes.len() {
-        if !escapes {
-            // ASCII quotes delimit UTF-8 boundaries. Skip ordinary literal
-            // contents with str's character search; only E strings need the
-            // byte-by-byte backslash handling below.
-            index += source[index..]
-                .find(char::from(quote))
-                .ok_or(LexError::UnterminatedQuote)?;
-        }
-        if escapes && bytes[index] == b'\\' {
-            index += 2;
-        } else if bytes[index] == quote {
-            if bytes.get(index + 1) == Some(&quote) {
-                index += 2;
-            } else {
-                return Ok(index + 1);
-            }
-        } else {
-            index += 1;
-        }
-    }
-    Err(LexError::UnterminatedQuote)
-}
-// PostgreSQL's quotecontinue rule permits whitespace/line comments containing
-// a newline. The original string mode carries across the continuation.
-fn string_literal(source: &str, mut index: usize, escapes: bool) -> Result<usize, LexError> {
-    let bytes = source.as_bytes();
-    loop {
-        let end = quoted(source, index, b'\'', escapes)?;
-        let mut gap = end;
-        let mut newline = false;
-        while gap < bytes.len() {
-            if bytes[gap].is_ascii_whitespace() {
-                newline |= matches!(bytes[gap], b'\r' | b'\n');
-                gap += 1;
-            } else if bytes[gap..].starts_with(b"--") {
-                gap += 2;
-                while gap < bytes.len() && !matches!(bytes[gap], b'\r' | b'\n') {
-                    gap += 1;
-                }
-            } else {
-                break;
-            }
-        }
-        if newline && bytes.get(gap) == Some(&b'\'') {
-            index = gap + 1;
-        } else {
-            return Ok(end);
-        }
-    }
-}
 
-fn dollar_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut index = start + 1;
-    if bytes.get(index) == Some(&b'$') {
-        return Some(index + 1);
-    }
-    if !bytes.get(index).copied().is_some_and(word_start) {
-        return None;
-    }
-    index += 1;
-    while let Some(&byte) = bytes.get(index) {
-        if byte == b'$' {
-            return Some(index + 1);
+/// Index just past the closing delimiter; a doubled closer is an escape.
+fn quoted(source: &str, index: usize, close: u8) -> Result<usize, LexError> {
+    let bytes = source.as_bytes();
+    let mut index = index;
+    loop {
+        // ASCII delimiters cannot occur inside a UTF-8 multibyte sequence.
+        index += source[index..]
+            .find(char::from(close))
+            .ok_or(LexError::UnterminatedQuote)?;
+        if close != b']' && bytes.get(index + 1) == Some(&close) {
+            index += 2;
+        } else {
+            return Ok(index + 1);
         }
-        if !(word_start(byte) || byte.is_ascii_digit()) {
-            return None;
-        }
-        index += 1;
     }
-    None
 }
 
 /// Count nonempty statements and report the first unquoted keyword.
@@ -112,6 +56,43 @@ pub fn statement_ranges(source: &str) -> Result<Vec<std::ops::Range<usize>>, Lex
     Ok(ranges)
 }
 
+/// Tracks `CREATE [TEMP|TEMPORARY] TRIGGER … BEGIN … END` within a statement.
+#[derive(Default)]
+struct TriggerState {
+    words: usize,
+    create: bool,
+    trigger: bool,
+    in_body: bool,
+    last_was_end: bool,
+}
+
+impl TriggerState {
+    fn word(&mut self, word: &str) {
+        let upper = word.to_ascii_uppercase();
+        match self.words {
+            0 => self.create = upper == "CREATE",
+            1 | 2 if self.create && upper == "TRIGGER" => self.trigger = true,
+            1 if upper == "TEMP" || upper == "TEMPORARY" => {}
+            1 => self.create = false,
+            _ => {}
+        }
+        if self.trigger && upper == "BEGIN" {
+            self.in_body = true;
+        }
+        self.words += 1;
+        self.last_was_end = upper == "END";
+    }
+
+    fn other_token(&mut self) {
+        self.last_was_end = false;
+    }
+
+    /// Whether a `;` here ends the statement (as `sqlite3_complete` decides).
+    fn ends_statement(&self) -> bool {
+        !self.in_body || self.last_was_end
+    }
+}
+
 fn scan(
     source: &str,
     mut on_statement: impl FnMut(std::ops::Range<usize>),
@@ -126,71 +107,60 @@ fn scan(
     let mut active = false;
     let mut head_seen = false;
     let mut first_word = None;
+    let mut trigger = TriggerState::default();
     while index < bytes.len() {
         let byte = bytes[index];
         if byte.is_ascii_whitespace() {
             index += 1;
         } else if bytes[index..].starts_with(b"--") {
             index += 2;
-            while index < bytes.len() && !matches!(bytes[index], b'\r' | b'\n') {
+            // SQLite ends a line comment only at `\n`; `\r` does not end it.
+            while index < bytes.len() && bytes[index] != b'\n' {
                 index += 1;
             }
         } else if bytes[index..].starts_with(b"/*") {
-            let mut depth = 1usize;
-            index += 2;
-            while index < bytes.len() && depth != 0 {
-                if bytes[index..].starts_with(b"/*") {
-                    depth += 1;
-                    index += 2;
-                } else if bytes[index..].starts_with(b"*/") {
-                    depth -= 1;
-                    index += 2;
-                } else {
-                    index += 1;
-                }
-            }
-            if depth != 0 {
-                return Err(LexError::UnterminatedComment);
-            }
-        } else if byte == b';' {
+            index = source[index + 2..]
+                .find("*/")
+                .map(|offset| index + 2 + offset + 2)
+                .ok_or(LexError::UnterminatedComment)?;
+        } else if byte == b';' && (!active || trigger.ends_statement()) {
             count += usize::from(active);
             if active {
                 on_statement(start..index + 1);
             }
             active = false;
+            trigger = TriggerState::default();
             index += 1;
             start = index;
         } else {
             active = true;
             let first = !head_seen;
             head_seen = true;
-            if matches!(byte, b'e' | b'E') && bytes.get(index + 1) == Some(&b'\'') {
-                index = string_literal(source, index + 2, true)?;
-            } else if byte == b'\'' {
-                index = string_literal(source, index + 1, false)?;
-            } else if byte == b'"' {
-                index = quoted(source, index + 1, byte, false)?;
-            } else if byte == b'$' {
-                if let Some(end) = dollar_end(bytes, index) {
-                    let tag = &source[index..end];
-                    index = source[end..]
-                        .find(tag)
-                        .map(|offset| end + offset + tag.len())
-                        .ok_or(LexError::UnterminatedDollarQuote)?;
-                } else {
+            match byte {
+                b'\'' | b'"' | b'`' => {
+                    index = quoted(source, index + 1, byte)?;
+                    trigger.other_token();
+                }
+                b'[' => {
+                    index = quoted(source, index + 1, b']')?;
+                    trigger.other_token();
+                }
+                byte if word_start(byte) => {
+                    let word_start_index = index;
                     index += 1;
+                    while bytes.get(index).copied().is_some_and(word_part) {
+                        index += 1;
+                    }
+                    let word = &source[word_start_index..index];
+                    if first {
+                        first_word = Some(word);
+                    }
+                    trigger.word(word);
                 }
-            } else if word_start(byte) {
-                let start = index;
-                index += 1;
-                while bytes.get(index).copied().is_some_and(word_part) {
+                _ => {
                     index += 1;
+                    trigger.other_token();
                 }
-                if first {
-                    first_word = Some(&source[start..index]);
-                }
-            } else {
-                index += 1;
             }
         }
     }
@@ -207,28 +177,20 @@ mod tests {
     #[test]
     fn literals_comments_and_empty_statements_keep_one_select() {
         let statements = [
-            "SELECT $$semi;colon$$ AS n",
-            "SELECT $$'$$ AS n",
             "SELECT 42 AS n; -- trailing comment",
-            r"SELECT E'a\';b' AS n",
             "-- leading comment\nSELECT 42 AS n",
             "SELECT 'it''s ; okay' AS n",
             "SELECT 'café'';okay' AS n",
-            "SELECT $tag$quote ' ; /*comment*/$tag$ AS n",
-            "SELECT $é$quote ' ; /*comment*/$é$ AS n",
-            "SELECT 1 /*outer /*inner*/ ; ' */ AS n",
-            "SELECT 1 -- comment\r;",
+            "SELECT 1 /* comment ; ' */ AS n",
+            "SELECT 1 -- comment\n;",
             "SELECT 1 AS \"semi;colon\"",
             "SELECT 1 AS \"a\"\";b\"",
             "SELECT 1 AS \"é\"\";b\"",
+            "SELECT 1 AS [semi;colon]",
+            "SELECT 1 AS `semi;colon`",
+            "SELECT X'3B' AS n",
         ];
-        let prefixes = [
-            "",
-            "-- prefix\r",
-            "-- prefix\n",
-            "/* nested /*inner*/ prefix */",
-            "; ; ",
-        ];
+        let prefixes = ["", "-- prefix\r\n", "-- prefix\n", "/* prefix */", "; ; "];
         let suffixes = ["", ";", "; -- after", "; /* after */ ; ;"];
         for statement in statements {
             for prefix in prefixes {
@@ -247,53 +209,49 @@ mod tests {
         }
     }
     #[test]
-    fn rejects_batches_hidden_after_carriage_return_comments() {
-        assert_eq!(analyze("SELECT 1 -- comment\r; SELECT 2").unwrap().count, 2);
+    fn statement_boundaries_match_sqlite_comments_and_strings() {
+        assert_eq!(analyze("SELECT 1 -- comment\n; SELECT 2").unwrap().count, 2);
+        // As in SQLite, `\r` does not end a line comment: nothing follows.
+        assert_eq!(analyze("SELECT 1 -- comment\r; SELECT 2").unwrap().count, 1);
         assert_eq!(analyze("SELECT ';'; SELECT 2").unwrap().count, 2);
-        assert_eq!(analyze("SELECT $$;$$; COMMIT").unwrap().count, 2);
+        assert_eq!(analyze("SELECT 1 /* a */; COMMIT").unwrap().count, 2);
+        // SQLite block comments do not nest.
+        assert_eq!(analyze("SELECT 1 /* a /* b */; SELECT 2").unwrap().count, 2);
+        // Backslashes are ordinary characters in SQLite strings.
+        assert_eq!(analyze(r"SELECT 'a\'; SELECT 2").unwrap().count, 2);
     }
     #[test]
     fn malformed_lexemes_are_errors() {
         for source in [
             "SELECT 'a",
             "SELECT \"a",
-            "SELECT E'a\\",
-            "SELECT $$a",
-            "SELECT $tag$a",
-            "SELECT 1 /*outer /*inner*/",
+            "SELECT [a",
+            "SELECT `a",
+            "SELECT 1 /*outer",
             "SELECT 1\0",
         ] {
             assert!(analyze(source).is_err(), "{source:?}");
         }
     }
     #[test]
-    fn dollar_inside_identifier_is_not_a_string_delimiter() {
-        assert_eq!(analyze("SELECT a$tag$b; SELECT 2").unwrap().count, 2);
-        assert_eq!(analyze("SELECT a$$b; SELECT 2").unwrap().count, 2);
-    }
-    #[test]
     fn quoted_first_token_cannot_become_read_keyword() {
-        for source in [
-            "\"select\" 42",
-            "'select' 42",
-            "$$select$$ 42",
-            "E'select' 42",
-        ] {
+        for source in ["\"select\" 42", "'select' 42", "[select] 42", "`select` 42"] {
             assert_eq!(analyze(source).unwrap().first_word, None);
         }
     }
-
     #[test]
-    fn string_continuations_retain_the_original_escape_mode() {
-        for separator in ["\n", "\r", " -- continuation\r", " -- continuation\n"] {
-            let source = format!("SELECT E'a'{separator}'b\\';c' AS n");
-            assert_eq!(analyze(&source).unwrap().count, 1, "{source:?}");
-            assert_eq!(analyze(&(source + "; SELECT 2")).unwrap().count, 2);
-        }
-        assert_eq!(
-            analyze("SELECT 'a'\n'b\\'; SELECT 2").unwrap().count,
-            2,
-            "ordinary strings keep standard_conforming_strings=on semantics"
-        );
+    fn trigger_bodies_are_one_statement() {
+        let trigger = "CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES(1); UPDATE c SET d=1; END;";
+        assert_eq!(statement_ranges(trigger).unwrap().len(), 1);
+        let temp = "create temp trigger \"x\" before delete on a begin select raise(abort,'no;'); end; SELECT 2;";
+        assert_eq!(analyze(temp).unwrap().count, 2);
+        // `BEGIN` outside a trigger is an ordinary statement.
+        assert_eq!(analyze("BEGIN; SELECT 1; END;").unwrap().count, 3);
+        assert_eq!(analyze("CREATE TABLE end_(x); SELECT 1").unwrap().count, 2);
+        // Like sqlite3_complete, `END;` after a CASE ends the scan early: a
+        // conservative over-count, never an under-count.
+        let case =
+            "CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT CASE WHEN 1 THEN 2 END; END; SELECT 3";
+        assert_eq!(analyze(case).unwrap().count, 3);
     }
 }

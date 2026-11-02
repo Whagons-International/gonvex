@@ -256,7 +256,7 @@ def main():
         'extractedBodyHashes': {name: hashlib.sha256(code.encode()).hexdigest() for name, code in bodies.items()},
         'expectedChecks': len(variants), 'checks': [],
         'scope': 'Actual extracted append bodies: canonical unsigned decimal, exact UTF-8 bytes, full SQL plus ordered u32 OID identity, description identity, namespace separation.',
-        'trustBoundaries': ['Unverified allocation/reservation/Cow wrappers', 'Pinned vstd String/slice/UTF-8 contracts, Verus, SMT, compiler', 'SQLx produces/type_info/codec relation and same-owned-plan caller discipline', 'Postgres/cache semantics, all other callers', 'Old Rust Display compatibility and runtime performance require parent native checks'],
+        'trustBoundaries': ['Unverified allocation/reservation/Cow wrappers', 'Pinned vstd String/slice/UTF-8 contracts, Verus, SMT, compiler', 'SQLx produces/type_info/codec relation and same-owned-plan caller discipline', 'SQLite/cache semantics, all other callers', 'Old Rust Display compatibility and runtime performance require parent native checks'],
     }
     for name, harness, expected in variants:
         path = args.output / (name + '.rs')

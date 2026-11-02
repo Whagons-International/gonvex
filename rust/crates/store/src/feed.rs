@@ -102,7 +102,8 @@ pub struct CommitNotice {
 
 impl CommitNotice {
     pub fn payload(&self) -> String {
-        let payload = json!({"epoch": self.epoch, "revision": self.revision, "tables": self.tables});
+        let payload =
+            json!({"epoch": self.epoch, "revision": self.revision, "tables": self.tables});
         let text = payload.to_string();
         if text.len() > 7000 {
             json!({"epoch": self.epoch, "revision": self.revision}).to_string()
@@ -201,6 +202,62 @@ pub async fn finalize(
     }))
 }
 
+/// Columns per `json_array` call and per OR group: bundled SQLite allows 127
+/// function arguments, 500 compound-select terms and expression depth 1000.
+const COLUMNS_PER_GROUP: usize = 100;
+
+/// JSON array of the names of columns an UPDATE changed, in column order.
+pub fn changed_columns_expr(columns: &[ColumnInfo]) -> String {
+    if columns.is_empty() {
+        return "'[]'".to_owned();
+    }
+    let groups = columns
+        .chunks(COLUMNS_PER_GROUP)
+        .enumerate()
+        .map(|(index, group)| {
+            let cases = group
+                .iter()
+                .map(|column| {
+                    let name = quote_identifier(&column.name);
+                    format!(
+                        "CASE WHEN OLD.{name} IS NOT NEW.{name} THEN '{}' END",
+                        column.name.replace('\'', "''")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let offset = index * COLUMNS_PER_GROUP;
+            format!("SELECT key + {offset} AS position, value FROM json_each(json_array({cases}))")
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "(SELECT json_group_array(value) FROM (SELECT value FROM ({groups}) WHERE value IS NOT NULL ORDER BY position))"
+    )
+}
+
+/// `OLD.c IS NOT NEW.c OR …` as a shallow tree of OR groups.
+pub fn any_column_changed_expr(columns: &[ColumnInfo]) -> String {
+    if columns.is_empty() {
+        return "0".to_owned();
+    }
+    columns
+        .chunks(COLUMNS_PER_GROUP)
+        .map(|group| {
+            let terms = group
+                .iter()
+                .map(|column| {
+                    let name = quote_identifier(&column.name);
+                    format!("OLD.{name} IS NOT NEW.{name}")
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            format!("({terms})")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// Trigger names for one table's change capture.
 pub fn capture_trigger_names(table: &str) -> [String; 3] {
     ["insert", "update", "delete"].map(|operation| format!("_gonvex_sync_{table}_{operation}"))
@@ -220,34 +277,8 @@ pub fn capture_triggers_sql(table: &str, key: &str, columns: &[ColumnInfo]) -> S
     let old_image = json_object_expr("OLD", &kinds);
     let key_new = format!("CAST(NEW.{} AS TEXT)", quote_identifier(key));
     let key_old = format!("CAST(OLD.{} AS TEXT)", quote_identifier(key));
-    let changed = if columns.is_empty() {
-        "'[]'".to_owned()
-    } else {
-        let branches = columns
-            .iter()
-            .map(|column| {
-                let name = quote_identifier(&column.name);
-                format!(
-                    "SELECT '{}' AS name WHERE OLD.{name} IS NOT NEW.{name}",
-                    column.name.replace('\'', "''")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" UNION ALL ");
-        format!("(SELECT json_group_array(name) FROM ({branches}))")
-    };
-    let any_change = if columns.is_empty() {
-        "0".to_owned()
-    } else {
-        columns
-            .iter()
-            .map(|column| {
-                let name = quote_identifier(&column.name);
-                format!("OLD.{name} IS NOT NEW.{name}")
-            })
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    };
+    let changed = changed_columns_expr(columns);
+    let any_change = any_column_changed_expr(columns);
     let [insert, update, delete] = capture_trigger_names(table).map(|name| quote_identifier(&name));
     format!(
         r#"DROP TRIGGER IF EXISTS {insert};
@@ -326,13 +357,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows.len(), 2, "a no-op update is not staged");
-        let image: serde_json::Value =
-            serde_json::from_str(&rows[0].get::<String, _>(2)).unwrap();
-        assert_eq!(image, json!({"_id":"a","title":"A","done":true,"meta":{"x":[1]},"n":5}));
+        let image: serde_json::Value = serde_json::from_str(&rows[0].get::<String, _>(2)).unwrap();
+        assert_eq!(
+            image,
+            json!({"_id":"a","title":"A","done":true,"meta":{"x":[1]},"n":5})
+        );
         assert_eq!(rows[1].get::<String, _>(3), r#"["done"]"#);
         assert_eq!(rows[1].get::<i64, _>(1), 2);
         assert_eq!(rows[1].get::<String, _>(4), "cmd-1");
         let mut tx = connection.begin().await.unwrap();
-        assert!(finalize(&mut tx, &Provenance::default()).await.unwrap().is_none());
+        assert!(finalize(&mut tx, &Provenance::default())
+            .await
+            .unwrap()
+            .is_none());
     }
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -41,7 +41,7 @@ for (const mode of ['success', 'lost_reply', 'write_failure', 'receipt_write_fai
   let dropped = false, failedWrite = false, failedAcceptanceWrite = false, blockIncoming = false;
   let closingForFault = false;
   let damaged = false;
-  let commitHeld = false, releaseCommit, heldWitness, postgresCrash;
+  let commitHeld = false, releaseCommit, heldWitness;
 
   class ObservedSocket extends NativeWebSocket {
     send(data) {
@@ -241,26 +241,6 @@ for (const mode of ['success', 'lost_reply', 'write_failure', 'receipt_write_fai
         assert.equal(retained[0].state, 'inflight', 'acceptance failure did not preserve the preceding journal checkpoint');
         journal.exec('DROP TRIGGER fail_acceptance_write');
       }
-      if (mode === 'lost_reply' && process.env.GONVEX_SDK_PG_CRASH_COORDINATION) {
-        const coordination = process.env.GONVEX_SDK_PG_CRASH_COORDINATION;
-        await writeFile(`${coordination}.ready.tmp`, JSON.stringify({ mode, key: calls[0].key, rowId,
-          committedRevision, retained, receivedResultDropped: dropped, oldSDKClosed: !client.connectionState().isWebSocketConnected }) + '\n');
-        await rename(`${coordination}.ready.tmp`, `${coordination}.ready`);
-        // A separate coordinator owns and kills PostgreSQL. The runtime and its
-        // existing pools remain alive; fresh SDK handles must recover through
-        // those pools after actual server crash recovery.
-        const deadline = Date.now() + 60_000;
-        for (;;) {
-          try { postgresCrash = JSON.parse(await readFile(`${coordination}.restarted`, 'utf8')); break; }
-          catch (error) { if (error.code !== 'ENOENT') throw error; }
-          assert(Date.now() < deadline, 'PostgreSQL crash coordinator did not resume recovery');
-          await delay(10);
-        }
-        assert.equal(postgresCrash.killSignal, 'SIGKILL');
-        assert.equal(postgresCrash.exitCode, 137);
-        assert.equal(postgresCrash.before.effects, 1);
-        assert.deepEqual(postgresCrash.after, postgresCrash.before);
-      }
       closeDatabases();
       blockIncoming = false;
       closingForFault = false;
@@ -282,8 +262,8 @@ for (const mode of ['success', 'lost_reply', 'write_failure', 'receipt_write_fai
     assert(events.some(event => event.type === 'auth.result'), 'real authenticated response missing');
     const sqlite = db.prepare('SELECT sqlite_version() AS version').get().version;
     await writeFile(join(output, `${mode}.json`), JSON.stringify({ mode, node: process.version, sqlite,
-      dropped, failedWrite, failedAcceptanceWrite, commitHeld, heldWitness, postgresCrash, calls, receiptQueries, retirementAttempts, retirements, cursorWrites, events, finalCursor: saved.cursor,
-      boundary: 'Real authenticated SDK WebSocket/runtime/V8/PostgreSQL and Node SQLite through the Expo adapter. Journal and replica use independent files; the retirement oracle uses another replica connection. Restart reopens SDK and all database handles. Does not prove native Expo/Hermes, browser engines or power-loss durability.' }, null, 2) + '\n');
+      dropped, failedWrite, failedAcceptanceWrite, commitHeld, heldWitness, calls, receiptQueries, retirementAttempts, retirements, cursorWrites, events, finalCursor: saved.cursor,
+      boundary: 'Real authenticated SDK WebSocket/runtime/V8/SQLite storage and Node SQLite through the Expo adapter. Journal and replica use independent files; the retirement oracle uses another replica connection. Restart reopens SDK and all database handles. Does not prove native Expo/Hermes, browser engines or power-loss durability.' }, null, 2) + '\n');
   } catch (error) {
     console.error(JSON.stringify({ mode, scope, committedRevision, dropped, failedWrite, events, calls,
       retirementAttempts, retirementCount: retirements.length, cursorWrites, memoryCursor: client?.localReplica.cursor(),

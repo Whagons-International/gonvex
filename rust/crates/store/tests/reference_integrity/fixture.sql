@@ -1,22 +1,11 @@
-CREATE TABLE teams(_id text PRIMARY KEY,"deletedAt" bigint);
-CREATE TABLE workspaces(_id text PRIMARY KEY,teams jsonb,"deletedAt" bigint,note text);
-CREATE TABLE approvals(_id text PRIMARY KEY,"deletedAt" bigint,selectors jsonb);
-CREATE TABLE history(_id text PRIMARY KEY,"teamId" text);
+CREATE TABLE teams(_id TEXT PRIMARY KEY,"deletedAt" INTEGER);
+CREATE TABLE workspaces(_id TEXT PRIMARY KEY,teams JSON,"deletedAt" INTEGER,note TEXT);
+CREATE TABLE approvals(_id TEXT PRIMARY KEY,"deletedAt" INTEGER,selectors JSON);
+CREATE TABLE history(_id TEXT PRIMARY KEY,"teamId" TEXT);
 INSERT INTO teams VALUES('before',NULL);
 INSERT INTO workspaces VALUES('before','["before"]',NULL,'before');
--- Demonstrate the reported invariant fails on the original unconstrained schema.
-DO $$ BEGIN
-  BEGIN
-    UPDATE teams SET "deletedAt"=1 WHERE _id='before';
-    IF NOT EXISTS (SELECT FROM workspaces w JOIN teams t ON w.teams ? t._id WHERE t."deletedAt" IS NOT NULL) THEN
-      RAISE EXCEPTION 'before fixture did not reproduce dangling live reference';
-    END IF;
-    RAISE EXCEPTION USING ERRCODE='P0004', MESSAGE='rollback reproduced orphan';
-  EXCEPTION WHEN assert_failure THEN NULL;
-  END;
-END $$;
 INSERT INTO workspaces VALUES('legacy','["missing"]',NULL,'unchanged');
-SELECT gonvex_declare_references($catalog${
+INSERT INTO _gonvex_reference_requests(declaration) VALUES('{
   "version":1,
   "tables":[
     {"name":"teams","key":"_id","live":"$.deletedAt == null"},
@@ -29,4 +18,4 @@ SELECT gonvex_declare_references($catalog${
     {"name":"approval.selectors","source":"approvals","at":"$.selectors[*]","path":"$.id","discriminator":"$.type","targets":{"team":"teams"},"state":"live"},
     {"name":"history.team","source":"history","path":"$.teamId","target":"teams","state":"exists","sourceWhen":"true"}
   ]
-}$catalog$::jsonb);
+}');

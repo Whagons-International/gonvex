@@ -59,12 +59,11 @@ pub async fn table_columns(
     connection: &mut SqliteConnection,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, DatabaseError> {
-    let rows = sqlx::query(
-        "SELECT name, type, \"notnull\", pk FROM pragma_table_info($1) ORDER BY cid",
-    )
-    .bind(table)
-    .fetch_all(connection)
-    .await?;
+    let rows =
+        sqlx::query("SELECT name, type, \"notnull\", pk FROM pragma_table_info($1) ORDER BY cid")
+            .bind(table)
+            .fetch_all(connection)
+            .await?;
     Ok(rows
         .into_iter()
         .map(|row| ColumnInfo {
@@ -93,9 +92,12 @@ pub fn json_value_expr(qualified: &str, kind: JsonKind) -> String {
     }
 }
 
-/// `json_object('a', r."a", …)` for the given columns. SQLite limits one
-/// function call to 1,000 arguments, so wide rows are merged with `json_patch`.
+/// `json_object('a', r."a", …)` for the given columns. Bundled SQLite (3.46)
+/// limits one function call to 127 arguments, so wide rows build one object
+/// per 60 columns and splice their members together. (`json_patch` cannot
+/// merge them: a merge patch deletes keys whose value is null.)
 pub fn json_object_expr(alias: &str, columns: &[(String, JsonKind)]) -> String {
+    const PAIRS_PER_CALL: usize = 60;
     let pairs = columns
         .iter()
         .map(|(name, kind)| {
@@ -112,16 +114,20 @@ pub fn json_object_expr(alias: &str, columns: &[(String, JsonKind)]) -> String {
         })
         .collect::<Vec<_>>();
     let chunks = pairs
-        .chunks(400)
+        .chunks(PAIRS_PER_CALL)
         .map(|chunk| format!("json_object({})", chunk.join(", ")))
         .collect::<Vec<_>>();
     match chunks.len() {
         0 => "json_object()".to_owned(),
         1 => chunks.into_iter().next().unwrap(),
-        _ => chunks
-            .into_iter()
-            .reduce(|left, right| format!("json_patch({left}, {right})"))
-            .unwrap(),
+        _ => {
+            let members = chunks
+                .iter()
+                .map(|chunk| format!("substr({chunk}, 2, length({chunk}) - 2)"))
+                .collect::<Vec<_>>()
+                .join(" || ',' || ");
+            format!("json('{{' || {members} || '}}')")
+        }
     }
 }
 
@@ -144,7 +150,9 @@ pub fn decode_value(value: SqliteValueRef<'_>, kind: JsonKind) -> Result<Value, 
             serde_json::from_str(&text).unwrap_or(Value::String(text))
         }
         (_, "INTEGER") => Value::Number(integer()?.into()),
-        (_, "REAL") => Number::from_f64(real()?).map(Value::Number).unwrap_or(Value::Null),
+        (_, "REAL") => Number::from_f64(real()?)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         (_, "TEXT") => Value::String(text()?),
         (_, "BLOB") => {
             let bytes = sqlx::Value::try_decode::<Vec<u8>>(&owned).map_err(decode_error)?;
@@ -189,11 +197,12 @@ mod tests {
     }
 
     #[test]
-    fn wide_rows_merge_json_object_chunks() {
+    fn wide_rows_splice_json_object_chunks() {
         let columns = (0..900)
             .map(|index| (format!("c{index}"), JsonKind::Text))
             .collect::<Vec<_>>();
         let expr = json_object_expr("r", &columns);
-        assert_eq!(expr.matches("json_patch").count(), 2);
+        assert_eq!(expr.matches("json_object(").count(), 2 * 15);
+        assert!(!expr.contains("json_patch"));
     }
 }

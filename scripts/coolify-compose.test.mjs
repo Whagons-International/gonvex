@@ -13,7 +13,7 @@ function resolvedCompose() {
     ["compose", "-f", composePath, "config", "--format", "json"],
     {
       cwd: root,
-      env: { ...process.env, GONVEX_POSTGRES_PASSWORD: "compose-postgres" },
+      env: process.env,
       encoding: "utf8",
     },
   );
@@ -23,11 +23,14 @@ function resolvedCompose() {
 
 test("Coolify Compose is a stable data plane only", () => {
   const compose = resolvedCompose();
-  assert.deepEqual(Object.keys(compose.services).sort(), ["gonvex-postgres"]);
+  assert.deepEqual(Object.keys(compose.services).sort(), ["gonvex-sqlite-backup"]);
   assert.equal(compose.services["gonvex-runtime"], undefined);
   assert.equal(compose.services["gonvex-dashboard"], undefined);
   assert.equal(compose.volumes["gonvex-runtime-data"], undefined);
-  assert.ok(compose.volumes["gonvex-postgres-data"]);
+  assert.equal(compose.volumes["gonvex-postgres-data"], undefined);
+  // The runtime Application owns the SQLite volume; this stack only reads it.
+  assert.equal(compose.volumes["gonvex-sqlite-data"].external, true);
+  assert.ok(compose.volumes["gonvex-sqlite-backups"]);
   assert.equal(compose.volumes["gonvex-valkey-data"], undefined);
   for (const service of Object.values(compose.services)) {
     assert.equal(service.ports, undefined, "durable dependencies must not publish host ports");

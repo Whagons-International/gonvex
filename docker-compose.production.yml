@@ -4,35 +4,15 @@ name: gonvex-maker
 # supplies the SERVICE_* secrets on first import and attaches public domains
 # only to `gonvex-maker-runtime` and `gonvex-maker-dashboard`. Every service
 # name is stack-specific so Coolify's shared network cannot resolve a generic
-# alias to an unrelated application's container. Postgres, MinIO, and
-# backups stay on the resource-private network and publish no host ports. The
+# alias to an unrelated application's container. MinIO and backups stay on the
+# resource-private network and publish no host ports. Every database is a
+# SQLite file in the `gonvex-sqlite-data` volume mounted at /data, owned by the
+# single runtime container (it holds /data/.gonvex.lock; never run two runtimes
+# on this volume). The
 # runtime alone also joins Coolify's edge network under a portfolio-specific
 # alias so same-server product containers do not depend on public-IP hairpin
 # routing. Management endpoints still enforce the production auth boundary.
 services:
-  gonvex-maker-postgres:
-    image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: gonvex
-      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_64_GONVEX_POSTGRES}
-      POSTGRES_DB: gonvex
-    volumes:
-      - gonvex-postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gonvex -d gonvex"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 10s
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 6G
-        reservations:
-          memory: 1G
-
   gonvex-maker-minio:
     image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     restart: unless-stopped
@@ -91,22 +71,14 @@ services:
     user: "0:0"
     restart: unless-stopped
     depends_on:
-      gonvex-maker-postgres:
-        condition: service_healthy
       gonvex-maker-minio-init:
         condition: service_healthy
     environment:
       GONVEX_ADDR: 0.0.0.0:8080
-      GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
-      DATABASE_URL: postgres://gonvex:${SERVICE_PASSWORD_64_GONVEX_POSTGRES}@gonvex-maker-postgres:5432/gonvex?sslmode=disable
-      GONVEX_DATA_DIR: /var/lib/gonvex/data
+      # Control Plane: /data/control.db; tenants: /data/projects/<project>/...
+      GONVEX_DATA_DIR: /data
+      GONVEX_SQLITE_SYNCHRONOUS: full
       GONVEX_TELEMETRY_LOG: /var/lib/gonvex/telemetry.jsonl
-      # Keep one runtime well below PostgreSQL's default 100-client ceiling.
-      # Tenant provisioning is single-flighted, and these explicit bounds keep
-      # a future environment override from turning lock contention into an outage.
-      GONVEX_DB_MAX_TOTAL_CONNS: "20"
-      GONVEX_DB_MAX_OPEN_CONNS: "2"
-      GONVEX_DB_MAX_IDLE_CONNS: "2"
       GONVEX_ENVIRONMENT: production
       GONVEX_REQUIRE_AUTH: "true"
       GONVEX_AGENT_ACTIONS_ENABLED: ${GONVEX_AGENT_ACTIONS_ENABLED:-false}
@@ -128,6 +100,11 @@ services:
       S3_FORCE_PATH_STYLE: "true"
     volumes:
       - gonvex-runtime-data:/var/lib/gonvex
+      - gonvex-sqlite-data:/data
+    # Stop the old container before the new one opens the files: SQLite has one
+    # writer per file and the runtime refuses to start while another holds the
+    # data directory lock.
+    stop_grace_period: 30s
     networks:
       default:
       coolify-edge:
@@ -227,48 +204,33 @@ services:
         reservations:
           memory: 128M
 
-  gonvex-maker-postgres-backup:
-    image: postgres:17-alpine@sha256:979c4379dd698aba0b890599a6104e082035f98ef31d9b9291ec22f2b13059ca
+  gonvex-maker-sqlite-backup:
+    build:
+      context: infra/sqlite-backup
     restart: unless-stopped
     depends_on:
       gonvex-maker-runtime:
         condition: service_healthy
     environment:
-      PGHOST: gonvex-maker-postgres
-      PGPORT: "5432"
-      PGUSER: gonvex
-      PGPASSWORD: ${SERVICE_PASSWORD_64_GONVEX_POSTGRES}
-      PGDATABASE: gonvex
+      GONVEX_DATA_DIR: /data
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: "14"
+      BACKUP_INTERVAL_SECONDS: "86400"
+    # Online backup API snapshots each file consistently while the runtime
+    # writes; it needs write access for SQLite's WAL index (-shm), never writes
+    # database pages. Runs are per-file consistent, not one cross-file instant.
     volumes:
-      - gonvex-postgres-backups:/backups
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        umask 077
-        while true; do
-          stamp="$$(date -u +%Y%m%dT%H%M%SZ)"
-          partial="/backups/gonvex-$${stamp}.dump.partial"
-          final="/backups/gonvex-$${stamp}.dump"
-          pg_dump --format=custom --compress=6 --file="$${partial}"
-          mv "$${partial}" "$${final}"
-          find /backups -type f -name 'gonvex-*.dump' -mtime +14 -delete
-          sleep 86400
-        done
+      - gonvex-sqlite-data:/data
+      - gonvex-sqlite-backups:/backups
+    command: ["loop"]
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          latest="$$(ls -1t /backups/gonvex-*.dump 2>/dev/null | head -n 1)" &&
-          test -n "$${latest}" &&
-          test "$$(wc -c < "$${latest}")" -ge 20000 &&
-          pg_restore --list "$${latest}" >/dev/null
+      test: ["CMD", "/usr/local/bin/gonvex-sqlite-backup", "check"]
       interval: 60s
-      timeout: 10s
+      timeout: 30s
       retries: 5
       start_period: 120s
     deploy:
@@ -283,11 +245,11 @@ networks:
     external: true
 
 volumes:
-  gonvex-postgres-data:
-    name: ${GONVEX_POSTGRES_VOLUME:-gonvex-maker-postgres-data}
   gonvex-minio-data:
     name: ${GONVEX_MINIO_VOLUME:-gonvex-maker-minio-data}
   gonvex-runtime-data:
     name: ${GONVEX_RUNTIME_VOLUME:-gonvex-maker-runtime-data}
-  gonvex-postgres-backups:
-    name: ${GONVEX_POSTGRES_BACKUP_VOLUME:-gonvex-maker-postgres-backups}
+  gonvex-sqlite-data:
+    name: ${GONVEX_SQLITE_VOLUME:-gonvex-maker-sqlite-data}
+  gonvex-sqlite-backups:
+    name: ${GONVEX_SQLITE_BACKUP_VOLUME:-gonvex-maker-sqlite-backups}

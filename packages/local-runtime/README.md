@@ -2,10 +2,11 @@
 
 The generated client executes the same TypeScript Reducer body used by the Rust
 server. Structured reads and writes use the normalized Local Replica in browsers
-and native JavaScript, and compile to parameterized PostgreSQL operations on the
-server. Production execution has no PGlite, WASM startup, scratch database, or
-WebView. The CLI uses PGlite only during schema compilation, and the test suite uses it
-as a PostgreSQL reference. Neither use is part of application execution.
+and native JavaScript, and compile to parameterized SQLite statements on the
+server. Production execution has no WASM startup, scratch database, or WebView.
+The CLI uses Node's built-in `node:sqlite` only during schema compilation, and
+the test suite uses it as the server SQL reference
+(`test/sqlite-reference.ts`). Neither use is part of application execution.
 
 Use the module SDK structured data operations inside an interactive Reducer.
 Arbitrary SQL belongs in server Queries or explicitly server-only work. One
@@ -50,7 +51,7 @@ and shared only through the SDK adapter.
 
 ## Verification
 
-The tests cover PostgreSQL/portable conformance, deterministic IDs, atomic rollback,
+The tests cover SQLite/portable conformance, deterministic IDs, atomic rollback,
 read-own-writes, incomplete data, ordered replay, persistence failures, rejection,
 concurrent tabs, scope changes, residency budgets, and real SQLite transactions.
 CLI tests bundle and execute generated Reducers in an offline browser and verify

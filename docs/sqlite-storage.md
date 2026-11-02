@@ -152,3 +152,31 @@ migration history is not replayed.
 database and writes the equivalent SQLite file, converting timestamps to
 milliseconds, booleans to integers and `jsonb` to JSON text, then verifies row
 counts per table.
+
+## Module SDK statements
+
+The structured data helpers in `@gonvex/module-sdk` (`data.ts`,
+`data-write.ts`) send only identifiers they validated and `$n` parameters.
+The runtime's `ctx.db.query` must provide:
+
+- **Parameter binding.** `null` → NULL, `true`/`false` → `1`/`0`, integers →
+  INTEGER, other numbers → REAL, strings → TEXT, arrays and objects → JSON
+  text. The SDK already passes every list as one JSON text parameter
+  (`IN (SELECT value FROM json_each($n))`), never as a bound array.
+- **`regexp(pattern, value)`** registered on every connection, so
+  `column REGEXP $n` works (`matches` predicates). Pattern syntax is the
+  portable subset the SDK validates.
+- **Savepoints.** `applyDataWrites` runs its operations as separate
+  statements between `SAVEPOINT gonvex_data_writes` and
+  `RELEASE gonvex_data_writes` (`ROLLBACK TO` on error) inside the Reducer
+  transaction, so a caught failure leaves no partial batch.
+- **Declared types in results.** Rows, including `RETURNING *`, are decoded
+  by declared type. Expression columns (`EXISTS (…)`, `count(*)`) have none
+  and arrive as integers; the SDK accepts `0`/`1` for booleans.
+
+`lockData` and `DataRead.lock: "update"` emit no SQL: one writer per tenant
+already serializes Reducers. Batched writes convert JSON input per column
+with `pragma_table_info`: a column whose declared type contains `JSON` takes
+`value -> '$.col'` (JSON text, JSON null as SQL NULL); others take
+`value ->> '$.col'`. `packages/local-runtime/test/sqlite-reference.ts` runs
+these statements on real SQLite against the portable engine.

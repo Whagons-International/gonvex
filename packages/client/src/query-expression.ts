@@ -140,7 +140,7 @@ export function runOfflineLiveQuery<T extends Record<string, unknown>>(
     const comparator = (left: T, right: T) => {
       for(let i=0;i<fields.length;i++){
         const a=resolved ? resolved.get(left)![i] : left[fields[i]!],b=resolved ? resolved.get(right)![i] : right[fields[i]!];
-        // PostgreSQL ASC puts NULL last; DESC puts it first.
+        // Server SQL orders ASC NULLS LAST and DESC NULLS FIRST.
         const order=a==null ? b==null ? 0 : 1 : b==null ? -1 : compare(a,b);
         if(order)return direction==='desc'?-order:order;
       }

@@ -94,7 +94,7 @@ export async function runSDKBrowserUpgrade(url, output) {
     assert.equal(deliveries(before.calls).length, 1);
     assert(!before.results.some(result => result.type === 'reducer.result'), 'rollback reported acceptance');
     await context.close(); context = undefined;
-    // The Rust fixture observes the actual PostgreSQL row and receipt before
+    // The Rust fixture observes the actual tenant database row and receipt before
     // allowing the supported browser contract migration to begin.
     await writeFile(join(output, 'rollback-request.tmp'), JSON.stringify({ key: original.idempotencyKey, rowId: original.args.id }) + '\n');
     await rename(join(output, 'rollback-request.tmp'), join(output, 'rollback-request.json'));
@@ -143,7 +143,7 @@ export async function runSDKBrowserUpgrade(url, output) {
     assert.notEqual(retained.state, 'committed', 'dropped result reached SDK acceptance dispatch');
     await writeFile(join(output, 'postcommit-interrupted.json'), JSON.stringify(interrupted, null, 2) + '\n');
     // Kill only this persistent browser, after its journal transaction has
-    // completed. The original runtime and PostgreSQL remain alive.
+    // completed. The original runtime and its SQLite files remain open.
     const browser = context.browser(), session = await browser.newBrowserCDPSession();
     const { processInfo } = await session.send('SystemInfo.getProcessInfo');
     const owned = processInfo.find(info => info.type === 'browser');

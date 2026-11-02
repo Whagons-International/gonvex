@@ -13,15 +13,24 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::SqliteRow as PgRow;
+use sqlx::sqlite::SqliteRow;
 use sqlx::types::Json;
-use sqlx::{Row, Sqlite, SqlitePool as PgPool, Transaction};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
+/// `CAST(unixepoch('subsec') * 1000 AS INTEGER)` as a literal for `concat!`.
+macro_rules! now_ms {
+    () => {
+        "CAST(unixepoch('subsec') * 1000 AS INTEGER)"
+    };
+}
+
+mod data_dir;
 pub mod feed;
 mod registry;
 pub mod rows;
+pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
     database_path, database_url, AdmissionPermit, DatabaseListener, Durability, KeyedLock,
@@ -29,9 +38,8 @@ pub use registry::{
 };
 
 mod provision;
-mod reference_integrity;
+pub mod reference_integrity;
 pub mod sql_lexer;
-mod sql_script;
 pub use provision::{MigrationScope, SqlMigration};
 
 #[derive(Debug, Error)]
@@ -74,6 +82,12 @@ pub enum DatabaseError {
     Io(String),
     #[error("value decode failed: {0}")]
     Decode(String),
+    #[error("data directory {0} is already in use by another Gonvex process")]
+    DataDirLocked(String),
+    #[error("reference integrity: {0}")]
+    ReferenceIntegrity(String),
+    #[error("transaction aborted: an earlier statement failed ({0})")]
+    TransactionAborted(String),
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
 }
@@ -245,7 +259,10 @@ pub struct ClaimedAction {
 #[derive(Clone)]
 pub struct ControlPlane {
     database_url: Arc<str>,
-    pool: PgPool,
+    /// The Control Plane writer (one connection). Every write uses it.
+    pool: SqlitePool,
+    /// Read-only Control Plane connections.
+    reader: SqlitePool,
     pools: PoolRegistry,
     configured_tenants: Arc<BTreeMap<String, String>>,
 }
@@ -261,8 +278,17 @@ fn developer_session_metadata(
     expires_at: i64,
 ) -> Option<Value> {
     (grant_id.starts_with("devmode_") && reason == "developer mode" && !actor.is_empty()
-        && actor == account && !tenant.is_empty() && expires_at > chrono::Utc::now().timestamp_millis())
+        && actor == account && !tenant.is_empty() && expires_at > unix_millis())
         .then(|| serde_json::json!({ "grantId": grant_id, "accountId": account, "tenantId": tenant, "expiresAt": expires_at }))
+}
+
+/// Joins the Account's most recently updated identity as `identity`.
+macro_rules! latest_identity_join {
+    () => {
+        "LEFT JOIN account_identities identity ON identity.rowid = (
+           SELECT rowid FROM account_identities
+           WHERE account_id = account.id ORDER BY updated_at DESC, rowid DESC LIMIT 1)"
+    };
 }
 
 impl ControlPlane {
@@ -275,7 +301,9 @@ impl ControlPlane {
     }
 
     pub async fn notify(&self, channel: &str, payload: &str) -> Result<(), DatabaseError> {
-        self.pools.notify(&self.database_url, channel, payload).await
+        self.pools
+            .notify(&self.database_url, channel, payload)
+            .await
     }
 
     pub fn pools(&self) -> &PoolRegistry {
@@ -292,9 +320,11 @@ impl ControlPlane {
         configured_tenants: BTreeMap<String, String>,
     ) -> Result<Self, DatabaseError> {
         let pool = pools.pool(database_url).await?;
+        let reader = pools.reader(database_url).await?;
         let control = Self {
             database_url: database_url.trim().into(),
             pool,
+            reader,
             pools,
             configured_tenants: Arc::new(configured_tenants),
         };
@@ -330,41 +360,32 @@ impl ControlPlane {
         }
         let token_hash = token_hash(token);
         let _admission = self.pools.admit(&self.database_url).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(concat!(
             r#"SELECT session.project_id, account.id, account.email,
-                      COALESCE(identity.verified_email, FALSE) AS email_verified,
+                      COALESCE(identity.verified_email, 0) AS email_verified,
                       account.name, account.avatar_url,
                       COALESCE(identity.provider, '') AS provider
                FROM gonvex_auth_sessions session
                JOIN accounts account
                  ON account.id = session.account_id
                 AND account.auth_realm_id = session.project_id
-               LEFT JOIN LATERAL (
-                   SELECT provider, verified_email
-                   FROM account_identities
-                   WHERE account_id = account.id
-                   ORDER BY updated_at DESC
-                   LIMIT 1
-               ) identity ON TRUE
+               "#,
+            latest_identity_join!(),
+            r#"
                WHERE session.token_hash = $1
                  AND session.revoked_at IS NULL
-                 AND session.expires_at > now()
-                 AND account.disabled_at IS NULL"#,
-        )
+                 AND session.expires_at > "#,
+            now_ms!(),
+            r#"
+                 AND account.disabled_at IS NULL"#
+        ))
         .bind(token_hash.clone())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?
         .ok_or(DatabaseError::InvalidSession)?;
         let identity = SessionIdentity {
             project_id: row.get("project_id"),
-            account: Account {
-                id: row.get("id"),
-                email: row.get("email"),
-                email_verified: row.get("email_verified"),
-                name: row.get("name"),
-                avatar_url: row.get("avatar_url"),
-                provider: row.get("provider"),
-            },
+            account: account_from_row(&row),
         };
         if let Some(requested) = requested_project_id
             .map(str::trim)
@@ -374,11 +395,13 @@ impl ControlPlane {
                 return Err(DatabaseError::SessionProjectMismatch);
             }
         }
-        sqlx::query(
-            r#"UPDATE gonvex_auth_sessions SET last_seen_at = now()
-               WHERE token_hash = $1
-                 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')"#,
-        )
+        sqlx::query(concat!(
+            "UPDATE gonvex_auth_sessions SET last_seen_at = ",
+            now_ms!(),
+            " WHERE token_hash = $1 AND (last_seen_at IS NULL OR last_seen_at < ",
+            now_ms!(),
+            " - 300000)"
+        ))
         .bind(token_hash)
         .execute(&self.pool)
         .await?;
@@ -433,16 +456,25 @@ impl ControlPlane {
         let _admission = self.pools.admit(&self.database_url).await?;
         let mut transaction = self.pool.begin().await?;
         let statement = if token.starts_with("gvx_imp_") {
-            r#"UPDATE gonvex_impersonation_grants SET
-                 used_at=now(),used_connection_id=$2,reconnect_token_hash=$3
-               WHERE token_hash=$1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>now()
+            concat!(
+                "UPDATE gonvex_impersonation_grants SET used_at=",
+                now_ms!(),
+                r#",used_connection_id=$2,reconnect_token_hash=$3
+               WHERE token_hash=$1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>"#,
+                now_ms!(),
+                r#"
                RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor,reason,expires_at"#
+            )
         } else {
-            r#"UPDATE gonvex_impersonation_grants SET
+            concat!(
+                r#"UPDATE gonvex_impersonation_grants SET
                  used_connection_id=$2,reconnect_token_hash=$3
                WHERE reconnect_token_hash=$1 AND used_at IS NOT NULL
-                 AND revoked_at IS NULL AND expires_at>now()
+                 AND revoked_at IS NULL AND expires_at>"#,
+                now_ms!(),
+                r#"
                RETURNING id,project_id,actor_account_id,target_account_id,tenant_id,delegation_actor,reason,expires_at"#
+            )
         };
         let row = sqlx::query(statement)
             .bind(token_hash(token))
@@ -462,8 +494,7 @@ impl ControlPlane {
             &actor_account_id,
             &account_id,
             &tenant_id,
-            row.get::<chrono::DateTime<chrono::Utc>, _>("expires_at")
-                .timestamp_millis(),
+            row.get::<i64, _>("expires_at"),
         );
         // Returning early drops the transaction, so a grant whose delegation
         // cannot be read is not consumed.
@@ -484,17 +515,16 @@ impl ControlPlane {
             transaction.rollback().await?;
             return Err(DatabaseError::InvalidSession);
         }
-        let account_row = sqlx::query(
+        let account_row = sqlx::query(concat!(
             r#"SELECT account.id,account.email,account.name,account.avatar_url,
-                      COALESCE(identity.verified_email,FALSE) AS email_verified,
+                      COALESCE(identity.verified_email,0) AS email_verified,
                       COALESCE(identity.provider,'') AS provider
                FROM accounts account
-               LEFT JOIN LATERAL (
-                 SELECT provider,verified_email FROM account_identities
-                 WHERE account_id=account.id ORDER BY updated_at DESC LIMIT 1
-               ) identity ON TRUE
-               WHERE account.id=$1 AND account.auth_realm_id=$2 AND account.disabled_at IS NULL"#,
-        )
+               "#,
+            latest_identity_join!(),
+            r#"
+               WHERE account.id=$1 AND account.auth_realm_id=$2 AND account.disabled_at IS NULL"#
+        ))
         .bind(&account_id)
         .bind(&project_id)
         .fetch_optional(&mut *transaction)
@@ -513,14 +543,7 @@ impl ControlPlane {
             tenant: TenantSession {
                 identity: SessionIdentity {
                     project_id,
-                    account: Account {
-                        id: account_row.get("id"),
-                        email: account_row.get("email"),
-                        email_verified: account_row.get("email_verified"),
-                        name: account_row.get("name"),
-                        avatar_url: account_row.get("avatar_url"),
-                        provider: account_row.get("provider"),
-                    },
+                    account: account_from_row(&account_row),
                 },
                 route,
                 member,
@@ -548,15 +571,16 @@ impl ControlPlane {
             return Err(DatabaseError::InvalidSession);
         }
         let _admission = self.pools.admit(&self.database_url).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(concat!(
             r#"SELECT id,project_id,actor_account_id,target_account_id,tenant_id,reason,expires_at
                FROM gonvex_impersonation_grants
                WHERE reconnect_token_hash=$1 AND used_at IS NOT NULL
-                 AND used_connection_id=$2 AND revoked_at IS NULL AND expires_at>now()"#,
-        )
+                 AND used_connection_id=$2 AND revoked_at IS NULL AND expires_at>"#,
+            now_ms!()
+        ))
         .bind(token_hash(token))
         .bind(connection_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?
         .ok_or(DatabaseError::InvalidSession)?;
         let project_id: String = row.get("project_id");
@@ -571,8 +595,7 @@ impl ControlPlane {
             &row.get::<String, _>("actor_account_id"),
             &account_id,
             &tenant_id,
-            row.get::<chrono::DateTime<chrono::Utc>, _>("expires_at")
-                .timestamp_millis(),
+            row.get::<i64, _>("expires_at"),
         )
         .is_some();
         drop(_admission);
@@ -593,37 +616,26 @@ impl ControlPlane {
         account_id: &str,
     ) -> Result<TenantSession, DatabaseError> {
         let _admission = self.pools.admit(&self.database_url).await?;
-        let row = sqlx::query(
+        let row = sqlx::query(concat!(
             r#"SELECT account.id, account.email,
-                      COALESCE(identity.verified_email, FALSE) AS email_verified,
+                      COALESCE(identity.verified_email, 0) AS email_verified,
                       account.name, account.avatar_url,
                       COALESCE(identity.provider, '') AS provider
                FROM accounts account
-               LEFT JOIN LATERAL (
-                   SELECT provider, verified_email
-                   FROM account_identities
-                   WHERE account_id = account.id
-                   ORDER BY updated_at DESC
-                   LIMIT 1
-               ) identity ON TRUE
+               "#,
+            latest_identity_join!(),
+            r#"
                WHERE account.id = $1
                  AND account.auth_realm_id = $2
-                 AND account.disabled_at IS NULL"#,
-        )
+                 AND account.disabled_at IS NULL"#
+        ))
         .bind(account_id)
         .bind(project_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?
         .ok_or(DatabaseError::InvalidSession)?;
         drop(_admission);
-        let account = Account {
-            id: row.get("id"),
-            email: row.get("email"),
-            email_verified: row.get("email_verified"),
-            name: row.get("name"),
-            avatar_url: row.get("avatar_url"),
-            provider: row.get("provider"),
-        };
+        let account = account_from_row(&row);
         let (route, member, admission_revision) = self
             .admit_member(project_id, tenant_id, &account.id)
             .await?;
@@ -661,7 +673,7 @@ impl ControlPlane {
         )
         .bind(project_id)
         .bind(account_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.reader)
         .await?;
         drop(admission);
         for row in rows {
@@ -684,7 +696,7 @@ impl ControlPlane {
                WHERE id = $1 AND status NOT IN ('deleted', 'disabled')"#,
         )
         .bind(project_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?
         .ok_or_else(|| DatabaseError::ProjectNotFound(project_id.to_owned()))?;
         Ok(project_from_row(row))
@@ -698,7 +710,7 @@ impl ControlPlane {
                WHERE module_hash <> ''
                ORDER BY updated_at, project_id"#,
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.reader)
         .await?;
         Ok(rows
             .into_iter()
@@ -721,7 +733,7 @@ impl ControlPlane {
             "SELECT project_key FROM gonvex_runtime_projects WHERE id=$1 AND status NOT IN ('deleted','disabled')",
         )
         .bind(project_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?;
         Ok(project_key
             .as_deref()
@@ -738,11 +750,11 @@ impl ControlPlane {
         record: &RuntimeManifestRecord,
     ) -> Result<(), DatabaseError> {
         let _admission = self.pools.admit(&self.database_url).await?;
-        sqlx::query(
-            r#"INSERT INTO gonvex_runtime_manifests(project_id,manifest,module_hash,updated_at)
-               VALUES($1,$2,$3,now()) ON CONFLICT(project_id) DO UPDATE SET
-                 manifest=EXCLUDED.manifest,module_hash=EXCLUDED.module_hash,updated_at=now()"#,
-        )
+        sqlx::query(concat!(
+            "INSERT INTO gonvex_runtime_manifests(project_id,manifest,module_hash,updated_at) VALUES($1,$2,$3,",
+            now_ms!(),
+            ") ON CONFLICT(project_id) DO UPDATE SET manifest=excluded.manifest,module_hash=excluded.module_hash,updated_at=excluded.updated_at"
+        ))
         .bind(&record.project_id)
         .bind(Json(record.manifest.clone()))
         .bind(&record.module_hash)
@@ -767,7 +779,7 @@ impl ControlPlane {
         )
         .bind(project_id)
         .bind(tenant_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?
         .ok_or_else(|| DatabaseError::TenantNotFound {
             project: project_id.to_owned(),
@@ -785,7 +797,7 @@ impl ControlPlane {
                  AND status NOT IN ('deleted','disabled') ORDER BY tenant_id"#,
         )
         .bind(project_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.reader)
         .await?;
         Ok(rows
             .into_iter()
@@ -833,7 +845,7 @@ impl ControlPlane {
         )
         .bind(project_id)
         .bind(tenant_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?;
         let row = row.ok_or_else(|| DatabaseError::TenantDatabaseMissing {
             tenant: tenant_id.to_owned(),
@@ -858,14 +870,15 @@ impl ControlPlane {
     ) -> Result<TenantRoute, DatabaseError> {
         self.project(project).await?;
         let row = sqlx::query("SELECT tenant_id FROM gonvex_runtime_tenants WHERE project_id=$1 AND (tenant_id=$2 OR lower(domain)=lower($2)) AND status='active' AND deleted_at IS NULL ORDER BY (tenant_id=$2) DESC LIMIT 1")
-            .bind(project).bind(tenant).fetch_optional(&self.pool).await?
+            .bind(project).bind(tenant).fetch_optional(&self.reader).await?
             .ok_or_else(|| DatabaseError::TenantDatabaseMissing { tenant: tenant.to_owned() })?;
         self.resolve_tenant(project, row.get::<String, _>("tenant_id").as_str())
             .await
     }
 
     /// This is the final tenant admission gate. Directory rows only locate the
-    /// tenant database; they cannot grant access.
+    /// tenant database; they cannot grant access. The Member row and the
+    /// change-feed revision come from one read snapshot.
     pub async fn admit_member(
         &self,
         project_id: &str,
@@ -874,12 +887,7 @@ impl ControlPlane {
     ) -> Result<(TenantRoute, Member, u64), DatabaseError> {
         let account_id = required(account_id, DatabaseError::MissingAccount)?;
         let route = self.resolve_tenant(project_id, tenant_id).await?;
-        let tenant_pool = self.pools.pool(&route.database_url).await?;
-        let _admission = self.pools.admit(&route.database_url).await?;
-        let mut transaction = tenant_pool.begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            .execute(&mut *transaction)
-            .await?;
+        let mut transaction = begin_transaction(&self.pools, &route.database_url, true).await?;
         let row = sqlx::query(
             r#"SELECT id, account_id, status, display_name, avatar_url, role,
                       permissions, membership_revision
@@ -887,12 +895,12 @@ impl ControlPlane {
                WHERE account_id = $1 AND status = 'active'"#,
         )
         .bind(account_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&mut **transaction.transaction())
         .await?
         .ok_or_else(|| DatabaseError::MemberNotFound(account_id.to_owned()))?;
         let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton=true")
-                .fetch_one(&mut *transaction)
+            sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton=1")
+                .fetch_one(&mut **transaction.transaction())
                 .await?;
         transaction.commit().await?;
         Ok((
@@ -923,7 +931,7 @@ impl ControlPlane {
         )
         .bind(project_id)
         .bind(account_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.reader)
         .await?
         .ok_or(DatabaseError::InvalidSession)?;
         let route = self.resolve_public_tenant(project_id, tenant_id).await?;
@@ -956,7 +964,7 @@ impl ControlPlane {
         route: &TenantRoute,
         member_id: &str,
     ) -> Result<Option<Member>, DatabaseError> {
-        let tenant_pool = self.pools.pool(&route.database_url).await?;
+        let tenant_pool = self.pools.reader(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
         let row = sqlx::query(
             r#"SELECT id, account_id, status, display_name, avatar_url, role,
@@ -1000,19 +1008,14 @@ impl ControlPlane {
         &self,
         route: &TenantRoute,
     ) -> Result<(), DatabaseError> {
-        let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
-        // CREATE INDEX takes a table lock even with IF NOT EXISTS. Running it
-        // for every reducer serializes callers behind an active receipt owner
-        // before the unique claim can arbitrate them. Inspect catalog state on
-        // the routed connection; no process cache can outlive a schema reset.
+        // Inspect the catalog on every call; no process cache can outlive a
+        // schema reset. Only cold initialization takes the writer.
         const STATUS: &str = r#"SELECT
-            to_regclass('_gonvex_reducer_idempotency') IS NOT NULL,
-            to_regclass('_gonvex_mutation_idempotency') IS NOT NULL,
-            EXISTS(SELECT 1 FROM pg_index
-                WHERE indexrelid=to_regclass('gonvex_reducer_idempotency_created_at')
-                AND indrelid=to_regclass('_gonvex_reducer_idempotency')
-                AND indisvalid AND indisready)"#;
+            EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_reducer_idempotency'),
+            EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_mutation_idempotency'),
+            EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index'
+                AND name='gonvex_reducer_idempotency_created_at' AND tbl_name='_gonvex_reducer_idempotency')"#;
         let initialized = |(current, legacy, indexed): (bool, bool, bool)| {
             if current && legacy {
                 Err(DatabaseError::AmbiguousReducerReceipts)
@@ -1020,41 +1023,49 @@ impl ControlPlane {
                 Ok(current && indexed)
             }
         };
-        if initialized(sqlx::query_as(STATUS).fetch_one(&pool).await?)? {
+        let reader = self.pools.reader(&route.database_url).await?;
+        if initialized(sqlx::query_as(STATUS).fetch_one(&reader).await?)? {
             return Ok(());
         }
-        // Serialize cold initialization and legacy rename across runtime
-        // processes. Recheck after acquiring the transaction-owned lock so a
-        // waiter never repeats DDL after another initializer has finished.
-        let mut transaction = pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gonvex:reducer-receipt-schema'))")
-            .execute(&mut *transaction)
+        // Serialize cold initialization and the legacy rename. Recheck after
+        // acquiring the lock so a waiter never repeats finished DDL.
+        let _lock = self
+            .pools
+            .lock(&route.database_url, "gonvex:reducer-receipt-schema")
             .await?;
-        if initialized(sqlx::query_as(STATUS).fetch_one(&mut *transaction).await?)? {
+        let pool = self.pools.pool(&route.database_url).await?;
+        let mut transaction = pool.begin().await?;
+        let (current, legacy, indexed) =
+            sqlx::query_as(STATUS).fetch_one(&mut *transaction).await?;
+        if initialized((current, legacy, indexed))? {
             transaction.commit().await?;
             return Ok(());
         }
-        let statements = sql_script::split_statements(
-            r#"DO $$ BEGIN
-                 IF to_regclass('_gonvex_mutation_idempotency') IS NOT NULL
-                   AND to_regclass('_gonvex_reducer_idempotency') IS NULL THEN
-                   ALTER TABLE _gonvex_mutation_idempotency RENAME TO _gonvex_reducer_idempotency;
-                 END IF;
-               END $$;
-               CREATE TABLE IF NOT EXISTS _gonvex_reducer_idempotency (
-                 subject text NOT NULL DEFAULT '',
-                 idempotency_key text NOT NULL,
-                 path text NOT NULL,
-                 result jsonb,
-                 created_at timestamptz NOT NULL DEFAULT now(),
+        if legacy && !current {
+            sqlx::query(
+                "ALTER TABLE _gonvex_mutation_idempotency RENAME TO _gonvex_reducer_idempotency",
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+        crate::execute_script(
+            &mut *transaction,
+            concat!(
+                r#"CREATE TABLE IF NOT EXISTS _gonvex_reducer_idempotency (
+                 subject TEXT NOT NULL DEFAULT '',
+                 idempotency_key TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 result JSON,
+                 created_at INTEGER NOT NULL DEFAULT ("#,
+                now_ms!(),
+                r#"),
                  PRIMARY KEY (subject, idempotency_key)
                );
                CREATE INDEX IF NOT EXISTS gonvex_reducer_idempotency_created_at
-                 ON _gonvex_reducer_idempotency (created_at);"#,
-        )?;
-        for statement in statements {
-            sqlx::query(&statement).execute(&mut *transaction).await?;
-        }
+                 ON _gonvex_reducer_idempotency (created_at);"#
+            ),
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -1066,7 +1077,7 @@ impl ControlPlane {
         key: &str,
         path: &str,
     ) -> Result<Value, DatabaseError> {
-        let pool = self.pools.pool(&route.database_url).await?;
+        let pool = self.pools.reader(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
         let row = sqlx::query(
             r#"SELECT result, path FROM _gonvex_reducer_idempotency
@@ -1089,31 +1100,35 @@ impl ControlPlane {
             .unwrap_or(Value::Null))
     }
 
+    /// Claims the oldest due action, or one whose delivery lease (five
+    /// minutes) expired. The single writer serializes claims.
     pub async fn claim_action(
         &self,
         route: &TenantRoute,
     ) -> Result<Option<ClaimedAction>, DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
-        let mut transaction = pool.begin().await?;
-        let row = sqlx::query(
-            r#"SELECT id, action_path, args,
-                      COALESCE(actor_user_id, '') AS actor_account_id,
-                      COALESCE(actor_email, '') AS actor_email,
-                      attempts + 1 AS next_attempt, provenance
-               FROM _gonvex_action_outbox
-               WHERE (status = 'pending' AND available_at <= now())
-                  OR (status = 'processing' AND locked_at < now() - interval '5 minutes')
-               ORDER BY available_at, created_at
-               FOR UPDATE SKIP LOCKED LIMIT 1"#,
-        )
-        .fetch_optional(&mut *transaction)
+        let row = sqlx::query(concat!(
+            "UPDATE _gonvex_action_outbox SET status = 'processing', locked_at = ",
+            now_ms!(),
+            r#", attempts = attempts + 1
+               WHERE id = (
+                 SELECT id FROM _gonvex_action_outbox
+                 WHERE (status = 'pending' AND available_at <= "#,
+            now_ms!(),
+            r#")
+                    OR (status = 'processing' AND locked_at < "#,
+            now_ms!(),
+            r#" - 300000)
+                 ORDER BY available_at, created_at LIMIT 1)
+               RETURNING id, action_path, args,
+                         COALESCE(actor_user_id, '') AS actor_account_id,
+                         COALESCE(actor_email, '') AS actor_email,
+                         attempts AS next_attempt, provenance"#
+        ))
+        .fetch_optional(&pool)
         .await?;
-        let Some(row) = row else {
-            transaction.rollback().await?;
-            return Ok(None);
-        };
-        let claimed = ClaimedAction {
+        Ok(row.map(|row| ClaimedAction {
             id: row.get("id"),
             path: row.get("action_path"),
             args: row.get("args"),
@@ -1121,18 +1136,7 @@ impl ControlPlane {
             actor_email: row.get("actor_email"),
             attempts: row.get("next_attempt"),
             provenance: row.get("provenance"),
-        };
-        sqlx::query(
-            r#"UPDATE _gonvex_action_outbox
-               SET status = 'processing', locked_at = now(), attempts = $2
-               WHERE id = $1"#,
-        )
-        .bind(&claimed.id)
-        .bind(claimed.attempts)
-        .execute(&mut *transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(Some(claimed))
+        }))
     }
 
     /// Only the current delivery attempt may extend its claim.
@@ -1144,9 +1148,15 @@ impl ControlPlane {
     ) -> Result<bool, DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
-        let result = sqlx::query(
-            "UPDATE _gonvex_action_outbox SET locked_at = now() WHERE id = $1 AND status = 'processing' AND attempts = $2",
-        ).bind(action_id).bind(attempt).execute(&pool).await?;
+        let result = sqlx::query(concat!(
+            "UPDATE _gonvex_action_outbox SET locked_at = ",
+            now_ms!(),
+            " WHERE id = $1 AND status = 'processing' AND attempts = $2"
+        ))
+        .bind(action_id)
+        .bind(attempt)
+        .execute(&pool)
+        .await?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -1164,6 +1174,8 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Releases a failed delivery; it becomes due again after `attempts`
+    /// seconds (clamped to 1–10).
     pub async fn retry_action(
         &self,
         route: &TenantRoute,
@@ -1173,13 +1185,15 @@ impl ControlPlane {
     ) -> Result<(), DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
-        sqlx::query(
+        sqlx::query(concat!(
             r#"UPDATE _gonvex_action_outbox
                SET status = 'pending', locked_at = NULL,
-                   available_at = now() + make_interval(secs => $2),
+                   available_at = "#,
+            now_ms!(),
+            r#" + $2 * 1000,
                    last_error = $3
-               WHERE id = $1"#,
-        )
+               WHERE id = $1"#
+        ))
         .bind(action_id)
         .bind(attempts.clamp(1, 10))
         .bind(error)
@@ -1210,6 +1224,7 @@ pub struct TenantTransaction {
     provenance: Provenance,
     publisher: Option<(PoolRegistry, Arc<str>)>,
     committed: Option<CommitNotice>,
+    failed: Option<String>,
 }
 
 /// Opens a transaction on the writer (or, when read-only, on a reader whose
@@ -1233,6 +1248,7 @@ pub async fn begin_transaction(
         provenance: Provenance::default(),
         publisher: (!read_only).then(|| (pools.clone(), Arc::from(database_url.trim()))),
         committed: None,
+        failed: None,
     })
 }
 
@@ -1347,12 +1363,41 @@ impl TenantTransaction {
         Ok(id.to_owned())
     }
 
+    /// Records that a statement in this transaction failed. Postgres aborts
+    /// the whole transaction on any statement error; SQLite keeps it usable,
+    /// so callers that run module SQL mark the failure and `commit` refuses,
+    /// preserving "a failed intent rolls back completely".
+    pub fn mark_failed(&mut self, reason: impl Into<String>) {
+        if self.failed.is_none() {
+            self.failed = Some(reason.into());
+        }
+    }
+
+    pub fn failed(&self) -> Option<&str> {
+        self.failed.as_deref()
+    }
+
+    /// Clears a recorded failure after the caller rolled back to a savepoint
+    /// taken before it, which Postgres also treats as recovery.
+    pub fn clear_failure(&mut self) {
+        self.failed = None;
+    }
+
     /// Commits and returns the revision it published, if it changed rows.
     pub async fn commit_with_revision(mut self) -> Result<Option<u64>, DatabaseError> {
+        if let Some(reason) = self.failed.take() {
+            self.transaction.rollback().await?;
+            return Err(DatabaseError::TransactionAborted(reason));
+        }
         let notice = if self.read_only {
             None
         } else {
-            match feed::finalize(&mut self.transaction, &self.provenance).await {
+            let finalized = async {
+                reference_integrity::flush(&mut self.transaction).await?;
+                feed::finalize(&mut self.transaction, &self.provenance).await
+            }
+            .await;
+            match finalized {
                 Ok(notice) => notice,
                 Err(error) => {
                     self.transaction.rollback().await?;
@@ -1381,8 +1426,7 @@ impl TenantTransaction {
     }
 }
 
-// SQLITE-PORT: Postgres-only tests disabled until ported to SQLite.
-#[cfg(all(test, any()))]
+#[cfg(test)]
 mod transaction_commit_tests;
 
 fn required(value: &str, error: DatabaseError) -> Result<&str, DatabaseError> {
@@ -1394,7 +1438,7 @@ fn required(value: &str, error: DatabaseError) -> Result<&str, DatabaseError> {
     }
 }
 
-fn project_from_row(row: PgRow) -> Project {
+fn project_from_row(row: SqliteRow) -> Project {
     Project {
         id: row.get("id"),
         name: row.get("name"),
@@ -1405,7 +1449,7 @@ fn project_from_row(row: PgRow) -> Project {
     }
 }
 
-fn tenant_from_row(row: PgRow) -> TenantDirectoryEntry {
+fn tenant_from_row(row: SqliteRow) -> TenantDirectoryEntry {
     TenantDirectoryEntry {
         id: row.get("tenant_id"),
         project_id: row.get("project_id"),
@@ -1417,7 +1461,18 @@ fn tenant_from_row(row: PgRow) -> TenantDirectoryEntry {
     }
 }
 
-fn member_from_row(row: PgRow) -> Member {
+fn account_from_row(row: &SqliteRow) -> Account {
+    Account {
+        id: row.get("id"),
+        email: row.get("email"),
+        email_verified: row.get::<i64, _>("email_verified") != 0,
+        name: row.get("name"),
+        avatar_url: row.get("avatar_url"),
+        provider: row.get("provider"),
+    }
+}
+
+fn member_from_row(row: SqliteRow) -> Member {
     Member {
         id: row.get("id"),
         account_id: row.get("account_id"),
@@ -1428,6 +1483,26 @@ fn member_from_row(row: PgRow) -> Member {
         permissions: row.get("permissions"),
         membership_revision: row.get("membership_revision"),
     }
+}
+
+/// Runs a multi-statement SQL script (trigger bodies included) on one
+/// connection. Unlike `sqlx::raw_sql(..).execute(..)`, the future is `Send`
+/// for any borrowed connection, so it can run inside spawned tasks.
+pub async fn execute_script(
+    connection: &mut sqlx::SqliteConnection,
+    sql: &str,
+) -> Result<(), DatabaseError> {
+    use sqlx::Executor as _;
+    connection.execute(sqlx::raw_sql(sql)).await?;
+    Ok(())
+}
+
+/// Current Unix time in milliseconds, the unit of every stored timestamp.
+pub fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 pub fn token_hash(token: &str) -> String {
@@ -1485,7 +1560,7 @@ mod tests {
 
     #[test]
     fn only_verified_self_developer_grants_expose_developer_metadata() {
-        let expiry = chrono::Utc::now().timestamp_millis() + 60_000;
+        let expiry = unix_millis() + 60_000;
         let accepted = developer_session_metadata(
             "devmode_test",
             "developer mode",
@@ -1614,6 +1689,9 @@ mod tests {
         let control = ControlPlane {
             database_url: "sqlite::memory:".into(),
             pool: sqlx::sqlite::SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .unwrap(),
+            reader: sqlx::sqlite::SqlitePoolOptions::new()
                 .connect_lazy("sqlite::memory:")
                 .unwrap(),
             pools: PoolRegistry::new(PoolLimits::default()),

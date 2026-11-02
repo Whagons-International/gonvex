@@ -1,119 +1,104 @@
 use super::*;
 
 struct Fixture {
-    admin: PgPool,
-    pool: PgPool,
-    schema: String,
+    _dir: TestDir,
+    pools: PoolRegistry,
+    url: String,
+}
+
+/// A unique directory under the system temp dir, removed on drop.
+pub(crate) struct TestDir(pub(crate) std::path::PathBuf);
+
+impl TestDir {
+    pub(crate) fn new(prefix: &str) -> Self {
+        let path = std::env::var_os("GONVEX_TEST_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("{prefix}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 impl Fixture {
-    async fn new() -> Option<Self> {
-        let Some(url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping transaction commit test");
-            return None;
-        };
-        let schema = format!("gonvex_commit_{}", uuid::Uuid::new_v4().simple());
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .unwrap();
-        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if url.contains('?') { '&' } else { '?' };
-        let scoped = format!("{url}{separator}options=-csearch_path%3D{schema}");
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&scoped)
-            .await
-            .unwrap();
-        Some(Self {
-            admin,
-            pool,
-            schema,
-        })
-    }
-
-    async fn begin(&self) -> TenantTransaction {
-        TenantTransaction {
-            transaction: self.pool.begin().await.unwrap(),
-            _admission: AdmissionPermit {
-                _shared: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
-                _database: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
-            },
-            read_only: false,
+    async fn new() -> Self {
+        let dir = TestDir::new("gonvex-commit");
+        let url = database_url(&dir.0.join("tenant.db"));
+        let pools = PoolRegistry::new(PoolLimits::default());
+        sqlx::raw_sql(
+            "CREATE TABLE records(id INTEGER PRIMARY KEY);
+             CREATE TABLE parents(id INTEGER PRIMARY KEY);
+             CREATE TABLE children(id INTEGER REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED);",
+        )
+        .execute(&pools.pool(&url).await.unwrap())
+        .await
+        .unwrap();
+        Self {
+            _dir: dir,
+            pools,
+            url,
         }
     }
 
-    async fn close(self) {
-        self.pool.close().await;
-        sqlx::query(&format!(r#"DROP SCHEMA "{}" CASCADE"#, self.schema))
-            .execute(&self.admin)
+    async fn begin(&self, read_only: bool) -> TenantTransaction {
+        begin_transaction(&self.pools, &self.url, read_only)
             .await
-            .unwrap();
-        self.admin.close().await;
+            .unwrap()
+    }
+
+    async fn count(&self, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(&self.pools.reader(&self.url).await.unwrap())
+            .await
+            .unwrap()
     }
 }
 
 #[tokio::test]
-async fn aborted_transaction_cannot_report_successful_commit() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    sqlx::query("CREATE TABLE records(id integer PRIMARY KEY)")
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
+async fn failed_statements_do_not_commit_their_own_effects() {
+    let fixture = Fixture::new().await;
+    // SQLite aborts only the failing statement; the transaction stays usable
+    // and commits the statements that succeeded. The failed one left nothing.
     for statement in [
         "INSERT INTO records VALUES (1)",
-        "SELECT 1/0",
         "SELECT * FROM missing_table",
     ] {
-        sqlx::query("TRUNCATE records")
-            .execute(&fixture.pool)
+        sqlx::query("DELETE FROM records")
+            .execute(&self_pool(&fixture).await)
             .await
             .unwrap();
-        let mut transaction = fixture.begin().await;
+        let mut transaction = fixture.begin(false).await;
         sqlx::query("INSERT INTO records VALUES (1)")
-            .execute(&mut *transaction.transaction)
+            .execute(&mut **transaction.transaction())
             .await
             .unwrap();
         assert!(sqlx::query(statement)
-            .execute(&mut *transaction.transaction)
+            .execute(&mut **transaction.transaction())
             .await
             .is_err());
-        assert!(
-            transaction.commit().await.is_err(),
-            "aborted transaction reported successful commit after {statement}"
-        );
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 0);
+        transaction.rollback().await.unwrap();
+        assert_eq!(fixture.count("records").await, 0, "after {statement}");
     }
-    fixture.close().await;
+}
+
+async fn self_pool(fixture: &Fixture) -> SqlitePool {
+    fixture.pools.pool(&fixture.url).await.unwrap()
 }
 
 #[tokio::test]
 async fn healthy_commit_and_explicit_rollback_keep_their_semantics() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    sqlx::query("CREATE TABLE records(id integer PRIMARY KEY)")
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
+    let fixture = Fixture::new().await;
     for (commit, expected) in [(true, 1i64), (false, 1i64)] {
-        let mut transaction = fixture.begin().await;
+        let mut transaction = fixture.begin(false).await;
         sqlx::query("INSERT INTO records VALUES ($1)")
             .bind(if commit { 1 } else { 2 })
-            .execute(&mut *transaction.transaction)
+            .execute(&mut **transaction.transaction())
             .await
             .unwrap();
         if commit {
@@ -121,73 +106,94 @@ async fn healthy_commit_and_explicit_rollback_keep_their_semantics() {
         } else {
             transaction.rollback().await.unwrap();
         }
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-        assert_eq!(count, expected);
+        assert_eq!(fixture.count("records").await, expected);
     }
-    fixture.close().await;
 }
 
 #[tokio::test]
 async fn snapshot_can_rollback_after_a_caught_sql_error() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    sqlx::query("CREATE TABLE records(id integer PRIMARY KEY)")
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
+    let fixture = Fixture::new().await;
     for statement in [
         "SELECT * FROM missing_table",
         "INSERT INTO records VALUES (1)",
     ] {
-        let mut transaction = fixture.begin().await;
-        transaction.read_only = true;
-        sqlx::query("SET TRANSACTION READ ONLY")
-            .execute(&mut *transaction.transaction)
-            .await
-            .unwrap();
-        assert!(sqlx::query(statement)
-            .execute(&mut *transaction.transaction)
-            .await
-            .is_err());
+        let mut transaction = fixture.begin(true).await;
+        assert!(transaction.read_only());
+        assert!(
+            sqlx::query(statement)
+                .execute(&mut **transaction.transaction())
+                .await
+                .is_err(),
+            "read-only snapshot accepted {statement}"
+        );
         transaction.rollback().await.unwrap();
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(fixture.count("records").await, 0);
     }
-    fixture.close().await;
 }
 
 #[tokio::test]
 async fn deferred_constraints_still_fail_at_commit() {
-    let Some(fixture) = Fixture::new().await else {
-        return;
-    };
-    sqlx::query("CREATE TABLE parents(id integer PRIMARY KEY)")
-        .execute(&fixture.pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "CREATE TABLE children(id integer REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED)",
-    )
-    .execute(&fixture.pool)
-    .await
-    .unwrap();
-    let mut transaction = fixture.begin().await;
+    let fixture = Fixture::new().await;
+    let mut transaction = fixture.begin(false).await;
     sqlx::query("INSERT INTO children VALUES (99)")
-        .execute(&mut *transaction.transaction)
+        .execute(&mut **transaction.transaction())
         .await
         .unwrap();
     assert!(transaction.commit().await.is_err());
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM children")
-        .fetch_one(&fixture.pool)
+    assert_eq!(fixture.count("children").await, 0);
+    // The writer is usable again after the failed commit rolled back.
+    let mut transaction = fixture.begin(false).await;
+    sqlx::query("INSERT INTO records VALUES (7)")
+        .execute(&mut **transaction.transaction())
         .await
         .unwrap();
-    assert_eq!(count, 0);
-    fixture.close().await;
+    transaction.commit().await.unwrap();
+    assert_eq!(fixture.count("records").await, 1);
+}
+
+#[tokio::test]
+async fn readers_keep_one_snapshot_while_the_writer_commits() {
+    let fixture = Fixture::new().await;
+    let mut snapshot = fixture.begin(true).await;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
+        .fetch_one(&mut **snapshot.transaction())
+        .await
+        .unwrap();
+    let mut writer = fixture.begin(false).await;
+    sqlx::query("INSERT INTO records VALUES (1)")
+        .execute(&mut **writer.transaction())
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+    let during: i64 = sqlx::query_scalar("SELECT count(*) FROM records")
+        .fetch_one(&mut **snapshot.transaction())
+        .await
+        .unwrap();
+    assert_eq!(before, during, "a read transaction sees one WAL snapshot");
+    snapshot.commit().await.unwrap();
+    assert_eq!(fixture.count("records").await, 1);
+}
+
+#[tokio::test]
+async fn aborted_transaction_cannot_report_successful_commit() {
+    let fixture = Fixture::new().await;
+    sqlx::query("INSERT INTO records VALUES (1)")
+        .execute(&self_pool(&fixture).await)
+        .await
+        .unwrap();
+    // A ROLLBACK conflict resolution ends the whole transaction inside SQLite.
+    let mut transaction = fixture.begin(false).await;
+    sqlx::query("INSERT INTO records VALUES (2)")
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    assert!(sqlx::query("INSERT OR ROLLBACK INTO records VALUES (1)")
+        .execute(&mut **transaction.transaction())
+        .await
+        .is_err());
+    assert!(
+        transaction.commit().await.is_err(),
+        "a transaction SQLite already rolled back reported a successful commit"
+    );
+    assert_eq!(fixture.count("records").await, 1);
 }

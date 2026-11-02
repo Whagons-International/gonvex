@@ -1,230 +1,94 @@
-//! Local-only physical-pool stress, deliberately independent of application latency.
-//! Baseline mode reproduces the pre-fix per-database pools and SQL admission.
-//! Set GONVEX_TEST_POSTGRES_URL to an owned numeric-loopback Postgres with
-//! max_connections=100. Run --baseline, then no flags for the selected defaults.
-//! --idle-one and --single measure tuning alternatives. --pgbouncer routes only
-//! query pools to loopback port 57433; keep LISTEN direct, use transaction mode,
-//! pool_size=2, max_user_connections=52, and max_prepared_statements=200.
-//! Each successful run removes its 26 synthetic databases. Pressure-aborted runs
-//! leave budget_synthetic_0..25 for the fixture owner to clean before retrying.
-use gonvex_store::{PoolLimits, PoolRegistry};
-use sqlx::postgres::{PgListener, PgPoolOptions};
+//! Local SQLite load: 26 tenant files, each with one writer and a reader pool,
+//! driven by simulated users that read a grid and commit small reducer-shaped
+//! writes. Prints throughput and the registry snapshot.
+//!
+//! `LOAD_USERS` (default 300), `LOAD_SECONDS` (default 10) and
+//! `GONVEX_DATA_DIR` (default: a fresh directory under the temp dir).
+use gonvex_store::{begin_transaction, DataDir, PoolLimits, PoolRegistry};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
 
 #[tokio::main]
 async fn main() {
-    let base = std::env::var("GONVEX_TEST_POSTGRES_URL").expect("explicit disposable local URL");
-    let url = url::Url::parse(&base).unwrap();
-    assert!(
-        matches!(url.host_str(), Some("127.0.0.1" | "::1")),
-        "numeric loopback only"
-    );
-    let warm_two = !std::env::args().any(|arg| arg == "--idle-one");
-    let single = std::env::args().any(|arg| arg == "--single");
-    let bouncer = std::env::args().any(|arg| arg == "--pgbouncer");
-    let baseline = std::env::args().any(|arg| arg == "--baseline");
     let users: usize = std::env::var("LOAD_USERS")
         .unwrap_or("300".into())
         .parse()
         .unwrap();
-    assert!(users <= 600);
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base)
-        .await
+    let seconds: u64 = std::env::var("LOAD_SECONDS")
+        .unwrap_or("10".into())
+        .parse()
         .unwrap();
-    let max: String = sqlx::query_scalar("SHOW max_connections")
-        .fetch_one(&admin)
-        .await
-        .unwrap();
-    assert_eq!(max, "100", "fixture must use incident connection limit");
-    let mut urls = Vec::new();
-    for index in 0..26 {
-        let name = format!("budget_synthetic_{index}");
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let mut tenant = url.clone();
-        tenant.set_path(&format!("/{name}"));
-        tenant
-            .query_pairs_mut()
-            .append_pair("application_name", "gonvex-local-budget-load");
-        urls.push(tenant.to_string());
-    }
-    // Entirely synthetic size fixtures. These are SQL pool tests, not Whagons
-    // reducers or client subscription measurements.
-    for (index, url) in urls.iter().enumerate() {
-        let fixture = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(url)
-            .await
-            .unwrap();
-        sqlx::query("CREATE TABLE tasks (id integer PRIMARY KEY, title text, status text, updated_at timestamptz DEFAULT now())").execute(&fixture).await.unwrap();
-        sqlx::query("CREATE TABLE members (id integer PRIMARY KEY, name text)")
-            .execute(&fixture)
-            .await
-            .unwrap();
-        let tasks = match index {
-            0 => 1900,
-            1 => 8800,
-            _ => 300,
-        };
-        let members = match index {
-            0 => 85,
-            1 => 89,
-            _ => 20,
-        };
-        sqlx::query("INSERT INTO tasks(id,title,status) SELECT n, 'Synthetic task ' || n, 'open' FROM generate_series(1,$1) n").bind(tasks).execute(&fixture).await.unwrap();
-        sqlx::query("INSERT INTO members(id,name) SELECT n, 'Synthetic member ' || n FROM generate_series(1,$1) n").bind(members).execute(&fixture).await.unwrap();
-        fixture.close().await;
-    }
-    let registry = PoolRegistry::new(PoolLimits {
-        max_total_connections: 20,
-        max_connections_per_database: if single { 1 } else { 2 },
-        max_idle_connections_per_database: if warm_two { 2 } else { 1 },
-        idle_timeout: Duration::from_secs(1),
-        acquire_timeout: Duration::from_secs(30),
-    });
-    let mut listeners = Vec::new();
+    let root = std::env::var("GONVEX_DATA_DIR")
+        .map(Into::into)
+        .unwrap_or_else(|_| {
+            std::env::temp_dir().join(format!("gonvex-load-{}", uuid::Uuid::new_v4().simple()))
+        });
+    let data = DataDir::new(&root);
+    let _lock = data.lock().expect("data directory lock");
+    let pools = PoolRegistry::new(PoolLimits::default());
+    let urls = (0..26)
+        .map(|index| data.tenant_url("load", &format!("tenant-{index}")).unwrap())
+        .collect::<Vec<_>>();
     for url in &urls {
-        let mut listener = PgListener::connect(url).await.unwrap();
-        listener.listen("budget_load").await.unwrap();
-        listeners.push(listener);
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY, title TEXT, done BOOLEAN NOT NULL DEFAULT 0);
+             INSERT INTO tasks(title)
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+             SELECT 'task ' || i FROM n WHERE NOT EXISTS (SELECT 1 FROM tasks);",
+        )
+        .execute(&pools.pool(url).await.unwrap())
+        .await
+        .unwrap();
     }
-    let shared = Arc::new(Semaphore::new(20));
-    let locals: Vec<_> = urls.iter().map(|_| Arc::new(Semaphore::new(16))).collect();
-    let mut old = Vec::new();
-    if baseline || bouncer {
-        for url in &urls {
-            let mut query_url = url::Url::parse(url).unwrap();
-            if bouncer {
-                query_url.set_port(Some(57433)).unwrap();
-            }
-            let pool = PgPoolOptions::new()
-                .max_connections(16)
-                .min_connections(0)
-                .idle_timeout(Duration::from_secs(1))
-                .max_lifetime(Duration::from_secs(30 * 60))
-                .acquire_timeout(Duration::from_secs(30))
-                .connect(query_url.as_str())
-                .await
-                .unwrap();
-            sqlx::query("SELECT 1").execute(&pool).await.unwrap();
-            old.push(pool);
-        }
-    } else {
-        for url in &urls {
-            let pool = registry.pool(url).await.unwrap();
-            sqlx::query("SELECT 1").execute(&pool).await.unwrap();
-        }
-    }
-    let observed = admin.clone();
-    let monitor = tokio::spawn(async move {
-        let mut peak = 0i64;
-        let mut server_peak = 0i64;
-        loop {
-            let total: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name='gonvex-local-budget-load'")
-                .fetch_one(&observed).await.unwrap();
-            let server_total: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend'",
-            )
-            .fetch_one(&observed)
-            .await
-            .unwrap();
-            server_peak = server_peak.max(server_total);
-            peak = peak.max(total);
-            println!(
-                "{}",
-                serde_json::json!({"sampleConnections":total,"peakConnections":peak,"serverConnections":server_total,"peakServerConnections":server_peak})
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    });
-    let mut jobs = Vec::new();
+    let reads = Arc::new(AtomicU64::new(0));
+    let writes = Arc::new(AtomicU64::new(0));
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut tasks = Vec::new();
     for user in 0..users {
-        let url = urls[user % 5].clone();
-        let shared = shared.clone();
-        let local = locals[user % 5].clone();
-        let registry = registry.clone();
-        let old = old.get(user % 5).cloned();
-        jobs.push(tokio::spawn(async move {
-            let mut results = Vec::new();
-            for _ in 0..10 {
-                let psi = std::fs::read_to_string("/proc/pressure/memory").unwrap();
-                let full = psi.lines().find(|line| line.starts_with("full ")).unwrap();
-                let pressure: f64 = full
-                    .split_whitespace()
-                    .find_map(|field| field.strip_prefix("avg10="))
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                assert!(
-                    pressure <= 5.0,
-                    "stop load: memory PSI full exceeds build-headroom gate"
-                );
-                let started = Instant::now();
-                let result = if let Some(pool) = &old {
-                    let permits = tokio::time::timeout(Duration::from_secs(30), async {
-                        let local = local.acquire().await.unwrap();
-                        let shared = shared.acquire().await.unwrap();
-                        (local, shared)
-                    }).await;
-                    match permits {
-                    Ok((_local, _shared)) => sqlx::query("WITH delay AS MATERIALIZED (SELECT pg_sleep(0.01)) UPDATE tasks SET updated_at=now() FROM delay WHERE id=1")
-                        .execute(pool)
+        let (pools, url) = (pools.clone(), urls[user % urls.len()].clone());
+        let (reads, writes) = (reads.clone(), writes.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut step = 0u64;
+            while Instant::now() < deadline {
+                step += 1;
+                let read_only = step % 5 != 0;
+                let mut transaction = begin_transaction(&pools, &url, read_only).await.unwrap();
+                if read_only {
+                    sqlx::query("SELECT id, title, done FROM tasks ORDER BY id LIMIT 100")
+                        .fetch_all(&mut **transaction.transaction())
                         .await
-                        .map(|_| ())
-                        .map_err(|e| e.to_string()),
-                    Err(_) => Err("database query admission timed out".to_owned()),
-                    }
+                        .unwrap();
+                    transaction.commit().await.unwrap();
+                    reads.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    match registry.pool(&url).await {
-                        Ok(pool) => async {
-                            let _admission = registry.admit(&url).await.map_err(|e| e.to_string())?;
-                            sqlx::query("WITH delay AS MATERIALIZED (SELECT pg_sleep(0.01)) UPDATE tasks SET updated_at=now() FROM delay WHERE id=1")
-                            .execute(&pool)
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
-                        }.await,
-                        Err(e) => Err(e.to_string()),
-                    }
-                };
-                results.push((started.elapsed().as_secs_f64() * 1000.0, result.err()));
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                    sqlx::query("UPDATE tasks SET done = NOT done WHERE id = $1")
+                        .bind((user as i64 * 7 + step as i64) % 1000 + 1)
+                        .execute(&mut **transaction.transaction())
+                        .await
+                        .unwrap();
+                    transaction.commit().await.unwrap();
+                    writes.fetch_add(1, Ordering::Relaxed);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            results
         }));
     }
-    let mut results = Vec::new();
-    for job in jobs {
-        results.extend(job.await.unwrap());
+    for task in tasks {
+        task.await.unwrap();
     }
-    monitor.abort();
-    let _ = monitor.await;
-    let mut times: Vec<_> = results.iter().map(|r| r.0).collect();
-    times.sort_by(f64::total_cmp);
-    let percentile = |p: f64| times[((times.len() - 1) as f64 * p) as usize];
-    let errors: Vec<_> = results.iter().filter_map(|r| r.1.as_ref()).collect();
-    println!(
-        "{}",
-        serde_json::json!({"baseline":baseline,"pgbouncer":bouncer,"singleConnection":single,"warmTwo":warm_two,"users":users,"operations":times.len(),"errors":errors.len(),"firstError":errors.first(),"p50Ms":percentile(0.5),"p95Ms":percentile(0.95),"p99Ms":percentile(0.99)})
+    let (reads, writes) = (
+        reads.load(Ordering::Relaxed),
+        writes.load(Ordering::Relaxed),
     );
-    drop(listeners);
-    for pool in old {
-        pool.close().await;
+    println!(
+        "users={users} seconds={seconds} reads/s={} writes/s={} snapshot={:?}",
+        reads / seconds,
+        writes / seconds,
+        pools.snapshot().await
+    );
+    pools.close().await;
+    if std::env::var("GONVEX_DATA_DIR").is_err() {
+        let _ = std::fs::remove_dir_all(&root);
     }
-    registry.close().await;
-    for index in 0..26 {
-        sqlx::query(&format!(
-            "DROP DATABASE budget_synthetic_{index} WITH (FORCE)"
-        ))
-        .execute(&admin)
-        .await
-        .unwrap();
-    }
-    admin.close().await;
 }

@@ -127,5 +127,5 @@ export async function runSDKConcurrency(url, output) {
     }
   }
   await writeFile(join(output, 'receipt.json'), JSON.stringify({ cases,
-    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. PostgreSQL wait graph witnesses overlap; query cancellation tests owner rollback and claimant takeover. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
+    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. The runtime's single-writer admission witnesses overlap; query cancellation tests owner rollback and claimant takeover. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
 }

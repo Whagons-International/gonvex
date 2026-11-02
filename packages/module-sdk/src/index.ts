@@ -1671,7 +1671,7 @@ export class ModuleBuilder {
 
 /**
  * Host-side executable registry. It is deliberately unaware of V8,
- * Postgres, or network transport; an engine supplies the capability-bearing
+ * the database, or network transport; an engine supplies the capability-bearing
  * context and this registry only selects and invokes the registered handler.
  */
 export class ModuleRuntimeRegistry {
