@@ -102,7 +102,7 @@ fn fixture_manifest(legacy: bool) -> (Value, String) {
         "teamAssigned":{"kind":"grant","table":"taskUsers","select":"taskId","joins":[{"table":"memberTeams","leftColumn":"teamId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]}
     },"where":{"operator":"or","children":[{"operator":"inSet","column":"workspaceId","set":"teams"},{"operator":"inSet","column":"id","set":"assigned"},{"operator":"inSet","column":"id","set":"teamAssigned"}]}});
     let notes = json!({"version":2,"table":"taskNotes","key":"id","permissionTables":permissions,"sets":{},"where":{"operator":"inherits","column":"taskId","table":"tasks","key":"id"}});
-    let (tasks, notes) = if legacy {
+    let (mut tasks, notes) = if legacy {
         // Today's failure shape: task IDs selected FROM tasks, and child sets
         // that join tasks. Every task write becomes a set dependency change.
         let workspace = json!({"table":"tasks","select":"id","joins":[{"table":"memberTeams","leftColumn":"workspaceId","rightColumn":"teamId"}],"where":[{"table":"memberTeams","column":"memberId","context":"member.id"}]});
@@ -118,6 +118,18 @@ fn fixture_manifest(legacy: bool) -> (Value, String) {
     } else {
         (tasks, notes)
     };
+    if !legacy {
+        // These valid mask states used to fail during initial SQL compilation:
+        // a role bypass leaves its sets inactive, and a derived set may be empty.
+        tasks["sets"]["notedAssignments"] = json!({
+            "kind":"derived","from":"assigned","table":"taskNotes",
+            "key":"taskId","select":"taskId"
+        });
+        tasks["where"]["children"].as_array_mut().unwrap().extend([
+            json!({"operator":"role","value":"admin"}),
+            json!({"operator":"inSet","column":"id","set":"notedAssignments"}),
+        ]);
+    }
     let mut functions = json!({});
     for (path, table, columns) in [
         ("tasks.list", "tasks", vec!["id", "workspaceId", "title"]),
@@ -125,6 +137,17 @@ fn fixture_manifest(legacy: bool) -> (Value, String) {
     ] {
         functions[path] = json!({"kind":"query","handler":"list","file":"test.js","delivery":"replica","args":{"kind":"object","fields":{}},"result":{"kind":"any"},"replica":{"table":table,"key":"id","columns":columns,"maxRows":50,"maxBytes":1048576}});
     }
+    functions["tasks.withNotes"] = json!({
+        "kind":"query","handler":"list","file":"test.js","delivery":"live",
+        "args":{"kind":"object","fields":{}},"result":{"kind":"any"},
+        "dependencies":{"liveQueryPlan":{
+            "table":"tasks","key":"id","columns":["id"],"resultPath":["rows"],
+            "where":{"operator":"inRelation","column":"id",
+                "relation":{"table":"taskNotes","column":"taskId"}},
+            "window":{"offsetArgument":"offset","limitArgument":"limit",
+                "defaultLimit":50,"maxLimit":50,"count":"exact"}
+        }}
+    });
     let code = "export function list() { return []; }";
     let javascript_hash = format!("{:x}", Sha256::digest(code));
     let mut module = json!({"generation":1,"language":"typescript","entrypoint":"test.js","files":{},"functions":functions,"visibility":{"tasks":tasks,"taskNotes":notes},"crons":[],"invitationAcceptanceReducer":"","javascript":{"path":"test.js","hash":javascript_hash}});
@@ -374,6 +397,36 @@ async fn run_visibility_fixture(legacy: bool) {
             subscriptions,
         });
     }
+    let related = runtime
+        .open_live_query(
+            &connections[0].session,
+            "related".into(),
+            "tasks.withNotes".into(),
+            json!({}),
+        )
+        .await
+        .expect("a related mask must resolve its own sets and inherited parents");
+    assert_eq!(
+        related.subscription.last_result["rows"],
+        json!([]),
+        "hidden related rows must never make a task visible"
+    );
+    if !legacy {
+        sqlx::query("INSERT INTO members(id,account_id,status,display_name,role) VALUES('admin','admin','active','Admin','admin')")
+            .execute(&db).await.unwrap();
+        let mut admin_session = connections[0].session.clone();
+        admin_session.identity.account.id = "admin".into();
+        admin_session.member.id = "admin".into();
+        admin_session.member.account_id = "admin".into();
+        admin_session.member.role = "admin".into();
+        let request =
+            serde_json::from_value(json!({"id":"admin","path":"tasks.list","args":{}})).unwrap();
+        let opened = runtime
+            .open_replica(&admin_session, request)
+            .await
+            .expect("role-pruned mask sets must not break admin admission");
+        assert_eq!(opened.subscription.unwrap().rows.len(), 2);
+    }
     let mut revision = change_feed::read_clock(&pools, &route)
         .await
         .unwrap()
@@ -582,6 +635,26 @@ async fn run_visibility_fixture(legacy: bool) {
             runtime.visibility_metrics().snapshot().collection_snapshots,
             0,
             "inheritance transition rebuilt an entire collection"
+        );
+    }
+    for connection in connections.iter().take(2) {
+        let related = runtime
+            .open_live_query(
+                &connection.session,
+                "related".into(),
+                "tasks.withNotes".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            related.subscription.last_result["rows"],
+            if connection.member == 0 {
+                json!([{"id":"hidden"}])
+            } else {
+                json!([])
+            },
+            "related visibility must follow only this member's current parent grants"
         );
     }
     runtime.shutdown().await;

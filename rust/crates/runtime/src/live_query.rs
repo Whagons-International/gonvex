@@ -737,7 +737,19 @@ impl Runtime {
                     .visibility
                     .get(&table)
                     .ok_or_else(|| LiveQueryError::VisibilityMissing(table.clone()))?;
-                let related_resolved = visibility::resolve_related_query(related_plan, &resolved)?;
+                let related_resolved = if related_plan.version == Some(2) {
+                    visibility::resolve_with_parents(
+                        &mut transaction,
+                        session,
+                        related_plan,
+                        revision,
+                        &module.visibility,
+                        &self.inner.parent_acl,
+                    )
+                    .await?
+                } else {
+                    visibility::resolve_related_query(related_plan, &resolved)?
+                };
                 related.insert(table, (related_plan.clone(), related_resolved));
             }
         }
