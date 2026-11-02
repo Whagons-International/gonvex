@@ -122,3 +122,37 @@ test("proxies the private dashboard WebSocket without forwarding cookies", async
   assert.equal(await response, JSON.stringify({ type: "auth", token: "dashboard-test" }));
   client.terminate();
 });
+
+
+test("dashboard retains runtime tokens and revalidates cookies without password fallback", async (t) => {
+  let revoked = false;
+  const runtime = createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/dev/auth/login' && !revoked) {
+      response.end(JSON.stringify({ session: { email: 'operator@example.test', name: 'Operator', role: 'admin', expiresAt: Date.now() + 60000, accessToken: 'runtime-owned-token' } }));
+    } else if (request.url === '/dev/auth/me' && !revoked) {
+      assert.equal(request.headers.authorization, 'Bearer runtime-owned-token');
+      response.end(JSON.stringify({ account: { email: 'operator@example.test', name: 'Operator', role: 'admin' } }));
+    } else { response.writeHead(401); response.end('{}'); }
+  });
+  await new Promise(resolve => runtime.listen(0, '127.0.0.1', resolve));
+  const values = { DASHBOARD_AUTH_ENABLED: 'true', DASHBOARD_AUTH_ACCOUNT: 'operator@example.test', DASHBOARD_AUTH_PASSWORD: 'configured-password', DASHBOARD_SESSION_SECRET: 'cookie-secret', GONVEX_RUNTIME_URL: `http://127.0.0.1:${runtime.address().port}` };
+  const before = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  const { createDashboardServer } = await import(`./server.mjs?revocation=${Date.now()}`);
+  for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+  const server = createDashboardServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => runtime.close(resolve))]); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = () => fetch(`${base}/api/dashboard/login`, { method: 'POST', body: JSON.stringify({ email: 'operator@example.test', password: 'configured-password' }) });
+  const response = await login();
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).session.accessToken, 'runtime-owned-token');
+  const cookie = response.headers.get('set-cookie').split(';')[0];
+  const session = () => fetch(`${base}/api/dashboard/session`, { headers: { cookie } });
+  assert.equal((await session()).status, 200);
+  revoked = true;
+  assert.equal((await session()).status, 401);
+  assert.equal((await login()).status, 401);
+});

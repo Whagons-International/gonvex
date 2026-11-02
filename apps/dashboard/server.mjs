@@ -11,7 +11,6 @@ export const sessionCookieName = "gonvex_dashboard_session";
 const rootDir = process.env.DASHBOARD_STATIC_ROOT ?? "/usr/share/nginx/html";
 const port = Number(process.env.PORT ?? "80");
 const authEnabled = envFlag(process.env.DASHBOARD_AUTH_ENABLED, true);
-const authAccount = normalizeEmail(process.env.DASHBOARD_AUTH_ACCOUNT ?? "");
 const authPassword = process.env.DASHBOARD_AUTH_PASSWORD ?? "";
 const sessionSecret = process.env.DASHBOARD_SESSION_SECRET ?? authPassword;
 const cookieSecure = envFlag(process.env.DASHBOARD_COOKIE_SECURE, true);
@@ -71,15 +70,6 @@ function constantTimeEqual(left, right) {
   const rightBuffer = Buffer.from(String(right ?? ""));
   if (leftBuffer.length !== rightBuffer.length) return false;
   return timingSafeEqual(leftBuffer, rightBuffer);
-}
-
-function displayNameFromEmail(email) {
-  const local = normalizeEmail(email).split("@")[0] || "Gonvex user";
-  return local
-    .split(/[._-]+/)
-    .filter(Boolean)
-    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 function parseCookies(header) {
@@ -177,18 +167,23 @@ function sessionFromRequest(request) {
   return verifySessionCookie(parseCookies(request.headers.cookie).get(sessionCookieName), sessionSecret);
 }
 
-function signedSession(session) {
-  const { accessToken: _ignored, ...payload } = session;
-  const accessToken = signSession(payload, sessionSecret);
-  return { accessToken, session: { ...payload, accessToken } };
-}
 
 async function handleAPI(request, response, url) {
   if (url.pathname === "/api/dashboard/session" && request.method === "GET") {
     const session = sessionFromRequest(request);
     if (!session) return writeJSON(response, 401, { error: "unauthorized" });
-    const token = parseCookies(request.headers.cookie).get(sessionCookieName);
-    return writeJSON(response, 200, { session: { ...session, accessToken: token } });
+    if (!authEnabled) return writeJSON(response, 200, { session });
+    if (!session.accessToken) return writeJSON(response, 401, { error: "unauthorized" });
+    try {
+      const upstream = await fetch(`${runtimeURL}/dev/auth/me`, {
+        headers: { authorization: `Bearer ${session.accessToken}` },
+      });
+      if (!upstream.ok) return writeJSON(response, upstream.status === 401 ? 401 : 503, { error: "session could not be validated" });
+      const { account } = await upstream.json();
+      return writeJSON(response, 200, { session: { ...session, ...account } });
+    } catch {
+      return writeJSON(response, 503, { error: "session could not be validated" });
+    }
   }
 
   if (url.pathname === "/api/dashboard/logout" && request.method === "POST") {
@@ -218,24 +213,17 @@ async function handleAPI(request, response, url) {
       });
       const payload = await runtimeResponse.json().catch(() => ({}));
       if (!runtimeResponse.ok || !payload.session) {
-        throw new Error(payload.error ?? "runtime dashboard login failed");
+        return writeJSON(response, runtimeResponse.status === 401 ? 401 : 503, { error: "dashboard login failed" });
       }
       session = payload.session;
     } catch {
-      if (!authAccount || !authPassword) return writeJSON(response, 503, { error: "dashboard auth is not configured" });
-      if (!verifyCredentials(parsed.email, parsed.password, authAccount, authPassword)) {
-        return writeJSON(response, 401, { error: "invalid email or password" });
-      }
-      session = {
-        email: authAccount,
-        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-        name: displayNameFromEmail(authAccount),
-        provider: "gonvex",
-      };
+      return writeJSON(response, 503, { error: "dashboard auth is unavailable" });
     }
-    const signed = signedSession(session);
-    return writeJSON(response, 200, { session: signed.session }, {
-      "Set-Cookie": `${sessionCookieName}=${encodeURIComponent(signed.accessToken)}; ${cookieOptions(7 * 24 * 60 * 60)}`,
+    if (!session.accessToken) return writeJSON(response, 503, { error: "dashboard session is unavailable" });
+    // The cookie protects the envelope; the runtime owns the revocable token.
+    const cookie = signSession(session, sessionSecret);
+    return writeJSON(response, 200, { session }, {
+      "Set-Cookie": `${sessionCookieName}=${encodeURIComponent(cookie)}; ${cookieOptions(7 * 24 * 60 * 60)}`,
     });
   }
 
