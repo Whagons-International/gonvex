@@ -18,6 +18,26 @@ use crate::execution::ExecutionAccess;
 use crate::modules::CronSpec;
 use crate::Runtime;
 
+/// Completed jobs are kept this long for the operator history, then deleted.
+const COMPLETED_JOB_RETENTION: ChronoDuration = ChronoDuration::days(7);
+const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+const PRUNE_BATCH: i64 = 5_000;
+const PRUNE_MAX_BATCHES: usize = 20;
+
+const CLAIM_DUE_SQL: &str = r#"WITH candidates AS (
+                 SELECT id FROM gonvex_scheduled_jobs
+                 WHERE status='pending' AND run_at<=now()
+                   AND (claim_token='' OR lease_until IS NULL OR lease_until<=now())
+                 ORDER BY (cron_name<>'') ASC,run_at,id FOR UPDATE SKIP LOCKED LIMIT $1
+               )
+               UPDATE gonvex_scheduled_jobs jobs SET
+                 claim_sequence=jobs.claim_sequence+1,
+                 claim_token=$2 || ':' || (jobs.claim_sequence+1)::text,
+                 lease_until=now()+interval '2 minutes',updated_at=now()
+               FROM candidates WHERE jobs.id=candidates.id
+               RETURNING jobs.id,jobs.project_id,jobs.tenant_id,jobs.function_path,
+                         jobs.args,jobs.run_at,jobs.scheduled_for,jobs.cron_name,jobs.claim_token,jobs.provenance"#;
+
 #[derive(Clone)]
 pub struct Scheduler {
     inner: Arc<SchedulerInner>,
@@ -97,6 +117,7 @@ impl Scheduler {
             }
         };
         tokio::pin!(outbox_scans);
+        let mut last_prune: Option<std::time::Instant> = None;
         loop {
             tokio::select! {
                 _ = &mut outbox_scans => break,
@@ -108,6 +129,10 @@ impl Scheduler {
             }
             if *stop.borrow() {
                 break;
+            }
+            if last_prune.is_none_or(|at| at.elapsed() >= PRUNE_INTERVAL) {
+                last_prune = Some(std::time::Instant::now());
+                self.prune_completed(&runtime).await;
             }
             let jobs = match self.claim_due(&runtime, 16).await {
                 Ok(jobs) => jobs,
@@ -197,47 +222,46 @@ impl Scheduler {
             .begin_control_transaction(false)
             .await
             .map_err(|error| error.to_string())?;
-        let rows = sqlx::query(
-            r#"WITH candidates AS (
-                 SELECT id FROM gonvex_scheduled_jobs
-                 WHERE status='pending' AND run_at<=now()
-                   AND (claim_token='' OR lease_until IS NULL OR lease_until<=now())
-                 ORDER BY (cron_name<>'') ASC,run_at,id FOR UPDATE SKIP LOCKED LIMIT $1
-               )
-               UPDATE gonvex_scheduled_jobs jobs SET
-                 claim_sequence=jobs.claim_sequence+1,
-                 claim_token=$2 || ':' || (jobs.claim_sequence+1)::text,
-                 lease_until=now()+interval '2 minutes',updated_at=now()
-               FROM candidates WHERE jobs.id=candidates.id
-               RETURNING jobs.id,jobs.project_id,jobs.tenant_id,jobs.function_path,
-                         jobs.args,jobs.run_at,jobs.scheduled_for,jobs.cron_name,jobs.claim_token,jobs.provenance"#,
-        )
-        .bind(limit)
-        .bind(&self.inner.owner)
-        .fetch_all(&mut **transaction.transaction())
-        .await
-        .map_err(|error| error.to_string())?;
+        let jobs = claim_due_jobs(transaction.transaction(), &self.inner.owner, limit)
+            .await
+            .map_err(|error| error.to_string())?;
         transaction
             .commit()
             .await
             .map_err(|error| error.to_string())?;
-        Ok(rows
-            .into_iter()
-            .map(|row| ScheduledJob {
-                id: row.get("id"),
-                project_id: row.get("project_id"),
-                tenant_id: row.get("tenant_id"),
-                function: row.get("function_path"),
-                args: row
-                    .get::<Option<Json<Value>>, _>("args")
-                    .map(|value| value.0)
-                    .unwrap_or(Value::Null),
-                scheduled_for: row.get("scheduled_for"),
-                cron_name: row.get("cron_name"),
-                claim_token: row.get("claim_token"),
-                provenance: row.get("provenance"),
-            })
-            .collect())
+        Ok(jobs)
+    }
+
+    async fn prune_completed(&self, runtime: &Runtime) {
+        let Some(control) = runtime.inner.control_plane.read().await.clone() else {
+            return;
+        };
+        let before = Utc::now() - COMPLETED_JOB_RETENTION;
+        for _ in 0..PRUNE_MAX_BATCHES {
+            let deleted = match control.begin_control_transaction(false).await {
+                Ok(mut transaction) => {
+                    let deleted =
+                        prune_completed_jobs(transaction.transaction(), before, PRUNE_BATCH).await;
+                    match deleted {
+                        Ok(deleted) => transaction
+                            .commit()
+                            .await
+                            .map(|_| deleted)
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            match deleted {
+                Ok(deleted) if deleted < PRUNE_BATCH as u64 => return,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "prune completed scheduled work");
+                    return;
+                }
+            }
+        }
     }
 
     async fn execute(&self, runtime: &Runtime, job: ScheduledJob) {
@@ -406,7 +430,9 @@ impl Scheduler {
         }
         if !job.cron_name.is_empty() {
             if let Some(next) = self.next_cron_occurrence(runtime, job).await? {
-                insert_cron_job(&mut transaction, job, next).await?;
+                insert_cron_job(transaction.transaction(), job, next)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
         }
         transaction
@@ -429,7 +455,7 @@ impl Scheduler {
         let Some(spec) = module.crons.iter().find(|spec| spec.name == job.cron_name) else {
             return Ok(None);
         };
-        next_occurrence(spec, job.scheduled_for)
+        next_cron_run(spec, job.scheduled_for, Utc::now())
     }
 
     async fn sync_all_crons(&self, runtime: &Runtime) -> Result<(), String> {
@@ -510,7 +536,9 @@ impl Scheduler {
                     claim_token: String::new(),
                     provenance: Value::Null,
                 };
-                insert_cron_job(&mut transaction, &job, next).await?;
+                insert_cron_job(transaction.transaction(), &job, next)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
         }
         transaction
@@ -581,16 +609,18 @@ impl Runtime {
     }
 }
 
+/// Inserts the next run of a cron. A run that is already pending for the same
+/// cron and tenant wins: the unique pending-cron index rejects the duplicate.
 async fn insert_cron_job(
-    transaction: &mut gonvex_postgres::TenantTransaction,
+    connection: &mut sqlx::PgConnection,
     job: &ScheduledJob,
     run_at: DateTime<Utc>,
-) -> Result<(), String> {
+) -> Result<(), sqlx::Error> {
     let id = cron_id(&job.project_id, &job.tenant_id, &job.cron_name, run_at);
     sqlx::query(
         r#"INSERT INTO gonvex_scheduled_jobs
            (id,project_id,tenant_id,function_path,args,run_at,scheduled_for,cron_name,provenance)
-           VALUES($1,$2,$3,$4,$5,$6,$6,$7,$8) ON CONFLICT(id) DO NOTHING"#,
+           VALUES($1,$2,$3,$4,$5,$6,$6,$7,$8) ON CONFLICT DO NOTHING"#,
     )
     .bind(id)
     .bind(&job.project_id)
@@ -600,10 +630,70 @@ async fn insert_cron_job(
     .bind(run_at)
     .bind(&job.cron_name)
     .bind(Json(job.provenance.clone()))
-    .execute(&mut **transaction.transaction())
-    .await
-    .map_err(|error| error.to_string())?;
+    .execute(connection)
+    .await?;
     Ok(())
+}
+
+async fn claim_due_jobs(
+    connection: &mut sqlx::PgConnection,
+    owner: &str,
+    limit: i64,
+) -> Result<Vec<ScheduledJob>, sqlx::Error> {
+    let rows = sqlx::query(CLAIM_DUE_SQL)
+        .bind(limit)
+        .bind(owner)
+        .fetch_all(connection)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ScheduledJob {
+            id: row.get("id"),
+            project_id: row.get("project_id"),
+            tenant_id: row.get("tenant_id"),
+            function: row.get("function_path"),
+            args: row
+                .get::<Option<Json<Value>>, _>("args")
+                .map(|value| value.0)
+                .unwrap_or(Value::Null),
+            scheduled_for: row.get("scheduled_for"),
+            cron_name: row.get("cron_name"),
+            claim_token: row.get("claim_token"),
+            provenance: row.get("provenance"),
+        })
+        .collect())
+}
+
+async fn prune_completed_jobs(
+    connection: &mut sqlx::PgConnection,
+    before: DateTime<Utc>,
+    limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"DELETE FROM gonvex_scheduled_jobs WHERE id IN (
+             SELECT id FROM gonvex_scheduled_jobs
+             WHERE status='completed' AND completed_at<$1
+             ORDER BY completed_at,id LIMIT $2
+           )"#,
+    )
+    .bind(before)
+    .bind(limit)
+    .execute(connection)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// The run after `scheduled_for`, or the first one after `now` when the
+/// scheduler fell behind. Missed runs are skipped, never replayed.
+fn next_cron_run(
+    spec: &CronSpec,
+    scheduled_for: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, String> {
+    match next_occurrence(spec, scheduled_for)? {
+        Some(next) if next <= now => next_occurrence(spec, now),
+        next => Ok(next),
+    }
 }
 
 fn next_occurrence(spec: &CronSpec, after: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, String> {
@@ -660,5 +750,279 @@ mod tests {
             ..interval
         };
         assert!(next_occurrence(&expression, now).unwrap().is_some());
+    }
+
+    fn minute_cron() -> CronSpec {
+        CronSpec {
+            name: "every-minute".to_owned(),
+            function: "jobs.run".to_owned(),
+            args: Value::Null,
+            scope: "tenant".to_owned(),
+            interval_ms: None,
+            expression: Some("* * * * *".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_cron_that_fell_behind_skips_missed_runs_instead_of_replaying_them() {
+        let spec = minute_cron();
+        let now = DateTime::parse_from_rfc3339("2026-11-02T17:30:20Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let on_time = now - ChronoDuration::seconds(20);
+        assert_eq!(
+            next_cron_run(&spec, on_time, now).unwrap(),
+            Some(on_time + ChronoDuration::minutes(1))
+        );
+        let six_days_late = now - ChronoDuration::days(6);
+        let next = next_cron_run(&spec, six_days_late, now).unwrap().unwrap();
+        assert!(next > now && next <= now + ChronoDuration::minutes(1));
+    }
+
+    struct ControlFixture {
+        pool: sqlx::PgPool,
+    }
+
+    /// A fresh Control Plane schema with the production DDL applied, or None when
+    /// GONVEX_TEST_POSTGRES_URL is unset.
+    async fn control_fixture(label: &str) -> Option<ControlFixture> {
+        let base = std::env::var("GONVEX_TEST_POSTGRES_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let schema = format!("gonvex_scheduler_{label}_{nonce}");
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&base)
+            .await
+            .unwrap();
+        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let separator = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let pools = gonvex_postgres::PoolRegistry::new(gonvex_postgres::PoolLimits::default());
+        gonvex_postgres::ControlPlane::connect(&url, pools, Default::default())
+            .await
+            .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap();
+        Some(ControlFixture { pool })
+    }
+
+    fn cron_job(tenant: &str) -> ScheduledJob {
+        ScheduledJob {
+            id: String::new(),
+            project_id: "project".to_owned(),
+            tenant_id: tenant.to_owned(),
+            function: "slas.evaluate".to_owned(),
+            args: Value::Null,
+            scheduled_for: Utc::now(),
+            cron_name: "slas".to_owned(),
+            claim_token: String::new(),
+            provenance: Value::Null,
+        }
+    }
+
+    async fn pending_runs(pool: &sqlx::PgPool, tenant: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM gonvex_scheduled_jobs WHERE status='pending' AND cron_name='slas' AND tenant_id=$1",
+        )
+        .bind(tenant)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Regression for the 2026-11-02 production incident: a scheduler that fell
+    /// behind enqueued a new copy of every cron each minute, 2.5 million in six days.
+    #[tokio::test]
+    async fn a_cron_never_has_more_than_one_pending_run_per_tenant() {
+        let Some(fixture) = control_fixture("backlog").await else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping scheduler backlog test");
+            return;
+        };
+        let mut connection = fixture.pool.acquire().await.unwrap();
+        let job = cron_job("tenant-a");
+        let start = Utc::now() - ChronoDuration::hours(1);
+        for minute in 0..60 {
+            insert_cron_job(
+                &mut connection,
+                &job,
+                start + ChronoDuration::minutes(minute),
+            )
+            .await
+            .unwrap();
+        }
+        insert_cron_job(&mut connection, &cron_job("tenant-b"), start)
+            .await
+            .unwrap();
+        assert_eq!(pending_runs(&fixture.pool, "tenant-a").await, 1);
+        assert_eq!(pending_runs(&fixture.pool, "tenant-b").await, 1);
+
+        // Finishing the pending run makes room for the next one, as finish() does.
+        let claimed = claim_due_jobs(&mut connection, "owner", 16).await.unwrap();
+        assert_eq!(claimed.len(), 2);
+        sqlx::query("UPDATE gonvex_scheduled_jobs SET status='completed',completed_at=now() WHERE tenant_id='tenant-a'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        insert_cron_job(
+            &mut connection,
+            &job,
+            Utc::now() + ChronoDuration::minutes(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending_runs(&fixture.pool, "tenant-a").await, 1);
+    }
+
+    /// Every claim used to scan the whole table, completed history included, so
+    /// each claim got slower as the table grew until the scheduler fell behind.
+    #[tokio::test]
+    async fn claims_use_an_index_instead_of_scanning_job_history() {
+        let Some(fixture) = control_fixture("claim").await else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping scheduler claim test");
+            return;
+        };
+        sqlx::query(
+            r#"INSERT INTO gonvex_scheduled_jobs
+                 (id,project_id,tenant_id,function_path,run_at,scheduled_for,cron_name,status,completed_at)
+               SELECT 'done_' || n,'project','tenant-' || (n % 30),'slas.evaluate',
+                      now() - n * interval '1 second',now() - n * interval '1 second',
+                      'slas','completed',now() - n * interval '1 second'
+               FROM generate_series(1,100000) AS n"#,
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"INSERT INTO gonvex_scheduled_jobs
+                 (id,project_id,tenant_id,function_path,run_at,scheduled_for,cron_name)
+               SELECT 'due_' || n,'project','tenant-' || n,'slas.evaluate',
+                      now() - interval '1 minute',now() - interval '1 minute',
+                      CASE WHEN n % 2 = 0 THEN 'slas' ELSE '' END
+               FROM generate_series(1,200) AS n"#,
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE gonvex_scheduled_jobs")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let mut connection = fixture.pool.acquire().await.unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(&format!("EXPLAIN {CLAIM_DUE_SQL}"))
+            .bind(16_i64)
+            .bind("owner")
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+        let plan = plan.join("\n");
+        assert!(
+            !plan.contains("Seq Scan on gonvex_scheduled_jobs"),
+            "claim scans the job table:\n{plan}"
+        );
+
+        let claimed = claim_due_jobs(&mut connection, "owner", 16).await.unwrap();
+        assert_eq!(claimed.len(), 16);
+        assert!(
+            claimed.iter().all(|job| job.cron_name.is_empty()),
+            "one-shot jobs are claimed before crons"
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_deletes_only_old_completed_jobs() {
+        let Some(fixture) = control_fixture("prune").await else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping scheduler prune test");
+            return;
+        };
+        sqlx::query(
+            r#"INSERT INTO gonvex_scheduled_jobs
+                 (id,project_id,tenant_id,function_path,run_at,scheduled_for,status,completed_at)
+               VALUES
+                 ('old_1','project','t','jobs.run',now() - interval '9 days',now() - interval '9 days','completed',now() - interval '9 days'),
+                 ('old_2','project','t','jobs.run',now() - interval '8 days',now() - interval '8 days','completed',now() - interval '8 days'),
+                 ('recent','project','t','jobs.run',now() - interval '1 day',now() - interval '1 day','completed',now() - interval '1 day'),
+                 ('pending','project','t','jobs.run',now() - interval '9 days',now() - interval '9 days','pending',NULL)"#,
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let mut connection = fixture.pool.acquire().await.unwrap();
+        let before = Utc::now() - COMPLETED_JOB_RETENTION;
+        assert_eq!(
+            prune_completed_jobs(&mut connection, before, 1)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            prune_completed_jobs(&mut connection, before, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            prune_completed_jobs(&mut connection, before, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM gonvex_scheduled_jobs ORDER BY id")
+                .fetch_all(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!(left, ["pending", "recent"]);
+    }
+
+    /// Databases that already piled up copies must still accept the unique index.
+    #[tokio::test]
+    async fn schema_upgrade_collapses_an_existing_cron_backlog() {
+        let Some(fixture) = control_fixture("upgrade").await else {
+            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping scheduler upgrade test");
+            return;
+        };
+        sqlx::query("DROP INDEX gonvex_scheduled_jobs_one_pending_cron")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO gonvex_scheduled_jobs
+                 (id,project_id,tenant_id,function_path,run_at,scheduled_for,cron_name)
+               SELECT 'copy_' || n,'project','tenant-a','slas.evaluate',
+                      now() - n * interval '1 minute',now() - n * interval '1 minute','slas'
+               FROM generate_series(1,500) AS n"#,
+        )
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let schema: String = sqlx::query_scalar("SELECT current_schema()")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        let base = std::env::var("GONVEX_TEST_POSTGRES_URL").unwrap();
+        let separator = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let pools = gonvex_postgres::PoolRegistry::new(gonvex_postgres::PoolLimits::default());
+        gonvex_postgres::ControlPlane::connect(&url, pools, Default::default())
+            .await
+            .unwrap();
+        let survivors: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM gonvex_scheduled_jobs WHERE status='pending' AND cron_name='slas'",
+        )
+        .fetch_all(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(survivors, ["copy_1"], "the newest copy survives");
     }
 }
