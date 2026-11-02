@@ -98,11 +98,14 @@ initialization step explicitly selects its five named native cases, requires
 PostgreSQL and the module host, and rejects ignored or missing execution. Both
 configured Mergify queues require `CI` before merge.
 
-Read-only GitHub inspections on 2026-10-30 and 2026-11-02 returned no branch protection or
-rulesets for `staging`. The workflow and configured queues therefore enforce
-the checks in those paths, but direct-push enforcement is not established.
-Repository settings were not changed. A published-head CI run and completion
-of this enforcement audit remain required; local checks alone do not close it.
+Staging branch protection was verified on 2026-11-02. It requires the aggregate
+`CI` check from the GitHub Actions app, requires an up-to-date branch and applies
+to administrators. No reviewer-approval gate was added. The required aggregate
+checks runtime tests, policy proofs and native-storage verification. This
+configuration and its API readback establish the repository enforcement policy;
+they trust GitHub to apply it. A successful published-head CI run and completion
+of the remaining contract audit are still required. Local checks alone do not
+close those items.
 
 The query callback checkpoint adds public-listener ownership checks, a durable
 published cache, ordered publication and independent revision reset for each
