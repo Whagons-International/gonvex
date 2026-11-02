@@ -781,6 +781,7 @@ async fn install_change_feed(pool: sqlx::PgPool) -> Result<(), DatabaseError> {
             SELECT FROM unnest(ARRAY['_gonvex_sync_clock', '_gonvex_sync_changes',
                 '_gonvex_sync_transactions', '_gonvex_action_outbox',
                 'gonvex_sync_changes_revision', 'gonvex_sync_changes_created_at',
+                'gonvex_sync_changes_transaction', 'gonvex_sync_changes_command',
                 '_gonvex_action_outbox_pending']) AS required(name)
             WHERE to_regclass(format('%I.%I', current_schema(), name)) IS NULL
         ) AND to_regprocedure(format('%I.gonvex_sync_finalize_transaction()', current_schema())) IS NOT NULL"#,
@@ -1124,6 +1125,9 @@ CREATE TABLE IF NOT EXISTS _gonvex_sync_changes (
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_revision ON _gonvex_sync_changes(revision,ordinal)
   WHERE revision IS NOT NULL;
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_created_at ON _gonvex_sync_changes(created_at);
+CREATE INDEX IF NOT EXISTS gonvex_sync_changes_transaction ON _gonvex_sync_changes(transaction_id);
+CREATE INDEX IF NOT EXISTS gonvex_sync_changes_command ON _gonvex_sync_changes(command_id,revision)
+  WHERE command_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS _gonvex_sync_transactions (
   revision bigint PRIMARY KEY, transaction_id bigint NOT NULL UNIQUE,
   root_command_id text NOT NULL, origin_command_id text NOT NULL,
