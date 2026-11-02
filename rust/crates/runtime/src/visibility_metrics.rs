@@ -11,6 +11,7 @@ pub struct VisibilityMetrics {
     collection_snapshots: AtomicU64,
     live_query_reruns: AtomicU64,
     principal_rebuilds: AtomicU64,
+    consistency_rebuilds: AtomicU64,
     in_memory_row_checks: AtomicU64,
 }
 
@@ -20,6 +21,7 @@ pub struct VisibilityMetricsSnapshot {
     pub collection_snapshots: u64,
     pub live_query_reruns: u64,
     pub principal_rebuilds: u64,
+    pub consistency_rebuilds: u64,
     pub in_memory_row_checks: u64,
 }
 
@@ -41,6 +43,10 @@ impl VisibilityMetrics {
         self.principal_rebuilds.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_consistency_rebuild(&self) {
+        self.consistency_rebuilds.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_in_memory_row_check(&self) {
         self.in_memory_row_checks.fetch_add(1, Ordering::Relaxed);
     }
@@ -51,6 +57,7 @@ impl VisibilityMetrics {
             collection_snapshots: self.collection_snapshots.load(Ordering::Relaxed),
             live_query_reruns: self.live_query_reruns.load(Ordering::Relaxed),
             principal_rebuilds: self.principal_rebuilds.load(Ordering::Relaxed),
+            consistency_rebuilds: self.consistency_rebuilds.load(Ordering::Relaxed),
             in_memory_row_checks: self.in_memory_row_checks.load(Ordering::Relaxed),
         }
     }
@@ -62,6 +69,7 @@ impl VisibilityMetrics {
         self.collection_snapshots.store(0, Ordering::Relaxed);
         self.live_query_reruns.store(0, Ordering::Relaxed);
         self.principal_rebuilds.store(0, Ordering::Relaxed);
+        self.consistency_rebuilds.store(0, Ordering::Relaxed);
         self.in_memory_row_checks.store(0, Ordering::Relaxed);
     }
 }
@@ -83,6 +91,7 @@ mod tests {
                         metrics.record_collection_snapshot();
                         metrics.record_live_query_rerun();
                         metrics.record_principal_rebuild();
+                        metrics.record_consistency_rebuild();
                         metrics.record_in_memory_row_check();
                     }
                 });
@@ -95,6 +104,7 @@ mod tests {
                 collection_snapshots: 400,
                 live_query_reruns: 400,
                 principal_rebuilds: 400,
+                consistency_rebuilds: 400,
                 in_memory_row_checks: 400,
             }
         );
