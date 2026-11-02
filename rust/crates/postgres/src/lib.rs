@@ -45,7 +45,7 @@ impl Default for PoolLimits {
         Self {
             max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
             max_connections_per_database: DEFAULT_MAX_CONNECTIONS_PER_DATABASE,
-            max_idle_connections_per_database: 1,
+            max_idle_connections_per_database: 2,
             idle_timeout: Duration::from_secs(1),
             acquire_timeout: Duration::from_secs(30),
         }
@@ -106,6 +106,7 @@ pub struct PoolRegistry {
     limits: PoolLimits,
     admission: Arc<Semaphore>,
     pools: Arc<RwLock<BTreeMap<String, DatabasePool>>>,
+    listeners: Arc<std::sync::Mutex<Vec<std::sync::Weak<PgPool>>>>,
 }
 
 #[derive(Clone)]
@@ -114,7 +115,26 @@ struct DatabasePool {
     capacity: Arc<Semaphore>,
 }
 
-/// A database-capacity slot and shared admission, held for the whole SQL job.
+/// A dedicated LISTEN session included in registry connection metrics.
+pub struct DatabaseListener {
+    listener: PgListener,
+    _pool: Arc<PgPool>,
+}
+
+impl std::ops::Deref for DatabaseListener {
+    type Target = PgListener;
+    fn deref(&self) -> &PgListener {
+        &self.listener
+    }
+}
+
+impl std::ops::DerefMut for DatabaseListener {
+    fn deref_mut(&mut self) -> &mut PgListener {
+        &mut self.listener
+    }
+}
+
+/// A database-capacity slot and shared admission held for the whole SQL job.
 /// Queued jobs for one database do not reserve shared capacity.
 pub struct AdmissionPermit {
     _shared: OwnedSemaphorePermit,
@@ -129,6 +149,7 @@ pub struct PoolRegistrySnapshot {
     pub in_use: u32,
     pub idle: usize,
     pub max_open_connections: u32,
+    pub listener_connections: u32,
     pub admission_limit: usize,
     pub admission_active: usize,
 }
@@ -139,6 +160,7 @@ impl PoolRegistry {
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
             pools: Arc::new(RwLock::new(BTreeMap::new())),
+            listeners: Arc::default(),
             limits,
         }
     }
@@ -160,6 +182,24 @@ impl PoolRegistry {
             .max_lifetime(Duration::from_secs(30 * 60))
             .idle_timeout(self.limits.idle_timeout)
             .acquire_timeout(self.limits.acquire_timeout)
+            .after_release({
+                let pools = Arc::downgrade(&self.pools);
+                let url = database_url.to_owned();
+                let max_idle = self.limits.max_idle_connections_per_database;
+                move |_, _| {
+                    let pools = pools.clone();
+                    let url = url.clone();
+                    Box::pin(async move {
+                        let Some(pools) = pools.upgrade() else {
+                            return Ok(false);
+                        };
+                        let pools = pools.read().await;
+                        // Count active connections too: concurrent releases must not
+                        // all observe an empty idle queue and exceed MAX_IDLE.
+                        Ok(pools.get(&url).is_some_and(|db| db.pool.size() <= max_idle))
+                    })
+                }
+            })
             .connect_lazy(database_url)?;
         let database = DatabasePool {
             pool,
@@ -191,6 +231,24 @@ impl PoolRegistry {
         .map_err(|_| DatabaseError::AdmissionTimeout)
     }
 
+    /// Dedicated sessions stay outside SQL-job admission, so a long-lived
+    /// LISTEN cannot pin the slots needed to execute reducers.
+    pub async fn listener(&self, database_url: &str) -> Result<DatabaseListener, DatabaseError> {
+        let pool = Arc::new(
+            PgPoolOptions::new()
+                .max_connections(1)
+                .min_connections(0)
+                .acquire_timeout(self.limits.acquire_timeout)
+                .connect_lazy(database_url)?,
+        );
+        self.listeners.lock().unwrap().push(Arc::downgrade(&pool));
+        let listener = PgListener::connect_with(&pool).await?;
+        Ok(DatabaseListener {
+            listener,
+            _pool: pool,
+        })
+    }
+
     pub async fn snapshot(&self) -> PoolRegistrySnapshot {
         let pools = self.pools.read().await;
         let open_connections = pools
@@ -201,14 +259,26 @@ impl PoolRegistry {
             .values()
             .map(|database| database.pool.num_idle())
             .sum::<usize>();
+        let listener_connections = {
+            let mut listeners = self.listeners.lock().unwrap();
+            listeners.retain(|pool| pool.strong_count() > 0);
+            listeners
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .map(|pool| pool.size())
+                .sum::<u32>()
+        };
+        let open_connections = open_connections + listener_connections;
         PoolRegistrySnapshot {
+            listener_connections,
             pools: pools.len(),
             open_connections,
             in_use: open_connections.saturating_sub(u32::try_from(idle).unwrap_or(u32::MAX)),
             idle,
             max_open_connections: u32::try_from(pools.len())
                 .unwrap_or(u32::MAX)
-                .saturating_mul(self.limits.max_connections_per_database),
+                .saturating_mul(self.limits.max_connections_per_database)
+                .saturating_add(listener_connections),
             admission_limit: self.limits.max_total_connections,
             admission_active: self
                 .limits
@@ -428,10 +498,10 @@ fn developer_session_metadata(
 }
 
 impl ControlPlane {
-    pub async fn listener(&self, channels: &[&str]) -> Result<PgListener, DatabaseError> {
+    pub async fn listener(&self, channels: &[&str]) -> Result<DatabaseListener, DatabaseError> {
         // LISTEN owns a long-lived connection; keep it outside the finite SQL
         // job pool, just like the tenant change-feed listeners.
-        let mut listener = PgListener::connect(&self.database_url).await?;
+        let mut listener = self.pools.listener(&self.database_url).await?;
         for channel in channels {
             listener.listen(channel).await?;
         }

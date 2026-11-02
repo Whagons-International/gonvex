@@ -221,12 +221,12 @@ impl Config {
             database_max_connections: integer(
                 "GONVEX_DB_MAX_OPEN_CONNS",
                 lookup("GONVEX_DB_MAX_OPEN_CONNS"),
-                16,
+                2,
             )? as u32,
             database_max_idle_connections: integer_allow_zero(
                 "GONVEX_DB_MAX_IDLE_CONNS",
                 lookup("GONVEX_DB_MAX_IDLE_CONNS"),
-                1,
+                2,
             )? as u32,
             module_host: ModuleHostConfig {
                 enabled: boolean(

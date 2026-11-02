@@ -1632,6 +1632,7 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     let database_json = json!({
         "pools":database.pools,
         "openConnections":database.open_connections,
+        "listenerConnections":database.listener_connections,
         "inUse":database.in_use,
         "idle":database.idle,
         "maxOpenConnections":database.max_open_connections,
