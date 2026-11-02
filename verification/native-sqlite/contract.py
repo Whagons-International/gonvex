@@ -168,13 +168,15 @@ def historical_transition(previous, phase, result):
 def validate_phase(events, phase, run_id, bundle, tool):
     require(phase in TERMINAL, "unknown phase")
     require(events, "no native observations")
-    allowed = {"environment", TERMINAL[phase]}
+    allowed = {"startup", "environment", TERMINAL[phase]}
     allowed.update({"running", "case"} if phase == "all" else {"committed-before-crash"} if phase == "crash-seed" else set())
     for event in events:
         require(event.get("type") != "fatal", "native fixture failed: " + event.get("message", ""))
         require(event.get("type") in allowed, "unknown native event")
         require(event.get("runId") == run_id and event.get("phase") == phase, "stale or foreign fixture event")
         require(event.get("bundleSha256") == bundle, "wrong source bundle")
+    startup = [e for e in events if e["type"] == "startup"]
+    require(len(startup) <= 1 and (not startup or events[0] == startup[0]), "repeated or misplaced native startup")
     environment = [e for e in events if e["type"] == "environment"]
     require(len(environment) == 1, "one native environment required per phase")
     env = environment[0]

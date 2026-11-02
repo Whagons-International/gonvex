@@ -124,3 +124,24 @@ native bridges that truncate bound TEXT at NUL. Already-truncated stored keys
 remain a recovery error. `GONVEX_HISTORICAL_TRUNCATE_BINDINGS=1` enables a targeted
 Node driver fault model for that observed Android input boundary; its receipt
 continues to identify itself as Node execution, not Expo/Hermes evidence.
+
+
+### Android cold-start entry point
+
+CI opens the pinned Expo Go APK's exported `ExperienceActivity` directly with
+its `experienceUrl` extra and `isOptimistic=false`. The same project URL is used
+for every phase so database ownership and filenames stay stable. The normal
+launcher delegates through Expo's optimistic manifest/bundle callbacks; two
+observed runs stalled before the next phase reported its environment, including
+one that had already fetched its bundle. The direct path is implemented by
+[Expo's cold-start activity](https://github.com/expo/expo/blob/sdk-54/apps/expo-go/android/expoview/src/main/java/host/exp/exponent/experience/ExperienceActivity.kt),
+and its exported component and extra names were checked against the actual
+checksum-pinned APK's manifest and bytecode. Local runs still use the opened
+agent-device session.
+
+This change adds no automatic phase retry. A `startup` observation precedes the
+SQLite version probe, and failures retain activity and logcat diagnostics in
+`startup.log`. That observation cannot replace the required native environment
+or any terminal storage result. All eleven phases, ten old-process exit checks,
+write/crash witnesses and existing time limits remain required. A new native CI
+run is needed to validate this launch path.

@@ -418,6 +418,7 @@ export async function execute(url, observe) {
       body: JSON.stringify(payload)
     });
   };
+  await emit({ type: 'startup' });
   const probe = await SQLite.openDatabaseAsync('gonvex-native-version.db');
   const version = await probe.getFirstAsync('SELECT sqlite_version() AS version');
   await probe.closeAsync();

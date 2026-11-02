@@ -29,6 +29,17 @@ class NativeContractTests(unittest.TestCase):
             with self.subTest(values=len(values)), self.assertRaises(AssertionError):
                 self.verify("all", values)
 
+    def test_startup_diagnostic_cannot_replace_required_native_observations(self):
+        values = events("recover")
+        startup = {key: values[0][key] for key in ("runId", "phase", "bundleSha256")}
+        startup["type"] = "startup"
+        self.verify("recover", [startup, *values])
+        for invalid in [[startup, values[-1]], [startup], [startup, startup, *values],
+                        [values[0], startup, *values[1:]], [dict(startup, runId="old"), *values],
+                        [dict(startup, bundleSha256="old"), *values]]:
+            with self.assertRaises(AssertionError):
+                self.verify("recover", invalid)
+
     def test_wrong_owner_phase_bundle_and_engine_fail(self):
         for field, value in [("runId", "old"), ("phase", "recover"), ("bundleSha256", "old"), ("hermes", False), ("sqlite", "unknown"), ("android", 35)]:
             values = events("all")
