@@ -1,3 +1,5 @@
+import { reserveKvOutboxId, withKvOutboxOperation } from "./kv-sequence.js";
+import { OutboxRecoveryError, validateOutboxEntry } from "./outbox-recovery.js";
 import type { ReducerOutboxEntry, OutboxStore } from "./outbox.js";
 
 /** Minimal host persistence boundary used by the reducer outbox and adapters. */
@@ -31,25 +33,50 @@ export function createMemoryGonvexKv(): GonvexKv {
   };
 }
 
+function parseKvIntent(raw: string, key: string): ReducerOutboxEntry {
+  let entry: unknown;
+  try { entry = JSON.parse(raw); }
+  catch (cause) { throw new OutboxRecoveryError("Invalid durable outbox JSON; journal recovery is required", { cause }); }
+  validateOutboxEntry(entry, key);
+  return entry;
+}
+
 export function createKvOutboxStore(kv: GonvexKv): OutboxStore {
+  const load = async () => (await kv.list(kvReducerOutboxTable))
+    .map(({ key, value }) => parseKvIntent(value, key))
+    .sort((left, right) => left.id - right.id);
   return {
-    async load() {
-      const entries: ReducerOutboxEntry[] = [];
-      for (const { value } of await kv.list(kvReducerOutboxTable)) {
-        try {
-          const entry = JSON.parse(value) as ReducerOutboxEntry;
-          if (entry && typeof entry.id === "number") entries.push(entry);
-        } catch { /* ignore corrupt disposable rows */ }
-      }
-      return entries.sort((left, right) => left.id - right.id);
-    },
-    async put(entry) { await kv.set(kvReducerOutboxTable, String(entry.id), JSON.stringify(entry)); },
-    async delete(id) { await kv.delete(kvReducerOutboxTable, String(id)); },
-    async clear(scope) {
-      if (scope === undefined) { await kv.clear(kvReducerOutboxTable); return; }
-      for (const { key, value } of await kv.list(kvReducerOutboxTable)) {
-        try { if ((JSON.parse(value) as ReducerOutboxEntry)?.scope === scope) await kv.delete(kvReducerOutboxTable, key); } catch { /* ignore */ }
-      }
-    },
+    strictPersistence: true,
+    allocateId: () => reserveKvOutboxId(kv),
+    load: () => withKvOutboxOperation(kv, load),
+    put: entry => withKvOutboxOperation(kv, async () => {
+      validateOutboxEntry(entry, String(entry.id));
+      await kv.set(kvReducerOutboxTable, String(entry.id), JSON.stringify(entry));
+    }),
+    update: (id, change) => withKvOutboxOperation(kv, async () => {
+      const key = String(id), raw = await kv.get(kvReducerOutboxTable, key);
+      if (raw === undefined) return undefined;
+      const prior = parseKvIntent(raw, key);
+      const scope = prior.scope, intentKey = prior.idempotencyKey;
+      const next = change(prior);
+      validateOutboxEntry(next, key);
+      if (next.scope !== scope || next.idempotencyKey !== intentKey)
+        throw new OutboxRecoveryError("Durable outbox identity cannot change");
+      const value = JSON.stringify(next);
+      if (value !== raw) await kv.set(kvReducerOutboxTable, key, value);
+      return next;
+    }),
+    delete: id => withKvOutboxOperation(kv, async () => {
+      const key = String(id), raw = await kv.get(kvReducerOutboxTable, key);
+      if (raw === undefined) return;
+      parseKvIntent(raw, key);
+      await kv.delete(kvReducerOutboxTable, key);
+    }),
+    clear: scope => withKvOutboxOperation(kv, async () => {
+      // Validate all rows before deleting any of an explicitly selected scope.
+      const entries = await load();
+      for (const entry of entries) if (scope === undefined || entry.scope === scope)
+        await kv.delete(kvReducerOutboxTable, String(entry.id));
+    }),
   };
 }

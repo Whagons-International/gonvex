@@ -1,4 +1,6 @@
 import { Dexie, type Table, type Collection } from "dexie";
+import { versionedIndexedDB } from './indexeddb-version.js';
+import { assertReplicaSequence, readReplicaSequence } from './indexeddb-sequence.js';
 import { entityRecord, indexedDBReadView, type EntityRecord, type ReadCoverage } from './indexeddb-read-view.js';
 import type { ReducerReadView } from '@gonvex/local-runtime/portable';
 import {mergeReplicaRecord} from './replica-record.js';
@@ -55,7 +57,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   private readonly peers=new Set<(scope:string)=>void>();
 
   constructor(name = "gonvex-local-replica") {
-    this.database = new Dexie(name, { cache: 'disabled' }) as ReplicaDatabase;
+    this.database = new Dexie(name, { cache: 'disabled', indexedDB: versionedIndexedDB(Dexie.dependencies.indexedDB, replicaSchemaVersion) }) as ReplicaDatabase;
     // Gonvex owns subscription delivery and peer synchronization. These private
     // tables are never queried through Dexie.liveQuery; collecting index ranges
     // and retaining a second query cache duplicates work on every replica write.
@@ -64,6 +66,23 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     this.channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(`gonvex-replica:${name}`) : undefined;
     if(this.channel) this.channel.onmessage=event=>{if(typeof event.data?.scope==='string')for(const listener of this.peers)listener(event.data.scope);};
     this.database.version(1).stores({ snapshots: "&key" });
+    // IndexedDB cannot change an object store's primary key in place. Stage the
+    // ownerless v1 checkpoint, recreate the store, then copy it into the default
+    // scope. Dexie runs these steps and normalization in one version transaction;
+    // failure restores the original v1 store and every source row.
+    this.database.version(1.1).stores({ snapshotMigration: "&key" }).upgrade(async transaction => {
+      const records = await transaction.table("snapshots").toArray() as LegacySnapshotRecord[];
+      if (records.length > 1) throw new Error("Ambiguous ownerless replica snapshots require explicit recovery.");
+      await transaction.table("snapshotMigration").bulkPut(records);
+    });
+    this.database.version(1.2).stores({ snapshots: null });
+    this.database.version(1.3).stores({ snapshots: "&scope" }).upgrade(async transaction => {
+      const records = await transaction.table("snapshotMigration").toArray() as LegacySnapshotRecord[];
+      for (const record of records) {
+        await transaction.table("snapshots").put({ scope: defaultReplicaScope, snapshot: record.snapshot });
+      }
+    });
+    this.database.version(1.4).stores({ snapshotMigration: null });
     this.database.version(2).stores({ snapshots: "&scope" }).upgrade(async (transaction) => {
       await transaction.table("snapshots").toCollection().modify((record: LegacySnapshotRecord & { key?: string }) => {
         record.scope = defaultReplicaScope;
@@ -121,6 +140,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   private async nextSequence(scope:string):Promise<number> {
     const prior=await this.database.meta.get([scope,'sequence']);
     const previousSequence=Number(prior?.value ?? 0);
+    await assertReplicaSequence(this.database, scope, prior, previousSequence);
     if (!Number.isSafeInteger(previousSequence) || previousSequence < 0 || previousSequence === Number.MAX_SAFE_INTEGER) {
       throw new Error('Invalid or exhausted replica storage sequence.');
     }
@@ -303,7 +323,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   async readChanges(scope:string,afterSequence:number,interest?:{rows:Record<string,string[]>;hasRow?:(entity:string,id:string)=>boolean;windows:string[];availableRows:number;availableBytes:number;maxRows:number;maxBytes:number}):Promise<ReplicaStorageChanges> {
     await this.initialize();
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
-      const sequence=Number((await this.database.meta.get([scope,'sequence']))?.value ?? 0);
+      const sequence=await readReplicaSequence(this.database,scope);
       const reset=afterSequence < Number((await this.database.meta.get([scope,'resetSequence']))?.value ?? 0);
       const changes:ReplicaStorageChanges={sequence,reset,entities:{},windows:{}};
       if(sequence===afterSequence)return changes;
@@ -338,7 +358,8 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
 
   async withReadView<T>(scope: string, coverage: ReadCoverage, run: (view: ReducerReadView) => Promise<T>): Promise<T> {
     await this.initialize();
-    return this.database.transaction('r', this.database.entities, async () => {
+    return this.database.transaction('r', this.database.entities, this.database.windows, this.database.meta, async () => {
+      await readReplicaSequence(this.database,normalizeScope(scope));
       // Database reads run normally in this transaction. Dexie.waitFor must
       // never surround work that also uses this transaction; keep it limited
       // to the deterministic crypto promise supplied by the ID allocator.
@@ -374,6 +395,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
+    const storageSequence=await readReplicaSequence(this.database,normalizedScope);
     const [entityRecords, windowRecords, cursor] = await Promise.all([
       this.database.entities.where("scope").equals(normalizedScope).toArray(),
       this.database.windows.where("scope").equals(normalizedScope).toArray(),
@@ -385,7 +407,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
     const liveQueries: ReplicaSnapshot["liveQueries"] = {};
     for (const record of windowRecords) if(!record.deleted) liveQueries[record.signature] = JSON.parse(record.value) as ReplicaWindow;
     return {
-      storageSequence:Number((await this.database.meta.get([normalizedScope,'sequence']))?.value ?? 0),
+      storageSequence,
       cursor: cursor ? JSON.parse(cursor.value) : undefined,
       entities,
       liveQueries,
@@ -399,6 +421,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   async loadWorkingSet(scope:string,budget:{maxRows:number;maxBytes:number;preferredWindows?:readonly string[]}):Promise<ReplicaSnapshot|undefined> {
     await this.initialize();
     return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
+      const storageSequence=await readReplicaSequence(this.database,scope);
       const entities:ReplicaSnapshot['entities']={},liveQueries:ReplicaSnapshot['liveQueries']={},partial=new Set<string>();
       let bytes=0,count=0,hasRows=false,full=false;
       // Membership metadata is small compared with row values. Recover exact
@@ -446,13 +469,14 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
         if(window.ids.some(id=>!entities[window.entity]?.[id]))partial.add(window.entity);
       const cursor=await this.database.meta.get([scope,'cursor']);
       if(!hasRows && !Object.keys(liveQueries).length && !cursor)return undefined;
-      return {entities,liveQueries,residentPartialTables:[...partial],cursor:cursor?JSON.parse(cursor.value):undefined,storageSequence:Number((await this.database.meta.get([scope,'sequence']))?.value??0)};
+      return {entities,liveQueries,residentPartialTables:[...partial],cursor:cursor?JSON.parse(cursor.value):undefined,storageSequence};
     });
   }
 
   async loadEntityRows(scope:string,entity:string,ids:readonly string[]):Promise<Array<{id:string;row:ReplicaRow}>> {
     await this.initialize();
-    return this.database.transaction('r',this.database.entities,async()=>{
+    return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
+    await readReplicaSequence(this.database,scope);
     const rows:Array<{id:string;row:ReplicaRow}>=[];
     for(let offset=0;offset<ids.length;offset+=500){
       const records=await this.database.entities.bulkGet(ids.slice(offset,offset+500).map(id=>[scope,entity,id]) as [string,string,string][]);
@@ -464,7 +488,8 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
 
   async loadWindowRows(scope:string,signature:string) {
     await this.initialize();
-    return this.database.transaction('r',this.database.entities,this.database.windows,async()=>{
+    return this.database.transaction('r',this.database.entities,this.database.windows,this.database.meta,async()=>{
+      await readReplicaSequence(this.database,scope);
       const record=await this.database.windows.get([scope,signature]);
       if(!record || record.deleted)return undefined;
       const window:ReplicaWindow=JSON.parse(record.value);
@@ -575,10 +600,9 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   ): Promise<void | ReplicaMetadataCommit> {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
-    // A watermark contains no entity changes. Keep this transaction limited to
-    // window metadata and the shared cursor so large normalized replicas are
-    // never rewritten once per retained collection.
-    const receipt = await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
+    // Read the last entity position for counter integrity. A watermark changes
+    // only window metadata and the cursor; it never rewrites entity rows.
+    const receipt = await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
       const accepted = await this.writeWindows(normalizedScope,windows,sequence);
       await this.saveCursor(normalizedScope,cursor);
@@ -636,7 +660,7 @@ export class IndexedDBLocalReplicaStorage implements LocalReplicaStorage {
   async removeWindow(signature: string, snapshot: ReplicaSnapshot, scope: ReplicaScope = defaultReplicaScope): Promise<void> {
     await this.initialize();
     const normalizedScope = normalizeScope(scope);
-    await this.database.transaction("rw", this.database.windows, this.database.meta, async () => {
+    await this.database.transaction("rw", this.database.entities, this.database.windows, this.database.meta, async () => {
       const sequence=await this.nextSequence(normalizedScope);
       await this.database.windows.put({scope:normalizedScope,signature,value:'null',deleted:true,sequence});
       await this.saveCursor(normalizedScope,snapshot.cursor);

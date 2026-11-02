@@ -95,6 +95,8 @@ pub enum DatabaseError {
         stored_path: String,
         requested_path: String,
     },
+    #[error("ambiguous current and legacy receipt history requires recovery")]
+    AmbiguousReducerReceipts,
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
 }
@@ -1185,10 +1187,42 @@ impl ControlPlane {
     ) -> Result<(), DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
-        sqlx::raw_sql(
+        // CREATE INDEX takes a table lock even with IF NOT EXISTS. Running it
+        // for every reducer serializes callers behind an active receipt owner
+        // before the unique claim can arbitrate them. Inspect catalog state on
+        // the routed connection; no process cache can outlive a schema reset.
+        const STATUS: &str = r#"SELECT
+            to_regclass('_gonvex_reducer_idempotency') IS NOT NULL,
+            to_regclass('_gonvex_mutation_idempotency') IS NOT NULL,
+            EXISTS(SELECT 1 FROM pg_index
+                WHERE indexrelid=to_regclass('gonvex_reducer_idempotency_created_at')
+                AND indrelid=to_regclass('_gonvex_reducer_idempotency')
+                AND indisvalid AND indisready)"#;
+        let initialized = |(current, legacy, indexed): (bool, bool, bool)| {
+            if current && legacy {
+                Err(DatabaseError::AmbiguousReducerReceipts)
+            } else {
+                Ok(current && indexed)
+            }
+        };
+        if initialized(sqlx::query_as(STATUS).fetch_one(&pool).await?)? {
+            return Ok(());
+        }
+        // Serialize cold initialization and legacy rename across runtime
+        // processes. Recheck after acquiring the transaction-owned lock so a
+        // waiter never repeats DDL after another initializer has finished.
+        let mut transaction = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gonvex:reducer-receipt-schema'))")
+            .execute(&mut *transaction)
+            .await?;
+        if initialized(sqlx::query_as(STATUS).fetch_one(&mut *transaction).await?)? {
+            transaction.commit().await?;
+            return Ok(());
+        }
+        let statements = sql_script::split_statements(
             r#"DO $$ BEGIN
-                 IF to_regclass('public._gonvex_mutation_idempotency') IS NOT NULL
-                   AND to_regclass('public._gonvex_reducer_idempotency') IS NULL THEN
+                 IF to_regclass('_gonvex_mutation_idempotency') IS NOT NULL
+                   AND to_regclass('_gonvex_reducer_idempotency') IS NULL THEN
                    ALTER TABLE _gonvex_mutation_idempotency RENAME TO _gonvex_reducer_idempotency;
                  END IF;
                END $$;
@@ -1202,9 +1236,11 @@ impl ControlPlane {
                );
                CREATE INDEX IF NOT EXISTS gonvex_reducer_idempotency_created_at
                  ON _gonvex_reducer_idempotency (created_at);"#,
-        )
-        .execute(&pool)
-        .await?;
+        )?;
+        for statement in statements {
+            sqlx::query(&statement).execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 

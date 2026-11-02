@@ -103,6 +103,7 @@ pub enum ClientFrame {
     },
     /// The caller gave up on a request; the invocation is abandoned and its
     /// isolate retired rather than left running for a result nobody wants.
+    /// Its ID remains reserved until the terminal response is queued.
     Cancel {
         id: u64,
     },
@@ -262,15 +263,25 @@ pub struct InvocationContextWire {
     pub deadline_unix_ms: Option<u64>,
 }
 
+fn effective_deadline_millis(
+    context_deadline: Option<u64>,
+    request_deadline: Option<u64>,
+) -> Option<u64> {
+    match (context_deadline, request_deadline) {
+        (Some(left), Some(right)) => Some(if left <= right { left } else { right }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 impl InvocationContextWire {
+    pub fn effective_deadline(&self, request_deadline: Option<u64>) -> Option<SystemTime> {
+        // Share the tighter deadline with root admission and engine dispatch.
+        effective_deadline_millis(self.deadline_unix_ms, request_deadline).map(from_unix_millis)
+    }
+
     pub fn into_context(self, generation: u64, request_deadline: Option<u64>) -> InvocationContext {
-        // The tighter of the request deadline and the context deadline wins:
-        // neither side may lengthen a budget the other set.
-        let deadline_unix_ms = match (self.deadline_unix_ms, request_deadline) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
+        let deadline = self.effective_deadline(request_deadline);
         InvocationContext {
             invitation_inviter: self.invitation_inviter,
             intent_entropy: self.intent_entropy,
@@ -294,7 +305,7 @@ impl InvocationContextWire {
                 0 => unix_millis(SystemTime::now()),
                 stamped => stamped,
             },
-            deadline: deadline_unix_ms.map(from_unix_millis),
+            deadline,
         }
     }
 }
@@ -638,6 +649,28 @@ impl HostCallFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_deadlines_round_trip_zero_and_full_wire_range() {
+        for context in [None, Some(0), Some(1), Some(u64::MAX)] {
+            for request in [None, Some(0), Some(1), Some(u64::MAX)] {
+                let expected = match (context, request) {
+                    (Some(left), Some(right)) => Some(left.min(right)),
+                    (Some(value), None) | (None, Some(value)) => Some(value),
+                    (None, None) => None,
+                };
+                let wire = InvocationContextWire {
+                    deadline_unix_ms: context,
+                    ..Default::default()
+                };
+                assert_eq!(wire.effective_deadline(request).map(unix_millis), expected);
+                assert_eq!(
+                    wire.into_context(1, request).deadline.map(unix_millis),
+                    expected
+                );
+            }
+        }
+    }
 
     #[test]
     fn insert_allocation_survives_the_module_host_wire() {

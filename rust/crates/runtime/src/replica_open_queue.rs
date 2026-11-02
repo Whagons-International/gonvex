@@ -1,11 +1,14 @@
 //! Bounded preparation jobs owned by one socket. Dropping or clearing the queue
-//! drops every SQL future; no detached task can publish into a later admission.
+//! cancels every owned task; no detached task can publish into a later admission.
 use futures_util::{
     future::{AbortHandle, Abortable, BoxFuture},
     stream::FuturesUnordered,
     FutureExt, StreamExt,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// Per-socket bound on pending preparations. Large tenants (El Rey) open far more
 /// than 256 windows on a fresh replica; hitting the bound failed the page render.
@@ -13,6 +16,25 @@ const MAX_ENTRIES: usize = 8192;
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 type Completion<T> = (String, u64, bool, T);
+struct Preparation<T>(tokio::task::JoinHandle<(bool, Option<Completion<T>>)>);
+impl<T> Future for Preparation<T> {
+    type Output = (bool, Option<Completion<T>>);
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.0).poll(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(value)) => Poll::Ready(value),
+            Poll::Ready(Err(error)) if error.is_panic() => {
+                std::panic::resume_unwind(error.into_panic())
+            }
+            Poll::Ready(Err(error)) => panic!("replica preparation task failed: {error}"),
+        }
+    }
+}
+impl<T> Drop for Preparation<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 struct Entry {
     ticket: u64,
     bytes: usize,
@@ -23,7 +45,7 @@ struct Waiting<T> {
     future: BoxFuture<'static, Option<Completion<T>>>,
 }
 pub(crate) struct ReplicaOpenQueue<T> {
-    active: FuturesUnordered<BoxFuture<'static, (bool, Option<Completion<T>>)>>,
+    active: FuturesUnordered<Preparation<T>>,
     waiting: VecDeque<(String, Waiting<T>)>,
     entries: BTreeMap<String, Entry>,
     bytes: usize,
@@ -120,8 +142,12 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
                 self.bulk_active += 1;
             }
             let bulk = job.bulk;
-            self.active
-                .push(async move { (bulk, job.future.await) }.boxed());
+            // The socket may await a query that needs a connection held by a
+            // preparation. Keep SQL progress independent of polling next().
+            // The queue owns cancellation and remains the only publisher.
+            self.active.push(Preparation(tokio::spawn(async move {
+                (bulk, job.future.await)
+            })));
         }
     }
     pub async fn next(&mut self) -> Option<T> {
@@ -148,6 +174,56 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn cancellation_drops_started_work_without_polling_completion() {
+        struct Exit(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Exit {
+            fn drop(&mut self) {
+                if let Some(exit) = self.0.take() {
+                    let _ = exit.send(());
+                }
+            }
+        }
+        for mode in ["clear", "remove", "drop"] {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (exit, stopped) = tokio::sync::oneshot::channel();
+            let mut queue = Some(ReplicaOpenQueue::default());
+            queue
+                .as_mut()
+                .unwrap()
+                .push(
+                    "owned".into(),
+                    128,
+                    false,
+                    async move {
+                        let _exit = Exit(Some(exit));
+                        let _ = started.send(());
+                        std::future::pending::<()>().await;
+                    }
+                    .boxed(),
+                )
+                .unwrap();
+            {
+                let pending = queue.as_mut().unwrap().next();
+                tokio::pin!(pending);
+                tokio::select! {
+                    _ = &mut pending => panic!("preparation completed before cancellation"),
+                    ready = ready => ready.unwrap(),
+                }
+            }
+            match mode {
+                "clear" => queue.as_mut().unwrap().clear(),
+                "remove" => queue.as_mut().unwrap().remove("owned"),
+                _ => {
+                    queue.take();
+                }
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(1), stopped)
+                .await
+                .expect("cancelled work survived without completion polling")
+                .unwrap();
+        }
+    }
     #[tokio::test]
     async fn publishes_small_source_without_waiting_for_bulk_and_reserves_capacity() {
         let mut queue = ReplicaOpenQueue::default();

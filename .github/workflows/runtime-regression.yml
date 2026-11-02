@@ -65,17 +65,29 @@ jobs:
         run: test -z "$(find . -path ./node_modules -prune -o -path ./rust/target -prune -o \( -name '*.go' -o -name go.mod -o -name go.sum \) -print)"
       - name: Build JavaScript packages
         run: pnpm build:packages
+      - name: Require historical SQLite transaction crash recovery and reject rearmed acceptance
+        run: python3 verification/native-sqlite/check_historical_node.py --output "${{ runner.temp }}/historical-sqlite-node"
+      - name: Retain historical SQLite process evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-sqlite-node
+          path: ${{ runner.temp }}/historical-sqlite-node
+          if-no-files-found: ignore
       - name: Verify native browser IndexedDB durability and SDK barriers
         run: pnpm --filter @gonvex/client test:browser-storage
         env:
           GONVEX_BROWSER_TEST_DIR: ${{ runner.temp }}/indexeddb-guarantees
           GONVEX_BROWSER_TEST_OUTPUT: ${{ runner.temp }}/indexeddb-guarantees.json
+          GONVEX_BROWSER_UPGRADE_OUTPUT: ${{ runner.temp }}/indexeddb-upgrades.json
       - name: Retain browser persistence evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: indexeddb-guarantees
-          path: ${{ runner.temp }}/indexeddb-guarantees.json
+          path: |
+            ${{ runner.temp }}/indexeddb-guarantees.json
+            ${{ runner.temp }}/indexeddb-upgrades.json
           if-no-files-found: ignore
       # Some script contracts import built package output (packages/*/dist).
       - name: Validate repository script contracts
@@ -88,8 +100,63 @@ jobs:
           GONVEX_STALL_TEST_CONTAINER: ${{ job.services.postgres.id }}
       - name: Test JavaScript workspace
         run: pnpm -r test
+      - name: Require post-storage watermark and readiness ownership and reject compiled stale completion controls
+        run: node verification/typescript/check-watermark-publication-runtime.mjs --output "${{ runner.temp }}/watermark-publication-runtime"
+      - name: Retain watermark ownership execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: watermark-publication-runtime
+          path: ${{ runner.temp }}/watermark-publication-runtime
+          if-no-files-found: ignore
+      - name: Require native browser intent observer ownership and stale source controls
+        env:
+          GONVEX_BROWSER_TEST_DIR: ${{ runner.temp }}/intent-browser
+          GONVEX_INTENT_BROWSER_OUTPUT: ${{ runner.temp }}/intent-browser.json
+        run: node --test packages/client/test/browser-intent-ownership.check.mjs
+      - name: Retain native browser intent ownership evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intent-browser
+          path: ${{ runner.temp }}/intent-browser.json
+          if-no-files-found: ignore
+      - name: Require intent snapshot activation ownership and reject compiled stale publication
+        run: node verification/typescript/check-intent-publication-runtime.mjs --output "${{ runner.temp }}/intent-publication-runtime"
+      - name: Retain intent snapshot ownership execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intent-publication-runtime
+          path: ${{ runner.temp }}/intent-publication-runtime
+          if-no-files-found: ignore
       - name: Type-check JavaScript workspace
         run: pnpm typecheck
+      - name: Require ordered query publication and reject compiled stale callback controls
+        run: node verification/typescript/check-query-publication-runtime.mjs --output "${{ runner.temp }}/query-publication-runtime"
+      - name: Require Control Query watch ownership, reuse and reconnect controls
+        run: node verification/typescript/check-control-watch-runtime.mjs --output "${{ runner.temp }}/control-watch-runtime"
+      - name: Require actual browser WebSocket close and scope-clear ownership
+        env:
+          GONVEX_BROWSER_TEST_DIR: ${{ runner.temp }}/control-close-browser
+          GONVEX_CONTROL_CLOSE_BROWSER_OUTPUT: ${{ runner.temp }}/control-close-browser.json
+        run: node --test packages/client/test/browser-control-close.check.mjs
+      - name: Require native IndexedDB query publication and transaction-abort controls
+        env:
+          GONVEX_BROWSER_TEST_DIR: ${{ runner.temp }}/query-publication-browser
+          GONVEX_QUERY_BROWSER_OUTPUT: ${{ runner.temp }}/query-publication-browser.json
+        run: node --test packages/client/test/browser-query-publication.check.mjs
+      - name: Retain query publication execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: query-publication
+          path: |
+            ${{ runner.temp }}/query-publication-runtime
+            ${{ runner.temp }}/control-watch-runtime
+            ${{ runner.temp }}/control-close-browser.json
+            ${{ runner.temp }}/query-publication-browser.json
+          if-no-files-found: ignore
       - name: Verify publishable npm tarballs
         run: pnpm verify:package-tarballs
       - name: Check Rust formatting
@@ -110,6 +177,55 @@ jobs:
         run: cargo test --locked --workspace --all-targets -- --test-threads=1
         env:
           GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+      - name: Require native root-admission deadlines, nested progress and exact permit capacity
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p gonvex-module-host --lib session::admission_tests -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/root-admission.log"
+          grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/root-admission.log"
+      - name: Retain native root-admission execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: root-admission
+          path: ${{ runner.temp }}/root-admission.log
+          if-no-files-found: ignore
+      - name: Require sandbox cancellation cleanup and originating execution ownership
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p gonvex-runtime --lib sandbox::cancellation_tests -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/sandbox-cancellation.log"
+          grep -F 'test result: ok. 8 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/sandbox-cancellation.log"
+      - name: Retain sandbox cancellation execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-cancellation
+          path: ${{ runner.temp }}/sandbox-cancellation.log
+          if-no-files-found: ignore
+      - name: Require native sandbox exit to retain capacity and permit later reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path rust/Cargo.toml -p gonvex-runtime --lib --no-run --message-format=json > "$RUNNER_TEMP/sandbox-retirement-build.jsonl"
+          python3 verification/backend-receipts/check_sandbox_retirement.py             --build-metadata "$RUNNER_TEMP/sandbox-retirement-build.jsonl"             --output "$RUNNER_TEMP/sandbox-retirement"
+      - name: Retain native sandbox exit and capacity witnesses
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-retirement
+          path: |
+            ${{ runner.temp }}/sandbox-retirement-build.jsonl
+            ${{ runner.temp }}/sandbox-retirement
+          if-no-files-found: ignore
+      - name: Require real tenant membership and receipt namespace isolation
+        working-directory: rust
+        env:
+          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+          GONVEX_TENANT_ISOLATION_REQUIRE_NATIVE: "1"
+        run: cargo test --locked -p gonvex-postgres --test tenant_isolation -- --test-threads=1
       - name: Build module host for required native receipt regressions
         working-directory: rust
         run: cargo build --locked -p gonvex-module-host --bin gonvex-module-host
@@ -136,6 +252,106 @@ jobs:
           test -x "$GONVEX_TEST_MODULE_HOST_BINARY"
           cargo test --locked -p gonvex-runtime --lib tests::receipt_guarantee_tests -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/native-receipts.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-receipts.log"
+      - name: Build exact runtime artifact for PostgreSQL crash recovery
+        working-directory: rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p gonvex-runtime --lib --no-run --message-format=json > "$RUNNER_TEMP/receipt-crash-build.jsonl"
+      - name: Require legacy receipt preservation and safe initialization
+        working-directory: rust
+        shell: bash
+        env:
+          GONVEX_TEST_POSTGRES_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+          GONVEX_TEST_MODULE_HOST_BINARY: ${{ github.workspace }}/rust/target/debug/gonvex-module-host
+          GONVEX_RECEIPT_TEST_REQUIRE_NATIVE: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked -p gonvex-runtime --lib tests::receipt_guarantee_tests::receipt_initialization_ -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/receipt-initialization.log"
+          for case in preserves_legacy_replay refuses_ambiguous_histories repairs_missing_index_and_observes_schema_reset serializes_cold_callers cancellation_releases_lock_and_admission; do
+            grep -F "test tests::receipt_guarantee_tests::receipt_initialization_$case ... " "$RUNNER_TEMP/receipt-initialization.log"
+          done
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/receipt-initialization.log"
+          cargo test --locked -p gonvex-runtime --lib tests::receipt_guarantee_tests::receipt_lookup_progresses_while_snapshot_preparations_own_pool_connections -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/snapshot-pool-progress.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/snapshot-pool-progress.log"
+          cargo test --locked -p gonvex-runtime --lib replica_open_queue::tests::cancellation_drops_started_work_without_polling_completion -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/snapshot-task-cancellation.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/snapshot-task-cancellation.log"
+      - name: Retain receipt initialization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: receipt-initialization
+          path: |
+            ${{ runner.temp }}/receipt-initialization.log
+            ${{ runner.temp }}/snapshot-pool-progress.log
+            ${{ runner.temp }}/snapshot-task-cancellation.log
+          if-no-files-found: error
+      - name: Require receipt and business effects across PostgreSQL process crashes
+        run: |
+          python3 verification/backend-receipts/check_restart.py \
+            --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
+            --module-host rust/target/debug/gonvex-module-host \
+            --output "$RUNNER_TEMP/receipt-crash-recovery"
+      - name: Require authenticated SDK, receipt and durable replica composition
+        run: |
+          python3 verification/backend-receipts/check_sdk.py \
+            --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
+            --module-host rust/target/debug/gonvex-module-host \
+            --output "$RUNNER_TEMP/sdk-receipt-composition"
+      - name: Retain authenticated SDK composition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-receipt-composition
+          path: ${{ runner.temp }}/sdk-receipt-composition
+          if-no-files-found: ignore
+      - name: Require SDK identity and completeness through backend contract replacement
+        run: |
+          python3 verification/backend-receipts/check_module_upgrade.py \
+            --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
+            --module-host rust/target/debug/gonvex-module-host \
+            --output "$RUNNER_TEMP/sdk-module-upgrade"
+      - name: Retain backend contract upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-module-upgrade
+          path: ${{ runner.temp }}/sdk-module-upgrade
+          if-no-files-found: error
+      - name: Require SDK recovery through existing runtime pools after PostgreSQL SIGKILL
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 verification/backend-receipts/check_sdk_postgres_crash.py \
+            --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
+            --module-host rust/target/debug/gonvex-module-host \
+            --output "$RUNNER_TEMP/sdk-postgres-crash"
+          if python3 verification/backend-receipts/check_sdk_postgres_crash.py \
+            --build-metadata "$RUNNER_TEMP/receipt-crash-build.jsonl" \
+            --module-host rust/target/debug/gonvex-module-host \
+            --output "$RUNNER_TEMP/sdk-postgres-crash-control" \
+            --missing-effect-control > "$RUNNER_TEMP/sdk-postgres-crash-control.log" 2>&1; then
+            echo "Missing committed business effect was accepted after PostgreSQL crash"
+            exit 1
+          fi
+          grep -F "PostgreSQL crash recovery lost committed business/receipt witness" "$RUNNER_TEMP/sdk-postgres-crash-control.log"
+      - name: Retain SDK PostgreSQL crash evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-postgres-crash
+          path: |
+            ${{ runner.temp }}/sdk-postgres-crash
+            ${{ runner.temp }}/sdk-postgres-crash-control
+            ${{ runner.temp }}/sdk-postgres-crash-control.log
+          if-no-files-found: ignore
+      - name: Retain PostgreSQL crash-recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: receipt-crash-recovery
+          path: ${{ runner.temp }}/receipt-crash-recovery
+          if-no-files-found: ignore
       - name: Test opt-in debug Firebase Auth Emulator verification
         working-directory: rust
         run: cargo test --locked -p gonvex-runtime --lib external_auth::tests --features test-firebase-auth-emulator

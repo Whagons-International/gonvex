@@ -58,7 +58,8 @@ class FakeExpoSQLiteDatabase implements ExpoSQLiteDatabase {
   async getFirstAsync<T>(sql: string, ...params: unknown[]): Promise<T | null> {
     const table = this.tableFrom(sql);
     const row = this.tables.get(table)?.rows.find((candidate) => candidate.scope === params[0]);
-    return (row as T | undefined) ?? null;
+    const projected = row && sql.includes("json_quote(signature)") ? { ...row, signature: JSON.stringify(row.signature) } : row;
+    return (projected as T | undefined) ?? null;
   }
 
   async getAllAsync<T>(sql: string, ...params: unknown[]): Promise<T[]> {
@@ -67,7 +68,8 @@ class FakeExpoSQLiteDatabase implements ExpoSQLiteDatabase {
       return (this.tables.get(table)?.columns ?? []).map((name) => ({ name })) as T[];
     }
     const table = this.tableFrom(sql);
-    return (this.tables.get(table)?.rows.filter((row) => row.scope === params[0]) ?? []) as T[];
+    return (this.tables.get(table)?.rows.filter((row) => row.scope === params[0]) ?? [])
+      .map(row => sql.includes("json_quote(signature)") ? { ...row, signature: JSON.stringify(row.signature) } : row) as T[];
   }
 
   async withTransactionAsync(task: () => Promise<void>): Promise<void> {

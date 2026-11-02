@@ -6,6 +6,7 @@ import {readFileSync, mkdirSync, writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {verifySettlement} from './receipt-settlement.mjs';
 const ts = createRequire(new URL('../../packages/gonvex/package.json', import.meta.url))('typescript-api');
 assert.equal(ts.version, '6.0.3');
 const SOURCE = fileURLToPath(new URL('../../packages/client/src/outbox-policy.ts', import.meta.url));
@@ -136,7 +137,8 @@ export function verify({z3, output}) {
   }
   const program = ts.createProgram([SOURCE, ...files], {strict: true, noEmit: true, skipLibCheck: true, types: [], target: ts.ScriptTarget.ES2022});
   const errors = ts.getPreEmitDiagnostics(program); assert.equal(errors.length, 0, errors.map(d => ts.flattenDiagnosticMessageText(d.messageText, '\n')).join('\n'));
-  const receipt = {source: 'packages/client/src/outbox-policy.ts', sourceSha256: hash(source), verifierSha256: hash(readFileSync(fileURLToPath(import.meta.url))), parser: ts.version, solver: version.stdout.trim(), solverSha256: hash(readFileSync(z3)), laws: Object.keys(laws), negativeControls: negativeResults, boundary: 'Closed five-state/seven-action source transition on existing records. Committed is absorbing across arbitrary finite action sequences. Covers state-level admission, recovery, commit, rejection, explicit retry and transient/exhausted failure. Does not prove storage atomicity, integration, deletion, metadata, attempt budgets, callback identity or async delivery.'};
+  const settlement = verifySettlement({z3, output: resolve(output, 'settlement'), policy: extract(source)});
+  const receipt = {settlement, source: 'packages/client/src/outbox-policy.ts', sourceSha256: hash(source), verifierSha256: hash(readFileSync(fileURLToPath(import.meta.url))), parser: ts.version, solver: version.stdout.trim(), solverSha256: hash(readFileSync(z3)), laws: Object.keys(laws), negativeControls: negativeResults, boundary: 'Closed five-state/seven-action source transition on existing records. Committed is absorbing across arbitrary finite action sequences. Covers state-level admission, recovery, commit, rejection, explicit retry and transient/exhausted failure. Does not prove storage atomicity, integration, deletion, metadata, attempt budgets, callback identity or async delivery.'};
   writeFileSync(resolve(output, 'source.ts'), source); writeFileSync(resolve(output, 'receipt.json'), JSON.stringify(receipt, null, 2)+'\n');
   console.log(`${Object.keys(laws).length} delivery laws verified; ${mutants.length} typed broken transitions rejected`); return receipt;
 }

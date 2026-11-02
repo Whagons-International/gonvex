@@ -2627,7 +2627,7 @@ describe("GonvexClient", () => {
     client.close();
   });
 
-  it('does not acknowledge or lose a transaction when its watermark arrives during auth renewal', async () => {
+  it.each([false, true])('does not acknowledge or lose a transaction during auth renewal, subscriptionsPreserved=%s', async preserved => {
     const collectionRef: FunctionReference = { kind: 'query', path: 'tasks.recent', delivery: 'replica', replica: { table: 'tasks', key: 'id', columns: ['id', 'title'], maxRows: 100 } };
     const client = new GonvexClient('ws://runtime.test/ws', { project: 'shop', tenant: 'tenant-a', token: 'first-token', identity: { sub: 'account-a', iss: 'shop' } });
     const tasks = client.watchReplica(collectionRef, {});
@@ -2659,7 +2659,18 @@ describe("GonvexClient", () => {
       expect(settled).toBe(false);
       expect(tasks.localReplicaState()).toMatchObject({ computedRevision: 1 });
       const secondAuth = sentMessages(socket).findLast(message => message.type === 'auth')!;
-      socket.receive({ type: 'auth.result', id: secondAuth.id, result: authenticatedResult({ accountId: 'account-a' }) });
+      socket.receive({ type: 'auth.result', id: secondAuth.id, result: authenticatedResult({ accountId: 'account-a', subscriptionsPreserved: preserved }) });
+      if (!preserved) {
+        await vi.waitFor(() => expect(sentMessages(socket).filter(message => message.type === 'replica.open')).toHaveLength(2));
+        await (client as any).replicaFrames;
+        await flushMicrotasks();
+        expect(settled).toBe(false);
+        const reopened = sentMessages(socket).findLast(message => message.type === 'replica.open')!;
+        const currentRows = [{ id: 'task-1', title: 'Working' }];
+        const currentHashes = await replicaRowsHashes(currentRows, 'id');
+        socket.receive({ type: 'replica.delta', id: reopened.id, path: collectionRef.path, cursor: { epoch: 'epoch:test', revision: 2 }, upserts: currentRows, deleted: [], hashes: currentHashes });
+        socket.receive({ type: 'replica.ready', id: reopened.id, path: collectionRef.path, cursor: { epoch: 'epoch:test', revision: 2 }, digest: await replicaHashesDigest(currentHashes), truncated: false });
+      }
       await expect(update).resolves.toBe('updated');
       expect(client.localReplica.entity('tasks', 'task-1')).toEqual({ id: 'task-1', title: 'Working' });
     } finally { client.close(); }
@@ -2852,7 +2863,7 @@ describe("GonvexClient", () => {
     expect(sentMessages(socket).filter((message) => message.type === "query.unsubscribe")).toHaveLength(0);
 
     client.subscribeLiveQuery(ref, { workspaceId: "workspace-a" }, second);
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(sentMessages(socket).filter((message) => message.type === "query.subscribe")).toHaveLength(1);
     expect(second).toHaveBeenCalledWith({ type: "query.result", id, result: { count: 4 } });

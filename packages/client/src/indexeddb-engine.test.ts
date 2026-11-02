@@ -188,7 +188,7 @@ it('uses reverse ownership for exclusion and deletes from every active owning wi
   const db = (storage as any).database;
   const allWindows = vi.spyOn(db.windows, 'where');
   await storage.applyTransaction({ cursor: { epoch: 'e', revision: 3 }, changes: [{ entity: 'tasks', id: 'b', operation: 'delete' }] }, empty);
-  expect(allWindows).not.toHaveBeenCalled();
+  expect(allWindows.mock.calls).toEqual([['[scope+sequence]']]);
   const after = await storage.load();
   expect(after?.liveQueries.tasks.ids).toEqual([]); expect(after?.liveQueries.other.ids).toEqual(['a']);
   expect(after?.entities.tasks.b).toBeUndefined();
@@ -577,9 +577,11 @@ it('keeps startup edits atomic with membership writes and does not revive an ind
   // Older SDKs copy an old startup marker on normalized deletes, or omit it
   // on window metadata writes. Neither may make the cached IDs authoritative.
   const record = await db.windows.get(['default', 'tasks']);
-  await db.transaction('rw', db.members, db.windows, async () => {
+  await db.transaction('rw', db.members, db.windows, db.meta, async () => {
+    const sequence = Number((await db.meta.get(['default', 'sequence'])).value) + 1;
     await db.members.delete(['default', 'tasks', record.generation, 'c']);
-    await db.windows.put({ ...record, sequence: record.sequence + 1 });
+    await db.windows.put({ ...record, sequence });
+    await db.meta.put({ scope: 'default', key: 'sequence', value: String(sequence) });
   });
   expect((await storage.load())?.liveQueries.tasks.ids).toEqual(['a']);
   await storage.advanceWatermark([window(['a'], 'tasks', 3)], { epoch: 'e', revision: 3 });
@@ -671,7 +673,9 @@ it.each([false, true])('batches many-owner deletes and rolls back startup patche
   const reads = vi.spyOn(db.windows, 'get'), bulkReads = vi.spyOn(db.windows, 'bulkGet'), deletes = vi.spyOn(db.members, 'delete');
   const windowPages = vi.spyOn(db.windows, 'where'), checkpoints = vi.spyOn(db.windows, 'bulkPut'), sequence = vi.spyOn(db.meta, 'put');
   const receipt = await storage.applyTransaction(transaction, empty);
-  expect(reads).not.toHaveBeenCalled(); expect(bulkReads).not.toHaveBeenCalled(); expect(windowPages).toHaveBeenCalledOnce(); expect(deletes).not.toHaveBeenCalled();
+  expect(reads).not.toHaveBeenCalled(); expect(bulkReads).not.toHaveBeenCalled();
+  expect(windowPages.mock.calls.map(call => call[0])).toEqual(['[scope+sequence]', 'scope']);
+  expect(deletes).not.toHaveBeenCalled();
   expect(checkpoints.mock.calls.flatMap(call => call[0])).toHaveLength(100);
   expect(sequence.mock.calls.filter(call => call[0].key === 'sequence')).toHaveLength(1);
   expect(receipt.changes.removedMemberships).toHaveLength(200);
@@ -717,7 +721,7 @@ it('falls back to exact window keys when many owners lie beyond the bounded meta
     { entity: 'tasks', id: 'a', operation: 'delete' },
     { entity: 'tasks', id: 'c', operation: 'delete' },
   ] }, empty);
-  expect(page).toHaveBeenCalledOnce(); expect(exact).toHaveBeenCalledTimes(2);
+  expect(page.mock.calls.map(call => call[0])).toEqual(['[scope+sequence]', 'scope']); expect(exact).toHaveBeenCalledTimes(2);
   expect(exact.mock.calls[0][0]).toHaveLength(40);
   const loaded = await storage.load();
   for (let index = 0; index < 40; index++) {

@@ -9,10 +9,15 @@ use gonvex_postgres::{
 use sqlx::{postgres::PgPoolOptions, Row};
 
 fn test_database_url() -> Option<String> {
-    env::var("GONVEX_TEST_POSTGRES_URL")
+    let url = env::var("GONVEX_TEST_POSTGRES_URL")
         .ok()
         .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty());
+    assert!(
+        url.is_some() || env::var_os("GONVEX_TENANT_ISOLATION_REQUIRE_NATIVE").is_none(),
+        "tenant isolation test requires PostgreSQL"
+    );
+    url
 }
 
 fn scoped_url(base: &str, schema: &str) -> String {
@@ -323,6 +328,73 @@ async fn tenant_database_is_the_final_membership_authority() {
             .unwrap(),
         serde_json::json!({"id":"task-1"})
     );
+
+    // Tenant B was denied above while its member was revoked. Admit the same
+    // session only after the physical tenant membership is activated, then use
+    // the identical account, intent key and business row ID in its own route.
+    let tenant_b = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&tenant_b_url)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE members SET status='active' WHERE id='member-b'")
+        .execute(&tenant_b)
+        .await
+        .unwrap();
+    let session_b = control
+        .authenticate_session("gvx_session_rust_test", Some("project"), Some("tenant-b"))
+        .await
+        .expect("new active membership admits tenant B");
+    assert_eq!(session_b.route.tenant_id, "tenant-b");
+    assert_eq!(session_b.member.id, "member-b");
+    control
+        .ensure_reducer_idempotency(&session_b.route)
+        .await
+        .unwrap();
+    let mut second_tenant = control
+        .begin_tenant_transaction(&session_b.route, false)
+        .await
+        .unwrap();
+    assert!(second_tenant
+        .claim_reducer("account-1", "retry-key", "tasks.create")
+        .await
+        .unwrap());
+    sqlx::query("INSERT INTO tasks VALUES ('task-1', 'Tenant B only')")
+        .execute(&mut **second_tenant.transaction())
+        .await
+        .unwrap();
+    second_tenant
+        .store_reducer_result(
+            "account-1",
+            "retry-key",
+            &serde_json::json!({"id":"task-1", "tenant":"B"}),
+        )
+        .await
+        .unwrap();
+    second_tenant.commit().await.unwrap();
+    for (route, expected) in [
+        (&tenant_session.route, serde_json::json!({"id":"task-1"})),
+        (
+            &session_b.route,
+            serde_json::json!({"id":"task-1", "tenant":"B"}),
+        ),
+    ] {
+        assert_eq!(
+            control
+                .replay_reducer_result(route, "account-1", "retry-key", "tasks.create")
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT title FROM tasks WHERE id='task-1'")
+            .fetch_one(&tenant_b)
+            .await
+            .unwrap(),
+        "Tenant B only"
+    );
+    tenant_b.close().await;
 
     let mut attributed = control
         .begin_tenant_transaction(&tenant_session.route, false)

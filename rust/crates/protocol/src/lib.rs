@@ -480,6 +480,9 @@ pub struct ServerCapabilities {
     pub reducer_batch: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_watermark: Option<u8>,
+    /// Read-only account/tenant-scoped receipt lookup through a framework Query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reducer_receipt_lookup: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_watermark: Option<u8>,
 }
