@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 import uuid
 
-from contract import TERMINAL, require, validate_phase
+from contract import TERMINAL, historical_transition, require, validate_phase
 
 PROJECT = Path(__file__).resolve().parent
 ROOT = PROJECT.parent.parent
@@ -27,8 +27,8 @@ def free_port():
 
 
 class Device:
-    def __init__(self, serial, output, driver_file):
-        self.serial, self.output = serial, output
+    def __init__(self, serial, output, driver_file, launch):
+        self.serial, self.output, self.launch = serial, output, launch
         self.adb = [os.environ.get("ADB", "adb"), "-s", serial]
         self.driver = None
         if driver_file:
@@ -63,7 +63,24 @@ class Device:
         if self.driver:
             self.command([*self.driver, "open", PACKAGE, url], timeout=90)
         else:
-            self.command([*self.adb, "shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", url, "-p", PACKAGE], timeout=90)
+            # The pinned APK exports a direct cold-start path. Supplying its
+            # manifest URL avoids the launcher's optimistic callback handoff.
+            self.command([*self.adb, "shell", "am", "start", "-W",
+                          "-n", self.launch["activity"], "-a", "android.intent.action.VIEW",
+                          "-d", url, "--es", self.launch["manifestExtra"], url,
+                          "--ez", self.launch["optimisticExtra"], "false"], timeout=90)
+
+    def startup_diagnostics(self, phase):
+        # Read-only diagnostics must not replace the original phase failure.
+        for label, args in [("activities", [*self.adb, "shell", "dumpsys", "activity", "activities"]),
+                            ("logcat", [*self.adb, "logcat", "-d", "-t", "500", "-v", "threadtime"])]:
+            try:
+                result = self.command(args, check=False)
+                value = {"phase": phase, "kind": label, "exit": result.returncode, "output": result.stdout}
+            except (OSError, subprocess.TimeoutExpired) as error:
+                value = {"phase": phase, "kind": label, "diagnosticError": str(error)}
+            with (self.output / "startup.log").open("a") as log:
+                log.write(json.dumps(value) + "\n")
 
     def pids(self):
         result = self.command([*self.adb, "shell", "pidof", PACKAGE], check=False)
@@ -177,7 +194,7 @@ def main():
     metro_port, collector_port = free_port(), free_port()
     require(metro_port != collector_port, "port allocation collision")
     run_id = uuid.uuid4().hex
-    device = Device(args.serial, output, args.agent_device_json)
+    device = Device(args.serial, output, args.agent_device_json, tool["expoGo"]["androidLaunch"])
     require(not device.installed(), "refuse to replace an existing Expo Go host")
     apk = args.apk or output / "expo-go.apk"
     if not args.apk:
@@ -192,7 +209,7 @@ def main():
     environment.update(CI="1", EXPO_OFFLINE="1", EXPO_NO_TELEMETRY="1", EXPO_NO_TYPESCRIPT_SETUP="1", EXPO_NO_DEPENDENCY_VALIDATION="1", TMPDIR=str(cache))
     collector = Collector(collector_port, output, run_id)
     metro, installation_attempted, reverse = None, False, []
-    receipt = {"complete": False, "runId": run_id, "source": source, "toolchain": tool, "phases": {}, "processStops": []}
+    receipt = {"complete": False, "launchMode": "agent-device" if device.driver else "explicit-experience-cold-start", "runId": run_id, "source": source, "toolchain": tool, "phases": {}, "processStops": []}
     try:
         installation_attempted = True
         device.install(apk)
@@ -219,9 +236,20 @@ def main():
                 old = set(stop["beforePids"])
             collector.config = {"runId": run_id, "phase": phase, "bundleSha256": source["bundleSha256"]}
             start = len(collector.events)
-            device.open(f"exp://127.0.0.1:{metro_port}")
-            events = collector.wait(phase, start, metro)
+            try:
+                device.open(f"exp://127.0.0.1:{metro_port}")
+                events = collector.wait(phase, start, metro)
+            except Exception:
+                try:
+                    device.startup_diagnostics(phase)
+                except Exception as error:
+                    print(f"Startup diagnostics failed: {error}", flush=True)
+                raise
             result = validate_phase(events, phase, run_id, source["bundleSha256"], tool)
+            if phase.startswith("historical-"):
+                historical_transition({name: value["result"] for name, value in receipt["phases"].items()}, phase, result)
+            if phase == "journal-corrupt-recover":
+                require(result["rows"] == receipt["phases"]["journal-corrupt-seed"]["result"]["rows"], "corrupt accepted journal bytes changed across process restart")
             current = device.pids()
             require(current and not current.intersection(old), "native phase reused a stopped process")
             receipt["phases"][phase] = {"pids": sorted(current), "result": result}
@@ -245,7 +273,7 @@ def main():
             receipt["complete"] = bool(receipt.get("testsPassed") and receipt.get("testAppRemoved"))
             (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     require(receipt["complete"] and receipt.get("testAppRemoved"), "native verification or cleanup incomplete")
-    print("Native SQLite: 3 counterexamples, 6 fixed cases, witnessed process recovery and restart passed")
+    print("Native SQLite: shared-handle, historical migration, corruption and process-recovery contracts passed")
 
 
 if __name__ == "__main__":

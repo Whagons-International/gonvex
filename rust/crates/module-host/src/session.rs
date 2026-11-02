@@ -10,7 +10,7 @@
 //! Nothing here is per tenant. One process serves every project: engines are
 //! per module generation, and tenancy travels on the invocation context.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -90,11 +90,25 @@ struct Connection {
     /// Host calls this process is waiting on, keyed by host-call id.
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, WireError>>>>,
     next_host_call: AtomicU64,
-    /// Requests still executing. Each holds the sending half of a cancellation
-    /// channel: dropping it stops the request, so a cancel and a teardown are
-    /// the same mechanism. The entry is registered before the task is spawned,
-    /// so a request that finishes immediately cannot leave one behind.
-    running: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+    /// Registered request IDs. Taking the sender cancels execution, but keeps
+    /// the ID reserved until its original task queues its terminal frame and
+    /// finishes. Duplicate IDs must never replace another request's sender.
+    running: Mutex<HashMap<u64, Option<oneshot::Sender<()>>>>,
+}
+
+struct PendingHostCall<'a> {
+    connection: &'a Connection,
+    id: u64,
+}
+
+impl Drop for PendingHostCall<'_> {
+    fn drop(&mut self) {
+        self.connection
+            .pending
+            .lock()
+            .expect("host call ledger lock")
+            .remove(&self.id);
+    }
 }
 
 impl Connection {
@@ -107,12 +121,20 @@ impl Connection {
     async fn host_call(&self, invocation: u64, call: HostCall) -> Result<HostResponse, HostError> {
         let capability = call.capability();
         let frame = HostCallFrame::from_host_call(call).map_err(HostError::Failed)?;
-        let id = self.next_host_call.fetch_add(1, Ordering::Relaxed);
+        // MAX is the exhausted sentinel. Never wrap into an older reply ID.
+        let id = self
+            .next_host_call
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| HostError::Failed("module host call identity exhausted".to_owned()))?;
         let (reply, response) = oneshot::channel();
         self.pending
             .lock()
             .expect("host call ledger lock")
             .insert(id, reply);
+        let _pending = PendingHostCall {
+            connection: self,
+            id,
+        };
         if self
             .outbound
             .send(ServerFrame::HostCall {
@@ -123,10 +145,6 @@ impl Connection {
             .await
             .is_err()
         {
-            self.pending
-                .lock()
-                .expect("host call ledger lock")
-                .remove(&id);
             return Err(HostError::Failed(
                 "module host connection closed before the host call was sent".to_owned(),
             ));
@@ -170,7 +188,7 @@ impl Connection {
             .remove(&request_id);
     }
 
-    /// Dropping the cancellation sender ends the request's select, which drops
+    /// Taking the cancellation sender ends the request's select, which drops
     /// the invocation future, releases its generation lease, and retires the
     /// isolate that was running it.
     fn cancel(&self, request_id: u64) {
@@ -178,7 +196,8 @@ impl Connection {
             self.running
                 .lock()
                 .expect("request ledger lock")
-                .remove(&request_id),
+                .get_mut(&request_id)
+                .and_then(Option::take),
         );
     }
 
@@ -321,13 +340,16 @@ async fn dispatch_frame(connection: &Arc<Connection>, payload: Vec<u8>) {
             let (cancel, cancelled) = oneshot::channel::<()>();
             // Registering before the spawn is what keeps the ledger honest: a
             // request that completes instantly cannot race its own entry.
-            if connection
-                .running
-                .lock()
-                .expect("request ledger lock")
-                .insert(id, cancel)
-                .is_some()
-            {
+            let registered = {
+                let mut running = connection.running.lock().expect("request ledger lock");
+                if let Entry::Vacant(entry) = running.entry(id) {
+                    entry.insert(Some(cancel));
+                    true
+                } else {
+                    false
+                }
+            };
+            if !registered {
                 connection
                     .send(ServerFrame::Error {
                         id,
@@ -559,14 +581,33 @@ async fn handle_invoke(
     // calls already hold a root slot and use depth-specific isolate pools, so
     // taking another root permit here can deadlock the parent and child.
     let permit: Option<OwnedSemaphorePermit> = if request.context.nesting_depth == 0 {
-        Some(
-            Arc::clone(&state.calls)
-                .acquire_owned()
-                .await
-                .map_err(|_| {
-                    WireError::retryable(codes::SHUTTING_DOWN, "module host is shutting down")
-                })?,
-        )
+        let acquire = Arc::clone(&state.calls).acquire_owned();
+        let expired = || {
+            module_error(
+                &module_id,
+                &request.function,
+                ModuleError::BudgetExceeded(
+                    "invocation deadline elapsed during root admission".to_owned(),
+                ),
+            )
+        };
+        let acquired = match request.context.effective_deadline(deadline_unix_ms) {
+            Some(deadline) => {
+                let remaining = deadline
+                    .duration_since(SystemTime::now())
+                    .map_err(|_| expired())?;
+                if remaining.is_zero() {
+                    return Err(expired());
+                }
+                tokio::time::timeout(remaining, acquire)
+                    .await
+                    .map_err(|_| expired())?
+            }
+            None => acquire.await,
+        };
+        Some(acquired.map_err(|_| {
+            WireError::retryable(codes::SHUTTING_DOWN, "module host is shutting down")
+        })?)
     } else {
         None
     };
@@ -712,3 +753,7 @@ pub fn log(message: &str) {
         unix_millis(SystemTime::now())
     );
 }
+
+#[cfg(test)]
+#[path = "session_admission_tests.rs"]
+mod admission_tests;

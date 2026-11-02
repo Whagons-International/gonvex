@@ -1,4 +1,6 @@
+import { coalescingAdmission } from "./coalescing-policy.js";
 import { Dexie, type Table } from "dexie";
+import { versionedIndexedDB } from "./indexeddb-version.js";
 import { IndexedDBLocalReplicaStorage } from "./indexeddb-replica.js";
 import { migrateClientData, migrationChain, type ClientContract, type ClientMigration } from "./client-upgrades.js";
 import type { LocalReplicaStorage, ReplicaSnapshot } from "./local-replica.js";
@@ -22,7 +24,7 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   storage: LocalReplicaStorage; store: OutboxStore; ready: Promise<void>; close(): void;
 } {
   const replica = new IndexedDBLocalReplicaStorage(options.replicaName);
-  const queue = new Dexie(options.outboxName, { cache: 'disabled' }) as Dexie & { entries: Table<ReducerOutboxEntry, number> };
+  const queue = new Dexie(options.outboxName, { cache: 'disabled', indexedDB: versionedIndexedDB(Dexie.dependencies.indexedDB, 2) }) as Dexie & { entries: Table<ReducerOutboxEntry, number> };
   // SDK fences and peer notifications own journal delivery. These stores are
   // never used by Dexie.liveQuery; its mutation ranges and cache transaction
   // observers add unused allocations and callbacks to durable admission.
@@ -30,7 +32,7 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
   queue.unuse({ stack: 'dbcore', name: 'Observability' });
   queue.version(1).stores({ entries: "++id, state, nextAttemptAt" });
   queue.version(2).stores({ entries: "++id, scope, state, nextAttemptAt, [scope+state], [scope+nextAttemptAt]" });
-  const meta = new Dexie(`${options.replicaName}-upgrades`, { cache: 'disabled' }) as Dexie & { state: Table<UpgradeRecord, string> };
+  const meta = new Dexie(`${options.replicaName}-upgrades`, { cache: 'disabled', indexedDB: versionedIndexedDB(Dexie.dependencies.indexedDB, 1) }) as Dexie & { state: Table<UpgradeRecord, string> };
   meta.unuse({ stack: 'dbcore', name: 'Cache' });
   meta.unuse({ stack: 'dbcore', name: 'Observability' });
   meta.version(1).stores({ state: "&key" });
@@ -213,7 +215,7 @@ export function browserUpgradeStorage(options: BrowserUpgradeOptions): {
       replacePending: (id, draft) => guarded(async () => {
         const entry = await queue.transaction('rw', queue.entries, async () => {
           const prior = await queue.entries.get(id);
-          if (!prior || prior.scope !== draft.scope || prior.path !== draft.path || prior.coalesceKey !== draft.coalesceKey || prior.state !== 'pending' || prior.sentAt !== undefined || prior.attempts || prior.lastError) return undefined;
+          if (!coalescingAdmission(draft.state, draft.knownUnsent) || !prior || !coalescingAdmission(prior.state, prior.knownUnsent) || prior.scope !== draft.scope || prior.path !== draft.path || prior.coalesceKey !== draft.coalesceKey || prior.sentAt !== undefined || prior.attempts || prior.lastError) return undefined;
           const next = { ...draft, id };
           await queue.entries.put(next);
           return next;

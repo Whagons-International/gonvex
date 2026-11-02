@@ -1,10 +1,11 @@
+import { OutboxRecoveryError, coalescingAdmission } from "@gonvex/client";
 import type { OutboxStore, ReducerOutboxEntry, ReducerOutboxState } from "@gonvex/client";
 import type { ExpoSQLiteDatabase } from "./index.js";
 import { withSQLiteOperation } from './database-operations.js';
 
 const outboxStates: ReadonlySet<ReducerOutboxState> = new Set(["pending", "inflight", "committed", "failed", "rejected"]);
 
-type OutboxRow = { value: string };
+type OutboxRow = { id: number; scope_json: string; intent_key_json: string; state: string; value: string };
 
 /**
  * Durable reducer outbox storage on Expo SQLite.
@@ -19,7 +20,7 @@ type OutboxRow = { value: string };
  * one; the tables are prefixed with `_gonvex_outbox`.
  */
 export class ExpoSQLiteOutboxStore implements OutboxStore {
-  readonly strictPersistence = false;
+  readonly strictPersistence = true;
   private initialized?: Promise<void>;
 
   constructor(private readonly database: ExpoSQLiteDatabase) {}
@@ -27,11 +28,11 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
   load(scope?: string): Promise<ReducerOutboxEntry[]> {
     return this.serial(async () => {
       const rows = scope === undefined
-        ? await this.database.getAllAsync<OutboxRow>(`SELECT value FROM _gonvex_outbox ORDER BY id`)
-        : await this.database.getAllAsync<OutboxRow>(`SELECT value FROM _gonvex_outbox WHERE scope = ? ORDER BY id`, scope);
+        ? await this.database.getAllAsync<OutboxRow>(`SELECT id,json_quote(scope) AS scope_json,json_quote(idempotency_key) AS intent_key_json,state,value FROM _gonvex_outbox ORDER BY id`)
+        : await this.database.getAllAsync<OutboxRow>(`SELECT id,json_quote(scope) AS scope_json,json_quote(idempotency_key) AS intent_key_json,state,value FROM _gonvex_outbox WHERE scope = ? ORDER BY id`, scope);
       const entries: ReducerOutboxEntry[] = [];
       for (const row of rows) {
-        const entry = parseEntry(row.value);
+        const entry = parseRow(row);
         if (entry) entries.push(entry);
       }
       return entries;
@@ -75,14 +76,15 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
 
   update(id: number, change: (entry: ReducerOutboxEntry) => ReducerOutboxEntry): Promise<ReducerOutboxEntry | undefined> {
     return this.serial(() => this.transaction(async () => {
-      const row = await this.database.getFirstAsync<OutboxRow>(`SELECT value FROM _gonvex_outbox WHERE id = ?`, id);
-      const prior = row ? parseEntry(row.value) : undefined;
+      const row = await this.database.getFirstAsync<OutboxRow>(`SELECT id,json_quote(scope) AS scope_json,json_quote(idempotency_key) AS intent_key_json,state,value FROM _gonvex_outbox WHERE id = ?`, id);
+      const prior = row ? parseRow(row) : undefined;
       if (!prior) return undefined;
+      const scope = prior.scope, intentKey = prior.idempotencyKey;
       const next = change(prior);
-      if (next.id !== prior.id || next.scope !== prior.scope || next.idempotencyKey !== prior.idempotencyKey) {
+      if (next.id !== id || next.scope !== scope || next.idempotencyKey !== intentKey) {
         throw new Error("Outbox identity cannot change");
       }
-      if (JSON.stringify(next) !== JSON.stringify(prior)) await this.write(next);
+      if (JSON.stringify(next) !== row!.value) await this.write(next);
       return next;
     }));
   }
@@ -91,12 +93,13 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
     return this.serial(() => this.transaction(async () => {
       const entries: ReducerOutboxEntry[] = [];
       for (const id of ids) {
-        const row = await this.database.getFirstAsync<OutboxRow>(`SELECT value FROM _gonvex_outbox WHERE id = ?`, id);
-        const prior = row ? parseEntry(row.value) : undefined;
+        const row = await this.database.getFirstAsync<OutboxRow>(`SELECT id,json_quote(scope) AS scope_json,json_quote(idempotency_key) AS intent_key_json,state,value FROM _gonvex_outbox WHERE id = ?`, id);
+        const prior = row ? parseRow(row) : undefined;
         if (!prior) continue;
+        const scope = prior.scope, intentKey = prior.idempotencyKey;
         const next = change(prior);
-        if (next.id !== prior.id || next.scope !== prior.scope || next.idempotencyKey !== prior.idempotencyKey) throw new Error("Outbox identity cannot change");
-        if (JSON.stringify(next) !== JSON.stringify(prior)) await this.write(next);
+        if (next.id !== id || next.scope !== scope || next.idempotencyKey !== intentKey) throw new Error("Outbox identity cannot change");
+        if (JSON.stringify(next) !== row!.value) await this.write(next);
         entries.push(next);
       }
       return entries;
@@ -105,9 +108,9 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
 
   replacePending(id: number, draft: Omit<ReducerOutboxEntry, "id">): Promise<ReducerOutboxEntry | undefined> {
     return this.serial(() => this.transaction(async () => {
-      const row = await this.database.getFirstAsync<OutboxRow>(`SELECT value FROM _gonvex_outbox WHERE id = ?`, id);
-      const prior = row ? parseEntry(row.value) : undefined;
-      if (!prior || prior.scope !== draft.scope || prior.path !== draft.path || prior.coalesceKey !== draft.coalesceKey || prior.state !== "pending" || prior.sentAt !== undefined || prior.attempts || prior.lastError) return undefined;
+      const row = await this.database.getFirstAsync<OutboxRow>(`SELECT id,json_quote(scope) AS scope_json,json_quote(idempotency_key) AS intent_key_json,state,value FROM _gonvex_outbox WHERE id = ?`, id);
+      const prior = row ? parseRow(row) : undefined;
+      if (!coalescingAdmission(draft.state, draft.knownUnsent) || !prior || !coalescingAdmission(prior.state, prior.knownUnsent) || prior.scope !== draft.scope || prior.path !== draft.path || prior.coalesceKey !== draft.coalesceKey || prior.sentAt !== undefined || prior.attempts || prior.lastError) return undefined;
       const next = { ...draft, id };
       await this.write(next);
       return next;
@@ -119,8 +122,9 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
    * an app kept under an AsyncStorage key). Runs in one transaction and is
    * idempotent: an entry whose scope and idempotency key already exist is
    * skipped, so re-running after a crash never duplicates an intent. Legacy
-   * ids are preserved to keep enqueue order; an id already taken by a
-   * different intent gets a fresh sequence id.
+   * ids are preserved where compatible with enqueue order. Collisions and
+   * subsequent rows receive fresh positions together. Conflicting existing
+   * positions abort the import, retaining the source for recovery.
    */
   importLegacy(legacy: string | readonly unknown[] | null | undefined): Promise<LegacyOutboxImport> {
     const parsed = typeof legacy === "string" ? JSON.parse(legacy) as unknown : legacy;
@@ -132,20 +136,31 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
         .filter((entry): entry is ReducerOutboxEntry => entry !== undefined)
         .sort((left, right) => left.id - right.id);
       const result: LegacyOutboxImport = { imported: 0, skipped: 0, invalid: parsed.length - sorted.length };
+      let previousId = 0;
       for (const entry of sorted) {
-        const existing = await this.database.getFirstAsync<{ id: number }>(
-          `SELECT id FROM _gonvex_outbox WHERE scope = ? AND idempotency_key = ?`, entry.scope, entry.idempotencyKey,
+        const existingRow = await this.database.getFirstAsync<OutboxRow>(
+          `SELECT id,json_quote(scope) AS scope_json,json_quote(idempotency_key) AS intent_key_json,state,value FROM _gonvex_outbox WHERE scope = ? AND idempotency_key = ?`, entry.scope, entry.idempotencyKey,
         );
-        if (existing) { result.skipped += 1; continue; }
+        if (existingRow) {
+          const existing = parseRow(existingRow);
+          if (existing.id < previousId) throw new OutboxRecoveryError("Legacy outbox order conflicts with existing command positions; recovery is required");
+          previousId = existing.id;
+          result.skipped += 1;
+          continue;
+        }
         const taken = await this.database.getFirstAsync<{ id: number }>(`SELECT id FROM _gonvex_outbox WHERE id = ?`, entry.id);
         // A legacy row that was mid-send when the app died is resumed exactly
         // like the SDK's own crash recovery: back to pending, same key.
         const imported: ReducerOutboxEntry = {
           ...entry,
-          ...(taken ? { id: await this.reserveId() } : {}),
+          knownUnsent: false,
+          // Once an earlier collision moved the sequence forward, later
+          // legacy rows must move with it to retain their enqueue order.
+          ...(taken || entry.id <= previousId ? { id: await this.reserveId() } : {}),
           ...(entry.state === "inflight" ? { state: "pending" as const } : {}),
         };
         await this.write(imported);
+        previousId = imported.id;
         result.imported += 1;
       }
       return result;
@@ -193,7 +208,13 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
   private async reserveId(): Promise<number> {
     const counter = await this.database.getFirstAsync<{ value: number }>(`SELECT value FROM _gonvex_outbox_meta WHERE key = 'sequence'`);
     const highest = await this.database.getFirstAsync<{ id: number | null }>(`SELECT MAX(id) AS id FROM _gonvex_outbox`);
-    const id = Math.max(Number(counter?.value ?? 0), Number(highest?.id ?? 0)) + 1;
+    const allocated = counter?.value ?? 0, maximum = highest?.id ?? 0;
+    if (!Number.isSafeInteger(allocated) || allocated < 0 || !Number.isSafeInteger(maximum) || maximum < 0) {
+      throw new OutboxRecoveryError("Invalid durable SQLite outbox sequence; recovery is required");
+    }
+    const previous = Math.max(allocated, maximum);
+    if (previous >= Number.MAX_SAFE_INTEGER) throw new OutboxRecoveryError("Durable SQLite outbox sequence is exhausted; recovery is required");
+    const id = previous + 1;
     await this.database.runAsync(
       `INSERT INTO _gonvex_outbox_meta (key, value) VALUES ('sequence', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       id,
@@ -202,6 +223,7 @@ export class ExpoSQLiteOutboxStore implements OutboxStore {
   }
 
   private async write(entry: ReducerOutboxEntry) {
+    if (!validEntry(entry)) throw new OutboxRecoveryError("Invalid durable SQLite outbox intent; recovery is required");
     await this.database.runAsync(
       `INSERT OR REPLACE INTO _gonvex_outbox (id, scope, idempotency_key, state, value) VALUES (?, ?, ?, ?, ?)`,
       entry.id, entry.scope, entry.idempotencyKey, entry.state, JSON.stringify(entry),
@@ -230,7 +252,8 @@ export type LegacyKeyValueStorage = {
 /**
  * One-time move of a legacy AsyncStorage outbox blob into SQLite. Run it
  * before constructing the GonvexClient. The legacy key is removed only after
- * the import committed; an unreadable blob throws and is left untouched so no
+ * the import committed and every row was recognized. An unreadable or partially
+ * unresolved blob throws and is left untouched so no
  * intent is ever lost. Safe to call on every launch.
  */
 export async function migrateLegacyOutbox(options: {
@@ -241,16 +264,30 @@ export async function migrateLegacyOutbox(options: {
   const raw = await options.storage.getItem(options.key);
   if (raw === null || raw === undefined) return { imported: 0, skipped: 0, invalid: 0 };
   const result = await options.store.importLegacy(raw);
+  // An explicit invalid count does not authorize deleting unknown history.
+  // Keep the whole source until every row has a recognized owner and intent.
+  if (result.invalid > 0) throw new OutboxRecoveryError("Legacy outbox contains unresolved intents; the original source was retained");
   await options.storage.removeItem(options.key);
   return result;
 }
 
-function parseEntry(value: string): ReducerOutboxEntry | undefined {
-  try {
-    return validEntry(JSON.parse(value));
-  } catch {
-    return undefined;
+function parseEntry(value: string): ReducerOutboxEntry {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); }
+  catch (cause) { throw new OutboxRecoveryError("Invalid durable SQLite outbox JSON; recovery is required", { cause }); }
+  const entry = validEntry(parsed);
+  if (!entry) throw new OutboxRecoveryError("Invalid durable SQLite outbox intent; recovery is required");
+  return entry;
+}
+
+function parseRow(row: OutboxRow): ReducerOutboxEntry {
+  const entry = parseEntry(row.value);
+  // Some SQLite bridges truncate TEXT at embedded NULs. JSON quoting in SQL
+  // preserves the complete indexed owner/key before the bridge reads them.
+  if (entry.id !== row.id || entry.scope !== JSON.parse(row.scope_json) || entry.idempotencyKey !== JSON.parse(row.intent_key_json) || entry.state !== row.state) {
+    throw new OutboxRecoveryError("Inconsistent durable SQLite outbox identity or state; recovery is required");
   }
+  return entry;
 }
 
 function validEntry(value: unknown): ReducerOutboxEntry | undefined {
@@ -259,7 +296,8 @@ function validEntry(value: unknown): ReducerOutboxEntry | undefined {
   if (
     typeof entry.id !== "number" || !Number.isSafeInteger(entry.id) || entry.id <= 0
     || typeof entry.scope !== "string" || entry.scope.length === 0
-    || typeof entry.path !== "string"
+    || typeof entry.path !== "string" || entry.path.length === 0
+    || !Object.prototype.hasOwnProperty.call(entry, "args") || entry.args === undefined
     || typeof entry.idempotencyKey !== "string" || entry.idempotencyKey.length === 0
     || typeof entry.state !== "string" || !outboxStates.has(entry.state)
   ) return undefined;

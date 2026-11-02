@@ -1,0 +1,131 @@
+// Closed AST publication contract. Compared to production methods by the verifier.
+// Equality guards rely on the separately proved ownsCurrentScope predicate.
+class PublicationContract {
+  private capturePublicationOwner() {
+    const scope = this.replicaScope;
+    const activation = this.receiptReconciliationGeneration;
+    const outboxGeneration = this.outboxScopeGeneration;
+    const socketGeneration = this.socketGeneration;
+    return () => ownsCurrentScope(scope, this.replicaScope, activation,
+      this.receiptReconciliationGeneration, this.manuallyClosed)
+      && outboxGeneration === this.outboxScopeGeneration && socketGeneration === this.socketGeneration;
+  }
+
+  private captureQueryPublication(subscription: QuerySubscription, scope: ReplicaScope, id: string) {
+    const current = this.capturePublicationOwner();
+    return () => current() && this.querySubscriptions.get(subscription.key) === subscription
+      && subscription.id === id && scope === this.replicaScope && subscription.scope === scope;
+  }
+
+  private captureReplicaPublication(subscription: ReplicaSubscription, scope: ReplicaScope, id: string) {
+    const current = this.capturePublicationOwner();
+    const generation = subscription.verificationGeneration;
+    return () => current() && this.ownsReplicaSubscription(subscription)
+      && subscription.id === id && scope === this.replicaScope && subscription.scope === scope
+      && generation === subscription.verificationGeneration;
+  }
+
+  private registerQueryHandler(subscription: QuerySubscription) {
+    this.handlers.set(subscription.id, (message) => {
+      const scope = subscription.scope ?? this.replicaScope;
+      const current = this.captureQueryPublication(subscription, scope, subscription.id);
+      void this.handleQueryMessage(subscription, message, scope)?.catch(() => {
+        if (current()) this.replica.setFreshness("verifying");
+      });
+    });
+  }
+
+  private handleQueryMessage(subscription: QuerySubscription, message: ServerMessage, scope = this.replicaScope) {
+      if (!("id" in message) || typeof message.id !== "string") return;
+      const owns = this.captureQueryPublication(subscription, scope, message.id);
+      if (!owns()) return;
+      const serverResult = message.type === "query.result";
+      const normalized = this.normalizeSubscriptionMessage(subscription, message);
+      if (!normalized || !owns() || (normalized.type !== "query.result" && normalized.type !== "query.error")) return;
+      message = normalized;
+      const current = owns;
+      if (message.type === "query.result") {
+        subscription.serverSettled = true;
+        subscription.lastMessage = message;
+        this.recordTelemetry({
+          type: "query",
+          id: message.id,
+          path: subscription.path,
+          reason: message.reason,
+          outcome: "ok",
+          clientReceivedAtMs: nowMs(),
+          serverTrace: message.trace,
+        }, serverResult);
+      }
+      if (message.type === "query.error") {
+        subscription.serverSettled = true;
+        subscription.lastMessage = message;
+        this.recordTelemetry({
+          type: "query",
+          id: message.id,
+          path: subscription.path,
+          outcome: "error",
+          error: message.error,
+          clientReceivedAtMs: nowMs(),
+        });
+      }
+      // Normalize the wire base immediately, but commit and publish in order.
+      // A later error or non-row result must not pass an older storage write.
+      const previous = subscription.publication;
+      const publish = () => this.publishQueryMessage(subscription, normalized, scope, current);
+      const publication = previous ? previous.catch(() => undefined).then(publish) : publish();
+      subscription.publication = publication;
+      const clear = () => { if (subscription.publication === publication) subscription.publication = undefined; };
+      void publication.then(clear, clear);
+      return publication;
+  }
+
+  private async publishQueryMessage(
+    subscription: QuerySubscription,
+    message: Extract<ServerMessage, { type: "query.result" | "query.error" }>,
+    scope: ReplicaScope,
+    current: () => boolean,
+  ) {
+      if (!current()) return;
+      if (message.type === "query.result" && subscription.live) {
+        // Local Replica is the source of truth for normalized Live Query
+        // reads. Publish the query callback only after its entity/membership
+        // window has been durably committed and atomically swapped.
+        try {
+          await this.materializeLiveQuery(subscription, message, scope);
+        } catch {
+          if (current()) this.replica.setFreshness("verifying");
+          if (current()) this.requestSubscriptionSnapshot(subscription);
+          return;
+        }
+        if (!current()) return;
+      }
+      if (message.type === "query.result") {
+        this.acknowledgeOptimisticSource(subscription.key, message.originCommandIds);
+        if (!current()) return;
+        this.acknowledgeOptimisticQuerySnapshot(subscription, message.result);
+      }
+      if (!current()) return;
+      subscription.publishedMessage = message;
+      const outgoing = this.materializeQueryMessage(subscription, message);
+      for (const listener of Array.from(subscription.listeners)) {
+        if (!current()) return;
+        if (subscription.listeners.has(listener)) listener(outgoing);
+      }
+
+  }
+
+  private emitReplicaMessage(subscription: ReplicaSubscription, message: ReplicaMessage, scope = this.replicaScope) {
+    const current = this.captureReplicaPublication(subscription, scope, message.id);
+    if (!current()) return;
+    // Hook observers consume metadata only; their rows come from Local Replica.
+    // Materialize a payload only when a public transport consumer needs it.
+    let outgoing: ReplicaMessage | undefined;
+    for (const listener of Array.from(subscription.listeners)) {
+      if (!current()) return;
+      if (!subscription.listeners.has(listener)) continue;
+      if (this.replicaMetadataListeners.has(listener)) listener(message);
+      else listener(outgoing ??= this.materializeReplicaMessage(subscription, message));
+    }
+  }
+}

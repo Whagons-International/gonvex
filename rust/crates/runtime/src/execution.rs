@@ -24,6 +24,9 @@ use crate::host_calls::{DatabaseCapability, DatabaseHostCalls, SCHEDULE_OUTBOX_P
 use crate::modules::ModuleCallLease;
 use crate::Runtime;
 
+/// Framework-only tenant Query. It must never enter application execution.
+pub(crate) const REDUCER_RECEIPT_QUERY: &str = "__gonvex.reducerReceipt";
+
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     #[error("project {0:?} has no active TypeScript module")]
@@ -123,8 +126,121 @@ impl Runtime {
         path: &str,
         args: Value,
     ) -> Result<Value, ExecutionError> {
+        if path == REDUCER_RECEIPT_QUERY {
+            return self.reducer_receipt_status(session, args).await;
+        }
         self.execute_tenant_query_with_access(session, path, args, ExecutionAccess::default())
             .await
+    }
+
+    async fn reducer_receipt_status(
+        &self,
+        session: &TenantSession,
+        args: Value,
+    ) -> Result<Value, ExecutionError> {
+        if session.is_anonymous() {
+            return Err(ExecutionError::HostCall(
+                "receipt lookup requires an authenticated tenant".into(),
+            ));
+        }
+        let key = args
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty());
+        let path = args
+            .get("receiptPath")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty());
+        let (Some(key), Some(path)) = (key, path) else {
+            return Err(ExecutionError::InvalidArguments {
+                path: REDUCER_RECEIPT_QUERY.into(),
+                message: "idempotencyKey and receiptPath are required".into(),
+            });
+        };
+        let control = self
+            .inner
+            .control_plane
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| ExecutionError::ModuleMissing(session.identity.project_id.clone()))?;
+        // One repeatable-read, read-only snapshot includes membership, receipt
+        // and clock. No claim, application handler or cached result is exposed.
+        let mut transaction = control
+            .begin_tenant_transaction(&session.route, true)
+            .await?;
+        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+            .bind(format!(
+                "{}ms",
+                self.inner.config.module_host.execution_timeout.as_millis()
+            ))
+            .execute(&mut **transaction.transaction())
+            .await
+            .map_err(gonvex_postgres::DatabaseError::from)?;
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM members WHERE id=$1 AND account_id=$2 AND status='active')")
+            .bind(&session.member.id).bind(&session.identity.account.id)
+            .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_postgres::DatabaseError::from)?;
+        if !active {
+            return Err(gonvex_postgres::DatabaseError::MemberNotFound(
+                session.identity.account.id.clone(),
+            )
+            .into());
+        }
+        let tables = sqlx::query("SELECT to_regclass('_gonvex_reducer_idempotency') IS NOT NULL AS current, to_regclass('_gonvex_mutation_idempotency') IS NOT NULL AS legacy")
+            .fetch_one(&mut **transaction.transaction()).await.map_err(gonvex_postgres::DatabaseError::from)?;
+        let current: bool = tables.get("current");
+        let legacy: bool = tables.get("legacy");
+        if current && legacy {
+            return Err(ExecutionError::HostCall(
+                "ambiguous current and legacy receipt history requires recovery".into(),
+            ));
+        }
+        let sql = if current {
+            "SELECT path, result IS NOT NULL AS complete FROM _gonvex_reducer_idempotency WHERE subject=$1 AND idempotency_key=$2"
+        } else if legacy {
+            "SELECT path, result IS NOT NULL AS complete FROM _gonvex_mutation_idempotency WHERE subject=$1 AND idempotency_key=$2"
+        } else {
+            transaction.commit().await?;
+            return Ok(serde_json::json!({"found":false}));
+        };
+        let receipt = sqlx::query(sql)
+            .bind(&session.identity.account.id)
+            .bind(key)
+            .fetch_optional(&mut **transaction.transaction())
+            .await
+            .map_err(gonvex_postgres::DatabaseError::from)?;
+        let Some(receipt) = receipt else {
+            transaction.commit().await?;
+            return Ok(serde_json::json!({"found":false}));
+        };
+        let stored_path: String = receipt.get("path");
+        if stored_path != path {
+            return Err(gonvex_postgres::DatabaseError::IdempotencyPathMismatch {
+                key: key.into(),
+                stored_path,
+                requested_path: path.into(),
+            }
+            .into());
+        }
+        if !receipt.get::<bool, _>("complete") {
+            transaction.commit().await?;
+            return Ok(serde_json::json!({"found":false}));
+        }
+        let clock =
+            sqlx::query("SELECT epoch,revision FROM _gonvex_sync_clock WHERE singleton=true")
+                .fetch_one(&mut **transaction.transaction())
+                .await
+                .map_err(gonvex_postgres::DatabaseError::from)?;
+        let epoch: String = clock.get("epoch");
+        let revision: i64 = clock.get("revision");
+        if epoch.is_empty() || !(0..=9_007_199_254_740_991).contains(&revision) {
+            return Err(ExecutionError::HostCall(
+                "receipt clock cannot be represented by the SDK".into(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(serde_json::json!({"found":true,"cursor":{"epoch":epoch,"revision":revision}}))
     }
 
     pub(crate) async fn execute_tenant_query_with_access(

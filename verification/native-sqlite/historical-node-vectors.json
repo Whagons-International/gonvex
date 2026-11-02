@@ -1,0 +1,3711 @@
+{
+  "origin": {
+    "driver": "Node SQLite, not Expo/Hermes; native platform envelopes in unit tests are synthetic",
+    "runtime": {
+      "node": "v22.23.4",
+      "sqlite": [
+        "3.53.4"
+      ],
+      "textBindings": "native-Node"
+    },
+    "sourceSha256": {
+      "verification/native-sqlite/historical.mjs": "83f17a4ca4860486f6eb7f57c82abb8fc7d9c7d026be581c3fbcb65f0309027a",
+      "verification/native-sqlite/historical-node.mjs": "a2e19ead0661ad2d98140ea5e0a10710831877cf73c75e69ecd2b05fda5623b4",
+      "packages/expo-sqlite/src/index.ts": "c2b870dcfde414bde3735b52b27e6064bfe006cd4772633c1390c638f107ca2f",
+      "packages/expo-sqlite/src/outbox.ts": "23ed2495c73957d252b23ec0ed6a69ea4eb8fc58c98de0203a9fe6b5c6ed19bd",
+      "packages/client/src/outbox.ts": "82f80923898053cae7d5f4aa890db141aeae357fccdb62add277b77f53955df8"
+    }
+  },
+  "phases": {
+    "historical-seed": {
+      "type": "historical-seeded",
+      "cases": [
+        {
+          "variant": "unscoped",
+          "raw": {
+            "schema": [
+              {
+                "type": "index",
+                "name": "sqlite_autoindex__gonvex_replica_entities_1",
+                "tbl_name": "_gonvex_replica_entities",
+                "sql": null
+              },
+              {
+                "type": "index",
+                "name": "sqlite_autoindex__gonvex_replica_meta_1",
+                "tbl_name": "_gonvex_replica_meta",
+                "sql": null
+              },
+              {
+                "type": "index",
+                "name": "sqlite_autoindex__gonvex_replica_queries_1",
+                "tbl_name": "_gonvex_replica_queries",
+                "sql": null
+              },
+              {
+                "type": "table",
+                "name": "_gonvex_replica_entities",
+                "tbl_name": "_gonvex_replica_entities",
+                "sql": "CREATE TABLE _gonvex_replica_entities(entity TEXT,id TEXT,value TEXT,PRIMARY KEY(entity,id))"
+              },
+              {
+                "type": "table",
+                "name": "_gonvex_replica_meta",
+                "tbl_name": "_gonvex_replica_meta",
+                "sql": "CREATE TABLE _gonvex_replica_meta(key TEXT,value TEXT,PRIMARY KEY(key))"
+              },
+              {
+                "type": "table",
+                "name": "_gonvex_replica_queries",
+                "tbl_name": "_gonvex_replica_queries",
+                "sql": "CREATE TABLE _gonvex_replica_queries(signature TEXT,value TEXT,PRIMARY KEY(signature))"
+              }
+            ],
+            "tables": {
+              "entities": [
+                {
+                  "entity": "7461736B73",
+                  "id": "61",
+                  "value": "7B226964223A2261222C22706172656E744964223A2270222C227469746C65223A2264656661756C745C753030303070726976617465227D"
+                },
+                {
+                  "entity": "7461736B73",
+                  "id": "676F6E65",
+                  "value": "6E756C6C"
+                }
+              ],
+              "queries": [
+                {
+                  "signature": "7461736B732E616C6C007B22706172656E744964223A2270227D",
+                  "value": "7B227369676E6174757265223A227461736B732E616C6C5C75303030307B5C22706172656E7449645C223A5C22705C227D222C226B696E64223A227265706C696361222C22656E74697479223A227461736B73222C226B6579223A226964222C22696473223A5B2261225D2C22637572736F72223A7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D2C22636F6D706C6574656E657373223A22636F6D706C657465222C22736F75726365223A22736572766572227D"
+                }
+              ],
+              "meta": [
+                {
+                  "key": "637572736F72",
+                  "value": "7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D"
+                }
+              ]
+            },
+            "appVersion": {
+              "user_version": 700
+            }
+          },
+          "legacy": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "sync": {
+            "synchronous": 2
+          },
+          "journal": {
+            "journal_mode": "delete"
+          }
+        },
+        {
+          "variant": "scoped",
+          "raw": {
+            "schema": [
+              {
+                "type": "index",
+                "name": "sqlite_autoindex__gonvex_replica_entities_1",
+                "tbl_name": "_gonvex_replica_entities",
+                "sql": null
+              },
+              {
+                "type": "index",
+                "name": "sqlite_autoindex__gonvex_replica_meta_1",
+                "tbl_name": "_gonvex_replica_meta",
+                "sql": null
+              },
+              {
+                "type": "index",
+                "name": "sqlite_autoindex__gonvex_replica_queries_1",
+                "tbl_name": "_gonvex_replica_queries",
+                "sql": null
+              },
+              {
+                "type": "table",
+                "name": "_gonvex_replica_entities",
+                "tbl_name": "_gonvex_replica_entities",
+                "sql": "CREATE TABLE _gonvex_replica_entities(scope TEXT,entity TEXT,id TEXT,value TEXT,PRIMARY KEY(scope,entity,id))"
+              },
+              {
+                "type": "table",
+                "name": "_gonvex_replica_meta",
+                "tbl_name": "_gonvex_replica_meta",
+                "sql": "CREATE TABLE _gonvex_replica_meta(scope TEXT,key TEXT,value TEXT,PRIMARY KEY(scope,key))"
+              },
+              {
+                "type": "table",
+                "name": "_gonvex_replica_queries",
+                "tbl_name": "_gonvex_replica_queries",
+                "sql": "CREATE TABLE _gonvex_replica_queries(scope TEXT,signature TEXT,value TEXT,PRIMARY KEY(scope,signature))"
+              }
+            ],
+            "tables": {
+              "entities": [
+                {
+                  "scope": "616C696365",
+                  "entity": "7461736B73",
+                  "id": "61",
+                  "value": "7B226964223A2261222C22706172656E744964223A2270222C227469746C65223A22616C6963655C753030303070726976617465227D"
+                },
+                {
+                  "scope": "616C696365",
+                  "entity": "7461736B73",
+                  "id": "676F6E65",
+                  "value": "6E756C6C"
+                },
+                {
+                  "scope": "626F62",
+                  "entity": "7461736B73",
+                  "id": "62",
+                  "value": "7B226964223A2262222C22706172656E744964223A2270222C227469746C65223A22626F625C753030303070726976617465227D"
+                },
+                {
+                  "scope": "626F62",
+                  "entity": "7461736B73",
+                  "id": "676F6E65",
+                  "value": "6E756C6C"
+                }
+              ],
+              "queries": [
+                {
+                  "scope": "616C696365",
+                  "signature": "7461736B732E616C6C007B22706172656E744964223A2270227D",
+                  "value": "7B227369676E6174757265223A227461736B732E616C6C5C75303030307B5C22706172656E7449645C223A5C22705C227D222C226B696E64223A227265706C696361222C22656E74697479223A227461736B73222C226B6579223A226964222C22696473223A5B2261225D2C22637572736F72223A7B2265706F6368223A22686973746F726963616C2D616C696365222C227265766973696F6E223A377D2C22636F6D706C6574656E657373223A22636F6D706C657465222C22736F75726365223A22736572766572227D"
+                },
+                {
+                  "scope": "626F62",
+                  "signature": "7461736B732E616C6C007B22706172656E744964223A2270227D",
+                  "value": "7B227369676E6174757265223A227461736B732E616C6C5C75303030307B5C22706172656E7449645C223A5C22705C227D222C226B696E64223A227265706C696361222C22656E74697479223A227461736B73222C226B6579223A226964222C22696473223A5B2262225D2C22637572736F72223A7B2265706F6368223A22686973746F726963616C2D626F62222C227265766973696F6E223A377D2C22636F6D706C6574656E657373223A22636F6D706C657465222C22736F75726365223A22736572766572227D"
+                }
+              ],
+              "meta": [
+                {
+                  "scope": "616C696365",
+                  "key": "637572736F72",
+                  "value": "7B2265706F6368223A22686973746F726963616C2D616C696365222C227265766973696F6E223A377D"
+                },
+                {
+                  "scope": "626F62",
+                  "key": "637572736F72",
+                  "value": "7B2265706F6368223A22686973746F726963616C2D626F62222C227265766973696F6E223A377D"
+                }
+              ]
+            },
+            "appVersion": {
+              "user_version": 700
+            }
+          },
+          "legacy": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "sync": {
+            "synchronous": 2
+          },
+          "journal": {
+            "journal_mode": "delete"
+          }
+        }
+      ],
+      "runtime": {
+        "node": "v22.23.4",
+        "sqlite": [
+          "3.53.4"
+        ],
+        "textBindings": "native-Node"
+      }
+    },
+    "historical-replica-held": {
+      "type": "historical-replica-write-held",
+      "variant": "unscoped",
+      "successfulEntityStatement": true,
+      "original": {
+        "schema": [
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_entities_1",
+            "tbl_name": "_gonvex_replica_entities",
+            "sql": null
+          },
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_meta_1",
+            "tbl_name": "_gonvex_replica_meta",
+            "sql": null
+          },
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_queries_1",
+            "tbl_name": "_gonvex_replica_queries",
+            "sql": null
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_entities",
+            "tbl_name": "_gonvex_replica_entities",
+            "sql": "CREATE TABLE _gonvex_replica_entities(entity TEXT,id TEXT,value TEXT,PRIMARY KEY(entity,id))"
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_meta",
+            "tbl_name": "_gonvex_replica_meta",
+            "sql": "CREATE TABLE _gonvex_replica_meta(key TEXT,value TEXT,PRIMARY KEY(key))"
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_queries",
+            "tbl_name": "_gonvex_replica_queries",
+            "sql": "CREATE TABLE _gonvex_replica_queries(signature TEXT,value TEXT,PRIMARY KEY(signature))"
+          }
+        ],
+        "tables": {
+          "entities": [
+            {
+              "entity": "7461736B73",
+              "id": "61",
+              "value": "7B226964223A2261222C22706172656E744964223A2270222C227469746C65223A2264656661756C745C753030303070726976617465227D"
+            },
+            {
+              "entity": "7461736B73",
+              "id": "676F6E65",
+              "value": "6E756C6C"
+            }
+          ],
+          "queries": [
+            {
+              "signature": "7461736B732E616C6C007B22706172656E744964223A2270227D",
+              "value": "7B227369676E6174757265223A227461736B732E616C6C5C75303030307B5C22706172656E7449645C223A5C22705C227D222C226B696E64223A227265706C696361222C22656E74697479223A227461736B73222C226B6579223A226964222C22696473223A5B2261225D2C22637572736F72223A7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D2C22636F6D706C6574656E657373223A22636F6D706C657465222C22736F75726365223A22736572766572227D"
+            }
+          ],
+          "meta": [
+            {
+              "key": "637572736F72",
+              "value": "7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D"
+            }
+          ]
+        },
+        "appVersion": {
+          "user_version": 700
+        }
+      },
+      "migratedRowsInsideTransaction": [
+        {
+          "scope": "default",
+          "entity": "tasks",
+          "id": "a",
+          "value": "{\"id\":\"a\",\"parentId\":\"p\",\"title\":\"default\\u0000private\"}"
+        },
+        {
+          "scope": "default",
+          "entity": "tasks",
+          "id": "gone",
+          "value": "null"
+        }
+      ],
+      "checkpointInsideTransaction": [],
+      "sync": {
+        "synchronous": 2
+      },
+      "journal": {
+        "journal_mode": "delete"
+      },
+      "runtime": {
+        "node": "v22.23.4",
+        "sqlite": [
+          "3.53.4"
+        ],
+        "textBindings": "native-Node"
+      }
+    },
+    "historical-journal-held": {
+      "type": "historical-journal-write-held",
+      "variant": "unscoped",
+      "successfulAcceptedStatement": true,
+      "original": {
+        "schema": [
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_entities_1",
+            "tbl_name": "_gonvex_replica_entities",
+            "sql": null
+          },
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_meta_1",
+            "tbl_name": "_gonvex_replica_meta",
+            "sql": null
+          },
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_queries_1",
+            "tbl_name": "_gonvex_replica_queries",
+            "sql": null
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_entities",
+            "tbl_name": "_gonvex_replica_entities",
+            "sql": "CREATE TABLE _gonvex_replica_entities(entity TEXT,id TEXT,value TEXT,PRIMARY KEY(entity,id))"
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_meta",
+            "tbl_name": "_gonvex_replica_meta",
+            "sql": "CREATE TABLE _gonvex_replica_meta(key TEXT,value TEXT,PRIMARY KEY(key))"
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_queries",
+            "tbl_name": "_gonvex_replica_queries",
+            "sql": "CREATE TABLE _gonvex_replica_queries(signature TEXT,value TEXT,PRIMARY KEY(signature))"
+          }
+        ],
+        "tables": {
+          "entities": [
+            {
+              "entity": "7461736B73",
+              "id": "61",
+              "value": "7B226964223A2261222C22706172656E744964223A2270222C227469746C65223A2264656661756C745C753030303070726976617465227D"
+            },
+            {
+              "entity": "7461736B73",
+              "id": "676F6E65",
+              "value": "6E756C6C"
+            }
+          ],
+          "queries": [
+            {
+              "signature": "7461736B732E616C6C007B22706172656E744964223A2270227D",
+              "value": "7B227369676E6174757265223A227461736B732E616C6C5C75303030307B5C22706172656E7449645C223A5C22705C227D222C226B696E64223A227265706C696361222C22656E74697479223A227461736B73222C226B6579223A226964222C22696473223A5B2261225D2C22637572736F72223A7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D2C22636F6D706C6574656E657373223A22636F6D706C657465222C22736F75726365223A22736572766572227D"
+            }
+          ],
+          "meta": [
+            {
+              "key": "637572736F72",
+              "value": "7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D"
+            }
+          ]
+        },
+        "appVersion": {
+          "user_version": 700
+        }
+      },
+      "beforeMigration": {
+        "schema": [
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_entities_1",
+            "tbl_name": "_gonvex_replica_entities",
+            "sql": null
+          },
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_meta_1",
+            "tbl_name": "_gonvex_replica_meta",
+            "sql": null
+          },
+          {
+            "type": "index",
+            "name": "sqlite_autoindex__gonvex_replica_queries_1",
+            "tbl_name": "_gonvex_replica_queries",
+            "sql": null
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_entities",
+            "tbl_name": "_gonvex_replica_entities",
+            "sql": "CREATE TABLE _gonvex_replica_entities(entity TEXT,id TEXT,value TEXT,PRIMARY KEY(entity,id))"
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_meta",
+            "tbl_name": "_gonvex_replica_meta",
+            "sql": "CREATE TABLE _gonvex_replica_meta(key TEXT,value TEXT,PRIMARY KEY(key))"
+          },
+          {
+            "type": "table",
+            "name": "_gonvex_replica_queries",
+            "tbl_name": "_gonvex_replica_queries",
+            "sql": "CREATE TABLE _gonvex_replica_queries(signature TEXT,value TEXT,PRIMARY KEY(signature))"
+          }
+        ],
+        "tables": {
+          "entities": [
+            {
+              "entity": "7461736B73",
+              "id": "61",
+              "value": "7B226964223A2261222C22706172656E744964223A2270222C227469746C65223A2264656661756C745C753030303070726976617465227D"
+            },
+            {
+              "entity": "7461736B73",
+              "id": "676F6E65",
+              "value": "6E756C6C"
+            }
+          ],
+          "queries": [
+            {
+              "signature": "7461736B732E616C6C007B22706172656E744964223A2270227D",
+              "value": "7B227369676E6174757265223A227461736B732E616C6C5C75303030307B5C22706172656E7449645C223A5C22705C227D222C226B696E64223A227265706C696361222C22656E74697479223A227461736B73222C226B6579223A226964222C22696473223A5B2261225D2C22637572736F72223A7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D2C22636F6D706C6574656E657373223A22636F6D706C657465222C22736F75726365223A22736572766572227D"
+            }
+          ],
+          "meta": [
+            {
+              "key": "637572736F72",
+              "value": "7B2265706F6368223A22686973746F726963616C2D64656661756C74222C227265766973696F6E223A377D"
+            }
+          ]
+        },
+        "appVersion": {
+          "user_version": 700
+        }
+      },
+      "importedRowsInsideTransaction": [
+        {
+          "id": 1,
+          "state": "pending",
+          "value": "{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":false,\"sentAt\":90}"
+        },
+        {
+          "id": 2,
+          "state": "pending",
+          "value": "{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"pending\",\"knownUnsent\":false,\"sentAt\":91}"
+        },
+        {
+          "id": 3,
+          "state": "committed",
+          "value": "{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":false,\"sentAt\":92,\"awaitingReplica\":true}"
+        }
+      ],
+      "legacy": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+      "sync": {
+        "synchronous": 2
+      },
+      "journal": {
+        "journal_mode": "delete"
+      },
+      "runtime": {
+        "node": "v22.23.4",
+        "sqlite": [
+          "3.53.4"
+        ],
+        "textBindings": "native-Node"
+      }
+    },
+    "historical-recover": {
+      "type": "historical-recovered",
+      "cases": [
+        {
+          "variant": "unscoped",
+          "owners": {
+            "default": {
+              "snapshot": {
+                "cursor": {
+                  "epoch": "historical-default",
+                  "revision": 7
+                },
+                "entities": {
+                  "tasks": {
+                    "a": {
+                      "id": "a",
+                      "parentId": "p",
+                      "title": "default\u0000private"
+                    }
+                  }
+                },
+                "liveQueries": {
+                  "tasks.all\u0000{\"parentId\":\"p\"}": {
+                    "signature": "tasks.all\u0000{\"parentId\":\"p\"}",
+                    "kind": "replica",
+                    "entity": "tasks",
+                    "key": "id",
+                    "ids": [
+                      "a"
+                    ],
+                    "cursor": {
+                      "epoch": "historical-default",
+                      "revision": 7
+                    },
+                    "completeness": "complete",
+                    "source": "server"
+                  }
+                }
+              },
+              "selected": {
+                "rows": [
+                  {
+                    "id": "a",
+                    "parentId": "p",
+                    "title": "default\u0000private"
+                  }
+                ],
+                "complete": true
+              }
+            },
+            "alice": {
+              "snapshot": null,
+              "selected": {
+                "rows": [],
+                "complete": true
+              }
+            },
+            "bob": {
+              "snapshot": null,
+              "selected": {
+                "rows": [],
+                "complete": true
+              }
+            }
+          },
+          "entries": [
+            {
+              "id": 1,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-1",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-1",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 100,
+              "attempts": 2,
+              "nextAttemptAt": 200,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 90
+            },
+            {
+              "id": 2,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-2",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-2",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 101,
+              "attempts": 2,
+              "nextAttemptAt": 201,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 91
+            },
+            {
+              "id": 3,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-3",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-3",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 102,
+              "attempts": 2,
+              "nextAttemptAt": 202,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 92,
+              "awaitingReplica": true
+            },
+            {
+              "id": 4,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-4",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-4",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 103,
+              "attempts": 2,
+              "nextAttemptAt": 203,
+              "state": "failed",
+              "knownUnsent": false,
+              "sentAt": 93,
+              "lastError": "retained rejection",
+              "lastErrorClass": "transient"
+            },
+            {
+              "id": 5,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-5",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-5",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 104,
+              "attempts": 2,
+              "nextAttemptAt": 204,
+              "state": "rejected",
+              "knownUnsent": false,
+              "sentAt": 94,
+              "lastError": "retained rejection",
+              "lastErrorClass": "rejected"
+            },
+            {
+              "id": 6,
+              "scope": "bob",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-6",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-6",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 105,
+              "attempts": 2,
+              "nextAttemptAt": 205,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 95
+            }
+          ],
+          "restored": {
+            "alice": [
+              {
+                "id": 1,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-1",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-1",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 100,
+                "attempts": 2,
+                "nextAttemptAt": 200,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 90
+              },
+              {
+                "id": 2,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-2",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-2",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 101,
+                "attempts": 2,
+                "nextAttemptAt": 201,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 91
+              },
+              {
+                "id": 3,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-3",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-3",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 102,
+                "attempts": 2,
+                "nextAttemptAt": 202,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 92,
+                "awaitingReplica": true
+              },
+              {
+                "id": 4,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-4",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-4",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 103,
+                "attempts": 2,
+                "nextAttemptAt": 203,
+                "state": "failed",
+                "knownUnsent": false,
+                "sentAt": 93,
+                "lastError": "retained rejection",
+                "lastErrorClass": "transient"
+              },
+              {
+                "id": 5,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-5",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-5",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 104,
+                "attempts": 2,
+                "nextAttemptAt": 204,
+                "state": "rejected",
+                "knownUnsent": false,
+                "sentAt": 94,
+                "lastError": "retained rejection",
+                "lastErrorClass": "rejected"
+              }
+            ],
+            "bob": [
+              {
+                "id": 6,
+                "scope": "bob",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-6",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-6",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 105,
+                "attempts": 2,
+                "nextAttemptAt": 205,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 95
+              }
+            ]
+          },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
+          "tombstones": [
+            {
+              "scope": "default",
+              "entity": "tasks",
+              "id": "gone",
+              "value": "null"
+            }
+          ],
+          "legacy": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "appVersion": {
+            "user_version": 700
+          },
+          "checkpoint": [
+            {
+              "id": 1,
+              "version": 3
+            }
+          ],
+          "integrity": {
+            "integrity_check": "ok"
+          },
+          "sync": {
+            "synchronous": 2
+          },
+          "journal": {
+            "journal_mode": "delete"
+          },
+          "beforeImport": [],
+          "migrated": {
+            "imported": 6,
+            "skipped": 0,
+            "invalid": 0
+          },
+          "imported": {
+            "imported": 0,
+            "skipped": 6,
+            "invalid": 0
+          },
+          "sourceBefore": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "sourceAfter": null,
+          "nextId": 7
+        },
+        {
+          "variant": "scoped",
+          "owners": {
+            "default": {
+              "snapshot": null,
+              "selected": {
+                "rows": [],
+                "complete": true
+              }
+            },
+            "alice": {
+              "snapshot": {
+                "cursor": {
+                  "epoch": "historical-alice",
+                  "revision": 7
+                },
+                "entities": {
+                  "tasks": {
+                    "a": {
+                      "id": "a",
+                      "parentId": "p",
+                      "title": "alice\u0000private"
+                    }
+                  }
+                },
+                "liveQueries": {
+                  "tasks.all\u0000{\"parentId\":\"p\"}": {
+                    "signature": "tasks.all\u0000{\"parentId\":\"p\"}",
+                    "kind": "replica",
+                    "entity": "tasks",
+                    "key": "id",
+                    "ids": [
+                      "a"
+                    ],
+                    "cursor": {
+                      "epoch": "historical-alice",
+                      "revision": 7
+                    },
+                    "completeness": "complete",
+                    "source": "server"
+                  }
+                }
+              },
+              "selected": {
+                "rows": [
+                  {
+                    "id": "a",
+                    "parentId": "p",
+                    "title": "alice\u0000private"
+                  }
+                ],
+                "complete": true
+              }
+            },
+            "bob": {
+              "snapshot": {
+                "cursor": {
+                  "epoch": "historical-bob",
+                  "revision": 7
+                },
+                "entities": {
+                  "tasks": {
+                    "b": {
+                      "id": "b",
+                      "parentId": "p",
+                      "title": "bob\u0000private"
+                    }
+                  }
+                },
+                "liveQueries": {
+                  "tasks.all\u0000{\"parentId\":\"p\"}": {
+                    "signature": "tasks.all\u0000{\"parentId\":\"p\"}",
+                    "kind": "replica",
+                    "entity": "tasks",
+                    "key": "id",
+                    "ids": [
+                      "b"
+                    ],
+                    "cursor": {
+                      "epoch": "historical-bob",
+                      "revision": 7
+                    },
+                    "completeness": "complete",
+                    "source": "server"
+                  }
+                }
+              },
+              "selected": {
+                "rows": [
+                  {
+                    "id": "b",
+                    "parentId": "p",
+                    "title": "bob\u0000private"
+                  }
+                ],
+                "complete": true
+              }
+            }
+          },
+          "entries": [
+            {
+              "id": 1,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-1",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-1",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 100,
+              "attempts": 2,
+              "nextAttemptAt": 200,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 90
+            },
+            {
+              "id": 2,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-2",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-2",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 101,
+              "attempts": 2,
+              "nextAttemptAt": 201,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 91
+            },
+            {
+              "id": 3,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-3",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-3",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 102,
+              "attempts": 2,
+              "nextAttemptAt": 202,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 92,
+              "awaitingReplica": true
+            },
+            {
+              "id": 4,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-4",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-4",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 103,
+              "attempts": 2,
+              "nextAttemptAt": 203,
+              "state": "failed",
+              "knownUnsent": false,
+              "sentAt": 93,
+              "lastError": "retained rejection",
+              "lastErrorClass": "transient"
+            },
+            {
+              "id": 5,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-5",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-5",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 104,
+              "attempts": 2,
+              "nextAttemptAt": 204,
+              "state": "rejected",
+              "knownUnsent": false,
+              "sentAt": 94,
+              "lastError": "retained rejection",
+              "lastErrorClass": "rejected"
+            },
+            {
+              "id": 6,
+              "scope": "bob",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-6",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-6",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 105,
+              "attempts": 2,
+              "nextAttemptAt": 205,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 95
+            }
+          ],
+          "restored": {
+            "alice": [
+              {
+                "id": 1,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-1",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-1",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 100,
+                "attempts": 2,
+                "nextAttemptAt": 200,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 90
+              },
+              {
+                "id": 2,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-2",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-2",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 101,
+                "attempts": 2,
+                "nextAttemptAt": 201,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 91
+              },
+              {
+                "id": 3,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-3",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-3",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 102,
+                "attempts": 2,
+                "nextAttemptAt": 202,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 92,
+                "awaitingReplica": true
+              },
+              {
+                "id": 4,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-4",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-4",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 103,
+                "attempts": 2,
+                "nextAttemptAt": 203,
+                "state": "failed",
+                "knownUnsent": false,
+                "sentAt": 93,
+                "lastError": "retained rejection",
+                "lastErrorClass": "transient"
+              },
+              {
+                "id": 5,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-5",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-5",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 104,
+                "attempts": 2,
+                "nextAttemptAt": 204,
+                "state": "rejected",
+                "knownUnsent": false,
+                "sentAt": 94,
+                "lastError": "retained rejection",
+                "lastErrorClass": "rejected"
+              }
+            ],
+            "bob": [
+              {
+                "id": 6,
+                "scope": "bob",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-6",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-6",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 105,
+                "attempts": 2,
+                "nextAttemptAt": 205,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 95
+              }
+            ]
+          },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
+          "tombstones": [
+            {
+              "scope": "alice",
+              "entity": "tasks",
+              "id": "gone",
+              "value": "null"
+            },
+            {
+              "scope": "bob",
+              "entity": "tasks",
+              "id": "gone",
+              "value": "null"
+            }
+          ],
+          "legacy": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "appVersion": {
+            "user_version": 700
+          },
+          "checkpoint": [
+            {
+              "id": 1,
+              "version": 3
+            }
+          ],
+          "integrity": {
+            "integrity_check": "ok"
+          },
+          "sync": {
+            "synchronous": 2
+          },
+          "journal": {
+            "journal_mode": "delete"
+          },
+          "beforeImport": [],
+          "migrated": {
+            "imported": 6,
+            "skipped": 0,
+            "invalid": 0
+          },
+          "imported": {
+            "imported": 0,
+            "skipped": 6,
+            "invalid": 0
+          },
+          "sourceBefore": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "sourceAfter": null,
+          "nextId": 7
+        }
+      ],
+      "runtime": {
+        "node": "v22.23.4",
+        "sqlite": [
+          "3.53.4"
+        ],
+        "textBindings": "native-Node"
+      }
+    },
+    "historical-reopen": {
+      "type": "historical-reopened",
+      "cases": [
+        {
+          "variant": "unscoped",
+          "owners": {
+            "default": {
+              "snapshot": {
+                "cursor": {
+                  "epoch": "historical-default",
+                  "revision": 7
+                },
+                "entities": {
+                  "tasks": {
+                    "a": {
+                      "id": "a",
+                      "parentId": "p",
+                      "title": "default\u0000private"
+                    }
+                  }
+                },
+                "liveQueries": {
+                  "tasks.all\u0000{\"parentId\":\"p\"}": {
+                    "signature": "tasks.all\u0000{\"parentId\":\"p\"}",
+                    "kind": "replica",
+                    "entity": "tasks",
+                    "key": "id",
+                    "ids": [
+                      "a"
+                    ],
+                    "cursor": {
+                      "epoch": "historical-default",
+                      "revision": 7
+                    },
+                    "completeness": "complete",
+                    "source": "server"
+                  }
+                }
+              },
+              "selected": {
+                "rows": [
+                  {
+                    "id": "a",
+                    "parentId": "p",
+                    "title": "default\u0000private"
+                  }
+                ],
+                "complete": true
+              }
+            },
+            "alice": {
+              "snapshot": null,
+              "selected": {
+                "rows": [],
+                "complete": true
+              }
+            },
+            "bob": {
+              "snapshot": null,
+              "selected": {
+                "rows": [],
+                "complete": true
+              }
+            }
+          },
+          "entries": [
+            {
+              "id": 1,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-1",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-1",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 100,
+              "attempts": 2,
+              "nextAttemptAt": 200,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 90
+            },
+            {
+              "id": 2,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-2",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-2",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 101,
+              "attempts": 2,
+              "nextAttemptAt": 201,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 91
+            },
+            {
+              "id": 3,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-3",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-3",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 102,
+              "attempts": 2,
+              "nextAttemptAt": 202,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 92,
+              "awaitingReplica": true
+            },
+            {
+              "id": 4,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-4",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-4",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 103,
+              "attempts": 2,
+              "nextAttemptAt": 203,
+              "state": "failed",
+              "knownUnsent": false,
+              "sentAt": 93,
+              "lastError": "retained rejection",
+              "lastErrorClass": "transient"
+            },
+            {
+              "id": 5,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-5",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-5",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 104,
+              "attempts": 2,
+              "nextAttemptAt": 204,
+              "state": "rejected",
+              "knownUnsent": false,
+              "sentAt": 94,
+              "lastError": "retained rejection",
+              "lastErrorClass": "rejected"
+            },
+            {
+              "id": 6,
+              "scope": "bob",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-6",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-6",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 105,
+              "attempts": 2,
+              "nextAttemptAt": 205,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 95
+            }
+          ],
+          "restored": {
+            "alice": [
+              {
+                "id": 1,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-1",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-1",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 100,
+                "attempts": 2,
+                "nextAttemptAt": 200,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 90
+              },
+              {
+                "id": 2,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-2",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-2",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 101,
+                "attempts": 2,
+                "nextAttemptAt": 201,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 91
+              },
+              {
+                "id": 3,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-3",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-3",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 102,
+                "attempts": 2,
+                "nextAttemptAt": 202,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 92,
+                "awaitingReplica": true
+              },
+              {
+                "id": 4,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-4",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-4",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 103,
+                "attempts": 2,
+                "nextAttemptAt": 203,
+                "state": "failed",
+                "knownUnsent": false,
+                "sentAt": 93,
+                "lastError": "retained rejection",
+                "lastErrorClass": "transient"
+              },
+              {
+                "id": 5,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-5",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-5",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 104,
+                "attempts": 2,
+                "nextAttemptAt": 204,
+                "state": "rejected",
+                "knownUnsent": false,
+                "sentAt": 94,
+                "lastError": "retained rejection",
+                "lastErrorClass": "rejected"
+              }
+            ],
+            "bob": [
+              {
+                "id": 6,
+                "scope": "bob",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-6",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-6",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 105,
+                "attempts": 2,
+                "nextAttemptAt": 205,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 95
+              }
+            ]
+          },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
+          "tombstones": [
+            {
+              "scope": "default",
+              "entity": "tasks",
+              "id": "gone",
+              "value": "null"
+            }
+          ],
+          "legacy": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "appVersion": {
+            "user_version": 700
+          },
+          "checkpoint": [
+            {
+              "id": 1,
+              "version": 3
+            }
+          ],
+          "integrity": {
+            "integrity_check": "ok"
+          },
+          "sync": {
+            "synchronous": 2
+          },
+          "journal": {
+            "journal_mode": "delete"
+          },
+          "beforeImport": [
+            {
+              "id": 1,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-1",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-1",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 100,
+              "attempts": 2,
+              "nextAttemptAt": 200,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 90
+            },
+            {
+              "id": 2,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-2",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-2",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 101,
+              "attempts": 2,
+              "nextAttemptAt": 201,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 91
+            },
+            {
+              "id": 3,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-3",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-3",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 102,
+              "attempts": 2,
+              "nextAttemptAt": 202,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 92,
+              "awaitingReplica": true
+            },
+            {
+              "id": 4,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-4",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-4",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 103,
+              "attempts": 2,
+              "nextAttemptAt": 203,
+              "state": "failed",
+              "knownUnsent": false,
+              "sentAt": 93,
+              "lastError": "retained rejection",
+              "lastErrorClass": "transient"
+            },
+            {
+              "id": 5,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-5",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-5",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 104,
+              "attempts": 2,
+              "nextAttemptAt": 204,
+              "state": "rejected",
+              "knownUnsent": false,
+              "sentAt": 94,
+              "lastError": "retained rejection",
+              "lastErrorClass": "rejected"
+            },
+            {
+              "id": 6,
+              "scope": "bob",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-6",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-6",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 105,
+              "attempts": 2,
+              "nextAttemptAt": 205,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 95
+            }
+          ],
+          "migrated": {
+            "imported": 0,
+            "skipped": 0,
+            "invalid": 0
+          },
+          "imported": {
+            "imported": 0,
+            "skipped": 6,
+            "invalid": 0
+          },
+          "sourceBefore": null,
+          "sourceAfter": null,
+          "nextId": 8
+        },
+        {
+          "variant": "scoped",
+          "owners": {
+            "default": {
+              "snapshot": null,
+              "selected": {
+                "rows": [],
+                "complete": true
+              }
+            },
+            "alice": {
+              "snapshot": {
+                "cursor": {
+                  "epoch": "historical-alice",
+                  "revision": 7
+                },
+                "entities": {
+                  "tasks": {
+                    "a": {
+                      "id": "a",
+                      "parentId": "p",
+                      "title": "alice\u0000private"
+                    }
+                  }
+                },
+                "liveQueries": {
+                  "tasks.all\u0000{\"parentId\":\"p\"}": {
+                    "signature": "tasks.all\u0000{\"parentId\":\"p\"}",
+                    "kind": "replica",
+                    "entity": "tasks",
+                    "key": "id",
+                    "ids": [
+                      "a"
+                    ],
+                    "cursor": {
+                      "epoch": "historical-alice",
+                      "revision": 7
+                    },
+                    "completeness": "complete",
+                    "source": "server"
+                  }
+                }
+              },
+              "selected": {
+                "rows": [
+                  {
+                    "id": "a",
+                    "parentId": "p",
+                    "title": "alice\u0000private"
+                  }
+                ],
+                "complete": true
+              }
+            },
+            "bob": {
+              "snapshot": {
+                "cursor": {
+                  "epoch": "historical-bob",
+                  "revision": 7
+                },
+                "entities": {
+                  "tasks": {
+                    "b": {
+                      "id": "b",
+                      "parentId": "p",
+                      "title": "bob\u0000private"
+                    }
+                  }
+                },
+                "liveQueries": {
+                  "tasks.all\u0000{\"parentId\":\"p\"}": {
+                    "signature": "tasks.all\u0000{\"parentId\":\"p\"}",
+                    "kind": "replica",
+                    "entity": "tasks",
+                    "key": "id",
+                    "ids": [
+                      "b"
+                    ],
+                    "cursor": {
+                      "epoch": "historical-bob",
+                      "revision": 7
+                    },
+                    "completeness": "complete",
+                    "source": "server"
+                  }
+                }
+              },
+              "selected": {
+                "rows": [
+                  {
+                    "id": "b",
+                    "parentId": "p",
+                    "title": "bob\u0000private"
+                  }
+                ],
+                "complete": true
+              }
+            }
+          },
+          "entries": [
+            {
+              "id": 1,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-1",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-1",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 100,
+              "attempts": 2,
+              "nextAttemptAt": 200,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 90
+            },
+            {
+              "id": 2,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-2",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-2",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 101,
+              "attempts": 2,
+              "nextAttemptAt": 201,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 91
+            },
+            {
+              "id": 3,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-3",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-3",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 102,
+              "attempts": 2,
+              "nextAttemptAt": 202,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 92,
+              "awaitingReplica": true
+            },
+            {
+              "id": 4,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-4",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-4",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 103,
+              "attempts": 2,
+              "nextAttemptAt": 203,
+              "state": "failed",
+              "knownUnsent": false,
+              "sentAt": 93,
+              "lastError": "retained rejection",
+              "lastErrorClass": "transient"
+            },
+            {
+              "id": 5,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-5",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-5",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 104,
+              "attempts": 2,
+              "nextAttemptAt": 204,
+              "state": "rejected",
+              "knownUnsent": false,
+              "sentAt": 94,
+              "lastError": "retained rejection",
+              "lastErrorClass": "rejected"
+            },
+            {
+              "id": 6,
+              "scope": "bob",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-6",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-6",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 105,
+              "attempts": 2,
+              "nextAttemptAt": 205,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 95
+            }
+          ],
+          "restored": {
+            "alice": [
+              {
+                "id": 1,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-1",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-1",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 100,
+                "attempts": 2,
+                "nextAttemptAt": 200,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 90
+              },
+              {
+                "id": 2,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-2",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-2",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 101,
+                "attempts": 2,
+                "nextAttemptAt": 201,
+                "state": "pending",
+                "knownUnsent": false,
+                "sentAt": 91
+              },
+              {
+                "id": 3,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-3",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-3",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 102,
+                "attempts": 2,
+                "nextAttemptAt": 202,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 92,
+                "awaitingReplica": true
+              },
+              {
+                "id": 4,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-4",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-4",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 103,
+                "attempts": 2,
+                "nextAttemptAt": 203,
+                "state": "failed",
+                "knownUnsent": false,
+                "sentAt": 93,
+                "lastError": "retained rejection",
+                "lastErrorClass": "transient"
+              },
+              {
+                "id": 5,
+                "scope": "alice",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-5",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-5",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 104,
+                "attempts": 2,
+                "nextAttemptAt": 204,
+                "state": "rejected",
+                "knownUnsent": false,
+                "sentAt": 94,
+                "lastError": "retained rejection",
+                "lastErrorClass": "rejected"
+              }
+            ],
+            "bob": [
+              {
+                "id": 6,
+                "scope": "bob",
+                "path": "tasks.write",
+                "receiptPath": "tasks.oldWrite",
+                "args": {
+                  "key": "historical-6",
+                  "text": "preserve\u0000suffix"
+                },
+                "idempotencyKey": "historical-6",
+                "entityKeys": [
+                  "tasks:a"
+                ],
+                "patches": [],
+                "createdAt": 105,
+                "attempts": 2,
+                "nextAttemptAt": 205,
+                "state": "committed",
+                "knownUnsent": false,
+                "sentAt": 95
+              }
+            ]
+          },
+          "windowBindings": {
+            "modes": [
+              {
+                "mode": "replaceWindow",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "replaceSnapshot",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "applyTransaction",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              },
+              {
+                "mode": "advanceWatermark",
+                "full": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "working": [
+                  "tasks\u0000a",
+                  "tasks\u0000b"
+                ],
+                "points": [
+                  {
+                    "window": {
+                      "signature": "tasks\u0000a",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-a"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-a"
+                      }
+                    ]
+                  },
+                  {
+                    "window": {
+                      "signature": "tasks\u0000b",
+                      "kind": "replica",
+                      "entity": "tasks",
+                      "key": "id",
+                      "ids": [
+                        "bind-b"
+                      ],
+                      "cursor": {
+                        "epoch": "bindings",
+                        "revision": 5
+                      },
+                      "completeness": "complete",
+                      "source": "server"
+                    },
+                    "rows": [
+                      {
+                        "id": "bind-b"
+                      }
+                    ]
+                  }
+                ],
+                "indexed": [
+                  {
+                    "bytes": "7461736B730061"
+                  },
+                  {
+                    "bytes": "7461736B730062"
+                  }
+                ]
+              }
+            ],
+            "beforeRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000a": {
+                  "signature": "tasks\u0000a",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                },
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            },
+            "afterRemove": {
+              "cursor": {
+                "epoch": "bindings",
+                "revision": 6
+              },
+              "entities": {
+                "tasks": {
+                  "bind-b": {
+                    "id": "bind-b"
+                  }
+                }
+              },
+              "liveQueries": {
+                "tasks\u0000b": {
+                  "signature": "tasks\u0000b",
+                  "kind": "replica",
+                  "entity": "tasks",
+                  "key": "id",
+                  "ids": [
+                    "bind-b"
+                  ],
+                  "cursor": {
+                    "epoch": "bindings",
+                    "revision": 5
+                  },
+                  "completeness": "complete",
+                  "source": "server"
+                }
+              }
+            }
+          },
+          "tombstones": [
+            {
+              "scope": "alice",
+              "entity": "tasks",
+              "id": "gone",
+              "value": "null"
+            },
+            {
+              "scope": "bob",
+              "entity": "tasks",
+              "id": "gone",
+              "value": "null"
+            }
+          ],
+          "legacy": "[{\"id\":1,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-1\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-1\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":100,\"attempts\":2,\"nextAttemptAt\":200,\"state\":\"pending\",\"knownUnsent\":true,\"sentAt\":90},{\"id\":2,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-2\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-2\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":101,\"attempts\":2,\"nextAttemptAt\":201,\"state\":\"inflight\",\"knownUnsent\":true,\"sentAt\":91},{\"id\":3,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-3\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-3\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":102,\"attempts\":2,\"nextAttemptAt\":202,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":92,\"awaitingReplica\":true},{\"id\":4,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-4\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-4\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":103,\"attempts\":2,\"nextAttemptAt\":203,\"state\":\"failed\",\"knownUnsent\":true,\"sentAt\":93,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"transient\"},{\"id\":5,\"scope\":\"alice\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-5\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-5\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":104,\"attempts\":2,\"nextAttemptAt\":204,\"state\":\"rejected\",\"knownUnsent\":true,\"sentAt\":94,\"lastError\":\"retained rejection\",\"lastErrorClass\":\"rejected\"},{\"id\":6,\"scope\":\"bob\",\"path\":\"tasks.write\",\"receiptPath\":\"tasks.oldWrite\",\"args\":{\"key\":\"historical-6\",\"text\":\"preserve\\u0000suffix\"},\"idempotencyKey\":\"historical-6\",\"entityKeys\":[\"tasks:a\"],\"patches\":[],\"createdAt\":105,\"attempts\":2,\"nextAttemptAt\":205,\"state\":\"committed\",\"knownUnsent\":true,\"sentAt\":95}]",
+          "appVersion": {
+            "user_version": 700
+          },
+          "checkpoint": [
+            {
+              "id": 1,
+              "version": 3
+            }
+          ],
+          "integrity": {
+            "integrity_check": "ok"
+          },
+          "sync": {
+            "synchronous": 2
+          },
+          "journal": {
+            "journal_mode": "delete"
+          },
+          "beforeImport": [
+            {
+              "id": 1,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-1",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-1",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 100,
+              "attempts": 2,
+              "nextAttemptAt": 200,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 90
+            },
+            {
+              "id": 2,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-2",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-2",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 101,
+              "attempts": 2,
+              "nextAttemptAt": 201,
+              "state": "pending",
+              "knownUnsent": false,
+              "sentAt": 91
+            },
+            {
+              "id": 3,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-3",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-3",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 102,
+              "attempts": 2,
+              "nextAttemptAt": 202,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 92,
+              "awaitingReplica": true
+            },
+            {
+              "id": 4,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-4",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-4",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 103,
+              "attempts": 2,
+              "nextAttemptAt": 203,
+              "state": "failed",
+              "knownUnsent": false,
+              "sentAt": 93,
+              "lastError": "retained rejection",
+              "lastErrorClass": "transient"
+            },
+            {
+              "id": 5,
+              "scope": "alice",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-5",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-5",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 104,
+              "attempts": 2,
+              "nextAttemptAt": 204,
+              "state": "rejected",
+              "knownUnsent": false,
+              "sentAt": 94,
+              "lastError": "retained rejection",
+              "lastErrorClass": "rejected"
+            },
+            {
+              "id": 6,
+              "scope": "bob",
+              "path": "tasks.write",
+              "receiptPath": "tasks.oldWrite",
+              "args": {
+                "key": "historical-6",
+                "text": "preserve\u0000suffix"
+              },
+              "idempotencyKey": "historical-6",
+              "entityKeys": [
+                "tasks:a"
+              ],
+              "patches": [],
+              "createdAt": 105,
+              "attempts": 2,
+              "nextAttemptAt": 205,
+              "state": "committed",
+              "knownUnsent": false,
+              "sentAt": 95
+            }
+          ],
+          "migrated": {
+            "imported": 0,
+            "skipped": 0,
+            "invalid": 0
+          },
+          "imported": {
+            "imported": 0,
+            "skipped": 6,
+            "invalid": 0
+          },
+          "sourceBefore": null,
+          "sourceAfter": null,
+          "nextId": 8
+        }
+      ],
+      "runtime": {
+        "node": "v22.23.4",
+        "sqlite": [
+          "3.53.4"
+        ],
+        "textBindings": "native-Node"
+      }
+    }
+  }
+}

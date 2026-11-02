@@ -4,6 +4,222 @@ import { replicaRowsHashes } from "./replica-integrity";
 import { MissingReducerDataError } from "@gonvex/local-runtime/portable";
 
 describe("LocalReplica", () => {
+  it('does not reuse a superseded activation when a listener returns to its owner', async () => {
+    const storage = new MemoryLocalReplicaStorage(), replica = new LocalReplica(storage);
+    const snapshot = (owner: string): ReplicaSnapshot => ({ cursor: { epoch: owner, revision: 1 },
+      entities: { tasks: { one: { id: 'one', owner } } }, liveQueries: {} });
+    for (const owner of ['alice', 'bob']) await storage.replaceSnapshot(snapshot(owner), owner);
+    const load = vi.spyOn(storage, 'load');
+    let phase = 0, bob: Promise<void> | undefined, again: Promise<void> | undefined;
+    const publications: Array<string | null> = [];
+    const stop = replica.subscribe(() => {
+      const owner = replica.entity('tasks', 'one')?.owner as string ?? null;
+      publications.push(owner);
+      if (phase === 0 && owner === 'alice') { phase = 1; bob = replica.activateScope('bob'); }
+      else if (phase === 1 && owner === null) { phase = 2; again = replica.activateScope('alice'); }
+    });
+    const alice = replica.activateScope('alice');
+    try {
+      await alice;
+      await Promise.all([bob, again]);
+      expect(phase).toBe(2);
+      expect(replica.entity('tasks', 'one')?.owner, JSON.stringify({ publications, reused: again === alice })).toBe('alice');
+      expect(again).not.toBe(alice);
+      expect(publications).not.toContain('bob');
+      expect(load.mock.calls.map(([scope]) => scope)).toEqual(['alice', 'alice']);
+    } finally {
+      await Promise.allSettled([alice, bob, again].filter(Boolean));
+      stop(); replica.dispose();
+    }
+  });
+
+  it('refuses a cached activation after disposal even while its old read is pending', async () => {
+    const storage = new MemoryLocalReplicaStorage(), replica = new LocalReplica(storage);
+    let release!: (snapshot: ReplicaSnapshot) => void, started!: () => void;
+    const read = new Promise<ReplicaSnapshot>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    vi.spyOn(storage, 'load').mockImplementation(() => { started(); return read; });
+    const alice = replica.activateScope('alice');
+    const observe = (promise: Promise<void>) => promise.then(() => undefined, error => String(error));
+    let closed: Promise<string | undefined> | undefined;
+    try {
+      await ready;
+      replica.dispose();
+      closed = observe(replica.activateScope('alice'));
+      release({ cursor: { epoch: 'alice', revision: 1 }, entities: { tasks: { one: { id: 'one' } } }, liveQueries: {} });
+      await alice;
+      expect((await closed) ?? '', 'closed replica reused a cached activation').toMatch(/Local replica is closed/);
+      expect(replica.entity('tasks', 'one')).toBeUndefined();
+    } finally {
+      release({ entities: {}, liveQueries: {} });
+      await Promise.allSettled([alice, closed].filter(Boolean));
+      replica.dispose();
+    }
+  });
+
+  it('keeps a newer owner when an invalidation listener starts another activation', async () => {
+    const storage = new MemoryLocalReplicaStorage(), replica = new LocalReplica(storage);
+    const snapshot = (owner: string): ReplicaSnapshot => ({ cursor: { epoch: owner, revision: 1 },
+      entities: { tasks: { one: { id: 'one', owner } } }, liveQueries: {} });
+    for (const owner of ['initial', 'alice', 'bob']) await storage.replaceSnapshot(snapshot(owner), owner);
+    await replica.activateScope('initial');
+    let releaseBob!: () => void, bobStarted!: () => void;
+    const gate = new Promise<void>(resolve => { releaseBob = resolve; });
+    const started = new Promise<void>(resolve => { bobStarted = resolve; });
+    const originalLoad = storage.load.bind(storage), loads: string[] = [], publications: Array<string | null> = [];
+    vi.spyOn(storage, 'load').mockImplementation(async scope => {
+      loads.push(scope ?? 'default');
+      if (scope === 'bob') { bobStarted(); await gate; }
+      return originalLoad(scope);
+    });
+    let switched = false, bob: Promise<void> | undefined;
+    const stop = replica.subscribe(() => {
+      publications.push(replica.entity('tasks', 'one')?.owner as string ?? null);
+      if (!switched) { switched = true; bob = replica.activateScope('bob'); }
+    });
+    const alice = replica.activateScope('alice');
+    try {
+      await started;
+      releaseBob();
+      await Promise.all([alice, bob]);
+      expect(replica.entity('tasks', 'one')?.owner, JSON.stringify({ loads, publications })).toBe('bob');
+      expect(publications).not.toContain('alice');
+      expect(loads).toEqual(['bob']);
+    } finally {
+      releaseBob(); await Promise.allSettled([alice, bob].filter(Boolean));
+      stop(); replica.dispose();
+    }
+  });
+
+  it('refuses exhausted scope activation identities without publishing an old owner', async () => {
+    const storage = new MemoryLocalReplicaStorage(), replica = new LocalReplica(storage);
+    // Advance a mathematically reachable process-local counter without running
+    // quadrillions of otherwise identical owner switches.
+    (replica as unknown as { scopeActivationGeneration: number }).scopeActivationGeneration = Number.MAX_SAFE_INTEGER - 1;
+    const snapshot = (owner: string): ReplicaSnapshot => ({ cursor: { epoch: owner, revision: 1 },
+      entities: { tasks: { one: { id: 'one', owner } } }, liveQueries: {} });
+    let releaseAlice!: (value: ReplicaSnapshot) => void, started!: () => void;
+    const aliceRead = new Promise<ReplicaSnapshot>(resolve => { releaseAlice = resolve; });
+    const aliceStarted = new Promise<void>(resolve => { started = resolve; });
+    const loads: string[] = [], publications: Array<string | null> = [];
+    vi.spyOn(storage, 'load').mockImplementation(scope => {
+      loads.push(scope ?? 'default');
+      if (scope === 'alice') { started(); return aliceRead; }
+      return Promise.resolve(snapshot(scope ?? 'default'));
+    });
+    const stop = replica.subscribe(() => publications.push(replica.entity('tasks', 'one')?.owner as string ?? null));
+    const observe = (promise: Promise<void>) => promise.then(() => ({ error: undefined as string | undefined }), error => ({ error: String(error) }));
+    const alice = replica.activateScope('alice');
+    let bob: ReturnType<typeof observe> | undefined, carol: ReturnType<typeof observe> | undefined, repeated: ReturnType<typeof observe> | undefined;
+    try {
+      await aliceStarted;
+      bob = observe(replica.activateScope('bob'));
+      carol = observe(replica.activateScope('carol'));
+      repeated = observe(replica.activateScope('alice'));
+      releaseAlice(snapshot('alice'));
+      await alice;
+      const outcomes = await Promise.all([bob, carol, repeated]);
+      for (const outcome of outcomes)
+        expect(outcome.error ?? '', `unsafe identity admitted owners: ${JSON.stringify({ loads, publications })}`).toMatch(/scope activation.*exhausted/i);
+      expect(loads).toEqual(['alice']);
+      expect(publications.every(owner => owner === null)).toBe(true);
+      expect(replica.entity('tasks', 'one')).toBeUndefined();
+      expect(replica.cursor()).toBeUndefined();
+    } finally {
+      releaseAlice(snapshot('alice'));
+      await Promise.allSettled([alice, bob, carol, repeated].filter(Boolean));
+      stop(); replica.dispose();
+    }
+  });
+
+  it('permits the last safe scope activation identity', async () => {
+    const storage = new MemoryLocalReplicaStorage(), replica = new LocalReplica(storage);
+    (replica as unknown as { scopeActivationGeneration: number }).scopeActivationGeneration = Number.MAX_SAFE_INTEGER - 1;
+    try {
+      await storage.replaceSnapshot({ cursor: { epoch: 'alice', revision: 1 },
+        entities: { tasks: { one: { id: 'one', owner: 'alice' } } }, liveQueries: {} }, 'alice');
+      await replica.activateScope('alice');
+      expect(replica.entity('tasks', 'one')?.owner).toBe('alice');
+      expect(replica.cursor()).toEqual({ epoch: 'alice', revision: 1 });
+    } finally { replica.dispose(); }
+  });
+
+  it('reloads a settled activation when explicitly requested', async () => {
+    const storage = new MemoryLocalReplicaStorage(), replica = new LocalReplica(storage);
+    const snapshot = (revision: number): ReplicaSnapshot => ({ cursor: { epoch: 'e', revision },
+      entities: { tasks: { one: { id: 'one', value: revision } } }, liveQueries: {} });
+    try {
+      await storage.replaceSnapshot(snapshot(1), 'alice');
+      await replica.activateScope('alice');
+      await storage.replaceSnapshot(snapshot(2), 'alice');
+      await replica.activateScope('alice', true);
+      expect(replica.entity('tasks', 'one')?.value).toBe(2);
+      expect(replica.cursor()).toEqual({ epoch: 'e', revision: 2 });
+    } finally { replica.dispose(); }
+  });
+
+  it('does not let a settled old activation clear a newer owner in flight', async () => {
+    const storage = new MemoryLocalReplicaStorage(), replica = new LocalReplica(storage);
+    const snapshot = (owner: string): ReplicaSnapshot => ({ cursor: { epoch: owner, revision: 1 },
+      entities: { tasks: { one: { id: 'one', owner } } }, liveQueries: {} });
+    let releaseAlice!: (value: ReplicaSnapshot) => void, releaseBob!: (value: ReplicaSnapshot) => void;
+    let aliceStarted!: () => void, bobStarted!: () => void;
+    const aliceRead = new Promise<ReplicaSnapshot>(resolve => { releaseAlice = resolve; });
+    const bobRead = new Promise<ReplicaSnapshot>(resolve => { releaseBob = resolve; });
+    const aliceReady = new Promise<void>(resolve => { aliceStarted = resolve; });
+    const bobReady = new Promise<void>(resolve => { bobStarted = resolve; });
+    const load = vi.spyOn(storage, 'load').mockImplementation(scope => {
+      if (scope === 'alice') { aliceStarted(); return aliceRead; }
+      bobStarted(); return bobRead;
+    });
+    const alice = replica.activateScope('alice');
+    let bob: Promise<void> | undefined, repeated: Promise<void> | undefined;
+    try {
+      await aliceReady;
+      bob = replica.activateScope('bob');
+      releaseAlice(snapshot('alice'));
+      await alice;
+      await bobReady;
+      repeated = replica.activateScope('bob');
+      expect(repeated).toBe(bob);
+      releaseBob(snapshot('bob'));
+      await bob;
+      expect(load.mock.calls.map(([scope]) => scope)).toEqual(['alice', 'bob']);
+      expect(replica.entity('tasks', 'one')?.owner).toBe('bob');
+    } finally {
+      releaseAlice(snapshot('alice')); releaseBob(snapshot('bob'));
+      await Promise.allSettled([alice, bob, repeated].filter((value): value is Promise<void> => value !== undefined));
+      replica.dispose();
+    }
+  });
+
+  it.each([false, true])('checkpoints a hydrated floor behind an already current window, failOnce=%s', async failOnce => {
+    const storage = new MemoryLocalReplicaStorage();
+    await storage.replaceSnapshot({ cursor: { epoch: 'e', revision: 3 },
+      entities: { statuses: { one: { id: 'one' } } }, liveQueries: { statuses: {
+        signature: 'statuses', kind: 'replica', entity: 'statuses', key: 'id', ids: ['one'],
+        hashes: { one: 'hash' }, cursor: { epoch: 'e', revision: 4 }, completeness: 'complete', source: 'server',
+      } } });
+    const replica = new LocalReplica(storage);
+    await replica.hydrate();
+    expect(replica.cursor()).toEqual({ epoch: 'e', revision: 3 });
+    await replica.advanceWatermark(3, ['statuses']);
+    expect(replica.cursor()).toEqual({ epoch: 'e', revision: 3 });
+    expect(replica.windowCanAdvance('statuses', 4)).toBe(true);
+    const advance = vi.spyOn(storage, 'advanceWatermark');
+    if (failOnce) {
+      advance.mockRejectedValueOnce(new Error('metadata checkpoint failed'));
+      await expect(replica.advanceWatermark(4, ['statuses'])).rejects.toThrow('metadata checkpoint failed');
+      expect(replica.cursor()).toEqual({ epoch: 'e', revision: 3 });
+      expect((await storage.load())?.cursor).toEqual({ epoch: 'e', revision: 3 });
+    }
+    await replica.advanceWatermark(4, ['statuses']);
+    expect(replica.cursor()).toEqual({ epoch: 'e', revision: 4 });
+    expect((await storage.load())?.cursor).toEqual({ epoch: 'e', revision: 4 });
+    expect(advance.mock.calls.at(-1)?.[0]).toEqual([]);
+    replica.dispose();
+  });
+
   it('checks watermark eligibility without iterating a window membership or integrity map', async () => {
     const replica = new LocalReplica(new MemoryLocalReplicaStorage());
     await replica.replaceWindow({ signature: 'statuses', kind: 'replica', entity: 'statuses', key: 'id', rows: [{ id: 'one' }], hashes: { one: 'hash' }, cursor: { epoch: 'test', revision: 1 }, completeness: 'complete', source: 'server' });

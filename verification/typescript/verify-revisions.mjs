@@ -107,6 +107,7 @@ const prelude = `(set-option :timeout 10000)
 (define-fun integral ((v ${FP})) Bool (and (finite v) (fp.eq v (fp.roundToIntegral RTZ v))))
 (define-fun safe ((v ${FP})) Bool (and (integral v) (fp.leq (fp.abs v) ${max})))
 (declare-const x ${FP}) (declare-const y ${FP}) (declare-const z ${FP})`;
+export const binary64Prelude = prelude;
 
 const laws = {
   'snapshot-exact-domain': `(= (isReplicaRevision x) (and (safe x) (fp.geq x ${zero})))`,

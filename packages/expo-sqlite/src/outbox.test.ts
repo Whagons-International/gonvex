@@ -134,8 +134,8 @@ it("imports a legacy AsyncStorage outbox once, preserving order and idempotency 
     getItem: async (key: string) => values.get(key) ?? null,
     removeItem: async (key: string) => { values.delete(key); },
   };
-  expect(await migrateLegacyOutbox({ store, storage, key: legacyKey })).toEqual({ imported: 2, skipped: 0, invalid: 1 });
-  expect(values.has(legacyKey)).toBe(false);
+  await expect(migrateLegacyOutbox({ store, storage, key: legacyKey })).rejects.toThrow("unresolved intents");
+  expect(values.has(legacyKey)).toBe(true);
   const imported = await store.load(scope);
   expect(imported.map((entry) => [entry.id, entry.idempotencyKey, entry.state, entry.attempts])).toEqual([
     [3, "first", "pending", 0],
@@ -146,7 +146,12 @@ it("imports a legacy AsyncStorage outbox once, preserving order and idempotency 
 
   // Re-running (e.g. a crash before removeItem) never duplicates an intent.
   expect(await store.importLegacy(blob)).toEqual({ imported: 0, skipped: 2, invalid: 1 });
-  expect(await migrateLegacyOutbox({ store, storage, key: legacyKey })).toEqual({ imported: 0, skipped: 0, invalid: 0 });
+  await expect(migrateLegacyOutbox({ store, storage, key: legacyKey })).rejects.toThrow("unresolved intents");
+  expect(values.get(legacyKey)).toBe(blob);
+  // Only an explicitly resolved source can be removed after all rows import.
+  values.set(legacyKey, JSON.stringify(JSON.parse(blob).filter((row: any) => row.id)));
+  expect(await migrateLegacyOutbox({ store, storage, key: legacyKey })).toEqual({ imported: 0, skipped: 2, invalid: 0 });
+  expect(values.has(legacyKey)).toBe(false);
 
   // The SDK sequence continues after the imported ids.
   const outbox = createReducerOutbox({ store });
@@ -238,4 +243,113 @@ it("does not revive committed intents during delivery recovery, including after 
     { id: committed.id, idempotencyKey: "accepted", state: "committed" },
     { id: pending.id, idempotencyKey: "pending", state: "pending" },
   ]);
+});
+
+
+it.each(["{", "null", '{"id":1}', '{"id":1,"state":"future"}'])("preserves corrupt SQLite bytes and blocks admission: %s", async value => {
+  const { db, adapter } = sqlite();
+  const store = new ExpoSQLiteOutboxStore(adapter);
+  await store.load();
+  db.prepare("INSERT INTO _gonvex_outbox(id, scope, idempotency_key, state, value) VALUES(1, 'owner', 'accepted', 'committed', ?)").run(value);
+  await expect(store.load()).rejects.toThrow(/outbox|recovery/i);
+  const outbox = createReducerOutbox({ store });
+  await expect(outbox.loadAll("owner")).rejects.toThrow(/outbox|recovery/i);
+  await expect(outbox.enqueue({ scope: "owner", path: "tasks.save", args: {} })).rejects.toThrow(/outbox|recovery/i);
+  expect(db.prepare("SELECT value FROM _gonvex_outbox WHERE id=1").get()).toEqual({ value });
+});
+
+it("does not trust a legacy blob's unsent provenance when importing command identity", async () => {
+  const { adapter } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  const legacy = legacyEntry({ knownUnsent: true, coalesceKey: "a", dependencies: { reads: [], writes: [{ entity: "tasks", rowId: "a" }], scans: [] } });
+  expect(await store.importLegacy([legacy])).toEqual({ imported: 1, skipped: 0, invalid: 0 });
+  const queue = createReducerOutbox({ store }); await queue.loadAll(scope);
+  const next = await queue.enqueue({ scope, path: legacy.path, args: { value: 2 }, idempotencyKey: "later", coalesceKey: "a", dependencies: legacy.dependencies });
+  expect(next.id).toBeGreaterThan(legacy.id);
+  expect(await store.load()).toMatchObject([
+    { id: 1, idempotencyKey: "command-1", args: legacy.args, knownUnsent: false },
+    { id: next.id, idempotencyKey: "later", args: { value: 2 } },
+  ]);
+});
+
+it.each((["id", "scope", "idempotencyKey", "state"] as const).flatMap(field =>
+  (["load", "update", "batch", "replace"] as const).map(operation => ({ field, operation }))))
+("refuses SQLite journal $field disagreement during $operation without modifying history", async ({ field, operation }) => {
+  const { adapter, db } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  const entry = legacyEntry({ knownUnsent: true, coalesceKey: "a" });
+  await store.put(entry);
+  const altered = { ...entry, [field]: field === "id" ? 2 : field === "state" ? "committed" : "different-owner-or-key" };
+  db.prepare("UPDATE _gonvex_outbox SET value=? WHERE id=1").run(JSON.stringify(altered));
+  const before = db.prepare("SELECT * FROM _gonvex_outbox").all();
+  const run = operation === "load" ? store.load(scope)
+    : operation === "update" ? store.update(1, prior => ({ ...prior, nextAttemptAt: 99 }))
+    : operation === "batch" ? store.updateMany([1], prior => ({ ...prior, nextAttemptAt: 99 }))
+    : store.replacePending(1, { ...entry, args: { replacement: true } });
+  await expect(run).rejects.toThrow(/identity|inconsistent|recovery/i);
+  expect(db.prepare("SELECT * FROM _gonvex_outbox").all()).toEqual(before);
+});
+
+it.each([Number.MAX_SAFE_INTEGER, -1, 1.5])("refuses unsafe SQLite sequence %s before returning a new intent", async allocated => {
+  const { adapter, db } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  await store.load();
+  db.prepare("INSERT INTO _gonvex_outbox_meta VALUES('sequence',?)").run(allocated);
+  await expect(store.append({ ...legacyEntry({}), idempotencyKey: "must-not-admit" })).rejects.toThrow(/sequence|exhaust|recovery/i);
+  expect(db.prepare("SELECT * FROM _gonvex_outbox").all()).toEqual([]);
+  expect(db.prepare("SELECT value FROM _gonvex_outbox_meta WHERE key='sequence'").get()).toEqual({ value: allocated });
+});
+
+it.each((["id", "scope", "idempotencyKey"] as const).flatMap(field => [false, true].map(batch => ({ field, batch }))))
+("rejects in-place SQLite $field mutation, batch=$batch", async ({ field, batch }) => {
+  const { adapter } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  const entry = legacyEntry({}); await store.put(entry);
+  const change = (prior: ReducerOutboxEntry) => {
+    if (field === "id") prior.id += 1;
+    else prior[field] = "different-owner-or-key";
+    return prior;
+  };
+  await expect(batch ? store.updateMany([1], change) : store.update(1, change)).rejects.toThrow(/identity/i);
+  expect(await store.load()).toEqual([entry]);
+});
+
+it("persists permitted in-place SQLite state updates", async () => {
+  const { adapter } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  await store.put(legacyEntry({}));
+  await store.update(1, entry => { entry.state = "committed"; return entry; });
+  expect(await store.load()).toMatchObject([{ id: 1, state: "committed" }]);
+});
+
+it.each([1, 2])("keeps legacy command order when colliding id %s is remapped above later legacy ids", async collision => {
+  const { adapter } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  await store.put(legacyEntry({ id: collision, scope: "other", idempotencyKey: "occupied" }));
+  await store.put(legacyEntry({ id: 100, scope: "other", idempotencyKey: "high-water" }));
+  const legacy = [1, 2, 3].map(id => legacyEntry({ id, idempotencyKey: `old-${id}`, args: { value: id } }));
+  expect(await store.importLegacy(legacy)).toEqual({ imported: 3, skipped: 0, invalid: 0 });
+  expect((await store.load(scope)).map(entry => [entry.idempotencyKey, entry.args])).toEqual(legacy.map(entry => [entry.idempotencyKey, entry.args]));
+  // Repeating after a crash before source removal keeps the remapped positions.
+  const once = await store.load();
+  expect(await store.importLegacy(legacy)).toEqual({ imported: 0, skipped: 3, invalid: 0 });
+  expect(await store.load()).toEqual(once);
+});
+
+it("retains legacy source and rolls back when existing command positions contradict its order", async () => {
+  const { adapter } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  const accepted = legacyEntry({ id: 1, idempotencyKey: "second", state: "committed" });
+  await store.put(accepted);
+  const raw = JSON.stringify([legacyEntry({ id: 1, idempotencyKey: "first" }), legacyEntry({ id: 2, idempotencyKey: "second" })]);
+  const removeItem = async () => { throw new Error("must retain original source"); };
+  await expect(migrateLegacyOutbox({ store, key: "legacy", storage: { getItem: async () => raw, removeItem } })).rejects.toThrow(/order/i);
+  expect(await store.load()).toEqual([accepted]);
+});
+
+it("retains legacy source when a matching indexed intent has inconsistent JSON ownership", async () => {
+  const { adapter, db } = sqlite(); const store = new ExpoSQLiteOutboxStore(adapter);
+  const entry = legacyEntry({}); await store.put(entry);
+  const value = JSON.stringify({ ...entry, scope: "different-owner" });
+  db.prepare("UPDATE _gonvex_outbox SET value=? WHERE id=1").run(value);
+  let removed = false;
+  const raw = JSON.stringify([entry]);
+  await expect(migrateLegacyOutbox({ store, key: "legacy", storage: {
+    getItem: async () => raw, removeItem: async () => { removed = true; },
+  } })).rejects.toThrow(/inconsistent|recovery/i);
+  expect(removed).toBe(false);
+  expect(db.prepare("SELECT value FROM _gonvex_outbox WHERE id=1").get()).toEqual({ value });
 });

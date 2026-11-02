@@ -1412,6 +1412,7 @@ async fn websocket(
             query_result_batch: Some(1),
             reducer_batch: Some(1),
             replica_watermark: Some(1),
+            reducer_receipt_lookup: Some(1),
             control_watermark: Some(1),
         }),
     };
@@ -2212,6 +2213,8 @@ async fn websocket(
                     args,
                     scope,
                 }) => {
+                    let receipt_lookup = scope != Some(ExecutionScope::Control)
+                        && path == execution::REDUCER_RECEIPT_QUERY;
                     runtime
                         .inner
                         .metrics
@@ -2245,11 +2248,33 @@ async fn websocket(
                                 .to_owned(),
                         }
                     };
+                    let terminal_watermark = call_watermark_after_sent_replica_work(
+                        &response,
+                        receipt_lookup && tenant_session.is_some(),
+                        replicas
+                            .values()
+                            .map(|subscription| subscription.cursor.revision)
+                            .chain(
+                                live_queries
+                                    .values()
+                                    .map(|subscription| subscription.computed_revision),
+                            )
+                            .min()
+                            .map(|revision| revision.max(sent_replica_revision)),
+                    );
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                         .await
                         .is_err()
                     {
                         break;
+                    }
+                    if let Some(watermark) = terminal_watermark {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &watermark)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
                 Ok(ClientMessage::QuerySubscribe {
@@ -3285,6 +3310,19 @@ fn call_watermark_after_sent_replica_work(
         | ServerMessage::ActionResult {
             committed_revision, ..
         } => *committed_revision,
+        ServerMessage::QueryResult { payload, .. }
+            if payload.get("path").and_then(serde_json::Value::as_str)
+                == Some(execution::REDUCER_RECEIPT_QUERY) =>
+        {
+            payload
+                .get("result")
+                .filter(|result| {
+                    result.get("found").and_then(serde_json::Value::as_bool) == Some(true)
+                })
+                .and_then(|result| result.get("cursor"))
+                .and_then(|cursor| cursor.get("revision"))
+                .and_then(serde_json::Value::as_u64)
+        }
         _ => None,
     }?;
     if lowest_sent_revision.is_some_and(|sent| sent < committed_revision) {
@@ -5413,6 +5451,34 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             call_watermark_after_sent_replica_work(&reducer, true, None),
             Some(ServerMessage::ReplicaWatermark { revision: 542 })
         ));
+    }
+
+    #[test]
+    fn receipt_lookup_watermarks_cannot_pass_sent_replica_work() {
+        let status = query_result(
+            "lookup".into(),
+            execution::REDUCER_RECEIPT_QUERY.into(),
+            serde_json::json!({"found":true,"cursor":{"epoch":"epoch","revision":542}}),
+        );
+        assert!(call_watermark_after_sent_replica_work(&status, true, Some(541)).is_none());
+        assert!(call_watermark_after_sent_replica_work(&status, false, None).is_none());
+        for sent in [None, Some(542), Some(600)] {
+            assert!(matches!(
+                call_watermark_after_sent_replica_work(&status, true, sent),
+                Some(ServerMessage::ReplicaWatermark { revision: 542 })
+            ));
+        }
+        for (path, found) in [
+            (execution::REDUCER_RECEIPT_QUERY, false),
+            ("application.query", true),
+        ] {
+            let response = query_result(
+                "lookup".into(),
+                path.into(),
+                serde_json::json!({"found":found,"cursor":{"epoch":"epoch","revision":542}}),
+            );
+            assert!(call_watermark_after_sent_replica_work(&response, true, None).is_none());
+        }
     }
 
     #[test]

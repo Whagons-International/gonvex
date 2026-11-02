@@ -114,13 +114,36 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
   constructor(private readonly database: ExpoSQLiteDatabase) {}
 
   private initialize() {
-    return (this.initialized ??= this.migrateSchema());
+    return (this.initialized ??= this.migrateSchema().catch(error => {
+      this.initialized = undefined;
+      throw error;
+    }));
   }
 
   private async migrateSchema() {
-    const storedVersion = await this.database.getFirstAsync<{
-      user_version: number;
-    }>("PRAGMA user_version");
+    await this.database.withTransactionAsync(() => this.migrateSchemaInTransaction());
+  }
+
+  private async migrateSchemaInTransaction() {
+    // user_version belongs to the host application. Historical Gonvex builds
+    // also wrote it, so it cannot identify this adapter's schema reliably.
+    const schemaColumns = await this.database.getAllAsync<TableInfo>(
+      "PRAGMA table_info(_gonvex_replica_schema)",
+    );
+    let storedVersion = 0;
+    if (schemaColumns.length > 0) {
+      if (!schemaColumns.some(column => column.name === "id") || !schemaColumns.some(column => column.name === "version")) {
+        throw new Error("Unrecognized Gonvex replica schema checkpoint");
+      }
+      const versions = await this.database.getAllAsync<{ id: number; version: number }>(
+        "SELECT id,version FROM _gonvex_replica_schema",
+      );
+      if (versions.length !== 1 || versions[0].id !== 1 || !Number.isSafeInteger(versions[0].version)
+        || versions[0].version < 1 || versions[0].version > replicaSchemaVersion) {
+        throw new Error("Unsupported Gonvex replica schema version");
+      }
+      storedVersion = versions[0].version;
+    }
     const [entities, queries, meta] = await Promise.all([
       this.database.getAllAsync<TableInfo>(
         `PRAGMA table_info(_gonvex_replica_entities)`,
@@ -140,6 +163,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     const legacyMeta =
       meta.length > 0 && !meta.some((column) => column.name === "scope");
     const createTables = `
+      CREATE TABLE IF NOT EXISTS _gonvex_replica_schema (
+        id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS _gonvex_replica_entities (
         scope TEXT NOT NULL, entity TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL,
         PRIMARY KEY (scope, entity, id)
@@ -174,70 +200,66 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
       CREATE INDEX IF NOT EXISTS _gonvex_replica_lookup_row ON _gonvex_replica_lookup(scope,entity,id);
     `;
     if (!legacyEntities && !legacyQueries && !legacyMeta) {
-      await this.database.withTransactionAsync(async () => {
-        await this.database.execAsync(createTables);
-        if ((storedVersion?.user_version ?? 0) < 3) await this.rebuildLookup();
-        await this.database.execAsync(
-          `PRAGMA user_version = ${replicaSchemaVersion}`,
-        );
-      });
+      await this.database.execAsync(createTables);
+      if (storedVersion < replicaSchemaVersion) await this.rebuildLookup();
+      await this.database.runAsync(
+        `INSERT OR REPLACE INTO _gonvex_replica_schema(id,version) VALUES(1,?)`, replicaSchemaVersion,
+      );
       return;
     }
     // The v1 tables had no namespace at all. Keep their contents available to
     // direct/default LocalReplica users, but never leave those rows in the
     // canonical tables where an authenticated scope could read them.
-    await this.database.withTransactionAsync(async () => {
-      if (legacyEntities)
-        await this.database.execAsync(
-          `ALTER TABLE _gonvex_replica_entities RENAME TO _gonvex_replica_entities_legacy_v1`,
-        );
-      if (legacyQueries)
-        await this.database.execAsync(
-          `ALTER TABLE _gonvex_replica_queries RENAME TO _gonvex_replica_queries_legacy_v1`,
-        );
-      if (legacyMeta)
-        await this.database.execAsync(
-          `ALTER TABLE _gonvex_replica_meta RENAME TO _gonvex_replica_meta_legacy_v1`,
-        );
-      await this.database.execAsync(createTables);
-      if (legacyEntities) {
-        await this.database.execAsync(
-          `INSERT INTO _gonvex_replica_entities (scope, entity, id, value)
-           SELECT '${defaultReplicaScope}', entity, id, value FROM _gonvex_replica_entities_legacy_v1`,
-        );
-      }
-      if (legacyQueries) {
-        await this.database.execAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value)
-           SELECT '${defaultReplicaScope}', signature, value FROM _gonvex_replica_queries_legacy_v1`,
-        );
-      }
-      if (legacyMeta) {
-        await this.database.execAsync(
-          `INSERT INTO _gonvex_replica_meta (scope, key, value)
-           SELECT '${defaultReplicaScope}', key, value FROM _gonvex_replica_meta_legacy_v1`,
-        );
-      }
-      // The copy and cleanup share the same SQLite transaction. A failed
-      // migration rolls back both, so legacy rows cannot be lost before the
-      // scoped normalized tables are complete.
-      if (legacyEntities)
-        await this.database.execAsync(
-          `DROP TABLE _gonvex_replica_entities_legacy_v1`,
-        );
-      if (legacyQueries)
-        await this.database.execAsync(
-          `DROP TABLE _gonvex_replica_queries_legacy_v1`,
-        );
-      if (legacyMeta)
-        await this.database.execAsync(
-          `DROP TABLE _gonvex_replica_meta_legacy_v1`,
-        );
-      await this.rebuildLookup();
+    if (legacyEntities)
       await this.database.execAsync(
-        `PRAGMA user_version = ${replicaSchemaVersion}`,
+        `ALTER TABLE _gonvex_replica_entities RENAME TO _gonvex_replica_entities_legacy_v1`,
       );
-    });
+    if (legacyQueries)
+      await this.database.execAsync(
+        `ALTER TABLE _gonvex_replica_queries RENAME TO _gonvex_replica_queries_legacy_v1`,
+      );
+    if (legacyMeta)
+      await this.database.execAsync(
+        `ALTER TABLE _gonvex_replica_meta RENAME TO _gonvex_replica_meta_legacy_v1`,
+      );
+    await this.database.execAsync(createTables);
+    if (legacyEntities) {
+      await this.database.execAsync(
+        `INSERT INTO _gonvex_replica_entities (scope, entity, id, value)
+         SELECT '${defaultReplicaScope}', entity, id, value FROM _gonvex_replica_entities_legacy_v1`,
+      );
+    }
+    if (legacyQueries) {
+      await this.database.execAsync(
+        `INSERT INTO _gonvex_replica_queries (scope, signature, value)
+         SELECT '${defaultReplicaScope}', signature, value FROM _gonvex_replica_queries_legacy_v1`,
+      );
+    }
+    if (legacyMeta) {
+      await this.database.execAsync(
+        `INSERT INTO _gonvex_replica_meta (scope, key, value)
+         SELECT '${defaultReplicaScope}', key, value FROM _gonvex_replica_meta_legacy_v1`,
+      );
+    }
+    // The copy and cleanup share the same SQLite transaction. A failed
+    // migration rolls back both, so legacy rows cannot be lost before the
+    // scoped normalized tables are complete.
+    if (legacyEntities)
+      await this.database.execAsync(
+        `DROP TABLE _gonvex_replica_entities_legacy_v1`,
+      );
+    if (legacyQueries)
+      await this.database.execAsync(
+        `DROP TABLE _gonvex_replica_queries_legacy_v1`,
+      );
+    if (legacyMeta)
+      await this.database.execAsync(
+        `DROP TABLE _gonvex_replica_meta_legacy_v1`,
+      );
+    await this.rebuildLookup();
+    await this.database.runAsync(
+      `INSERT OR REPLACE INTO _gonvex_replica_schema(id,version) VALUES(1,?)`, replicaSchemaVersion,
+    );
   }
 
   private async rebuildLookup() {
@@ -267,13 +289,12 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     }
     const liveQueries: Record<string, ReplicaWindow> = {};
     const queryRecords = await this.database.getAllAsync<QueryRecord>(
-      `SELECT scope, signature, value FROM _gonvex_replica_queries WHERE scope = ? ORDER BY signature`,
+      `SELECT scope, json_quote(signature) AS signature, value FROM _gonvex_replica_queries WHERE scope = ? ORDER BY _gonvex_replica_queries.signature`,
       scope,
     );
     for (const row of queryRecords) {
-      liveQueries[row.signature] = normalizeWindow(
-        JSON.parse(row.value) as ReplicaWindow,
-      );
+      const window = readWindowRecord(row);
+      liveQueries[window.signature] = window;
     }
     if (!cursor && entityRecords.length === 0 && queryRecords.length === 0)
       return undefined;
@@ -296,7 +317,7 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         scope,
       );
       const queries = await this.database.getAllAsync<QueryRecord>(
-        `SELECT scope, signature, value FROM _gonvex_replica_queries WHERE scope = ? ORDER BY signature`,
+        `SELECT scope, json_quote(signature) AS signature, value FROM _gonvex_replica_queries WHERE scope = ? ORDER BY _gonvex_replica_queries.signature`,
         scope,
       );
       // Count live rows for every table in this read transaction. Looking
@@ -351,10 +372,10 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
             )
             .map(({ entity }) => entity),
           liveQueries: Object.fromEntries(
-            queries.map((row) => [
-              row.signature,
-              normalizeWindow(JSON.parse(row.value)),
-            ]),
+            queries.map((row) => {
+              const window = readWindowRecord(row);
+              return [window.signature, window];
+            }),
           ),
         };
     });
@@ -387,12 +408,12 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     let result: { window: ReplicaWindow; rows: ReplicaRow[] } | undefined;
     await this.database.withTransactionAsync(async () => {
       const record = await this.database.getFirstAsync<QueryRecord>(
-        `SELECT scope, signature, value FROM _gonvex_replica_queries WHERE scope = ? AND signature = ?`,
+        `SELECT scope, json_quote(signature) AS signature, value FROM _gonvex_replica_queries WHERE scope = ? AND _gonvex_replica_queries.signature = json_extract(?, '$')`,
         scope,
-        signature,
+        JSON.stringify(signature),
       );
       if (!record) return;
-      const window = normalizeWindow(JSON.parse(record.value));
+      const window = readWindowRecord(record);
       result = {
         window,
         rows: (await this.loadEntityRows(scope, window.entity, window.ids)).map(
@@ -592,10 +613,10 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
       }
       for (const membership of transaction.memberships ?? []) {
         await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)
            ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
           scope,
-          membership.signature,
+          JSON.stringify(membership.signature),
           JSON.stringify(membership),
         );
       }
@@ -605,9 +626,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
       if (attemptedDeletes.size) {
         const explicit = new Set((transaction.memberships ?? []).map(window => window.signature));
         const records = await this.database.getAllAsync<QueryRecord>(
-          `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=?`, scope);
+          `SELECT scope,json_quote(signature) AS signature,value FROM _gonvex_replica_queries WHERE scope=?`, scope);
         for (const record of records) {
-          let window: ReplicaWindow = JSON.parse(record.value);
+          let window = readWindowRecord(record);
           const attempted = attemptedDeletes.get(window.entity);
           if (!attempted || !window.ids.some(id => attempted.has(id))) continue;
           if (!explicit.has(window.signature)
@@ -616,8 +637,8 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
             if (ids.length !== window.ids.length) {
               window = { ...window, ids };
               await this.database.runAsync(
-                `UPDATE _gonvex_replica_queries SET value=? WHERE scope=? AND signature=?`,
-                JSON.stringify(window), scope, window.signature);
+                `UPDATE _gonvex_replica_queries SET value=? WHERE scope=? AND signature=json_extract(?, '$')`,
+                JSON.stringify(window), scope, JSON.stringify(window.signature));
             }
           }
           postImages.windows[window.signature] = window;
@@ -646,10 +667,10 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     await this.database.withTransactionAsync(async () => {
       for (const window of windows) {
         await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)
            ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
           scope,
-          window.signature,
+          JSON.stringify(window.signature),
           JSON.stringify(normalizeWindow(window)),
         );
       }
@@ -699,9 +720,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         snapshot.liveQueries,
       )) {
         await this.database.runAsync(
-          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)`,
+          `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)`,
           scope,
-          signature,
+          JSON.stringify(signature),
           JSON.stringify(membership),
         );
       }
@@ -811,12 +832,12 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         ? { epoch: window.cursor.epoch, revision: 0 } : snapshot.cursor;
       await this.resetForEpoch(scope, checkpoint);
       const oldRecord = await this.database.getFirstAsync<QueryRecord>(
-        `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=? AND signature=?`,
+        `SELECT scope,json_quote(signature) AS signature,value FROM _gonvex_replica_queries WHERE scope=? AND _gonvex_replica_queries.signature=json_extract(?, '$')`,
         scope,
-        window.signature,
+        JSON.stringify(window.signature),
       );
       const oldWindow: ReplicaWindow | undefined = oldRecord
-        ? JSON.parse(oldRecord.value)
+        ? readWindowRecord(oldRecord)
         : undefined;
       if (
         oldWindow?.cursor &&
@@ -843,10 +864,10 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         window.cursor,
       );
       await this.database.runAsync(
-        `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, ?, ?)
+        `INSERT INTO _gonvex_replica_queries (scope, signature, value) VALUES (?, json_extract(?, '$'), ?)
          ON CONFLICT(scope, signature) DO UPDATE SET value = excluded.value`,
         scope,
-        window.signature,
+        JSON.stringify(window.signature),
         JSON.stringify(normalizeWindow(window)),
       );
       postImages.windows[window.signature] = normalizeWindow(window);
@@ -854,12 +875,12 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
         oldWindow?.ids.filter((id) => !window.ids.includes(id)) ?? [];
       if (removed.length) {
         const windows = await this.database.getAllAsync<QueryRecord>(
-          `SELECT scope,signature,value FROM _gonvex_replica_queries WHERE scope=?`,
+          `SELECT scope,json_quote(signature) AS signature,value FROM _gonvex_replica_queries WHERE scope=?`,
           scope,
         );
         const retained = new Set(
           windows.flatMap((record) => {
-            const other: ReplicaWindow = JSON.parse(record.value);
+            const other = readWindowRecord(record);
             return other.entity === window.entity ? other.ids : [];
           }),
         );
@@ -912,9 +933,9 @@ class SQLiteReplicaStorageCore implements LocalReplicaStorage {
     await this.initialize();
     await this.database.withTransactionAsync(async () => {
       await this.database.runAsync(
-        `DELETE FROM _gonvex_replica_queries WHERE scope = ? AND signature = ?`,
+        `DELETE FROM _gonvex_replica_queries WHERE scope = ? AND _gonvex_replica_queries.signature = json_extract(?, '$')`,
         scope,
-        signature,
+        JSON.stringify(signature),
       );
       if (snapshot.cursor) {
         await this.database.runAsync(
@@ -952,6 +973,19 @@ export * from "./outbox.js";
 
 export function expoSQLite(database: ExpoSQLiteDatabase): LocalReplicaStorage {
   return new ExpoSQLiteLocalReplicaStorage(database);
+}
+
+function readWindowRecord(record: QueryRecord): ReplicaWindow {
+  // Bind keys as JSON and decode them in SQL: some native bridges truncate
+  // bound TEXT at NUL too. Stored keys retain their historical TEXT format.
+  // Drivers can truncate an ordinary TEXT column at an embedded NUL. Read
+  // its JSON-quoted representation and verify the payload uses that full key.
+  const signature: unknown = JSON.parse(record.signature);
+  const window = JSON.parse(record.value) as ReplicaWindow;
+  if (typeof signature !== "string" || window.signature !== signature) {
+    throw new Error("Inconsistent durable SQLite replica signature; recovery is required");
+  }
+  return normalizeWindow(window);
 }
 
 function normalizeWindow(value: ReplicaWindow): ReplicaWindow {

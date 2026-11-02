@@ -202,9 +202,14 @@ export type ServerCapabilities = {
   reducerBatch?: 1;
   /** Server emits connection-level replica revision watermarks. */
   replicaWatermark?: 1;
+  /** Read-only receipt lookup; never claims a key or invokes its reducer. */
+  reducerReceiptLookup?: 1;
   /** Server closes each successful Control write after refreshing this connection's Control subscriptions. */
   controlWatermark?: 1;
 };
+
+/** Reserved tenant Query for reconciling an already accepted durable intent. */
+export const REDUCER_RECEIPT_QUERY = "__gonvex.reducerReceipt";
 
 export type QuerySubscribeRequest = {
   id: string;

@@ -29,6 +29,17 @@ class NativeContractTests(unittest.TestCase):
             with self.subTest(values=len(values)), self.assertRaises(AssertionError):
                 self.verify("all", values)
 
+    def test_startup_diagnostic_cannot_replace_required_native_observations(self):
+        values = events("recover")
+        startup = {key: values[0][key] for key in ("runId", "phase", "bundleSha256")}
+        startup["type"] = "startup"
+        self.verify("recover", [startup, *values])
+        for invalid in [[startup, values[-1]], [startup], [startup, startup, *values],
+                        [values[0], startup, *values[1:]], [dict(startup, runId="old"), *values],
+                        [dict(startup, bundleSha256="old"), *values]]:
+            with self.assertRaises(AssertionError):
+                self.verify("recover", invalid)
+
     def test_wrong_owner_phase_bundle_and_engine_fail(self):
         for field, value in [("runId", "old"), ("phase", "recover"), ("bundleSha256", "old"), ("hermes", False), ("sqlite", "unknown"), ("android", 35)]:
             values = events("all")
@@ -57,6 +68,33 @@ class NativeContractTests(unittest.TestCase):
             mutate(values[-1])
             with self.assertRaises(AssertionError):
                 self.verify("recover", values)
+
+    def synthetic_journal_events(self, phase):
+        # Constructed validator vectors, not claims of native execution.
+        environment = dict(events("all")[0], phase=phase)
+        result = dict(environment, type="corrupt-journal-refused" if phase.endswith("recover") else "corrupt-journal-seeded",
+                      rows=[{"id": 1, "scope": "account", "idempotency_key": "native-corrupt", "state": "committed", "value": "{invalid accepted bytes"},
+                            {"id": 2, "scope": "account", "idempotency_key": "native-good", "state": "committed", "value": json.dumps({"id": 2, "idempotencyKey": "native-good", "state": "committed", "args": {"key": "native-good"}})}],
+                      sync={"synchronous": 2}, journal={"journal_mode": "delete"})
+        if phase.endswith("recover"):
+            result["errors"] = {key: {"name": "OutboxRecoveryError", "message": "recovery required"}
+                                for key in ("load", "update", "restore", "enqueue")}
+        return [environment, result]
+
+    def test_synthetic_journal_vectors_validate_only_declared_postconditions(self):
+        for phase in ("journal-corrupt-seed", "journal-corrupt-recover"):
+            self.verify(phase, self.synthetic_journal_events(phase))
+        for mutate in [
+            lambda result: result["rows"].pop(),
+            lambda result: result["rows"][0].update(value="changed"),
+            lambda result: result["rows"][1].update(state="pending"),
+            lambda result: result["errors"].update(enqueue=None),
+            lambda result: result["errors"].pop("restore"),
+        ]:
+            values = self.synthetic_journal_events("journal-corrupt-recover")
+            mutate(values[-1])
+            with self.assertRaises(AssertionError):
+                self.verify("journal-corrupt-recover", values)
 
     def test_missing_crash_write_witness_or_committed_intent_fails(self):
         values = events("crash-seed")

@@ -66,7 +66,7 @@ describe.each(factories)("%s settlement", (_, create) => {
       const before = await queue.list(scope);
       if (queue.markCommittedMany) await queue.markCommittedMany(entries.map(entry => entry.id));
       else for (const entry of entries) await queue.markCommitted(entry.id);
-      expect(await queue.list(scope)).toEqual(before.map(entry => ({ ...entry, state: "committed" })));
+      expect(await queue.list(scope)).toEqual(before.map(entry => ({ ...entry, knownUnsent: false, state: "committed" })));
     } finally { queue.dispose?.(); }
   });
 

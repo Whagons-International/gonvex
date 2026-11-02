@@ -9,7 +9,12 @@
   "expoGo": {
     "version": "54.0.8",
     "url": "https://github.com/expo/expo-go-releases/releases/download/Expo-Go-54.0.8/Expo-Go-54.0.8.apk",
-    "sha256": "d72ed2cec15bf029c942d1cb70c933976ec83048e00d130bbfa6bad8cf22331a"
+    "sha256": "d72ed2cec15bf029c942d1cb70c933976ec83048e00d130bbfa6bad8cf22331a",
+    "androidLaunch": {
+      "activity": "host.exp.exponent/.experience.ExperienceActivity",
+      "manifestExtra": "experienceUrl",
+      "optimisticExtra": "isOptimistic"
+    }
   },
   "sqliteVersion": "3.50.3",
   "androidApi": 36
