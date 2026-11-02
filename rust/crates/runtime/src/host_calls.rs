@@ -21,7 +21,7 @@ use sqlx::postgres::PgRow;
 use sqlx::types::Json;
 #[cfg(test)]
 use sqlx::{postgres::PgArguments, query::Query, Postgres};
-use sqlx::{Column, Either, Executor, Row, TypeInfo, ValueRef};
+use sqlx::{Column, Either, Executor, Row, Statement, TypeInfo, ValueRef};
 use uuid::Uuid;
 
 use crate::error_class::TransientFault;
@@ -378,8 +378,11 @@ impl DatabaseHostCalls {
         let parameter_types = if parameters.iter().any(Value::is_array) {
             let fault = self.fault.clone();
             let description_key = crate::sql_statement_key::description(statement.trim());
+            // Only parameter types are needed. describe() additionally infers
+            // output nullability with catalog queries and EXPLAIN EXECUTE on
+            // every call, even for an already cached statement.
             let description = (&mut **self.transaction()?.transaction())
-                .describe(description_key.as_str())
+                .prepare(description_key.as_str())
                 .await
                 .map_err(|error| {
                     format!(

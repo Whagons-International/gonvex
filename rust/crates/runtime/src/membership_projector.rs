@@ -5,38 +5,51 @@
 //! Control Plane and only then removes the outbox row. A crash at any point is
 //! safe because the Control Plane upsert is revision guarded.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::Row;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 use crate::Runtime;
 
 #[derive(Clone)]
 pub struct MembershipProjector {
     shutdown: watch::Sender<bool>,
+    wake: Arc<Notify>,
 }
 
 impl Default for MembershipProjector {
     fn default() -> Self {
         let (shutdown, _) = watch::channel(false);
-        Self { shutdown }
+        Self {
+            shutdown,
+            wake: Arc::new(Notify::new()),
+        }
     }
 }
 
 impl MembershipProjector {
     pub fn start(&self, runtime: Runtime) {
         let mut shutdown = self.shutdown.subscribe();
+        let projector = self.clone();
         tokio::spawn(async move {
+            let mut delay = Duration::from_secs(2);
             loop {
                 if *shutdown.borrow() {
                     return;
                 }
-                if let Err(error) = drain_all(&runtime).await {
-                    tracing::warn!(%error, "project tenant membership directory");
-                }
+                let projected = match drain_all(&runtime).await {
+                    Ok(projected) => projected,
+                    Err(error) => {
+                        tracing::warn!(%error, "project tenant membership directory");
+                        // Retry errors at the busy interval too.
+                        true
+                    }
+                };
+                delay = next_delay(delay, projected);
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    _ = projector.wait(delay) => {}
                     changed = shutdown.changed() => {
                         if changed.is_err() || *shutdown.borrow() { return; }
                     }
@@ -45,14 +58,35 @@ impl MembershipProjector {
         });
     }
 
+    /// Coalesces commits, including commits arriving while a pass is running.
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    async fn wait(&self, delay: Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = self.wake.notified() => {}
+        }
+    }
+
     pub fn shutdown(&self) {
         let _ = self.shutdown.send(true);
     }
 }
 
-async fn drain_all(runtime: &Runtime) -> Result<(), gonvex_postgres::DatabaseError> {
+fn next_delay(previous: Duration, projected: bool) -> Duration {
+    if projected {
+        Duration::from_secs(2)
+    } else {
+        (previous * 2).min(Duration::from_secs(10))
+    }
+}
+
+async fn drain_all(runtime: &Runtime) -> Result<bool, gonvex_postgres::DatabaseError> {
+    let mut projected = false;
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
-        return Ok(());
+        return Ok(false);
     };
     for project in control.runtime_projects().await? {
         let Some(project_id) = project.get("id").and_then(serde_json::Value::as_str) else {
@@ -67,7 +101,10 @@ async fn drain_all(runtime: &Runtime) -> Result<(), gonvex_postgres::DatabaseErr
         }
         for route in control.tenant_routes(project_id).await? {
             match project_membership_outbox_once(&control, &route).await {
-                Ok(true) => runtime.notify_control_changed(project_id),
+                Ok(true) => {
+                    projected = true;
+                    runtime.notify_control_changed(project_id);
+                }
                 Ok(false) => {}
                 Err(error) => {
                     tracing::warn!(
@@ -80,7 +117,7 @@ async fn drain_all(runtime: &Runtime) -> Result<(), gonvex_postgres::DatabaseErr
             }
         }
     }
-    Ok(())
+    Ok(projected)
 }
 
 #[doc(hidden)]
@@ -144,5 +181,57 @@ pub async fn project_membership_outbox_once(
             // the global SQL admission controller.
             tokio::task::yield_now().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_caps_and_resets_after_work() {
+        let mut delay = Duration::from_secs(2);
+        for seconds in [4, 8, 10, 10] {
+            delay = next_delay(delay, false);
+            assert_eq!(delay, Duration::from_secs(seconds));
+        }
+        delay = next_delay(delay, true);
+        assert_eq!(delay, Duration::from_secs(2));
+        assert_eq!(next_delay(delay, true), Duration::from_secs(2));
+        assert_eq!(next_delay(delay, false), Duration::from_secs(4));
+    }
+
+    #[tokio::test]
+    async fn wake_interrupts_idle_sleep() {
+        let projector = MembershipProjector::default();
+        let wait = projector.wait(Duration::from_secs(10));
+        tokio::pin!(wait);
+        tokio::select! {
+            _ = &mut wait => panic!("idle sleep completed before a wake"),
+            _ = tokio::task::yield_now() => {}
+        }
+        projector.clone().wake();
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wake_during_pass_is_retained_and_coalesced() {
+        let projector = MembershipProjector::default();
+        projector.wake();
+        projector.wake();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            projector.wait(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(20),
+            projector.wait(Duration::from_secs(10))
+        )
+        .await
+        .is_err());
     }
 }

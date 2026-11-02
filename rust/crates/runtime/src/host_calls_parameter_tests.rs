@@ -148,7 +148,7 @@ async fn crud_type_changes_cannot_commit_unrelated_row_writes() {
 }
 
 #[tokio::test]
-async fn raw_query_type_changes_and_described_text_arrays_preserve_values() {
+async fn raw_query_type_changes_and_prepared_arrays_preserve_values() {
     let Some(fixture) = Fixture::new().await else {
         return;
     };
@@ -179,6 +179,25 @@ async fn raw_query_type_changes_and_described_text_arrays_preserve_values() {
                 .unwrap(),
             serde_json::json!([{"n":["a","é"]}])
         );
+    }
+    // Parameter-only preparation must preserve native arrays and JSON arrays,
+    // including output columns whose nullability would require EXPLAIN.
+    for (cast, value) in [
+        ("bigint[]", serde_json::json!([1, 2])),
+        ("boolean[]", serde_json::json!([true, false])),
+        ("jsonb", serde_json::json!([{"x": 1}])),
+    ] {
+        let statement =
+            format!("SELECT $1::{cast} AS n, t.id FROM (SELECT 1) s LEFT JOIN tasks t ON false");
+        for _ in 0..2 {
+            assert_eq!(
+                calls
+                    .query(&statement, Value::Array(vec![value.clone()]))
+                    .await
+                    .unwrap(),
+                serde_json::json!([{"n": value, "id": null}])
+            );
+        }
     }
     calls.finish(false).await.unwrap();
     fixture.close().await;

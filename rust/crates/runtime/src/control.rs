@@ -816,6 +816,7 @@ impl Runtime {
         .fetch_one(&mut **tenant_tx.transaction())
         .await?;
         tenant_tx.commit().await?;
+        self.inner.membership_projector.wake();
 
         let subject = control_subject(connection, Authorization::TenantAdmin);
         let mut finish_tx = control.begin_control_transaction(false).await?;
@@ -929,6 +930,7 @@ impl Runtime {
             (false, 0)
         };
         tenant_tx.commit().await?;
+        self.inner.membership_projector.wake();
 
         let subject = control_subject(connection, Authorization::Developer);
         let mut finish_tx = control.begin_control_transaction(false).await?;
@@ -1263,6 +1265,7 @@ impl Runtime {
         .fetch_one(&mut **tenant_tx.transaction())
         .await?;
         tenant_tx.commit().await?;
+        self.inner.membership_projector.wake();
 
         let subject = control_subject(connection, Authorization::Account);
         let mut finish_tx = control.begin_control_transaction(false).await?;
@@ -1456,6 +1459,7 @@ impl Runtime {
         .fetch_one(&mut **tenant_tx.transaction())
         .await?;
         tenant_tx.commit().await?;
+        self.inner.membership_projector.wake();
 
         let mut finish_tx = control.begin_control_transaction(false).await?;
         sqlx::query(
@@ -1536,6 +1540,7 @@ impl Runtime {
         .await?
         .unwrap_or(0);
         tenant_tx.commit().await?;
+        self.inner.membership_projector.wake();
 
         let mut finish_tx = control.begin_control_transaction(false).await?;
         sqlx::query("DELETE FROM gonvex_demo_accounts WHERE project_id=$1 AND account_id=$2")
@@ -1905,6 +1910,7 @@ impl Runtime {
                     .await?;
                 tenant_tx.commit().await?;
             }
+            self.inner.membership_projector.wake();
             let _ = reducer_result;
         } else {
             tenant_tx.rollback().await?;
