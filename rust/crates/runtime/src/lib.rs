@@ -492,6 +492,7 @@ async fn storage_download_inner(
                     .headers_mut()
                     .insert(axum::http::HeaderName::from_static(name), value);
             }
+            protect_storage_response(response.headers_mut());
             response.headers_mut().insert(
                 axum::http::header::CACHE_CONTROL,
                 HeaderValue::from_static("private, max-age=300"),
@@ -501,6 +502,62 @@ async fn storage_download_inner(
         Ok(_) => (StatusCode::NOT_FOUND, "object not found").into_response(),
         Err(error) => (StatusCode::BAD_GATEWAY, error).into_response(),
     }
+}
+
+// Only these explicit media formats may render on the runtime origin. Everything
+// else downloads, including SVG, XML, HTML and unrecognized image subtypes.
+// PDF is retained for the documented task-attachment preview workflow.
+fn protect_storage_response(headers: &mut HeaderMap) {
+    let mime = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let inline = matches!(
+        mime.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "audio/wav"
+            | "audio/webm"
+            | "audio/mp4"
+            | "video/mp4"
+            | "video/webm"
+            | "video/ogg"
+            | "application/pdf"
+    );
+    // Rebuild rather than forward arbitrary parameters or malformed MIME values.
+    let content_type = if inline {
+        mime.as_str()
+    } else {
+        "application/octet-stream"
+    };
+    headers.insert("content-type", HeaderValue::from_str(content_type).unwrap());
+    headers.insert(
+        "content-disposition",
+        HeaderValue::from_static(if inline { "inline" } else { "attachment" }),
+    );
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(if inline {
+            // Native PDF viewers cannot load in a sandboxed document. The
+            // explicit MIME allowlist and nosniff keep these media responses
+            // from being interpreted as HTML.
+            "default-src 'none'; base-uri 'none'"
+        } else {
+            "sandbox; default-src 'none'; base-uri 'none'"
+        }),
+    );
 }
 
 async fn storage_upload(
@@ -5400,6 +5457,142 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 },
                 "{change}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_storage_download_enforces_response_policy_and_ranges() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        for (mime, disposition) in [
+            ("text/html", "attachment"),
+            ("image/svg+xml", "attachment"),
+            ("application/xml", "attachment"),
+            ("application/pdf", "inline"),
+            ("IMAGE/PNG; charset=binary", "inline"),
+            ("video/mp4", "inline"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let upstream = Router::new().fallback(move |headers: HeaderMap| async move {
+                assert_eq!(headers["range"], "bytes=0-4");
+                (
+                    StatusCode::PARTIAL_CONTENT,
+                    [("content-type", mime), ("content-range", "bytes 0-4/10")],
+                    "hello",
+                )
+            });
+            let server =
+                tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+            let mut settings = config(false);
+            settings.storage = crate::config::StorageConfig {
+                endpoint: format!("http://{address}"),
+                region: "us-east-1".into(),
+                bucket: "test".into(),
+                access_key_id: "test".into(),
+                secret_access_key: "test-secret".into(),
+                force_path_style: true,
+                ..Default::default()
+            };
+            let runtime = Runtime::new(settings);
+            let expiry = Utc::now().timestamp() + 60;
+            let mut mac = Hmac::<Sha256>::new_from_slice(b"gonvex-storage:test-secret").unwrap();
+            mac.update(format!("file\n{expiry}").as_bytes());
+            let signature: String = mac
+                .finalize()
+                .into_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let response = runtime
+                .router()
+                .oneshot(
+                    Request::get(format!("/storage/file?exp={expiry}&sig={signature}"))
+                        .header("range", "bytes=0-4")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                response.headers().get("content-disposition").unwrap(),
+                disposition,
+                "{mime}"
+            );
+            assert_eq!(response.headers()["content-range"], "bytes 0-4/10");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(to_bytes(response.into_body(), 100).await.unwrap(), "hello");
+            let denied = runtime
+                .router()
+                .oneshot(
+                    Request::get(format!("/storage/file?exp={expiry}&sig=invalid"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn storage_response_blocks_active_and_unknown_content() {
+        for mime in [
+            "text/html",
+            "TEXT/HTML; charset=utf-8",
+            "image/svg+xml",
+            "application/xml",
+            "text/xml",
+            "image/unknown",
+            "",
+            "text/html, image/png",
+            "image/png\tgarbage",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", HeaderValue::from_str(mime).unwrap());
+            protect_storage_response(&mut headers);
+            assert_eq!(headers["content-disposition"], "attachment", "{mime}");
+            assert_eq!(headers["content-type"], "application/octet-stream");
+            assert_eq!(headers["x-content-type-options"], "nosniff");
+            assert_eq!(
+                headers["content-security-policy"],
+                "sandbox; default-src 'none'; base-uri 'none'"
+            );
+        }
+        let mut missing = HeaderMap::new();
+        protect_storage_response(&mut missing);
+        assert_eq!(missing["content-disposition"], "attachment");
+        assert!(HeaderValue::from_str("image/png\r\nX-Injected: yes").is_err());
+    }
+
+    #[test]
+    fn storage_response_preserves_safe_media_and_ranges() {
+        for mime in [
+            "image/png",
+            "IMAGE/JPEG; charset=binary",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "application/pdf",
+            "audio/mpeg",
+            "audio/ogg",
+            "video/mp4",
+            "VIDEO/WEBM; codecs=vp9",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", HeaderValue::from_str(mime).unwrap());
+            headers.insert("content-range", HeaderValue::from_static("bytes 0-9/100"));
+            headers.insert("content-length", HeaderValue::from_static("10"));
+            protect_storage_response(&mut headers);
+            assert_eq!(headers["content-disposition"], "inline", "{mime}");
+            assert_eq!(
+                headers["content-security-policy"],
+                "default-src 'none'; base-uri 'none'"
+            );
+            assert_eq!(headers["content-range"], "bytes 0-9/100");
+            assert_eq!(headers["content-length"], "10");
         }
     }
 
