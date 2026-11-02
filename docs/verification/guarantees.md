@@ -99,13 +99,16 @@ PostgreSQL and the module host, and rejects ignored or missing execution. Both
 configured Mergify queues require `CI` before merge.
 
 Staging branch protection was verified on 2026-11-02. It requires the aggregate
-`CI` check from the GitHub Actions app, requires an up-to-date branch and applies
-to administrators. No reviewer-approval gate was added. The required aggregate
-checks runtime tests, policy proofs and native-storage verification. This
-configuration and its API readback establish the repository enforcement policy;
-they trust GitHub to apply it. A successful published-head CI run and completion
-of the remaining contract audit are still required. Local checks alone do not
-close those items.
+`CI` check from the GitHub Actions app and applies to administrators. No
+reviewer-approval gate was added. The required aggregate checks runtime tests,
+policy proofs and native-storage verification. The configured Mergify staging
+queue tests a batch against the latest base before merging. GitHub's strict
+up-to-date-branch setting is disabled because that queue tests a separate batch
+PR rather than rewriting each original branch. Required CI remains enforced.
+The configuration and API readback trust GitHub and Mergify to apply these
+policies. Published head `afc8112c` passed CI, including the Android historical SQLite
+schedules. Queue admission, successful batch CI and the remaining contract
+audit are still required; later PR heads require their own green checks. Local checks alone do not close those items.
 
 The query callback checkpoint adds public-listener ownership checks, a durable
 published cache, ordered publication and independent revision reset for each
