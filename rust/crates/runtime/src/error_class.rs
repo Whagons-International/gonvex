@@ -58,7 +58,10 @@ pub fn database_error_class(error: &DatabaseError) -> ReducerErrorClass {
         | DatabaseError::ListenerLagged
         | DatabaseError::ListenerClosed
         | DatabaseError::Io(_)
-        | DatabaseError::DataDirLocked(_) => ReducerErrorClass::Transient,
+        | DatabaseError::DataDirLocked(_)
+        // The group this write joined did not commit (another member was
+        // cancelled or COMMIT failed): nothing of it was applied, retry.
+        | DatabaseError::GroupCommit(_) => ReducerErrorClass::Transient,
         DatabaseError::Sql(sql) if sql_error_is_transient(sql) => ReducerErrorClass::Transient,
         DatabaseError::MissingProject
         | DatabaseError::MissingTenant

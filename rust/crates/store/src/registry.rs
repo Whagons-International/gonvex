@@ -174,6 +174,10 @@ pub(crate) struct Database {
     pub(crate) reader: SqlitePool,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// The open group-commit transaction on the writer (see `group`).
+    pub(crate) group: Arc<Mutex<Option<crate::group::WriteGroup>>>,
+    /// Write transactions waiting for `group`.
+    pub(crate) group_waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -317,6 +321,8 @@ impl PoolRegistry {
             reader,
             notify,
             locks: Arc::default(),
+            group: Arc::default(),
+            group_waiting: Arc::default(),
         };
         Ok(database)
     }
@@ -328,6 +334,10 @@ impl PoolRegistry {
             .values()
             .filter_map(|cell| cell.get().cloned())
             .collect()
+    }
+
+    pub(crate) fn acquire_timeout(&self) -> Duration {
+        self.limits.acquire_timeout
     }
 
     /// The writer pool (one connection). Every write must use it.
