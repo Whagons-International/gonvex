@@ -83,6 +83,35 @@ fn sqlite_cache_kib() -> u64 {
     env_u64("GONVEX_SQLITE_CACHE_KIB", 8 * 1024)
 }
 
+/// Process-wide budget for SQLite's heap in MiB
+/// (`GONVEX_SQLITE_CACHE_BUDGET_MB`, default 128; 0 disables). Every
+/// connection of every tenant file allocates its page cache, parsed schema
+/// and prepared statements from one heap; past the budget SQLite recycles
+/// page-cache pages instead of growing (`sqlite3_soft_heap_limit64`), so the
+/// total stays near the budget however many files and readers are open.
+/// It is a soft limit: allocations never fail because of it.
+pub fn sqlite_cache_budget_mib() -> u64 {
+    env_u64("GONVEX_SQLITE_CACHE_BUDGET_MB", 128)
+}
+
+/// Applies [`sqlite_cache_budget_mib`] once per process.
+fn apply_cache_budget() {
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    APPLIED.call_once(|| {
+        let budget = sqlite_cache_budget_mib();
+        if budget > 0 {
+            unsafe {
+                libsqlite3_sys::sqlite3_soft_heap_limit64((budget * 1024 * 1024) as i64);
+            }
+        }
+    });
+}
+
+/// SQLite heap in use by this process, in bytes.
+pub fn sqlite_memory_used() -> i64 {
+    unsafe { libsqlite3_sys::sqlite3_memory_used() }
+}
+
 /// Shared memory-mapped window per database file in MiB
 /// (`GONVEX_SQLITE_MMAP_MIB`, default 256; 0 disables mmap).
 fn sqlite_mmap_mib() -> u64 {
@@ -175,12 +204,19 @@ pub struct PoolRegistrySnapshot {
 
 #[derive(Clone)]
 pub(crate) struct Database {
+    /// Prepared statements of the writer connection (see `direct`). Declared
+    /// before `writer`: when the last handle drops, they are finalized while
+    /// the connection is still open.
+    pub(crate) statements: Arc<crate::direct::WriterStatements>,
     pub(crate) writer: SqlitePool,
     pub(crate) reader: SqlitePool,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
     sync: Arc<crate::sync_barrier::SyncBarrier>,
+    /// Background WAL checkpoints (see `checkpoint`); `None` when SQLite's
+    /// automatic checkpoint runs inside the writer's commits.
+    wal: Option<Arc<crate::checkpoint::WalState>>,
 }
 
 #[derive(Clone)]
@@ -236,6 +272,7 @@ impl PoolRegistry {
 
     pub fn with_durability(limits: PoolLimits, durability: Durability) -> Self {
         let limits = limits.bounded();
+        apply_cache_budget();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
             admission_count: Arc::default(),
@@ -256,7 +293,9 @@ impl PoolRegistry {
         // `PRAGMA journal_mode` takes a lock, so issuing it on every reader
         // open made reader opens wait behind the writer's transactions.
         if !read_only {
-            options = options.journal_mode(SqliteJournalMode::Wal);
+            // Serialized mode: direct sessions finalize their cached
+            // statements on the writer from any thread (see `direct`).
+            options = options.journal_mode(SqliteJournalMode::Wal).serialized(true);
         }
         let options = options
             // COMMIT never syncs while holding the single writer; Full
@@ -298,6 +337,9 @@ impl PoolRegistry {
             std::fs::create_dir_all(parent)
                 .map_err(|error| DatabaseError::Io(error.to_string()))?;
         }
+        let wal = crate::checkpoint::background_enabled()
+            .then(|| crate::checkpoint::WalState::new(&path));
+        let writer_wal = wal.clone();
         // The writer creates the file and switches it to WAL before any reader
         // opens it; a read-only connection cannot change the journal mode.
         let writer = SqlitePoolOptions::new()
@@ -305,14 +347,26 @@ impl PoolRegistry {
             .min_connections(1)
             .idle_timeout(None)
             .max_lifetime(None)
+            // A local SQLite connection does not drop like a socket; the
+            // default ping on every acquire was one more worker round trip
+            // per transaction.
+            .test_before_acquire(false)
             .acquire_timeout(self.limits.acquire_timeout)
             // Change capture reads row values through the pre-update hook,
             // installed on the writer only (readers never write).
-            .after_connect(|connection, _| {
+            .after_connect(move |connection, _| {
+                let wal = writer_wal.clone();
                 Box::pin(async move {
                     crate::capture::install(connection)
                         .await
-                        .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+                        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                    // Checkpoints leave the writer's commits (see `checkpoint`).
+                    if let Some(wal) = wal {
+                        crate::checkpoint::install(connection, wal)
+                            .await
+                            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                    }
+                    Ok(())
                 })
             })
             .connect_with(self.options(&path, false)?)
@@ -322,15 +376,18 @@ impl PoolRegistry {
             .min_connections(0)
             .idle_timeout(Some(self.limits.idle_timeout))
             .max_lifetime(None)
+            .test_before_acquire(false)
             .acquire_timeout(self.limits.acquire_timeout)
             .connect_lazy_with(self.options(&path, true)?);
         let (notify, _) = broadcast::channel(NOTIFY_CAPACITY);
         let database = Database {
+            statements: crate::direct::WriterStatements::new(),
             writer,
             reader,
             notify,
             locks: Arc::default(),
             sync: crate::sync_barrier::SyncBarrier::new(&path),
+            wal,
         };
         Ok(database)
     }
@@ -356,6 +413,14 @@ impl PoolRegistry {
     /// The writer pool (one connection). Every write must use it.
     pub async fn pool(&self, database_url: &str) -> Result<SqlitePool, DatabaseError> {
         Ok(self.database(database_url).await?.writer)
+    }
+
+    /// Prepared-statement counters of the writer's direct sessions.
+    pub async fn writer_statement_stats(
+        &self,
+        database_url: &str,
+    ) -> Result<crate::direct::StatementStats, DatabaseError> {
+        Ok(self.database(database_url).await?.statements.stats())
     }
 
     /// The read-only pool. Each transaction sees one WAL snapshot.
@@ -454,7 +519,11 @@ impl PoolRegistry {
         let cells = std::mem::take(&mut *self.databases.lock().unwrap());
         for database in cells.into_values().filter_map(|cell| cell.get().cloned()) {
             database.reader.close().await;
+            database.statements.close();
             database.writer.close().await;
+            if let Some(wal) = &database.wal {
+                wal.close().await;
+            }
         }
     }
 
@@ -462,7 +531,11 @@ impl PoolRegistry {
         let cell = self.databases.lock().unwrap().remove(&key(database_url));
         if let Some(database) = cell.and_then(|cell| cell.get().cloned()) {
             database.reader.close().await;
+            database.statements.close();
             database.writer.close().await;
+            if let Some(wal) = &database.wal {
+                wal.close().await;
+            }
         }
     }
 }

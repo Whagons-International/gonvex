@@ -7,7 +7,8 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use gonvex_module_host::protocol::{
-    ActivateRequest, FunctionWire, JavaScriptWire, LoadRequest, ModuleArtifactWire, ResponsePayload,
+    ActivateRequest, FunctionWire, JavaScriptWire, LoadRequest, ModuleArtifactWire,
+    ReducerBundleWire, ResponsePayload,
 };
 use gonvex_store::RuntimeManifestRecord;
 use serde_json::{Map, Value};
@@ -575,6 +576,12 @@ fn artifact_from_manifest(
             .ok_or_else(|| invalid("artifact has no JavaScript bundle".to_owned()))?,
     )
     .map_err(|error| invalid(error.to_string()))?;
+    let reducer_bundle: Option<ReducerBundleWire> = module
+        .get("reducerBundle")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| invalid(format!("reducerBundle: {error}")))?;
     let function_values = module
         .get("functions")
         .and_then(Value::as_object)
@@ -787,6 +794,23 @@ fn artifact_from_manifest(
         );
     }
     function_wires.sort_by(|left, right| left.path.cmp(&right.path));
+    if let Some(bundle) = &reducer_bundle {
+        for path in &bundle.functions {
+            match definitions.get(path) {
+                Some(definition) if matches!(definition.kind.as_str(), "query" | "reducer") => {}
+                Some(_) => {
+                    return Err(invalid(format!(
+                        "reducerBundle lists {path:?}, which is not a Query or Reducer"
+                    )))
+                }
+                None => {
+                    return Err(invalid(format!(
+                        "reducerBundle lists unknown function {path:?}"
+                    )))
+                }
+            }
+        }
+    }
     let visibility: BTreeMap<String, crate::visibility::VisibilityPlan> = module
         .get("visibility")
         .cloned()
@@ -846,6 +870,7 @@ fn artifact_from_manifest(
             entrypoint: text(module, "entrypoint")?,
             hash,
             javascript,
+            reducer_bundle,
             functions: function_wires,
             metadata: Map::new(),
         },
@@ -874,6 +899,21 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
             "hash":javascript.get("hash").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase(),
         },
     });
+    // A split artifact signs its reducer bundle too. Unsplit artifacts keep
+    // their existing hash because the key is absent.
+    if let Some(bundle) = module.get("reducerBundle") {
+        let bundle = bundle
+            .as_object()
+            .ok_or_else(|| "reducerBundle must be an object".to_owned())?;
+        contract.as_object_mut().expect("contract object").insert(
+            "reducerBundle".to_owned(),
+            serde_json::json!({
+                "path": bundle.get("path").cloned().unwrap_or(Value::Null),
+                "hash": bundle.get("hash").and_then(Value::as_str).unwrap_or("").trim().to_ascii_lowercase(),
+                "functions": bundle.get("functions").cloned().unwrap_or_else(|| serde_json::json!([])),
+            }),
+        );
+    }
     // Declared only by modules that use `ctx.permissions`; absent keeps every
     // earlier artifact hash unchanged.
     if let Some(grants) = module.get("permissionGrants").filter(|value| !value.is_null()) {

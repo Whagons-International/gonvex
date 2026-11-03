@@ -448,14 +448,17 @@
   const hostCall = async (payload) => {
     // The op answers with a JSON envelope so a denial, a host failure and a
     // successful response are one shape the host fully controls.
-    const outcome = JSON.parse(await ops.op_gonvex_host_call(JSON.stringify(payload)));
-    if (outcome.status !== "ok") throw new GonvexHostError(outcome.message, outcome.status);
-    if (outcome.value === "") return undefined;
+    // A successful value is embedded as JSON (absent means undefined), so the
+    // response is parsed once.
+    const raw = await ops.op_gonvex_host_call(JSON.stringify(payload));
+    let outcome;
     try {
-      return JSON.parse(outcome.value);
+      outcome = JSON.parse(raw);
     } catch {
       throw new GonvexHostError(`host operation ${payload.kind} returned a response that is not JSON`, "failed");
     }
+    if (outcome.status !== "ok") throw new GonvexHostError(outcome.message, outcome.status);
+    return outcome.value;
   };
 
   const text = (name, value) => {

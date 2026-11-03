@@ -19,6 +19,9 @@ use tokio::sync::watch;
 
 use crate::DatabaseError;
 
+/// WAL syncs run by every barrier in this process (observability and tests).
+pub static WAL_SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Clone, Debug, Default)]
 struct Synced {
     /// Highest ticket covered by a finished sync.
@@ -84,6 +87,7 @@ impl SyncBarrier {
     async fn run(self: Arc<Self>) {
         loop {
             let target = self.state.lock().unwrap().issued;
+            WAL_SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let wal = self.wal.clone();
             let result = tokio::task::spawn_blocking(move || sync_file(&wal))
                 .await

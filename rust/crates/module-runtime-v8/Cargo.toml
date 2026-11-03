@@ -18,3 +18,4 @@ pkcs1 = "0.7"
 rand.workspace = true
 url.workspace = true
 tokio.workspace = true
+libc.workspace = true

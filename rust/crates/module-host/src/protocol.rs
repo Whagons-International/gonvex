@@ -351,6 +351,11 @@ pub struct ModuleArtifactWire {
     #[serde(default)]
     pub hash: String,
     pub javascript: JavaScriptWire,
+    /// Optional Query/Reducer-only bundle. When present, the functions it
+    /// lists run from it (resolved by exact path) and every other function,
+    /// Actions included, runs from `javascript`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reducer_bundle: Option<ReducerBundleWire>,
     #[serde(default)]
     pub functions: Vec<FunctionWire>,
     #[serde(default)]
@@ -366,6 +371,17 @@ pub struct JavaScriptWire {
     pub hash: String,
     /// Base64-encoded UTF-8 ESM bundle.
     pub code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReducerBundleWire {
+    #[serde(default)]
+    pub path: String,
+    pub hash: String,
+    pub code: String,
+    /// Function paths served by this bundle. Only Queries and Reducers.
+    pub functions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

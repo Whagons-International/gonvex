@@ -29,6 +29,7 @@ import type {
   ModuleFunction,
   ModuleJavaScript,
   ModuleLanguage,
+  ModuleReducerBundle,
   ModuleSchema,
   PermissionGrantSource,
   ReplicaCollectionDefinition,
@@ -101,6 +102,8 @@ export type ModuleArtifactOptions = {
   entrypoint?: string;
   /** gonvex.json `module.bundle`, project-relative output under gonvex/_build. */
   bundle?: string;
+  /** gonvex.json `module.split`: also emit the Query/Reducer-only bundle. */
+  split?: boolean;
 };
 
 /**
@@ -220,6 +223,9 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   }
   const sortedFiles = sortedRecord(files);
   const sortedFunctions = sortedRecord(functions);
+  const reducerBundle = options.split
+    ? await bundleReducerJavaScript(options, javascript, sortedFunctions)
+    : undefined;
   const sortedVisibility = sortedRecord(visibilityPlans);
   const sortedCrons = crons.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
   if (invitationAcceptanceReducer) {
@@ -236,6 +242,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       visibility: sortedVisibility,
       crons: sortedCrons,
       javascript,
+      reducerBundle,
       invitationAcceptanceReducer,
       permissionGrants: grantSource,
     }),
@@ -244,6 +251,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     visibility: sortedVisibility,
     files: sortedFiles,
     javascript,
+    ...(reducerBundle ? { reducerBundle } : {}),
     ...(sortedCrons.length > 0 ? { crons: sortedCrons } : {}),
     ...(invitationAcceptanceReducer ? { invitationAcceptanceReducer } : {}),
     ...(grantSource ? { permissionGrants: grantSource } : {}),
@@ -636,6 +644,7 @@ function artifactHash(input: {
   visibility: Record<string, VisibilityPlan>;
   crons: ModuleCron[];
   javascript: ModuleJavaScript;
+  reducerBundle?: ModuleReducerBundle;
   invitationAcceptanceReducer?: string;
   permissionGrants?: PermissionGrantSource;
 }) {
@@ -651,6 +660,14 @@ function artifactHash(input: {
     invitationAcceptanceReducer: input.invitationAcceptanceReducer ?? "",
     // Only modules that declare it hash it: earlier artifact hashes are unchanged.
     ...(input.permissionGrants ? { permissionGrants: input.permissionGrants } : {}),
+    // Present only for split artifacts, so unsplit artifact hashes are unchanged.
+    ...(input.reducerBundle ? {
+      reducerBundle: {
+        path: input.reducerBundle.path,
+        hash: input.reducerBundle.hash,
+        functions: input.reducerBundle.functions,
+      },
+    } : {}),
   };
   return createHash("sha256").update(canonicalJson(contract)).digest("hex");
 }
@@ -666,6 +683,11 @@ function canonicalJson(value: unknown): string {
 }
 
 async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint: string): Promise<ModuleJavaScript> {
+  const outputPath = moduleBundleOutputPath(options);
+  return writeBundle(options, entrypoint, outputPath, [], entrypoint);
+}
+
+function moduleBundleOutputPath(options: ModuleArtifactOptions): string {
   const buildDir = resolve(options.backendDir, "_build");
   const declaredOutput = options.bundle?.trim();
   if (declaredOutput && isAbsolute(declaredOutput)) {
@@ -673,12 +695,59 @@ async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint
   }
   const outputPath = declaredOutput ? resolve(options.root, declaredOutput) : resolve(options.backendDir, defaultBundlePath);
   assertInside(buildDir, outputPath, "gonvex.json module.bundle must resolve under gonvex/_build");
+  return outputPath;
+}
 
+const reducerEntryId = "\0gonvex-reducer-entry";
+
+/**
+ * Builds the Query/Reducer-only bundle. Its entry imports each Query and
+ * Reducer export straight from its defining file and re-exports it under the
+ * function path, so Action-only exports (and whatever only they import) are
+ * tree-shaken away. A function the entry cannot address statically (no export
+ * binding, the SDK's synthesized `__local` replica Queries) stays out of the
+ * list and keeps running from the complete bundle.
+ */
+async function bundleReducerJavaScript(
+  options: ModuleArtifactOptions,
+  complete: ModuleJavaScript,
+  functions: Record<string, ModuleFunction>,
+): Promise<ModuleReducerBundle> {
+  const served: Array<[string, ModuleFunction]> = Object.entries(functions)
+    .filter(([, entry]) => (entry.kind === "query" || entry.kind === "reducer")
+      && !!entry.export && entry.handler !== "__local" && !!entry.file)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const lines: string[] = [];
+  const exports: string[] = [];
+  served.forEach(([path, entry], index) => {
+    const source = resolve(options.root, entry.file);
+    assertInside(resolve(options.root), source, `function ${path} file must be inside the project`);
+    lines.push(`import { ${entry.export} as __gonvex_${index} } from ${JSON.stringify(source)};`);
+    exports.push(`  __gonvex_${index} as ${JSON.stringify(path)},`);
+  });
+  const entrySource = `${lines.join("\n")}\nexport {\n${exports.join("\n")}\n};\n`;
+  const completePath = resolve(options.root, complete.path);
+  const outputPath = completePath.replace(/(\.[cm]?js)?$/, ".reducers.js");
+  const javascript = await writeBundle(options, reducerEntryId, outputPath, [{
+    name: "gonvex-reducer-entry",
+    resolveId: (id) => (id === reducerEntryId ? reducerEntryId : null),
+    load: (id) => (id === reducerEntryId ? entrySource : null),
+  }], "reducer bundle");
+  return { ...javascript, functions: served.map(([path]) => path) };
+}
+
+async function writeBundle(
+  options: ModuleArtifactOptions,
+  input: string,
+  outputPath: string,
+  plugins: RolldownPlugin[],
+  label: string,
+): Promise<ModuleJavaScript> {
   await mkdir(dirname(outputPath), { recursive: true });
   let bundle: Awaited<ReturnType<typeof rolldown>>;
   try {
     bundle = await rolldown({
-      input: entrypoint,
+      input,
       cwd: options.root,
       platform: "neutral",
       tsconfig: false,
@@ -689,10 +758,10 @@ async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint
         conditionNames: ["browser", "import", "default"],
         mainFields: ["browser", "module", "main"],
       },
-      plugins: [rejectNodeBuiltinsPlugin()],
+      plugins: [...plugins, rejectNodeBuiltinsPlugin()],
     });
   } catch (error) {
-    throw moduleBundleError(entrypoint, error);
+    throw moduleBundleError(label, error);
   }
 
   try {
@@ -722,7 +791,7 @@ async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint
       code: code.toString("base64"),
     };
   } catch (error) {
-    throw moduleBundleError(entrypoint, error);
+    throw moduleBundleError(label, error);
   } finally {
     await bundle.close();
   }

@@ -138,6 +138,21 @@ async fn flush_inner(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
     Ok(())
 }
 
+/// Whether `flush` has staged rows to process, checked directly on the
+/// connection (the common answer, "no", then costs no sqlx round trip).
+pub(crate) fn staged_direct(connection: &mut crate::direct::Conn<'_>) -> Result<bool, sqlx::Error> {
+    let ledger = connection.query_i64(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='_gonvex_reference_pending'",
+        &[],
+    )?;
+    if ledger.is_none() {
+        return Ok(false);
+    }
+    Ok(connection
+        .query_i64("SELECT 1 FROM _gonvex_reference_pending LIMIT 1", &[])?
+        .is_some())
+}
+
 /// Installs (or replaces) the reference catalog. Runs in a savepoint, so it
 /// may be called inside an open transaction; the whole declaration applies or
 /// none of it does.

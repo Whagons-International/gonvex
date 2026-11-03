@@ -144,6 +144,71 @@ async fn run() {
             result.extra.insert("rows".into(), json!(rows));
         }
     }
+    // ---- Snapshot query + decode only (the 9k-row admin statement) ------
+    // `json_object` over every task column, no predicate, as the Admin
+    // snapshot reads it: sqlx (`fetch` + String + `serde_json::from_str`)
+    // against the direct row stream (bytes only, and bytes + `Value`).
+    if report.enabled("snapshot_query/") {
+        let url = tenant.route.database_url.clone();
+        let pools = fixture.pools().clone();
+        let columns = {
+            let reader = pools.reader(&url).await.unwrap();
+            let mut connection = reader.acquire().await.unwrap();
+            gonvex_store::rows::table_columns(&mut connection, "tasks")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|column| (column.name.clone(), column.kind()))
+                .collect::<Vec<_>>()
+        };
+        let sql = format!(
+            "SELECT {} FROM \"tasks\" AS r",
+            gonvex_store::rows::json_object_expr("r", &columns)
+        );
+        for variant in ["sqlx_value", "direct_bytes", "direct_value"] {
+            let name = format!("snapshot_query/tasks_9000/{variant}");
+            let rows = std::cell::Cell::new(0usize);
+            report
+                .run_simple(&name, BenchConfig::new(2, 15), 1.0, "query", |_| {
+                    let (pools, url, sql, rows) = (pools.clone(), url.clone(), sql.clone(), &rows);
+                    async move {
+                        let mut transaction =
+                            gonvex_store::begin_transaction(&pools, &url, true).await.unwrap();
+                        let mut decoded = Vec::new();
+                        let mut bytes = 0usize;
+                        if variant == "sqlx_value" {
+                            use futures_util::StreamExt;
+                            let mut stream = sqlx::query_scalar::<_, Option<String>>(&sql)
+                                .fetch(&mut **transaction.transaction());
+                            while let Some(row) = stream.next().await {
+                                let raw = row.unwrap().unwrap();
+                                decoded.push(serde_json::from_str::<Value>(&raw).unwrap());
+                            }
+                        } else {
+                            let mut stream =
+                                transaction.stream_json_rows(sql, Vec::new()).await.unwrap();
+                            while let Some(batch) = stream.next_batch().await {
+                                let batch = batch.unwrap();
+                                for row in batch.rows() {
+                                    if variant == "direct_value" {
+                                        decoded.push(serde_json::from_slice::<Value>(row).unwrap());
+                                    } else {
+                                        bytes += row.len();
+                                        decoded.push(Value::Null);
+                                    }
+                                }
+                            }
+                        }
+                        rows.set(decoded.len());
+                        std::hint::black_box((decoded, bytes));
+                        transaction.commit().await.unwrap();
+                    }
+                })
+                .await
+                .map(|result| result.extra.insert("rows".into(), json!(rows.get())));
+        }
+    }
+
     // A member's full subscription set (10 collections), one op.
     let team_member = fixture.members_of_kind(BIG, MemberKind::TeamAllSpots)[0];
     report

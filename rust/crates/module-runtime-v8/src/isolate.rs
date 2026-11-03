@@ -19,8 +19,8 @@ use deno_core::{
     extension, op2, v8, JsRuntime, ModuleSpecifier, OpState, PollEventLoopOptions, RuntimeOptions,
 };
 use gonvex_module_runtime::{
-    Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse, Invocation,
-    InvocationResult, ModuleError,
+    Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse, InlineHost,
+    Invocation, InvocationResult, ModuleError,
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -46,6 +46,9 @@ const WEB_STREAMS: &str = include_str!("vendor/web_streams_ponyfill.js");
 pub(crate) struct ModuleSource {
     specifier: ModuleSpecifier,
     code: String,
+    /// A split reducer bundle exports every function under its exact path,
+    /// so it is resolved by path alone and no other candidate can shadow it.
+    resolve_by_path: bool,
     #[cfg(test)]
     pub(crate) probe: Arc<WorkerTestProbe>,
 }
@@ -76,9 +79,23 @@ impl ModuleSource {
         Ok(Self {
             specifier,
             code,
+            resolve_by_path: false,
             #[cfg(test)]
             probe: Arc::default(),
         })
+    }
+}
+
+impl ModuleSource {
+    /// The Query/Reducer-only bundle of a split artifact. Its specifier is
+    /// distinct from the complete bundle's so stack traces name the bundle.
+    pub(crate) fn reducer_bundle(module_id: &str, code: String) -> Result<Self, ModuleError> {
+        let mut source = Self::new(module_id, code)?;
+        source.specifier = source.specifier.join("reducers.js").map_err(|err| {
+            ModuleError::InvalidArtifact(format!("reducer bundle specifier: {err}"))
+        })?;
+        source.resolve_by_path = true;
+        Ok(source)
     }
 }
 
@@ -131,6 +148,7 @@ pub(crate) struct CallSpec {
     pub(crate) timeout: Option<Duration>,
     pub(crate) max_result_bytes: usize,
     pub(crate) host: mpsc::UnboundedSender<HostRequest>,
+    pub(crate) inline: Option<Arc<dyn InlineHost>>,
 }
 
 pub(crate) struct WorkerCall {
@@ -204,6 +222,29 @@ struct WorkerExit(Arc<WorkerControl>);
 impl Drop for WorkerExit {
     fn drop(&mut self) {
         self.0.stopped();
+    }
+}
+
+/// Returns freed native heap to the operating system. V8 parses and compiles
+/// a module bundle with malloc-backed zones on the isolate's own thread; glibc
+/// keeps those freed pages in that thread's arena, so without a trim every
+/// isolate start or stop leaves tens of megabytes resident.
+pub fn trim_native_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let enabled = *ENABLED.get_or_init(|| {
+            std::env::var("GONVEX_MODULE_MALLOC_TRIM")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true)
+        });
+        if enabled {
+            // SAFETY: malloc_trim has no preconditions; it only releases
+            // free memory held by the allocator.
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        }
     }
 }
 
@@ -284,6 +325,8 @@ fn worker_main(
         &runtime,
         worker_loop(source, config, ready, calls, &control),
     );
+    drop(runtime);
+    trim_native_heap();
 }
 
 async fn worker_loop(
@@ -298,6 +341,8 @@ async fn worker_loop(
         _ = control.canceled() => Err(ModuleError::Execution("module isolate startup was canceled".into())),
         result = ModuleIsolate::create(&source, config, control) => result,
     };
+    // Parsing and top-level evaluation are done; release their scratch memory.
+    trim_native_heap();
     let mut isolate = match initialized {
         Ok(isolate) => {
             if ready.send(Ok(())).is_err() {
@@ -310,6 +355,7 @@ async fn worker_loop(
             return;
         }
     };
+    let mut served: u64 = 0;
     loop {
         let call = tokio::select! {
             biased;
@@ -322,6 +368,10 @@ async fn worker_loop(
             reply = isolate.run(call.spec) => reply,
         };
         let healthy = reply.healthy;
+        served += 1;
+        if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
+            log_heap_statistics(&mut isolate.runtime, &source.specifier, &format!("after-{served}-calls"));
+        }
         let _ = call.reply.send(reply);
         if !healthy {
             break;
@@ -343,6 +393,10 @@ struct ActiveCall {
     capabilities: Capabilities,
     action_tools: BTreeSet<String>,
     host: mpsc::UnboundedSender<HostRequest>,
+    /// Calls the host answers on this thread (see `InlineHost`).
+    inline: Option<Arc<dyn InlineHost>>,
+    /// Ordered host calls sent to the invoking task and not yet answered.
+    serial_outstanding: u32,
     violation: Option<Violation>,
 }
 
@@ -377,7 +431,9 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
         Err(message) => return HostCallOutcome::failed(message),
     };
 
-    let response = {
+    let mut call = call;
+    let mut inline_tried = false;
+    let (response, serial) = loop {
         let mut op_state = state.borrow_mut();
         let Some(active) = op_state.borrow_mut::<InvocationSlot>().active.as_mut() else {
             return HostCallOutcome::failed("no module invocation is active".to_owned());
@@ -420,6 +476,24 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 return HostCallOutcome::denied(message);
             }
         }
+        let serial = !matches!(call, HostCall::Fetch { .. });
+        // Answer on this thread when the host can (in-process database work on
+        // the connection leased to this invocation): no hop to the invoking
+        // task and back. Only while no ordered host call is outstanding, so a
+        // call never overtakes one issued before it.
+        if serial && !inline_tried && active.serial_outstanding == 0 {
+            if let Some(inline) = active.inline.clone() {
+                inline_tried = true;
+                drop(op_state);
+                match inline.call_inline(call) {
+                    Ok(result) => return outcome_of(result),
+                    Err(back) => {
+                        call = back;
+                        continue;
+                    }
+                }
+            }
+        }
         let (reply, response) = oneshot::channel();
         if active.host.send(HostRequest { call, reply }).is_err() {
             let message = "module host bridge closed".to_owned();
@@ -428,19 +502,21 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 .get_or_insert(Violation::Bridge(message.clone()));
             return HostCallOutcome::failed(message);
         }
-        response
+        if serial {
+            active.serial_outstanding += 1;
+        }
+        break (response, serial);
     };
 
-    match response.await {
-        // Host responses travel as bytes in the ABI; this engine speaks JSON,
-        // so a non-UTF-8 response is a host/module contract mismatch.
-        Ok(Ok(HostResponse { value })) => match String::from_utf8(value) {
-            Ok(text) => HostCallOutcome::ok(text),
-            Err(_) => HostCallOutcome::failed("host response is not valid UTF-8 JSON".to_owned()),
-        },
-        // A host-side failure is the host's error, not a broken module: it stays
-        // catchable so a handler can fall back or report it.
-        Ok(Err(err)) => HostCallOutcome::failed(err.to_string()),
+    let response = response.await;
+    if serial {
+        let mut op_state = state.borrow_mut();
+        if let Some(active) = op_state.borrow_mut::<InvocationSlot>().active.as_mut() {
+            active.serial_outstanding = active.serial_outstanding.saturating_sub(1);
+        }
+    }
+    match response {
+        Ok(result) => outcome_of(result),
         Err(_) => {
             let message = "module host bridge closed before responding".to_owned();
             let mut op_state = state.borrow_mut();
@@ -451,6 +527,20 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
             }
             HostCallOutcome::failed(message)
         }
+    }
+}
+
+/// Host responses travel as bytes in the ABI; this engine speaks JSON, so a
+/// non-UTF-8 response is a host/module contract mismatch. A host-side failure
+/// is the host's error, not a broken module: it stays catchable so a handler
+/// can fall back or report it.
+fn outcome_of(result: Result<HostResponse, HostError>) -> HostCallOutcome {
+    match result {
+        Ok(HostResponse { value }) => match String::from_utf8(value) {
+            Ok(text) => HostCallOutcome::ok(text),
+            Err(_) => HostCallOutcome::failed("host response is not valid UTF-8 JSON".to_owned()),
+        },
+        Err(err) => HostCallOutcome::failed(err.to_string()),
     }
 }
 
@@ -534,6 +624,33 @@ extension!(
     ]
 );
 
+fn heap_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GONVEX_V8_HEAP_STATS")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Diagnostic only (`GONVEX_V8_HEAP_STATS=1`): one stderr line of V8 heap
+/// statistics, so memory studies can attribute RSS to isolate heaps.
+fn log_heap_statistics(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, moment: &str) {
+    let mut stats = v8::HeapStatistics::default();
+    runtime.v8_isolate().get_heap_statistics(&mut stats);
+    eprintln!(
+        "[gonvex-module-host] v8-heap {{\"moment\":\"{moment}\",\"module\":\"{specifier}\",\"total\":{},\"executable\":{},\"physical\":{},\"used\":{},\"malloced\":{},\"external\":{},\"limit\":{},\"contexts\":{}}}",
+        stats.total_heap_size(),
+        stats.total_heap_size_executable(),
+        stats.total_physical_size(),
+        stats.used_heap_size(),
+        stats.malloced_memory(),
+        stats.external_memory(),
+        stats.heap_size_limit(),
+        stats.number_of_native_contexts(),
+    );
+}
+
 /// Field order is drop order: the watchdog stops before the V8 handles and the
 /// runtime go away, so it can never terminate an isolate that is being torn
 /// down.
@@ -545,6 +662,7 @@ struct ModuleIsolate {
     terminated: Arc<AtomicBool>,
     heap_exhausted: Arc<AtomicBool>,
     config: V8Config,
+    resolve_by_path: bool,
 }
 
 impl ModuleIsolate {
@@ -617,6 +735,9 @@ impl ModuleIsolate {
             )));
         }
         let (dispatch, namespace) = initialized.expect("initialization timeout checked")?;
+        if heap_stats_enabled() {
+            log_heap_statistics(&mut runtime, &source.specifier, "initialized");
+        }
         Ok(Self {
             watchdog,
             dispatch,
@@ -625,6 +746,7 @@ impl ModuleIsolate {
             terminated,
             heap_exhausted,
             config,
+            resolve_by_path: source.resolve_by_path,
         })
     }
 
@@ -835,6 +957,8 @@ impl ModuleIsolate {
                     .cloned()
                     .collect(),
                 host: spec.host,
+                inline: spec.inline,
+                serial_outstanding: 0,
                 violation: None,
             });
 
@@ -940,7 +1064,11 @@ impl ModuleIsolate {
         &mut self,
         contract: &FunctionContract,
     ) -> Result<v8::Global<v8::Value>, ModuleError> {
-        let candidates = handler_candidates(contract);
+        let candidates = if self.resolve_by_path {
+            vec![contract.path.clone()]
+        } else {
+            handler_candidates(contract)
+        };
         let exports = &self.namespace;
         let scope = &mut self.runtime.handle_scope();
         // A namespace lookup can throw on a cyclic import, so it runs under a
