@@ -191,7 +191,27 @@ gonvex-admin export-sqlite \
 #   --sample-rows N               rows compared per table (default 200; 0 = off)
 #   --source-url-map FROM=TO      rewrite a source URL prefix (e.g. a Docker host)
 #   --report FILE                 also write the JSON report to FILE
+#   --preflight                   plan every database, copy nothing (below)
+#   --resume                      keep files an earlier run verified (below)
 ```
+
+**Preflight.** `--preflight` builds the SQLite schema in a throwaway
+directory, plans every database against its source snapshot and reports every
+mismatch at once (missing required columns, Postgres-only columns and tables
+with their row counts, what `--allow-drop-*` would skip), then exits. It copies
+nothing and does not touch `--data-dir`. Run it first on a production
+migration and settle every finding before the real export.
+
+**Resume.** A database file whose copy verified cleanly gets a `.export-ok`
+marker next to it. `--resume` keeps marked files (reported as `resumed`) and
+replaces only the others, so a run that failed halfway does not redo the
+databases it finished. Use it only while the source is still stopped; `--force`
+without `--resume` replaces every file and its marker.
+
+**Module manifests.** `gonvex_runtime_manifests` is not copied: a Postgres-era
+module artifact carries Postgres migrations the SQLite runtime would try to
+apply. Deploy the module again after the export; until then the runtime starts
+with no active module.
 
 Stop the Postgres runtime first. The tool reads each source database in one
 `REPEATABLE READ READ ONLY` snapshot, holds the data-directory lock while it

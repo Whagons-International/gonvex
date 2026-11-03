@@ -50,6 +50,8 @@ fn options(control_url: &str, data_dir: &Path) -> ExportOptions {
         sample_rows: 50,
         source_url_maps: Vec::new(),
         report_file: None,
+        preflight: false,
+        resume: false,
     }
 }
 
@@ -343,7 +345,9 @@ async fn export_sqlite_moves_a_postgres_deployment() {
             .await
             .unwrap();
     assert_eq!(violations, vec!["33333333-3333-4333-8333-333333333333"]);
-    // Change capture is live again: a write stages a change row.
+    // Change capture is live again: a write stages a change row. Writers need
+    // the pre-update hook and `gonvex_capture`, as the runtime installs them.
+    gonvex_store::capture::install(&mut acme).await.unwrap();
     let mut transaction = acme.begin().await.unwrap();
     sqlx::query("UPDATE tasks SET title='renamed' WHERE id='11111111-1111-4111-8111-111111111111'")
         .execute(&mut *transaction)
@@ -373,6 +377,42 @@ async fn export_sqlite_moves_a_postgres_deployment() {
     forced.force = true;
     let error = export(&forced).await.unwrap_err();
     assert!(error.to_string().contains("legacy"), "{error}");
+
+    // --preflight reports every mismatch at once, copies nothing and leaves the
+    // data directory as it was.
+    sqlx::query("CREATE TABLE legacy_only (id int PRIMARY KEY)")
+        .execute(&tenant)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO legacy_only VALUES (1), (2)")
+        .execute(&tenant)
+        .await
+        .unwrap();
+    let before = std::fs::metadata(directory.join("control.db"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let mut preflight = options(&control_url, &directory);
+    preflight.preflight = true;
+    let planned = export(&preflight).await.unwrap();
+    assert!(planned.preflight && !planned.ok);
+    let text = serde_json::to_string_pretty(&planned).unwrap();
+    assert!(
+        text.contains("legacy") && text.contains("legacy_only (2 rows)"),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::metadata(directory.join("control.db"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before,
+        "preflight must not touch the data directory"
+    );
+    sqlx::query("DROP TABLE legacy_only")
+        .execute(&tenant)
+        .await
+        .unwrap();
     forced.allow_drop_columns = true;
     let report = export(&forced).await.unwrap();
     assert!(
@@ -380,6 +420,19 @@ async fn export_sqlite_moves_a_postgres_deployment() {
         "{}",
         serde_json::to_string_pretty(&report).unwrap()
     );
+
+    // --resume keeps every file the last run verified and copies nothing again.
+    let mut resume = options(&control_url, &directory);
+    resume.resume = true;
+    resume.allow_drop_columns = true;
+    let resumed = export(&resume).await.unwrap();
+    assert!(
+        resumed.ok,
+        "{}",
+        serde_json::to_string_pretty(&resumed).unwrap()
+    );
+    assert!(resumed.control_plane.as_ref().unwrap().resumed);
+    assert!(resumed.databases.iter().all(|database| database.resumed));
 
     tenant.close().await;
     control.close().await;

@@ -49,6 +49,7 @@ fn never_copied(table: &str) -> bool {
             | "_gonvex_sync_changes"
             | "_gonvex_sync_transactions"
             | "_gonvex_sync_clock"
+            | "gonvex_runtime_manifests"
     ) || table.starts_with("_gonvex_reference_")
 }
 
@@ -286,6 +287,12 @@ pub struct ExportOptions {
     pub sample_rows: usize,
     pub source_url_maps: Vec<(String, String)>,
     pub report_file: Option<PathBuf>,
+    /// Plan every database against a throwaway SQLite schema and report all
+    /// mismatches at once; copies nothing and leaves `--data-dir` untouched.
+    pub preflight: bool,
+    /// Keep database files a previous run copied and verified (they carry a
+    /// `.export-ok` marker); export only the rest.
+    pub resume: bool,
 }
 
 pub fn usage() -> &'static str {
@@ -293,7 +300,8 @@ pub fn usage() -> &'static str {
       --migrations DIR | --migrations PROJECT_ID=DIR ...
       [--project ID ...] [--tenant ID ...] [--force] [--no-control-plane]
       [--allow-drop-columns] [--allow-drop-tables] [--keep-epoch]
-      [--sample-rows N] [--source-url-map FROM=TO ...] [--report FILE]"
+      [--sample-rows N] [--source-url-map FROM=TO ...] [--report FILE]
+      [--preflight] [--resume]"
 }
 
 pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
@@ -311,6 +319,8 @@ pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
         sample_rows: DEFAULT_SAMPLE_ROWS,
         source_url_maps: Vec::new(),
         report_file: None,
+        preflight: false,
+        resume: false,
     };
     let mut index = 0;
     while index < args.len() {
@@ -327,6 +337,8 @@ pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
             "--allow-drop-columns" => options.allow_drop_columns = true,
             "--allow-drop-tables" => options.allow_drop_tables = true,
             "--keep-epoch" => options.keep_epoch = true,
+            "--preflight" => options.preflight = true,
+            "--resume" => options.resume = true,
             "--no-control-plane" => options.no_control_plane = true,
             "--control-plane-url" => options.control_plane_url = value()?,
             "--data-dir" => options.data_dir = PathBuf::from(value()?),
@@ -412,6 +424,9 @@ pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub ok: bool,
+    /// `--preflight`: nothing was copied; findings are what would stop an export.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preflight: bool,
     pub data_dir: String,
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -432,6 +447,9 @@ pub struct DatabaseReport {
     pub tenant_ids: Vec<String>,
     pub source: String,
     pub target: String,
+    /// `--resume`: this file was copied and verified by an earlier run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
     pub tables: Vec<TableReport>,
     /// Source tables intentionally not copied, with the reason.
     pub skipped_source_tables: BTreeMap<String, String>,
@@ -990,6 +1008,7 @@ struct DatabaseJob<'a> {
     allow_drop_tables: bool,
     keep_epoch: bool,
     sample_rows: usize,
+    preflight: bool,
     /// Source tables to ignore silently (the Control Plane's own tables when a
     /// tenant shares the Control Plane database).
     ignore_source: BTreeSet<String>,
@@ -1065,13 +1084,20 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
                 ))
                 .fetch_one(&mut *source)
                 .await?;
-                let plan = plan_table(
+                let plan = match plan_table(
                     table,
                     source_name,
                     columns,
                     job.allow_drop_columns,
                     source_empty,
-                )?;
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) if job.preflight => {
+                        job.report.findings.push(error.to_string());
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 work.push((table, source_name.to_owned(), plan));
             }
             None => job.report.target_only_tables.push(table.name.clone()),
@@ -1090,6 +1116,8 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
             Some("revision carried over; epoch set explicitly")
         } else if name == "gonvex_migrations" {
             Some("Postgres migration ledger; the SQLite ledger records the SQLite migrations")
+        } else if name == "gonvex_runtime_manifests" {
+            Some("Postgres-era module artifact (its migrations are Postgres SQL); deploy the module again after the export")
         } else if name.starts_with("_gonvex_reference_") {
             Some("reference ledger rebuilt from the catalog")
         } else if name == "_gonvex_mutation_idempotency"
@@ -1109,7 +1137,27 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
         }
     }
     if !dropped_tables.is_empty() {
-        if !job.allow_drop_tables {
+        if job.preflight {
+            let mut counted = Vec::new();
+            for name in &dropped_tables {
+                let rows: i64 =
+                    sqlx::query_scalar(&format!("SELECT count(*) FROM {}", quote(name)))
+                        .fetch_one(&mut *source)
+                        .await?;
+                counted.push(format!("{name} ({rows} rows)"));
+                job.report.skipped_source_tables.insert(
+                    name.clone(),
+                    format!("no SQLite table; {rows} rows (--allow-drop-tables skips it)"),
+                );
+            }
+            if !job.allow_drop_tables {
+                job.report.findings.push(format!(
+                    "Postgres tables with no SQLite table: {}; add them to the SQLite migrations or pass --allow-drop-tables",
+                    counted.join(", ")
+                ));
+            }
+            dropped_tables.clear();
+        } else if !job.allow_drop_tables {
             return Err(format!(
                 "{}: Postgres tables with no SQLite table: {}; add them to the SQLite migrations or pass --allow-drop-tables",
                 job.report.target,
@@ -1122,6 +1170,28 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
                 .skipped_source_tables
                 .insert(name, "no SQLite table (--allow-drop-tables)".to_owned());
         }
+    }
+
+    if job.preflight {
+        for (table, source_name, plan) in &work {
+            let source_rows: i64 =
+                sqlx::query_scalar(&format!("SELECT count(*) FROM {}", quote(source_name)))
+                    .fetch_one(&mut *source)
+                    .await?;
+            job.report.tables.push(TableReport {
+                table: table.name.clone(),
+                source_table: source_name.clone(),
+                source_rows,
+                dropped_columns: plan.dropped.clone(),
+                defaulted_columns: plan.defaulted.clone(),
+                relaxed_for_empty_source: plan.relaxed.clone(),
+                ..TableReport::default()
+            });
+        }
+        job.report.integrity_check = "not run (preflight)".to_owned();
+        source.rollback().await?;
+        target.close().await?;
+        return Ok(());
     }
 
     // Copy tables that application triggers write into after their writers.
@@ -1350,8 +1420,35 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Orchestration
 
+/// Marker written next to a database file once its copy verified cleanly.
+const EXPORT_OK_SUFFIX: &str = ".export-ok";
+
+fn export_ok_marker(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(EXPORT_OK_SUFFIX);
+    PathBuf::from(name)
+}
+
+fn verified_earlier(path: &Path) -> bool {
+    path.exists() && export_ok_marker(path).exists()
+}
+
+fn mark_verified(path: &Path, report: &DatabaseReport) -> Result<()> {
+    let marker = serde_json::json!({
+        "target": report.target,
+        "tables": report.tables.len(),
+        "sourceRows": report.tables.iter().map(|table| table.source_rows).sum::<i64>(),
+        "exportedAtUnixMs": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or_default(),
+    });
+    std::fs::write(export_ok_marker(path), format!("{marker}\n"))
+        .map_err(|error| format!("write marker for {}: {error}", path.display()).into())
+}
+
 fn remove_database_file(path: &Path) -> Result<()> {
-    for suffix in ["", "-wal", "-shm", "-journal"] {
+    for suffix in ["", "-wal", "-shm", "-journal", EXPORT_OK_SUFFIX] {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
         match std::fs::remove_file(&name) {
@@ -1435,15 +1532,41 @@ fn route_of(database: &DatabasePlan) -> TenantRoute {
     }
 }
 
+/// Removes the throwaway `--preflight` data directory however the run ends.
+struct PreflightDir(PathBuf);
+
+impl Drop for PreflightDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub async fn export(options: &ExportOptions) -> Result<Report> {
-    let data = DataDir::new(&options.data_dir);
+    // --preflight builds the SQLite schema in a throwaway directory, so the
+    // real data directory is neither locked nor touched.
+    let preflight_dir = options.preflight.then(|| {
+        PreflightDir(
+            std::env::temp_dir().join(format!("gonvex-export-preflight-{}", std::process::id())),
+        )
+    });
+    if let Some(dir) = &preflight_dir {
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir_all(&dir.0)
+            .map_err(|error| format!("create {}: {error}", dir.0.display()))?;
+    }
+    let data = DataDir::new(
+        preflight_dir
+            .as_ref()
+            .map_or(options.data_dir.as_path(), |dir| dir.0.as_path()),
+    );
     let _lock = data.lock().map_err(|error| format!("{error}"))?;
     let control_source = connect_source(&options.control_plane_url).await?;
     let (projects, tenants) = source_routes(&control_source).await?;
     let routes = plan_routes(&data, &projects, &tenants)?;
     let mut report = Report {
-        data_dir: data.root().display().to_string(),
+        data_dir: options.data_dir.display().to_string(),
         source: redact_url(&options.control_plane_url),
+        preflight: options.preflight,
         ..Report::default()
     };
     for filter in &options.projects {
@@ -1471,9 +1594,15 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         .map(|database| database.target_url.clone())
         .collect();
 
-    // Preflight: never overwrite without --force.
+    // Never overwrite without --force (or --resume, which replaces only files
+    // that no earlier run verified).
     let control_path = data.control_path();
-    if options.no_control_plane {
+    let control_resumed = options.resume && verified_earlier(&control_path);
+    let resumed = selected
+        .iter()
+        .map(|database| options.resume && verified_earlier(&database.target_path))
+        .collect::<Vec<_>>();
+    if control_resumed || options.no_control_plane {
         if !control_path.exists() {
             return Err(format!(
                 "--no-control-plane needs an existing {}",
@@ -1482,7 +1611,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             .into());
         }
     } else if control_path.exists() {
-        if !options.force {
+        if !options.force && !options.resume {
             return Err(format!(
                 "{} already exists; pass --force to replace it",
                 control_path.display()
@@ -1491,9 +1620,12 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         }
         remove_database_file(&control_path)?;
     }
-    for database in &selected {
+    for (database, &resumed) in selected.iter().zip(&resumed) {
+        if resumed {
+            continue;
+        }
         if database.target_path.exists() {
-            if !options.force {
+            if !options.force && !options.resume {
                 return Err(format!(
                     "{} already exists; pass --force to replace it",
                     database.target_path.display()
@@ -1513,7 +1645,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
     let control_url = data.control_url();
     {
         let control = ControlPlane::connect(&control_url, registry(), BTreeMap::new()).await?;
-        if !options.no_control_plane {
+        if !options.no_control_plane && !control_resumed {
             let mut seen = BTreeSet::new();
             let control_migrations = cache
                 .values()
@@ -1527,7 +1659,12 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
                 .apply_control_migrations(control_migrations)
                 .await?;
         }
-        for (database, migrations) in selected.iter().zip(&database_migrations) {
+        for ((database, migrations), &resumed) in
+            selected.iter().zip(&database_migrations).zip(&resumed)
+        {
+            if resumed {
+                continue;
+            }
             let route = route_of(database);
             control
                 .clone()
@@ -1540,7 +1677,16 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
     }
 
     // 2. Control Plane rows.
-    if !options.no_control_plane {
+    if control_resumed {
+        report.control_plane = Some(DatabaseReport {
+            kind: "controlPlane".to_owned(),
+            source: redact_url(&options.control_plane_url),
+            target: control_url.clone(),
+            resumed: true,
+            integrity_check: "verified by an earlier run".to_owned(),
+            ..DatabaseReport::default()
+        });
+    } else if !options.no_control_plane {
         let mut job = DatabaseJob {
             report: DatabaseReport {
                 kind: "controlPlane".to_owned(),
@@ -1554,6 +1700,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             allow_drop_tables: options.allow_drop_tables,
             keep_epoch: options.keep_epoch,
             sample_rows: options.sample_rows,
+            preflight: options.preflight,
             ignore_source: BTreeSet::new(),
             rewrites: BTreeMap::from([
                 (
@@ -1590,7 +1737,23 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
     };
 
     // 3. Each project/tenant database.
-    for database in &selected {
+    for (database, &resumed) in selected.iter().zip(&resumed) {
+        let kind = match database.kind {
+            DatabaseKind::Project => "project",
+            DatabaseKind::Tenant => "tenant",
+        };
+        if resumed {
+            report.databases.push(DatabaseReport {
+                kind: kind.to_owned(),
+                project_id: database.project_id.clone(),
+                tenant_ids: database.tenant_ids.clone(),
+                target: database.target_url.clone(),
+                resumed: true,
+                integrity_check: "verified by an earlier run".to_owned(),
+                ..DatabaseReport::default()
+            });
+            continue;
+        }
         let source_url = map_source_url(&database.source_url, &options.source_url_maps);
         let pool = if source_url == options.control_plane_url {
             control_source.clone()
@@ -1599,10 +1762,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         };
         let mut job = DatabaseJob {
             report: DatabaseReport {
-                kind: match database.kind {
-                    DatabaseKind::Project => "project".to_owned(),
-                    DatabaseKind::Tenant => "tenant".to_owned(),
-                },
+                kind: kind.to_owned(),
                 project_id: database.project_id.clone(),
                 tenant_ids: database.tenant_ids.clone(),
                 source: redact_url(&source_url),
@@ -1615,6 +1775,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             allow_drop_tables: options.allow_drop_tables,
             keep_epoch: options.keep_epoch,
             sample_rows: options.sample_rows,
+            preflight: options.preflight,
             ignore_source: if source_url == options.control_plane_url {
                 control_tables.clone()
             } else {
@@ -1632,7 +1793,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
 
     // 4. The store's installer must accept every file as current (change
     //    capture and membership triggers installed, nothing staged).
-    {
+    if !options.preflight {
         let control = ControlPlane::connect(&control_url, registry(), BTreeMap::new()).await?;
         for ((database, migrations), database_report) in selected
             .iter()
@@ -1670,6 +1831,20 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             }
         }
         control.pools().close().await;
+    }
+
+    // 5. --resume markers: every file this run copied and fully verified.
+    if !options.preflight {
+        if let Some(control) = &report.control_plane {
+            if !control.resumed && control.findings.is_empty() {
+                mark_verified(&control_path, control)?;
+            }
+        }
+        for (database, database_report) in selected.iter().zip(&report.databases) {
+            if !database_report.resumed && database_report.findings.is_empty() {
+                mark_verified(&database.target_path, database_report)?;
+            }
+        }
     }
 
     let mut findings = Vec::new();
@@ -1896,6 +2071,48 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("--allow-drop-columns"), "{error}");
+    }
+
+    #[test]
+    fn preflight_and_resume_flags_and_markers() {
+        let options = parse_options(&args(&[
+            "--control-plane-url",
+            "postgres://u:p@db/control",
+            "--data-dir",
+            "/srv/data",
+            "--migrations",
+            "./migrations",
+            "--preflight",
+            "--resume",
+        ]))
+        .unwrap();
+        assert!(options.preflight && options.resume && !options.force);
+        // The Postgres-era module artifact is never carried into control.db.
+        assert!(never_copied("gonvex_runtime_manifests"));
+
+        let dir = std::env::temp_dir().join(format!("gonvex-export-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tenant.db");
+        assert!(!verified_earlier(&file));
+        std::fs::write(&file, b"").unwrap();
+        assert!(
+            !verified_earlier(&file),
+            "a file without a marker is not verified"
+        );
+        let report = DatabaseReport {
+            target: "sqlite:///x/tenant.db".to_owned(),
+            ..DatabaseReport::default()
+        };
+        mark_verified(&file, &report).unwrap();
+        assert!(verified_earlier(&file));
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(export_ok_marker(&file)).unwrap())
+                .unwrap();
+        assert_eq!(marker["target"], "sqlite:///x/tenant.db");
+        // Replacing a file (--force) removes its marker with it.
+        remove_database_file(&file).unwrap();
+        assert!(!file.exists() && !export_ok_marker(&file).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
