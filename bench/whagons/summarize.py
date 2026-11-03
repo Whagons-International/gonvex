@@ -69,6 +69,9 @@ for phase in sys.argv[2:]:
                 'peakMemoryBytes': max(x[2] for x in samples),
             }
     if whole_host:
+        anon = [x['memoryStat']['runtime']['anon'] for x in whole_host if x.get('memoryStat', {}).get('runtime')]
+        if anon:
+            stats['runtimePeakAnonBytes'] = max(anon)
         # Peak memory over the whole phase (sign-in burst included).
         peaks = [int(x['runtime'].splitlines()[-1]) for x in whole_host if x.get('runtime', '').count('\n')]
         if peaks:
@@ -82,8 +85,11 @@ for phase in sys.argv[2:]:
             for name in ['runtime', 'generator']}
         if any(stats['oomKills'].values()):
             stats['capacityPassed'] = False
-        per_phase = root / (phase + '.json.metrics.jsonl')
-        metrics = loadlines(per_phase if per_phase.exists() else root / 'fixture.json.metrics.jsonl')
+        # Unsharded runs write <phase>.json.metrics.jsonl; sharded runs write
+        # it from shard 0 only.
+        candidates = [root / (phase + '.json.metrics.jsonl'), root / (phase + '.json.shard-0.metrics.jsonl'),
+                      root / 'fixture.json.metrics.jsonl']
+        metrics = loadlines(next((c for c in candidates if c.exists()), candidates[-1]))
         metrics = [x for x in metrics if host[0]['at'] * 1000 <= x['at'] <= host[-1]['at'] * 1000
                    and isinstance(x.get('metrics'), dict) and 'websocket' in x['metrics'] and 'database' in x['metrics']]
         if r.get('steadyStartMs') and not metrics:
@@ -92,7 +98,13 @@ for phase in sys.argv[2:]:
             steady = [x['metrics']['websocket']['accounts'] for x in metrics]
             stats['steadyAccountSamples'] = len(steady)
             stats['minSteadyAuthenticatedAccounts'] = min(steady)
-            if min(steady) < r.get('targetUsers', 0):
+            # The reconnect wave drops ~30% of sessions for a few seconds by
+            # design: every user must be connected in 90% of samples and at
+            # the end of the plateau.
+            target_users = r.get('targetUsers', 0)
+            connected = sum(x >= target_users for x in steady) / len(steady)
+            stats['fullyConnectedSampleShare'] = connected
+            if connected < 0.9 or steady[-1] < target_users:
                 stats['capacityPassed'] = False
             first = metrics[0]['metrics']['database']
             last = metrics[-1]['metrics']['database']
@@ -107,7 +119,8 @@ for phase in sys.argv[2:]:
             stats['capacityPassed'] = False
     if (stats['memoryStopped'] or not r or r.get('aborted') or r.get('partial') or not host
             or not r.get('steadyStartMs')
-            or r.get('steadyEndMs', 0) - r.get('steadyStartMs', 0) < r.get('steadySeconds', 180) * 1000):
+            # Shards start their plateaus a few hundred ms apart; allow 2%.
+            or r.get('steadyEndMs', 0) - r.get('steadyStartMs', 0) < r.get('steadySeconds', 180) * 980):
         stats['capacityPassed'] = False
     output.append(stats)
 print(json.dumps(output, indent=2))

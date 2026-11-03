@@ -27,5 +27,7 @@ for label in sys.argv[2:]:
     for name in ['runtime','generator']:
         x=d.get(name) or {}
         print('   %s cores %.2f peak %dMB' % (name, x.get('userCores',0)+x.get('systemCores',0), x.get('peakMemoryBytes',0)/1e6))
+    if d.get('runtimePeakAnonBytes'):
+        print('   runtime peak anon %dMB (heap; the cgroup peak includes page cache)' % (d['runtimePeakAnonBytes']/1e6))
     if r.get('errors'):
         print('   top errors', sorted(r['errors'].items(),key=lambda e:-e[1])[:3])

@@ -51,6 +51,10 @@ with (out/'host.jsonl').open('w') as host:
     pid,_,cg=entry
     try:
      sample[name]=(cg/'cpu.stat').read_text().strip()+'\n'+(cg/'memory.current').read_text().strip()
+     # memory.current includes reclaimable page cache (SQLite reads); anon is
+     # the heap and stacks that cannot be reclaimed.
+     stat={k:int(n) for k,n in (line.split() for line in (cg/'memory.stat').read_text().splitlines()) if k in ('anon','file','kernel','sock')}
+     sample.setdefault('memoryStat',{})[name]=stat
      sample['memoryEvents'][name]={k:int(n) for k,n in (line.split() for line in (cg/'memory.events').read_text().splitlines())}
      if name=='runtime':
       processes={};children=pathlib.Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
