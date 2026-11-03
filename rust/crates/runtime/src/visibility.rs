@@ -1729,7 +1729,11 @@ pub fn resolve_with_parents<'a>(
                 table,
                 InheritedParent {
                     plan: shared_plan(parent),
-                    resolved: Arc::new(parent_resolved),
+                    resolved: shared_parent_resolution(
+                        &session.route.database_url,
+                        &parent.table,
+                        parent_resolved,
+                    ),
                     index,
                 },
             );
@@ -1754,6 +1758,78 @@ pub fn resolve_with_parents<'a>(
         }
         Ok(resolved)
     })
+}
+
+/// One `Arc` per identical parent resolution of a member: every collection
+/// inheriting from the same parent (Whagons' taskUsers, taskTags, notes...
+/// all inherit `tasks`) held its own deep copy of the member's tasks
+/// principal (~45 KB each). In-memory grant patches use `Arc::make_mut`, so a
+/// shared resolution is copied on write and never changes under another
+/// subscription.
+fn shared_parent_resolution(
+    database: &str,
+    table: &str,
+    resolved: ResolvedVisibility,
+) -> Arc<ResolvedVisibility> {
+    type Key = (String, String, String, u64);
+    static SHARED: std::sync::OnceLock<std::sync::Mutex<(BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>, usize)>> =
+        std::sync::OnceLock::new();
+    fn same(left: &ResolvedVisibility, right: &ResolvedVisibility) -> bool {
+        left.ephemeral_member == right.ephemeral_member
+            && left.revision == right.revision
+            && left.role == right.role
+            && left.direct == right.direct
+            && left.permissions == right.permissions
+            && left.sets == right.sets
+            && left.fingerprint == right.fingerprint
+            && left.indexes.len() == right.indexes.len()
+            && left
+                .indexes
+                .iter()
+                .zip(&right.indexes)
+                .all(|((a, x), (b, y))| a == b && Arc::ptr_eq(x, y))
+            && left.inherited.len() == right.inherited.len()
+            && left.inherited.iter().zip(&right.inherited).all(|((a, x), (b, y))| {
+                a == b
+                    && Arc::ptr_eq(&x.plan, &y.plan)
+                    && Arc::ptr_eq(&x.resolved, &y.resolved)
+                    && Arc::ptr_eq(&x.index, &y.index)
+            })
+    }
+    let key = (
+        database.to_owned(),
+        table.to_owned(),
+        resolved
+            .direct
+            .get("member.id")
+            .cloned()
+            .unwrap_or_default(),
+        resolved.revision,
+    );
+    let mut shared = SHARED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (map, swept_at) = &mut *shared;
+    let entries = map.entry(key).or_default();
+    entries.retain(|entry| entry.strong_count() > 0);
+    if let Some(existing) = entries
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .find(|existing| same(existing, &resolved))
+    {
+        return existing;
+    }
+    let created = Arc::new(resolved);
+    entries.push(Arc::downgrade(&created));
+    if map.len() > (*swept_at).max(1024) * 2 {
+        map.retain(|_, entries| {
+            entries.retain(|entry| entry.strong_count() > 0);
+            !entries.is_empty()
+        });
+        *swept_at = map.len();
+    }
+    created
 }
 
 /// Recompute every derived set of a version 2 plan in memory from its source
