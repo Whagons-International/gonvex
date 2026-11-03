@@ -1,8 +1,11 @@
 //! Optional RFC 7692 transport. JSON and the application protocol are unchanged.
 mod frame_limits;
 mod negotiation;
+mod shared;
 use frame_limits::FrameLimits;
 use futures_util::Stream;
+use shared::{deflate_segment, COMPRESSION_LEVEL};
+pub use shared::{BatchFrame, OutboundBatch, Segment, SharedText};
 use std::{
     future::Future,
     io,
@@ -17,6 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::BytesMut;
+#[cfg(test)]
 use flate2::{Compress, Compression, FlushCompress};
 use hyper_util::rt::TokioIo;
 use ratchet_ext::{
@@ -53,7 +57,7 @@ where
             Ok(upgrade) => upgrade
                 .max_message_size(max_message)
                 .max_frame_size(max_frame)
-                .on_upgrade(move |socket| callback(WebSocket::Plain(Box::new(socket))))
+                .on_upgrade(move |socket| callback(WebSocket::plain(socket)))
                 .into_response(),
             Err(error) => error.into_response(),
         };
@@ -73,11 +77,13 @@ where
     tokio::spawn(async move {
         if let Ok(stream) = upgraded.await {
             let alternative = Arc::default();
+            let precompressed = Arc::default();
             let extension = Deflate {
                 encoder: Encode {
                     window_bits: selection.server_window,
                     threshold,
                     alternative: Arc::clone(&alternative),
+                    precompressed: Arc::clone(&precompressed),
                 },
                 decoder: Decode {
                     window_bits: selection.client_window,
@@ -98,7 +104,14 @@ where
                 BytesMut::new(),
                 ratchet_core::Role::Server,
             );
-            callback(WebSocket::compressed(socket, threshold, alternative)).await;
+            callback(WebSocket::compressed(
+                socket,
+                threshold,
+                selection.server_window,
+                alternative,
+                precompressed,
+            ))
+            .await;
         }
     });
     response.map(|_| axum::body::Body::empty()).into_response()
@@ -107,14 +120,24 @@ where
 type IoStream = FrameLimits<tokio::io::BufWriter<TokioIo<hyper::upgrade::Upgraded>>>;
 type CompressedSocket = ratchet_core::WebSocket<IoStream, Deflate>;
 
-pub enum WebSocket {
+/// A server WebSocket: the transport plus at most one pending batched
+/// message. Every send flushes the pending batch first, so batching never
+/// reorders frames.
+pub struct WebSocket {
+    transport: Transport,
+    batch: OutboundBatch,
+}
+
+enum Transport {
     Plain(Box<ws::WebSocket>),
     Compressed(Box<Compressed>),
 }
 
 pub struct Compressed {
     threshold: usize,
+    window_bits: u8,
     alternative: Arc<Mutex<Option<Vec<u8>>>>,
+    precompressed: Arc<Mutex<Option<BytesMut>>>,
     sender: ratchet_core::Sender<IoStream, Encode>,
     receiver: mpsc::Receiver<Result<ws::Message, axum::Error>>,
     reader: JoinHandle<()>,
@@ -122,8 +145,8 @@ pub struct Compressed {
 
 // Cancellation or an early write error must never leave a candidate armed for
 // a later, unrelated text message.
-struct AlternativeGuard(Arc<Mutex<Option<Vec<u8>>>>);
-impl Drop for AlternativeGuard {
+struct AlternativeGuard<T>(Arc<Mutex<Option<T>>>);
+impl<T> Drop for AlternativeGuard<T> {
     fn drop(&mut self) {
         self.0.lock().unwrap().take();
     }
@@ -138,18 +161,84 @@ impl Drop for Compressed {
 impl Stream for WebSocket {
     type Item = Result<ws::Message, axum::Error>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.get_mut() {
-            Self::Plain(socket) => Pin::new(socket.as_mut()).poll_next(cx),
-            Self::Compressed(socket) => socket.receiver.poll_recv(cx),
+        match &mut self.get_mut().transport {
+            Transport::Plain(socket) => Pin::new(socket.as_mut()).poll_next(cx),
+            Transport::Compressed(socket) => socket.receiver.poll_recv(cx),
         }
     }
 }
 
 impl WebSocket {
+    /// A connection without permessage-deflate.
+    pub fn plain(socket: ws::WebSocket) -> Self {
+        Self {
+            transport: Transport::Plain(Box::new(socket)),
+            batch: OutboundBatch::default(),
+        }
+    }
+
+    pub fn is_compressed(&self) -> bool {
+        matches!(self.transport, Transport::Compressed(_))
+    }
+
+    /// The negotiated server DEFLATE window, if the connection compresses.
+    pub fn deflate_window(&self) -> Option<u8> {
+        match &self.transport {
+            Transport::Plain(_) => None,
+            Transport::Compressed(socket) => Some(socket.window_bits),
+        }
+    }
+
+    /// The pending batched message (delivery v2).
+    pub fn batch(&self) -> &OutboundBatch {
+        &self.batch
+    }
+
+    pub fn batch_mut(&mut self) -> &mut OutboundBatch {
+        &mut self.batch
+    }
+
+    /// Sends the pending batched message as one text frame. Compressed
+    /// connections send the shared compressed segments without compressing
+    /// anything for this connection.
+    pub async fn flush_batch(&mut self) -> Result<(), axum::Error> {
+        let deflate = match &self.transport {
+            Transport::Plain(_) => None,
+            Transport::Compressed(socket) => Some((socket.window_bits, socket.threshold)),
+        };
+        let Some(frame) = self.batch.take_frame(deflate) else {
+            return Ok(());
+        };
+        match &mut self.transport {
+            Transport::Plain(socket) => {
+                let text =
+                    ws::Utf8Bytes::try_from(frame.bytes.freeze()).map_err(axum::Error::new)?;
+                socket.send(ws::Message::Text(text)).await
+            }
+            Transport::Compressed(socket) if !frame.compressed => {
+                let text = std::str::from_utf8(&frame.bytes).map_err(axum::Error::new)?;
+                socket
+                    .sender
+                    .write_text(text)
+                    .await
+                    .map_err(axum::Error::new)
+            }
+            Transport::Compressed(socket) => {
+                let guard = AlternativeGuard(Arc::clone(&socket.precompressed));
+                *socket.precompressed.lock().unwrap() = Some(frame.bytes);
+                let result = socket.sender.write_text("").await;
+                drop(guard);
+                result.map_err(axum::Error::new)
+            }
+        }
+    }
+
     fn compressed(
         socket: CompressedSocket,
         threshold: usize,
+        window_bits: u8,
         alternative: Arc<Mutex<Option<Vec<u8>>>>,
+        precompressed: Arc<Mutex<Option<BytesMut>>>,
     ) -> Self {
         let (sender, mut receiver) = socket.split().expect("fresh socket");
         let (tx, rx) = mpsc::channel(1);
@@ -192,27 +281,32 @@ impl WebSocket {
                 }
             }
         });
-        Self::Compressed(Box::new(Compressed {
-            threshold,
-            alternative,
-            sender,
-            receiver: rx,
-            reader,
-        }))
+        Self {
+            transport: Transport::Compressed(Box::new(Compressed {
+                threshold,
+                window_bits,
+                alternative,
+                precompressed,
+                sender,
+                receiver: rx,
+                reader,
+            })),
+            batch: OutboundBatch::default(),
+        }
     }
 
     /// The actual negotiated transport threshold; plain fallback cannot compress.
     pub fn compression_threshold(&self) -> Option<usize> {
-        match self {
-            Self::Plain(_) => None,
-            Self::Compressed(socket) => Some(socket.threshold),
+        match &self.transport {
+            Transport::Plain(_) => None,
+            Transport::Compressed(socket) => Some(socket.threshold),
         }
     }
 
     pub async fn next(&mut self) -> Option<Result<ws::Message, axum::Error>> {
-        match self {
-            Self::Plain(socket) => socket.recv().await,
-            Self::Compressed(socket) => socket.receiver.recv().await,
+        match &mut self.transport {
+            Transport::Plain(socket) => socket.recv().await,
+            Transport::Compressed(socket) => socket.receiver.recv().await,
         }
     }
 
@@ -220,8 +314,9 @@ impl WebSocket {
     /// settings. The extension sends the selected compressed bytes directly;
     /// it does not recompress the winner. Plain connections compare raw bytes.
     pub async fn send_best_text(&mut self, full: &str, patch: &str) -> Result<(), axum::Error> {
-        match self {
-            Self::Plain(socket) => {
+        self.flush_batch().await?;
+        match &mut self.transport {
+            Transport::Plain(socket) => {
                 socket
                     .send(ws::Message::Text(
                         if patch.len() < full.len() {
@@ -234,7 +329,7 @@ impl WebSocket {
                     ))
                     .await
             }
-            Self::Compressed(socket) => {
+            Transport::Compressed(socket) => {
                 let guard = AlternativeGuard(Arc::clone(&socket.alternative));
                 *socket.alternative.lock().unwrap() = Some(patch.as_bytes().to_vec());
                 let result = socket.sender.write_text(full).await;
@@ -245,11 +340,10 @@ impl WebSocket {
     }
 
     pub async fn send(&mut self, message: ws::Message) -> Result<(), axum::Error> {
-        let Self::Compressed(socket) = self else {
-            if let Self::Plain(socket) = self {
-                return socket.send(message).await;
-            }
-            unreachable!();
+        self.flush_batch().await?;
+        let socket = match &mut self.transport {
+            Transport::Plain(socket) => return socket.send(message).await,
+            Transport::Compressed(socket) => socket,
         };
         let result = match message {
             ws::Message::Text(text) => socket.sender.write_text(text.as_str()).await,
@@ -273,8 +367,6 @@ impl WebSocket {
     }
 }
 
-const COMPRESSION_LEVEL: u32 = 1;
-
 #[derive(Debug)]
 struct Deflate {
     encoder: Encode,
@@ -285,6 +377,8 @@ struct Encode {
     window_bits: u8,
     threshold: usize,
     alternative: Arc<Mutex<Option<Vec<u8>>>>,
+    /// A complete compressed message body assembled from shared segments.
+    precompressed: Arc<Mutex<Option<BytesMut>>>,
 }
 #[derive(Debug)]
 struct Decode {
@@ -297,6 +391,15 @@ impl ExtensionEncoder for Encode {
     type Error = io::Error;
     fn encode(&mut self, payload: &mut BytesMut, header: &mut FrameHeader) -> io::Result<()> {
         if header.opcode == OpCode::Text {
+            let precompressed = self.precompressed.lock().unwrap().take();
+            if let Some(precompressed) = precompressed {
+                if !header.fin {
+                    return Err(io::Error::other("precompressed messages must be complete"));
+                }
+                *payload = precompressed;
+                header.rsv1 = true;
+                return Ok(());
+            }
             let alternative = self.alternative.lock().unwrap().take();
             if let Some(alternative) = alternative {
                 if !header.fin {
@@ -345,37 +448,36 @@ pub fn perf_compress_text(
     compress_text(payload, window_bits, threshold)
 }
 
+/// The pre-delivery-v2 compressor: a new zlib stream per message (benchmarks).
+#[cfg(feature = "perf-fixture")]
+#[doc(hidden)]
+pub fn perf_compress_text_fresh(
+    payload: &[u8],
+    window_bits: u8,
+    threshold: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    if payload.len() < threshold {
+        return Ok(None);
+    }
+    let mut codec = flate2::Compress::new_with_window_bits(
+        flate2::Compression::new(COMPRESSION_LEVEL),
+        false,
+        window_bits,
+    );
+    let mut encoded = Vec::new();
+    shared::deflate_with(&mut codec, payload, &mut encoded)?;
+    encoded.truncate(encoded.len() - 4);
+    Ok((encoded.len() < payload.len()).then_some(encoded))
+}
+
 fn compress_text(payload: &[u8], window_bits: u8, threshold: usize) -> io::Result<Option<Vec<u8>>> {
     if payload.len() < threshold {
         return Ok(None);
     }
-    // No context takeover, including when comparing alternatives.
-    let mut codec =
-        Compress::new_with_window_bits(Compression::new(COMPRESSION_LEVEL), false, window_bits);
-    let mut encoded = Vec::with_capacity(payload.len() / 4);
-    let mut scratch = [0; 8192];
-    loop {
-        let before_in = codec.total_in();
-        let before_out = codec.total_out();
-        codec
-            .compress(
-                &payload[before_in as usize..],
-                &mut scratch,
-                FlushCompress::Sync,
-            )
-            .map_err(io::Error::other)?;
-        let written = (codec.total_out() - before_out) as usize;
-        encoded.extend_from_slice(&scratch[..written]);
-        if codec.total_in() as usize == payload.len() && written < scratch.len() {
-            break;
-        }
-        if codec.total_in() == before_in && written == 0 {
-            return Err(io::Error::other("compressor stalled"));
-        }
-    }
-    if !encoded.ends_with(&[0, 0, 255, 255]) {
-        return Err(io::Error::other("missing deflate trailer"));
-    }
+    // No context takeover, including when comparing alternatives. The
+    // thread's compressor is reset, not rebuilt, for every message.
+    let mut encoded = Vec::new();
+    deflate_segment(payload, window_bits, &mut encoded)?;
     encoded.truncate(encoded.len() - 4);
     if encoded.len() < payload.len() {
         return Ok(Some(encoded));
@@ -456,6 +558,7 @@ mod tests {
                 window_bits: 12,
                 threshold: 1024,
                 alternative: alternative.clone(),
+                precompressed: Arc::default(),
             };
             let mut payload = BytesMut::from(full.as_bytes());
             let mut header = FrameHeader {
@@ -491,7 +594,7 @@ mod tests {
             move |mut socket| async move {
                 assert_eq!(
                     socket.compression_threshold(),
-                    matches!(socket, WebSocket::Compressed(_)).then_some(threshold),
+                    socket.is_compressed().then_some(threshold),
                 );
                 loop {
                     // Exercise the same repeated cancellation as the runtime select loop.
@@ -530,6 +633,43 @@ mod tests {
                                 })))
                                 .await;
                             return;
+                        }
+                        ws::Message::Text(ref text) if text.as_str() == "send-batch" => {
+                            let shared = Arc::new(SharedText::new(format!(
+                                "{{\"row\":\"{}\"}}",
+                                "shared row ".repeat(200)
+                            )));
+                            // Two batches: one flushed by the next send, one explicitly.
+                            for _ in 0..2 {
+                                socket
+                                    .batch_mut()
+                                    .open(bytes::Bytes::from_static(b"{\"items\":["), b"]}");
+                                socket.batch_mut().push(Segment::Shared(shared.clone()));
+                                socket
+                                    .batch_mut()
+                                    .push(Segment::Inline(bytes::Bytes::from_static(b",")));
+                                socket.batch_mut().push(Segment::Shared(Arc::new(
+                                    SharedText::new("{\"small\":1}".to_owned()),
+                                )));
+                                socket.batch_mut().set_tail(Some(bytes::Bytes::from_static(
+                                    b",{\"watermark\":7}",
+                                )));
+                                if socket.batch().len() == 0 {
+                                    return;
+                                }
+                                socket
+                                    .send(ws::Message::Text("after".into()))
+                                    .await
+                                    .unwrap();
+                            }
+                            socket
+                                .batch_mut()
+                                .open(bytes::Bytes::from_static(b"["), b"]");
+                            socket
+                                .batch_mut()
+                                .push(Segment::Inline(bytes::Bytes::from_static(b"1")));
+                            socket.flush_batch().await.unwrap();
+                            continue;
                         }
                         ws::Message::Text(ref text) if text.as_str() == "close-policy" => {
                             let _ = socket
@@ -680,6 +820,47 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(read(&mut stream).await, (0x81, b"old JSON client".to_vec()));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn batches_flush_before_other_frames_and_inflate_from_shared_segments() {
+        for (enabled, offer) in [
+            (true, Some("permessage-deflate; client_max_window_bits")),
+            (true, Some("permessage-deflate; server_max_window_bits=9")),
+            (false, None),
+        ] {
+            let (mut stream, _, server) = connect(enabled, offer).await;
+            stream
+                .write_all(&masked(0x81, b"send-batch"))
+                .await
+                .unwrap();
+            let expected = format!(
+                "{{\"items\":[{{\"row\":\"{}\"}},{{\"small\":1}},{{\"watermark\":7}}]}}",
+                "shared row ".repeat(200)
+            );
+            let window = if offer.is_some_and(|offer| offer.contains("=9")) {
+                9
+            } else {
+                12
+            };
+            for _ in 0..2 {
+                let (opcode, data) = read(&mut stream).await;
+                if enabled {
+                    assert_eq!(opcode, 0xc1);
+                    assert!(data.len() < expected.len() / 4);
+                    assert_eq!(
+                        inflate_message(&data, window, 1 << 20).unwrap(),
+                        expected.as_bytes()
+                    );
+                } else {
+                    assert_eq!((opcode, data), (0x81, expected.clone().into_bytes()));
+                }
+                assert_eq!(read(&mut stream).await, (0x81, b"after".to_vec()));
+            }
+            // Below the threshold a batch is sent uncompressed.
+            assert_eq!(read(&mut stream).await, (0x81, b"[1]".to_vec()));
             server.abort();
         }
     }
@@ -984,6 +1165,7 @@ mod tests {
             window_bits: 12,
             threshold: 1024,
             alternative: Arc::default(),
+            precompressed: Arc::default(),
         };
         let mut seed = 42u32;
         let data: Vec<u8> = (0..2048)
@@ -1013,6 +1195,7 @@ mod tests {
             window_bits: 12,
             threshold: 1024,
             alternative: Arc::default(),
+            precompressed: Arc::default(),
         };
         let mut seed = 42u32;
         for size in [1024, 8192, 131072] {
