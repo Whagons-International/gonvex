@@ -72,6 +72,9 @@ for phase in sys.argv[2:]:
   stats['runtimeErrorLogLines']=sum(' ERROR ' in re.sub(r'\x1b\[[0-9;]*m','',line) for line in (runtime_logs.stdout+runtime_logs.stderr).splitlines())
   if runtime_logs.returncode or stats['runtimeErrorLogLines']:stats['capacityPassed']=False
  stats['invalidBuildOverlap']=(d/'INVALID_BUILD_OVERLAP').exists()
- if stats['memoryStopped'] or stats['invalidBuildOverlap'] or not r:stats['capacityPassed']=False
+ if (stats['memoryStopped'] or stats['invalidBuildOverlap'] or not r or r.get('aborted')
+     or r.get('partial') or not pg or not host or not r.get('steadyStartMs')
+     or r.get('steadyEndMs',0)-r.get('steadyStartMs',0) < r.get('steadySeconds',180)*1000):
+  stats['capacityPassed']=False
  output.append(stats)
 print(json.dumps(output,indent=2))

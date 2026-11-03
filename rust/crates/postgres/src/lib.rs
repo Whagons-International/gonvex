@@ -154,8 +154,11 @@ pub struct PoolRegistrySnapshot {
     pub idle: usize,
     pub max_open_connections: u32,
     pub listener_connections: u32,
+    /// Completed admission attempts, including uncontended successes and timeouts.
     pub admission_count: u64,
+    /// Total queue time for completed attempts; excludes physical connection setup.
     pub admission_wait_us: u64,
+    /// Longest completed attempt since this registry started.
     pub admission_wait_max_us: u64,
     pub admission_limit: usize,
     pub admission_active: usize,
