@@ -6576,9 +6576,13 @@ mod connection_future_sizes {
         // Every connection's task holds this future for its whole life. Rarely
         // run requests (reducers, queries, auth) are boxed at their await so
         // they do not size it; feed delivery stays inline (hot path).
+        // The budget is for optimized builds (what production runs); debug
+        // builds lay futures out less tightly (~30 KB measured), so CI's debug
+        // test run gets proportionally more room.
+        let budget = if cfg!(debug_assertions) { 34 } else { 28 } * 1024;
         assert!(
-            connection <= 28 * 1024,
-            "connection future grew to {connection} bytes"
+            connection <= budget,
+            "connection future grew to {connection} bytes (budget {budget})"
         );
         println!(
             "future_size {:>6} next_socket_or_feed",
