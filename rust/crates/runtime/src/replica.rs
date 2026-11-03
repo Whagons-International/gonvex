@@ -64,7 +64,10 @@ pub struct ReplicaSubscription {
     pub path: String,
     pub args: Value,
     pub definition: ReplicaCollectionDefinition,
-    pub visibility: VisibilityPlan,
+    /// Shared by every subscription to this module version and table: the
+    /// v2 mask plans are large (17-26 KB as JSON, several times that as
+    /// structs) and a deep copy per subscription cost ~1 MB per user.
+    pub visibility: Arc<VisibilityPlan>,
     pub visibility_scope: String,
     pub cursor: ReplicaCursor,
     pub rows: RowMap,
@@ -141,6 +144,23 @@ fn snapshot_permits() -> &'static tokio::sync::Semaphore {
             .unwrap_or(default);
         tokio::sync::Semaphore::new(permits)
     })
+}
+
+/// The module's visibility plan for `table`, shared per module version.
+fn shared_visibility(
+    module: &crate::modules::ProjectModule,
+    table: &str,
+) -> Option<Arc<VisibilityPlan>> {
+    type Plans = std::collections::HashMap<(String, String), Arc<VisibilityPlan>>;
+    static PLANS: std::sync::OnceLock<std::sync::Mutex<Plans>> = std::sync::OnceLock::new();
+    let key = (module.artifact_hash.clone(), table.to_owned());
+    let mut plans = PLANS.get_or_init(Default::default).lock().unwrap();
+    if let Some(plan) = plans.get(&key) {
+        return Some(plan.clone());
+    }
+    let plan = Arc::new(module.visibility.get(table)?.clone());
+    plans.insert(key, plan.clone());
+    Some(plan)
 }
 
 /// A replica row shared by every subscription that holds it: its key, content
@@ -289,10 +309,7 @@ impl Runtime {
             .replica
             .clone()
             .ok_or_else(|| ReplicaError::FunctionMissing(request.path.clone()))?;
-        let visibility = module
-            .visibility
-            .get(&definition.table)
-            .cloned()
+        let visibility = shared_visibility(&module, &definition.table)
             .ok_or_else(|| ReplicaError::VisibilityMissing(definition.table.clone()))?;
         let directive = module.replica_directive(
             &session.route.tenant_id,
