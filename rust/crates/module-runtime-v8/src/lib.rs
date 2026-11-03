@@ -1,3 +1,4 @@
+#![warn(clippy::redundant_clone)]
 //! Bounded TypeScript/V8 module engine.
 //!
 //! The adapter executes one bundled JavaScript ESM artifact inside pooled

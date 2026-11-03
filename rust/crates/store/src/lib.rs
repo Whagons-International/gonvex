@@ -1,3 +1,4 @@
+#![warn(clippy::redundant_clone)]
 //! SQLite ownership for the Rust runtime.
 //!
 //! Browser and module inputs name a project and tenant. They never carry a
