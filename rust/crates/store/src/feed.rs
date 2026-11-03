@@ -218,6 +218,129 @@ pub async fn finalize(
     }))
 }
 
+/// [`finalize`] run directly on the connection (see `direct`): the same
+/// statements in the same order, without a sqlx round trip per statement.
+pub(crate) fn finalize_direct(
+    connection: &mut crate::direct::Conn<'_>,
+    provenance: &Provenance,
+) -> Result<Option<CommitNotice>, sqlx::Error> {
+    use crate::direct::Bind;
+    let has_feed = connection.query_i64(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_gonvex_sync_changes')",
+        &[],
+    )?;
+    if has_feed != Some(1) {
+        return Ok(None);
+    }
+    connection.execute(
+        "DELETE FROM _gonvex_sync_changes WHERE revision IS NULL AND operation = 'update' AND new_value IS NULL",
+        &[],
+    )?;
+    connection.execute(
+        r#"UPDATE _gonvex_sync_changes
+           SET old_value = nullif(new_value -> '$[0]', 'null'),
+               changed_columns = coalesce(new_value -> '$[2]', '[]'),
+               new_value = nullif(new_value -> '$[1]', 'null')
+           WHERE revision IS NULL AND json_type(new_value) = 'array'"#,
+        &[],
+    )?;
+    let pending = connection.query_i64(
+        "SELECT EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL)",
+        &[],
+    )?;
+    if pending != Some(1) {
+        return Ok(None);
+    }
+    let (revision, epoch) = {
+        let mut clock = connection.prepare(
+            "UPDATE _gonvex_sync_clock SET revision = revision + 1 WHERE singleton = 1 RETURNING revision, epoch",
+        )?;
+        if !clock.step()? {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        let revision = clock.int64(0);
+        let epoch = clock
+            .str(1)
+            .map_err(|error| sqlx::Error::Decode(error.into()))?
+            .to_owned();
+        while clock.step()? {}
+        (revision, epoch)
+    };
+    let command = provenance.command_id.as_deref().filter(|id| !id.is_empty());
+    connection.execute(
+        r#"UPDATE _gonvex_sync_changes
+           SET revision = $1, transaction_id = $1, ordinal = ranked.row_ordinal, command_id = $2
+           FROM (SELECT event_id, row_number() OVER (ORDER BY event_id) AS row_ordinal
+                 FROM _gonvex_sync_changes WHERE revision IS NULL) AS ranked
+           WHERE _gonvex_sync_changes.event_id = ranked.event_id"#,
+        &[
+            Bind::Integer(revision),
+            command.map_or(Bind::Null, Bind::Text),
+        ],
+    )?;
+    let tables = {
+        let mut tables = Vec::new();
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT table_name FROM _gonvex_sync_changes WHERE revision = $1 ORDER BY table_name",
+        )?;
+        statement.bind(&[Bind::Integer(revision)])?;
+        while statement.step()? {
+            tables.push(
+                statement
+                    .str(0)
+                    .map_err(|error| sqlx::Error::Decode(error.into()))?
+                    .to_owned(),
+            );
+        }
+        tables
+    };
+    let command = provenance.command_id.clone().unwrap_or_default();
+    let root = provenance
+        .root_command_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| command.clone());
+    let channel = provenance
+        .channel
+        .clone()
+        .filter(|channel| !channel.is_empty())
+        .unwrap_or_else(|| "system".to_owned());
+    let root_channel = provenance
+        .root_channel
+        .clone()
+        .filter(|channel| !channel.is_empty())
+        .unwrap_or_else(|| channel.clone());
+    fn optional(value: &Option<String>) -> Bind<'_> {
+        match value.as_deref() {
+            Some(value) if !value.is_empty() => Bind::Text(value),
+            _ => Bind::Null,
+        }
+    }
+    connection.execute(
+        r#"INSERT INTO _gonvex_sync_transactions
+           (revision, transaction_id, root_command_id, origin_command_id, root_invocation_channel,
+            invocation_channel, actor_account_id, actor_member_id, on_behalf_of_member_id, agent_execution_id)
+           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (revision) DO NOTHING"#,
+        &[
+            Bind::Integer(revision),
+            Bind::Text(&root),
+            Bind::Text(&command),
+            Bind::Text(&root_channel),
+            Bind::Text(&channel),
+            optional(&provenance.actor_account_id),
+            optional(&provenance.actor_member_id),
+            optional(&provenance.on_behalf_of_member_id),
+            optional(&provenance.agent_execution_id),
+        ],
+    )?;
+    Ok(Some(CommitNotice {
+        epoch,
+        revision: revision as u64,
+        tables,
+    }))
+}
+
 /// Columns per `json_array` call and per OR group: bundled SQLite allows 127
 /// function arguments, 500 compound-select terms and expression depth 1000.
 const COLUMNS_PER_GROUP: usize = 100;

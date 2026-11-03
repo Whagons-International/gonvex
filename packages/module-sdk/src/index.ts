@@ -258,7 +258,43 @@ export type ReducerContext = AuthContext & TenantContext & InvocationAware & {
   readonly actions: ReducerActions;
   readonly scheduler: Scheduler;
   readonly now: number;
+  /**
+   * The invoking member's committed permission bits, from the module's
+   * `permissionGrants` projection, answered in memory by the host. Absent in
+   * local/optimistic executors and on hosts without the projection.
+   */
+  readonly permissions?: Permissions;
 };
+
+/** One bit per (permission, scope). `""` (the default) is the tenant-wide scope. */
+export type Permissions = {
+  /**
+   * Whether the member holds `permission` in exactly `scope`. Reads the
+   * committed state (never this Reducer's own uncommitted grant rows).
+   */
+  readonly has: (permission: string, scope?: string) => Promise<boolean>;
+};
+
+/**
+ * A table whose rows grant `member` the `permission` in `scope`. The module
+ * keeps it current inside the Reducers that change permissions, flattening
+ * derived grants (role defaults, spot-tree descendants) into rows. Rows with a
+ * non-null `whereNull` column grant nothing; `key` is the row id column
+ * (default `_id`).
+ */
+export type PermissionGrantSource = {
+  readonly table: string;
+  readonly member: string;
+  readonly permission: string;
+  readonly scope: string;
+  readonly whereNull?: readonly string[];
+  readonly key?: string;
+};
+
+/** Declare the module's permission grant projection (backs `ctx.permissions`). Use literal values. */
+export function permissionGrants(source: PermissionGrantSource): Readonly<PermissionGrantSource> {
+  return freeze({ ...source, ...(source.whereNull ? { whereNull: freeze([...source.whereNull]) } : {}) });
+}
 
 export type ActionStorage = {
   readonly generateUploadUrl: (options?: JsonObject) => Promise<JsonValue>;
@@ -655,6 +691,7 @@ export type ModuleManifest = {
   readonly artifact?: { readonly hash: string; readonly mediaType: string; readonly entrypoint: string };
   readonly visibility?: Readonly<Record<string, VisibilityPlan>>;
   readonly invitationAcceptanceReducer?: string;
+  readonly permissionGrants?: PermissionGrantSource;
 };
 
 /** Declare the host-invoked internal Reducer that applies invitation payloads. */

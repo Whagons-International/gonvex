@@ -284,6 +284,17 @@ export type ModuleArtifact = {
   visibility: Record<string, VisibilityPlan>;
   crons?: ModuleCron[];
   invitationAcceptanceReducer?: string;
+  permissionGrants?: PermissionGrantSource;
+};
+
+/** Backs `ctx.permissions`: rows of `table` grant `member` a `permission` in `scope`. */
+export type PermissionGrantSource = {
+  table: string;
+  member: string;
+  permission: string;
+  scope: string;
+  whereNull?: string[];
+  key?: string;
 };
 
 export type ModuleCron = {

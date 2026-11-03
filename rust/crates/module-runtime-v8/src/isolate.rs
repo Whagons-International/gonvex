@@ -19,8 +19,8 @@ use deno_core::{
     extension, op2, v8, JsRuntime, ModuleSpecifier, OpState, PollEventLoopOptions, RuntimeOptions,
 };
 use gonvex_module_runtime::{
-    Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse, Invocation,
-    InvocationResult, ModuleError,
+    Capabilities, FunctionContract, FunctionKind, HostCall, HostError, HostResponse, InlineHost,
+    Invocation, InvocationResult, ModuleError,
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -148,6 +148,7 @@ pub(crate) struct CallSpec {
     pub(crate) timeout: Option<Duration>,
     pub(crate) max_result_bytes: usize,
     pub(crate) host: mpsc::UnboundedSender<HostRequest>,
+    pub(crate) inline: Option<Arc<dyn InlineHost>>,
 }
 
 pub(crate) struct WorkerCall {
@@ -396,6 +397,10 @@ struct ActiveCall {
     capabilities: Capabilities,
     action_tools: BTreeSet<String>,
     host: mpsc::UnboundedSender<HostRequest>,
+    /// Calls the host answers on this thread (see `InlineHost`).
+    inline: Option<Arc<dyn InlineHost>>,
+    /// Ordered host calls sent to the invoking task and not yet answered.
+    serial_outstanding: u32,
     violation: Option<Violation>,
 }
 
@@ -430,7 +435,9 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
         Err(message) => return HostCallOutcome::failed(message),
     };
 
-    let response = {
+    let mut call = call;
+    let mut inline_tried = false;
+    let (response, serial) = loop {
         let mut op_state = state.borrow_mut();
         let Some(active) = op_state.borrow_mut::<InvocationSlot>().active.as_mut() else {
             return HostCallOutcome::failed("no module invocation is active".to_owned());
@@ -473,6 +480,24 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 return HostCallOutcome::denied(message);
             }
         }
+        let serial = !matches!(call, HostCall::Fetch { .. });
+        // Answer on this thread when the host can (in-process database work on
+        // the connection leased to this invocation): no hop to the invoking
+        // task and back. Only while no ordered host call is outstanding, so a
+        // call never overtakes one issued before it.
+        if serial && !inline_tried && active.serial_outstanding == 0 {
+            if let Some(inline) = active.inline.clone() {
+                inline_tried = true;
+                drop(op_state);
+                match inline.call_inline(call) {
+                    Ok(result) => return outcome_of(result),
+                    Err(back) => {
+                        call = back;
+                        continue;
+                    }
+                }
+            }
+        }
         let (reply, response) = oneshot::channel();
         if active.host.send(HostRequest { call, reply }).is_err() {
             let message = "module host bridge closed".to_owned();
@@ -481,19 +506,21 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
                 .get_or_insert(Violation::Bridge(message.clone()));
             return HostCallOutcome::failed(message);
         }
-        response
+        if serial {
+            active.serial_outstanding += 1;
+        }
+        break (response, serial);
     };
 
-    match response.await {
-        // Host responses travel as bytes in the ABI; this engine speaks JSON,
-        // so a non-UTF-8 response is a host/module contract mismatch.
-        Ok(Ok(HostResponse { value })) => match String::from_utf8(value) {
-            Ok(text) => HostCallOutcome::ok(text),
-            Err(_) => HostCallOutcome::failed("host response is not valid UTF-8 JSON".to_owned()),
-        },
-        // A host-side failure is the host's error, not a broken module: it stays
-        // catchable so a handler can fall back or report it.
-        Ok(Err(err)) => HostCallOutcome::failed(err.to_string()),
+    let response = response.await;
+    if serial {
+        let mut op_state = state.borrow_mut();
+        if let Some(active) = op_state.borrow_mut::<InvocationSlot>().active.as_mut() {
+            active.serial_outstanding = active.serial_outstanding.saturating_sub(1);
+        }
+    }
+    match response {
+        Ok(result) => outcome_of(result),
         Err(_) => {
             let message = "module host bridge closed before responding".to_owned();
             let mut op_state = state.borrow_mut();
@@ -504,6 +531,20 @@ async fn host_call(state: Rc<RefCell<OpState>>, request: String) -> HostCallOutc
             }
             HostCallOutcome::failed(message)
         }
+    }
+}
+
+/// Host responses travel as bytes in the ABI; this engine speaks JSON, so a
+/// non-UTF-8 response is a host/module contract mismatch. A host-side failure
+/// is the host's error, not a broken module: it stays catchable so a handler
+/// can fall back or report it.
+fn outcome_of(result: Result<HostResponse, HostError>) -> HostCallOutcome {
+    match result {
+        Ok(HostResponse { value }) => match String::from_utf8(value) {
+            Ok(text) => HostCallOutcome::ok(text),
+            Err(_) => HostCallOutcome::failed("host response is not valid UTF-8 JSON".to_owned()),
+        },
+        Err(err) => HostCallOutcome::failed(err.to_string()),
     }
 }
 
@@ -947,6 +988,8 @@ impl ModuleIsolate {
                     .cloned()
                     .collect(),
                 host: spec.host,
+                inline: spec.inline,
+                serial_outstanding: 0,
                 violation: None,
             });
 

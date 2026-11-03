@@ -1553,6 +1553,7 @@ dependencies = [
  "axum",
  "base64",
  "bigdecimal",
+ "bytes",
  "calamine",
  "chrono",
  "cron",
@@ -1650,7 +1651,10 @@ dependencies = [
  "ratchet_core",
  "ratchet_ext",
  "serde_json",
+ "socket2",
  "tokio",
+ "tokio-tungstenite",
+ "tracing",
 ]
 
 [[package]]

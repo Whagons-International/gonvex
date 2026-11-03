@@ -86,6 +86,8 @@ pub struct ProjectModule {
     pub(crate) replica_epochs: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
     pub schema: Value,
     pub visibility: BTreeMap<String, crate::visibility::VisibilityPlan>,
+    /// Optional `permissionGrants` projection backing `ctx.permissions`.
+    pub permission_grants: Option<crate::permission_bits::PermissionGrantSource>,
     pub invitation_acceptance_reducer: String,
     pub migrations: Vec<gonvex_store::SqlMigration>,
     pub crons: Vec<CronSpec>,
@@ -172,6 +174,21 @@ impl ModuleRegistry {
             }
         })?;
         let crons = crons_from_module(module, &project)?;
+        let permission_grants = module
+            .get("permissionGrants")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                serde_json::from_value::<crate::permission_bits::PermissionGrantSource>(
+                    value.clone(),
+                )
+                .map_err(|error| error.to_string())
+                .and_then(|source| source.validate().map(|()| source))
+            })
+            .transpose()
+            .map_err(|message| ModuleRegistryError::InvalidArtifact {
+                project: project.clone(),
+                message: format!("permissionGrants: {message}"),
+            })?;
         let (artifact, functions, visibility) = artifact_from_manifest(&record)?;
         for cron in &crons {
             let function = functions.get(&cron.function).ok_or_else(|| {
@@ -236,6 +253,7 @@ impl ModuleRegistry {
                 .cloned()
                 .unwrap_or_else(|| Value::Object(Map::new())),
             visibility,
+            permission_grants,
             invitation_acceptance_reducer: record
                 .manifest
                 .get("module")
@@ -896,6 +914,11 @@ pub fn canonical_artifact_hash(module: &Map<String, Value>) -> Result<String, St
             }),
         );
     }
+    // Declared only by modules that use `ctx.permissions`; absent keeps every
+    // earlier artifact hash unchanged.
+    if let Some(grants) = module.get("permissionGrants").filter(|value| !value.is_null()) {
+        contract["permissionGrants"] = grants.clone();
+    }
     let bytes = canonical_json(&contract)?.into_bytes();
     Ok(Sha256::digest(bytes)
         .iter()
@@ -977,6 +1000,7 @@ mod tests {
             schema: serde_json::json!({"tasks": {"id": "text"}}),
             replica_epochs: Default::default(),
             visibility: BTreeMap::new(),
+            permission_grants: None,
             invitation_acceptance_reducer: String::new(),
             migrations: Vec::new(),
             crons: Vec::new(),

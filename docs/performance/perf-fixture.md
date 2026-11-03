@@ -96,6 +96,17 @@ functions issue the same `ctx.db` host calls the SDK issues on the server:
   `memberTeams`, the task's status, then one `dbUpdate` (4 host calls;
   `TaskUpdate { extra_reads }` adds more).
 
+**Reducers always run on the fake socket host.** The fixture sets
+`GONVEX_MODULE_HOST_IN_PROCESS=false` (and ignores any `GONVEX_MODULE_HOST_BINARY`),
+so on branches with the in-process V8 host (`perf/native-reducers`, where
+`IN_PROCESS` defaults to true) `reducer/*` benches still measure the socket
+bridge with scripted Rust reducers. Without that override the runtime would
+load the fixture's placeholder bundle (`export {};`) into in-process V8 and
+every reducer would fail with `function_not_found`. The fixture cannot run its
+reducers in-process: that needs a real JavaScript bundle. Measure in-process
+reducer cost with that branch's own `bridge_bench` instead, and compare the
+socket numbers here against it.
+
 `fixture.host.set_js_time(Duration, JsTimeMode::Spin | Sleep)` adds simulated
 JavaScript time to every invoke. `host.invocations()` / `host.host_calls()`
 count the traffic. Add a function by implementing `ScriptedFunction` and

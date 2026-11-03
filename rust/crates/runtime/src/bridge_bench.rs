@@ -83,6 +83,89 @@ struct Probe {
     first: Option<Instant>,
     kinds: BTreeMap<&'static str, u32>,
     schedulable: Vec<String>,
+    /// Calls answered on the isolate thread (`SqlInline`) once the
+    /// transaction is open; counted and timed there.
+    inline: Arc<ProbeInline>,
+}
+
+#[derive(Default)]
+struct ProbeInline {
+    target: std::sync::OnceLock<Arc<dyn gonvex_module_runtime::InlineHost>>,
+    calls: std::sync::atomic::AtomicU32,
+    queries: std::sync::atomic::AtomicU32,
+    nanos: std::sync::atomic::AtomicU64,
+}
+
+impl gonvex_module_runtime::InlineHost for ProbeInline {
+    fn call_inline(
+        &self,
+        call: gonvex_module_runtime::HostCall,
+    ) -> Result<Result<gonvex_module_runtime::HostResponse, gonvex_module_runtime::HostError>, gonvex_module_runtime::HostCall>
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(target) = self.target.get() else {
+            return Err(call);
+        };
+        let query = matches!(call, gonvex_module_runtime::HostCall::DbQuery { .. });
+        let trace = env("BRIDGE_BENCH_TRACE").is_some().then(|| match &call {
+            gonvex_module_runtime::HostCall::DbQuery { statement, .. } => statement.clone(),
+            other => other.capability().to_owned(),
+        });
+        let started = Instant::now();
+        let result = if env("BRIDGE_BENCH_INLINE_THREAD").is_some() {
+            // Model "one dedicated SQLite thread per database, a job per
+            // statement": the isolate thread hands the call over and blocks.
+            writer_thread_call(target.clone(), call)?
+        } else {
+            target.call_inline(call)?
+        };
+        self.nanos.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        if let Some(statement) = trace {
+            let bytes = match &result {
+                Ok(response) => response.value.len(),
+                Err(_) => 0,
+            };
+            println!(
+                "BRIDGE_TRACE {:>8.1}us {:>7}B {}",
+                started.elapsed().as_secs_f64() * 1e6,
+                bytes,
+                statement.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(220).collect::<String>()
+            );
+        }
+        self.calls.fetch_add(1, Relaxed);
+        if query {
+            self.queries.fetch_add(1, Relaxed);
+        }
+        Ok(result)
+    }
+}
+
+type ThreadJob = Box<dyn FnOnce() + Send>;
+
+fn writer_thread_call(
+    target: Arc<dyn gonvex_module_runtime::InlineHost>,
+    call: gonvex_module_runtime::HostCall,
+) -> Result<Result<gonvex_module_runtime::HostResponse, gonvex_module_runtime::HostError>, gonvex_module_runtime::HostCall>
+{
+    static THREAD: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<ThreadJob>>> =
+        std::sync::OnceLock::new();
+    let jobs = THREAD.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<ThreadJob>();
+        std::thread::spawn(move || {
+            for job in receiver {
+                job();
+            }
+        });
+        std::sync::Mutex::new(sender)
+    });
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    jobs.lock()
+        .unwrap()
+        .send(Box::new(move || {
+            let _ = reply.send(target.call_inline(call));
+        }))
+        .unwrap();
+    answer.recv().unwrap()
 }
 
 impl Probe {
@@ -95,7 +178,27 @@ impl Probe {
             first: None,
             kinds: BTreeMap::new(),
             schedulable: Vec::new(),
+            inline: Arc::default(),
         }
+    }
+
+    /// Host calls and handler time, including those answered inline.
+    fn totals(&self) -> (u32, Duration, BTreeMap<&'static str, u32>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut kinds = self.kinds.clone();
+        let queries = self.inline.queries.load(Relaxed);
+        let writes = self.inline.calls.load(Relaxed) - queries;
+        if queries > 0 {
+            *kinds.entry("dbQuery").or_default() += queries;
+        }
+        if writes > 0 {
+            *kinds.entry("dbWrite(inline)").or_default() += writes;
+        }
+        (
+            self.calls + self.inline.calls.load(Relaxed),
+            self.handler + Duration::from_nanos(self.inline.nanos.load(Relaxed)),
+            kinds,
+        )
     }
 
     /// Ends the transaction; returns the writer hold time.
@@ -138,13 +241,17 @@ impl HostCallHandler for Probe {
                     let transaction = gonvex_store::begin_transaction(pools, url, false)
                         .await
                         .map_err(|error| error.to_string())?;
-                    self.inner = Some(
-                        DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
-                            .with_schema(schema)
-                            .with_intent(TENANT, command)
-                            .with_actor("bench-account", "bench@example.test")
-                            .with_schedulable_functions(self.schedulable.clone()),
-                    );
+                    let inner = DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
+                        .with_schema(schema)
+                        .with_intent(TENANT, command)
+                        .with_actor("bench-account", "bench@example.test")
+                        .with_schedulable_functions(self.schedulable.clone());
+                    if env("BRIDGE_BENCH_NO_INLINE").is_none() {
+                        if let Some(target) = inner.inline_host() {
+                            let _ = self.inline.target.set(target);
+                        }
+                    }
+                    self.inner = Some(inner);
                 }
                 match self.inner.as_mut() {
                     Some(inner) => inner.handle(call).await,
@@ -157,6 +264,45 @@ impl HostCallHandler for Probe {
         }
         self.handler += started.elapsed();
         result
+    }
+
+    async fn handle_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        if self.database.is_none() {
+            let value = self.handle(call).await?;
+            return Ok(serde_json::to_vec(&value).unwrap());
+        }
+        // Same accounting as `handle`, but keep the handler's own bytes.
+        let started = Instant::now();
+        self.calls += 1;
+        *self.kinds.entry(kind(&call)).or_default() += 1;
+        let (pools, url, schema, command) = self.database.clone().unwrap();
+        if self.first.is_none() {
+            self.first = Some(started);
+            let transaction = gonvex_store::begin_transaction(&pools, &url, false)
+                .await
+                .map_err(|error| error.to_string())?;
+            let inner = DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
+                .with_schema(&schema)
+                .with_intent(TENANT, &command)
+                .with_actor("bench-account", "bench@example.test")
+                .with_schedulable_functions(self.schedulable.clone());
+            if env("BRIDGE_BENCH_NO_INLINE").is_none() {
+                if let Some(target) = inner.inline_host() {
+                    let _ = self.inline.target.set(target);
+                }
+            }
+            self.inner = Some(inner);
+        }
+        let result = match self.inner.as_mut() {
+            Some(inner) => inner.handle_bytes(call).await,
+            None => Err("no transaction".to_owned()),
+        };
+        self.handler += started.elapsed();
+        result
+    }
+
+    fn inline_host(&self) -> Option<Arc<dyn gonvex_module_runtime::InlineHost>> {
+        Some(self.inline.clone())
     }
 }
 
@@ -393,7 +539,7 @@ export const loop = async (ctx, args) => {
                 let started = Instant::now();
                 host.invoke(request, &mut probe).await.unwrap();
                 let total = started.elapsed();
-                let (calls, handler, kinds) = (probe.calls, probe.handler, probe.kinds.clone());
+                let (calls, handler, kinds) = probe.totals();
                 let hold = probe.finish().await;
                 if i < 20 {
                     continue;
@@ -554,7 +700,7 @@ fn bridge_bench_whagons() {
                 let started = Instant::now();
                 let result = host.invoke(request, &mut probe).await;
                 let total = started.elapsed();
-                let (calls, handler, kinds) = (probe.calls, probe.handler, probe.kinds.clone());
+                let (calls, handler, kinds) = probe.totals();
                 let hold = probe.finish().await;
                 if let Err(error) = result {
                     failures += 1;
@@ -583,7 +729,9 @@ fn bridge_bench_whagons() {
             report["failures"] = json!(failures);
             reports.push(report);
         }
+        let statements = pools.writer_statement_stats(&url).await.unwrap();
         let summary = json!({
+            "writerStatements": {"cached": statements.cached, "prepared": statements.prepared, "reused": statements.reused},
             "mode": if in_process() { "in-process" } else { "socket" },
             "loadMs": load_ms,
             "runtimeRssKb": {"beforeLoad": rss_before, "afterLoad": rss_loaded, "afterCalls": rss_kb()},

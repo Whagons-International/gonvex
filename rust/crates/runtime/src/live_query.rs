@@ -1126,15 +1126,20 @@ pub(super) async fn execute_in_transaction(
         statement.push_str(&format!(" OFFSET ${}", parameters.len()));
     }
     let parameters = Parameters::scalars(&parameters).map_err(LiveQueryError::Invalid)?;
-    let query = parameters.bind(sqlx::query(&statement));
-    let rows = query.fetch_all(&mut **transaction.transaction()).await?;
-    let rows = rows
-        .into_iter()
-        .map(|row| {
-            let raw: String = row.get(0);
-            serde_json::from_str(&raw).map_err(|error| LiveQueryError::Invalid(error.to_string()))
-        })
-        .collect::<Result<Vec<Value>, _>>()?;
+    // JSON text straight from the reader connection, off the async workers.
+    let mut stream = transaction
+        .stream_json_rows(statement, parameters.into_owned_binds())
+        .await?;
+    let mut rows = Vec::new();
+    while let Some(batch) = stream.next_batch().await {
+        for row in batch?.rows() {
+            rows.push(
+                serde_json::from_slice::<Value>(row)
+                    .map_err(|error| LiveQueryError::Invalid(error.to_string()))?,
+            );
+        }
+    }
+    drop(stream);
     let total = if plan
         .window
         .as_ref()
@@ -2166,7 +2171,7 @@ mod tests {
             .await
             .unwrap();
         gonvex_store::execute_script(
-            &mut **transaction.transaction(),
+            transaction.transaction(),
             "CREATE TABLE live_count_items (id INTEGER PRIMARY KEY);
              INSERT INTO live_count_items VALUES (0), (1);
              CREATE TABLE members (account_id TEXT, status TEXT);

@@ -54,6 +54,16 @@ pub struct Config {
     pub public_functions: crate::public_functions::PublicLimits,
     /// Presence v2 (`GONVEX_PRESENCE_*`); see `presence.rs`.
     pub presence: crate::presence::PresenceConfig,
+    /// Per-connection socket caps and outbound bounds (`GONVEX_TCP_*`,
+    /// `GONVEX_WS_*`): a client that stops reading pins a fixed amount of
+    /// memory and is disconnected.
+    pub connection: ConnectionConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionConfig {
+    pub socket: crate::accept::SocketTuning,
+    pub outbound: gonvex_websocket::OutboundLimits,
 }
 
 /// One trusted backend service credential. Only the SHA-256 digest of the
@@ -463,6 +473,7 @@ impl Config {
                 public_base_url: non_empty(lookup("GONVEX_PUBLIC_URL")).unwrap_or_default(),
             },
             presence: presence_config(&mut lookup)?,
+            connection: connection_config(&mut lookup)?,
             public_functions: crate::public_functions::PublicLimits {
                 pending_per_ip: integer(
                     "GONVEX_PENDING_CONNECTIONS_PER_IP",
@@ -609,6 +620,54 @@ fn path_list(value: Option<String>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Zero (or unset, for the receive buffer) keeps the platform default.
+fn connection_config(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<ConnectionConfig, ConfigError> {
+    let socket = crate::accept::SocketTuning::default();
+    let outbound = gonvex_websocket::OutboundLimits::default();
+    let optional = |value: usize| (value > 0).then_some(value);
+    let max_bytes = integer(
+        "GONVEX_WS_OUTBOUND_MAX_BYTES",
+        lookup("GONVEX_WS_OUTBOUND_MAX_BYTES"),
+        outbound.max_bytes,
+    )?;
+    Ok(ConnectionConfig {
+        socket: crate::accept::SocketTuning {
+            send_buffer: optional(integer_allow_zero(
+                "GONVEX_TCP_SEND_BUFFER_BYTES",
+                lookup("GONVEX_TCP_SEND_BUFFER_BYTES"),
+                socket.send_buffer.unwrap_or(0),
+            )?),
+            receive_buffer: optional(integer_allow_zero(
+                "GONVEX_TCP_RECEIVE_BUFFER_BYTES",
+                lookup("GONVEX_TCP_RECEIVE_BUFFER_BYTES"),
+                socket.receive_buffer.unwrap_or(0),
+            )?),
+            notsent_lowat: optional(integer_allow_zero(
+                "GONVEX_TCP_NOTSENT_LOWAT_BYTES",
+                lookup("GONVEX_TCP_NOTSENT_LOWAT_BYTES"),
+                socket.notsent_lowat.unwrap_or(0) as usize,
+            )?)
+            .map(|bytes| bytes.min(u32::MAX as usize) as u32),
+        },
+        outbound: gonvex_websocket::OutboundLimits {
+            max_bytes,
+            max_frames: integer(
+                "GONVEX_WS_OUTBOUND_MAX_FRAMES",
+                lookup("GONVEX_WS_OUTBOUND_MAX_FRAMES"),
+                outbound.max_frames,
+            )?,
+            low_water: outbound.low_water.min(max_bytes),
+            stall_timeout: Duration::from_secs(integer(
+                "GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS",
+                lookup("GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS"),
+                outbound.stall_timeout.as_secs() as usize,
+            )? as u64),
+        },
+    })
 }
 
 fn presence_config(
@@ -838,6 +897,34 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_owned()))
         })
+    }
+
+    #[test]
+    fn connection_limits_config() {
+        let defaults = config(&[]).unwrap().connection;
+        assert_eq!(defaults.socket.send_buffer, Some(256 << 10));
+        assert_eq!(defaults.socket.notsent_lowat, Some(128 << 10));
+        assert_eq!(defaults.socket.receive_buffer, None);
+        assert_eq!(defaults.outbound, gonvex_websocket::OutboundLimits::default());
+        assert_eq!(defaults.outbound.stall_timeout, Duration::from_secs(30));
+        let custom = config(&[
+            ("GONVEX_TCP_SEND_BUFFER_BYTES", "0"),
+            ("GONVEX_TCP_RECEIVE_BUFFER_BYTES", "65536"),
+            ("GONVEX_TCP_NOTSENT_LOWAT_BYTES", "0"),
+            ("GONVEX_WS_OUTBOUND_MAX_BYTES", "32768"),
+            ("GONVEX_WS_OUTBOUND_MAX_FRAMES", "16"),
+            ("GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS", "5"),
+        ])
+        .unwrap()
+        .connection;
+        assert_eq!(custom.socket.send_buffer, None);
+        assert_eq!(custom.socket.receive_buffer, Some(65536));
+        assert_eq!(custom.socket.notsent_lowat, None);
+        assert_eq!(custom.outbound.max_bytes, 32768);
+        assert_eq!(custom.outbound.low_water, 32768);
+        assert_eq!(custom.outbound.max_frames, 16);
+        assert_eq!(custom.outbound.stall_timeout, Duration::from_secs(5));
+        assert!(config(&[("GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS", "0")]).is_err());
     }
 
     #[test]

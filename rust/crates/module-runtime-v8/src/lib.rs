@@ -1,3 +1,4 @@
+#![warn(clippy::redundant_clone)]
 //! Bounded TypeScript/V8 module engine.
 //!
 //! The adapter executes one bundled JavaScript ESM artifact inside pooled
@@ -449,6 +450,7 @@ impl EngineInner {
                 timeout,
                 max_result_bytes: self.config.max_result_bytes,
                 host: host_sender,
+                inline: host.inline(),
             },
             reply,
         })?;

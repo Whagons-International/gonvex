@@ -6,11 +6,10 @@ use std::process::ExitCode;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use axum::serve::ListenerExt;
 use gonvex_runtime::config::Config;
 use gonvex_runtime::Runtime;
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
@@ -74,6 +73,7 @@ async fn run() -> ExitCode {
         };
     }
 
+    raise_open_file_limit();
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {
@@ -95,12 +95,13 @@ async fn run() -> ExitCode {
         },
         None => None,
     };
+    let runtime_socket_tuning = config.connection.socket;
     let runtime = Runtime::new(config);
     if let Err(error) = runtime.start().await {
         error!(%error, "Gonvex runtime startup failed");
         return ExitCode::FAILURE;
     }
-    let listener = match tokio::net::TcpListener::bind(addr).await {
+    let listener = match gonvex_runtime::accept::bind(addr) {
         Ok(listener) => listener,
         Err(error) => {
             error!(%error, %addr, "failed to bind Gonvex runtime");
@@ -110,11 +111,13 @@ async fn run() -> ExitCode {
     };
 
     info!(%addr, "starting Gonvex Rust runtime");
+    // Nagle off plus per-socket kernel buffer caps on every accepted socket.
+    let listener = gonvex_runtime::accept::TunedListener::new(listener, runtime_socket_tuning);
     let server = axum::serve(
-        listener.tap_io(disable_nagle),
+        listener,
         runtime
             .router()
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            .into_make_service_with_connect_info::<gonvex_runtime::accept::AcceptedSocket>(),
     )
     .with_graceful_shutdown(shutdown_signal());
     // After the signal the listener stops accepting. In-flight HTTP requests
@@ -172,6 +175,31 @@ async fn shutdown_signal() {
     }
 }
 
+/// Every WebSocket holds a descriptor. Some Docker daemons start containers
+/// with a soft `nofile` of 1024 (hard 524288), which caps a runtime at about a
+/// thousand connections; raise the soft limit to the hard limit.
+fn raise_open_file_limit() {
+    #[cfg(unix)]
+    unsafe {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max
+        {
+            let previous = limit.rlim_cur;
+            limit.rlim_cur = limit.rlim_max;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) == 0 {
+                info!(
+                    from = previous,
+                    to = limit.rlim_cur,
+                    "raised the open file limit"
+                );
+            }
+        }
+    }
+}
+
 /// Takes the store's exclusive `{data}/.gonvex.lock`, held until dropped.
 fn lock_data_dir(data_dir: &std::path::Path) -> Result<gonvex_store::DataDirLock, String> {
     gonvex_store::DataDir::new(data_dir)
@@ -182,14 +210,6 @@ fn lock_data_dir(data_dir: &std::path::Path) -> Result<gonvex_store::DataDirLock
             }
             other => other.to_string(),
         })
-}
-
-fn disable_nagle(stream: &mut tokio::net::TcpStream) {
-    // Protocol frames already batch their headers and payloads. Holding a
-    // following small delta/ready frame for a delayed ACK adds a network stall.
-    if let Err(error) = stream.set_nodelay(true) {
-        warn!(%error, "failed to enable TCP_NODELAY");
-    }
 }
 
 #[cfg(test)]
@@ -203,17 +223,5 @@ mod tests {
         assert!(lock_data_dir(data.path()).is_err());
         drop(first);
         assert!(lock_data_dir(data.path()).is_ok());
-    }
-
-    #[tokio::test]
-    async fn accepted_connections_disable_nagle() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
-        let (client, accepted) = tokio::join!(client, listener.accept());
-        let _client = client.unwrap();
-        let (mut stream, _) = accepted.unwrap();
-        stream.set_nodelay(false).unwrap();
-        disable_nagle(&mut stream);
-        assert!(stream.nodelay().unwrap());
     }
 }

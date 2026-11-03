@@ -200,6 +200,9 @@ pub struct ClientCapabilities {
     pub query_fanout: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_result_batch: Option<u8>,
+    /// Accepts `replica.batch` messages (delivery v2, see ServerCapabilities).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_batch_frames: Option<u8>,
     /// Presence v2: the client reports its state with `presence.set`
     /// transitions only (no reducer heartbeats) and may `presence.subscribe`.
     /// Its liveness is the WebSocket itself (server Ping, any inbound frame).
@@ -533,6 +536,10 @@ pub struct ServerCapabilities {
     pub reducer_receipt_lookup: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_watermark: Option<u8>,
+    /// Delivery v2: replica feed frames arrive in `replica.batch` messages of
+    /// shared, stream-addressed items (one message per connection per tick).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_batch_frames: Option<u8>,
     /// Presence v2 (in-memory, transition-only presence feed). When set the
     /// runtime also answers support/error heartbeats from memory, so clients
     /// should stop sending periodic heartbeats.

@@ -6,7 +6,6 @@
 #[path = "support/replica_client.rs"]
 mod replica_client;
 use base64::Engine as _;
-use gonvex_protocol::ReplicaOpenRequest;
 use gonvex_runtime::change_feed::{self, FeedEvent};
 use gonvex_runtime::replica::ReplicaSubscription;
 use gonvex_runtime::{
@@ -146,6 +145,7 @@ fn test_config(database_url: String) -> Config {
         service_principals: Vec::new(),
         public_functions: Default::default(),
         presence: Default::default(),
+        connection: Default::default(),
     }
 }
 
@@ -386,7 +386,7 @@ async fn committed(pools: &PoolRegistry, route: &TenantRoute, after: &mut u64) -
     FeedEvent::Transaction {
         database_epoch: clock.epoch,
         revision: clock.revision,
-        changes,
+        changes: std::sync::Arc::new(changes),
     }
 }
 

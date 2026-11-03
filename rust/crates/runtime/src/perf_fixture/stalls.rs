@@ -251,7 +251,7 @@ pub async fn connection_loop(
 ) -> MemberConnection {
     while let Ok((committed, event)) = events.recv().await {
         match runtime
-            .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event)
+            .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None)
             .await
         {
             Ok(messages) => {
@@ -283,7 +283,7 @@ pub async fn apply_offloaded(
     event: FeedEvent,
 ) -> Result<Vec<ServerMessage>, crate::replica::ReplicaError> {
     runtime
-        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event)
+        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None)
         .await
 }
 

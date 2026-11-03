@@ -191,6 +191,11 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    PermissionsHas {
+        permission: String,
+        #[serde(default)]
+        scope: String,
+    },
 }
 
 impl HostCallRequest {
@@ -290,6 +295,9 @@ impl HostCallRequest {
                 operation,
                 payload: encode(payload)?,
             },
+            Self::PermissionsHas { permission, scope } => {
+                HostCall::PermissionsHas { permission, scope }
+            }
         })
     }
 }
@@ -308,7 +316,23 @@ pub(crate) enum HostCallOutcome {
 impl HostCallOutcome {
     /// Encoding here rather than through serde_v8 keeps the op's return type a
     /// plain string, so the module boundary stays one shape in both directions.
+    ///
+    /// A successful value is the host's JSON text, embedded as is: the module
+    /// parses one envelope instead of an envelope plus a JSON string inside it
+    /// (which cost an escape pass here and a second parse in the isolate). An
+    /// empty value means `undefined` and is left out.
     pub(crate) fn encode(&self) -> String {
+        if let Self::Ok { value } = self {
+            if value.is_empty() {
+                return r#"{"status":"ok"}"#.to_owned();
+            }
+            const HEAD: &str = r#"{"status":"ok","value":"#;
+            let mut encoded = String::with_capacity(HEAD.len() + value.len() + 1);
+            encoded.push_str(HEAD);
+            encoded.push_str(value);
+            encoded.push('}');
+            return encoded;
+        }
         serde_json::to_string(self).unwrap_or_else(|_| {
             r#"{"status":"failed","message":"host call outcome could not be encoded"}"#.to_owned()
         })
@@ -426,6 +450,33 @@ mod tests {
         assert!(!effective_capabilities(&FunctionKind::Query, &granted).scheduler);
         assert!(effective_capabilities(&FunctionKind::Reducer, &granted).scheduler);
         assert!(effective_capabilities(&FunctionKind::Action, &granted).scheduler);
+    }
+
+    #[test]
+    fn permissions_request_lowers_to_a_db_read_host_call() {
+        let request: HostCallRequest = serde_json::from_value(serde_json::json!({
+            "kind": "permissionsHas",
+            "permission": "edit-tasks",
+            "scope": "workspace-1"
+        }))
+        .expect("permissions request should decode");
+        let call = request.into_host_call().expect("permissions request should lower");
+        assert_eq!(call.capability(), "db_read");
+        assert_eq!(
+            call,
+            HostCall::PermissionsHas {
+                permission: "edit-tasks".to_owned(),
+                scope: "workspace-1".to_owned(),
+            }
+        );
+        let tenant_wide: HostCallRequest = serde_json::from_value(serde_json::json!({
+            "kind": "permissionsHas", "permission": "view"
+        }))
+        .expect("scope defaults to tenant-wide");
+        assert!(matches!(
+            tenant_wide.into_host_call(),
+            Ok(HostCall::PermissionsHas { scope, .. }) if scope.is_empty()
+        ));
     }
 
     #[test]

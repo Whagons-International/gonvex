@@ -6,6 +6,7 @@
 //! sqlite_writer_bench thread      # sqlx worker thread vs rusqlite on one thread vs inline raw handle
 //! sqlite_writer_bench commit      # reducer-shaped write transactions at 1/10/50/200 writers
 //! sqlite_writer_bench cache       # read latency + RSS with 27 tenant files open
+//! sqlite_writer_bench txn         # production TenantTransaction path, sqlx vs direct session
 //! ```
 //!
 //! Environment: `BENCH_DIR` (data directory, default under the temp dir),
@@ -44,6 +45,7 @@ fn main() {
         match mode.as_str() {
             "thread" => thread_model().await,
             "commit" => commit().await,
+            "txn" => txn().await,
             "cache" => cache().await,
             other => panic!("unknown mode {other}"),
         }
@@ -587,6 +589,39 @@ async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64
         .await
         .unwrap();
     let now = step as i64;
+    if std::env::var("BENCH_PATH").as_deref() == Ok("direct") {
+        // The same statements on the transaction's direct session (what the
+        // runtime's module SQL now runs on).
+        use gonvex_store::direct::Bind;
+        let session = tx.direct().await.unwrap();
+        session
+            .run(|conn| {
+                if step % 10 == 0 {
+                    let id = ((writer as i64 * 7919 + step as i64) % TASK_ROWS) + 1;
+                    conn.query_i64("SELECT length(status) FROM tasks WHERE id = $1", &[Bind::Integer(id)]).unwrap().unwrap();
+                    conn.execute(
+                        "UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3",
+                        &[Bind::Text(if step % 20 == 0 { "doing" } else { "done" }), Bind::Integer(now), Bind::Integer(id)],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO task_events (task_id, kind, at) VALUES ($1, 'status', $2)",
+                        &[Bind::Integer(id), Bind::Integer(now)],
+                    )
+                    .unwrap();
+                } else {
+                    let id = format!("p{}", writer as i64 % PRESENCE_ROWS + 1);
+                    conn.execute(HEARTBEAT, &[Bind::Integer(now), Bind::Text("online"), Bind::Text(&id)]).unwrap();
+                }
+            })
+            .unwrap();
+        let hold: u64 = env_or("BENCH_HOLD_US", 0);
+        if hold > 0 {
+            tokio::time::sleep(Duration::from_micros(hold)).await;
+        }
+        tx.commit_with_revision().await.unwrap();
+        return;
+    }
     if step % 10 == 0 {
         let id = ((writer as i64 * 7919 + step as i64) % TASK_ROWS) + 1;
         sqlx::query("SELECT status FROM tasks WHERE id = $1")
@@ -717,6 +752,114 @@ async fn commit() {
         .unwrap_or(0);
     println!("wal bytes at end: {wal}");
     pools.close().await;
+}
+
+// ------------------------------------------------------------------ 4. txn
+
+/// Heartbeat transactions and point reads through the production
+/// `TenantTransaction` (registry pools, `Durability::Normal` so fsync is not
+/// in the numbers), one at a time: per-statement and per-transaction CPU and
+/// context switches of the sqlx path vs the direct session.
+async fn txn() {
+    let dir = bench_dir();
+    let n: u64 = env_or("BENCH_OPS", 20_000);
+    let pools = PoolRegistry::with_durability(PoolLimits::default(), Durability::Normal);
+    let url = gonvex_store::database_url(&dir.join("txn.db"));
+    {
+        let writer = pools.pool(&url).await.unwrap();
+        let mut connection = writer.acquire().await.unwrap();
+        provision(&mut connection, TASK_ROWS, PRESENCE_ROWS).await;
+    }
+    let report = |label: &str, ops, wall, lat_ns, before, after| Report {
+        label: label.into(), ops, wall, lat_ns, before, after,
+    };
+    let direct = std::env::var("BENCH_PATH").as_deref() != Ok("sqlx");
+    // (a) point reads inside one open write transaction, sqlx
+    {
+        let mut tx = begin_transaction(&pools, &url, false).await.unwrap();
+        for i in 0..200 {
+            sqlx::query(POINT_READ).bind(format!("p{}", i % 100 + 1)).fetch_optional(&mut **tx.transaction()).await.unwrap();
+        }
+        let mut lat = Vec::with_capacity(n as usize);
+        let (u0, t0) = (usage(), Instant::now());
+        for i in 0..n {
+            let s = Instant::now();
+            sqlx::query(POINT_READ).bind(format!("p{}", i % 2000 + 1)).fetch_optional(&mut **tx.transaction()).await.unwrap();
+            lat.push(s.elapsed().as_nanos() as u64);
+        }
+        report("tx point-read sqlx", n, t0.elapsed(), lat, u0, usage()).print();
+        tx.rollback().await.unwrap();
+    }
+    // (b) the same reads on the transaction's direct session
+    if direct {
+        bench_direct_reads(&pools, &url, n).await;
+    }
+    // (c) heartbeat transaction: BEGIN, UPDATE (sqlx), commit_with_revision
+    {
+        let mut lat = Vec::with_capacity(n as usize);
+        let (u0, t0) = (usage(), Instant::now());
+        for i in 0..n {
+            let s = Instant::now();
+            let mut tx = begin_transaction(&pools, &url, false).await.unwrap();
+            tx.set_command_id("cmd").await.unwrap();
+            sqlx::query(HEARTBEAT).bind(i as i64).bind("online").bind(format!("p{}", i % 2000 + 1))
+                .execute(&mut **tx.transaction()).await.unwrap();
+            tx.commit_with_revision().await.unwrap();
+            lat.push(s.elapsed().as_nanos() as u64);
+        }
+        report("txn heartbeat, statement via sqlx", n, t0.elapsed(), lat, u0, usage()).print();
+    }
+    if direct {
+        bench_direct_heartbeats(&pools, &url, n).await;
+    }
+    pools.close().await;
+}
+
+async fn bench_direct_reads(pools: &PoolRegistry, url: &str, n: u64) {
+    use gonvex_store::direct::Bind;
+    let mut tx = begin_transaction(pools, url, false).await.unwrap();
+    let session = tx.direct().await.unwrap();
+    let read = |id: &str| {
+        session
+            .run(|conn| {
+                let mut statement = conn.prepare(POINT_READ).unwrap();
+                statement.bind(&[Bind::Text(id)]).unwrap();
+                statement.step().unwrap().then(|| statement.str(0).unwrap().to_owned())
+            })
+            .unwrap()
+    };
+    for i in 0..200 {
+        read(&format!("p{}", i % 100 + 1));
+    }
+    let mut lat = Vec::with_capacity(n as usize);
+    let (u0, t0) = (usage(), Instant::now());
+    for i in 0..n {
+        let s = Instant::now();
+        read(&format!("p{}", i % 2000 + 1));
+        lat.push(s.elapsed().as_nanos() as u64);
+    }
+    Report { label: "tx point-read direct session".into(), ops: n, wall: t0.elapsed(), lat_ns: lat, before: u0, after: usage() }.print();
+    tx.rollback().await.unwrap();
+}
+
+async fn bench_direct_heartbeats(pools: &PoolRegistry, url: &str, n: u64) {
+    use gonvex_store::direct::Bind;
+    let mut lat = Vec::with_capacity(n as usize);
+    let (u0, t0) = (usage(), Instant::now());
+    for i in 0..n {
+        let s = Instant::now();
+        let mut tx = begin_transaction(pools, url, false).await.unwrap();
+        tx.set_command_id("cmd").await.unwrap();
+        let session = tx.direct().await.unwrap();
+        let id = format!("p{}", i % 2000 + 1);
+        session
+            .run(|conn| conn.execute(HEARTBEAT, &[Bind::Integer((i + n) as i64), Bind::Text("online"), Bind::Text(&id)]))
+            .unwrap()
+            .unwrap();
+        tx.commit_with_revision().await.unwrap();
+        lat.push(s.elapsed().as_nanos() as u64);
+    }
+    Report { label: "txn heartbeat, statement via direct".into(), ops: n, wall: t0.elapsed(), lat_ns: lat, before: u0, after: usage() }.print();
 }
 
 // ----------------------------------------------------------------- 5. cache

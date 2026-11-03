@@ -150,6 +150,29 @@ test('legacy rows: a single-frame replica.snapshot activates on ready', async ()
   assert.deepEqual(w.localReplicaResult(), [{ _id: 'x', name: 'X' }]);
 });
 
+test('replica.batch items apply like the separate frames, through stream bindings', async () => {
+  const { c, sent } = connected();
+  const w = c.watchReplica(ref, {}); w.onUpdate(() => {}); await tick();
+  const id = sent.find((m) => m.type === 'replica.openMany').opens[0].id;
+  c.dispatch({ type: 'replica.snapshotStart', id, snapshotId: 's', cursor: { epoch: 'e', revision: 10 }, key: '_id' });
+  c.dispatch({ type: 'replica.snapshotEncodedPage', id, snapshotId: 's', sequence: 0, last: true, canonicalRows: [row('a', 'A')] });
+  c.dispatch({ type: 'replica.ready', id, cursor: { epoch: 'e', revision: 10 }, digest: 'd' });
+  let done = false;
+  const p = c.reducer({ path: 'tasks.rename' }, { taskId: 'a' }).then(() => { done = true; });
+  const call = sent.find((m) => m.type === 'reducer.call');
+  c.dispatch({ type: 'reducer.result', id: call.id, result: null, committedRevision: 11 });
+  c.dispatch({ type: 'replica.batch', tenant: 'x', class: '0', from: 10, items: [
+    { type: 'replica.transactionEncoded', cursor: { epoch: 'e', revision: 11 }, canonicalChanges: [JSON.stringify({ entity: 'tasks', id: 'a', newValue: { _id: 'a', name: 'A2' }, operation: 'update' })] },
+    { type: 'replica.stream', id, stream: '~1' },
+    { type: 'replica.delta', id: '~1', cursor: { epoch: 'e', revision: 11 }, canonicalUpserts: [row('b', 'B')], deleted: [] },
+    { type: 'replica.ready', id: '~1', cursor: { epoch: 'e', revision: 11 }, digest: 'd2' },
+    { type: 'replica.delta', id: '~unbound', cursor: { epoch: 'e', revision: 11 }, canonicalUpserts: [row('z', 'Z')], deleted: [] },
+  ], watermark: 11 });
+  await p; assert.equal(done, true);
+  const byId = Object.fromEntries(w.localReplicaResult().map((r) => [r._id, r.name]));
+  assert.deepEqual(byId, { a: 'A2', b: 'B' });
+  assert.deepEqual(ThinClient.stats.unsupported, {});
+});
 test('presence v2: capability, transitions only, re-announce after auth, snapshot and patches', async () => {
   const { c, sent } = connected();
   // Same capability object (and key order) as the SDK auth frame.
@@ -182,6 +205,20 @@ test('presence v2: capability, transitions only, re-announce after auth, snapsho
   assert.deepEqual(presence().slice(-2), [{ type: 'presence.set', state: 'idle' }, { type: 'presence.subscribe', id: 'presence-2' }]);
   stop();
   assert.deepEqual(presence().at(-1), { type: 'presence.unsubscribe' });
+  assert.deepEqual(ThinClient.stats.unsupported, {});
+});
+
+test('presence v2: presence.patch items in a replica.batch apply like the separate frame', async () => {
+  const { c, sent } = connected();
+  c.serverCapabilities = { replicaWatermark: 1, controlWatermark: 1, presence: 1 };
+  c.authReady = true;
+  c.subscribePresence(() => {});
+  const id = sent.find((m) => m.type === 'presence.subscribe').id;
+  c.dispatch({ type: 'presence.snapshot', id, serverTime: 1, members: [{ memberId: 'm1', state: 'active', since: 1 }] });
+  c.dispatch({ type: 'replica.batch', tenant: 't', class: '00000000000000aa', from: 0, items: [
+    { type: 'presence.patch', serverTime: 2, changes: [{ memberId: 'm1', state: 'offline', since: 2 }, { memberId: 'm2', state: 'idle', since: 2 }] },
+  ] });
+  assert.deepEqual([...c.presenceSnapshot().members.keys()], ['m2']);
   assert.deepEqual(ThinClient.stats.unsupported, {});
 });
 

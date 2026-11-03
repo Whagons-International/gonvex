@@ -1,3 +1,4 @@
+#![warn(clippy::redundant_clone)]
 //! SQLite ownership for the Rust runtime.
 //!
 //! Browser and module inputs name a project and tenant. They never carry a
@@ -29,11 +30,14 @@ macro_rules! now_ms {
 pub mod capture;
 pub mod checkpoint;
 mod data_dir;
+pub mod direct;
+pub mod json_rows;
+pub use json_rows::{JsonRowBatch, JsonRows};
+mod sync_barrier;
+pub use sync_barrier::WAL_SYNCS;
 pub mod feed;
 mod registry;
 pub mod rows;
-mod sync_barrier;
-pub use sync_barrier::WAL_SYNCS;
 pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
@@ -1235,17 +1239,51 @@ pub struct TransactionAttribution<'a> {
 /// One invocation-scoped tenant transaction. The admission permit is held for
 /// the transaction lifetime so a burst of module calls cannot bypass the
 /// runtime-wide database limit.
+///
+/// Hot statements can run directly on the transaction's connection through a
+/// [`direct::DirectSession`] (see [`TenantTransaction::direct`]); every sqlx
+/// use of the transaction first ends that lease. Field order matters: the
+/// lease and the writer's statement cache drop before the sqlx transaction.
 pub struct TenantTransaction {
+    direct: Option<DirectLock>,
+    statements: Option<Arc<direct::WriterStatements>>,
     transaction: Transaction<'static, Sqlite>,
     _admission: AdmissionPermit,
     read_only: bool,
     provenance: Provenance,
     publisher: Option<(PoolRegistry, Arc<str>)>,
     committed: Option<CommitNotice>,
-    failed: Option<String>,
+    /// Shared with direct sessions, which mark failures from other threads.
+    failed: Arc<std::sync::Mutex<Option<String>>>,
     /// Function class for the commit-stage histograms.
     profile_label: gonvex_profiler::Label,
     _writer_held: Option<gonvex_profiler::GaugeGuard>,
+}
+
+/// The connection locked out of sqlx's worker for direct statements. The
+/// worker thread parks on the connection lock until the guard drops.
+struct DirectLock {
+    session: direct::DirectSession,
+    _guard: LockedHandle,
+}
+
+/// `LockedSqliteHandle` borrows the connection's worker state, which sits in
+/// an `Arc` owned by the connection inside the transaction. The lock is
+/// dropped before that transaction (field order, and `release_direct` before
+/// every other use), so extending the borrow to `'static` never outlives it.
+struct LockedHandle(#[allow(dead_code)] sqlx::sqlite::LockedSqliteHandle<'static>);
+
+// SAFETY: the guard only unlocks the worker's connection mutex when dropped,
+// which is valid from any thread.
+unsafe impl Send for LockedHandle {}
+unsafe impl Sync for LockedHandle {}
+
+impl Drop for DirectLock {
+    fn drop(&mut self) {
+        // End the lease (waiting for a statement in progress) before the
+        // guard hands the connection back to sqlx.
+        self.session.release();
+    }
 }
 
 /// Opens a transaction on the writer (or, when read-only, on a reader whose
@@ -1257,45 +1295,103 @@ pub async fn begin_transaction(
 ) -> Result<TenantTransaction, DatabaseError> {
     use gonvex_profiler::{Label, Stage, Timer};
     let admission = pools.admit(database_url).await?;
-    let (transaction, writer_held) = if read_only {
-        let pool = pools.reader(database_url).await?;
+    let database = pools.database(database_url).await?;
+    let (transaction, statements, writer_held) = if read_only {
         let mut timer = Timer::start();
-        let transaction = pool.begin().await?;
+        let transaction = database.reader.begin().await?;
         timer.lap(Stage::ReaderBegin, Label::None);
-        (transaction, None)
+        (transaction, None, None)
     } else {
-        let (pool, stats) = pools.writer_with_stats(database_url).await?;
+        let stats = database.writer_stats.clone();
         let waiting = stats.enter();
         let mut timer = Timer::start();
-        let transaction = pool.begin().await?;
+        let transaction = database.writer.begin().await?;
         let waited = timer.lap(Stage::WriterAcquire, Label::None);
         drop(waiting);
         stats.acquired(waited);
         (
             transaction,
+            Some(database.statements),
             Some(gonvex_profiler::gauge(gonvex_profiler::GaugeId::WriterHeld).guard()),
         )
     };
     Ok(TenantTransaction {
+        direct: None,
+        statements,
         transaction,
         _admission: admission,
         read_only,
         provenance: Provenance::default(),
         publisher: (!read_only).then(|| (pools.clone(), Arc::from(database_url.trim()))),
         committed: None,
-        failed: None,
+        failed: Arc::default(),
         profile_label: Label::None,
         _writer_held: writer_held,
     })
 }
 
+fn released() -> DatabaseError {
+    DatabaseError::Io("the direct database session was released".to_owned())
+}
+
 impl TenantTransaction {
+    /// The sqlx transaction. Ends a direct session first.
     pub fn transaction(&mut self) -> &mut Transaction<'static, Sqlite> {
+        self.release_direct();
         &mut self.transaction
     }
 
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// A lease on this transaction's connection for direct statements on the
+    /// calling thread (see [`direct`]). Locking it costs one round trip to
+    /// sqlx's worker; it stays locked until the next sqlx use of this
+    /// transaction, `release_direct`, commit, rollback or drop.
+    pub async fn direct(&mut self) -> Result<direct::DirectSession, DatabaseError> {
+        if let Some(lock) = &self.direct {
+            if lock.session.active() {
+                return Ok(lock.session.clone());
+            }
+        }
+        self.direct = None;
+        let mut handle = self.transaction.lock_handle().await?;
+        let db = handle.as_raw_handle();
+        // SAFETY: see `LockedHandle`.
+        let handle: sqlx::sqlite::LockedSqliteHandle<'static> =
+            unsafe { std::mem::transmute(handle) };
+        let writer = if self.read_only {
+            None
+        } else {
+            self.statements.clone()
+        };
+        let checks_schema = writer.is_some();
+        let session = direct::DirectSession::new(db, writer, self.failed.clone());
+        let lock = DirectLock {
+            session: session.clone(),
+            _guard: LockedHandle(handle),
+        };
+        if checks_schema {
+            session
+                .run(|conn| conn.check_schema())
+                .ok_or_else(released)??;
+        }
+        self.direct = Some(lock);
+        Ok(session)
+    }
+
+    /// Ends the direct session, if any; the connection returns to sqlx.
+    pub fn release_direct(&mut self) {
+        self.direct = None;
+    }
+
+    async fn with_direct<R>(
+        &mut self,
+        work: impl FnOnce(&mut direct::Conn<'_>) -> Result<R, sqlx::Error>,
+    ) -> Result<R, DatabaseError> {
+        let session = self.direct().await?;
+        Ok(session.run(work).ok_or_else(released)??)
     }
 
     /// Labels this transaction's commit-stage histograms with a function class.
@@ -1329,17 +1425,18 @@ impl TenantTransaction {
         key: &str,
         path: &str,
     ) -> Result<bool, DatabaseError> {
-        let result = sqlx::query(
-            r#"INSERT INTO _gonvex_reducer_idempotency (subject, idempotency_key, path)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (subject, idempotency_key) DO NOTHING"#,
-        )
-        .bind(subject)
-        .bind(key)
-        .bind(path)
-        .execute(&mut *self.transaction)
-        .await?;
-        Ok(result.rows_affected() > 0)
+        use direct::Bind::Text;
+        let changed = self
+            .with_direct(|conn| {
+                conn.execute(
+                    r#"INSERT INTO _gonvex_reducer_idempotency (subject, idempotency_key, path)
+                       VALUES ($1, $2, $3)
+                       ON CONFLICT (subject, idempotency_key) DO NOTHING"#,
+                    &[Text(subject), Text(key), Text(path)],
+                )
+            })
+            .await?;
+        Ok(changed > 0)
     }
 
     pub async fn store_reducer_result(
@@ -1348,14 +1445,15 @@ impl TenantTransaction {
         key: &str,
         result: &Value,
     ) -> Result<(), DatabaseError> {
-        sqlx::query(
-            r#"UPDATE _gonvex_reducer_idempotency SET result = $3
-               WHERE subject = $1 AND idempotency_key = $2"#,
-        )
-        .bind(subject)
-        .bind(key)
-        .bind(Json(result.clone()))
-        .execute(&mut *self.transaction)
+        use direct::Bind::Text;
+        let result = result.to_string();
+        self.with_direct(|conn| {
+            conn.execute(
+                r#"UPDATE _gonvex_reducer_idempotency SET result = $3
+                   WHERE subject = $1 AND idempotency_key = $2"#,
+                &[Text(subject), Text(key), Text(&result)],
+            )
+        })
         .await?;
         Ok(())
     }
@@ -1389,20 +1487,64 @@ impl TenantTransaction {
         actor_email: &str,
         provenance: &Value,
     ) -> Result<String, DatabaseError> {
-        sqlx::query(
-            r#"INSERT INTO _gonvex_action_outbox
-               (id, action_path, args, actor_user_id, actor_email, provenance)
-               VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6)"#,
-        )
-        .bind(id)
-        .bind(action_path)
-        .bind(Json(args.clone()))
-        .bind(actor_account_id)
-        .bind(actor_email)
-        .bind(Json(provenance.clone()))
-        .execute(&mut *self.transaction)
+        use direct::Bind::Text;
+        let (args, provenance) = (args.to_string(), provenance.to_string());
+        self.with_direct(|conn| {
+            conn.execute(
+                r#"INSERT INTO _gonvex_action_outbox
+                   (id, action_path, args, actor_user_id, actor_email, provenance)
+                   VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6)"#,
+                &[
+                    Text(id),
+                    Text(action_path),
+                    Text(&args),
+                    Text(actor_account_id),
+                    Text(actor_email),
+                    Text(&provenance),
+                ],
+            )
+        })
         .await?;
         Ok(id.to_owned())
+    }
+
+    /// Streams the first column of each row of `sql` (JSON text, e.g. built
+    /// with `rows::json_object_expr`) in batches, without decoding it. The
+    /// query runs on a blocking thread on this transaction's connection
+    /// (read-only snapshot transactions use their reader), never on an async
+    /// worker. The stream borrows the transaction: nothing else can use it
+    /// until the stream is dropped, which stops the query.
+    pub async fn stream_json_rows(
+        &mut self,
+        sql: String,
+        binds: Vec<direct::OwnedBind>,
+    ) -> Result<JsonRows<'_>, DatabaseError> {
+        let session = self.direct().await?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        tokio::task::spawn_blocking(move || {
+            let outcome = session.run(|conn| {
+                direct::stream_json_rows(conn, &sql, &binds, &stopped, |batch| {
+                    !stopped.load(std::sync::atomic::Ordering::Relaxed)
+                        && sender.blocking_send(Ok(batch)).is_ok()
+                })
+            });
+            let error = match outcome {
+                _ if stopped.load(std::sync::atomic::Ordering::Relaxed) => None,
+                None => Some(released()),
+                Some(Err(error)) => Some(DatabaseError::from(error)),
+                Some(Ok(())) => None,
+            };
+            if let Some(error) = error {
+                let _ = sender.blocking_send(Err(error));
+            }
+        });
+        Ok(JsonRows {
+            receiver,
+            stop,
+            _transaction: std::marker::PhantomData,
+        })
     }
 
     /// Records that a statement in this transaction failed. Postgres aborts
@@ -1410,24 +1552,44 @@ impl TenantTransaction {
     /// so callers that run module SQL mark the failure and `commit` refuses,
     /// preserving "a failed intent rolls back completely".
     pub fn mark_failed(&mut self, reason: impl Into<String>) {
-        if self.failed.is_none() {
-            self.failed = Some(reason.into());
+        let mut failed = self.failure();
+        if failed.is_none() {
+            *failed = Some(reason.into());
         }
     }
 
-    pub fn failed(&self) -> Option<&str> {
-        self.failed.as_deref()
+    pub fn failed(&self) -> Option<String> {
+        self.failure().clone()
     }
 
     /// Clears a recorded failure after the caller rolled back to a savepoint
     /// taken before it, which Postgres also treats as recovery.
     pub fn clear_failure(&mut self) {
-        self.failed = None;
+        *self.failure() = None;
+    }
+
+    fn failure(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.failed.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Reference-integrity flush and change-feed finalize, before COMMIT.
+    /// Both run directly on the connection; only a staged reference ledger
+    /// (rare) runs its flush through sqlx.
+    async fn finalize(&mut self) -> Result<Option<CommitNotice>, DatabaseError> {
+        let staged = self.with_direct(reference_integrity::staged_direct).await?;
+        if staged {
+            reference_integrity::flush(&mut *self.transaction()).await?;
+        }
+        let provenance = self.provenance.clone();
+        self.with_direct(|conn| feed::finalize_direct(conn, &provenance))
+            .await
     }
 
     /// Commits and returns the revision it published, if it changed rows.
     pub async fn commit_with_revision(mut self) -> Result<Option<u64>, DatabaseError> {
-        if let Some(reason) = self.failed.take() {
+        let failed = self.failure().take();
+        if let Some(reason) = failed {
+            self.release_direct();
             self.transaction.rollback().await?;
             return Err(DatabaseError::TransactionAborted(reason));
         }
@@ -1437,20 +1599,17 @@ impl TenantTransaction {
         let notice = if self.read_only {
             None
         } else {
-            let finalized = async {
-                reference_integrity::flush(&mut self.transaction).await?;
-                feed::finalize(&mut self.transaction, &self.provenance).await
-            }
-            .await;
-            match finalized {
+            match self.finalize().await {
                 Ok(notice) => notice,
                 Err(error) => {
+                    self.release_direct();
                     self.transaction.rollback().await?;
                     return Err(error);
                 }
             }
         };
         timer.lap(Stage::CommitFinalize, label);
+        self.release_direct();
         self.transaction.commit().await?;
         timer.lap(Stage::CommitSql, label);
         // Acknowledge and publish only once the commit is on disk; one WAL
@@ -1476,11 +1635,13 @@ impl TenantTransaction {
         self.commit_with_revision().await.map(|_| ())
     }
 
-    pub async fn rollback(self) -> Result<(), DatabaseError> {
+    pub async fn rollback(mut self) -> Result<(), DatabaseError> {
+        self.release_direct();
         self.transaction.rollback().await?;
         Ok(())
     }
 }
+
 
 #[cfg(test)]
 mod transaction_commit_tests;

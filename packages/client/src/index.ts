@@ -1,5 +1,5 @@
 import { isReplicaRevision } from "./revision-policy.js";
-import { REDUCER_RECEIPT_QUERY } from "@gonvex/protocol";
+import { REDUCER_RECEIPT_QUERY, expandReplicaBatch } from "@gonvex/protocol";
 import { ownsCurrentScope } from "./ownership-policy.js";
 import { RowPatchDecoder } from "./row-patch.js";
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
@@ -2027,6 +2027,8 @@ export class GonvexClient {
     }
     const socket = new WebSocket(transportUrl);
     const rowPatches = new RowPatchDecoder();
+    // Delivery v2 stream token -> subscription ids, scoped to this socket.
+    const replicaStreams = new Map<string, string[]>();
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -2080,11 +2082,21 @@ export class GonvexClient {
       this.scheduleReconnect();
       this.notifyConnectionState();
     });
-    socket.addEventListener("message", (event) => {
+    // Delivery v2 batches re-enter with already parsed frames (`parsed`).
+    const onMessage = (event: { data?: unknown; parsed?: ServerMessage }) => {
       if (this.socket !== socket) return;
       let message: ServerMessage;
       try {
-        const frame = JSON.parse(String(event.data));
+        const frame = event.parsed ?? JSON.parse(String(event.data));
+        if (frame?.type === "replica.batch") {
+          // One message per tick of shared, stream-addressed items: dispatch
+          // the frames it stands for, in order (see docs/performance/delivery.md).
+          for (const parsed of expandReplicaBatch(frame, replicaStreams)) {
+            if (this.socket !== socket) return;
+            onMessage({ parsed });
+          }
+          return;
+        }
         if (frame?.type === "replica.rowPatch") {
           try {
             if (!this.replicaFieldPatchesEnabled || this.serverCapabilities.replicaFieldPatches !== 1) throw new Error("unnegotiated-replica-row-patch");
@@ -2444,7 +2456,8 @@ export class GonvexClient {
 			}
       const id = "id" in message ? message.id : "system";
       this.handlers.get(id)?.(message);
-    });
+    };
+    socket.addEventListener("message", onMessage);
   }
 
   close() {
@@ -5505,7 +5518,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
+		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
     });
   }
 

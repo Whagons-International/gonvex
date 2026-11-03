@@ -375,6 +375,7 @@ impl Runtime {
         session: &TenantSession,
         subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
         event: FeedEvent,
+        prewarm: Option<(bool, Option<u8>)>,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let pool = offload();
         let tables = feed_tables(&event);
@@ -395,6 +396,18 @@ impl Runtime {
                 async move {
                     let started = Instant::now();
                     let result = runtime.apply_feed_event(&session, &mut owned, event).await;
+                    // Delivery v3: encode and compress the shared items here,
+                    // not at push time on the network thread.
+                    if let (Ok(messages), Some((native, window))) = (&result, prewarm) {
+                        crate::delivery::prewarm(
+                            &runtime.inner.delivery,
+                            &session.route.tenant_id,
+                            native,
+                            window,
+                            &owned,
+                            messages,
+                        );
+                    }
                     (owned, result, started.elapsed())
                 },
             ))
@@ -650,9 +663,18 @@ impl SnapshotAdmission {
 }
 
 impl SnapshotPermit {
+    /// Records a finished streaming build of `json_bytes` of row JSON as the
+    /// next estimate (same heap factor as [`Self::observe`]).
+    pub fn observe_json_bytes(&self, json_bytes: usize) {
+        self.record(json_bytes * HEAP_PER_JSON_BYTE);
+    }
+
     /// Records the decoded size of the finished build as the next estimate.
     pub fn observe(&self, rows: &[Value]) {
-        let bytes = estimate_rows_bytes(rows);
+        self.record(estimate_rows_bytes(rows));
+    }
+
+    fn record(&self, bytes: usize) {
         let mut estimates = self.admission.estimates.lock().unwrap();
         if estimates.by_key.len() >= ESTIMATE_ENTRIES {
             estimates.by_key.clear();

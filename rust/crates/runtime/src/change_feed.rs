@@ -46,11 +46,63 @@ pub enum FeedEvent {
     Transaction {
         database_epoch: String,
         revision: u64,
-        changes: Vec<LogChange>,
+        /// Shared by every receiver of the broadcast: a connection's copy of
+        /// the event is a reference count, not a deep copy of every row image.
+        changes: std::sync::Arc<Vec<LogChange>>,
     },
     Reset {
         reason: String,
     },
+}
+
+/// Delivery v3, slow connections: consecutive transactions of one database
+/// epoch as one event (changes in commit order, the last revision). Applying
+/// it collapses every row to its first before-image and last after-image, so
+/// a connection that fell behind receives each row's newest state once
+/// instead of every intermediate one. The caller must only merge when no
+/// subscription's cursor lies inside the merged range (a subscription skips
+/// whole events at or before its cursor). `None` unless all are
+/// transactions of one epoch in ascending revision order.
+pub fn merge_transactions(events: &[FeedEvent]) -> Option<FeedEvent> {
+    let mut changes = Vec::new();
+    let mut epoch: Option<&str> = None;
+    let mut last = 0u64;
+    for event in events {
+        let FeedEvent::Transaction {
+            database_epoch,
+            revision,
+            changes: event_changes,
+        } = event
+        else {
+            return None;
+        };
+        if epoch.is_some_and(|epoch| epoch != database_epoch) || *revision <= last {
+            return None;
+        }
+        epoch = Some(database_epoch);
+        last = *revision;
+        changes.extend(event_changes.iter().cloned());
+    }
+    Some(FeedEvent::Transaction {
+        database_epoch: epoch?.to_owned(),
+        revision: last,
+        changes: std::sync::Arc::new(changes),
+    })
+}
+
+/// The first revision of a feed event (`None` for a reset).
+pub fn first_revision(event: &FeedEvent) -> Option<u64> {
+    match event {
+        FeedEvent::Transaction { revision, changes, .. } => Some(
+            changes
+                .iter()
+                .map(|change| change.revision)
+                .min()
+                .unwrap_or(*revision)
+                .min(*revision),
+        ),
+        FeedEvent::Reset { .. } => None,
+    }
 }
 
 pub struct ChangeFeedHub {
@@ -335,7 +387,7 @@ async fn deliver_committed(
             let _ = sender.send(FeedEvent::Transaction {
                 database_epoch: clock.epoch.clone(),
                 revision: current_revision,
-                changes: std::mem::take(&mut batch),
+                changes: std::sync::Arc::new(std::mem::take(&mut batch)),
             });
         }
         current_revision = change.revision;
@@ -346,7 +398,7 @@ async fn deliver_committed(
         let _ = sender.send(FeedEvent::Transaction {
             database_epoch: clock.epoch,
             revision: current_revision,
-            changes: batch,
+            changes: std::sync::Arc::new(batch),
         });
     }
     Ok(clock.revision)

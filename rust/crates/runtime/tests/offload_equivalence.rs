@@ -26,9 +26,9 @@ async fn offloaded_opens_feeds_and_pages_match_inline() {
                 .await
                 .unwrap();
             let pooled_subscription = pooled.subscription.unwrap();
-            assert_eq!(direct.hashes, pooled_subscription.hashes, "{path} member {member}");
+            assert_eq!(direct.digest(), pooled_subscription.digest(), "{path} member {member}");
             assert_eq!(direct.cursor, pooled_subscription.cursor);
-            assert_eq!(pooled.rows, direct.rows.len());
+            assert_eq!(pooled.rows, direct.row_count());
         }
     }
 
@@ -76,7 +76,7 @@ async fn offloaded_opens_feeds_and_pages_match_inline() {
                 a.member
             );
             for (path, subscription) in &a.subscriptions {
-                assert_eq!(subscription.hashes, b.subscriptions[path].hashes);
+                assert_eq!(subscription.digest(), b.subscriptions[path].digest());
                 assert_eq!(subscription.cursor, b.subscriptions[path].cursor);
             }
         }

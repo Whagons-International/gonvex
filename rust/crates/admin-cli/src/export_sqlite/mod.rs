@@ -282,6 +282,10 @@ pub struct TableReport {
     pub dropped_columns: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub defaulted_columns: Vec<String>,
+    /// Schema mismatches accepted only because the source table had no rows
+    /// in the export snapshot (nothing could be lost or invented).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub relaxed_for_empty_source: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -426,13 +430,19 @@ struct TablePlan {
     columns: Vec<ColumnCopy>,
     dropped: Vec<String>,
     defaulted: Vec<String>,
+    relaxed: Vec<String>,
 }
 
+/// `source_empty`: the source table has no rows in the export snapshot. Then a
+/// required SQLite column missing from Postgres, or a Postgres column missing
+/// from SQLite, cannot lose or invent data, so the mismatch is recorded in
+/// `relaxed` instead of stopping the export. With rows, both still fail.
 fn plan_table(
     target: &TargetTable,
     source_name: &str,
     source: &[SourceColumn],
     allow_drop_columns: bool,
+    source_empty: bool,
 ) -> Result<TablePlan> {
     let by_name = source
         .iter()
@@ -440,6 +450,7 @@ fn plan_table(
         .collect::<BTreeMap<_, _>>();
     let mut columns = Vec::new();
     let mut defaulted = Vec::new();
+    let mut relaxed = Vec::new();
     for column in &target.columns {
         match by_name.get(column.name.as_str()) {
             Some(source) => {
@@ -456,6 +467,13 @@ fn plan_table(
                     && column.declared.eq_ignore_ascii_case("INTEGER")
                     && target.columns.iter().filter(|c| c.pk > 0).count() == 1;
                 if column.not_null && !column.has_default && !rowid_alias {
+                    if source_empty {
+                        relaxed.push(format!(
+                            "{}: NOT NULL without a default, missing from Postgres (source table empty)",
+                            column.name
+                        ));
+                        continue;
+                    }
                     return Err(format!(
                         "{}.{}: NOT NULL without a default and missing from Postgres table {source_name}",
                         target.name, column.name
@@ -476,7 +494,11 @@ fn plan_table(
         .filter(|column| !target_names.contains(column.name.as_str()))
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
-    if !dropped.is_empty() && !allow_drop_columns {
+    if !dropped.is_empty() && !allow_drop_columns && source_empty {
+        relaxed.extend(dropped.iter().map(|name| {
+            format!("{name}: Postgres column with no SQLite column (source table empty)")
+        }));
+    } else if !dropped.is_empty() && !allow_drop_columns {
         return Err(format!(
             "Postgres table {source_name} has columns missing from SQLite table {}: {}; fix the SQLite schema or pass --allow-drop-columns",
             target.name,
@@ -491,6 +513,7 @@ fn plan_table(
         columns,
         dropped,
         defaulted,
+        relaxed,
     })
 }
 
@@ -854,7 +877,19 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
         match source_for(&table.name, &schema) {
             Some((source_name, columns)) => {
                 consumed.insert(source_name.to_owned());
-                let plan = plan_table(table, source_name, columns, job.allow_drop_columns)?;
+                let source_empty: bool = !sqlx::query_scalar::<_, bool>(&format!(
+                    "SELECT EXISTS (SELECT 1 FROM {})",
+                    quote(source_name)
+                ))
+                .fetch_one(&mut *source)
+                .await?;
+                let plan = plan_table(
+                    table,
+                    source_name,
+                    columns,
+                    job.allow_drop_columns,
+                    source_empty,
+                )?;
                 work.push((table, source_name.to_owned(), plan));
             }
             None => job.report.target_only_tables.push(table.name.clone()),
@@ -1076,6 +1111,7 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
             sample_mismatches: mismatches,
             dropped_columns: plan.dropped.clone(),
             defaulted_columns: plan.defaulted.clone(),
+            relaxed_for_empty_source: plan.relaxed.clone(),
         });
     }
     source.rollback().await?;
@@ -1617,25 +1653,50 @@ mod tests {
             "tasks",
             &[column("id", "uuid"), column("title", "text")],
             false,
+            false,
         )
         .unwrap();
         assert_eq!(plan.defaulted, vec!["done"]);
         assert_eq!(plan.columns[0].select, "\"id\"::text");
-        let missing = plan_table(&target, "tasks", &[column("id", "uuid")], false);
+        let missing = plan_table(&target, "tasks", &[column("id", "uuid")], false, false);
         assert!(missing.err().unwrap().to_string().contains("NOT NULL"));
         let extra = [
             column("id", "uuid"),
             column("title", "text"),
             column("legacy", "text"),
         ];
-        assert!(plan_table(&target, "tasks", &extra, false)
+        assert!(plan_table(&target, "tasks", &extra, false, false)
             .err()
             .unwrap()
             .to_string()
             .contains("--allow-drop-columns"));
         assert_eq!(
-            plan_table(&target, "tasks", &extra, true).unwrap().dropped,
+            plan_table(&target, "tasks", &extra, true, false)
+                .unwrap()
+                .dropped,
             vec!["legacy"]
         );
+
+        // An empty source table: a required SQLite column missing from
+        // Postgres and a Postgres-only column are recorded, not fatal.
+        let renamed = [column("id", "uuid"), column("legacy_title", "text")];
+        let relaxed = plan_table(&target, "tasks", &renamed, false, true).unwrap();
+        assert_eq!(relaxed.dropped, vec!["legacy_title"]);
+        assert_eq!(relaxed.defaulted, vec!["done"]);
+        assert_eq!(relaxed.columns.len(), 1);
+        assert_eq!(relaxed.relaxed.len(), 2);
+        assert!(relaxed.relaxed[0].starts_with("title: NOT NULL"));
+        assert!(relaxed.relaxed[1].starts_with("legacy_title: Postgres column"));
+        // The same shapes with rows still stop the export.
+        let error = plan_table(&target, "tasks", &renamed, false, false)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("title: NOT NULL"), "{error}");
+        let error = plan_table(&target, "tasks", &extra, false, false)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("--allow-drop-columns"), "{error}");
     }
 }

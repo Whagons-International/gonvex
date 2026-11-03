@@ -87,6 +87,15 @@ pub struct ReplicaSubscription {
     pub resolved: ResolvedVisibility,
     pub(crate) digest: ReplicaAggregate,
     pub(crate) window: ReplicaWindow,
+    /// Compiled visibility binding of `resolved` (`visibility_class`),
+    /// cleared whenever an event changes `resolved` in memory.
+    pub(crate) mask: crate::visibility_class::HandleCache,
+    /// Every table a change to which can concern this subscription
+    /// (`replica_mask::concern_tables`), computed on first use.
+    pub(crate) concern_tables: Option<Arc<std::collections::HashSet<String>>>,
+    /// Per inherited parent table: the parent ACL index columns (the only
+    /// parent columns its visibility reads), computed on first use.
+    pub(crate) parent_acl_columns: Option<Arc<BTreeMap<String, BTreeSet<String>>>>,
 }
 
 /// Counters of the rows a client holds, and for a truncated ordered window
@@ -265,7 +274,9 @@ struct CollectionRead {
     transaction: TenantTransaction,
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
-    _permit: crate::offload::SnapshotPermit,
+    permit: crate::offload::SnapshotPermit,
+    /// Snapshot-active gauge, held as long as the permit.
+    _active: gonvex_profiler::GaugeGuard,
 }
 
 // Small and normal application collections can carry their integrity map with
@@ -292,7 +303,7 @@ impl Runtime {
         args: &Value,
     ) -> Result<Value, ReplicaError> {
         let mut read = self
-            .begin_collection_read(session, definition, visibility)
+            .begin_collection_read(session, definition, visibility, args)
             .await?;
         let mut rows = Vec::new();
         scan_window(
@@ -384,7 +395,7 @@ impl Runtime {
             subscription: None,
         };
         let mut read = self
-            .begin_collection_read(session, &definition, &visibility)
+            .begin_collection_read(session, &definition, &visibility, &request.args)
             .await?;
         let cursor = cursor_for(&read.clock, &definition, &directive.visibility_scope);
         let resumable = cursor_resumable(
@@ -420,6 +431,7 @@ impl Runtime {
                 },
             )
             .await?;
+            read.permit.observe_json_bytes(window.bytes.max(0) as usize);
             read.transaction.commit().await?;
             messages.push(replica_snapshot_message(
                 &request,
@@ -471,6 +483,7 @@ impl Runtime {
                         },
                     )
                     .await?;
+                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
                     read.transaction.commit().await?;
                     let mut prior = digest.clone();
                     let mut upserts = BTreeMap::new();
@@ -550,6 +563,7 @@ impl Runtime {
                         },
                     )
                     .await?;
+                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
                     read.transaction.commit().await?;
                     if request.digest.as_deref() != Some(hashes_digest(&hashes).as_str()) {
                         return Ok(need_hashes(&request));
@@ -576,6 +590,7 @@ impl Runtime {
                         },
                     )
                     .await?;
+                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
                     read.transaction.commit().await?;
                     let deleted = request
                         .keys
@@ -621,6 +636,9 @@ impl Runtime {
                 resolved: read.resolved,
                 digest,
                 window,
+                mask: Default::default(),
+                concern_tables: None,
+                parent_acl_columns: None,
             }),
         })
     }
@@ -632,15 +650,14 @@ impl Runtime {
         session: &TenantSession,
         definition: &ReplicaCollectionDefinition,
         plan: &VisibilityPlan,
+        args: &Value,
     ) -> Result<CollectionRead, ReplicaError> {
         // Each WebSocket queues up to REPLICA_OPEN_CONCURRENCY preparations,
-        // so a sign-in burst could otherwise scan hundreds of collections at
-        // once. Scans are CPU bound: more of them than cores only multiplies
-        // peak memory, so bound them process-wide.
-        // Profiler: snapshot.permit_wait / acl / begin / visibility. After the
-        // replica-state merge, rows stream from the read (no snapshot.query /
-        // snapshot.intern / snapshot.build stages here).
-        use gonvex_profiler::{gauge, GaugeId, Label, Stage, Timer};
+        // so a sign-in burst could otherwise build hundreds of full snapshots
+        // at once. Snapshot builds are CPU and memory bound: more of them than
+        // cores only multiplies peak memory, so bound them process-wide.
+        use gonvex_profiler::{gauge, GaugeId, Label, ScopeTimer, Stage, Timer};
+        let _build = ScopeTimer::new(Stage::SnapshotBuild, Label::None);
         let mut timer = Timer::start();
         // Bounded by count and by an estimated byte budget
         // (`crate::offload::SnapshotAdmission`).
@@ -656,6 +673,7 @@ impl Runtime {
                 )
                 .await
         };
+        let active = gauge(GaugeId::SnapshotActive).guard();
         timer.lap(Stage::SnapshotPermitWait, Label::None);
         let control = self
             .inner
@@ -723,7 +741,8 @@ impl Runtime {
             transaction,
             clock,
             resolved,
-            _permit: permit,
+            permit,
+            _active: active,
         })
     }
 
@@ -754,6 +773,18 @@ impl Runtime {
         let mut messages = Vec::new();
         let mut touches = BTreeMap::<(String, String), EntityTouch>::new();
         let mut resynced = BTreeSet::new();
+        // Change rows decoded once and class defaults evaluated once per
+        // visibility class for the whole event (`changes` outlives it).
+        let mut memo = crate::visibility_class::EvalMemo::default();
+        // Delivery v3: the same, plus per-class row decisions, shared by every
+        // connection of the tenant (`feed_share`).
+        let share = self
+            .inner
+            .delivery
+            .tenant(&session.route.tenant_id)
+            .events
+            .share(&database_epoch, revision, &changes);
+        let mut shared_stats = crate::visibility_class::EvalStats::default();
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
@@ -766,7 +797,7 @@ impl Runtime {
                     // index complete through this revision.
                     Step::Resync(Resync::Consistency)
                 } else {
-                    self.mask_step(session, subscription, revision, &changes, &collapsed)
+                    self.mask_step(session, subscription, revision, &changes, &collapsed, share.as_deref())
                         .await?
                 }
             } else {
@@ -785,7 +816,40 @@ impl Runtime {
                 }
                 Step::Apply(context) => context,
             };
-            let Some(delta) = apply_rows(subscription, &context, &collapsed)? else {
+            let shared = share
+                .as_deref()
+                .filter(|_| shareable_plan(&subscription.visibility));
+            let applied = match shared {
+                Some(share) => {
+                    let mut guard = share.memo.lock().unwrap();
+                    let before = guard.stats;
+                    let applied = apply_rows_with(
+                        subscription,
+                        &context,
+                        &collapsed,
+                        Some((&mut guard, session.route.database_url.as_str())),
+                        Some(share),
+                    );
+                    let after = guard.stats;
+                    drop(guard);
+                    shared_stats.compiled_checks += after.compiled_checks - before.compiled_checks;
+                    shared_stats.class_evaluations +=
+                        after.class_evaluations - before.class_evaluations;
+                    shared_stats.member_evaluations +=
+                        after.member_evaluations - before.member_evaluations;
+                    shared_stats.fallback_checks += after.fallback_checks - before.fallback_checks;
+                    applied
+                }
+                None => apply_rows_with(
+                    subscription,
+                    &context,
+                    &collapsed,
+                    Some((&mut memo, session.route.database_url.as_str())),
+                    None,
+                ),
+            };
+            let Some(delta) = applied?
+            else {
                 self.resync(subscription, Resync::Window, &mut messages, &mut resynced);
                 continue;
             };
@@ -853,6 +917,8 @@ impl Runtime {
                 },
             );
         }
+        self.inner.visibility_metrics.record_eval_stats(&memo.stats);
+        self.inner.visibility_metrics.record_eval_stats(&shared_stats);
         Ok(messages)
     }
 
@@ -987,11 +1053,70 @@ pub(crate) struct SubscriptionDelta {
 /// Applies the event's source rows (and rows a visibility change affected)
 /// to one subscription's digest and window. None when the change cannot be
 /// represented without the client's membership (the caller reconciles).
+#[cfg(test)]
 fn apply_rows(
     subscription: &mut ReplicaSubscription,
     context: &ApplyContext,
     collapsed: &CollapsedChanges<'_>,
 ) -> Result<Option<SubscriptionDelta>, ReplicaError> {
+    apply_rows_with(subscription, context, collapsed, None, None)
+}
+
+/// Whether a plan's row decisions may be shared per visibility class: version
+/// 2 plans without inherited (parent-row) visibility.
+fn shareable_plan(plan: &VisibilityPlan) -> bool {
+    plan.version == Some(2)
+        && plan.inherited_columns().is_empty()
+        && visibility::inherits_any(plan).is_empty()
+}
+
+/// `compiled`: the event's memo and the tenant database (class scope). With
+/// it, rows are decided by the subscription's compiled visibility class.
+fn apply_rows_with(
+    subscription: &mut ReplicaSubscription,
+    context: &ApplyContext,
+    collapsed: &CollapsedChanges<'_>,
+    mut compiled: Option<(&mut crate::visibility_class::EvalMemo, &str)>,
+    share: Option<&crate::feed_share::EventShare>,
+) -> Result<Option<SubscriptionDelta>, ReplicaError> {
+    if context.before.is_some() {
+        // The event changed this principal in memory: rebind.
+        subscription.mask.clear();
+    }
+    let handle = compiled.as_ref().map(|(_, scope)| {
+        subscription
+            .mask
+            .get(&subscription.visibility, &subscription.resolved, scope)
+    });
+    // Per-class decisions apply only when nothing about this subscription
+    // but its class decides: the principal did not move in this event, no
+    // affected-row read, complete window, compiled plan.
+    let class_key = match (share, handle.as_ref()) {
+        (Some(_), Some(crate::visibility_class::MemberHandle::Compiled(member)))
+            if context.before.is_none()
+                && context.overlay.is_none()
+                && !subscription.window.truncated =>
+        {
+            Some((
+                member.class().id(),
+                Arc::as_ptr(&subscription.definition) as usize,
+                Arc::<str>::from(
+                    serde_json::to_string(&subscription.args)
+                        .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?,
+                ),
+                Arc::<str>::from(subscription.definition.table.as_str()),
+            ))
+        }
+        _ => None,
+    };
+    let mut compiled = match (compiled.as_mut(), handle.as_ref()) {
+        (Some((memo, _)), Some(handle)) => Some(Compiled {
+            memo,
+            handle,
+            share: share.zip(class_key.as_ref()),
+        }),
+        _ => None,
+    };
     let mut delta = SubscriptionDelta::default();
     let table = subscription.definition.table.clone();
     for ((_, id), change) in collapsed
@@ -1011,12 +1136,24 @@ fn apply_rows(
             change.new,
             changed_columns,
             &mut delta,
+            compiled.as_mut(),
+            true,
         )? {
             return Ok(None);
         }
     }
     for (id, row) in &context.affected {
-        if !row_step(subscription, context, id, row, row, Vec::new(), &mut delta)? {
+        if !row_step(
+            subscription,
+            context,
+            id,
+            row,
+            row,
+            Vec::new(),
+            &mut delta,
+            compiled.as_mut(),
+            false,
+        )? {
             return Ok(None);
         }
     }
@@ -1031,7 +1168,7 @@ fn apply_rows(
 /// after the event, and the window: every subscription of the same
 /// collection and visibility class gets the same decision, so a delivery
 /// layer can decide once per class and apply the result per subscriber.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RowDecision {
     /// The client neither held nor may hold the row.
     Outside,
@@ -1070,11 +1207,48 @@ pub fn decide_row(
     old: &Value,
     new: &Value,
 ) -> Result<RowDecision, ReplicaError> {
+    decide_row_with(
+        definition,
+        args,
+        plan,
+        before,
+        after,
+        overlay,
+        window,
+        old,
+        new,
+        &mut |_, _| None,
+    )
+}
+
+/// `decide_row` with a compiled visibility check: `compiled(row, is_old)`
+/// answers the row's visibility (collection filters are applied here), or
+/// None to use the interpreted evaluator.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decide_row_with(
+    definition: &ReplicaCollectionDefinition,
+    args: &Value,
+    plan: &VisibilityPlan,
+    before: &ResolvedVisibility,
+    after: &ResolvedVisibility,
+    overlay: &Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
+    window: &ReplicaWindow,
+    old: &Value,
+    new: &Value,
+    compiled: &mut dyn FnMut(&Value, bool) -> Option<bool>,
+) -> Result<RowDecision, ReplicaError> {
     let old_visible = !old.is_null()
-        && visibility::with_parent_overlay(overlay, || {
-            row_in_collection(old, args, definition, plan, before)
-        });
-    let new_visible = !new.is_null() && row_in_collection(new, args, definition, plan, after);
+        && collection_filters_admit(old, args, definition)
+        && match compiled(old, true) {
+            Some(visible) => visible,
+            None => visibility::with_parent_overlay(overlay, || visible(plan, before, old)),
+        };
+    let new_visible = !new.is_null()
+        && collection_filters_admit(new, args, definition)
+        && match compiled(new, false) {
+            Some(visible) => visible,
+            None => visible(plan, after, new),
+        };
     if !old_visible && !new_visible {
         return Ok(RowDecision::Outside);
     }
@@ -1139,6 +1313,19 @@ pub fn decide_row(
 
 /// One row's transition for one subscription. Returns false when the window
 /// cannot be maintained from the images alone.
+/// A subscription's compiled binding and the event's memo.
+struct Compiled<'a> {
+    memo: &'a mut crate::visibility_class::EvalMemo,
+    handle: &'a crate::visibility_class::MemberHandle,
+    /// The event share and this subscription's (class, definition, args,
+    /// table) when its decisions may be shared per class.
+    share: Option<(
+        &'a crate::feed_share::EventShare,
+        &'a (u64, usize, Arc<str>, Arc<str>),
+    )>,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn row_step(
     subscription: &mut ReplicaSubscription,
     context: &ApplyContext,
@@ -1147,18 +1334,80 @@ fn row_step(
     new: &Value,
     changed_columns: Vec<String>,
     delta: &mut SubscriptionDelta,
+    compiled: Option<&mut Compiled<'_>>,
+    memoize: bool,
 ) -> Result<bool, ReplicaError> {
-    let decision = decide_row(
-        &subscription.definition,
-        &subscription.args,
-        &subscription.visibility,
-        context.before.as_ref().unwrap_or(&subscription.resolved),
-        &subscription.resolved,
-        &context.overlay,
-        &subscription.window,
-        old,
-        new,
-    )?;
+    // The binding is of the principal after the event; the old image is
+    // decided by it only when the principal and the parents did not move.
+    let same_principal = context.before.is_none() && context.overlay.is_none();
+    let mut compiled = compiled;
+    // A class-shared decision: only for change rows (memoized images) that
+    // hit no member atom of this subscription's member.
+    let shared_key = match compiled.as_deref_mut() {
+        Some(Compiled {
+            memo,
+            handle: crate::visibility_class::MemberHandle::Compiled(member),
+            share: Some((share, (class, definition, args, table))),
+        }) if memoize && same_principal => {
+            let hit = (!old.is_null() && member.hit_memo(memo, old))
+                || (!new.is_null() && member.hit_memo(memo, new));
+            (!hit).then(|| {
+                (
+                    *share,
+                    crate::feed_share::DecisionKey {
+                        class: *class,
+                        definition: *definition,
+                        args: Arc::clone(args),
+                        table: Arc::clone(table),
+                        row: Arc::from(id),
+                    },
+                )
+            })
+        }
+        _ => None,
+    };
+    let cached = shared_key
+        .as_ref()
+        .and_then(|(share, key)| share.decision(key));
+    let mut check = |row: &Value, is_old: bool| -> Option<bool> {
+        use crate::visibility_class::{MemberHandle, RowView};
+        let compiled = compiled.as_deref_mut()?;
+        if is_old && !same_principal {
+            return None;
+        }
+        match compiled.handle {
+            MemberHandle::Compiled(member) if memoize => Some(member.visible_memo(compiled.memo, row)),
+            MemberHandle::Compiled(member) => {
+                compiled.memo.stats.compiled_checks += 1;
+                Some(member.visible(RowView::Value(row)))
+            }
+            MemberHandle::Fallback => {
+                compiled.memo.stats.fallback_checks += 1;
+                None
+            }
+        }
+    };
+    let decision = match cached {
+        Some(decision) => RowDecision::clone(&decision),
+        None => {
+            let decision = decide_row_with(
+                &subscription.definition,
+                &subscription.args,
+                &subscription.visibility,
+                context.before.as_ref().unwrap_or(&subscription.resolved),
+                &subscription.resolved,
+                &context.overlay,
+                &subscription.window,
+                old,
+                new,
+                &mut check,
+            )?;
+            if let Some((share, key)) = shared_key {
+                share.insert(key, Arc::new(decision.clone()));
+            }
+            decision
+        }
+    };
     let (changed, old, new) = match decision {
         RowDecision::Outside => return Ok(true),
         RowDecision::Reconcile => return Ok(false),
@@ -1412,21 +1661,29 @@ pub(crate) async fn scan_window(
         statement.push_str(&format!(" LIMIT ${}", parameters.len()));
     }
     let parameters = Parameters::scalars(&parameters).map_err(ReplicaError::InvalidIdentifier)?;
-    let query = parameters.bind(sqlx::query(&statement));
-    // Decode and admit one row at a time. SQL still uses maxRows + 1;
-    // a byte-limited source must not first allocate its entire SQL result.
-    let rows = query
-        .fetch(&mut **transaction.transaction())
-        .map(|row| {
-            let row = row?;
-            let raw: Option<String> = row.try_get(0)?;
-            raw.map(|raw| {
-                serde_json::from_str(&raw)
-                    .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
-            })
-            .transpose()
+    // Rows stream as JSON text from a blocking thread on the snapshot's own
+    // reader connection (`TenantTransaction::stream_json_rows`), in batches,
+    // and are decoded and admitted one at a time. SQL still uses
+    // maxRows + 1; a byte-limited source must not first allocate its entire
+    // SQL result.
+    let rows = transaction
+        .stream_json_rows(statement, parameters.into_owned_binds())
+        .await?;
+    let rows = futures_util::stream::unfold(rows, |mut rows| async move {
+        rows.next_batch().await.map(|batch| (batch, rows))
+    })
+    .flat_map(|batch| {
+        futures_util::stream::iter(match batch {
+            Ok(batch) => batch
+                .rows()
+                .map(|row| {
+                    serde_json::from_slice::<Value>(row)
+                        .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => vec![Err(ReplicaError::from(error))],
         })
-        .filter_map(|row| std::future::ready(row.transpose()));
+    });
     collect_window(rows, definition, visit).await
 }
 
@@ -1560,6 +1817,15 @@ fn row_in_collection(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> bool {
+    collection_filters_admit(row, args, definition) && visible(plan, resolved, row)
+}
+
+/// The collection's own filters (exclusions and argument equalities).
+fn collection_filters_admit(
+    row: &Value,
+    args: &Value,
+    definition: &ReplicaCollectionDefinition,
+) -> bool {
     let (Some(object), Some(args)) = (row.as_object(), args.as_object()) else {
         return false;
     };
@@ -1577,7 +1843,7 @@ fn row_in_collection(
     {
         return false;
     }
-    visible(plan, resolved, row)
+    true
 }
 
 /// The one call into the in-memory visibility evaluator (workstream 7 swaps
@@ -2870,6 +3136,9 @@ mod tests {
             resolved,
             digest,
             window,
+            mask: Default::default(),
+            concern_tables: None,
+            parent_acl_columns: None,
         }
     }
 

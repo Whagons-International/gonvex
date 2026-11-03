@@ -8,21 +8,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use std::sync::{Mutex, MutexGuard};
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use gonvex_module_host::protocol::HostCallFrame;
-use gonvex_store::rows::{self, JsonKind};
+use gonvex_module_host::protocol::{codes, HostCallFrame};
+use gonvex_module_runtime::{HostCall, HostError, HostResponse, InlineHost};
+use gonvex_store::direct::{self, Bind, Conn as DirectConn, DirectSession};
+use gonvex_store::rows::JsonKind;
 use gonvex_store::TenantTransaction;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::SqliteRow;
-use sqlx::{Column, Row, TypeInfo};
 use uuid::Uuid;
 
 use crate::error_class::TransientFault;
 use crate::module_host::HostCallHandler;
 use crate::sql_admission::{admit_statement, AdmittedStatement};
-use crate::sql_parameters::{Parameter, Parameters};
+use crate::sql_parameters::Parameter;
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
@@ -110,9 +112,6 @@ pub struct DatabaseHostCalls {
     transaction: Option<TenantTransaction>,
     pending: Option<PendingWrite>,
     claim_conflict: bool,
-    capability: DatabaseCapability,
-    schema: Value,
-    tables: BTreeMap<String, Arc<TableCatalog>>,
     schedulable_functions: BTreeSet<String>,
     actor_account_id: String,
     actor_email: String,
@@ -121,10 +120,8 @@ pub struct DatabaseHostCalls {
     intent_command: String,
     deferred_ordinals: BTreeMap<String, u64>,
     fault: Arc<TransientFault>,
-    /// Set by a failed SQL statement. SQLite rolls back only the failing
-    /// statement; like PostgreSQL, the invocation treats the transaction as
-    /// aborted until `ROLLBACK TO` a savepoint, and never commits it.
-    aborted: bool,
+    /// Module SQL state, shared with the isolate thread (`SqlInline`).
+    sql: Arc<Mutex<SqlCalls>>,
     /// Function class for profiler histograms.
     profile_label: gonvex_profiler::Label,
     /// ns spent opening the lazy write transaction (writer wait).
@@ -135,16 +132,43 @@ pub struct DatabaseHostCalls {
     invoke_times: crate::module_host::InvokeTimes,
 }
 
+/// The part of a database handler that runs module SQL. It lives behind a
+/// mutex shared by the async handler and [`SqlInline`], which answers the
+/// same calls on the isolate's own thread once the invocation's transaction
+/// has lent its connection (`DirectSession`). Every statement runs directly
+/// on that connection: no sqlx worker hand-off, cached prepared statements,
+/// and results written straight to the JSON the module receives.
+pub(crate) struct SqlCalls {
+    capability: DatabaseCapability,
+    schema: Value,
+    tables: BTreeMap<String, Arc<TableCatalog>>,
+    fault: Arc<TransientFault>,
+    /// Set by a failed SQL statement. SQLite rolls back only the failing
+    /// statement; like PostgreSQL, the invocation treats the transaction as
+    /// aborted until `ROLLBACK TO` a savepoint, and never commits it.
+    aborted: Option<String>,
+    session: Option<DirectSession>,
+    /// Calls answered on the isolate thread (diagnostics and tests).
+    inline_calls: u64,
+    /// ns spent in SQL answered on the isolate thread (profiler only).
+    inline_sql_ns: u64,
+    profile_label: gonvex_profiler::Label,
+}
+
+const CLOSED: &str = "the invocation transaction is closed";
+
 impl DatabaseHostCalls {
-    pub fn new(transaction: TenantTransaction, capability: DatabaseCapability) -> Self {
+    fn with_parts(
+        transaction: Option<TenantTransaction>,
+        pending: Option<PendingWrite>,
+        capability: DatabaseCapability,
+    ) -> Self {
+        let fault: Arc<TransientFault> = Arc::default();
         Self {
             storage_context: None,
-            transaction: Some(transaction),
-            pending: None,
+            transaction,
+            pending,
             claim_conflict: false,
-            capability,
-            schema: Value::Null,
-            tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
             actor_account_id: String::new(),
             actor_email: String::new(),
@@ -152,8 +176,18 @@ impl DatabaseHostCalls {
             intent_tenant: String::new(),
             intent_command: String::new(),
             deferred_ordinals: BTreeMap::new(),
-            fault: Arc::default(),
-            aborted: false,
+            sql: Arc::new(Mutex::new(SqlCalls {
+                capability,
+                schema: Value::Null,
+                tables: BTreeMap::new(),
+                fault: fault.clone(),
+                aborted: None,
+                session: None,
+                inline_calls: 0,
+                inline_sql_ns: 0,
+                profile_label: gonvex_profiler::Label::None,
+            })),
+            fault,
             profile_label: gonvex_profiler::Label::None,
             writer_wait_ns: 0,
             sql_ns: 0,
@@ -161,32 +195,26 @@ impl DatabaseHostCalls {
         }
     }
 
+    pub fn new(transaction: TenantTransaction, capability: DatabaseCapability) -> Self {
+        Self::with_parts(Some(transaction), None, capability)
+    }
+
     /// A Reducer handler whose write transaction opens on first use.
     pub(crate) fn lazy_reducer(pending: PendingWrite) -> Self {
-        let mut handler = Self {
-            storage_context: None,
-            transaction: None,
-            pending: Some(pending),
-            claim_conflict: false,
-            capability: DatabaseCapability::Reducer,
-            schema: Value::Null,
-            tables: BTreeMap::new(),
-            schedulable_functions: BTreeSet::new(),
-            actor_account_id: String::new(),
-            actor_email: String::new(),
-            provenance: Value::Null,
-            intent_tenant: String::new(),
-            intent_command: String::new(),
-            deferred_ordinals: BTreeMap::new(),
-            fault: Arc::default(),
-            aborted: false,
-            profile_label: gonvex_profiler::Label::None,
-            writer_wait_ns: 0,
-            sql_ns: 0,
-            invoke_times: Default::default(),
-        };
-        handler.transaction = None;
-        handler
+        Self::with_parts(None, Some(pending), DatabaseCapability::Reducer)
+    }
+
+    fn sql(&self) -> MutexGuard<'_, SqlCalls> {
+        self.sql.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn capability(&self) -> DatabaseCapability {
+        self.sql().capability
+    }
+
+    /// Module SQL calls answered on the isolate thread so far.
+    pub(crate) fn inline_calls(&self) -> u64 {
+        self.sql().inline_calls
     }
 
     /// Whether opening the transaction found the idempotency key claimed.
@@ -248,14 +276,33 @@ impl DatabaseHostCalls {
         self.transaction()
     }
 
+    /// Opens the transaction if needed and lends its connection to module
+    /// SQL (here and on the isolate thread).
+    async fn ensure_session(&mut self) -> Result<(), String> {
+        let active = self.sql().session.as_ref().is_some_and(DirectSession::active);
+        if active {
+            return Ok(());
+        }
+        let fault = self.fault.clone();
+        let session = self
+            .ensure_transaction()
+            .await?
+            .direct()
+            .await
+            .map_err(|error| fault.database(error))?;
+        self.sql().session = Some(session);
+        Ok(())
+    }
+
     /// Profiler slow-trace inputs: module-host timing, writer wait, SQL time.
     pub(crate) fn profile_times(&self) -> (crate::module_host::InvokeTimes, u64, u64) {
-        (self.invoke_times, self.writer_wait_ns, self.sql_ns)
+        (self.invoke_times, self.writer_wait_ns, self.sql_ns + self.sql().inline_sql_ns)
     }
 
     /// Labels this handler's profiler stages with a function class.
     pub fn with_profile_label(mut self, label: gonvex_profiler::Label) -> Self {
         self.profile_label = label;
+        self.sql().profile_label = label;
         if let Some(transaction) = self.transaction.as_mut() {
             transaction.set_profile_label(label);
         }
@@ -312,8 +359,8 @@ impl DatabaseHostCalls {
         id
     }
 
-    pub fn with_schema(mut self, schema: &Value) -> Self {
-        self.schema = schema.clone();
+    pub fn with_schema(self, schema: &Value) -> Self {
+        self.sql().schema = schema.clone();
         self
     }
 
@@ -339,19 +386,25 @@ impl DatabaseHostCalls {
             // The Reducer never touched the database: nothing to commit.
             return Ok(None);
         }
-        let transaction = self
+        let (capability, aborted) = {
+            let mut sql = self.sql();
+            sql.session = None;
+            (sql.capability, sql.aborted.clone())
+        };
+        let mut transaction = self
             .transaction
             .take()
             .ok_or_else(|| "the invocation transaction is already closed".to_owned())?;
         let fault = self.fault.clone();
-        if self.capability == DatabaseCapability::Reducer && success && self.aborted {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| fault.database(error))?;
-            return Err(ABORTED.to_owned());
-        }
-        if self.capability == DatabaseCapability::Reducer && success {
+        if capability == DatabaseCapability::Reducer && success {
+            if let Some(reason) = aborted {
+                transaction.mark_failed(reason);
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|error| fault.database(error))?;
+                return Err(ABORTED.to_owned());
+            }
             transaction
                 .commit_with_revision()
                 .await
@@ -368,7 +421,7 @@ impl DatabaseHostCalls {
     fn transaction(&mut self) -> Result<&mut TenantTransaction, String> {
         self.transaction
             .as_mut()
-            .ok_or_else(|| "the invocation transaction is closed".to_owned())
+            .ok_or_else(|| CLOSED.to_owned())
     }
 
     pub fn transaction_mut(&mut self) -> &mut TenantTransaction {
@@ -377,33 +430,97 @@ impl DatabaseHostCalls {
             .expect("invocation transaction stays open until finish")
     }
 
-    /// Refuses further SQL after a failed statement (see `aborted`).
+    /// Refuses further SQL after a failed statement (see `SqlCalls::aborted`).
     fn require_open(&self) -> Result<(), String> {
-        if self.aborted {
-            Err(ABORTED.to_owned())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn sql_failure(&mut self, error: sqlx::Error) -> String {
-        let message = self.fault.sql(error);
-        self.aborted = true;
-        // The store refuses to commit a transaction marked failed, so a
-        // caught SQL error can never become a partial commit.
-        if let Some(transaction) = self.transaction.as_mut() {
-            transaction.mark_failed(message.clone());
-        }
-        message
+        self.sql().require_open()
     }
 
     fn require_write(&self) -> Result<(), String> {
-        if self.capability == DatabaseCapability::Reducer {
-            Ok(())
-        } else {
-            Err("a Query cannot modify application tables".to_owned())
-        }
+        self.sql().require_write()
     }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn query(&mut self, statement: &str, parameters: Value) -> Result<Value, String> {
+        let bytes = self.db_bytes(HostCallFrame::DbQuery { statement: statement.to_owned(), parameters }).await?;
+        decode_response(&bytes)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn insert(
+        &mut self,
+        table: &str,
+        row: Value,
+        generated_id: Option<String>,
+    ) -> Result<Value, String> {
+        let bytes = self
+            .db_bytes(HostCallFrame::DbInsert { table: table.to_owned(), row, generated_id })
+            .await?;
+        decode_response(&bytes)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn update(&mut self, table: &str, key: &str, id: Value, patch: Value) -> Result<Value, String> {
+        let bytes = self
+            .db_bytes(HostCallFrame::DbUpdate { table: table.to_owned(), key: key.to_owned(), id, patch })
+            .await?;
+        decode_response(&bytes)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn delete(&mut self, table: &str, key: &str, id: Value) -> Result<Value, String> {
+        let bytes = self
+            .db_bytes(HostCallFrame::DbDelete { table: table.to_owned(), key: key.to_owned(), id })
+            .await?;
+        decode_response(&bytes)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn delete_many(&mut self, table: &str, key: &str, ids: Value) -> Result<Value, String> {
+        let bytes = self
+            .db_bytes(HostCallFrame::DbDeleteMany { table: table.to_owned(), key: key.to_owned(), ids })
+            .await?;
+        decode_response(&bytes)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    async fn resolve_table_key(&mut self, table: &str, requested: &str) -> Result<String, String> {
+        if let Some(key) = self.sql().declared_table_key(table, requested)? {
+            return Ok(key);
+        }
+        self.ensure_session().await?;
+        self.sql().resolve_table_key(table, requested)
+    }
+
+    /// A module SQL call on the async path: opens the transaction and its
+    /// direct session if needed, then runs exactly what `SqlInline` runs.
+    async fn db_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        if matches!(
+            call,
+            HostCallFrame::DbInsert { .. }
+                | HostCallFrame::DbUpdate { .. }
+                | HostCallFrame::DbDelete { .. }
+                | HostCallFrame::DbDeleteMany { .. }
+        ) {
+            self.require_write()?;
+        }
+        self.ensure_session().await?;
+        self.sql().call(call)
+    }
+}
+
+fn decode_response(bytes: &[u8]) -> Result<Value, String> {
+    serde_json::from_slice(bytes).map_err(|error| format!("host response is not JSON: {error}"))
+}
+
+fn is_db_call(call: &HostCallFrame) -> bool {
+    matches!(
+        call,
+        HostCallFrame::DbQuery { .. }
+            | HostCallFrame::DbInsert { .. }
+            | HostCallFrame::DbUpdate { .. }
+            | HostCallFrame::DbDelete { .. }
+            | HostCallFrame::DbDeleteMany { .. }
+    )
 }
 
 #[async_trait]
@@ -412,19 +529,112 @@ impl HostCallHandler for DatabaseHostCalls {
         if !gonvex_profiler::enabled() {
             return self.handle_call(call).await;
         }
-        let database = matches!(
-            call,
-            HostCallFrame::DbQuery { .. }
-                | HostCallFrame::DbInsert { .. }
-                | HostCallFrame::DbUpdate { .. }
-                | HostCallFrame::DbDelete { .. }
-                | HostCallFrame::DbDeleteMany { .. }
-        );
+        let database = is_db_call(&call);
         let started = gonvex_profiler::now_ns();
         let writer_wait_before = self.writer_wait_ns;
         let result = self.handle_call(call).await;
-        // The first database call also opens the write transaction; that wait
-        // is its own stage (db.writer_wait), so SQL time excludes it.
+        self.record_call(database, started, writer_wait_before);
+        result
+    }
+
+    async fn handle_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        if !gonvex_profiler::enabled() {
+            return self.handle_call_bytes(call).await;
+        }
+        let database = is_db_call(&call);
+        let started = gonvex_profiler::now_ns();
+        let writer_wait_before = self.writer_wait_ns;
+        let result = self.handle_call_bytes(call).await;
+        self.record_call(database, started, writer_wait_before);
+        result
+    }
+
+    fn invoke_profiled(&mut self, times: crate::module_host::InvokeTimes) {
+        self.invoke_times = times;
+    }
+
+    fn inline_host(&self) -> Option<Arc<dyn InlineHost>> {
+        Some(Arc::new(SqlInline {
+            sql: self.sql.clone(),
+        }))
+    }
+}
+
+/// Answers module SQL on the isolate thread, on the connection the
+/// invocation's transaction lent to it. Anything else, and every call before
+/// the transaction is open, goes back through the async handler.
+struct SqlInline {
+    sql: Arc<Mutex<SqlCalls>>,
+}
+
+impl InlineHost for SqlInline {
+    fn call_inline(&self, call: HostCall) -> Result<Result<HostResponse, HostError>, HostCall> {
+        if !matches!(
+            call,
+            HostCall::DbQuery { .. }
+                | HostCall::DbInsert { .. }
+                | HostCall::DbUpdate { .. }
+                | HostCall::DbDelete { .. }
+                | HostCall::DbDeleteMany { .. }
+        ) {
+            return Err(call);
+        }
+        // Never wait here: the async side holds this only while it runs a
+        // call itself, and then this call goes behind it.
+        let Ok(mut sql) = self.sql.try_lock() else {
+            return Err(call);
+        };
+        if !sql.session.as_ref().is_some_and(DirectSession::active) {
+            return Err(call);
+        }
+        let capability = call.capability();
+        let frame = match HostCallFrame::from_host_call(call) {
+            Ok(frame) => frame,
+            Err(message) => return Ok(Err(HostError::Failed(message))),
+        };
+        sql.inline_calls += 1;
+        let writes = !matches!(frame, HostCallFrame::DbQuery { .. });
+        let started = gonvex_profiler::enabled().then(gonvex_profiler::now_ns);
+        let result = if writes { sql.require_write() } else { Ok(()) }.and_then(|()| sql.call(frame));
+        if let Some(started) = started {
+            let elapsed = gonvex_profiler::now_ns().saturating_sub(started);
+            sql.inline_sql_ns += elapsed;
+            gonvex_profiler::record(gonvex_profiler::Stage::Sql, sql.profile_label, elapsed);
+        }
+        Ok(match result {
+            Ok(value) => Ok(HostResponse { value }),
+            // Same text as the async transport (`in_process::DirectHost`).
+            Err(message) => Err(HostError::Failed(format!(
+                "{} host call failed [{}]: {}",
+                capability,
+                codes::HOST_CALL_FAILED,
+                message
+            ))),
+        })
+    }
+}
+
+impl DatabaseHostCalls {
+    async fn handle_call(&mut self, call: HostCallFrame) -> Result<Value, String> {
+        if is_db_call(&call) {
+            let bytes = self.db_bytes(call).await?;
+            return decode_response(&bytes);
+        }
+        self.handle_other(call).await
+    }
+
+    async fn handle_call_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        if is_db_call(&call) {
+            return self.db_bytes(call).await;
+        }
+        let value = self.handle_other(call).await?;
+        serde_json::to_vec(&value).map_err(|error| format!("host response could not be re-encoded: {error}"))
+    }
+
+    /// Records one host call's stage. The first database call also opens the
+    /// write transaction; that wait is its own stage (db.writer_wait), so SQL
+    /// time excludes it.
+    fn record_call(&mut self, database: bool, started: u64, writer_wait_before: u64) {
         let elapsed = gonvex_profiler::now_ns()
             .saturating_sub(started)
             .saturating_sub(self.writer_wait_ns - writer_wait_before);
@@ -440,16 +650,9 @@ impl HostCallHandler for DatabaseHostCalls {
             self.profile_label,
             elapsed,
         );
-        result
     }
 
-    fn invoke_profiled(&mut self, times: crate::module_host::InvokeTimes) {
-        self.invoke_times = times;
-    }
-}
-
-impl DatabaseHostCalls {
-    async fn handle_call(&mut self, call: HostCallFrame) -> Result<Value, String> {
+    async fn handle_other(&mut self, call: HostCallFrame) -> Result<Value, String> {
         match call {
             HostCallFrame::Storage { operation, payload } if operation == "getMetadata" => {
                 let (runtime, session) = self
@@ -466,36 +669,6 @@ impl DatabaseHostCalls {
                     .storage
                     .reducer_metadata(&session, self.ensure_transaction().await?, file_id)
                     .await
-            }
-
-            HostCallFrame::DbQuery {
-                statement,
-                parameters,
-            } => self.query(&statement, parameters).await,
-            HostCallFrame::DbInsert {
-                table,
-                row,
-                generated_id,
-            } => {
-                self.require_write()?;
-                self.insert(&table, row, generated_id).await
-            }
-            HostCallFrame::DbUpdate {
-                table,
-                key,
-                id,
-                patch,
-            } => {
-                self.require_write()?;
-                self.update(&table, &key, id, patch).await
-            }
-            HostCallFrame::DbDelete { table, key, id } => {
-                self.require_write()?;
-                self.delete(&table, &key, id).await
-            }
-            HostCallFrame::DbDeleteMany { table, key, ids } => {
-                self.require_write()?;
-                self.delete_many(&table, &key, ids).await
             }
             HostCallFrame::ActionEnqueue { function, args } => {
                 self.require_write()?;
@@ -557,7 +730,10 @@ impl DatabaseHostCalls {
                 self.enqueue_scheduled(&function, args, run_at, coalesce)
                     .await
             }
-            _ => Err(match self.capability {
+            HostCallFrame::PermissionsHas { permission, scope } => {
+                self.permissions_has(&permission, &scope).await
+            }
+            _ => Err(match self.capability() {
                 DatabaseCapability::Query => {
                     "a Query may only use its read-only database capability".to_owned()
                 }
@@ -568,9 +744,35 @@ impl DatabaseHostCalls {
             }),
         }
     }
-}
 
-impl DatabaseHostCalls {
+    /// `ctx.permissions.has`: a bit test on the tenant's committed
+    /// permission bits. When this invocation already holds its transaction,
+    /// first wait until the bits cover every revision that transaction sees,
+    /// so a check never answers from a state older than the Reducer's reads.
+    async fn permissions_has(&mut self, permission: &str, scope: &str) -> Result<Value, String> {
+        let (runtime, session) = self.storage_context.clone().ok_or_else(|| {
+            "ctx.permissions is available to Reducers with a tenant session".to_owned()
+        })?;
+        let index = runtime.permission_index(&session).await?;
+        if let Some(transaction) = self.transaction.as_mut() {
+            let revision: i64 =
+                sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1")
+                    .fetch_one(&mut **transaction.transaction())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            if !crate::permission_bits::PermissionIndex::wait_for(&index, revision.max(0) as u64)
+                .await
+            {
+                return Err("permission bits are rebuilding; retry".to_owned());
+            }
+        }
+        let held = index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .has(&session.member.id, permission, scope);
+        Ok(Value::Bool(held))
+    }
+
     async fn enqueue_scheduled(
         &mut self,
         function: &str,
@@ -610,8 +812,90 @@ impl DatabaseHostCalls {
             .map_err(|error| fault.database(error))?;
         Ok(Value::String(job_id))
     }
+}
 
-    async fn query(&mut self, statement: &str, parameters: Value) -> Result<Value, String> {
+/// A statement failure inside a direct session.
+enum Failure {
+    /// SQL failed: the transaction counts as aborted.
+    Sql(sqlx::Error),
+    /// Decoding a result failed; the statement itself succeeded.
+    Decode(String),
+}
+
+impl From<sqlx::Error> for Failure {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Sql(error)
+    }
+}
+
+impl SqlCalls {
+    fn require_open(&self) -> Result<(), String> {
+        if self.aborted.is_some() {
+            Err(ABORTED.to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_write(&self) -> Result<(), String> {
+        if self.capability == DatabaseCapability::Reducer {
+            Ok(())
+        } else {
+            Err("a Query cannot modify application tables".to_owned())
+        }
+    }
+
+    fn sql_failure(&mut self, error: sqlx::Error) -> String {
+        let message = self.fault.sql(error);
+        if self.aborted.is_none() {
+            self.aborted = Some(message.clone());
+        }
+        // The store refuses to commit a transaction marked failed, so a
+        // caught SQL error can never become a partial commit.
+        if let Some(session) = &self.session {
+            session.mark_failed(message.clone());
+        }
+        message
+    }
+
+    /// Runs `work` on the lent connection, classifying its failure.
+    fn run<R>(
+        &mut self,
+        work: impl FnOnce(&mut DirectConn<'_>) -> Result<R, Failure>,
+    ) -> Result<R, String> {
+        let session = self.session.clone().ok_or_else(|| CLOSED.to_owned())?;
+        match session.run(work).ok_or_else(|| CLOSED.to_owned())? {
+            Ok(value) => Ok(value),
+            Err(Failure::Sql(error)) => Err(self.sql_failure(error)),
+            Err(Failure::Decode(message)) => Err(message),
+        }
+    }
+
+    /// One database host call, answered with the JSON bytes the module gets.
+    fn call(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        match call {
+            HostCallFrame::DbQuery {
+                statement,
+                parameters,
+            } => self.query(&statement, parameters),
+            HostCallFrame::DbInsert {
+                table,
+                row,
+                generated_id,
+            } => self.insert(&table, row, generated_id),
+            HostCallFrame::DbUpdate {
+                table,
+                key,
+                id,
+                patch,
+            } => self.update(&table, &key, id, patch),
+            HostCallFrame::DbDelete { table, key, id } => self.delete(&table, &key, id),
+            HostCallFrame::DbDeleteMany { table, key, ids } => self.delete_many(&table, &key, ids),
+            _ => Err("not a database call".to_owned()),
+        }
+    }
+
+    fn query(&mut self, statement: &str, parameters: Value) -> Result<Vec<u8>, String> {
         let admitted = require_single_statement(statement)?;
         if self.capability == DatabaseCapability::Query {
             require_read_head(&admitted.first_word)?;
@@ -639,48 +923,44 @@ impl DatabaseHostCalls {
         // `INSERT/UPDATE/DELETE … RETURNING` columns carry no reliable declared
         // type, so decode them with the target table's pragma_table_info kinds.
         let target = match write_target(statement) {
-            Some(table) if quote_identifier(&table).is_ok() => {
-                Some(self.catalog_table(&table).await?)
-            }
+            Some(table) if quote_identifier(&table).is_ok() => Some(self.catalog_table(&table)?),
             _ => None,
         };
-        let query = Parameters::new(parameters).bind(sqlx::query(statement.trim()));
-        let transaction = self.ensure_transaction().await?.transaction();
-        // Exact declared types of the result columns (sqlx reports `JSON` as
-        // NULL). A statement that fails to prepare fails again below with the
-        // real error, so a describe failure only means "unknown".
-        let kinds = rows::result_column_kinds(transaction, statement.trim())
-            .await
-            .ok();
-        let rows = query.fetch_all(&mut **transaction).await;
-        let rows = rows.map_err(|error| self.sql_failure(error))?;
+        let changes_schema = matches!(admitted.first_word.as_str(), "create" | "alter" | "drop");
+        let sql = statement.trim();
+        let result = self.run(|conn| {
+            let rows = {
+                let mut statement = conn.prepare(sql)?;
+                let binds = parameters.iter().map(Parameter::as_bind).collect::<Vec<_>>();
+                statement.bind(&binds)?;
+                write_query_rows(&mut statement, target.as_deref())?
+            };
+            if changes_schema {
+                conn.schema_changed();
+            }
+            Ok(rows)
+        });
+        if changes_schema {
+            self.tables.clear();
+        }
+        let rows = result?;
         if recovers {
-            self.aborted = false;
-            if let Some(transaction) = self.transaction.as_mut() {
-                transaction.clear_failure();
+            self.aborted = None;
+            if let Some(session) = &self.session {
+                session.clear_failure();
             }
         }
-        rows.iter()
-            .map(|row| {
-                query_row_to_json(row, target.as_deref(), kinds.as_deref().map(Vec::as_slice))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array)
+        Ok(rows)
     }
 
-    async fn insert(
-        &mut self,
-        table: &str,
-        row: Value,
-        generated_id: Option<String>,
-    ) -> Result<Value, String> {
+    fn insert(&mut self, table: &str, row: Value, generated_id: Option<String>) -> Result<Vec<u8>, String> {
         self.require_open()?;
         let row = object(row, "row")?;
         if row.is_empty() {
             return Err("an insert requires at least one column".to_owned());
         }
         let mut values: BTreeMap<String, Value> = row.into_iter().collect();
-        let catalog = self.catalog_table(table).await?;
+        let catalog = self.catalog_table(table)?;
         let key = catalog.key.clone();
         if !values.contains_key(&key.column) {
             if let Some(id) = generated_id.filter(|_| key.text_key()) {
@@ -721,30 +1001,18 @@ impl DatabaseHostCalls {
             .iter()
             .map(|(column, value)| catalog.parameter(column, value))
             .collect::<Result<Vec<_>, _>>()?;
-        let query = Parameters::new(parameters).bind(sqlx::query(&statement));
-        let transaction = self.ensure_transaction().await?.transaction();
-        let row = query.fetch_optional(&mut **transaction).await;
-        let row = row.map_err(|error| self.sql_failure(error))?;
-        row.map(|row| catalog.row_to_json(&row))
-            .transpose()
-            .map(|row| row.unwrap_or(Value::Null))
+        self.run(|conn| returning_row(conn, &statement, &parameters, &catalog))
     }
 
-    async fn update(
-        &mut self,
-        table: &str,
-        key: &str,
-        id: Value,
-        patch: Value,
-    ) -> Result<Value, String> {
+    fn update(&mut self, table: &str, key: &str, id: Value, patch: Value) -> Result<Vec<u8>, String> {
         self.require_open()?;
-        let key = self.resolve_table_key(table, key).await?;
+        let key = self.resolve_table_key(table, key)?;
         require_row_id(&id)?;
         let values: BTreeMap<String, Value> = object(patch, "patch")?.into_iter().collect();
         if values.is_empty() {
             return Err("an update requires at least one column".to_owned());
         }
-        let catalog = self.catalog_table(table).await?;
+        let catalog = self.catalog_table(table)?;
         let quoted_table = quote_identifier(table)?;
         let assignments = values
             .keys()
@@ -761,29 +1029,21 @@ impl DatabaseHostCalls {
             .map(|(column, value)| catalog.parameter(column, value))
             .collect::<Result<Vec<_>, _>>()?;
         parameters.push(Parameter::scalar(&id)?);
-        let query = Parameters::new(parameters).bind(sqlx::query(&statement));
-        let transaction = self.ensure_transaction().await?.transaction();
-        let row = query.fetch_optional(&mut **transaction).await;
-        let row = row.map_err(|error| self.sql_failure(error))?;
-        row.map(|row| catalog.row_to_json(&row))
-            .transpose()
-            .map(|row| row.unwrap_or(Value::Null))
+        self.run(|conn| returning_row(conn, &statement, &parameters, &catalog))
     }
 
-    async fn delete(&mut self, table: &str, key: &str, id: Value) -> Result<Value, String> {
+    fn delete(&mut self, table: &str, key: &str, id: Value) -> Result<Vec<u8>, String> {
         self.require_open()?;
-        let key = self.resolve_table_key(table, key).await?;
+        let key = self.resolve_table_key(table, key)?;
         let table = quote_identifier(table)?;
         require_row_id(&id)?;
         let statement = format!("DELETE FROM {table} WHERE {key} = $1");
-        let query = Parameters::scalars(std::iter::once(&id))?.bind(sqlx::query(&statement));
-        let transaction = self.ensure_transaction().await?.transaction();
-        let result = query.execute(&mut **transaction).await;
-        let result = result.map_err(|error| self.sql_failure(error))?;
-        Ok(serde_json::json!({ "deleted": result.rows_affected() }))
+        let parameter = Parameter::scalar(&id)?;
+        let deleted = self.run(|conn| Ok(conn.execute(&statement, &[parameter.as_bind()])?))?;
+        Ok(format!(r#"{{"deleted":{deleted}}}"#).into_bytes())
     }
 
-    async fn delete_many(&mut self, table: &str, key: &str, ids: Value) -> Result<Value, String> {
+    fn delete_many(&mut self, table: &str, key: &str, ids: Value) -> Result<Vec<u8>, String> {
         self.require_open()?;
         let ids = ids
             .as_array()
@@ -792,26 +1052,25 @@ impl DatabaseHostCalls {
             return Err("deleteMany cannot delete more than 10000 rows per call".to_owned());
         }
         if ids.is_empty() {
-            return Ok(serde_json::json!({ "deleted": 0 }));
+            return Ok(br#"{"deleted":0}"#.to_vec());
         }
         for id in ids {
             require_row_id(id)?;
         }
-        let key = self.resolve_table_key(table, key).await?;
+        let key = self.resolve_table_key(table, key)?;
         let table = quote_identifier(table)?;
         // One JSON array parameter instead of up to 10,000 placeholders
         // (SQLite's default variable limit is 32,766).
-        let statement =
-            format!("DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))");
-        let query = Parameters::new(vec![Parameter::Json(Value::Array(ids.clone()).to_string())])
-            .bind(sqlx::query(&statement));
-        let transaction = self.ensure_transaction().await?.transaction();
-        let result = query.execute(&mut **transaction).await;
-        let result = result.map_err(|error| self.sql_failure(error))?;
-        Ok(serde_json::json!({ "deleted": result.rows_affected() }))
+        let statement = format!(
+            "DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))"
+        );
+        let ids = Value::Array(ids.clone()).to_string();
+        let deleted = self.run(|conn| Ok(conn.execute(&statement, &[Bind::Text(&ids)])?))?;
+        Ok(format!(r#"{{"deleted":{deleted}}}"#).into_bytes())
     }
 
-    async fn resolve_table_key(&mut self, table: &str, requested: &str) -> Result<String, String> {
+    /// The key a module declared for `table`, without touching the database.
+    fn declared_table_key(&self, table: &str, requested: &str) -> Result<Option<String>, String> {
         let requested = requested.trim();
         let declared = declared_table_key(&self.schema, table)?.map(str::to_owned);
         if !requested.is_empty() {
@@ -824,44 +1083,54 @@ impl DatabaseHostCalls {
                     declared.as_deref().unwrap_or_default(),
                 ));
             }
-            return quote_identifier(requested);
+            return quote_identifier(requested).map(Some);
         }
         if let Some(declared) = declared {
-            return quote_identifier(&declared);
+            return quote_identifier(&declared).map(Some);
         }
         if let Some(cached) = self.tables.get(table) {
-            return quote_identifier(&cached.key.column);
+            return quote_identifier(&cached.key.column).map(Some);
         }
+        Ok(None)
+    }
 
-        let catalog = self.catalog_table(table).await?;
+    fn resolve_table_key(&mut self, table: &str, requested: &str) -> Result<String, String> {
+        if let Some(key) = self.declared_table_key(table, requested)? {
+            return Ok(key);
+        }
+        let catalog = self.catalog_table(table)?;
         quote_identifier(&catalog.key.column)
     }
 
     /// Columns and primary key of `table`, read once per invocation
     /// transaction from `pragma_table_info`.
-    async fn catalog_table(&mut self, table: &str) -> Result<Arc<TableCatalog>, String> {
+    fn catalog_table(&mut self, table: &str) -> Result<Arc<TableCatalog>, String> {
         if let Some(cached) = self.tables.get(table) {
             return Ok(cached.clone());
         }
         let (schema_name, table_name) = table_catalog_parts(table)?;
         self.require_open()?;
-        let rows = sqlx::query(
-            r#"SELECT name, type, pk, dflt_value IS NOT NULL AS has_default
-               FROM pragma_table_info($1, COALESCE($2, 'main'))
-               ORDER BY cid"#,
-        )
-        .bind(table_name)
-        .bind(schema_name)
-        .fetch_all(&mut **self.ensure_transaction().await?.transaction())
-        .await;
-        let rows = rows.map_err(|error| self.sql_failure(error))?;
+        let rows = self.run(|conn| {
+            let mut statement = conn.prepare(
+                r#"SELECT name, type, pk, dflt_value IS NOT NULL AS has_default
+                   FROM pragma_table_info($1, COALESCE($2, 'main'))
+                   ORDER BY cid"#,
+            )?;
+            statement.bind(&[
+                Bind::Text(&table_name),
+                schema_name.as_deref().map_or(Bind::Null, Bind::Text),
+            ])?;
+            let mut rows = Vec::new();
+            while statement.step()? {
+                let name = statement.str(0).map_err(Failure::Decode)?.to_owned();
+                let declared = statement.str(1).map_err(Failure::Decode)?.to_owned();
+                rows.push((name, declared, statement.int64(2), statement.int64(3) != 0));
+            }
+            Ok(rows)
+        })?;
         let mut columns = BTreeMap::new();
         let mut keys = Vec::new();
-        for row in &rows {
-            let name: String = row.try_get("name").map_err(db_decode)?;
-            let declared: String = row.try_get("type").map_err(db_decode)?;
-            let position: i64 = row.try_get("pk").map_err(db_decode)?;
-            let has_default: bool = row.try_get("has_default").map_err(db_decode)?;
+        for (name, declared, position, has_default) in rows {
             columns.insert(name.clone(), JsonKind::from_declared(&declared));
             if position > 0 {
                 keys.push((position, name, declared, has_default));
@@ -907,49 +1176,141 @@ impl TableCatalog {
         }
         .map_err(|error| format!("column {column:?}: {error}"))
     }
+}
 
-    fn row_to_json(&self, row: &SqliteRow) -> Result<Value, String> {
-        rows::row_to_object(row, |name| self.columns.get(name).copied())
-            .map(Value::Object)
-            .map_err(|error| error.to_string())
+/// Runs an `INSERT/UPDATE … RETURNING *` and writes its first row (or
+/// `null`) decoded by the table's declared kinds, as `rows::row_to_object`
+/// does for sqlx rows.
+fn returning_row(
+    conn: &mut DirectConn<'_>,
+    sql: &str,
+    parameters: &[Parameter],
+    catalog: &TableCatalog,
+) -> Result<Vec<u8>, Failure> {
+    let mut statement = conn.prepare(sql)?;
+    let binds = parameters.iter().map(Parameter::as_bind).collect::<Vec<_>>();
+    statement.bind(&binds)?;
+    if !statement.step()? {
+        return Ok(b"null".to_vec());
+    }
+    let mut out = Vec::with_capacity(256);
+    out.push(b'{');
+    for index in 0..statement.column_count() {
+        if index > 0 {
+            out.push(b',');
+        }
+        let name = statement.column_name(index);
+        let kind = catalog
+            .columns
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| sqlx_declared_kind(statement.column_decltype(index)));
+        direct::write_str(&mut out, name);
+        out.push(b':');
+        statement
+            .write_json(index, kind, &mut out)
+            .map_err(Failure::Decode)?;
+    }
+    out.push(b'}');
+    Ok(out)
+}
+
+/// The kind `JsonKind::from_declared` gives sqlx's own name for a declared
+/// type (sqlx maps unknown declarations, and expressions, to `NULL`).
+fn sqlx_declared_kind(declared: Option<&str>) -> JsonKind {
+    let Some(declared) = declared else {
+        return JsonKind::Text;
+    };
+    let declared = declared.to_ascii_lowercase();
+    match declared.as_str() {
+        "int4" | "int8" => JsonKind::Integer,
+        "boolean" | "bool" => JsonKind::Boolean,
+        "date" | "time" | "datetime" | "timestamp" => JsonKind::Text,
+        _ if declared.contains("int") => JsonKind::Integer,
+        _ if declared.contains("char") || declared.contains("clob") || declared.contains("text") => {
+            JsonKind::Text
+        }
+        _ if declared.contains("blob") => JsonKind::Text,
+        _ if declared.contains("real") || declared.contains("floa") || declared.contains("doub") => {
+            JsonKind::Real
+        }
+        _ => JsonKind::Text,
     }
 }
 
-/// Decodes a module query row by each column's declared type: the write
-/// target's catalog for `RETURNING`, else the statement's exact declared
-/// result types (`sqlite3_column_decltype`). Only expression columns, which
-/// have no declared type, fall back to the storage class, where TEXT that is
+/// Writes every row of a module query as a JSON array of objects. Each column
+/// is decoded by its declared type: the write target's catalog for
+/// `RETURNING`, else the statement's exact declared result type
+/// (`sqlite3_column_decltype`). Only expression columns, which have no
+/// declared type, fall back to the storage class, where TEXT that is
 /// unambiguously a JSON value (object, array, quoted string, `true`/`false`)
 /// is decoded as JSON because SQL builds JSON there (`json_object`,
 /// `json_group_array`). Columns declared TEXT are never reinterpreted.
-fn query_row_to_json(
-    row: &SqliteRow,
+fn write_query_rows(
+    statement: &mut direct::Stmt<'_>,
     target: Option<&TableCatalog>,
-    kinds: Option<&[Option<JsonKind>]>,
-) -> Result<Value, String> {
-    let mut result = Map::new();
-    for (index, column) in row.columns().iter().enumerate() {
-        let declared = column.type_info().name();
-        let raw = row.try_get_raw(index).map_err(db_decode)?;
-        let known = target
-            .and_then(|table| table.columns.get(column.name()).copied())
-            .or_else(|| kinds.and_then(|kinds| kinds.get(index).copied().flatten()));
-        let value = if let Some(kind) = known {
-            rows::decode_value(raw, kind).map_err(|error| error.to_string())?
-        } else if declared.eq_ignore_ascii_case("NULL") {
-            match rows::decode_value(raw, JsonKind::Text).map_err(|error| error.to_string())? {
-                Value::String(text) if json_shaped(&text) => {
-                    serde_json::from_str(&text).unwrap_or(Value::String(text))
-                }
-                value => value,
+) -> Result<Vec<u8>, Failure> {
+    let mut out = Vec::with_capacity(256);
+    out.push(b'[');
+    let mut columns: Option<Vec<(Vec<u8>, Option<JsonKind>)>> = None;
+    let mut first = true;
+    while statement.step()? {
+        let columns = columns.get_or_insert_with(|| {
+            (0..statement.column_count())
+                .map(|index| {
+                    let name = statement.column_name(index);
+                    let mut key = Vec::with_capacity(name.len() + 3);
+                    direct::write_str(&mut key, name);
+                    key.push(b':');
+                    let kind = target
+                        .and_then(|table| table.columns.get(name).copied())
+                        .or_else(|| statement.column_decltype(index).map(JsonKind::from_declared));
+                    (key, kind)
+                })
+                .collect()
+        });
+        if !first {
+            out.push(b',');
+        }
+        first = false;
+        out.push(b'{');
+        for (index, (key, kind)) in columns.iter().enumerate() {
+            if index > 0 {
+                out.push(b',');
             }
-        } else {
-            rows::decode_value(raw, JsonKind::from_declared(declared))
-                .map_err(|error| error.to_string())?
-        };
-        result.insert(column.name().to_owned(), value);
+            out.extend_from_slice(key);
+            match kind {
+                Some(kind) => statement
+                    .write_json(index, *kind, &mut out)
+                    .map_err(Failure::Decode)?,
+                None => write_expression_cell(statement, index, &mut out)?,
+            }
+        }
+        out.push(b'}');
     }
-    Ok(Value::Object(result))
+    out.push(b']');
+    Ok(out)
+}
+
+fn write_expression_cell(
+    statement: &direct::Stmt<'_>,
+    index: usize,
+    out: &mut Vec<u8>,
+) -> Result<(), Failure> {
+    if statement.is_text(index) {
+        let text = statement.str(index).map_err(Failure::Decode)?;
+        if json_shaped(text) {
+            if let Ok(value) = serde_json::from_str::<Value>(text) {
+                direct::write_value(out, &value);
+                return Ok(());
+            }
+        }
+        direct::write_str(out, text);
+        return Ok(());
+    }
+    statement
+        .write_json(index, JsonKind::Text, out)
+        .map_err(Failure::Decode)
 }
 
 /// The table a single-table `INSERT INTO t`, `UPDATE t` or `DELETE FROM t`
@@ -1000,10 +1361,6 @@ fn json_shaped(text: &str) -> bool {
     matches!(trimmed.as_bytes().first(), Some(b'{' | b'[' | b'"'))
         || trimmed == "true"
         || trimmed == "false"
-}
-
-fn db_decode(error: sqlx::Error) -> String {
-    error.to_string()
 }
 
 fn object(value: Value, name: &str) -> Result<Map<String, Value>, String> {
@@ -1205,28 +1562,8 @@ mod tests {
         });
         assert_eq!(declared_table_key(&schema, "tasks").unwrap(), Some("_id"));
 
-        let calls = DatabaseHostCalls {
-            pending: None,
-            claim_conflict: false,
-            storage_context: None,
-            transaction: None,
-            capability: DatabaseCapability::Reducer,
-            schema,
-            tables: BTreeMap::new(),
-            schedulable_functions: BTreeSet::new(),
-            actor_account_id: String::new(),
-            actor_email: String::new(),
-            provenance: Value::Null,
-            intent_tenant: String::new(),
-            intent_command: String::new(),
-            deferred_ordinals: BTreeMap::new(),
-            fault: Default::default(),
-            aborted: false,
-            profile_label: gonvex_profiler::Label::None,
-            writer_wait_ns: 0,
-            sql_ns: 0,
-            invoke_times: Default::default(),
-        };
+        let calls = DatabaseHostCalls::with_parts(None, None, DatabaseCapability::Reducer)
+            .with_schema(&schema);
         let mut calls = calls;
         assert_eq!(
             calls.resolve_table_key("tasks", "").await.unwrap(),
@@ -1245,28 +1582,8 @@ mod tests {
                 }
             }
         });
-        let calls = DatabaseHostCalls {
-            pending: None,
-            claim_conflict: false,
-            storage_context: None,
-            transaction: None,
-            capability: DatabaseCapability::Reducer,
-            schema,
-            tables: BTreeMap::new(),
-            schedulable_functions: BTreeSet::new(),
-            actor_account_id: String::new(),
-            actor_email: String::new(),
-            provenance: Value::Null,
-            intent_tenant: String::new(),
-            intent_command: String::new(),
-            deferred_ordinals: BTreeMap::new(),
-            fault: Default::default(),
-            aborted: false,
-            profile_label: gonvex_profiler::Label::None,
-            writer_wait_ns: 0,
-            sql_ns: 0,
-            invoke_times: Default::default(),
-        };
+        let calls = DatabaseHostCalls::with_parts(None, None, DatabaseCapability::Reducer)
+            .with_schema(&schema);
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());
     }

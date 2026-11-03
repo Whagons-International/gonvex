@@ -56,6 +56,8 @@ uuid.workspace = true
 url.workspace = true
 duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
+bytes = "1"
+socket2 = { version = "0.6", features = ["all"] }
 
 [lints.clippy]
 # Deep clones on hot paths (perf workstreams).
@@ -63,7 +65,6 @@ redundant_clone = "warn"
 
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-socket2 = "0.6"
 tempfile = "3"
 tokio-tungstenite = "0.29"
 tower.workspace = true
@@ -74,7 +75,22 @@ harness = false
 required-features = ["perf-fixture"]
 
 [[bench]]
+name = "delivery"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "visibility_classes"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
 name = "replica_state"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "delivery_v3"
 harness = false
 required-features = ["perf-fixture"]
 
@@ -92,5 +108,18 @@ name = "perf_fixture_smoke"
 required-features = ["perf-fixture"]
 
 [[test]]
+name = "delivery_oracle"
+required-features = ["perf-fixture"]
+
+[[test]]
 name = "replica_state"
 required-features = ["perf-fixture"]
+
+[[test]]
+name = "slow_reader_delivery"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "class_sharing_oracle"
+required-features = ["perf-fixture"]
+

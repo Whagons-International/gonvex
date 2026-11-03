@@ -141,6 +141,19 @@ describe("presence v2", () => {
     expect(sdk.presenceSnapshot().members.size).toBe(0);
   });
 
+  it("applies presence.patch items carried in a replica.batch (delivery v3)", async () => {
+    const sdk = client();
+    const stop = sdk.subscribePresence(() => {});
+    const socket = await connect(sdk, true);
+    socket.receive({ type: "presence.snapshot", id: "presence-1", serverTime: 1, members: [{ memberId: "m1", state: "active", since: 1 }] });
+    socket.receive({ type: "replica.batch", tenant: "t", class: "00000000000000aa", from: 0, items: [
+      { type: "presence.patch", serverTime: 2, changes: [{ memberId: "m1", state: "offline", since: 2 }, { memberId: "m2", state: "idle", since: 2 }] },
+    ] });
+    await tick();
+    expect(Object.fromEntries([...sdk.presenceSnapshot().members].map(([id, m]) => [id, m.state]))).toEqual({ m2: "idle" });
+    stop();
+  });
+
   it("notifies connection-state listeners when the presence capability arrives", async () => {
     const sdk = client();
     const states = vi.fn();

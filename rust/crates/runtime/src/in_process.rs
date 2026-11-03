@@ -64,6 +64,7 @@ pub(crate) async fn request(
     match handler {
         Some(handler) => {
             let host = DirectHost {
+                inline: handler.inline_host(),
                 handler: tokio::sync::Mutex::new(handler),
             };
             handle_local(state, deadline_unix_ms, operation, Some(&host)).await
@@ -74,6 +75,7 @@ pub(crate) async fn request(
             RequestOp::Invoke(_) => {
                 let mut none = NoDispatcher;
                 let host = DirectHost {
+                    inline: None,
                     handler: tokio::sync::Mutex::new(&mut none),
                 };
                 handle_local(state, deadline_unix_ms, operation, Some(&host)).await
@@ -110,9 +112,16 @@ impl HostCallHandler for NoDispatcher {
 /// database calls; it only turns `&self` into the handler's `&mut self`.
 struct DirectHost<'a> {
     handler: tokio::sync::Mutex<&'a mut dyn HostCallHandler>,
+    /// Database calls the isolate thread answers itself, on the connection
+    /// the invocation's transaction lends it (`host_calls::SqlInline`).
+    inline: Option<std::sync::Arc<dyn gonvex_module_runtime::InlineHost>>,
 }
 
 impl gonvex_module_runtime::ModuleHost for DirectHost<'_> {
+    fn inline(&self) -> Option<std::sync::Arc<dyn gonvex_module_runtime::InlineHost>> {
+        self.inline.clone()
+    }
+
     fn call<'b>(
         &'b self,
         _context: &'b InvocationContext,
@@ -123,15 +132,14 @@ impl gonvex_module_runtime::ModuleHost for DirectHost<'_> {
             let frame = HostCallFrame::from_host_call(call).map_err(HostError::Failed)?;
             let concurrent = self.handler.lock().await.concurrent(&frame);
             let outcome = match concurrent {
-                Some(work) => work.await,
-                None => self.handler.lock().await.handle(frame).await,
+                Some(work) => work.await.and_then(|value| {
+                    serde_json::to_vec(&value)
+                        .map_err(|err| format!("host response could not be re-encoded: {err}"))
+                }),
+                None => self.handler.lock().await.handle_bytes(frame).await,
             };
             match outcome {
-                Ok(value) => Ok(HostResponse {
-                    value: serde_json::to_vec(&value).map_err(|err| {
-                        HostError::Failed(format!("host response could not be re-encoded: {err}"))
-                    })?,
-                }),
+                Ok(value) => Ok(HostResponse { value }),
                 // Same text the socket transport produced, so module code and
                 // error classification see identical failures.
                 Err(message) => Err(HostError::Failed(format!(
@@ -355,6 +363,155 @@ export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1
                 .await
                 .unwrap();
             assert_eq!(value, json!(1));
+            host.shutdown().await;
+        });
+    }
+
+    const SQL_CODE: &str = r#"
+export const crud = async (ctx, args) => {
+  await ctx.db.query("INSERT INTO items (id, label, meta, done) VALUES ($1, $2, $3, $4)", [args.id, "first", {a: 1}, true]);
+  const inserted = await ctx.db.insert("items", { id: args.id + "-2", label: "second", meta: {b: [1, 2.5, "x"]}, done: false });
+  const rows = await ctx.db.query("SELECT id, label, meta, done, json_object('k', 1) AS expr, 'plain' AS text FROM items ORDER BY id", []);
+  const updated = await ctx.db.update("items", args.id, { label: "renamed" });
+  const removed = await ctx.db.delete("items", args.id + "-2");
+  const none = await ctx.db.query("SELECT id FROM items WHERE id = $1", ["missing"]);
+  return { inserted, rows, updated, removed, none };
+};
+export const recover = async (ctx) => {
+  await ctx.db.query("SAVEPOINT s", []);
+  await ctx.db.query("INSERT INTO items (id, label) VALUES ('x', 'one')", []);
+  let failed = "";
+  try { await ctx.db.query("INSERT INTO items (id, label) VALUES ('x', 'dup')", []); } catch (e) { failed = String(e.message); }
+  let refused = "";
+  try { await ctx.db.query("SELECT 1", []); } catch (e) { refused = String(e.message); }
+  await ctx.db.query("ROLLBACK TO s", []);
+  const after = await ctx.db.query("SELECT count(*) AS n FROM items", []);
+  return { failed, refused, after };
+};
+export const swallow = async (ctx) => {
+  await ctx.db.query("INSERT INTO items (id, label) VALUES ('kept?', 'no')", []);
+  try { await ctx.db.query("INSERT INTO items (id, label) VALUES ('y', NULL)", []); } catch {}
+  return "ok";
+};
+"#;
+
+    fn sql_artifact() -> ModuleArtifactWire {
+        let mut artifact = artifact();
+        artifact.javascript.code = base64::engine::general_purpose::STANDARD.encode(SQL_CODE);
+        artifact.javascript.hash = Sha256::digest(SQL_CODE.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        for (function, name) in artifact.functions.iter_mut().zip(["crud", "recover", "swallow", "spin"]) {
+            function.path = format!("t.{name}");
+            function.handler = Some(name.into());
+            function.export = Some(name.into());
+        }
+        artifact.functions.truncate(3);
+        artifact
+    }
+
+    /// Hides the handler's inline host, so every call takes the async path.
+    struct AsyncOnly(crate::host_calls::DatabaseHostCalls);
+
+    #[async_trait::async_trait]
+    impl HostCallHandler for AsyncOnly {
+        async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
+            self.0.handle(call).await
+        }
+        async fn handle_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+            self.0.handle_bytes(call).await
+        }
+    }
+
+    #[test]
+    fn module_sql_runs_on_the_isolate_thread_with_the_async_path_results() {
+        use crate::host_calls::{DatabaseCapability, DatabaseHostCalls};
+        use gonvex_store::{begin_transaction, Durability, PoolLimits, PoolRegistry};
+        run(async {
+            let directory = tempfile::tempdir().unwrap();
+            let url = gonvex_store::database_url(&directory.path().join("tenant.db"));
+            let pools = PoolRegistry::with_durability(PoolLimits::default(), Durability::Normal);
+            let writer = pools.pool(&url).await.unwrap();
+            gonvex_store::execute_script(
+                &mut writer.acquire().await.unwrap(),
+                "CREATE TABLE items (id TEXT PRIMARY KEY, label TEXT NOT NULL, meta JSON, done BOOLEAN)",
+            )
+            .await
+            .unwrap();
+            let host = ModuleHost::new(ModuleHostConfig {
+                enabled: true,
+                in_process: true,
+                max_heap_bytes: 16 << 20,
+                binary: None,
+                endpoint: None,
+                start_timeout: Duration::from_secs(10),
+                shutdown_timeout: Duration::from_secs(2),
+                max_frame_bytes: 1 << 20,
+                max_concurrent_calls: 4,
+                isolate_pool_size: 1,
+                execution_timeout: Duration::from_secs(5),
+                action_execution_timeout: Duration::from_secs(5),
+            });
+            host.start().await.unwrap();
+            host.load(LoadRequest { module_id: "t".into(), generation: Some(1), artifact: sql_artifact() })
+                .await
+                .unwrap();
+            host.activate(ActivateRequest { module_id: "t".into(), generation: 1, drain_ms: None })
+                .await
+                .unwrap();
+            let calls = || async {
+                let transaction = begin_transaction(&pools, &url, false).await.unwrap();
+                DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
+            };
+
+            // Same results whether the isolate answers SQL itself or every
+            // call takes the async path.
+            let mut inline = calls().await;
+            let direct = host.invoke(request("crud", json!({"id": "a"})), &mut inline).await.unwrap();
+            assert!(inline.inline_calls() >= 5, "{}", inline.inline_calls());
+            inline.finish(false).await.unwrap();
+            let mut asynchronous = AsyncOnly(calls().await);
+            let routed = host.invoke(request("crud", json!({"id": "a"})), &mut asynchronous).await.unwrap();
+            assert_eq!(asynchronous.0.inline_calls(), 0);
+            asynchronous.0.finish(false).await.unwrap();
+            assert_eq!(direct, routed);
+            assert_eq!(
+                direct,
+                json!({
+                    "inserted": {"id": "a-2", "label": "second", "meta": {"b": [1, 2.5, "x"]}, "done": false},
+                    "rows": [
+                        {"id": "a", "label": "first", "meta": {"a": 1}, "done": true, "expr": {"k": 1}, "text": "plain"},
+                        {"id": "a-2", "label": "second", "meta": {"b": [1, 2.5, "x"]}, "done": false, "expr": {"k": 1}, "text": "plain"}
+                    ],
+                    "updated": {"id": "a", "label": "renamed", "meta": {"a": 1}, "done": true},
+                    "removed": {"deleted": 1},
+                    "none": []
+                })
+            );
+
+            // A failed statement aborts the transaction until ROLLBACK TO.
+            let mut handler = calls().await;
+            let value = host.invoke(request("recover", json!(null)), &mut handler).await.unwrap();
+            assert!(
+                value["failed"].as_str().unwrap().contains(
+                    "db_read host call failed [host_call_failed]: error returned from database: (code: 1555) UNIQUE constraint failed: items.id"
+                ),
+                "{value}"
+            );
+            assert!(value["refused"].as_str().unwrap().contains("current transaction is aborted"), "{value}");
+            assert_eq!(value["after"], json!([{"n": 0}]));
+            assert_eq!(handler.finish_with_revision(true).await.unwrap(), None);
+
+            // A caught failure never commits.
+            let mut handler = calls().await;
+            assert_eq!(host.invoke(request("swallow", json!(null)), &mut handler).await.unwrap(), json!("ok"));
+            assert!(handler.finish(true).await.unwrap_err().contains("current transaction is aborted"));
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM items")
+                .fetch_one(&pools.reader(&url).await.unwrap())
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
             host.shutdown().await;
         });
     }
