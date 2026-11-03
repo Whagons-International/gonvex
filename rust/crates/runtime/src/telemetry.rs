@@ -161,6 +161,22 @@ impl Runtime {
                 .as_ref()
                 .map(|tenant| tenant.route.tenant_id.as_str())
                 .unwrap_or("");
+            let release = release.map(|value| bounded_text(value, 200));
+            let environment = environment.map(|value| bounded_text(value, 100));
+            // Presence v2: the open socket is the session's liveness. Only a
+            // new session or changed attribution needs the durable upsert and
+            // the Control Plane change notification.
+            if self.inner.presence.support_is_current(
+                &connection.connection_id,
+                &connection.project_id,
+                &connection.connection_id,
+                tenant_id,
+                &identity.account.id,
+                release.as_deref(),
+                environment.as_deref(),
+            ) {
+                return error_ack(id, None, None, None);
+            }
             let result = async {
                 let mut transaction = control.begin_control_transaction(false).await?;
                 sqlx::query(
@@ -180,8 +196,8 @@ impl Runtime {
                 .bind(&connection.project_id)
                 .bind(tenant_id)
                 .bind(&identity.account.id)
-                .bind(bounded_text(release.unwrap_or(""), 200))
-                .bind(bounded_text(environment.unwrap_or(""), 100))
+                .bind(release.as_deref().unwrap_or(""))
+                .bind(environment.as_deref().unwrap_or(""))
                 .execute(&mut **transaction.transaction())
                 .await?;
                 transaction.commit().await
@@ -190,6 +206,16 @@ impl Runtime {
             if result.is_err() {
                 return error_ack(id, Some("error store unavailable"), None, None);
             }
+            // An empty value keeps the stored one (see the upsert above).
+            self.inner.presence.support_register(
+                &connection.connection_id,
+                &connection.project_id,
+                &connection.connection_id,
+                tenant_id,
+                &identity.account.id,
+                release.as_deref().filter(|value| !value.is_empty()),
+                environment.as_deref().filter(|value| !value.is_empty()),
+            );
             self.notify_control_changed(&connection.project_id);
         }
         error_ack(id, None, None, None)

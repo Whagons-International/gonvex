@@ -200,6 +200,43 @@ pub struct ClientCapabilities {
     pub query_fanout: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_result_batch: Option<u8>,
+    /// Presence v2: the client reports its state with `presence.set`
+    /// transitions only (no reducer heartbeats) and may `presence.subscribe`.
+    /// Its liveness is the WebSocket itself (server Ping, any inbound frame).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<u8>,
+}
+
+/// Presence v2 state of one tenant Member, as reported by the server.
+///
+/// `offline` only appears in `presence.patch`; snapshots list online
+/// (active or idle) Members only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PresenceState {
+    Active,
+    Idle,
+    Offline,
+}
+
+impl PresenceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Idle => "idle",
+            Self::Offline => "offline",
+        }
+    }
+}
+
+/// One Member's aggregated presence: `since` is the server time (Unix ms)
+/// at which the Member entered `state`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresenceMember {
+    pub member_id: String,
+    pub state: PresenceState,
+    pub since: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -407,6 +444,17 @@ pub enum ClientMessage {
     TelemetryBatch {
         events: Vec<PerformanceTelemetryEvent>,
     },
+    /// Presence v2: this connection's own state. Sent on transitions and
+    /// after every successful `auth`; never periodically. `state` is
+    /// `active`, `idle` or `offline` (`gone` is accepted as `offline`).
+    #[serde(rename = "presence.set")]
+    PresenceSet { state: String },
+    /// Presence v2: receive `presence.snapshot` (same `id`) and then
+    /// `presence.patch` frames for the connection's tenant.
+    #[serde(rename = "presence.subscribe")]
+    PresenceSubscribe { id: String },
+    #[serde(rename = "presence.unsubscribe")]
+    PresenceUnsubscribe {},
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -485,6 +533,11 @@ pub struct ServerCapabilities {
     pub reducer_receipt_lookup: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_watermark: Option<u8>,
+    /// Presence v2 (in-memory, transition-only presence feed). When set the
+    /// runtime also answers support/error heartbeats from memory, so clients
+    /// should stop sending periodic heartbeats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -773,6 +826,25 @@ pub enum ServerMessage {
     },
     #[serde(rename = "support.command")]
     SupportCommand { id: String, result: Value },
+    /// Presence v2: every online Member of the tenant, answering
+    /// `presence.subscribe` (same `id`) or resynchronizing a lagging
+    /// connection. Replaces the client's whole presence map.
+    #[serde(rename = "presence.snapshot")]
+    PresenceSnapshot {
+        id: String,
+        #[serde(rename = "serverTime")]
+        server_time: i64,
+        members: Vec<PresenceMember>,
+    },
+    /// Presence v2: coalesced state transitions since the previous frame.
+    #[serde(rename = "presence.patch")]
+    PresencePatch {
+        #[serde(rename = "serverTime")]
+        server_time: i64,
+        changes: Vec<PresenceMember>,
+    },
+    #[serde(rename = "presence.error")]
+    PresenceError { id: String, error: String },
     #[serde(rename = "client.updateRequired")]
     ClientUpdateRequired { reason: String, contract: u64 },
     #[serde(rename = "system.reload")]
@@ -902,6 +974,22 @@ mod tests {
             serde_json::from_value(expected.clone()).expect("client frame");
         let actual = serde_json::to_value(message).expect("serialized client frame");
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn presence_v2_frames_round_trip() {
+        round_trip_client(r#"{"type":"auth","id":"a","capabilities":{"presence":1}}"#);
+        round_trip_client(r#"{"type":"presence.set","state":"idle"}"#);
+        round_trip_client(r#"{"type":"presence.subscribe","id":"p1"}"#);
+        round_trip_client(r#"{"type":"presence.unsubscribe"}"#);
+        round_trip_server(r#"{"type":"session.ready","capabilities":{"presence":1}}"#);
+        round_trip_server(
+            r#"{"type":"presence.snapshot","id":"p1","serverTime":5,"members":[{"memberId":"m1","state":"active","since":1}]}"#,
+        );
+        round_trip_server(
+            r#"{"type":"presence.patch","serverTime":9,"changes":[{"memberId":"m1","state":"offline","since":9}]}"#,
+        );
+        round_trip_server(r#"{"type":"presence.error","id":"p1","error":"no tenant member session"}"#);
     }
 
     fn round_trip_server(source: &str) {
