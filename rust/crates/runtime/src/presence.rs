@@ -1095,8 +1095,14 @@ mod tests {
         let mut live = hub.live_support_sessions(42);
         live.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         assert_eq!(
-            live.iter().map(|s| (s.project_id.as_str(), s.session_id.as_str(), s.last_seen_ms)).collect::<Vec<_>>(),
-            vec![("p", "c1", 42), ("p", "support_c1", 42), ("q", "support_c2", 42)]
+            live.iter()
+                .map(|s| (s.project_id.as_str(), s.session_id.as_str(), s.last_seen_ms))
+                .collect::<Vec<_>>(),
+            vec![
+                ("p", "c1", 42),
+                ("p", "support_c1", 42),
+                ("q", "support_c2", 42)
+            ]
         );
         hub.disconnect("c1", Instant::now());
         assert_eq!(hub.live_support_sessions(1).len(), 1);

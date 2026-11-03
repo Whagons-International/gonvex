@@ -585,7 +585,11 @@ async fn register_support_sessions(socket: &mut Socket) -> Vec<String> {
         }
     }
     // The SDK error reporter's session (id = connection id).
-    send(socket, json!({"type":"error.register","id":"err","release":"1.2.3","environment":"production"})).await;
+    send(
+        socket,
+        json!({"type":"error.register","id":"err","release":"1.2.3","environment":"production"}),
+    )
+    .await;
     loop {
         let frame = next_json(socket).await;
         if frame["type"] == "error.ack" {
@@ -626,7 +630,10 @@ async fn shutdown_records_end_times_of_open_support_sessions() {
     fixture.runtime.shutdown().await;
     assert!(started.elapsed() < Duration::from_secs(5));
     for (id, before) in sessions.iter().zip(before) {
-        assert!(last_seen(&control, id).await > before, "end time recorded for {id}");
+        assert!(
+            last_seen(&control, id).await > before,
+            "end time recorded for {id}"
+        );
     }
     drop((alice, bob, control));
     fixture.server.abort();
@@ -677,7 +684,11 @@ async fn periodic_refresh_updates_open_sessions_without_control_fanout() {
     assert!(refreshed.is_ok(), "open sessions refreshed");
     // A direct refresh is one batched write of every open session.
     assert_eq!(fixture.runtime.refresh_support_sessions().await, 2);
-    assert_eq!(fixture.runtime.control_notification_count(), notifications, "no Control fan-out");
+    assert_eq!(
+        fixture.runtime.control_notification_count(),
+        notifications,
+        "no Control fan-out"
+    );
     assert_eq!(idempotency().await, rows, "no idempotency rows");
     // Nothing was pushed to the open connection either.
     if let Ok(Some(Ok(Message::Text(text)))) =

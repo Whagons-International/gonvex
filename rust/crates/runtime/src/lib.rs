@@ -309,7 +309,8 @@ impl Runtime {
         let every = self.inner.presence.config().support_refresh;
         let offset = every.mul_f64(rand::random::<f64>());
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + offset, every);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + offset, every);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
@@ -324,7 +325,10 @@ impl Runtime {
     /// batched Control Plane transaction. No idempotency rows, no Control
     /// change notification, no query refresh. Returns the sessions written.
     pub async fn refresh_support_sessions(&self) -> usize {
-        let live = self.inner.presence.live_support_sessions(presence::now_ms());
+        let live = self
+            .inner
+            .presence
+            .live_support_sessions(presence::now_ms());
         match write_support_last_seen(&self.inner, &live).await {
             Ok(()) => live.len(),
             Err(error) => {
@@ -338,7 +342,11 @@ impl Runtime {
     /// and `now` for every session still open, in one batched transaction.
     pub async fn flush_support_sessions(&self) -> usize {
         let mut sessions = self.inner.presence.take_last_seen_flush();
-        sessions.extend(self.inner.presence.live_support_sessions(presence::now_ms()));
+        sessions.extend(
+            self.inner
+                .presence
+                .live_support_sessions(presence::now_ms()),
+        );
         match write_support_last_seen(&self.inner, &sessions).await {
             Ok(()) => sessions.len(),
             Err(error) => {
@@ -481,8 +489,15 @@ impl Runtime {
     pub async fn shutdown(&self) {
         // Before any pool closes: record end times of open support sessions.
         // Bounded so a slow disk cannot eat the container's stop grace.
-        match tokio::time::timeout(SUPPORT_SHUTDOWN_FLUSH_TIMEOUT, self.flush_support_sessions()).await {
-            Ok(written) if written > 0 => tracing::info!(sessions = written, "support session end times recorded"),
+        match tokio::time::timeout(
+            SUPPORT_SHUTDOWN_FLUSH_TIMEOUT,
+            self.flush_support_sessions(),
+        )
+        .await
+        {
+            Ok(written) if written > 0 => {
+                tracing::info!(sessions = written, "support session end times recorded")
+            }
             Ok(_) => {}
             Err(_) => tracing::warn!("support session end-time flush timed out"),
         }

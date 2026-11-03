@@ -841,7 +841,10 @@ mod tests {
         assert!(defaults.legacy_beat_paths.is_empty());
         assert_eq!(defaults.support_refresh, Duration::from_secs(300));
         assert_eq!(
-            config(&[("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS", "60")]).unwrap().presence.support_refresh,
+            config(&[("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS", "60")])
+                .unwrap()
+                .presence
+                .support_refresh,
             Duration::from_secs(60)
         );
         let custom = config(&[
