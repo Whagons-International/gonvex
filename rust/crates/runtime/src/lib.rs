@@ -4467,8 +4467,13 @@ mod tests {
             .unwrap();
         let mut pages = Vec::new();
         let mut start = None;
-        while let Ok(Some(message)) =
-            tokio::time::timeout(std::time::Duration::from_millis(100), socket.next()).await
+        // Frames are encoded on the offload pool: wait generously for the
+        // first one, then 100 ms for the server to stop on its credit window.
+        while let Ok(Some(message)) = tokio::time::timeout(
+            std::time::Duration::from_millis(if pages.is_empty() { 10_000 } else { 100 }),
+            socket.next(),
+        )
+        .await
         {
             let message = message.unwrap();
             if message.is_text() {

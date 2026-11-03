@@ -76,5 +76,9 @@ harness = false
 required-features = ["perf-fixture"]
 
 [[test]]
+name = "offload_equivalence"
+required-features = ["perf-fixture"]
+
+[[test]]
 name = "perf_fixture_smoke"
 required-features = ["perf-fixture"]

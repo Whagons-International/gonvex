@@ -372,6 +372,10 @@ async fn run() {
                 json!(SnapshotAdmission::global().take_peak_reserved_bytes()),
             );
             extra.insert(
+                "tasksEstimateBytes".into(),
+                json!(SnapshotAdmission::global().table_estimate("tasks")),
+            );
+            extra.insert(
                 "snapshotBudgetBytes".into(),
                 json!(SnapshotAdmission::global().budget_bytes()),
             );

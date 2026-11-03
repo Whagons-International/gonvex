@@ -26,8 +26,8 @@
 //! - `GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`: concurrent snapshot builds
 //!   (default: available CPUs, min 2).
 //! - `GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES`: estimated decoded snapshot heap
-//!   in flight across all builds (default 128 MiB). Estimated as 12x the rows'
-//!   JSON size: a 9,000-task Admin snapshot (~6 MB of JSON) peaks at ~76 MB.
+//!   in flight across all builds (default 128 MiB). Estimated as 10x the rows'
+//!   JSON size (Whagons task rows decode to ~10x their JSON in `Value`s).
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -549,7 +549,7 @@ struct Estimates {
 const UNKNOWN_SNAPSHOT_BYTES: usize = 8 << 20;
 /// Decoded heap per byte of row JSON (`serde_json::Value` maps with string
 /// keys), measured on the Whagons task rows of the perf fixture.
-const HEAP_PER_JSON_BYTE: usize = 12;
+const HEAP_PER_JSON_BYTE: usize = 10;
 const ESTIMATE_ENTRIES: usize = 65_536;
 
 pub struct SnapshotPermit {
@@ -599,8 +599,20 @@ impl SnapshotAdmission {
             .unwrap_or(UNKNOWN_SNAPSHOT_BYTES)
     }
 
-    /// Waits for a count slot and the estimated bytes of `key`.
+    /// The largest estimate recorded for `table`, if any.
+    pub fn table_estimate(&self, table: &str) -> Option<usize> {
+        self.estimates.lock().unwrap().by_table.get(table).copied()
+    }
+
+    /// Waits for a count slot, then for the estimated bytes of `key`. The
+    /// estimate is taken after the count wait, so a burst queued before any
+    /// build finished still uses the sizes those builds observe.
     pub async fn admit(&'static self, key: String, table: &str) -> SnapshotPermit {
+        let count = self
+            .count
+            .acquire()
+            .await
+            .expect("snapshot semaphore is never closed");
         let estimate = self.estimate(&key, table);
         let reserved_kib = estimate.div_ceil(1024).clamp(1, self.budget_kib);
         let bytes = self
@@ -608,11 +620,6 @@ impl SnapshotAdmission {
             .acquire_many(reserved_kib as u32)
             .await
             .expect("snapshot budget is never closed");
-        let count = self
-            .count
-            .acquire()
-            .await
-            .expect("snapshot semaphore is never closed");
         let reserved = self.reserved_kib.fetch_add(reserved_kib, Relaxed) + reserved_kib;
         self.peak_reserved_kib.fetch_max(reserved, Relaxed);
         SnapshotPermit {

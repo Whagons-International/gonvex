@@ -275,3 +275,37 @@ pub async fn connection_loop(
     }
     connection
 }
+
+/// `apply_feed_event_offloaded` for one fixture connection (the socket path).
+pub async fn apply_offloaded(
+    runtime: &Runtime,
+    connection: &mut MemberConnection,
+    event: FeedEvent,
+) -> Result<Vec<ServerMessage>, crate::replica::ReplicaError> {
+    runtime
+        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event)
+        .await
+}
+
+/// The paged JSON frames of a snapshot message, encoded either through
+/// [`crate::offload::PageEncoder`] (`offloaded`) or by iterating the pages
+/// on the caller's thread; each frame parsed back, without its random
+/// `snapshotId`, so the two can be compared.
+pub async fn snapshot_page_frames(message: ServerMessage, offloaded: bool) -> Vec<Value> {
+    let pages = crate::replica::SnapshotPages::new(message);
+    let mut frames = Vec::new();
+    if offloaded {
+        let mut encoder = crate::offload::PageEncoder::new(pages);
+        while let Some(page) = encoder.next().await {
+            frames.push(serde_json::from_str::<Value>(&page.unwrap()).unwrap());
+        }
+    } else {
+        for page in pages {
+            frames.push(serde_json::to_value(&page).unwrap());
+        }
+    }
+    for frame in &mut frames {
+        frame.as_object_mut().unwrap().remove("snapshotId");
+    }
+    frames
+}
