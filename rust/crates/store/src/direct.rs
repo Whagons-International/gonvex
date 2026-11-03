@@ -775,49 +775,7 @@ pub fn write_hex(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b'"');
 }
 
-/// Rows of a query's first column (JSON text, e.g. from `json_object`),
-/// packed into one buffer. NULL rows are skipped.
-#[derive(Debug, Default)]
-pub struct JsonRowBatch {
-    data: Vec<u8>,
-    ends: Vec<usize>,
-}
-
-impl JsonRowBatch {
-    fn with_capacity(rows: usize, bytes: usize) -> Self {
-        Self {
-            data: Vec::with_capacity(bytes),
-            ends: Vec::with_capacity(rows),
-        }
-    }
-
-    fn push(&mut self, row: &[u8]) {
-        self.data.extend_from_slice(row);
-        self.ends.push(self.data.len());
-    }
-
-    pub fn len(&self) -> usize {
-        self.ends.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.ends.is_empty()
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Each row's JSON text, in query order.
-    pub fn rows(&self) -> impl Iterator<Item = &[u8]> + '_ {
-        let mut start = 0;
-        self.ends.iter().map(move |end| {
-            let row = &self.data[start..*end];
-            start = *end;
-            row
-        })
-    }
-}
+pub use crate::json_rows::JsonRowBatch;
 
 const BATCH_ROWS: usize = 128;
 const BATCH_BYTES: usize = 256 * 1024;

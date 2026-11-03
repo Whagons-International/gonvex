@@ -30,6 +30,8 @@ pub mod capture;
 pub mod checkpoint;
 mod data_dir;
 pub mod direct;
+pub mod json_rows;
+pub use json_rows::{JsonRowBatch, JsonRows};
 mod sync_barrier;
 pub use sync_barrier::WAL_SYNCS;
 pub mod feed;
@@ -1603,26 +1605,6 @@ impl TenantTransaction {
     }
 }
 
-/// Row batches from [`TenantTransaction::stream_json_rows`].
-pub struct JsonRows<'t> {
-    receiver: tokio::sync::mpsc::Receiver<Result<direct::JsonRowBatch, DatabaseError>>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    _transaction: std::marker::PhantomData<&'t mut TenantTransaction>,
-}
-
-impl JsonRows<'_> {
-    /// The next batch; `None` after the last row.
-    pub async fn next_batch(&mut self) -> Option<Result<direct::JsonRowBatch, DatabaseError>> {
-        self.receiver.recv().await
-    }
-}
-
-impl Drop for JsonRows<'_> {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.receiver.close();
-    }
-}
 
 #[cfg(test)]
 mod transaction_commit_tests;
