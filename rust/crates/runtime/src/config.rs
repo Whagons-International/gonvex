@@ -303,7 +303,7 @@ impl Config {
                 isolate_pool_size: integer(
                     "GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE",
                     lookup("GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE"),
-                    4,
+                    default_isolate_pool_size(),
                 )?,
                 execution_timeout: duration_ms(
                     "GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS",
@@ -522,6 +522,16 @@ fn boolean(name: &'static str, value: Option<String>, default: bool) -> Result<b
         "false" | "0" | "no" | "off" => Ok(false),
         _ => Err(ConfigError::Boolean { name, value }),
     }
+}
+
+/// One V8 isolate per available CPU (cgroup quota aware), at most 4. Each
+/// isolate holds the whole application bundle (~290 MB for Whagons), and
+/// isolates beyond the CPU count add memory without adding throughput.
+fn default_isolate_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .clamp(1, 4)
 }
 
 fn integer(
