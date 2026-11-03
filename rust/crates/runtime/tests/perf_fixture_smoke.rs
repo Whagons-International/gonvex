@@ -30,16 +30,12 @@ async fn fixture_builds_and_every_helper_runs() {
         WHAGONS_SUBSCRIPTIONS.len()
     );
     assert_eq!(
-        admin_connection.subscriptions["tasks.recentWorkspaceTasks"]
-            .rows
-            .len(),
+        admin_connection.subscriptions["tasks.recentWorkspaceTasks"].row_count(),
         tasks,
         "an admin sees every task"
     );
     let grant_connection = fixture.connect(0, grant).await.unwrap();
-    let granted = grant_connection.subscriptions["tasks.recentWorkspaceTasks"]
-        .rows
-        .len();
+    let granted = grant_connection.subscriptions["tasks.recentWorkspaceTasks"].row_count();
     assert!(
         granted > 0 && granted < tasks,
         "grant-only member sees {granted} of {tasks}"
