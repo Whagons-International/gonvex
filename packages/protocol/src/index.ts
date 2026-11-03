@@ -634,7 +634,9 @@ export type ReplicaStreamBinding = { type: "replica.stream"; id: string; stream:
 /** Items of a `replica.batch` message. */
 export type ReplicaBatchItem =
   | ReplicaStreamBinding
-  | Extract<ServerMessage, { type: "replica.delta" | "replica.ready" | "replica.transaction" }>;
+  | Extract<ServerMessage, { type: "replica.delta" | "replica.ready" | "replica.transaction" }>
+  /** Delivery v3: the connection's pending presence changes (or a resync snapshot) ride in the tick's batch. */
+  | Extract<ServerMessage, { type: "presence.patch" | "presence.snapshot" }>;
 
 /**
  * Expands a `replica.batch` message into the per-subscription frames the

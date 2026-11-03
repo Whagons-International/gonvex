@@ -93,6 +93,9 @@ pub struct ReplicaSubscription {
     /// Every table a change to which can concern this subscription
     /// (`replica_mask::concern_tables`), computed on first use.
     pub(crate) concern_tables: Option<Arc<std::collections::HashSet<String>>>,
+    /// Per inherited parent table: the parent ACL index columns (the only
+    /// parent columns its visibility reads), computed on first use.
+    pub(crate) parent_acl_columns: Option<Arc<BTreeMap<String, BTreeSet<String>>>>,
 }
 
 /// Counters of the rows a client holds, and for a truncated ordered window
@@ -635,6 +638,7 @@ impl Runtime {
                 window,
                 mask: Default::default(),
                 concern_tables: None,
+                parent_acl_columns: None,
             }),
         })
     }
@@ -793,7 +797,7 @@ impl Runtime {
                     // index complete through this revision.
                     Step::Resync(Resync::Consistency)
                 } else {
-                    self.mask_step(session, subscription, revision, &changes, &collapsed)
+                    self.mask_step(session, subscription, revision, &changes, &collapsed, share.as_deref())
                         .await?
                 }
             } else {
@@ -3134,6 +3138,7 @@ mod tests {
             window,
             mask: Default::default(),
             concern_tables: None,
+            parent_acl_columns: None,
         }
     }
 

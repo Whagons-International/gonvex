@@ -53,6 +53,28 @@ enum GrantDelta {
 
 /// Grant rows decided in memory. Additions patch the set; a removal may still
 /// be covered by another row of the member, so it re-resolves this member.
+/// Per inherited parent table, the columns of its tenant-shared ACL index
+/// (`visibility::index_columns` for this child and parent plan).
+fn parent_acl_columns(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+) -> BTreeMap<String, BTreeSet<String>> {
+    resolved
+        .inherited
+        .iter()
+        .map(|(table, parent)| {
+            let plans = BTreeMap::from([
+                (table.clone(), parent.plan.as_ref().clone()),
+                (plan.table.clone(), plan.clone()),
+            ]);
+            (
+                table.clone(),
+                visibility::index_columns(&plans, table, &parent.plan.key),
+            )
+        })
+        .collect()
+}
+
 /// Every table the visibility of `plan` (as resolved for one member) reads:
 /// its own table, every set's table and joins, parent and `inheritsAny`
 /// tables, recursively through inherited parents. A change to any other
@@ -148,6 +170,7 @@ impl Runtime {
         revision: u64,
         changes: &[LogChange],
         collapsed: &CollapsedChanges<'_>,
+        share: Option<&crate::feed_share::EventShare>,
     ) -> Result<Step, ReplicaError> {
         let metrics = &self.inner.visibility_metrics;
         let parents = subscription.visibility.inherited_columns();
@@ -347,7 +370,12 @@ impl Runtime {
                 overlay.push((
                     change.table.clone(),
                     change.row_id.clone(),
-                    (!image.is_null()).then(|| Arc::new(image.clone())),
+                    (!image.is_null()).then(|| match share {
+                        // One copy of the before-image per event, not per
+                        // subscription.
+                        Some(share) => share.image(image),
+                        None => Arc::new(image.clone()),
+                    }),
                 ));
                 let (Some(was_parent), Some(now_parent)) = (
                     before.inherited.get(&change.table),
@@ -355,9 +383,26 @@ impl Runtime {
                 ) else {
                     continue;
                 };
-                let last = collapsed
-                    .get(&(change.table.as_str(), change.row_id.as_str()))
-                    .map_or(&change.new_value, |collapsed| collapsed.new);
+                let net = collapsed.get(&(change.table.as_str(), change.row_id.as_str()));
+                let last = net.map_or(&change.new_value, |collapsed| collapsed.new);
+                // An update that changed none of the parent's ACL index
+                // columns, under an unchanged principal, cannot flip whether
+                // the parent admits its children (parent visibility reads
+                // only those columns).
+                if context.before.is_none() && !image.is_null() && !last.is_null() {
+                    let columns = Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
+                        Arc::new(parent_acl_columns(&subscription.visibility, &subscription.resolved))
+                    }));
+                    let unchanged = net.is_some_and(|net| {
+                        !net.changed_columns.is_empty()
+                            && columns.get(&change.table).is_some_and(|acl| {
+                                net.changed_columns.iter().all(|column| !acl.contains(*column))
+                            })
+                    });
+                    if unchanged {
+                        continue;
+                    }
+                }
                 let was =
                     subscription
                         .visibility

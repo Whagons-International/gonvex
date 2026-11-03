@@ -189,16 +189,20 @@ impl Fixture {
     }
 
     async fn connect(&self, token: &str, tenant: &str, presence: bool) -> Socket {
+        let mut capabilities = json!({"preserveSubscriptions":1});
+        if presence {
+            capabilities["presence"] = json!(1);
+        }
+        self.connect_with(token, tenant, capabilities).await
+    }
+
+    async fn connect_with(&self, token: &str, tenant: &str, capabilities: Value) -> Socket {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.address))
             .await
             .unwrap();
         let ready = next_json(&mut socket).await;
         assert_eq!(ready["type"], "session.ready");
         assert_eq!(ready["capabilities"]["presence"], 1);
-        let mut capabilities = json!({"preserveSubscriptions":1});
-        if presence {
-            capabilities["presence"] = json!(1);
-        }
         send(
             &mut socket,
             json!({"type":"auth","id":"auth","token":token,"project":"project","tenant":tenant,"capabilities":capabilities}),
@@ -700,4 +704,37 @@ async fn periodic_refresh_updates_open_sessions_without_control_fanout() {
     fixture.server.abort();
     fixture.runtime.shutdown().await;
     fixture.pools.close().await;
+}
+
+/// Delivery v3: a connection that negotiated `replicaBatchFrames` receives
+/// its presence changes as items of the tick's `replica.batch` (one frame per
+/// tick), never as separate `presence.patch` frames.
+#[tokio::test]
+async fn presence_patches_ride_in_the_replica_batch() {
+    let fixture = fixture(config()).await;
+    let (alice, alice_token) = fixture.member("tenant-a", "alice@example.test").await;
+    let (_bob, bob_token) = fixture.member("tenant-a", "bob@example.test").await;
+    let mut bob = fixture
+        .connect_with(
+            &bob_token,
+            "tenant-a",
+            json!({"preserveSubscriptions":1,"replicaBatchFrames":1,"presence":1}),
+        )
+        .await;
+    send(&mut bob, json!({"type":"presence.subscribe","id":"watch"})).await;
+    let snapshot = next_presence(&mut bob).await;
+    assert_eq!(snapshot["type"], "presence.snapshot");
+    let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
+    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    let batch = loop {
+        let frame = next_json(&mut bob).await;
+        assert_ne!(frame["type"], "presence.patch", "presence outside the batch: {frame}");
+        if frame["type"] == "replica.batch" {
+            break frame;
+        }
+    };
+    assert_eq!(batch["tenant"].is_string(), true);
+    let items = batch["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{batch}");
+    assert_eq!(changes(&items[0]), vec![(alice.clone(), "active".into())]);
 }

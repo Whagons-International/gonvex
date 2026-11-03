@@ -668,6 +668,22 @@ impl ReplicaBatcher {
         Ok(None)
     }
 
+    /// Appends a non-replica item (delivery v3: the connection's drained
+    /// `presence.patch`) to the open batch, opening one when needed. It counts
+    /// as data: the batch goes at the next tick, so presence keeps its own
+    /// cadence (one drain per presence tick) without a frame of its own.
+    pub fn push_item(
+        &mut self,
+        socket: &mut OutboundBatch,
+        tenant_id: &str,
+        replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
+        text: String,
+    ) {
+        self.ensure_open(socket, tenant_id, replicas);
+        self.push_segment(socket, Segment::Inline(Bytes::from(text)));
+        self.data += 1;
+    }
+
     /// Records the connection's watermark for the open batch (opening a
     /// watermark-only batch when needed).
     pub fn watermark(

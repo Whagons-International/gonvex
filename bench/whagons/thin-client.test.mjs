@@ -162,6 +162,20 @@ test('presence v2: capability, transitions only, re-announce after auth, snapsho
   assert.deepEqual(ThinClient.stats.unsupported, {});
 });
 
+test('presence v2: presence.patch items in a replica.batch apply like the separate frame', async () => {
+  const { c, sent } = connected();
+  c.serverCapabilities = { replicaWatermark: 1, controlWatermark: 1, presence: 1 };
+  c.authReady = true;
+  c.subscribePresence(() => {});
+  const id = sent.find((m) => m.type === 'presence.subscribe').id;
+  c.dispatch({ type: 'presence.snapshot', id, serverTime: 1, members: [{ memberId: 'm1', state: 'active', since: 1 }] });
+  c.dispatch({ type: 'replica.batch', tenant: 't', class: '00000000000000aa', from: 0, items: [
+    { type: 'presence.patch', serverTime: 2, changes: [{ memberId: 'm1', state: 'offline', since: 2 }, { memberId: 'm2', state: 'idle', since: 2 }] },
+  ] });
+  assert.deepEqual([...c.presenceSnapshot().members.keys()], ['m2']);
+  assert.deepEqual(ThinClient.stats.unsupported, {});
+});
+
 test('presence v2: nothing is sent to a runtime without the capability', () => {
   const { c, sent } = connected();
   c.setPresence('active');

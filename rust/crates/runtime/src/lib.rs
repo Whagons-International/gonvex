@@ -2001,7 +2001,17 @@ async fn websocket(
             } => {
                 if let Some(slot) = presence_slot.as_ref() {
                     if let Some(frame) = presence_hub.drain(&connection_id, slot) {
-                        if socket.send(Message::Text(frame.into())).await.is_err() { return; }
+                        match tenant_session.as_ref() {
+                            // Delivery v3: presence rides in the tick's batch
+                            // (one frame per tick per connection).
+                            Some(session) if batcher.enabled() => {
+                                batcher.push_item(socket.batch_mut(), &session.route.tenant_id, &replicas, frame);
+                                if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
+                            }
+                            _ => {
+                                if socket.send(Message::Text(frame.into())).await.is_err() { return; }
+                            }
+                        }
                     }
                 }
                 continue;

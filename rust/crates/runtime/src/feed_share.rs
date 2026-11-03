@@ -91,6 +91,9 @@ pub struct EventShare {
     changes: Arc<Vec<LogChange>>,
     pub(crate) memo: Mutex<EvalMemo>,
     decisions: Mutex<HashMap<DecisionKey, Arc<RowDecision>>>,
+    /// Shared copies of change images (parent before-image overlays), by
+    /// address in `changes`.
+    images: Mutex<HashMap<usize, Arc<serde_json::Value>>>,
 }
 
 impl EventShare {
@@ -104,6 +107,18 @@ impl EventShare {
 
     pub(crate) fn insert(&self, key: DecisionKey, decision: Arc<RowDecision>) {
         self.decisions.lock().unwrap().insert(key, decision);
+    }
+
+    /// One shared copy of `image`, a row image of this event's changes.
+    pub(crate) fn image(&self, image: &serde_json::Value) -> Arc<serde_json::Value> {
+        let address = image as *const serde_json::Value as usize;
+        Arc::clone(
+            self.images
+                .lock()
+                .unwrap()
+                .entry(address)
+                .or_insert_with(|| Arc::new(image.clone())),
+        )
     }
 
     /// Decisions shared so far (tests and benchmarks).
@@ -144,6 +159,7 @@ impl EventShares {
             changes: Arc::clone(changes),
             memo: Mutex::default(),
             decisions: Mutex::default(),
+            images: Mutex::default(),
         });
         recent.push_back(Arc::clone(&share));
         while recent.len() > KEEP_EVENTS {
