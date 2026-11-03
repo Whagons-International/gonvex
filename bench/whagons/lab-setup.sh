@@ -14,7 +14,13 @@ compose=(docker compose -f "$bench/compose.yaml" ${LOAD_COMPOSE_OVERRIDE:+-f "$L
 headroom() { until ${LOAD_HEADROOM_CHECK:-true} "$lab"; do sleep 30; done; }
 "${compose[@]}" --profile load down --remove-orphans >/dev/null 2>&1 || true
 docker volume rm $prefix-state >/dev/null 2>&1 || true
-rm -rf "$lab/auth-export" "$lab/auth-golden" "$lab/fixture.json" "$lab/fixture.json.metrics.jsonl"
+# A fresh named volume is root-owned; the runtime and tools run as LOAD_UID.
+docker volume create $prefix-state >/dev/null
+# Keep it non-empty: Docker copies the image mount point (root-owned) into an empty volume.
+docker run --rm -v $prefix-state:/state alpine:latest sh -c "mkdir -p /state/data && chown -R ${LOAD_UID:-0}:${LOAD_GID:-0} /state"
+# The auth emulator runs as root, so its exports are root-owned.
+docker run --rm -v "$lab:/lab" alpine:latest rm -rf /lab/auth-export /lab/auth-golden
+rm -rf "$lab/fixture.json" "$lab/fixture.json.metrics.jsonl"
 headroom
 "${compose[@]}" up -d --wait --wait-timeout 240
 "${compose[@]}" run --name $prefix-generator --rm --no-deps generator setup > "$lab/setup.log" 2>&1
@@ -30,6 +36,6 @@ grep -c '"ok":true' "$lab/verify.log"
 # Freeze the emulator's accounts while it runs (export-on-exit never fires:
 # SIGTERM stops npx before the emulator exports). Every later start imports
 # this copy, so a teardown cannot leave auth out of step with tenant members.
-"${compose[@]}" exec -T auth npx --offline --yes firebase-tools@15.11.0 emulators:export /state/auth-golden \
+"${compose[@]}" exec -T auth ${LOAD_FIREBASE_CLI:-npx --offline --yes firebase-tools@15.11.0} emulators:export /state/auth-golden \
   --project demo-whagons-e2e --force > "$lab/auth-export.log" 2>&1
 test -d "$lab/auth-golden"

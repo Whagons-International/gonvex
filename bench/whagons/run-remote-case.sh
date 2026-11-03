@@ -50,10 +50,15 @@ systemd-run --user --quiet --unit="$tunnel" --collect -- ssh -N -o ExitOnForward
 tunnel_cg=/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value "$tunnel.service")
 proxy_cg=/sys/fs/cgroup$(sed -n 's/^0:://p' "/proc/$(docker inspect "$prefix-remote-proxy" --format '{{.State.Pid}}')/cgroup")
 "${compose[@]}" run -d --rm --no-deps --name "$prefix-monitor" monitor "/lab/$label" "$proxy_cg" "$tunnel_cg" > /dev/null
-# /dev/metrics snapshots from this side (independent of the generator).
+# /dev/metrics and /dev/profile snapshots every 10 s from this side (independent of the generator).
 ( while :; do
    m=$(curl -s --max-time 5 --unix-socket "$lab/proxy/runtime.sock" -H 'authorization: Bearer local-load-admin' http://127.0.0.1/dev/metrics || true)
    [ -z "$m" ] || printf '{"at":%s,"metrics":%s}\n' "$(date +%s%3N)" "$m" >> "$out/dev-metrics.jsonl"
+   # /dev/profile dumps (perf/profiler); pick the two that bracket the plateau
+   # and diff them with bench/profiler/top.py --delta.
+   mkdir -p "$out/profile"
+   curl -sf --max-time 5 --unix-socket "$lab/proxy/runtime.sock" -H 'authorization: Bearer local-load-admin' \
+    -o "$out/profile/$(date +%s%3N).json" http://127.0.0.1/dev/profile || true
    sleep 10
   done ) & poller=$!
 finish() {
