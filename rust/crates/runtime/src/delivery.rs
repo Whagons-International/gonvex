@@ -45,8 +45,8 @@ const MAX_MEMO_BYTES: usize = 8 << 20;
 pub struct BatchConfig {
     /// A batch holding replica data is sent at most this long after it opened.
     pub tick: Duration,
-    /// A batch holding only a watermark waits this long (unless a call is
-    /// waiting for that revision, then `tick`).
+    /// A batch without changed rows (only `replica.ready` items and/or a
+    /// watermark) waits this long, unless a call waits for that revision.
     pub idle: Duration,
     /// A batch is sent as soon as it holds this many uncompressed bytes.
     pub max_bytes: usize,
@@ -261,6 +261,8 @@ pub struct ReplicaBatcher {
     open: bool,
     opened_at: Option<Instant>,
     items: usize,
+    /// Transaction and delta items (changed rows) in the open batch.
+    data: usize,
     watermark: Option<u64>,
     last_watermark: u64,
     urgent_through: u64,
@@ -284,6 +286,7 @@ impl ReplicaBatcher {
             open: false,
             opened_at: None,
             items: 0,
+            data: 0,
             watermark: None,
             last_watermark: 0,
             urgent_through: 0,
@@ -294,9 +297,11 @@ impl ReplicaBatcher {
         self.enabled
     }
 
-    /// Whether the open batch holds replica items (not only a watermark).
+    /// Whether the open batch holds changed rows (transaction or delta
+    /// items). A batch of only `replica.ready` items and a watermark carries
+    /// no row change for this connection and waits for the idle delay.
     pub fn has_items(&self) -> bool {
-        self.open && self.items > 0
+        self.open && self.data > 0
     }
 
     /// Negotiated at authentication (client `replicaBatchFrames: 1`).
@@ -324,7 +329,7 @@ impl ReplicaBatcher {
         let urgent = self
             .watermark
             .is_some_and(|watermark| self.urgent_through > 0 && watermark >= self.urgent_through);
-        Some(if self.items > 0 || urgent {
+        Some(if self.data > 0 || urgent {
             opened_at + self.config.tick
         } else {
             opened_at + self.config.idle
@@ -355,6 +360,7 @@ impl ReplicaBatcher {
             self.open = false;
             self.opened_at = None;
             self.items = 0;
+            self.data = 0;
             if let Some(watermark) = self.watermark.take() {
                 self.last_watermark = self.last_watermark.max(watermark);
                 if watermark >= self.urgent_through {
@@ -385,6 +391,7 @@ impl ReplicaBatcher {
         self.open = true;
         self.opened_at = Some(Instant::now());
         self.items = 0;
+        self.data = 0;
         self.watermark = None;
     }
 
@@ -533,6 +540,7 @@ impl ReplicaBatcher {
                 )?;
                 self.push_segment(socket, Segment::Shared(text));
                 socket.push(Segment::Inline(Bytes::from(tail)));
+                self.data += 1;
                 return Ok(None);
             }
             ServerMessage::ReplicaReady {
@@ -574,6 +582,7 @@ impl ReplicaBatcher {
             message,
         )?;
         self.push_segment(socket, Segment::Shared(text));
+        self.data += 1;
         Ok(None)
     }
 

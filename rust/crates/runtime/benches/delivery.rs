@@ -253,7 +253,7 @@ async fn run() {
             let stats_before = frames_memo.stats();
             let mut v2 = v2_connections(members);
             let mut wires = Vec::new();
-            let mut watermark_only = 0u64;
+            let mut deferred = 0u64;
             let mut inputs = Vec::new();
             let config = BenchConfig::new(3, 20);
             for _ in 0..config.warmup + config.iterations {
@@ -297,9 +297,11 @@ async fn run() {
                             if connection.batcher.has_items() {
                                 wire.add(v2_flush(connection));
                             } else {
-                                // Watermark-only: waits for the idle delay;
-                                // counted below as one frame per idle period.
-                                watermark_only += 1;
+                                // No changed row for this member (only its
+                                // collection's ready/digest and the watermark):
+                                // waits for the idle delay, coalesced with
+                                // later changes; not counted per change.
+                                deferred += 1;
                                 let _ = connection.batcher.take_frame(&mut connection.batch, None);
                             }
                         }
@@ -330,8 +332,8 @@ async fn run() {
                 if path == Path::V2 {
                     let total = (config.warmup + config.iterations) as f64;
                     result.extra.insert(
-                        "watermarkOnlyConnectionsPerChange".into(),
-                        json!(watermark_only as f64 / total),
+                        "deferredNoRowChangeConnectionsPerChange".into(),
+                        json!(deferred as f64 / total),
                     );
                     memo_extra(&mut result.extra, stats_before, &frames_memo, total);
                 }

@@ -3,12 +3,12 @@ pub mod change_feed;
 pub mod config;
 pub mod control;
 mod dashboard;
+pub mod delivery;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
 #[cfg(not(feature = "duckdb"))]
 #[path = "data_ingest_disabled.rs"]
 mod data_ingest;
-pub mod delivery;
 pub mod error_class;
 pub mod execution;
 pub mod external_auth;
@@ -255,9 +255,9 @@ impl Runtime {
                 public_limiter: Arc::new(public_functions::PublicLimiter::default()),
                 visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 parent_acl: visibility::ParentAclRegistry::default(),
+                delivery: delivery::DeliveryHub::default(),
             }),
         }
-                delivery: delivery::DeliveryHub::default(),
     }
 
     pub async fn start(&self) -> Result<(), RuntimeStartError> {
@@ -1448,9 +1448,9 @@ async fn websocket(
     let mut replica_no_old_values_enabled = false;
     let mut replica_field_patches_enabled = false;
     let mut row_patches = gonvex_protocol::row_patch::RowPatchEncoder::default();
+    let mut batcher = delivery::ReplicaBatcher::default();
     let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
     let mut legacy_snapshot_delivery = snapshot_delivery::LegacySnapshotDelivery::default();
-    let mut batcher = delivery::ReplicaBatcher::default();
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
@@ -1499,9 +1499,9 @@ async fn websocket(
             replica_watermark: Some(1),
             reducer_receipt_lookup: Some(1),
             control_watermark: Some(1),
+            replica_batch_frames: Some(1),
         }),
     };
-            replica_batch_frames: Some(1),
     if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
         .await
         .is_err()
@@ -1515,9 +1515,9 @@ async fn websocket(
         () => {{
             replicas.clear();
             row_patches.clear();
+            batcher.clear_bindings();
             replica_opens.clear();
             pending_replica_opens.clear();
-            batcher.clear_bindings();
             snapshot_delivery.clear();
             legacy_snapshot_delivery.clear();
             live_queries.clear();
@@ -1551,15 +1551,15 @@ async fn websocket(
             bytes > replica_open_queue::MAX_BYTES || replica_opens.has_capacity(&request.id, bytes)
         });
         let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
-        let message = tokio::select! {
-            _ = std::future::ready(()), if admit_replica => {
         let batch_deadline = batcher.deadline(socket.batch());
-                let request = pending_replica_opens.pop_front().unwrap();
+        let message = tokio::select! {
             // Delivery v2: one frame per connection per tick.
             _ = async { tokio::time::sleep_until(batch_deadline.unwrap()).await }, if batch_deadline.is_some() => {
                 if batcher.flush(&mut socket).await.is_err() { return; }
                 continue;
             }
+            _ = std::future::ready(()), if admit_replica => {
+                let request = pending_replica_opens.pop_front().unwrap();
                 snapshot_delivery.remove(&request.id);
                 legacy_snapshot_delivery.remove(&request.id);
                 replicas.remove(&request.id);
@@ -1682,8 +1682,6 @@ async fn websocket(
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
                             match runtime.apply_feed_event(session, &mut replicas, event).await {
-                                Ok(messages) => {
-                                    for mut message in messages {
                                 Ok(messages) if batcher.enabled() => {
                                     let tenant_id = session.route.tenant_id.as_str();
                                     for message in messages {
@@ -1713,6 +1711,8 @@ async fn websocket(
                                         legacy_snapshot_delivery.clear();
                                     }
                                 }
+                                Ok(messages) => {
+                                    for mut message in messages {
                                         if replica_field_patches_enabled && !replica_native_rows_enabled {
                                             match row_patches.prepare(&message) {
                                                 Ok(Some((full, patch))) => {
@@ -2252,12 +2252,12 @@ async fn websocket(
                     replica_field_patches_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_field_patches) == Some(1);
                     row_patches.clear();
-                    replica_native_rows_enabled =
-                        snapshot_delivery::negotiated(capabilities.as_ref());
                     batcher.set_enabled(
                         capabilities.as_ref().and_then(|c| c.replica_batch_frames) == Some(1),
                     );
                     batcher.clear_bindings();
+                    replica_native_rows_enabled =
+                        snapshot_delivery::negotiated(capabilities.as_ref());
                     snapshot_delivery.set_native(replica_native_rows_enabled);
                     replica_sum_digest_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_set_digest) == Some(1);
@@ -2388,13 +2388,13 @@ async fn websocket(
                             .min()
                             .map(|revision| revision.max(sent_replica_revision)),
                     );
-                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
-                        .await
                     if terminal_watermark.is_none() {
                         if let Some(revision) = committed_revision(&response) {
                             batcher.urgent(revision);
                         }
                     }
+                    if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
+                        .await
                         .is_err()
                     {
                         break;
@@ -2623,13 +2623,13 @@ async fn websocket(
                             .min()
                             .map(|revision| revision.max(sent_replica_revision)),
                     );
-                    let control_succeeded =
-                        control_write && matches!(response, ServerMessage::ReducerResult { .. });
                     if terminal_watermark.is_none() {
                         if let Some(revision) = committed_revision(&response) {
                             batcher.urgent(revision);
                         }
                     }
+                    let control_succeeded =
+                        control_write && matches!(response, ServerMessage::ReducerResult { .. });
                     let control_updates = if control_succeeded {
                         runtime
                             .refresh_control_queries(
@@ -2738,13 +2738,13 @@ async fn websocket(
                                 .min()
                                 .map(|revision| revision.max(sent_replica_revision)),
                         );
-                        let control_succeeded = control_write
-                            && matches!(response, ServerMessage::ReducerResult { .. });
                         if terminal_watermark.is_none() {
                             if let Some(revision) = committed_revision(&response) {
                                 batcher.urgent(revision);
                             }
                         }
+                        let control_succeeded = control_write
+                            && matches!(response, ServerMessage::ReducerResult { .. });
                         let control_updates = if control_succeeded {
                             runtime
                                 .refresh_control_queries(
@@ -2861,13 +2861,13 @@ async fn websocket(
                             .min()
                             .map(|revision| revision.max(sent_replica_revision)),
                     );
-                    let control_succeeded = scope == Some(ExecutionScope::Control)
-                        && matches!(response, ServerMessage::ActionResult { .. });
                     if terminal_watermark.is_none() {
                         if let Some(revision) = committed_revision(&response) {
                             batcher.urgent(revision);
                         }
                     }
+                    let control_succeeded = scope == Some(ExecutionScope::Control)
+                        && matches!(response, ServerMessage::ActionResult { .. });
                     let control_updates = if control_succeeded {
                         runtime
                             .refresh_control_queries(
@@ -3425,8 +3425,6 @@ fn bootstrap_watermark_after_sent_snapshots(
         .then_some(ServerMessage::ReplicaWatermark { revision })
 }
 
-fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
-    match event {
 /// The revision a durable call result waits for before it settles.
 fn committed_revision(response: &ServerMessage) -> Option<u64> {
     match response {
@@ -3440,6 +3438,8 @@ fn committed_revision(response: &ServerMessage) -> Option<u64> {
     }
 }
 
+fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
+    match event {
         change_feed::FeedEvent::Transaction { revision, .. } => {
             Some(ServerMessage::ReplicaWatermark {
                 revision: *revision,
