@@ -508,15 +508,10 @@ impl Runtime {
             .with_profile_label(profile_label)
             .with_intent(&session.route.tenant_id, command_id)
             .with_schema(&module.schema)
-            .with_schedulable_functions(
-                module
-                    .functions
-                    .iter()
-                    .filter(|(_, definition)| {
-                        matches!(definition.kind.as_str(), "reducer" | "action")
-                    })
-                    .map(|(path, _)| path.clone()),
-            )
+            // Every Reducer call used to copy all ~2,000 function names into
+            // a fresh BTreeSet here; the module's own table answers the same
+            // question.
+            .with_schedulable_module(module.shared())
             .with_actor(
                 &session.identity.account.id,
                 &session.identity.account.email,

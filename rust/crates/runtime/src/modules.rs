@@ -126,6 +126,13 @@ pub struct ModuleCallLease {
     _activation: Arc<OwnedRwLockReadGuard<()>>,
 }
 
+impl ModuleCallLease {
+    /// The leased module itself (shared, no copy).
+    pub fn shared(&self) -> Arc<ProjectModule> {
+        self.module.clone()
+    }
+}
+
 impl std::ops::Deref for ModuleCallLease {
     type Target = ProjectModule;
 

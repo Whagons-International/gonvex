@@ -112,6 +112,9 @@ pub struct DatabaseHostCalls {
     schema: Value,
     tables: BTreeMap<String, Arc<TableCatalog>>,
     schedulable_functions: BTreeSet<String>,
+    /// The calling module: `scheduler.*` targets are checked against its
+    /// function table instead of a per-call copy of every function name.
+    schedulable_module: Option<Arc<crate::modules::ProjectModule>>,
     actor_account_id: String,
     actor_email: String,
     provenance: Value,
@@ -146,6 +149,7 @@ impl DatabaseHostCalls {
             schema: Value::Null,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
@@ -173,6 +177,7 @@ impl DatabaseHostCalls {
             schema: Value::Null,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
@@ -315,6 +320,27 @@ impl DatabaseHostCalls {
     pub fn with_schema(mut self, schema: &Value) -> Self {
         self.schema = schema.clone();
         self
+    }
+
+    /// Schedulable targets are this module's Reducers and Actions.
+    pub(crate) fn with_schedulable_module(
+        mut self,
+        module: Arc<crate::modules::ProjectModule>,
+    ) -> Self {
+        self.schedulable_module = Some(module);
+        self
+    }
+
+    fn schedulable(&self, function: &str) -> bool {
+        if self.schedulable_functions.contains(function) {
+            return true;
+        }
+        self.schedulable_module.as_ref().is_some_and(|module| {
+            module
+                .functions
+                .get(function)
+                .is_some_and(|definition| matches!(definition.kind.as_str(), "reducer" | "action"))
+        })
     }
 
     pub fn with_schedulable_functions(
@@ -601,7 +627,7 @@ impl DatabaseHostCalls {
     ) -> Result<Value, String> {
         self.require_open()?;
         let function = function.trim();
-        if !self.schedulable_functions.contains(function) {
+        if !self.schedulable(function) {
             return Err(format!(
                 "scheduled function {function:?} is not a registered Reducer or Action"
             ));
@@ -1237,6 +1263,7 @@ mod tests {
             schema,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
@@ -1278,6 +1305,7 @@ mod tests {
             schema,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
