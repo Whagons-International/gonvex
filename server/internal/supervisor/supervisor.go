@@ -20,7 +20,9 @@ import (
 )
 
 const (
-	defaultStartupTimeout = 5 * time.Minute
+	// Plugin compiles on a busy host took more than 5 minutes on 2026-11-02 and
+	// the new container killed itself mid-deploy; allow a slow cold start.
+	defaultStartupTimeout = 30 * time.Minute
 	defaultDrainTimeout   = 20 * time.Second
 	defaultHealthInterval = 250 * time.Millisecond
 	recycleWorkerHeader   = "X-Gonvex-Recycle-Worker"
