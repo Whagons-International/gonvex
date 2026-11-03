@@ -37,7 +37,7 @@
  * Unsupported server frames are counted in `ThinClient.stats.unsupported` and
  * reported by the harness, so a protocol drift cannot pass silently.
  */
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 const ZERO_DIGEST = 'xor1:' + '0'.repeat(64);
 const MAX_BATCH_OPENS = 256;
@@ -89,6 +89,15 @@ class ChangeCache {
     if (this.map.size > this.limit) this.map.delete(this.map.keys().next().value);
     return change;
   }
+}
+
+// The SDK's replica-integrity stableStringify (sorted keys by UTF-8 bytes, U+2028/9 escaped).
+const utf8Compare = (a, b) => (!/[^\x00-\x7f]/.test(a) && !/[^\x00-\x7f]/.test(b)) ? (a < b ? -1 : a > b ? 1 : 0) : Buffer.compare(Buffer.from(a), Buffer.from(b));
+function stableStringify(value) {
+  if (typeof value === 'string') return JSON.stringify(value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(value).sort(utf8Compare).map((k) => `${stableStringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
 }
 
 export const defaultPool = new RowPool();
@@ -424,7 +433,7 @@ export class ThinClient {
       case 'replica.syncing': { const sub = this.byId.get(m.id); if (sub) { sub.isUpToDate = false; sub.notify(); } return; }
       case 'replica.closed': return;
       case 'presence.snapshot': case 'presence.patch': case 'presence.error': return this.onPresence(m);
-      case 'replica.needHashes': // The SDK re-opens with full integrity; a cold open is the thin equivalent.
+      case 'replica.needHashes': return this.onNeedHashes(m);
       case 'replica.reset': { ThinClient.stats.resets++; const sub = this.byId.get(m.id); if (sub) { this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); this.openSubscription(sub); sub.notify(); } return; }
       case 'replica.error': { const sub = this.byId.get(m.id); if (sub) { sub.error = new Error(m.error); sub.notify(); } this.unsupported('replica.error: ' + String(m.error).slice(0, 160)); return; }
       default: this.unsupported(m.type || 'untyped');
@@ -548,6 +557,32 @@ export class ThinClient {
     const ack = { type: 'replica.snapshotAck', id: m.id, snapshotId: m.snapshotId, sequence: m.sequence };
     if (this.ackDelayMs > 0) setTimeout(() => { if (this.socket?.readyState === 1) this.rawSend(ack); }, this.ackDelayMs);
     else this.rawSend(ack);
+  }
+  /** replica.needHashes (also unsolicited on an open subscription since
+   * perf/replica-state): like the SDK, keep the rows and reopen the same id
+   * with cursor, keys, row hashes and their xor1 aggregate (fullIntegrity), so
+   * the server streams only differing rows. Hashes use the SDK's
+   * stableStringify + SHA-256 over the row projected to the declared columns. */
+  onNeedHashes(m) {
+    ThinClient.stats.needHashes = (ThinClient.stats.needHashes || 0) + 1;
+    const sub = this.byId.get(m.id);
+    if (!sub) return;
+    sub.dropStaging();
+    const cols = sub.ref.replica?.columns;
+    const keys = [], hashes = {}, aggregate = Buffer.alloc(32);
+    for (const [key, entry] of sub.rows) {
+      let row = entry.value;
+      if (cols?.length) { const projected = {}; for (const c of cols) if (Object.prototype.hasOwnProperty.call(row, c)) projected[c] = row[c]; row = projected; }
+      const hash = createHash('sha256').update(stableStringify(row)).digest();
+      for (let i = 0; i < 32; i++) aggregate[i] ^= hash[i];
+      keys.push(key); hashes[key] = hash.toString('hex');
+    }
+    sub.opening = true; sub.isUpToDate = false; sub.notify();
+    const cursor = sub.readyCursor;
+    const open = cursor
+      ? { id: sub.id, path: sub.path, args: sub.args, cursor, keys, hashes, digest: 'xor1:' + aggregate.toString('hex'), fullIntegrity: true }
+      : { id: sub.id, path: sub.path, args: sub.args, digest: ZERO_DIGEST };
+    if (this.socket?.readyState === 1 && this.authReady) this.rawSend({ type: 'replica.openMany', opens: [open] });
   }
   /** Legacy JSON pages (and single-frame replica.snapshot): stage, no ACK. */
   onLegacySnapshotPage(m) {

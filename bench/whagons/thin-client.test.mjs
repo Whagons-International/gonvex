@@ -192,3 +192,24 @@ test('presence v2: nothing is sent to a runtime without the capability', () => {
   assert.equal(c.presenceSupported(), false);
   assert.equal(sent.filter((m) => String(m.type).startsWith('presence.')).length, 0);
 });
+
+test('needHashes on an open subscription reopens the same id with keys, hashes and the xor1 aggregate', async () => {
+  const { c, sent } = connected();
+  const w = c.watchReplica(ref, {}); w.onUpdate(() => {}); await tick();
+  const id = sent.find((m) => m.type === 'replica.openMany').opens[0].id;
+  const cursor = { epoch: 'e', revision: 4 };
+  c.dispatch({ type: 'replica.snapshot', id, cursor, key: '_id', result: [{ _id: 'a', name: 'A' }, { _id: 'b', name: 'B' }] });
+  c.dispatch({ type: 'replica.ready', id, cursor, digest: 'd' });
+  c.dispatch({ type: 'replica.needHashes', id });
+  const open = sent.at(-1).opens[0];
+  assert.deepEqual(Object.keys(open), ['id', 'path', 'args', 'cursor', 'keys', 'hashes', 'digest', 'fullIntegrity']);
+  assert.equal(open.id, id);
+  assert.deepEqual(open.keys, ['a', 'b']);
+  const { createHash } = await import('node:crypto');
+  assert.equal(open.hashes.a, createHash('sha256').update('{"_id":"a","name":"A"}').digest('hex'));
+  assert.equal(w.status().isUpToDate, false);
+  c.dispatch({ type: 'replica.delta', id, cursor: { epoch: 'e', revision: 5 }, upserts: [{ _id: 'b', name: 'B2' }], deleted: ['a'] });
+  c.dispatch({ type: 'replica.ready', id, cursor: { epoch: 'e', revision: 5 }, digest: 'd' });
+  assert.deepEqual(w.localReplicaResult(), [{ _id: 'b', name: 'B2' }]);
+  assert.deepEqual(c.constructor.stats.unsupported, {});
+});
