@@ -108,3 +108,14 @@ follow-up. The four membership-change rebuilds must not be described as one
 shared rebuild or as establishing that portion of V3. The guarantee above remains
 intended and incomplete. Pure in-memory relevance checks are excluded from the
 fixture's definition of expensive per-connection work.
+
+
+## Live Query relation and projection routing
+
+Version 2 Live Queries retain the admitted mask for every related table. Related-row changes use that table's mask, including recursive parents and derived grants, and await all its shared indexes before deciding relevance. A hidden relation does not wake other members. A related table that is also a projection or search input still follows the separate projection rule.
+
+Projection and search rows route by their configured root key in both old and new payloads. They use root rows from the same event, or the manifest-required shared root ACL index, and preserve previously held result IDs. Root event payloads are indexed once per event rather than scanned per member and source row. Composite source keys do not assume `change.row_id` is the root ID.
+
+Dependency hints remain in the manifest for offline evaluation. The server skips hint-only wakes only when the tenant catalog proves all projection sources have the installed, enabled change-feed triggers. Proofs are shared by tenant route, module hash and epoch and invalidated on module replacement. A view or untracked source retains conservative dependency wakes. Plans without a manifest-required root ACL index retain conservative wakes as well. Search continues to read source text under the root's visibility, exactly as its SQL does.
+
+The native fixture includes 201 Live Query connections, hidden and visible related/projection/search writes, grant/revoke, unchanged hints, source key moves, colliding composite-key feed IDs and an untracked view. Separate base controls fail the relation and projection routing assertions without the corresponding fix. This does not claim zero work when a change genuinely affects every member's exact query window.
