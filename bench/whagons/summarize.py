@@ -98,13 +98,18 @@ for phase in sys.argv[2:]:
             steady = [x['metrics']['websocket']['accounts'] for x in metrics]
             stats['steadyAccountSamples'] = len(steady)
             stats['minSteadyAuthenticatedAccounts'] = min(steady)
-            # The reconnect wave drops ~30% of sessions for a few seconds by
-            # design: every user must be connected in 90% of samples and at
-            # the end of the plateau.
+            # The reconnect wave drops ~30% of sessions on purpose. Outside its
+            # window (plus 30 s for those users to sign in and reload), every
+            # user must be connected in every sample, and at the end.
             target_users = r.get('targetUsers', 0)
-            connected = sum(x >= target_users for x in steady) / len(steady)
-            stats['fullyConnectedSampleShare'] = connected
-            if connected < 0.9 or steady[-1] < target_users:
+            # Older results lack the window; the wave starts at the plateau midpoint.
+            middle = (r.get('steadyStartMs', 0) + r.get('steadyEndMs', 0)) / 2
+            window = r.get('reconnectWindowMs') or [middle, middle + 10000]
+            outside = [x['metrics']['websocket']['accounts'] for x in metrics
+                       if not window[0] <= x['at'] <= window[1] + 30000]
+            stats['fullyConnectedSampleShare'] = sum(x >= target_users for x in steady) / len(steady)
+            stats['disconnectedSamplesOutsideReconnectWave'] = sum(x < target_users for x in outside)
+            if stats['disconnectedSamplesOutsideReconnectWave'] or steady[-1] < target_users:
                 stats['capacityPassed'] = False
             first = metrics[0]['metrics']['database']
             last = metrics[-1]['metrics']['database']
