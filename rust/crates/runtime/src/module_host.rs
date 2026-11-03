@@ -84,6 +84,10 @@ pub struct ModuleHost {
     endpoint: RwLock<Option<String>>,
     child: Mutex<Option<Child>>,
     status: RwLock<ModuleHostStatus>,
+    /// Isolates owned by this process (`config.in_process`). The same module
+    /// registry, admission and error rules as the separate host, without the
+    /// socket: see `in_process.rs`.
+    local: Option<Arc<gonvex_module_host::session::HostState>>,
 }
 
 /// Runtime-side timing of one module-host invocation (ns), handed to the
@@ -123,6 +127,8 @@ impl ModuleHost {
             }),
             endpoint: RwLock::new(config.endpoint.clone()),
             child: Mutex::new(None),
+            local: (config.enabled && config.in_process)
+                .then(|| crate::in_process::host_state(&config)),
             config,
         })
     }
@@ -130,6 +136,16 @@ impl ModuleHost {
     pub async fn start(&self) -> Result<(), ModuleHostError> {
         if !self.config.enabled {
             return Ok(());
+        }
+        if self.local.is_some() {
+            // Idempotent; production initializes the platform in `main`
+            // before Tokio starts its worker threads.
+            gonvex_module_runtime_v8::initialize_v8_platform();
+            let mut status = self.status.write().await;
+            status.ready = true;
+            status.reason = None;
+            drop(status);
+            return self.ping().await;
         }
         if self.config.binary.is_none() {
             if self.config.endpoint.is_some() {
@@ -252,6 +268,20 @@ impl ModuleHost {
             gonvex_profiler::gauge(gonvex_profiler::GaugeId::ModuleInflight).guard();
         let _total = label
             .map(|label| gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::InvokeTotal, label));
+        if let Some(state) = &self.local {
+            if !self.status.read().await.ready {
+                return Err(ModuleHostError::NotReady);
+            }
+            // In-process V8: no socket, so invoke.connect is zero; first_frame,
+            // js, host_calls and host_call_count keep their socket meanings
+            // (InvokeProfile in in_process::DirectHost).
+            if let Some(label) = label.filter(|_| gonvex_profiler::enabled()) {
+                gonvex_profiler::record(gonvex_profiler::Stage::InvokeConnect, label, 0);
+            }
+            return crate::in_process::request(state, operation, handler.take(), label)
+                .await
+                .map_err(remote_error);
+        }
         let mut timer = gonvex_profiler::Timer::start();
         let mut connect_ns = 0;
         let mut stream = self.connect().await?;
@@ -320,6 +350,11 @@ impl ModuleHost {
     }
 
     pub async fn shutdown(&self) {
+        if let Some(state) = &self.local {
+            crate::in_process::shutdown(state, self.config.shutdown_timeout).await;
+            self.status.write().await.ready = false;
+            return;
+        }
         let mut child_slot = self.child.lock().await;
         let Some(child) = child_slot.as_mut() else {
             return;
@@ -442,7 +477,7 @@ async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 /// Splits one module-host invocation into first-frame wait (isolate wait +
 /// JS before the first host call), later JS gaps and host-call handling, as
 /// seen from the runtime side of the socket. Records on drop (any exit).
-struct InvokeProfile {
+pub(crate) struct InvokeProfile {
     label: Option<gonvex_profiler::Label>,
     connect: u64,
     first_frame: u64,
@@ -454,7 +489,7 @@ struct InvokeProfile {
 }
 
 impl InvokeProfile {
-    fn new(label: Option<gonvex_profiler::Label>, connect: u64) -> Self {
+    pub(crate) fn new(label: Option<gonvex_profiler::Label>, connect: u64) -> Self {
         let label = label.filter(|_| gonvex_profiler::enabled());
         Self {
             label,
@@ -468,7 +503,7 @@ impl InvokeProfile {
         }
     }
 
-    fn frame_arrived(&mut self) {
+    pub(crate) fn frame_arrived(&mut self) {
         if let Some(label) = self.label {
             let now = gonvex_profiler::now_ns();
             let gap = now.saturating_sub(self.mark);
@@ -483,7 +518,7 @@ impl InvokeProfile {
         }
     }
 
-    fn times(&self) -> Option<InvokeTimes> {
+    pub(crate) fn times(&self) -> Option<InvokeTimes> {
         self.label.map(|_| InvokeTimes {
             connect: self.connect,
             first_frame: self.first_frame,
@@ -493,7 +528,7 @@ impl InvokeProfile {
         })
     }
 
-    fn host_call_answered(&mut self) {
+    pub(crate) fn host_call_answered(&mut self) {
         if self.label.is_some() {
             let now = gonvex_profiler::now_ns();
             self.host += now.saturating_sub(self.mark);

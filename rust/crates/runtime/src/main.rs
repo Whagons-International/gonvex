@@ -13,8 +13,20 @@ use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // In-process module isolates need the V8 platform initialized on this
+    // thread before Tokio starts its workers (see gonvex-module-host main).
+    gonvex_module_runtime_v8::initialize_v8_platform();
+    match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(runtime) => runtime.block_on(run()),
+        Err(error) => {
+            eprintln!("gonvex-runtime: failed to start async runtime: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let verify = args
         .first()

@@ -33,6 +33,7 @@ hmac.workspace = true
 ipnet.workspace = true
 gonvex-module-host = { path = "../module-host" }
 gonvex-module-runtime = { path = "../module-runtime" }
+gonvex-module-runtime-v8 = { path = "../module-runtime-v8" }
 gonvex-protocol = { path = "../protocol" }
 gonvex-store = { path = "../store" }
 serde.workspace = true

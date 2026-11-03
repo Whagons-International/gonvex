@@ -396,7 +396,13 @@ async fn handle_request(
             protocol: PROTOCOL_VERSION,
             version: env!("CARGO_PKG_VERSION").to_owned(),
         }),
-        RequestOp::Load(request) => handle_load(state, request).await,
+        RequestOp::Load(request) => {
+            let loaded = handle_load(state, request).await;
+            // The load frame carried the whole artifact (base64 bundles and
+            // function schemas); give those pages back once it is decoded.
+            gonvex_module_runtime_v8::trim_native_heap();
+            loaded
+        }
         RequestOp::Activate(request) => handle_activate(state, request),
         RequestOp::Describe(request) => handle_describe(state, request),
         RequestOp::Unload(request) => handle_unload(state, request).await,
@@ -424,7 +430,12 @@ async fn handle_load(
         .map_err(|err| registry_error(&module_id, err))?;
 
     let decoded = artifact::decode(&module_id, generation, request.artifact)?;
-    let engine = V8ModuleEngine::from_artifact(decoded.artifact, state.config.v8.clone()).map_err(
+    let engine = V8ModuleEngine::from_split_artifact(
+        decoded.artifact,
+        decoded.reducer_bundle,
+        state.config.v8.clone(),
+    )
+    .map_err(
         |err| {
             WireError::new(
                 codes::MODULE_LOAD_FAILED,
@@ -442,12 +453,14 @@ async fn handle_load(
         )
     })?;
 
+    let split = engine.is_split();
     state
         .modules
         .stage(&module_id, generation, Arc::new(engine));
     log(&format!(
-        "loaded module {module_id} generation {generation} with {} functions",
-        decoded.summaries.len()
+        "loaded module {module_id} generation {generation} with {} functions{}",
+        decoded.summaries.len(),
+        if split { " (split: Queries/Reducers warm, complete bundle on demand)" } else { "" }
     ));
     Ok(ResponsePayload::Loaded {
         module_id,
@@ -563,7 +576,55 @@ async fn handle_invoke(
     deadline_unix_ms: Option<u64>,
     request: InvokeRequest,
 ) -> Result<ResponsePayload, WireError> {
-    let state = Arc::clone(&connection.state);
+    let host = ConnectionHost {
+        connection: Arc::clone(connection),
+        invocation: request_id,
+    };
+    invoke_with_host(&connection.state, &host, deadline_unix_ms, request).await
+}
+
+/// Answers one request in this process, without a connection. The runtime
+/// uses it when the isolates run inside the runtime process: the same load,
+/// activation, admission, deadline and error rules apply, and host calls go to
+/// `host` as direct function calls instead of socket frames.
+pub async fn handle_local(
+    state: &Arc<HostState>,
+    deadline_unix_ms: Option<u64>,
+    op: RequestOp,
+    host: Option<&dyn ModuleHost>,
+) -> Result<ResponsePayload, WireError> {
+    let state = Arc::clone(state);
+    match op {
+        RequestOp::Ping => Ok(ResponsePayload::Pong {
+            protocol: PROTOCOL_VERSION,
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        }),
+        RequestOp::Load(request) => {
+            let loaded = handle_load(state, request).await;
+            gonvex_module_runtime_v8::trim_native_heap();
+            loaded
+        }
+        RequestOp::Activate(request) => handle_activate(state, request),
+        RequestOp::Describe(request) => handle_describe(state, request),
+        RequestOp::Unload(request) => handle_unload(state, request).await,
+        RequestOp::Shutdown(request) => handle_shutdown(state, request).await,
+        RequestOp::Invoke(request) => match host {
+            Some(host) => invoke_with_host(&state, host, deadline_unix_ms, request).await,
+            None => Err(WireError::new(
+                codes::BAD_REQUEST,
+                "an in-process invocation requires a host-call dispatcher",
+            )),
+        },
+    }
+}
+
+async fn invoke_with_host(
+    state: &Arc<HostState>,
+    host: &dyn ModuleHost,
+    deadline_unix_ms: Option<u64>,
+    request: InvokeRequest,
+) -> Result<ResponsePayload, WireError> {
+    let state = Arc::clone(state);
     let module_id = require_module_id(&request.module_id)?;
     let kind = parse_kind(request.kind.trim()).ok_or_else(|| {
         WireError::new(
@@ -638,10 +699,6 @@ async fn handle_invoke(
             .duration_since(SystemTime::now())
             .unwrap_or_default()
     });
-    let host = ConnectionHost {
-        connection: Arc::clone(connection),
-        invocation: request_id,
-    };
     let invocation = Invocation {
         function: request.function.clone(),
         kind,
@@ -649,7 +706,7 @@ async fn handle_invoke(
         context,
     };
 
-    let call = lease.engine().invoke(&host, invocation);
+    let call = lease.engine().invoke(host, invocation);
     let result = if let Some(budget) = budget {
         match tokio::time::timeout(budget + INVOKE_SLACK, call).await {
             Ok(result) => result,
