@@ -1092,6 +1092,8 @@ pub(crate) fn install_change_feed_locked(
             }
         }
         tx.commit().await?;
+        // The writer's capture hook must know the tables it now captures.
+        crate::capture::refresh(connection).await?;
         Ok(())
     })
 }

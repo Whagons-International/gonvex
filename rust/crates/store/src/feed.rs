@@ -267,36 +267,32 @@ pub fn capture_trigger_names(table: &str) -> [String; 3] {
 /// `key` is the primary-key column used as `row_id`. Updates that change no
 /// column are not staged.
 pub fn capture_triggers_sql(table: &str, key: &str, columns: &[ColumnInfo]) -> String {
+    // Row images come from `gonvex_capture` (pre-update hook, see
+    // `capture`), so each trigger stays a few hundred bytes. Large
+    // `json_object` trigger bodies made every connection's parsed schema
+    // ~27 MB on the Whagons tenant schema.
+    let _ = columns;
     let quoted_table = quote_identifier(table);
     let literal_table = table.replace('\'', "''");
-    let kinds = columns
-        .iter()
-        .map(|column| (column.name.clone(), column.kind()))
-        .collect::<Vec<_>>();
-    let new_image = json_object_expr("NEW", &kinds);
-    let old_image = json_object_expr("OLD", &kinds);
     let key_new = format!("CAST(NEW.{} AS TEXT)", quote_identifier(key));
     let key_old = format!("CAST(OLD.{} AS TEXT)", quote_identifier(key));
-    let changed = changed_columns_expr(columns);
-    let any_change = any_column_changed_expr(columns);
     let [insert, update, delete] = capture_trigger_names(table).map(|name| quote_identifier(&name));
+    let body = |row_key: &str, operation: &str, rowid: &str, op: u8| {
+        format!(
+            "INSERT INTO _gonvex_sync_changes (table_name, row_id, operation, old_value, new_value, changed_columns)\n  \
+             SELECT '{literal_table}', {row_key}, '{operation}', nullif(c -> '$[0]', 'null'), nullif(c -> '$[1]', 'null'), c -> '$[2]'\n  \
+             FROM (SELECT {function}('{literal_table}', {rowid}, {op}) AS c) WHERE c IS NOT NULL;",
+            function = crate::capture::CAPTURE_FUNCTION,
+        )
+    };
     format!(
-        r#"DROP TRIGGER IF EXISTS {insert};
-DROP TRIGGER IF EXISTS {update};
-DROP TRIGGER IF EXISTS {delete};
-CREATE TRIGGER {insert} AFTER INSERT ON {quoted_table} BEGIN
-  INSERT INTO _gonvex_sync_changes (table_name, row_id, operation, old_value, new_value, changed_columns)
-  VALUES ('{literal_table}', {key_new}, 'insert', NULL, {new_image}, '[]');
-END;
-CREATE TRIGGER {update} AFTER UPDATE ON {quoted_table} WHEN {any_change} BEGIN
-  INSERT INTO _gonvex_sync_changes (table_name, row_id, operation, old_value, new_value, changed_columns)
-  VALUES ('{literal_table}', {key_new}, 'update', {old_image}, {new_image}, {changed});
-END;
-CREATE TRIGGER {delete} AFTER DELETE ON {quoted_table} BEGIN
-  INSERT INTO _gonvex_sync_changes (table_name, row_id, operation, old_value, new_value, changed_columns)
-  VALUES ('{literal_table}', {key_old}, 'delete', {old_image}, NULL, '[]');
-END;
-"#
+        "DROP TRIGGER IF EXISTS {insert};\nDROP TRIGGER IF EXISTS {update};\nDROP TRIGGER IF EXISTS {delete};\n\
+         CREATE TRIGGER {insert} AFTER INSERT ON {quoted_table} BEGIN\n  {}\nEND;\n\
+         CREATE TRIGGER {update} AFTER UPDATE ON {quoted_table} BEGIN\n  {}\nEND;\n\
+         CREATE TRIGGER {delete} AFTER DELETE ON {quoted_table} BEGIN\n  {}\nEND;\n",
+        body(&key_new, "insert", "NEW.rowid", 0),
+        body(&key_new, "update", "NEW.rowid", 1),
+        body(&key_old, "delete", "OLD.rowid", 2),
     )
 }
 
@@ -324,6 +320,7 @@ mod tests {
             .execute(&mut connection)
             .await
             .unwrap();
+        crate::capture::install(&mut connection).await.unwrap();
         let mut tx = connection.begin().await.unwrap();
         sqlx::query(r#"INSERT INTO tasks VALUES ('a', 'A', 1, '{"x":[1]}', 5)"#)
             .execute(&mut *tx)

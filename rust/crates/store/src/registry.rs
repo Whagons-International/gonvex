@@ -284,6 +284,15 @@ impl PoolRegistry {
             .idle_timeout(None)
             .max_lifetime(None)
             .acquire_timeout(self.limits.acquire_timeout)
+            // Change capture reads row values through the pre-update hook,
+            // installed on the writer only (readers never write).
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    crate::capture::install(connection)
+                        .await
+                        .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+                })
+            })
             .connect_with(self.options(&path, false)?)
             .await?;
         let reader = SqlitePoolOptions::new()

@@ -26,6 +26,7 @@ macro_rules! now_ms {
     };
 }
 
+pub mod capture;
 mod data_dir;
 pub mod feed;
 mod registry;
