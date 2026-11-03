@@ -152,9 +152,13 @@ impl Runtime {
         if path == "control.auth.memberProviders" {
             return member_auth_providers(&control, connection, args).await;
         }
+        if path == "control.support.listTenants" {
+            empty_args(args)?;
+            return self.list_support_tenants(&control, connection).await;
+        }
         let mut transaction = control.begin_control_transaction(true).await?;
         let result = self
-            .control_query(&control, &mut transaction, connection, path, args)
+            .control_query(&mut transaction, connection, path, args)
             .await?;
         transaction.commit().await?;
         if path == "control.support.sendCommand" {
@@ -411,7 +415,7 @@ impl Runtime {
         .await?
         {
             transaction.commit().await?;
-            return Ok(result);
+            return session_result_from_directory(control, &connection.project_id, result).await;
         }
         let (grant, account, requested_tenant) = match path {
             "control.auth.passwordLogin" => {
@@ -543,15 +547,9 @@ impl Runtime {
             }
             _ => unreachable!(),
         };
-        let result = session_result_from_directory(
-            control,
-            &mut transaction,
-            &connection.project_id,
-            &grant,
-            &account,
-            &requested_tenant,
-        )
-        .await?;
+        // Persist credentials atomically with idempotency before tenant admission.
+        // Admission may need this same control pool or the same shared SQL slots.
+        let result = session_result(&grant, &account, &requested_tenant);
         sqlx::query(
             r#"UPDATE gonvex_control_idempotency
                SET state='completed',result=$4,error='',updated_at=now()
@@ -564,7 +562,7 @@ impl Runtime {
         .execute(&mut **transaction.transaction())
         .await?;
         transaction.commit().await?;
-        Ok(result)
+        session_result_from_directory(control, &connection.project_id, result).await
     }
 
     async fn reset_member_password(
@@ -1710,6 +1708,12 @@ impl Runtime {
             .resolve_tenant(&connection.project_id, &tenant_id)
             .await?;
         control.ensure_reducer_idempotency(&route).await?;
+        // Resolve identity before holding tenant SQL capacity. The locked member
+        // check below still validates authority through commit. Recovery of an
+        // already committed command does not depend on this admission succeeding.
+        let inviter_session = control
+            .tenant_session_for_account(&connection.project_id, &tenant_id, &inviter_account_id)
+            .await;
         let mut tenant_tx = control.begin_tenant_transaction(&route, false).await?;
         let command_id = format!("invitation:{invitation_id}");
         tenant_tx.set_command_id(&command_id).await?;
@@ -1745,9 +1749,7 @@ impl Runtime {
             // A previously committed tenant command only needs handoff recovery;
             // it must not replay grants or depend on the issuer's later status.
             let authority = async {
-              let inviter_session = control
-                .tenant_session_for_account(&connection.project_id, &tenant_id, &inviter_account_id)
-                .await.map_err(|_| invitation_authority_denial())?;
+              let inviter_session = inviter_session.map_err(|_| invitation_authority_denial())?;
               let inviter = sqlx::query(
                 "SELECT status,role,permissions FROM members WHERE id=$1 AND account_id=$2 FOR SHARE",
             )
@@ -2095,9 +2097,57 @@ impl Runtime {
         }
     }
 
-    async fn control_query(
+    async fn list_support_tenants(
         &self,
         control: &gonvex_postgres::ControlPlane,
+        connection: &ControlConnection,
+    ) -> Result<Value, ControlError> {
+        let mut transaction = control.begin_control_transaction(true).await?;
+        let rows = sqlx::query(
+            r#"SELECT tenant_id,name,domain,status,timezone,seat_limit,created_at
+                       FROM gonvex_runtime_tenants WHERE project_id=$1 AND deleted_at IS NULL
+                       ORDER BY name,tenant_id"#,
+        )
+        .bind(&connection.project_id)
+        .fetch_all(&mut **transaction.transaction())
+        .await?;
+        transaction.commit().await?;
+        let connections = self
+            .inner
+            .metrics
+            .tenant_connection_counts(&connection.project_id);
+        let tenants = futures_util::stream::iter(rows).map(|row| {
+                    let tenant_id: String = row.get("tenant_id");
+                    let live = connections.get(&tenant_id).copied().unwrap_or_default();
+                    async move {
+                        // Members are authoritative in the physical tenant database. Do not
+                        // recreate membership copies in the Control Plane for this overview.
+                        let count = async {
+                            let route = control.resolve_tenant(&connection.project_id, &tenant_id).await?;
+                            let mut tenant_tx = control.begin_tenant_transaction(&route, true).await?;
+                            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM members WHERE status='active'")
+                                .fetch_one(&mut **tenant_tx.transaction()).await?;
+                            tenant_tx.commit().await?;
+                            Ok::<_, gonvex_postgres::DatabaseError>(count)
+                        }.await;
+                        if let Err(error) = &count {
+                            tracing::warn!(project = %connection.project_id, tenant = %tenant_id, %error, "could not read tenant member count");
+                        }
+                        serde_json::json!({
+                            "id":tenant_id,"name":row.get::<String,_>("name"),
+                            "domain":row.get::<String,_>("domain"),"status":row.get::<String,_>("status"),
+                            "timezone":row.get::<String,_>("timezone"),
+                            "seatLimit":row.get::<Option<i32>,_>("seat_limit"),
+                            "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
+                            "userCount":count.ok(),"activeSessions":live,
+                        })
+                    }
+                }).buffered(4).collect::<Vec<_>>().await;
+        Ok(Value::Array(tenants))
+    }
+
+    async fn control_query(
+        &self,
         transaction: &mut TenantTransaction,
         connection: &ControlConnection,
         path: &str,
@@ -2357,49 +2407,7 @@ impl Runtime {
                     "lastSeenAt":timestamp(row.get::<DateTime<Utc>,_>("last_seen_at")),
                 })).collect()))
             }
-            "control.support.listTenants" => {
-                empty_args(args)?;
-                let rows = sqlx::query(
-                    r#"SELECT tenant_id,name,domain,status,timezone,seat_limit,created_at
-                       FROM gonvex_runtime_tenants WHERE project_id=$1 AND deleted_at IS NULL
-                       ORDER BY name,tenant_id"#,
-                )
-                .bind(&connection.project_id)
-                .fetch_all(&mut **transaction.transaction())
-                .await?;
-                let connections = self
-                    .inner
-                    .metrics
-                    .tenant_connection_counts(&connection.project_id);
-                let tenants = futures_util::stream::iter(rows).map(|row| {
-                    let tenant_id: String = row.get("tenant_id");
-                    let live = connections.get(&tenant_id).copied().unwrap_or_default();
-                    async move {
-                        // Members are authoritative in the physical tenant database. Do not
-                        // recreate membership copies in the Control Plane for this overview.
-                        let count = async {
-                            let route = control.resolve_tenant(&connection.project_id, &tenant_id).await?;
-                            let mut tenant_tx = control.begin_tenant_transaction(&route, true).await?;
-                            let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM members WHERE status='active'")
-                                .fetch_one(&mut **tenant_tx.transaction()).await?;
-                            tenant_tx.commit().await?;
-                            Ok::<_, gonvex_postgres::DatabaseError>(count)
-                        }.await;
-                        if let Err(error) = &count {
-                            tracing::warn!(project = %connection.project_id, tenant = %tenant_id, %error, "could not read tenant member count");
-                        }
-                        serde_json::json!({
-                            "id":tenant_id,"name":row.get::<String,_>("name"),
-                            "domain":row.get::<String,_>("domain"),"status":row.get::<String,_>("status"),
-                            "timezone":row.get::<String,_>("timezone"),
-                            "seatLimit":row.get::<Option<i32>,_>("seat_limit"),
-                            "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
-                            "userCount":count.ok(),"activeSessions":live,
-                        })
-                    }
-                }).buffered(4).collect::<Vec<_>>().await;
-                Ok(Value::Array(tenants))
-            }
+            "control.support.listTenants" => unreachable!(),
             "control.support.getSession" => {
                 let object = exact_object(args, &["id"])?;
                 let id = required_string(object, "id")?;
@@ -3981,12 +3989,12 @@ pub(crate) async fn revoke_family(
 
 pub(crate) async fn session_result_from_directory(
     control: &gonvex_postgres::ControlPlane,
-    transaction: &mut TenantTransaction,
     project: &str,
-    grant: &SessionGrant,
-    account: &AuthAccount,
-    requested_tenant: &str,
+    mut result: Value,
 ) -> Result<Value, ControlError> {
+    let account_id = result["account"]["id"].as_str().unwrap_or("").to_owned();
+    let requested_tenant = result["activeTenantId"].as_str().unwrap_or("").to_owned();
+    let mut transaction = control.begin_control_transaction(true).await?;
     let rows = sqlx::query(
         r#"SELECT tenant.tenant_id,tenant.name,tenant.domain,tenant.timezone,
                   tenant.description,tenant.profile,directory.member_id
@@ -3998,7 +4006,7 @@ pub(crate) async fn session_result_from_directory(
            ORDER BY lower(tenant.name),tenant.tenant_id"#,
     )
     .bind(project)
-    .bind(&account.id)
+    .bind(&account_id)
     .fetch_all(&mut **transaction.transaction())
     .await?;
     // The directory is only a routing projection. Every candidate is admitted
@@ -4016,9 +4024,10 @@ pub(crate) async fn session_result_from_directory(
             )
         })
         .collect::<Vec<_>>();
+    transaction.commit().await?;
     let mut tenants = Vec::new();
     for (tenant_id, name, domain, timezone, description, profile) in candidates {
-        let Ok((_, member, _)) = control.admit_member(project, &tenant_id, &account.id).await
+        let Ok((_, member, _)) = control.admit_member(project, &tenant_id, &account_id).await
         else {
             continue;
         };
@@ -4029,11 +4038,11 @@ pub(crate) async fn session_result_from_directory(
         }));
     }
     let active = if let Some(tenant) = tenants.iter().find(|tenant| {
-        tenant.get("id").and_then(Value::as_str) == Some(requested_tenant)
+        tenant.get("id").and_then(Value::as_str) == Some(requested_tenant.as_str())
             || tenant
                 .get("domain")
                 .and_then(Value::as_str)
-                .is_some_and(|domain| domain.eq_ignore_ascii_case(requested_tenant))
+                .is_some_and(|domain| domain.eq_ignore_ascii_case(&requested_tenant))
     }) {
         tenant
             .get("id")
@@ -4048,7 +4057,17 @@ pub(crate) async fn session_result_from_directory(
             .unwrap_or("")
             .to_owned()
     };
-    Ok(serde_json::json!({
+    result["tenants"] = Value::Array(tenants);
+    result["activeTenantId"] = Value::String(active);
+    Ok(result)
+}
+
+pub(crate) fn session_result(
+    grant: &SessionGrant,
+    account: &AuthAccount,
+    requested_tenant: &str,
+) -> Value {
+    serde_json::json!({
         "accessToken":grant.access_token,
         "tokenType":"Bearer",
         "expiresIn":900,
@@ -4059,9 +4078,9 @@ pub(crate) async fn session_result_from_directory(
             "id":account.id,"email":account.email,"emailVerified":account.email_verified,
             "name":account.name,"picture":account.picture,"provider":account.provider,
         },
-        "tenants":tenants,
-        "activeTenantId":active,
-    }))
+        "tenants":[],
+        "activeTenantId":requested_tenant,
+    })
 }
 
 fn auth_subject(path: &str, args: &Value) -> Result<String, ControlError> {

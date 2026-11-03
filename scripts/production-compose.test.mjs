@@ -85,6 +85,7 @@ test("production runtime and dashboard require protected durable configuration",
   assert.equal(runtime.environment.GONVEX_DB_MAX_TOTAL_CONNS, "20");
   assert.equal(runtime.environment.GONVEX_DB_MAX_OPEN_CONNS, "2");
   assert.equal(runtime.environment.GONVEX_DB_MAX_IDLE_CONNS, "2");
+  assert.equal(runtime.environment.GONVEX_DB_IDLE_TIMEOUT_MS, "60000");
   assert.equal(runtime.environment.GOCACHE, undefined);
   assert.equal(runtime.environment.S3_ENDPOINT, "http://gonvex-maker-minio:9000");
   assert.deepEqual(runtime.cap_drop, ["ALL"]);
