@@ -204,6 +204,14 @@ impl Config {
         Self::from_lookup(|name| env::var(name).ok())
     }
 
+    /// Production defaults with explicit overrides, for the benchmark fixture.
+    #[cfg(feature = "perf-fixture")]
+    pub(crate) fn perf_from_lookup(
+        lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        Self::from_lookup(lookup)
+    }
+
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let addr_value = lookup("GONVEX_ADDR").unwrap_or_else(|| DEFAULT_ADDR.to_owned());
         let addr = normalize_addr(&addr_value).ok_or_else(|| ConfigError::Address {
