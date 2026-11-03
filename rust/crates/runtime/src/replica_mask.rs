@@ -53,6 +53,37 @@ enum GrantDelta {
 
 /// Grant rows decided in memory. Additions patch the set; a removal may still
 /// be covered by another row of the member, so it re-resolves this member.
+/// Every table the visibility of `plan` (as resolved for one member) reads:
+/// its own table, every set's table and joins, parent and `inheritsAny`
+/// tables, recursively through inherited parents. A change to any other
+/// table cannot move a principal, grant, derived set or parent decision.
+fn concern_tables(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    out: &mut std::collections::HashSet<String>,
+) {
+    out.insert(plan.table.clone());
+    for set in plan.sets.values() {
+        out.insert(set.table.clone());
+        for join in &set.joins {
+            out.insert(join.table.clone());
+        }
+    }
+    for table in plan.inherited_columns().keys() {
+        out.insert(table.clone());
+    }
+    for expression in visibility::inherits_any(plan) {
+        out.insert(expression.table.clone());
+        if let Some(via) = &expression.via {
+            out.insert(via.table.clone());
+        }
+    }
+    for (table, parent) in &resolved.inherited {
+        out.insert(table.clone());
+        concern_tables(&parent.plan, &parent.resolved, out);
+    }
+}
+
 fn grant_delta(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
@@ -124,6 +155,13 @@ impl Runtime {
             .into_iter()
             .filter_map(|expression| Some((expression.via.clone()?, expression.table.clone())))
             .collect::<Vec<_>>();
+        let tables = Arc::clone(subscription.concern_tables.get_or_insert_with(|| {
+            let mut tables = std::collections::HashSet::new();
+            tables.insert(subscription.definition.table.clone());
+            tables.insert("members".to_owned());
+            concern_tables(&subscription.visibility, &subscription.resolved, &mut tables);
+            Arc::new(tables)
+        }));
         let mut source = false;
         let mut parent_changes = Vec::new();
         // (scope table, set name, token): own plan or a directly inherited parent.
@@ -131,6 +169,11 @@ impl Runtime {
         let mut derived_touched = false;
         for change in changes {
             metrics.record_in_memory_row_check();
+            if !tables.contains(change.table.as_str()) {
+                // Neither the source nor any table the plan, its sets or its
+                // parents read: none of the checks below can fire.
+                continue;
+            }
             if subscription.visibility.principal_change_concerns(
                 &subscription.resolved,
                 &change.table,

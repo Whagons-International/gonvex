@@ -90,6 +90,9 @@ pub struct ReplicaSubscription {
     /// Compiled visibility binding of `resolved` (`visibility_class`),
     /// cleared whenever an event changes `resolved` in memory.
     pub(crate) mask: crate::visibility_class::HandleCache,
+    /// Every table a change to which can concern this subscription
+    /// (`replica_mask::concern_tables`), computed on first use.
+    pub(crate) concern_tables: Option<Arc<std::collections::HashSet<String>>>,
 }
 
 /// Counters of the rows a client holds, and for a truncated ordered window
@@ -631,6 +634,7 @@ impl Runtime {
                 digest,
                 window,
                 mask: Default::default(),
+                concern_tables: None,
             }),
         })
     }
@@ -3129,6 +3133,7 @@ mod tests {
             digest,
             window,
             mask: Default::default(),
+            concern_tables: None,
         }
     }
 
