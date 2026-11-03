@@ -6,6 +6,7 @@
 //! Member admission check on the selected tenant database.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -105,6 +106,9 @@ pub enum DatabaseError {
 pub struct PoolRegistry {
     limits: PoolLimits,
     admission: Arc<Semaphore>,
+    admission_count: Arc<AtomicU64>,
+    admission_wait_us: Arc<AtomicU64>,
+    admission_wait_max_us: Arc<AtomicU64>,
     pools: Arc<RwLock<BTreeMap<String, DatabasePool>>>,
     listeners: Arc<std::sync::Mutex<Vec<std::sync::Weak<PgPool>>>>,
 }
@@ -150,6 +154,12 @@ pub struct PoolRegistrySnapshot {
     pub idle: usize,
     pub max_open_connections: u32,
     pub listener_connections: u32,
+    /// Completed admission attempts, including uncontended successes and timeouts.
+    pub admission_count: u64,
+    /// Total queue time for completed attempts; excludes physical connection setup.
+    pub admission_wait_us: u64,
+    /// Longest completed attempt since this registry started.
+    pub admission_wait_max_us: u64,
     pub admission_limit: usize,
     pub admission_active: usize,
 }
@@ -159,6 +169,9 @@ impl PoolRegistry {
         let limits = limits.bounded();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
+            admission_count: Arc::default(),
+            admission_wait_us: Arc::default(),
+            admission_wait_max_us: Arc::default(),
             pools: Arc::new(RwLock::new(BTreeMap::new())),
             listeners: Arc::default(),
             limits,
@@ -218,7 +231,8 @@ impl PoolRegistry {
         let database = self.database_pool(database_url).await?;
         // One existing admission deadline covers both queues. Cancellation or
         // timeout drops any acquired slot, including while waiting globally.
-        tokio::time::timeout(self.limits.acquire_timeout, async {
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(self.limits.acquire_timeout, async {
             let local = database.capacity.acquire_owned().await?;
             let shared = self.admission.clone().acquire_owned().await?;
             Ok::<_, tokio::sync::AcquireError>(AdmissionPermit {
@@ -227,8 +241,14 @@ impl PoolRegistry {
             })
         })
         .await
-        .map_err(|_| DatabaseError::AdmissionTimeout)?
         .map_err(|_| DatabaseError::AdmissionTimeout)
+        .and_then(|result| result.map_err(|_| DatabaseError::AdmissionTimeout));
+        let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.admission_count.fetch_add(1, Ordering::Relaxed);
+        self.admission_wait_us.fetch_add(elapsed, Ordering::Relaxed);
+        self.admission_wait_max_us
+            .fetch_max(elapsed, Ordering::Relaxed);
+        result
     }
 
     /// Dedicated sessions stay outside SQL-job admission, so a long-lived
@@ -279,6 +299,9 @@ impl PoolRegistry {
                 .unwrap_or(u32::MAX)
                 .saturating_mul(self.limits.max_connections_per_database)
                 .saturating_add(listener_connections),
+            admission_count: self.admission_count.load(Ordering::Relaxed),
+            admission_wait_us: self.admission_wait_us.load(Ordering::Relaxed),
+            admission_wait_max_us: self.admission_wait_max_us.load(Ordering::Relaxed),
             admission_limit: self.limits.max_total_connections,
             admission_active: self
                 .limits
@@ -1711,6 +1734,31 @@ fn session_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admission_metrics_include_success_and_timeout() {
+        let limits = PoolLimits {
+            max_total_connections: 1,
+            max_connections_per_database: 1,
+            acquire_timeout: Duration::from_millis(20),
+            ..PoolLimits::default()
+        };
+        let registry = PoolRegistry::new(limits);
+        let held = registry
+            .admit("postgres://127.0.0.1:0/not_connected")
+            .await
+            .unwrap();
+        assert!(matches!(
+            registry.admit("postgres://127.0.0.1:0/not_connected").await,
+            Err(DatabaseError::AdmissionTimeout)
+        ));
+        let snapshot = serde_json::to_value(registry.snapshot().await).unwrap();
+        assert_eq!(snapshot["admissionCount"].as_u64(), Some(2));
+        assert!(snapshot["admissionWaitUs"].as_u64().unwrap_or(0) >= 20_000);
+        assert!(snapshot["admissionWaitMaxUs"].as_u64().unwrap_or(0) >= 20_000);
+        drop(held);
+        assert_eq!(registry.snapshot().await.admission_active, 0);
+    }
 
     #[test]
     fn only_verified_self_developer_grants_expose_developer_metadata() {

@@ -1,0 +1,8 @@
+# syntax=docker/dockerfile:1
+FROM rust:1.94-bookworm
+WORKDIR /src
+COPY rust rust
+COPY packages/module-sdk/runtime-contract packages/module-sdk/runtime-contract
+COPY packages/protocol/fixtures packages/protocol/fixtures
+RUN --mount=type=cache,id=gvmac-cargo-registry,target=/usr/local/cargo/registry --mount=type=cache,id=gvmac-cargo-target,target=/src/rust/target CARGO_BUILD_JOBS=4 cargo test --locked --manifest-path rust/Cargo.toml --profile local-load --config 'profile.local-load.inherits="release"' --config 'profile.local-load.debug-assertions=true' -p gonvex-postgres --lib admission_metrics_include_success_and_timeout -- --nocapture
+RUN --mount=type=cache,id=gvmac-cargo-registry,target=/usr/local/cargo/registry --mount=type=cache,id=gvmac-cargo-target,target=/src/rust/target CARGO_BUILD_JOBS=4 cargo test --locked --manifest-path rust/Cargo.toml --profile local-load --config 'profile.local-load.inherits="release"' --config 'profile.local-load.debug-assertions=true' --features gonvex-runtime/test-firebase-auth-emulator -p gonvex-runtime --lib idle_timeout -- --nocapture
