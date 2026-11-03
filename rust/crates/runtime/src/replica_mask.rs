@@ -605,7 +605,7 @@ impl Runtime {
         if old.is_none() && projection.is_none() {
             return Ok(());
         }
-        if old.is_some() && old == projection {
+        if old.is_some() && old.as_deref() == projection.as_ref() {
             return Ok(());
         }
         let new_hash = projection.as_ref().map(row_hash);
@@ -619,7 +619,14 @@ impl Runtime {
         }
         match (&projection, new_hash) {
             (Some(row), Some(hash)) => {
-                subscription.rows.insert(id.to_owned(), row.clone());
+                let shared = crate::replica::intern_row(
+                    &subscription.database_url,
+                    &subscription.definition.table,
+                    id,
+                    &hash,
+                    row,
+                );
+                subscription.rows.insert(id.to_owned(), shared);
                 subscription.hashes.insert(id.to_owned(), hash);
             }
             _ => {
@@ -640,7 +647,7 @@ impl Runtime {
                 entity: table,
                 id: id.to_owned(),
                 operation: operation.to_owned(),
-                old_value: old,
+                old_value: old.map(|row| (*row).clone()),
                 new_value: projection,
                 changed_columns: changed_columns.to_vec(),
             },
@@ -660,7 +667,7 @@ impl Runtime {
     ) -> Result<bool, ReplicaError> {
         let definition = &subscription.definition;
         let over_rows = definition.max_rows > 0 && subscription.rows.len() > definition.max_rows;
-        let bytes = |rows: &BTreeMap<String, Value>| {
+        let bytes = |rows: &crate::replica::RowMap| {
             rows.values()
                 .map(|row| serde_json::to_vec(row).unwrap_or_default().len() as i64)
                 .sum::<i64>()

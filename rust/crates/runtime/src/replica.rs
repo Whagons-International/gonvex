@@ -2,6 +2,7 @@
 
 #[path = "replica_mask.rs"]
 mod mask;
+use std::sync::Arc;
 use mask::MaskStep;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,7 +67,9 @@ pub struct ReplicaSubscription {
     pub visibility: VisibilityPlan,
     pub visibility_scope: String,
     pub cursor: ReplicaCursor,
-    pub rows: BTreeMap<String, Value>,
+    pub rows: RowMap,
+    /// Tenant database the rows come from (interning scope).
+    pub database_url: String,
     pub hashes: BTreeMap<String, String>,
     pub aggregate: Option<ReplicaAggregate>,
     pub truncated: bool,
@@ -137,9 +140,42 @@ fn snapshot_permits() -> &'static tokio::sync::Semaphore {
     })
 }
 
+/// A replica row shared by every subscription that holds it. Each
+/// subscription keeps its collection's rows for diffs and old values; with
+/// owned rows, N subscribers to a 9,000-task tenant held N full copies
+/// (~50 MB per Whagons user). Rows are interned by tenant, table, key and
+/// content hash, so identical rows are stored once.
+pub type SharedRow = Arc<Value>;
+pub type RowMap = BTreeMap<String, SharedRow>;
+
+type RowIdentity = (String, String, String, String);
+
+fn row_interner() -> &'static std::sync::Mutex<std::collections::HashMap<RowIdentity, std::sync::Weak<Value>>> {
+    static ROWS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<RowIdentity, std::sync::Weak<Value>>>,
+    > = std::sync::OnceLock::new();
+    ROWS.get_or_init(Default::default)
+}
+
+/// The shared copy of `row` (identified by database, table, key and hash).
+pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row: &Value) -> SharedRow {
+    let identity = (database.to_owned(), table.to_owned(), key.to_owned(), hash.to_owned());
+    let mut rows = row_interner().lock().unwrap();
+    if let Some(shared) = rows.get(&identity).and_then(std::sync::Weak::upgrade) {
+        return shared;
+    }
+    // Sweep dead entries occasionally so the map tracks live rows only.
+    if rows.len() > 1024 && rows.len().is_power_of_two() {
+        rows.retain(|_, weak| weak.strong_count() > 0);
+    }
+    let shared = Arc::new(row.clone());
+    rows.insert(identity, Arc::downgrade(&shared));
+    shared
+}
+
 struct Snapshot {
     rows: Vec<Value>,
-    by_key: BTreeMap<String, Value>,
+    by_key: RowMap,
     hashes: BTreeMap<String, String>,
     truncated: bool,
     clock: ReplicaClock,
@@ -342,6 +378,7 @@ impl Runtime {
                 visibility_scope: directive.visibility_scope,
                 cursor,
                 rows: snapshot.by_key,
+                database_url: session.route.database_url.clone(),
                 aggregate: resume_aggregate,
                 hashes: snapshot.hashes,
                 truncated: snapshot.truncated,
@@ -455,10 +492,12 @@ impl Runtime {
                 tokio::task::yield_now().await;
             }
             let key = row_key(row, &definition.key)?;
-            if by_key.insert(key.clone(), row.clone()).is_some() {
+            let hash = row_hash(row);
+            let shared = intern_row(&session.route.database_url, &definition.table, &key, &hash, row);
+            if by_key.insert(key.clone(), shared).is_some() {
                 return Err(ReplicaError::DuplicateKey(key));
             }
-            hashes.insert(key, row_hash(row));
+            hashes.insert(key, hash);
         }
         Ok(Snapshot {
             rows,
@@ -636,7 +675,7 @@ impl Runtime {
                             entity: subscription.definition.table.clone(),
                             id: key.clone(),
                             operation: "delete".to_owned(),
-                            old_value: subscription.rows.get(key).cloned(),
+                            old_value: subscription.rows.get(key).map(|row| (**row).clone()),
                             new_value: None,
                             changed_columns: Vec::new(),
                         },
@@ -709,12 +748,16 @@ impl Runtime {
                         let new_projection = new_projection
                             .as_ref()
                             .expect("visible source rows have a projection");
-                        subscription
-                            .rows
-                            .insert(change.row_id.clone(), new_projection.clone());
-                        subscription
-                            .hashes
-                            .insert(change.row_id.clone(), new_hash.unwrap());
+                        let hash = new_hash.unwrap();
+                        let shared = intern_row(
+                            &subscription.database_url,
+                            &subscription.definition.table,
+                            &change.row_id,
+                            &hash,
+                            new_projection,
+                        );
+                        subscription.rows.insert(change.row_id.clone(), shared);
+                        subscription.hashes.insert(change.row_id.clone(), hash);
                     } else {
                         subscription.rows.remove(&change.row_id);
                         subscription.hashes.remove(&change.row_id);
@@ -799,7 +842,7 @@ impl Runtime {
 // fields or delete an entity still present in a different collection.
 fn normalize_entity_changes<'a>(
     changes: &mut BTreeMap<(String, String), ReplicaChange>,
-    collections: impl Iterator<Item = (&'a str, &'a BTreeMap<String, Value>)>,
+    collections: impl Iterator<Item = (&'a str, &'a RowMap)>,
 ) {
     let collections: Vec<_> = collections.collect();
     for ((table, id), change) in changes.iter_mut() {
@@ -808,7 +851,7 @@ fn normalize_entity_changes<'a>(
             if *collection_table != table {
                 continue;
             }
-            if let Some(row) = rows.get(id).and_then(Value::as_object) {
+            if let Some(row) = rows.get(id).and_then(|row| row.as_object()) {
                 fields.extend(row.clone());
             }
         }
@@ -1115,7 +1158,7 @@ fn bounded_sql_visibility(
 }
 
 fn source_update_requires_snapshot<'a>(
-    rows: &BTreeMap<String, Value>,
+    rows: &RowMap,
     truncated: bool,
     definition: &ReplicaCollectionDefinition,
     args: &Value,
@@ -1141,7 +1184,7 @@ fn source_update_requires_snapshot<'a>(
         if new_visible {
             projected.insert(
                 change.row_id.clone(),
-                project_row(&change.new_value, definition)?,
+                Arc::new(project_row(&change.new_value, definition)?),
             );
         } else if old_visible || projected.contains_key(&change.row_id) {
             projected.remove(&change.row_id);
@@ -1404,7 +1447,7 @@ fn cursor_for(
 }
 
 fn diff_rows(
-    current_rows: &BTreeMap<String, Value>,
+    current_rows: &RowMap,
     current_hashes: &BTreeMap<String, String>,
     client_hashes: &BTreeMap<String, String>,
     client_keys: &[String],
@@ -1412,7 +1455,7 @@ fn diff_rows(
     let upserts = current_rows
         .iter()
         .filter(|(key, _)| client_hashes.get(*key) != current_hashes.get(*key))
-        .map(|(_, row)| row.clone())
+        .map(|(_, row)| (**row).clone())
         .collect();
     let deleted = client_keys
         .iter()
@@ -1823,6 +1866,9 @@ fn hex_digest(value: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn shared_rows(rows: std::collections::BTreeMap<String, serde_json::Value>) -> super::RowMap {
+        rows.into_iter().map(|(key, row)| (key, std::sync::Arc::new(row))).collect()
+    }
     use super::*;
 
     #[tokio::test]
@@ -2294,7 +2340,7 @@ mod tests {
             Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         let (upserts, deleted) = diff_rows(
-            &BTreeMap::from([("1".into(), new.clone()), ("2".into(), inserted.clone())]),
+            &shared_rows(BTreeMap::from([("1".into(), new.clone()), ("2".into(), inserted.clone())])),
             &current,
             &prior,
             &["1".into(), "3".into()],
@@ -2428,6 +2474,9 @@ mod tests {
             "a".to_owned(),
             serde_json::json!({"id":"a","status":"working","note":null}),
         )]);
+        let statuses = shared_rows(statuses.clone());
+        let names = shared_rows(names.clone());
+        let empty = shared_rows(empty.clone());
         normalize_entity_changes(
             &mut changes,
             [("tasks", &empty), ("tasks", &names), ("tasks", &statuses)].into_iter(),
@@ -2616,6 +2665,7 @@ mod tests {
         let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
         let change = source_change(old, new);
 
+        let rows = shared_rows(rows.clone());
         assert!(!source_update_requires_snapshot(
             &rows,
             false,
@@ -2656,6 +2706,7 @@ mod tests {
         let rows = BTreeMap::from([("1".to_owned(), project_row(&old, &definition)?)]);
         let change = source_change(old, new.clone());
 
+        let rows = shared_rows(rows.clone());
         assert!(!source_update_requires_snapshot(
             &rows,
             false,
@@ -2697,6 +2748,7 @@ mod tests {
         let mut change = source_change(old, new);
         change.row_id = "2".to_owned();
 
+        let rows = shared_rows(rows.clone());
         assert!(source_update_requires_snapshot(
             &rows,
             false,
@@ -2733,6 +2785,7 @@ mod tests {
         let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
         let change = source_change(old, new);
 
+        let rows = shared_rows(rows.clone());
         assert!(source_update_requires_snapshot(
             &rows,
             false,
