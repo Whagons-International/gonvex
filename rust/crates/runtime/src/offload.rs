@@ -26,8 +26,8 @@
 //! - `GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`: concurrent snapshot builds
 //!   (default: available CPUs, min 2).
 //! - `GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES`: estimated decoded snapshot heap
-//!   in flight across all builds (default 128 MiB). Estimated as 10x the rows'
-//!   JSON size (Whagons task rows decode to ~10x their JSON in `Value`s).
+//!   in flight across all builds (default 128 MiB). Estimated as 5x the rows'
+//!   JSON size (a 9,000-row Admin task snapshot: ~16 MB JSON, +76 MB heap).
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -548,8 +548,9 @@ struct Estimates {
 
 const UNKNOWN_SNAPSHOT_BYTES: usize = 8 << 20;
 /// Decoded heap per byte of row JSON (`serde_json::Value` maps with string
-/// keys), measured on the Whagons task rows of the perf fixture.
-const HEAP_PER_JSON_BYTE: usize = 10;
+/// keys). Perf fixture: an Admin's 9,000 task rows are ~16 MB of JSON and the
+/// open peaks at +76 MB of heap (docs/performance/perf-fixture.md).
+const HEAP_PER_JSON_BYTE: usize = 5;
 const ESTIMATE_ENTRIES: usize = 65_536;
 
 pub struct SnapshotPermit {
