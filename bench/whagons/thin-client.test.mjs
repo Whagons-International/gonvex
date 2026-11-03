@@ -103,3 +103,46 @@ test('released collections close after the retention delay and rows are shared b
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(pool.size, 0);
 });
+
+test('presence v2: capability, transitions only, re-announce after auth, snapshot and patches', async () => {
+  const { c, sent } = connected();
+  // Same capability object (and key order) as the SDK auth frame.
+  c.socket.readyState = 1; c.authReady = false;
+  c.sendAuth();
+  const auth = sent.at(-1);
+  assert.equal(auth.capabilities.presence, 1);
+  assert.equal(Object.keys(auth.capabilities).at(-1), 'presence');
+  c.serverCapabilities = { replicaWatermark: 1, controlWatermark: 1, presence: 1 };
+  assert.equal(c.presenceSupported(), true);
+  c.setPresence('active');
+  assert.equal(sent.filter((m) => m.type === 'presence.set').length, 0, 'not before auth.result');
+  const updates = [];
+  const stop = c.subscribePresence(() => updates.push(c.presenceSnapshot()));
+  c.dispatch({ type: 'auth.result', id: auth.id, result: {} });
+  const presence = () => sent.filter((m) => String(m.type).startsWith('presence.'));
+  assert.deepEqual(presence(), [{ type: 'presence.set', state: 'active' }, { type: 'presence.subscribe', id: 'presence-1' }]);
+  c.setPresence('active');
+  c.setPresence('idle');
+  assert.deepEqual(presence().at(-1), { type: 'presence.set', state: 'idle' });
+  assert.equal(presence().length, 3);
+  c.dispatch({ type: 'presence.snapshot', id: 'presence-1', serverTime: 1, members: [{ memberId: 'm1', state: 'active', since: 1 }] });
+  assert.equal(c.presenceSnapshot().ready, true);
+  c.dispatch({ type: 'presence.patch', serverTime: 2, changes: [{ memberId: 'm1', state: 'offline', since: 2 }, { memberId: 'm2', state: 'idle', since: 2 }] });
+  assert.deepEqual([...c.presenceSnapshot().members.keys()], ['m2']);
+  assert.ok(updates.length >= 2);
+  // Re-auth (e.g. session-expired) re-announces state and resubscribes.
+  c.authReady = false; c.sendAuth(); const again = sent.at(-1);
+  c.dispatch({ type: 'auth.result', id: again.id, result: {} });
+  assert.deepEqual(presence().slice(-2), [{ type: 'presence.set', state: 'idle' }, { type: 'presence.subscribe', id: 'presence-2' }]);
+  stop();
+  assert.deepEqual(presence().at(-1), { type: 'presence.unsubscribe' });
+  assert.deepEqual(ThinClient.stats.unsupported, {});
+});
+
+test('presence v2: nothing is sent to a runtime without the capability', () => {
+  const { c, sent } = connected();
+  c.setPresence('active');
+  c.subscribePresence(() => {});
+  assert.equal(c.presenceSupported(), false);
+  assert.equal(sent.filter((m) => String(m.type).startsWith('presence.')).length, 0);
+});
