@@ -388,3 +388,98 @@ async fn load_shapes(
     }
     Ok(shapes.into_iter().map(|(table, shape)| (table, Arc::new(shape))).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::feed::{capture_triggers_sql, finalize, Provenance, SYNC_INFRASTRUCTURE_SQL};
+    use crate::rows::table_columns;
+    use serde_json::{json, Value};
+    use sqlx::{Connection, Row, SqliteConnection};
+
+    async fn connection_with(table_sql: &str, table: &str, key: &str) -> SqliteConnection {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(SYNC_INFRASTRUCTURE_SQL).execute(&mut connection).await.unwrap();
+        sqlx::raw_sql(table_sql).execute(&mut connection).await.unwrap();
+        let columns = table_columns(&mut connection, table).await.unwrap();
+        sqlx::raw_sql(&capture_triggers_sql(table, key, &columns))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        super::install(&mut connection).await.unwrap();
+        connection
+    }
+
+    async fn changes(connection: &mut SqliteConnection) -> Vec<(String, Value, Value, Value)> {
+        sqlx::query("SELECT operation, old_value, new_value, changed_columns FROM _gonvex_sync_changes ORDER BY event_id")
+            .fetch_all(connection)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                let json = |index: usize| {
+                    row.get::<Option<String>, _>(index)
+                        .map(|text| serde_json::from_str(&text).unwrap())
+                        .unwrap_or(Value::Null)
+                };
+                (row.get(0), json(1), json(2), json(3))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn nested_same_row_trigger_updates_keep_their_own_images() {
+        // Like Whagons' member timestamps: an app trigger updates the row it fired for.
+        let mut connection = connection_with(
+            r#"CREATE TABLE m (id TEXT PRIMARY KEY, name TEXT, updated_at INTEGER);
+               CREATE TRIGGER stamp AFTER UPDATE OF name ON m BEGIN
+                 UPDATE m SET updated_at = 99 WHERE id = NEW.id;
+               END;"#,
+            "m",
+            "id",
+        )
+        .await;
+        let mut tx = connection.begin().await.unwrap();
+        sqlx::query("INSERT INTO m VALUES ('a', 'old', 1)").execute(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE m SET name = 'new' WHERE id = 'a'").execute(&mut *tx).await.unwrap();
+        finalize(&mut tx, &Provenance::default()).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        let rows = changes(&mut connection).await;
+        assert_eq!(rows[0].0, "insert");
+        assert_eq!(rows[0].2, json!({"id":"a","name":"old","updated_at":1}));
+        let updates = rows.iter().filter(|row| row.0 == "update").collect::<Vec<_>>();
+        assert_eq!(updates.len(), 2, "{rows:?}");
+        let name_change = updates.iter().find(|row| row.3 == json!(["name"])).unwrap();
+        assert_eq!(name_change.1, json!({"id":"a","name":"old","updated_at":1}));
+        assert_eq!(name_change.2, json!({"id":"a","name":"new","updated_at":1}));
+        let stamp = updates.iter().find(|row| row.3 == json!(["updated_at"])).unwrap();
+        assert_eq!(stamp.1, json!({"id":"a","name":"new","updated_at":1}));
+        assert_eq!(stamp.2, json!({"id":"a","name":"new","updated_at":99}));
+    }
+
+    #[tokio::test]
+    async fn failed_statement_leaves_no_change_and_later_changes_capture_correctly() {
+        let mut connection = connection_with(
+            r#"CREATE TABLE t (id TEXT PRIMARY KEY, n INTEGER NOT NULL CHECK (n < 10))"#,
+            "t",
+            "id",
+        )
+        .await;
+        let mut tx = connection.begin().await.unwrap();
+        sqlx::query("INSERT INTO t VALUES ('a', 1), ('c', 4)").execute(&mut *tx).await.unwrap();
+        // One statement: 'a' becomes 3 (hook fires, its change row is
+        // written), then 'c' becomes 12 and fails the CHECK. SQLite rolls the
+        // whole statement back, including the change row already written.
+        let failed = sqlx::query("UPDATE t SET n = n * 3").execute(&mut *tx).await;
+        assert!(failed.is_err());
+        sqlx::query("UPDATE t SET n = 2 WHERE id = 'a'").execute(&mut *tx).await.unwrap();
+        finalize(&mut tx, &Provenance::default()).await.unwrap().unwrap();
+        tx.commit().await.unwrap();
+        let rows = changes(&mut connection).await;
+        let last = rows.last().unwrap();
+        assert_eq!(last.0, "update");
+        assert_eq!(last.2, json!({"id":"a","n":2}));
+        assert!(rows.iter().all(|row| row.2 != json!({"id":"a","n":3})), "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.0 == "update").count(), 1, "{rows:?}");
+        assert_eq!(last.1, json!({"id":"a","n":1}));
+    }
+}

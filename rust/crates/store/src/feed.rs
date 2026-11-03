@@ -9,7 +9,7 @@
 use serde_json::json;
 use sqlx::{Row, SqliteConnection};
 
-use crate::rows::{json_object_expr, quote_identifier, ColumnInfo};
+use crate::rows::{quote_identifier, ColumnInfo};
 use crate::DatabaseError;
 
 pub const NOW_MS: &str = "CAST(unixepoch('subsec') * 1000 AS INTEGER)";
@@ -128,6 +128,22 @@ pub async fn finalize(
     if !has_feed {
         return Ok(None);
     }
+    // Hook-captured rows hold `[old, new, changed]` in new_value (see
+    // capture_triggers_sql). Updates that changed no column carry NULL.
+    sqlx::query(
+        "DELETE FROM _gonvex_sync_changes WHERE revision IS NULL AND operation = 'update' AND new_value IS NULL",
+    )
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        r#"UPDATE _gonvex_sync_changes
+           SET old_value = nullif(new_value -> '$[0]', 'null'),
+               changed_columns = coalesce(new_value -> '$[2]', '[]'),
+               new_value = nullif(new_value -> '$[1]', 'null')
+           WHERE revision IS NULL AND json_type(new_value) = 'array'"#,
+    )
+    .execute(&mut *connection)
+    .await?;
     let pending: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL)",
     )
@@ -277,11 +293,13 @@ pub fn capture_triggers_sql(table: &str, key: &str, columns: &[ColumnInfo]) -> S
     let key_new = format!("CAST(NEW.{} AS TEXT)", quote_identifier(key));
     let key_old = format!("CAST(OLD.{} AS TEXT)", quote_identifier(key));
     let [insert, update, delete] = capture_trigger_names(table).map(|name| quote_identifier(&name));
+    // One `gonvex_capture` call per row change: the trigger stores its
+    // `[old, new, changed]` result in `new_value` and `finalize` splits it.
+    // A subquery would be flattened and re-run the function per reference.
     let body = |row_key: &str, operation: &str, rowid: &str, op: u8| {
         format!(
-            "INSERT INTO _gonvex_sync_changes (table_name, row_id, operation, old_value, new_value, changed_columns)\n  \
-             SELECT '{literal_table}', {row_key}, '{operation}', nullif(c -> '$[0]', 'null'), nullif(c -> '$[1]', 'null'), c -> '$[2]'\n  \
-             FROM (SELECT {function}('{literal_table}', {rowid}, {op}) AS c) WHERE c IS NOT NULL;",
+            "INSERT INTO _gonvex_sync_changes (table_name, row_id, operation, new_value)\n  \
+             VALUES ('{literal_table}', {row_key}, '{operation}', {function}('{literal_table}', {rowid}, {op}));",
             function = crate::capture::CAPTURE_FUNCTION,
         )
     };

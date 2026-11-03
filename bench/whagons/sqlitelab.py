@@ -35,6 +35,10 @@ def host_path(url):
 
 def connect(path):
     db = sqlite3.connect(path, isolation_level=None, timeout=30)
+    # The runtime fills row images through its pre-update hook. Lab scripts
+    # write with no clients connected, so their change rows carry no images
+    # (updates are dropped as no-ops at finalize).
+    db.create_function('gonvex_capture', 3, lambda table, rowid, op: None)
     db.execute('PRAGMA foreign_keys=ON')
     db.execute('PRAGMA busy_timeout=30000')
     return db
@@ -55,6 +59,10 @@ def tenant_db(tenant_id):
 def finalize(db, command='load-lab'):
     """Assigns one revision to changes staged by this script, exactly as the
     runtime's commit would, so they are not adopted by an unrelated commit."""
+    db.execute("DELETE FROM _gonvex_sync_changes WHERE revision IS NULL AND operation = 'update' AND new_value IS NULL")
+    db.execute("""UPDATE _gonvex_sync_changes SET old_value = nullif(new_value -> '$[0]', 'null'),
+                  changed_columns = coalesce(new_value -> '$[2]', '[]'), new_value = nullif(new_value -> '$[1]', 'null')
+                  WHERE revision IS NULL AND json_type(new_value) = 'array'""")
     if not db.execute("SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL LIMIT 1").fetchone():
         return None
     revision = db.execute(
