@@ -20,6 +20,8 @@ pub mod modules;
 mod native_auth;
 mod operations;
 mod operator_data;
+#[cfg(feature = "perf-fixture")]
+pub mod perf_fixture;
 pub mod public_functions;
 pub mod replica;
 mod replica_cursor;

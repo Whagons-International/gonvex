@@ -334,6 +334,17 @@ impl ExtensionEncoder for Encode {
     }
 }
 
+/// Benchmark access to the per-message compressor (`perf-fixture` only).
+#[cfg(feature = "perf-fixture")]
+#[doc(hidden)]
+pub fn perf_compress_text(
+    payload: &[u8],
+    window_bits: u8,
+    threshold: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    compress_text(payload, window_bits, threshold)
+}
+
 fn compress_text(payload: &[u8], window_bits: u8, threshold: usize) -> io::Result<Option<Vec<u8>>> {
     if payload.len() < threshold {
         return Ok(None);

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Exposes internal codecs to the runtime's benchmark fixture.
+perf-fixture = []
+
 [dependencies]
 axum.workspace = true
 bytes = "1"

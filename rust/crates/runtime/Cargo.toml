@@ -11,6 +11,9 @@ test-firebase-auth-emulator = []
 # Heap profiling builds: use the system allocator instead of mimalloc.
 system-alloc = []
 duckdb = ["dep:duckdb", "dep:calamine"]
+# Benchmark fixture (`gonvex_runtime::perf_fixture`): a Whagons-shaped
+# Runtime with a fake in-process module host. Never enabled in release builds.
+perf-fixture = ["gonvex-websocket/perf-fixture"]
 
 [dependencies]
 # Process allocator: lower fragmentation under bursty multi-threaded snapshot
@@ -55,3 +58,12 @@ gonvex-websocket = { path = "../websocket" }
 tempfile = "3"
 tokio-tungstenite = "0.29"
 tower.workspace = true
+
+[[bench]]
+name = "baseline"
+harness = false
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "perf_fixture_smoke"
+required-features = ["perf-fixture"]
