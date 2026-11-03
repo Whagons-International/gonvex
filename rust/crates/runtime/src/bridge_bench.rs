@@ -105,15 +105,65 @@ impl gonvex_module_runtime::InlineHost for ProbeInline {
             return Err(call);
         };
         let query = matches!(call, gonvex_module_runtime::HostCall::DbQuery { .. });
+        let trace = env("BRIDGE_BENCH_TRACE").is_some().then(|| match &call {
+            gonvex_module_runtime::HostCall::DbQuery { statement, .. } => statement.clone(),
+            other => other.capability().to_owned(),
+        });
         let started = Instant::now();
-        let result = target.call_inline(call)?;
+        let result = if env("BRIDGE_BENCH_INLINE_THREAD").is_some() {
+            // Model "one dedicated SQLite thread per database, a job per
+            // statement": the isolate thread hands the call over and blocks.
+            writer_thread_call(target.clone(), call)?
+        } else {
+            target.call_inline(call)?
+        };
         self.nanos.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        if let Some(statement) = trace {
+            let bytes = match &result {
+                Ok(response) => response.value.len(),
+                Err(_) => 0,
+            };
+            println!(
+                "BRIDGE_TRACE {:>8.1}us {:>7}B {}",
+                started.elapsed().as_secs_f64() * 1e6,
+                bytes,
+                statement.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(220).collect::<String>()
+            );
+        }
         self.calls.fetch_add(1, Relaxed);
         if query {
             self.queries.fetch_add(1, Relaxed);
         }
         Ok(result)
     }
+}
+
+type ThreadJob = Box<dyn FnOnce() + Send>;
+
+fn writer_thread_call(
+    target: Arc<dyn gonvex_module_runtime::InlineHost>,
+    call: gonvex_module_runtime::HostCall,
+) -> Result<Result<gonvex_module_runtime::HostResponse, gonvex_module_runtime::HostError>, gonvex_module_runtime::HostCall>
+{
+    static THREAD: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<ThreadJob>>> =
+        std::sync::OnceLock::new();
+    let jobs = THREAD.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<ThreadJob>();
+        std::thread::spawn(move || {
+            for job in receiver {
+                job();
+            }
+        });
+        std::sync::Mutex::new(sender)
+    });
+    let (reply, answer) = std::sync::mpsc::sync_channel(1);
+    jobs.lock()
+        .unwrap()
+        .send(Box::new(move || {
+            let _ = reply.send(target.call_inline(call));
+        }))
+        .unwrap();
+    answer.recv().unwrap()
 }
 
 impl Probe {
@@ -646,7 +696,9 @@ fn bridge_bench_whagons() {
             report["failures"] = json!(failures);
             reports.push(report);
         }
+        let statements = pools.writer_statement_stats(&url).await.unwrap();
         let summary = json!({
+            "writerStatements": {"cached": statements.cached, "prepared": statements.prepared, "reused": statements.reused},
             "mode": if in_process() { "in-process" } else { "socket" },
             "loadMs": load_ms,
             "runtimeRssKb": {"beforeLoad": rss_before, "afterLoad": rss_loaded, "afterCalls": rss_kb()},

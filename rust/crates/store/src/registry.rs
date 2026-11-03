@@ -347,6 +347,10 @@ impl PoolRegistry {
             .min_connections(1)
             .idle_timeout(None)
             .max_lifetime(None)
+            // A local SQLite connection does not drop like a socket; the
+            // default ping on every acquire was one more worker round trip
+            // per transaction.
+            .test_before_acquire(false)
             .acquire_timeout(self.limits.acquire_timeout)
             // Change capture reads row values through the pre-update hook,
             // installed on the writer only (readers never write).
@@ -372,6 +376,7 @@ impl PoolRegistry {
             .min_connections(0)
             .idle_timeout(Some(self.limits.idle_timeout))
             .max_lifetime(None)
+            .test_before_acquire(false)
             .acquire_timeout(self.limits.acquire_timeout)
             .connect_lazy_with(self.options(&path, true)?);
         let (notify, _) = broadcast::channel(NOTIFY_CAPACITY);
