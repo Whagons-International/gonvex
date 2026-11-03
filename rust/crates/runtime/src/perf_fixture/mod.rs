@@ -483,7 +483,7 @@ impl Fixture {
         Ok(FeedEvent::Transaction {
             database_epoch: clock.epoch,
             revision: clock.revision,
-            changes,
+            changes: std::sync::Arc::new(changes),
         })
     }
 

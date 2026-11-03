@@ -5187,7 +5187,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision,
-            changes: Vec::new(),
+            changes: Default::default(),
         }
     }
 
@@ -5887,7 +5887,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let transaction = change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision: 535,
-            changes: Vec::new(),
+            changes: Default::default(),
         };
         assert!(matches!(
             replica_watermark(&transaction),
@@ -6099,7 +6099,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let event = |revision, changed_columns: Vec<&str>| change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision,
-            changes: vec![change_feed::LogChange {
+            changes: std::sync::Arc::new(vec![change_feed::LogChange {
                 revision,
                 ordinal: 0,
                 origin_command_id: "command".to_owned(),
@@ -6110,7 +6110,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 old_value: serde_json::json!({"id":"member","account_id":"account","status":"active"}),
                 new_value: serde_json::json!({"id":"member","account_id":"account","status":"revoked"}),
                 provenance: change_feed::TransactionProvenance::default(),
-            }],
+            }]),
         };
 
         assert!(!membership_affects(&session, &event(5, vec!["status"])));
@@ -6182,7 +6182,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let transaction = change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision: 7,
-            changes: Vec::new(),
+            changes: Default::default(),
         };
         let frames = membership_changed_frames(replica_watermark(&transaction));
         assert_eq!(frames.len(), 2);

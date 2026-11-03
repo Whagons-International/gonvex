@@ -46,7 +46,9 @@ pub enum FeedEvent {
     Transaction {
         database_epoch: String,
         revision: u64,
-        changes: Vec<LogChange>,
+        /// Shared by every receiver of the broadcast: a connection's copy of
+        /// the event is a reference count, not a deep copy of every row image.
+        changes: std::sync::Arc<Vec<LogChange>>,
     },
     Reset {
         reason: String,
@@ -335,7 +337,7 @@ async fn deliver_committed(
             let _ = sender.send(FeedEvent::Transaction {
                 database_epoch: clock.epoch.clone(),
                 revision: current_revision,
-                changes: std::mem::take(&mut batch),
+                changes: std::sync::Arc::new(std::mem::take(&mut batch)),
             });
         }
         current_revision = change.revision;
@@ -346,7 +348,7 @@ async fn deliver_committed(
         let _ = sender.send(FeedEvent::Transaction {
             database_epoch: clock.epoch,
             revision: current_revision,
-            changes: batch,
+            changes: std::sync::Arc::new(batch),
         });
     }
     Ok(clock.revision)

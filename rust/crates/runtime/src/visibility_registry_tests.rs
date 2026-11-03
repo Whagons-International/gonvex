@@ -37,7 +37,7 @@ fn tx(epoch: &str, revision: u64, changes: Vec<LogChange>) -> FeedEvent {
     FeedEvent::Transaction {
         database_epoch: epoch.into(),
         revision,
-        changes,
+        changes: std::sync::Arc::new(changes),
     }
 }
 
