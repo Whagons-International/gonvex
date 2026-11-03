@@ -51,8 +51,9 @@ tunnel_cg=/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value "$tunnel
 proxy_cg=/sys/fs/cgroup$(sed -n 's/^0:://p' "/proc/$(docker inspect "$prefix-remote-proxy" --format '{{.State.Pid}}')/cgroup")
 "${compose[@]}" run -d --rm --no-deps --name "$prefix-monitor" monitor "/lab/$label" "$proxy_cg" "$tunnel_cg" > /dev/null
 # /dev/metrics and /dev/profile snapshots every 10 s from this side (independent of the generator).
+pid=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["projectId"])' "$lab/fixture.json")
 ( while :; do
-   m=$(curl -s --max-time 5 --unix-socket "$lab/proxy/runtime.sock" -H 'authorization: Bearer local-load-admin' http://127.0.0.1/dev/metrics || true)
+   m=$(curl -s --max-time 5 --unix-socket "$lab/proxy/runtime.sock" -H 'authorization: Bearer local-load-admin' "http://127.0.0.1/dev/metrics?project=$pid" || true)
    [ -z "$m" ] || printf '{"at":%s,"metrics":%s}\n' "$(date +%s%3N)" "$m" >> "$out/dev-metrics.jsonl"
    # /dev/profile dumps (perf/profiler); pick the two that bracket the plateau
    # and diff them with bench/profiler/top.py --delta.
@@ -63,6 +64,7 @@ proxy_cg=/sys/fs/cgroup$(sed -n 's/^0:://p' "/proc/$(docker inspect "$prefix-rem
   done ) & poller=$!
 finish() {
  kill "$poller" 2>/dev/null || true
+ [ -z "${perfjob:-}" ] || wait "$perfjob" 2>/dev/null || true
  docker stop -t 5 "$prefix-monitor" >/dev/null 2>&1 || true
  systemctl --user stop "$tunnel.service" >/dev/null 2>&1 || true
 }
@@ -72,7 +74,7 @@ trap 'exit 143' TERM
 for _ in $(seq 50); do ssh "$remote" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$rport/healthz" 2>/dev/null | grep -q 200 && break; sleep 0.2; done
 # Ship this commit's harness and the lab fixture to the generator host.
 rh="$rroot/harness-$(git -C "$bench" rev-parse --short HEAD)$( [ -z "$(git -C "$bench" status --porcelain -- .)" ] || echo -dirty)"
-rsync -a --delete --exclude results "$bench/" "$remote:$rh/"
+tar -C "$bench" --exclude ./results -cf - . | ssh "$remote" "rm -rf $rh && mkdir -p $rh && tar -C $rh -xf -"
 scp -q "$lab/fixture.json" "$remote:$rroot/fixture.json"
 rresult="$rroot/results/$label.json"
 fwd=""
@@ -80,6 +82,16 @@ for v in LOAD_CLIENT LOAD_SDK_USERS LOAD_ORACLE_CLIENT LOAD_OPEN_LOOP LOAD_NATIV
  LOAD_RAMP_SECONDS LOAD_SHARDS LOAD_ALL_TENANTS_ACTIVE LOAD_SCRIPT LOAD_SCENARIO LOAD_RATE LOAD_DWELL_MS LOAD_PREPARED_USERS LOAD_MAX_INFLIGHT LOAD_PATH_MOUNTS; do
  [ -z "${!v:-}" ] || fwd="$fwd $v=$(printf %q "${!v}")"
 done
+# On-CPU then off-CPU flamegraphs of the runtime, 30 s each, starting
+# LOAD_PERF_AT seconds after the generator starts (default: ramp + 45 s, in the
+# plateau). LOAD_PERF=0 skips them.
+if [ "${LOAD_PERF:-1}" != 0 ] && command -v perf >/dev/null; then
+ rpid=$(docker inspect "$prefix-runtime" --format '{{.State.Pid}}')
+ perf buildid-cache -a "$LOAD_BIN_DIR/gonvex-runtime" 2>/dev/null || true
+ ( sleep "${LOAD_PERF_AT:-$(( ${LOAD_RAMP_SECONDS:-60} + 45 ))}"
+   "$bench/../profiler/perf-oncpu.sh" "$rpid" 30 "$out/oncpu.svg" > "$out/perf-oncpu.log" 2>&1
+   "$bench/../profiler/offcpu.sh" "$rpid" 30 "$out/offcpu.svg" > "$out/perf-offcpu.log" 2>&1 ) & perfjob=$!
+fi
 status=0
 ssh "$remote" "cd $rroot && env WHAGONS_CHECKOUT=$rroot/app LOAD_STATE=$rroot/fixture.json LOAD_ADMIN_KEY=local-load-admin \
  LOAD_URL=http://127.0.0.1:$rport LOAD_AUTH_URL=http://127.0.0.1:$aport LOAD_RESULT=$rresult \
@@ -87,7 +99,7 @@ ssh "$remote" "cd $rroot && env WHAGONS_CHECKOUT=$rroot/app LOAD_STATE=$rroot/fi
  PATH=$rroot/tools/node-v26.13.0-darwin-arm64/bin:/usr/bin:/bin:/usr/sbin:/sbin $fwd sh $rh/remote-shards.sh" > "$out/generator.log" 2>&1 || status=$?
 finish
 trap - EXIT INT TERM
-rsync -a "$remote:$rroot/results/$label.json*" "$lab/" || true
+ssh "$remote" "cd $rroot/results && tar -cf - $label.json*" | tar -C "$lab" -xf - || true
 # summarize.py reads <label>.json (+ .shard-0.metrics.jsonl) beside the case directory.
 printf '%s\n' "$status" > "$lab/$label.exit"
 LOAD_CONTAINER_PREFIX="$prefix-" python3 "$bench/summarize.py" "$lab" "$label" > "$lab/$label-summary.json" || true
