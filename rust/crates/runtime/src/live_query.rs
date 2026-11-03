@@ -1088,7 +1088,7 @@ pub(super) async fn execute_in_transaction(
         quote(column)?;
     }
     // Declared types keep JSON and BOOLEAN columns typed in each row object.
-    let declared = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &plan.table)
+    let declared = gonvex_store::rows::table_columns(transaction.transaction(), &plan.table)
         .await?
         .into_iter()
         .map(|column| (column.name.clone(), column.kind()))

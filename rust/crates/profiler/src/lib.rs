@@ -19,6 +19,8 @@
 //!
 //! `GONVEX_PROFILER=0` turns every recording site into a single relaxed load.
 
+pub mod cron;
+
 use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
@@ -227,9 +229,20 @@ pub enum Label {
     Reducer = 3,
     Query = 4,
     Action = 5,
+    /// Work started by the scheduler (crons, `runAt`/`wakeAt` jobs). Set by
+    /// the caller, never by [`Label::classify`].
+    Cron = 6,
 }
 
-pub const LABELS: [&str; 6] = ["-", "heartbeat", "presence", "reducer", "query", "action"];
+pub const LABELS: [&str; 7] = [
+    "-",
+    "heartbeat",
+    "presence",
+    "reducer",
+    "query",
+    "action",
+    "cron",
+];
 pub const LABEL_COUNT: usize = LABELS.len();
 
 impl Label {
@@ -265,6 +278,7 @@ impl Label {
             3 => Self::Reducer,
             4 => Self::Query,
             5 => Self::Action,
+            6 => Self::Cron,
             _ => Self::None,
         }
     }
@@ -1316,6 +1330,8 @@ mod tests {
         );
         assert_eq!(Label::classify("reducer", "tasks.save"), Label::Reducer);
         assert_eq!(Label::classify("query", "tasks.list"), Label::Query);
+        assert_eq!(Label::from_u8(Label::Cron as u8), Label::Cron);
+        assert_eq!(LABELS[Label::Cron as usize], "cron");
         assert_eq!(STAGES.len(), STAGE_COUNT);
         assert_eq!(STAGES[Stage::PollOther as usize].name, "poll.other");
     }

@@ -103,6 +103,15 @@ pub struct CronSpec {
     pub interval_ms: Option<u64>,
     #[serde(default)]
     pub expression: Option<String>,
+    /// Optional pre-check: one read-only SQL statement evaluated on a tenant
+    /// reader before each run, with `$1` bound to the run's due time (Unix
+    /// ms). The run enters V8 only when the first column of the first row is
+    /// truthy (not NULL, 0, '' or absent). Errors fail open (the run happens).
+    #[serde(default)]
+    pub due_when: Option<String>,
+    /// Profiler cron-table slot, assigned once at module install.
+    #[serde(skip)]
+    pub slot: u16,
 }
 
 #[derive(Default)]
@@ -116,6 +125,13 @@ pub struct ModuleRegistry {
 pub struct ModuleCallLease {
     module: Arc<ProjectModule>,
     _activation: Arc<OwnedRwLockReadGuard<()>>,
+}
+
+impl ModuleCallLease {
+    /// The leased module itself (shared, no copy).
+    pub fn shared(&self) -> Arc<ProjectModule> {
+        self.module.clone()
+    }
 }
 
 impl std::ops::Deref for ModuleCallLease {
@@ -305,7 +321,7 @@ fn crons_from_module(
         .get("crons")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    let crons: Vec<CronSpec> = serde_json::from_value(values)
+    let mut crons: Vec<CronSpec> = serde_json::from_value(values)
         .map_err(|error| invalid(format!("invalid crons: {error}")))?;
     let mut names = std::collections::BTreeSet::new();
     for cron in &crons {
@@ -330,6 +346,17 @@ fn crons_from_module(
                 cron.name
             )));
         }
+    }
+    for cron in &mut crons {
+        if let Some(statement) = cron.due_when.as_deref() {
+            if statement.trim().is_empty() {
+                cron.due_when = None;
+            } else {
+                crate::host_calls::admit_read_statement(statement)
+                    .map_err(|error| invalid(format!("cron {:?} dueWhen: {error}", cron.name)))?;
+            }
+        }
+        cron.slot = gonvex_profiler::cron::register(cron.name.trim());
     }
     Ok(crons)
 }

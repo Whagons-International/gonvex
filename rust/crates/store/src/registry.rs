@@ -210,6 +210,9 @@ pub struct WriterStats {
     acquisitions: AtomicU64,
     wait_ns: AtomicU64,
     wait_max_ns: AtomicU64,
+    /// Set once the database is known to carry the change feed (it is never
+    /// removed), so commits skip the schema lookup.
+    pub(crate) has_feed: std::sync::atomic::AtomicBool,
 }
 
 /// Holds a writer-queue slot while a transaction waits for its database's

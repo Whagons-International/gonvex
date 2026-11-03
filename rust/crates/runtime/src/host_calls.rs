@@ -114,6 +114,9 @@ pub struct DatabaseHostCalls {
     schema: Value,
     tables: BTreeMap<String, Arc<TableCatalog>>,
     schedulable_functions: BTreeSet<String>,
+    /// The calling module: `scheduler.*` targets are checked against its
+    /// function table instead of a per-call copy of every function name.
+    schedulable_module: Option<Arc<crate::modules::ProjectModule>>,
     actor_account_id: String,
     actor_email: String,
     provenance: Value,
@@ -133,6 +136,8 @@ pub struct DatabaseHostCalls {
     /// host invocation timing (profiler slow traces).
     sql_ns: u64,
     invoke_times: crate::module_host::InvokeTimes,
+    /// Profiler clock when the lazy write transaction opened (0: not open).
+    writer_acquired_ns: u64,
 }
 
 impl DatabaseHostCalls {
@@ -146,6 +151,7 @@ impl DatabaseHostCalls {
             schema: Value::Null,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
@@ -158,6 +164,7 @@ impl DatabaseHostCalls {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         }
     }
 
@@ -172,6 +179,7 @@ impl DatabaseHostCalls {
             schema: Value::Null,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
@@ -184,6 +192,7 @@ impl DatabaseHostCalls {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         };
         handler.transaction = None;
         handler
@@ -241,6 +250,7 @@ impl DatabaseHostCalls {
                 }
                 self.writer_wait_ns +=
                     timer.lap(gonvex_profiler::Stage::WriterWait, self.profile_label);
+                self.writer_acquired_ns = timer.at_ns();
                 transaction.set_profile_label(self.profile_label);
                 self.transaction = Some(transaction);
             }
@@ -317,6 +327,27 @@ impl DatabaseHostCalls {
         self
     }
 
+    /// Schedulable targets are this module's Reducers and Actions.
+    pub(crate) fn with_schedulable_module(
+        mut self,
+        module: Arc<crate::modules::ProjectModule>,
+    ) -> Self {
+        self.schedulable_module = Some(module);
+        self
+    }
+
+    fn schedulable(&self, function: &str) -> bool {
+        if self.schedulable_functions.contains(function) {
+            return true;
+        }
+        self.schedulable_module.as_ref().is_some_and(|module| {
+            module
+                .functions
+                .get(function)
+                .is_some_and(|definition| matches!(definition.kind.as_str(), "reducer" | "action"))
+        })
+    }
+
     pub fn with_schedulable_functions(
         mut self,
         functions: impl IntoIterator<Item = String>,
@@ -331,13 +362,28 @@ impl DatabaseHostCalls {
 
     /// Commits (Reducer success) or rolls back, returning the revision the
     /// commit published, if it changed tracked rows.
-    pub async fn finish_with_revision(mut self, success: bool) -> Result<Option<u64>, String> {
+    pub async fn finish_with_revision(self, success: bool) -> Result<Option<u64>, String> {
+        self.finish_with_outcome(success)
+            .await
+            .map(|outcome| outcome.revision)
+    }
+
+    /// Profiler clock when the write transaction opened (0: never opened).
+    pub(crate) fn writer_acquired_ns(&self) -> u64 {
+        self.writer_acquired_ns
+    }
+
+    /// Like [`Self::finish_with_revision`], with the published change count.
+    pub(crate) async fn finish_with_outcome(
+        mut self,
+        success: bool,
+    ) -> Result<gonvex_store::CommitOutcome, String> {
         if self.claim_conflict {
             return Err(RECEIPT_REPLAY.to_owned());
         }
         if self.transaction.is_none() && self.pending.take().is_some() {
             // The Reducer never touched the database: nothing to commit.
-            return Ok(None);
+            return Ok(Default::default());
         }
         let transaction = self
             .transaction
@@ -353,14 +399,14 @@ impl DatabaseHostCalls {
         }
         if self.capability == DatabaseCapability::Reducer && success {
             transaction
-                .commit_with_revision()
+                .commit_with_outcome()
                 .await
                 .map_err(|error| fault.database(error))
         } else {
             transaction
                 .rollback()
                 .await
-                .map(|_| None)
+                .map(|_| Default::default())
                 .map_err(|error| fault.database(error))
         }
     }
@@ -422,7 +468,13 @@ impl HostCallHandler for DatabaseHostCalls {
         );
         let started = gonvex_profiler::now_ns();
         let writer_wait_before = self.writer_wait_ns;
+        let query = matches!(call, HostCallFrame::DbQuery { .. });
         let result = self.handle_call(call).await;
+        if query && crate::cron_profile::active() {
+            if let Ok(Value::Array(rows)) = &result {
+                crate::cron_profile::add(|run| &run.rows_read, rows.len() as u64);
+            }
+        }
         // The first database call also opens the write transaction; that wait
         // is its own stage (db.writer_wait), so SQL time excludes it.
         let elapsed = gonvex_profiler::now_ns()
@@ -580,7 +632,7 @@ impl DatabaseHostCalls {
     ) -> Result<Value, String> {
         self.require_open()?;
         let function = function.trim();
-        if !self.schedulable_functions.contains(function) {
+        if !self.schedulable(function) {
             return Err(format!(
                 "scheduled function {function:?} is not a registered Reducer or Action"
             ));
@@ -649,7 +701,7 @@ impl DatabaseHostCalls {
         // Exact declared types of the result columns (sqlx reports `JSON` as
         // NULL). A statement that fails to prepare fails again below with the
         // real error, so a describe failure only means "unknown".
-        let kinds = rows::result_column_kinds(&mut **transaction, statement.trim())
+        let kinds = rows::result_column_kinds(transaction, statement.trim())
             .await
             .ok();
         let rows = query.fetch_all(&mut **transaction).await;
@@ -1104,6 +1156,12 @@ fn require_read_head(head: &str) -> Result<(), String> {
     }
 }
 
+/// Admits one read-only statement (a cron's `dueWhen` pre-check).
+pub(crate) fn admit_read_statement(statement: &str) -> Result<(), String> {
+    let admitted = require_single_statement(statement)?;
+    require_read_head(&admitted.first_word)
+}
+
 #[cfg(test)]
 fn require_read_statement(statement: &str) -> Result<(), String> {
     let admitted = require_single_statement(statement)?;
@@ -1214,6 +1272,7 @@ mod tests {
             schema,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
@@ -1226,6 +1285,7 @@ mod tests {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         };
         let mut calls = calls;
         assert_eq!(
@@ -1254,6 +1314,7 @@ mod tests {
             schema,
             tables: BTreeMap::new(),
             schedulable_functions: BTreeSet::new(),
+            schedulable_module: None,
             actor_account_id: String::new(),
             actor_email: String::new(),
             provenance: Value::Null,
@@ -1266,6 +1327,7 @@ mod tests {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());

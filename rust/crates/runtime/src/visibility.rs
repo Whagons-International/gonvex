@@ -535,7 +535,7 @@ async fn load_index(
         .begin_tenant_transaction(&session.route, true)
         .await?;
     // Declared types keep JSON and BOOLEAN columns typed in the projection.
-    let kinds = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &shape.table)
+    let kinds = gonvex_store::rows::table_columns(transaction.transaction(), &shape.table)
         .await?
         .into_iter()
         .map(|column| (column.name.clone(), column.kind()))

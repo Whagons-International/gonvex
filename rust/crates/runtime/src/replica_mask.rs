@@ -669,11 +669,7 @@ impl Runtime {
     ) -> Result<bool, ReplicaError> {
         let definition = &subscription.definition;
         let over_rows = definition.max_rows > 0 && subscription.rows.len() > definition.max_rows;
-        let bytes = |rows: &crate::replica::RowMap| {
-            rows.values()
-                .map(|row| serde_json::to_vec(row).unwrap_or_default().len() as i64)
-                .sum::<i64>()
-        };
+        let bytes = |rows: &crate::replica::RowMap| rows.values().map(|row| row.bytes).sum::<i64>();
         let over_bytes =
             definition.max_bytes > 0 && bytes(&subscription.rows) > definition.max_bytes;
         if !over_rows && !over_bytes {
@@ -711,9 +707,7 @@ impl Runtime {
         let mut kept_bytes = 0i64;
         let mut evict = Vec::new();
         for (index, (id, _)) in ordered.iter().enumerate() {
-            let size = serde_json::to_vec(&subscription.rows[id])
-                .unwrap_or_default()
-                .len() as i64;
+            let size = subscription.rows[id].bytes;
             if index >= max_rows || (max_bytes > 0 && kept_bytes + size > max_bytes) {
                 evict.push(id.clone());
             } else {

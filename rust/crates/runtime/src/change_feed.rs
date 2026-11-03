@@ -110,6 +110,20 @@ impl ChangeFeedHub {
     pub fn shutdown(&self) {
         let _ = self.shutdown.send(true);
     }
+
+    /// Connections subscribed to this database's feed, or 0 when the map is
+    /// busy (profiler attribution only; never waits).
+    pub fn receiver_count(&self, database_url: &str) -> usize {
+        self.feeds
+            .try_read()
+            .ok()
+            .and_then(|feeds| {
+                feeds
+                    .get(database_url)
+                    .map(broadcast::Sender::receiver_count)
+            })
+            .unwrap_or(0)
+    }
 }
 
 async fn run_feed(

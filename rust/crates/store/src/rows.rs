@@ -222,8 +222,9 @@ pub async fn result_column_kinds(
 ) -> Result<std::sync::Arc<Vec<Option<JsonKind>>>, DatabaseError> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<(usize, u64, String), Arc<Vec<Option<JsonKind>>>>>> =
-        OnceLock::new();
+    type Kinds = Arc<Vec<Option<JsonKind>>>;
+    type KindCache = Mutex<HashMap<(usize, u64, String), Kinds>>;
+    static CACHE: OnceLock<KindCache> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let mut handle = connection.lock_handle().await?;
     let raw = handle.as_raw_handle();

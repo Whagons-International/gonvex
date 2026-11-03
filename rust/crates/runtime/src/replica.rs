@@ -176,14 +176,36 @@ pub struct ReplicaEntry {
     pub hash: RowHash,
     /// Shared with snapshot messages that send this row.
     pub row: Arc<Value>,
+    /// Encoded JSON length of `row`, computed once so byte budgets do not
+    /// re-serialize every row on every change.
+    pub bytes: i64,
+}
+
+/// Encoded JSON length of `value` without allocating the encoding.
+pub(crate) fn json_len(value: &Value) -> i64 {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0 as i64
 }
 
 impl ReplicaEntry {
-    /// An entry outside the interner (size projections and tests).
+    /// An entry outside the interner (tests).
+    #[cfg(test)]
     pub(crate) fn detached(key: &str, row: Value) -> SharedRow {
         Arc::new(Self {
             key: key.into(),
             hash: row_hash(&row).into(),
+            bytes: json_len(&row),
             row: Arc::new(row),
         })
     }
@@ -236,17 +258,11 @@ pub(crate) fn intern_row(
     let shared = Arc::new(ReplicaEntry {
         key: key.into(),
         hash: hash.into(),
+        bytes: json_len(&row),
         row: Arc::new(row),
     });
     rows.insert(identity, Arc::downgrade(&shared));
     shared
-}
-
-/// The key/hash map of `rows` (pointers into the shared entries).
-pub(crate) fn row_hashes(rows: &RowMap) -> RowHashes {
-    rows.values()
-        .map(|entry| (entry.key.clone(), entry.hash.clone()))
-        .collect()
 }
 
 struct Snapshot {
@@ -1211,7 +1227,7 @@ async fn collect_snapshot_rows(
         if definition.max_rows > 0 && kept.len() >= definition.max_rows {
             return Ok((kept, true));
         }
-        let row_bytes = serde_json::to_vec(&row).unwrap_or_default().len() as i64;
+        let row_bytes = json_len(&row);
         if definition.max_bytes > 0 && bytes + row_bytes > definition.max_bytes {
             return Ok((kept, true));
         }
@@ -1306,13 +1322,12 @@ fn source_update_requires_snapshot<'a>(
         return Ok(true);
     }
     if definition.max_bytes > 0 {
-        let size = |row: &Value| serde_json::to_vec(row).unwrap_or_default().len() as i64;
         let bytes = rows
             .iter()
             .filter(|(id, _)| !overlay.contains_key(id.as_ref()))
-            .map(|(_, row)| size(&row.row))
+            .map(|(_, row)| row.bytes)
             .sum::<i64>()
-            + overlay.values().flatten().map(size).sum::<i64>();
+            + overlay.values().flatten().map(json_len).sum::<i64>();
         if bytes > definition.max_bytes {
             return Ok(true);
         }
@@ -2038,6 +2053,19 @@ mod tests {
             .collect()
     }
     use super::*;
+
+    #[test]
+    fn cached_row_bytes_match_the_encoded_row() {
+        let row =
+            serde_json::json!({"_id":"a","name":"ñandú \"q\"","n":[1,2.5,null],"o":{"x":true}});
+        let encoded = serde_json::to_vec(&row).unwrap().len() as i64;
+        assert_eq!(json_len(&row), encoded);
+        assert_eq!(ReplicaEntry::detached("a", row.clone()).bytes, encoded);
+        assert_eq!(
+            intern_row("db", "t", "a", "h-bytes-test", row).bytes,
+            encoded
+        );
+    }
 
     #[tokio::test]
     async fn snapshot_stream_stops_after_row_or_byte_budget_lookahead() {

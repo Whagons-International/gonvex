@@ -68,7 +68,7 @@ async fn script(pools: &PoolRegistry, url: &str, sql: &str) {
     let mut transaction = gonvex_store::begin_transaction(pools, url, false)
         .await
         .unwrap();
-    gonvex_store::execute_script(&mut **transaction.transaction(), sql)
+    gonvex_store::execute_script(transaction.transaction(), sql)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -372,7 +372,7 @@ async fn run_visibility_fixture(legacy: bool) {
         let mut transaction = gonvex_store::begin_transaction(&pools, &url, false)
             .await
             .unwrap();
-        gonvex_store::execute_script(&mut **transaction.transaction(), r#"
+        gonvex_store::execute_script(transaction.transaction(), r#"
             CREATE TABLE tasks(id TEXT PRIMARY KEY, "workspaceId" TEXT, title TEXT);
             CREATE TABLE "taskNotes"(id TEXT PRIMARY KEY, "taskId" TEXT, body TEXT);
             CREATE TABLE projects(id TEXT PRIMARY KEY, "workspaceId" TEXT);

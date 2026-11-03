@@ -4,6 +4,7 @@ mod bridge_bench;
 pub mod change_feed;
 pub mod config;
 pub mod control;
+mod cron_profile;
 mod dashboard;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
@@ -30,12 +31,15 @@ pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
 pub mod sandbox;
+mod scheduled_lane;
 pub mod scheduler;
 mod service_principal;
 mod snapshot_ack;
 mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
+// Kept for the Verus proof and benchmark in verification/; unused by the SQLite store.
+#[allow(dead_code)]
 mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;

@@ -98,6 +98,8 @@ pub struct CommitNotice {
     pub epoch: String,
     pub revision: u64,
     pub tables: Vec<String>,
+    /// Change rows in the revision (tracked rows written by the transaction).
+    pub changes: u64,
 }
 
 impl CommitNotice {
@@ -120,12 +122,39 @@ pub async fn finalize(
     connection: &mut SqliteConnection,
     provenance: &Provenance,
 ) -> Result<Option<CommitNotice>, DatabaseError> {
-    let has_feed: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_gonvex_sync_changes')",
+    finalize_known(connection, provenance, None).await
+}
+
+/// [`finalize`], with a per-database flag that remembers that the change feed
+/// exists (it is created once and never dropped). A transaction that staged
+/// no change rows costs one indexed probe and publishes nothing.
+pub async fn finalize_known(
+    connection: &mut SqliteConnection,
+    provenance: &Provenance,
+    feed_known: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Option<CommitNotice>, DatabaseError> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !feed_known.is_some_and(|known| known.load(Relaxed)) {
+        let has_feed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_gonvex_sync_changes')",
+        )
+        .fetch_one(&mut *connection)
+        .await?;
+        if !has_feed {
+            return Ok(None);
+        }
+        if let Some(known) = feed_known {
+            known.store(true, Relaxed);
+        }
+    }
+    // Nothing staged (a read-only or no-op transaction): no revision. Uses
+    // the partial index on pending rows.
+    let staged: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM _gonvex_sync_changes WHERE revision IS NULL)",
     )
     .fetch_one(&mut *connection)
     .await?;
-    if !has_feed {
+    if !staged {
         return Ok(None);
     }
     // Hook-captured rows hold `[old, new, changed]` in new_value (see
@@ -159,7 +188,7 @@ pub async fn finalize(
     .await?;
     let revision: i64 = clock.get(0);
     let epoch: String = clock.get(1);
-    sqlx::query(
+    let changes = sqlx::query(
         r#"UPDATE _gonvex_sync_changes
            SET revision = $1, transaction_id = $1, ordinal = ranked.row_ordinal, command_id = $2
            FROM (SELECT event_id, row_number() OVER (ORDER BY event_id) AS row_ordinal
@@ -169,7 +198,8 @@ pub async fn finalize(
     .bind(revision)
     .bind(provenance.command_id.as_deref().filter(|id| !id.is_empty()))
     .execute(&mut *connection)
-    .await?;
+    .await?
+    .rows_affected();
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT table_name FROM _gonvex_sync_changes WHERE revision = $1 ORDER BY table_name",
     )
@@ -215,6 +245,7 @@ pub async fn finalize(
         epoch,
         revision: revision as u64,
         tables,
+        changes,
     }))
 }
 
