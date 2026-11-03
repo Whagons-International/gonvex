@@ -1070,7 +1070,7 @@ fn bind(
         (sets, member_sets)
     };
     let key = ClassKey {
-        shape: residual.shape.clone(),
+        shape: residual.shape,
         sets,
         parents: parent_classes
             .iter()

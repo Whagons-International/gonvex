@@ -1836,7 +1836,7 @@ pub fn ancestor_row_change_concerns(
             };
             admitted(old) != admitted(new)
         });
-        let association = inherits_any(&parent.plan).into_iter().any(|expression| {
+        let association = inherits_any(&parent.plan).iter().any(|expression| {
             let (Some(via), Some(ancestor)) =
                 (&expression.via, state.inherited.get(&expression.table))
             else {

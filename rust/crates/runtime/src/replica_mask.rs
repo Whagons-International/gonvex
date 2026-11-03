@@ -92,6 +92,7 @@ fn set_columns(expression: &VisibilityExpression, set: &str, output: &mut BTreeS
 }
 
 impl Runtime {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn apply_mask_feed(
         &self,
         session: &TenantSession,

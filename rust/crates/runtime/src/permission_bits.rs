@@ -2,7 +2,7 @@
 //!
 //! A module may declare a permission grant projection in its manifest:
 //!
-//! ```json
+//! ```text
 //! "permissionGrants": {"table": "memberPermissionGrants", "member": "memberId",
 //!   "permission": "permission", "scope": "scope", "whereNull": ["deletedAt"]}
 //! ```
