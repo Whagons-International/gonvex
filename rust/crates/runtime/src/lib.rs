@@ -8,6 +8,7 @@ mod data_ingest;
 #[cfg(not(feature = "duckdb"))]
 #[path = "data_ingest_disabled.rs"]
 mod data_ingest;
+pub mod delivery;
 pub mod error_class;
 pub mod execution;
 pub mod external_auth;
@@ -92,6 +93,7 @@ struct RuntimeInner {
     public_limiter: Arc<public_functions::PublicLimiter>,
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
+    delivery: delivery::DeliveryHub,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -255,6 +257,7 @@ impl Runtime {
                 parent_acl: visibility::ParentAclRegistry::default(),
             }),
         }
+                delivery: delivery::DeliveryHub::default(),
     }
 
     pub async fn start(&self) -> Result<(), RuntimeStartError> {
@@ -1447,6 +1450,7 @@ async fn websocket(
     let mut row_patches = gonvex_protocol::row_patch::RowPatchEncoder::default();
     let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
     let mut legacy_snapshot_delivery = snapshot_delivery::LegacySnapshotDelivery::default();
+    let mut batcher = delivery::ReplicaBatcher::default();
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
@@ -1497,6 +1501,7 @@ async fn websocket(
             control_watermark: Some(1),
         }),
     };
+            replica_batch_frames: Some(1),
     if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
         .await
         .is_err()
@@ -1512,6 +1517,7 @@ async fn websocket(
             row_patches.clear();
             replica_opens.clear();
             pending_replica_opens.clear();
+            batcher.clear_bindings();
             snapshot_delivery.clear();
             legacy_snapshot_delivery.clear();
             live_queries.clear();
@@ -1547,7 +1553,13 @@ async fn websocket(
         let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
         let message = tokio::select! {
             _ = std::future::ready(()), if admit_replica => {
+        let batch_deadline = batcher.deadline(socket.batch());
                 let request = pending_replica_opens.pop_front().unwrap();
+            // Delivery v2: one frame per connection per tick.
+            _ = async { tokio::time::sleep_until(batch_deadline.unwrap()).await }, if batch_deadline.is_some() => {
+                if batcher.flush(&mut socket).await.is_err() { return; }
+                continue;
+            }
                 snapshot_delivery.remove(&request.id);
                 legacy_snapshot_delivery.remove(&request.id);
                 replicas.remove(&request.id);
@@ -1672,6 +1684,35 @@ async fn websocket(
                             match runtime.apply_feed_event(session, &mut replicas, event).await {
                                 Ok(messages) => {
                                     for mut message in messages {
+                                Ok(messages) if batcher.enabled() => {
+                                    let tenant_id = session.route.tenant_id.as_str();
+                                    for message in messages {
+                                        // Ready frames of a snapshot still being
+                                        // delivered wait in the gate, as before.
+                                        let message = if matches!(message, ServerMessage::ReplicaReady { .. }) {
+                                            match snapshot_delivery.gate(&message) { Some(message) => message, None => continue }
+                                        } else { message };
+                                        match batcher.push(socket.batch_mut(), &runtime.inner.delivery, tenant_id, snapshot_delivery.native(), &replicas, message) {
+                                            Ok(None) => {}
+                                            Ok(Some(message)) => {
+                                                if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
+                                            }
+                                            Err(()) => return,
+                                        }
+                                    }
+                                    if let Some(ServerMessage::ReplicaWatermark { revision }) = transaction_watermark {
+                                        batcher.watermark(socket.batch_mut(), tenant_id, &replicas, revision);
+                                        sent_replica_revision = sent_replica_revision.max(revision);
+                                    }
+                                    if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
+                                    if reset {
+                                        replicas.clear();
+                                        replica_opens.clear();
+                                        pending_replica_opens.clear();
+                                        snapshot_delivery.clear();
+                                        legacy_snapshot_delivery.clear();
+                                    }
+                                }
                                         if replica_field_patches_enabled && !replica_native_rows_enabled {
                                             match row_patches.prepare(&message) {
                                                 Ok(Some((full, patch))) => {
@@ -2213,6 +2254,10 @@ async fn websocket(
                     row_patches.clear();
                     replica_native_rows_enabled =
                         snapshot_delivery::negotiated(capabilities.as_ref());
+                    batcher.set_enabled(
+                        capabilities.as_ref().and_then(|c| c.replica_batch_frames) == Some(1),
+                    );
+                    batcher.clear_bindings();
                     snapshot_delivery.set_native(replica_native_rows_enabled);
                     replica_sum_digest_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_set_digest) == Some(1);
@@ -2345,6 +2390,11 @@ async fn websocket(
                     );
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                         .await
+                    if terminal_watermark.is_none() {
+                        if let Some(revision) = committed_revision(&response) {
+                            batcher.urgent(revision);
+                        }
+                    }
                         .is_err()
                     {
                         break;
@@ -2575,6 +2625,11 @@ async fn websocket(
                     );
                     let control_succeeded =
                         control_write && matches!(response, ServerMessage::ReducerResult { .. });
+                    if terminal_watermark.is_none() {
+                        if let Some(revision) = committed_revision(&response) {
+                            batcher.urgent(revision);
+                        }
+                    }
                     let control_updates = if control_succeeded {
                         runtime
                             .refresh_control_queries(
@@ -2685,6 +2740,11 @@ async fn websocket(
                         );
                         let control_succeeded = control_write
                             && matches!(response, ServerMessage::ReducerResult { .. });
+                        if terminal_watermark.is_none() {
+                            if let Some(revision) = committed_revision(&response) {
+                                batcher.urgent(revision);
+                            }
+                        }
                         let control_updates = if control_succeeded {
                             runtime
                                 .refresh_control_queries(
@@ -2803,6 +2863,11 @@ async fn websocket(
                     );
                     let control_succeeded = scope == Some(ExecutionScope::Control)
                         && matches!(response, ServerMessage::ActionResult { .. });
+                    if terminal_watermark.is_none() {
+                        if let Some(revision) = committed_revision(&response) {
+                            batcher.urgent(revision);
+                        }
+                    }
                     let control_updates = if control_succeeded {
                         runtime
                             .refresh_control_queries(
@@ -3362,6 +3427,19 @@ fn bootstrap_watermark_after_sent_snapshots(
 
 fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
     match event {
+/// The revision a durable call result waits for before it settles.
+fn committed_revision(response: &ServerMessage) -> Option<u64> {
+    match response {
+        ServerMessage::ReducerResult {
+            committed_revision, ..
+        }
+        | ServerMessage::ActionResult {
+            committed_revision, ..
+        } => *committed_revision,
+        _ => None,
+    }
+}
+
         change_feed::FeedEvent::Transaction { revision, .. } => {
             Some(ServerMessage::ReplicaWatermark {
                 revision: *revision,
@@ -4346,7 +4424,7 @@ mod tests {
             "/proof",
             axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async {
                 upgrade.on_upgrade(|socket| async move {
-                    let mut socket = super::WebSocket::Plain(Box::new(socket));
+                    let mut socket = super::WebSocket::plain(socket);
                     let mut delivery = super::snapshot_delivery::SnapshotDelivery::default();
                     let cursor = ReplicaCursor {
                         epoch: "e".into(),

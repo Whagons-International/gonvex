@@ -53,9 +53,11 @@ uuid.workspace = true
 url.workspace = true
 duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
+bytes = "1"
 
 [dev-dependencies]
 tempfile = "3"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tokio-tungstenite = "0.29"
 tower.workspace = true
 
@@ -64,6 +66,18 @@ name = "baseline"
 harness = false
 required-features = ["perf-fixture"]
 
+[[bench]]
+name = "delivery"
+harness = false
+required-features = ["perf-fixture"]
+
 [[test]]
 name = "perf_fixture_smoke"
 required-features = ["perf-fixture"]
+
+[[test]]
+name = "delivery_oracle"
+required-features = ["perf-fixture"]
+
+[lints.clippy]
+redundant_clone = "warn"
