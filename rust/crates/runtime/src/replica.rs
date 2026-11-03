@@ -2909,7 +2909,7 @@ mod tests {
         let definition = collection(serde_json::json!({}));
         let row = serde_json::json!({"id":"1", "title":"t", "workspaceId":"a", "rank":1});
         let mut client = BTreeMap::from([("1".to_owned(), row.clone())]);
-        let mut subscription = holding(definition, serde_json::json!({}), &[row.clone()]);
+        let mut subscription = holding(definition, serde_json::json!({}), std::slice::from_ref(&row));
         let mut wider = row.clone();
         wider["internalNotes"] = "not replicated".into();
         let mut renamed = row.clone();
@@ -2942,7 +2942,7 @@ mod tests {
             &mut subscription,
             &mut client,
             &[
-                row_change("1", row.clone(), edited.clone()),
+                row_change("1", row, edited.clone()),
                 row_change("1", edited, soft_deleted),
             ],
         )
