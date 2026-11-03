@@ -28,7 +28,6 @@ macro_rules! now_ms {
 
 pub mod capture;
 mod data_dir;
-mod group;
 pub mod feed;
 mod registry;
 pub mod rows;
@@ -88,8 +87,6 @@ pub enum DatabaseError {
     DataDirLocked(String),
     #[error("reference integrity: {0}")]
     ReferenceIntegrity(String),
-    #[error("group commit failed: {0}")]
-    GroupCommit(String),
     #[error("transaction aborted: an earlier statement failed ({0})")]
     TransactionAborted(String),
     #[error(transparent)]
@@ -1221,17 +1218,12 @@ pub struct TransactionAttribution<'a> {
 /// One invocation-scoped tenant transaction. The admission permit is held for
 /// the transaction lifetime so a burst of module calls cannot bypass the
 /// runtime-wide database limit.
-enum Connection {
-    Read(Transaction<'static, Sqlite>),
-    /// Writes share the database's group-commit transaction (see `group`).
-    Write(group::Member),
-}
-
 pub struct TenantTransaction {
-    connection: Option<Connection>,
+    transaction: Transaction<'static, Sqlite>,
     _admission: AdmissionPermit,
     read_only: bool,
     provenance: Provenance,
+    publisher: Option<(PoolRegistry, Arc<str>)>,
     committed: Option<CommitNotice>,
     failed: Option<String>,
 }
@@ -1244,16 +1236,18 @@ pub async fn begin_transaction(
     read_only: bool,
 ) -> Result<TenantTransaction, DatabaseError> {
     let admission = pools.admit(database_url).await?;
-    let connection = if read_only {
-        Connection::Read(pools.reader(database_url).await?.begin().await?)
+    let pool = if read_only {
+        pools.reader(database_url).await?
     } else {
-        Connection::Write(group::Member::join(pools, database_url).await?)
+        pools.pool(database_url).await?
     };
+    let transaction = pool.begin().await?;
     Ok(TenantTransaction {
-        connection: Some(connection),
+        transaction,
         _admission: admission,
         read_only,
         provenance: Provenance::default(),
+        publisher: (!read_only).then(|| (pools.clone(), Arc::from(database_url.trim()))),
         committed: None,
         failed: None,
     })
@@ -1261,10 +1255,7 @@ pub async fn begin_transaction(
 
 impl TenantTransaction {
     pub fn transaction(&mut self) -> &mut Transaction<'static, Sqlite> {
-        match self.connection.as_mut().expect("transaction is open") {
-            Connection::Read(transaction) => transaction,
-            Connection::Write(member) => member.transaction(),
-        }
+        &mut self.transaction
     }
 
     pub fn read_only(&self) -> bool {
@@ -1305,7 +1296,7 @@ impl TenantTransaction {
         .bind(subject)
         .bind(key)
         .bind(path)
-        .execute(&mut **self.transaction())
+        .execute(&mut *self.transaction)
         .await?;
         Ok(result.rows_affected() > 0)
     }
@@ -1323,7 +1314,7 @@ impl TenantTransaction {
         .bind(subject)
         .bind(key)
         .bind(Json(result.clone()))
-        .execute(&mut **self.transaction())
+        .execute(&mut *self.transaction)
         .await?;
         Ok(())
     }
@@ -1368,7 +1359,7 @@ impl TenantTransaction {
         .bind(actor_account_id)
         .bind(actor_email)
         .bind(Json(provenance.clone()))
-        .execute(&mut **self.transaction())
+        .execute(&mut *self.transaction)
         .await?;
         Ok(id.to_owned())
     }
@@ -1395,34 +1386,34 @@ impl TenantTransaction {
 
     /// Commits and returns the revision it published, if it changed rows.
     pub async fn commit_with_revision(mut self) -> Result<Option<u64>, DatabaseError> {
-        let connection = self.connection.take().expect("transaction is open");
-        let mut member = match connection {
-            Connection::Read(transaction) => {
-                transaction.commit().await?;
-                return Ok(None);
-            }
-            Connection::Write(member) => member,
-        };
         if let Some(reason) = self.failed.take() {
-            member.rollback().await?;
+            self.transaction.rollback().await?;
             return Err(DatabaseError::TransactionAborted(reason));
         }
-        let finalized = async {
-            reference_integrity::flush(member.transaction()).await?;
-            feed::finalize(member.transaction(), &self.provenance).await
-        }
-        .await;
-        let notice = match finalized {
-            Ok(notice) => notice,
-            Err(error) => {
-                member.rollback().await?;
-                return Err(error);
+        let notice = if self.read_only {
+            None
+        } else {
+            let finalized = async {
+                reference_integrity::flush(&mut self.transaction).await?;
+                feed::finalize(&mut self.transaction, &self.provenance).await
+            }
+            .await;
+            match finalized {
+                Ok(notice) => notice,
+                Err(error) => {
+                    self.transaction.rollback().await?;
+                    return Err(error);
+                }
             }
         };
+        self.transaction.commit().await?;
         let revision = notice.as_ref().map(|notice| notice.revision);
-        // Returns after the group's COMMIT; the group publishes the revision.
-        member.commit(notice.clone()).await?;
-        self.committed = notice;
+        if let (Some(notice), Some((pools, database_url))) = (notice, self.publisher.take()) {
+            pools
+                .notify(&database_url, feed::CHANGE_FEED_CHANNEL, &notice.payload())
+                .await?;
+            self.committed = Some(notice);
+        }
         Ok(revision)
     }
 
@@ -1430,11 +1421,8 @@ impl TenantTransaction {
         self.commit_with_revision().await.map(|_| ())
     }
 
-    pub async fn rollback(mut self) -> Result<(), DatabaseError> {
-        match self.connection.take().expect("transaction is open") {
-            Connection::Read(transaction) => transaction.rollback().await?,
-            Connection::Write(member) => member.rollback().await?,
-        }
+    pub async fn rollback(self) -> Result<(), DatabaseError> {
+        self.transaction.rollback().await?;
         Ok(())
     }
 }
