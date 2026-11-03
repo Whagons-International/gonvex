@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { buildModuleArtifact, moduleManifestFunctions } from "../dist/module-artifact.js";
+import { buildModuleArtifact, latin1JavaScript, moduleManifestFunctions } from "../dist/module-artifact.js";
 import { renderFunctionCatalog } from "../dist/function-catalog.js";
 
 async function moduleProject(t, source, supportingFiles = {}) {
@@ -190,6 +190,32 @@ export const rename = reducer<RenameArgs, RenameResult>({
   assert.deepEqual(functions.rename.result, { kind: "object", fields: { ok: { kind: "boolean" } } });
 });
 
+test("one-byte bundle source escapes non-Latin-1 text without changing values", async () => {
+  const source = [
+    "// comment — dash",
+    "export const dash = \"a—b\";",
+    "export const emoji = '😀';",
+    "export const strip = (value) => value.normalize('NFD').replace(/[\u0300-\u036f̀-ͯ]/g, '');",
+    "export const unicode = /😀/u.test('😀');",
+    "export const template = `x—${dash}—y`;",
+    "export const café = 'é stays Latin-1';",
+    "export const ναme = 1;",
+  ].join("\n");
+  const result = latin1JavaScript(source);
+  assert.equal(result.latin1, true);
+  assert.doesNotMatch(result.code, /[^\u0000-\u00ff]/);
+  const load = (code) => import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const [before, after] = await Promise.all([load(source), load(result.code)]);
+  for (const key of ["dash", "emoji", "unicode", "template", "café", "ναme"]) assert.deepEqual(after[key], before[key], key);
+  assert.equal(after.strip("é"), before.strip("é"));
+
+  // A tagged template exposes its raw text, so it is left as written.
+  const tagged = latin1JavaScript("export const raw = String.raw`a—b`;");
+  assert.equal(tagged.latin1, false);
+  assert.match(tagged.code, /a—b/);
+  assert.equal(latin1JavaScript("export const ascii = 1;").code, "export const ascii = 1;");
+});
+
 test("split artifacts add a Query/Reducer bundle without Action-only code", async (t) => {
   const definitions = `
 export const schema = {
@@ -208,13 +234,13 @@ export * as assistant from "./assistant.ts";
     "heavy.ts": "export const heavyModel = () => 'HEAVY_ACTION_ONLY_DEPENDENCY';\n",
     "tasks.ts": `
 import { query, reducer, schema } from "./sdk.ts";
-export const get = query({ args: schema.object({}), result: schema.string(), run: async () => "task" });
+export const get = query({ liveQueryPlan: { table: "tasks", key: "id", columns: ["id", "deletedAt"], where: { operator: "eq", column: "deletedAt", value: { literal: null } } }, args: schema.object({}), result: schema.string(), run: async () => "task" });
 export const rename = reducer({ name: "tasks.rename", args: schema.object({ title: schema.string() }), result: schema.string(), run: async (_ctx, args) => args.title });
 `,
     "assistant.ts": `
 import { action, query, schema } from "./sdk.ts";
 import { heavyModel } from "./heavy.ts";
-export const status = query({ args: schema.object({}), result: schema.string(), run: async () => "ready" });
+export const status = query({ liveQueryPlan: { table: "tasks", key: "id", columns: ["id", "deletedAt"], where: { operator: "eq", column: "deletedAt", value: { literal: null } } }, args: schema.object({}), result: schema.string(), run: async () => "ready" });
 export const ask = action({ args: schema.object({}), result: schema.string(), run: async () => heavyModel() });
 `,
   });

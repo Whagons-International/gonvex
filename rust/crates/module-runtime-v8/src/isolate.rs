@@ -610,6 +610,30 @@ fn log_heap_statistics(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, mom
     );
 }
 
+/// Diagnostic only (`GONVEX_V8_HEAP_SNAPSHOT_DIR`): writes a `.heapsnapshot`
+/// of the freshly initialized isolate for offline attribution.
+fn write_heap_snapshot(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, directory: &str) {
+    use std::io::Write as _;
+    let name = specifier
+        .path()
+        .trim_matches('/')
+        .replace('/', "-");
+    let path = std::path::Path::new(directory).join(format!(
+        "{name}-{}-{:?}.heapsnapshot",
+        std::process::id(),
+        thread::current().id()
+    ));
+    let Ok(file) = std::fs::File::create(&path) else {
+        eprintln!("[gonvex-module-host] cannot write heap snapshot {}", path.display());
+        return;
+    };
+    let mut file = std::io::BufWriter::new(file);
+    runtime
+        .v8_isolate()
+        .take_heap_snapshot(|chunk| file.write_all(chunk).is_ok());
+    let _ = file.flush();
+}
+
 /// Field order is drop order: the watchdog stops before the V8 handles and the
 /// runtime go away, so it can never terminate an isolate that is being torn
 /// down.
@@ -696,6 +720,9 @@ impl ModuleIsolate {
         let (dispatch, namespace) = initialized.expect("initialization timeout checked")?;
         if heap_stats_enabled() {
             log_heap_statistics(&mut runtime, &source.specifier, "initialized");
+        }
+        if let Ok(directory) = std::env::var("GONVEX_V8_HEAP_SNAPSHOT_DIR") {
+            write_heap_snapshot(&mut runtime, &source.specifier, &directory);
         }
         Ok(Self {
             watchdog,
