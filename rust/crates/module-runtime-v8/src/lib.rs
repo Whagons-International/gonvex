@@ -30,6 +30,8 @@ mod lookup_deadline_tests;
 mod pool;
 #[cfg(test)]
 mod runtime_contract_tests;
+#[cfg(test)]
+mod split_tests;
 mod webcrypto;
 
 use futures_util::{stream::FuturesUnordered, StreamExt};
@@ -46,6 +48,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::budget::CallBudget;
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
+pub use crate::isolate::trim_native_heap;
 use crate::pool::IsolatePool;
 use gonvex_module_runtime::effective_capabilities;
 
@@ -54,7 +57,22 @@ use gonvex_module_runtime::effective_capabilities;
 /// lazy initialization makes later generations created by sibling threads
 /// abort the process instead of loading alongside the active generation.
 pub fn initialize_v8_platform() {
+    // V8 freezes its flags once the platform is initialized, so operator
+    // flags (for example `--max-lazy`, `--no-opt`) are applied first. The
+    // deno_core defaults are applied on top and do not reset them.
+    if let Some(flags) = v8_flags_from_env() {
+        deno_core::v8::V8::set_flags_from_string(&flags);
+    }
     deno_core::JsRuntime::init_platform(None, false);
+}
+
+/// Extra V8 flags from `GONVEX_V8_FLAGS`, space separated. Unset or blank
+/// means V8's defaults.
+pub fn v8_flags_from_env() -> Option<String> {
+    std::env::var("GONVEX_V8_FLAGS")
+        .ok()
+        .map(|flags| flags.trim().to_owned())
+        .filter(|flags| !flags.is_empty())
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +93,15 @@ pub struct V8Config {
     pub recycle_after_calls: usize,
     /// Live isolates, and therefore the ceiling on concurrent module calls.
     pub isolate_pool_size: usize,
+    /// Split artifacts only: how long an idle isolate of the complete bundle
+    /// (which serves Actions) stays alive before it is released. Those
+    /// isolates start on demand, so a quiet module keeps only its small
+    /// Query/Reducer isolates resident.
+    pub on_demand_idle_ttl: Duration,
+    /// Split artifacts only: evaluate the complete bundle once while loading,
+    /// then release that isolate, so a bundle that throws at evaluation still
+    /// fails the load instead of the first Action.
+    pub validate_on_demand_bundle: bool,
 }
 
 impl Default for V8Config {
@@ -87,6 +114,8 @@ impl Default for V8Config {
             max_result_bytes: 8 * 1024 * 1024,
             recycle_after_calls: 10_000,
             isolate_pool_size: 1,
+            on_demand_idle_ttl: Duration::from_secs(60),
+            validate_on_demand_bundle: true,
         }
     }
 }
@@ -106,15 +135,44 @@ pub struct V8ModuleEngine {
     inner: Arc<EngineInner>,
 }
 
+/// The Query/Reducer-only bundle of a split artifact.
+#[derive(Clone, Debug)]
+pub struct ReducerBundle {
+    pub code: Vec<u8>,
+    /// Function paths this bundle serves; each must be a Query or Reducer of
+    /// the artifact. Every other function runs from the complete bundle.
+    pub functions: Vec<String>,
+}
+
 struct EngineInner {
     manifest: ModuleManifest,
     functions: HashMap<String, FunctionContract>,
     config: V8Config,
+    /// Complete bundle, one pool per nesting depth. In a split engine these
+    /// isolates start on demand and are released after `on_demand_idle_ttl`.
+    pools: Vec<IsolatePool>,
+    reducer: Option<ReducerPools>,
+}
+
+struct ReducerPools {
+    functions: std::collections::HashSet<String>,
     pools: Vec<IsolatePool>,
 }
 
 impl V8ModuleEngine {
     pub fn from_artifact(artifact: ModuleArtifact, config: V8Config) -> Result<Self, ModuleError> {
+        Self::from_split_artifact(artifact, None, config)
+    }
+
+    /// Like `from_artifact`, plus an optional Query/Reducer-only bundle. The
+    /// functions it lists run from it, resolved by exact export path; all
+    /// other functions, Actions included, run from the complete bundle, whose
+    /// isolates are then started on demand and released when idle.
+    pub fn from_split_artifact(
+        artifact: ModuleArtifact,
+        reducer: Option<ReducerBundle>,
+        config: V8Config,
+    ) -> Result<Self, ModuleError> {
         if !matches!(artifact.manifest.language, ModuleLanguage::TypeScript) {
             return Err(ModuleError::InvalidArtifact(
                 "V8 adapter requires a TypeScript artifact".to_owned(),
@@ -173,14 +231,66 @@ impl V8ModuleEngine {
         let pools = (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
             .map(|_| IsolatePool::new(Arc::clone(&source), config.clone()))
             .collect();
-        Ok(Self {
-            inner: Arc::new(EngineInner {
-                manifest: artifact.manifest,
-                functions,
-                config,
-                pools,
-            }),
-        })
+        let reducer = match reducer {
+            None => None,
+            Some(bundle) => {
+                if bundle.code.is_empty() {
+                    return Err(ModuleError::InvalidArtifact(
+                        "empty JavaScript reducer bundle".to_owned(),
+                    ));
+                }
+                let code = String::from_utf8(bundle.code).map_err(|_| {
+                    ModuleError::InvalidArtifact(
+                        "JavaScript reducer bundle is not valid UTF-8".to_owned(),
+                    )
+                })?;
+                let mut served = std::collections::HashSet::with_capacity(bundle.functions.len());
+                for path in bundle.functions {
+                    match functions.get(&path).map(|contract| &contract.kind) {
+                        Some(gonvex_module_runtime::FunctionKind::Query)
+                        | Some(gonvex_module_runtime::FunctionKind::Reducer) => {
+                            served.insert(path);
+                        }
+                        Some(_) => {
+                            return Err(ModuleError::InvalidArtifact(format!(
+                                "reducer bundle lists {path}, which is not a Query or Reducer"
+                            )))
+                        }
+                        None => {
+                            return Err(ModuleError::InvalidArtifact(format!(
+                                "reducer bundle lists unknown function {path}"
+                            )))
+                        }
+                    }
+                }
+                let source = Arc::new(ModuleSource::reducer_bundle(
+                    &artifact.manifest.module_id,
+                    code,
+                )?);
+                Some(ReducerPools {
+                    functions: served,
+                    pools: (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
+                        .map(|_| IsolatePool::new(Arc::clone(&source), config.clone()))
+                        .collect(),
+                })
+            }
+        };
+        let inner = Arc::new(EngineInner {
+            manifest: artifact.manifest,
+            functions,
+            config,
+            pools,
+            reducer,
+        });
+        if inner.reducer.is_some() {
+            spawn_on_demand_reaper(Arc::downgrade(&inner));
+        }
+        Ok(Self { inner })
+    }
+
+    /// Whether this engine runs a split artifact.
+    pub fn is_split(&self) -> bool {
+        self.inner.reducer.is_some()
     }
 
     pub fn config(&self) -> &V8Config {
@@ -191,15 +301,32 @@ impl V8ModuleEngine {
     /// broken artifact fails at load time rather than on a user's first call
     /// and an activated generation is warm before it serves traffic. Leases are
     /// held together, so this warms the pool rather than one reused isolate.
+    ///
+    /// A split engine warms its Query/Reducer pool instead, and evaluates the
+    /// complete bundle once (unless `validate_on_demand_bundle` is off) before
+    /// releasing that isolate again.
     pub async fn prewarm(&self) -> Result<(), ModuleError> {
+        let warm = match &self.inner.reducer {
+            Some(reducer) => &reducer.pools[0],
+            None => &self.inner.pools[0],
+        };
         let mut leases = Vec::with_capacity(self.inner.config.isolate_pool_size.max(1));
         for _ in 0..self.inner.config.isolate_pool_size.max(1) {
-            leases.push(self.inner.pools[0].acquire().await?);
+            leases.push(warm.acquire().await?);
         }
         for lease in leases {
             lease.release_unused();
         }
+        if self.inner.reducer.is_some() && self.inner.config.validate_on_demand_bundle {
+            self.inner.pools[0].acquire().await?.retire_unused();
+        }
         Ok(())
+    }
+
+    /// Releases idle isolates of the on-demand (complete bundle) pools that
+    /// have been idle for at least `ttl`. Returns how many were released.
+    pub fn release_idle_on_demand(&self, ttl: Duration) -> usize {
+        self.inner.release_idle_on_demand(ttl)
     }
 }
 
@@ -217,7 +344,33 @@ impl ModuleEngine for V8ModuleEngine {
     }
 }
 
+/// One thread per split engine; it ends once the engine is dropped.
+fn spawn_on_demand_reaper(engine: std::sync::Weak<EngineInner>) {
+    let _ = std::thread::Builder::new()
+        .name("gonvex-module-reaper".to_owned())
+        .spawn(move || loop {
+            let ttl = match engine.upgrade() {
+                Some(engine) => engine.config.on_demand_idle_ttl,
+                None => return,
+            };
+            std::thread::sleep((ttl / 4).clamp(Duration::from_millis(50), Duration::from_secs(5)));
+            match engine.upgrade() {
+                Some(engine) => {
+                    engine.release_idle_on_demand(ttl);
+                }
+                None => return,
+            }
+        });
+}
+
 impl EngineInner {
+    fn release_idle_on_demand(&self, ttl: Duration) -> usize {
+        if self.reducer.is_none() {
+            return 0;
+        }
+        self.pools.iter().map(|pool| pool.evict_idle(ttl)).sum()
+    }
+
     async fn execute(
         &self,
         host: &dyn ModuleHost,
@@ -255,8 +408,11 @@ impl EngineInner {
             stamped => stamped,
         };
 
-        let pool = self
-            .pools
+        let pools = match &self.reducer {
+            Some(reducer) if reducer.functions.contains(&invocation.function) => &reducer.pools,
+            _ => &self.pools,
+        };
+        let pool = pools
             .get(usize::from(invocation.context.nesting_depth))
             .ok_or_else(|| {
                 ModuleError::Execution(

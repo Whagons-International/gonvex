@@ -84,6 +84,10 @@ pub struct ModuleHost {
     endpoint: RwLock<Option<String>>,
     child: Mutex<Option<Child>>,
     status: RwLock<ModuleHostStatus>,
+    /// Isolates owned by this process (`config.in_process`). The same module
+    /// registry, admission and error rules as the separate host, without the
+    /// socket: see `in_process.rs`.
+    local: Option<Arc<gonvex_module_host::session::HostState>>,
 }
 
 /// Runtime-side timing of one module-host invocation (ns), handed to the
@@ -123,6 +127,8 @@ impl ModuleHost {
             }),
             endpoint: RwLock::new(config.endpoint.clone()),
             child: Mutex::new(None),
+            local: (config.enabled && config.in_process)
+                .then(|| crate::in_process::host_state(&config)),
             config,
         })
     }
@@ -130,6 +136,16 @@ impl ModuleHost {
     pub async fn start(&self) -> Result<(), ModuleHostError> {
         if !self.config.enabled {
             return Ok(());
+        }
+        if self.local.is_some() {
+            // Idempotent; production initializes the platform in `main`
+            // before Tokio starts its worker threads.
+            gonvex_module_runtime_v8::initialize_v8_platform();
+            let mut status = self.status.write().await;
+            status.ready = true;
+            status.reason = None;
+            drop(status);
+            return self.ping().await;
         }
         if self.config.binary.is_none() {
             if self.config.endpoint.is_some() {
@@ -241,6 +257,14 @@ impl ModuleHost {
         operation: RequestOp,
         mut handler: Option<&mut dyn HostCallHandler>,
     ) -> Result<ResponsePayload, ModuleHostError> {
+        if let Some(state) = &self.local {
+            if !self.status.read().await.ready {
+                return Err(ModuleHostError::NotReady);
+            }
+            return crate::in_process::request(state, operation, handler.take())
+                .await
+                .map_err(remote_error);
+        }
         let label = match &operation {
             RequestOp::Invoke(request) => Some(gonvex_profiler::Label::classify(
                 &request.kind,
@@ -320,6 +344,11 @@ impl ModuleHost {
     }
 
     pub async fn shutdown(&self) {
+        if let Some(state) = &self.local {
+            crate::in_process::shutdown(state, self.config.shutdown_timeout).await;
+            self.status.write().await.ready = false;
+            return;
+        }
         let mut child_slot = self.child.lock().await;
         let Some(child) = child_slot.as_mut() else {
             return;

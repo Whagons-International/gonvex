@@ -12,6 +12,9 @@ pub mod error_class;
 pub mod execution;
 pub mod external_auth;
 pub mod host_calls;
+mod in_process;
+#[cfg(test)]
+mod bridge_bench;
 pub mod live_query;
 pub mod membership_projector;
 mod metrics;
@@ -4631,6 +4634,8 @@ mod tests {
             database_idle_timeout: std::time::Duration::from_secs(60),
             module_host: ModuleHostConfig {
                 enabled,
+                in_process: false,
+                max_heap_bytes: 64 << 20,
                 binary: None,
                 endpoint: None,
                 start_timeout: Duration::from_secs(1),

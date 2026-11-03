@@ -256,6 +256,18 @@ export type ModuleJavaScript = {
   sourceMap?: string;
 };
 
+/**
+ * Query/Reducer-only bundle emitted when gonvex.json sets `module.split`.
+ * Its ESM namespace exports every listed function under its exact path
+ * (`export { beat as "presence.beat" }`), and hosts resolve these functions by
+ * path. `ModuleArtifact.javascript` stays the complete bundle and serves every
+ * function that is not listed here (Actions, and anything the split skipped).
+ */
+export type ModuleReducerBundle = ModuleJavaScript & {
+  /** Sorted function paths this bundle serves. Only Queries and Reducers. */
+  functions: string[];
+};
+
 export type ModuleArtifact = {
   language: ModuleLanguage;
   /** Artifact format generation; bumped when the layout changes. */
@@ -268,6 +280,7 @@ export type ModuleArtifact = {
   /** Project-relative POSIX path to base64 contents, in sorted key order. */
   files: Record<string, string>;
   javascript?: ModuleJavaScript;
+  reducerBundle?: ModuleReducerBundle;
   visibility: Record<string, VisibilityPlan>;
   crons?: ModuleCron[];
   invitationAcceptanceReducer?: string;
