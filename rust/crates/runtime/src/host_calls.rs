@@ -127,6 +127,10 @@ pub struct DatabaseHostCalls {
     profile_label: gonvex_profiler::Label,
     /// ns spent opening the lazy write transaction (writer wait).
     writer_wait_ns: u64,
+    /// ns in database host calls excluding the writer wait, and the module
+    /// host invocation timing (profiler slow traces).
+    sql_ns: u64,
+    invoke_times: crate::module_host::InvokeTimes,
 }
 
 impl DatabaseHostCalls {
@@ -150,6 +154,8 @@ impl DatabaseHostCalls {
             aborted: false,
             profile_label: gonvex_profiler::Label::None,
             writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         }
     }
 
@@ -174,6 +180,8 @@ impl DatabaseHostCalls {
             aborted: false,
             profile_label: gonvex_profiler::Label::None,
             writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         };
         handler.transaction = None;
         handler
@@ -233,6 +241,11 @@ impl DatabaseHostCalls {
             }
         }
         self.transaction()
+    }
+
+    /// Profiler slow-trace inputs: module-host timing, writer wait, SQL time.
+    pub(crate) fn profile_times(&self) -> (crate::module_host::InvokeTimes, u64, u64) {
+        (self.invoke_times, self.writer_wait_ns, self.sql_ns)
     }
 
     /// Labels this handler's profiler stages with a function class.
@@ -410,6 +423,9 @@ impl HostCallHandler for DatabaseHostCalls {
         let elapsed = gonvex_profiler::now_ns()
             .saturating_sub(started)
             .saturating_sub(self.writer_wait_ns - writer_wait_before);
+        if database {
+            self.sql_ns += elapsed;
+        }
         gonvex_profiler::record(
             if database {
                 gonvex_profiler::Stage::Sql
@@ -420,6 +436,10 @@ impl HostCallHandler for DatabaseHostCalls {
             elapsed,
         );
         result
+    }
+
+    fn invoke_profiled(&mut self, times: crate::module_host::InvokeTimes) {
+        self.invoke_times = times;
     }
 }
 
@@ -1195,6 +1215,8 @@ mod tests {
             aborted: false,
             profile_label: gonvex_profiler::Label::None,
             writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         };
         let mut calls = calls;
         assert_eq!(
@@ -1233,6 +1255,8 @@ mod tests {
             aborted: false,
             profile_label: gonvex_profiler::Label::None,
             writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());

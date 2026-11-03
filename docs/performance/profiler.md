@@ -18,6 +18,7 @@ of a static histogram.
 | `GONVEX_PROFILER_LONG_POLL_MS` | 5 | Instrumented task polls at least this long go to the long-poll ring buffer |
 | `GONVEX_PROFILER_STALL_MS` | 25 | Watchdog threshold: probe silent this long, or an instrumented poll still running this long, is reported |
 | `GONVEX_PROFILER_PROBE_MS` | 10 | Scheduler-lag probe sleep interval |
+| `GONVEX_PROFILER_SLOW_MS` | 100 | Reducers at least this slow keep a per-call stage breakdown (slow traces) |
 
 ## Endpoints
 
@@ -28,7 +29,9 @@ Both need an operator token with `projects:read` (the Whagons bench `admin` bear
   `p50Ns`/`p90Ns`/`p99Ns`/`p999Ns`, sparse `buckets` (`[index, count]` pairs, so that
   clients can compute percentiles over any interval from two dumps),
   `bucketLowerBoundsNs`, `stageInfo` (descriptions), `gauges`, `writerQueues` (top 10),
-  `tokio`, `watchdog` and `longPolls` (total plus the newest 64 of a 256-entry ring).
+  `tokio`, `watchdog`, `longPolls` (total plus the newest 64 of a 256-entry ring) and
+  `slowTraces` (`fields` plus the newest of a 128-entry ring of slow reducer calls,
+  each with its own per-stage values).
 - `GET /dev/metrics?project=…`: the existing payload, plus a compact `profiler` key
   (per-stage p50/p99/max, gauges, tokio metrics, watchdog). The bench harness already
   scrapes this endpoint every 10 s.
@@ -69,6 +72,12 @@ bench/profiler/top.py --delta before.json after.json
   remainder is printed as "unaccounted". p99 values do not add up. The last column
   (stage p99 ÷ total p99) shows which single stage reaches the tail on its own: a stage
   near 100% *is* the tail.
+- **"slowest calls"** answers the tail question exactly instead of from aggregates.
+  Every reducer slower than `GONVEX_PROFILER_SLOW_MS` keeps its own breakdown:
+  prepare, connect, first_frame, js, host_calls, writer_wait, sql, finish and the
+  host-call count. The table gives, per label, the mean share of each stage in those
+  calls' own totals, followed by the newest few calls. In live/delta mode, only calls
+  from the current window are shown.
 - `recent long polls / stalls` shows `poll` entries (a poll that finished and took this
   long) and `watchdog` entries (`probe_stalled`: the scheduler-lag probe did not wake;
   or a task family seen still inside one poll after the stall threshold, which is
@@ -161,6 +170,15 @@ All of these are in `replica_snapshot_for_resume` (runtime/src/replica.rs), exce
 | `poll.snapshot` | Every poll of a replica-open preparation task (`replica_open_queue.rs`) |
 | `poll.feed` | Every poll of a change-feed reader task (`change_feed.rs`) |
 | `poll.outbox` | Every poll of the post-commit action-outbox drain task (execution.rs) |
+
+### Slow traces
+
+`execute_tenant_reducer_with_access` assembles them on the success path, after the
+commit. `fn.prepare` and `fn.finish` come from its own timer. `invoke.*` comes from
+`InvokeProfile` in module_host.rs, handed to the handler through
+`HostCallHandler::invoke_profiled` (a default no-op method). `db.writer_wait` and
+`db.sql` are accumulated on `DatabaseHostCalls`. When the call is fast, assembling the
+trace costs one comparison.
 
 ## Gauges
 

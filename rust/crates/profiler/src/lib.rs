@@ -35,6 +35,7 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 static LONG_POLL_NS: AtomicU64 = AtomicU64::new(5_000_000);
 static STALL_NS: AtomicU64 = AtomicU64::new(25_000_000);
 static PROBE_NS: AtomicU64 = AtomicU64::new(10_000_000);
+static SLOW_NS: AtomicU64 = AtomicU64::new(100_000_000);
 
 /// Whether recording is on. One relaxed load.
 #[inline(always)]
@@ -55,12 +56,14 @@ pub struct Config {
     pub long_poll: Duration,
     pub stall: Duration,
     pub probe_interval: Duration,
+    pub slow_trace: Duration,
 }
 
 /// Reads `GONVEX_PROFILER` (`0`/`false`/`off` disables),
 /// `GONVEX_PROFILER_LONG_POLL_MS` (default 5), `GONVEX_PROFILER_STALL_MS`
 /// (watchdog threshold, default 25) and `GONVEX_PROFILER_PROBE_MS`
-/// (scheduler-lag probe interval, default 10).
+/// (scheduler-lag probe interval, default 10) and `GONVEX_PROFILER_SLOW_MS`
+/// (reducers at least this slow keep a per-stage trace, default 100).
 pub fn init_from_env() -> Config {
     let off = std::env::var("GONVEX_PROFILER")
         .map(|value| {
@@ -82,11 +85,13 @@ pub fn init_from_env() -> Config {
         long_poll: Duration::from_secs_f64(millis("GONVEX_PROFILER_LONG_POLL_MS", 5.0) / 1e3),
         stall: Duration::from_secs_f64(millis("GONVEX_PROFILER_STALL_MS", 25.0) / 1e3),
         probe_interval: Duration::from_secs_f64(millis("GONVEX_PROFILER_PROBE_MS", 10.0) / 1e3),
+        slow_trace: Duration::from_secs_f64(millis("GONVEX_PROFILER_SLOW_MS", 100.0) / 1e3),
     };
     ENABLED.store(config.enabled, Relaxed);
     LONG_POLL_NS.store(config.long_poll.as_nanos() as u64, Relaxed);
     STALL_NS.store(config.stall.as_nanos() as u64, Relaxed);
     PROBE_NS.store(config.probe_interval.as_nanos() as u64, Relaxed);
+    SLOW_NS.store(config.slow_trace.as_nanos() as u64, Relaxed);
     epoch();
     config
 }
@@ -98,6 +103,7 @@ pub fn config() -> Config {
         long_poll: Duration::from_nanos(LONG_POLL_NS.load(Relaxed)),
         stall: Duration::from_nanos(STALL_NS.load(Relaxed)),
         probe_interval: Duration::from_nanos(PROBE_NS.load(Relaxed)),
+        slow_trace: Duration::from_nanos(SLOW_NS.load(Relaxed)),
     }
 }
 
@@ -934,6 +940,104 @@ pub fn start_watchdog() {
 }
 
 // ---------------------------------------------------------------------------
+// Slow reducer traces
+// ---------------------------------------------------------------------------
+
+/// Per-call stage breakdown kept for reducers slower than
+/// `GONVEX_PROFILER_SLOW_MS`. Index `i` of [`TraceValues`] is `TRACE_FIELDS[i]`
+/// (ns, except `invoke.host_call_count`).
+pub const TRACE_FIELDS: [&str; 10] = [
+    "fn.total",
+    "fn.prepare",
+    "invoke.connect",
+    "invoke.first_frame",
+    "invoke.js",
+    "invoke.host_calls",
+    "db.writer_wait",
+    "db.sql",
+    "fn.finish",
+    "invoke.host_call_count",
+];
+pub type TraceValues = [u64; TRACE_FIELDS.len()];
+
+const TRACE_RING: usize = 128;
+struct TraceSlot {
+    seq: AtomicU64,
+    at_unix_ms: AtomicU64,
+    label: AtomicU64,
+    values: [AtomicU64; TRACE_FIELDS.len()],
+}
+#[allow(clippy::declare_interior_mutable_const)]
+const TRACE_SLOT: TraceSlot = TraceSlot {
+    seq: AtomicU64::new(0),
+    at_unix_ms: AtomicU64::new(0),
+    label: AtomicU64::new(0),
+    values: [const { AtomicU64::new(0) }; TRACE_FIELDS.len()],
+};
+static TRACES: [TraceSlot; TRACE_RING] = [TRACE_SLOT; TRACE_RING];
+static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a call of this total duration would be kept (callers can skip
+/// building the breakdown otherwise).
+#[inline]
+pub fn is_slow(total_ns: u64) -> bool {
+    enabled() && total_ns >= SLOW_NS.load(Relaxed)
+}
+
+/// Keeps the breakdown of one slow call (`values[0]` is the total) in a
+/// 128-slot lock-free ring.
+pub fn record_slow_trace(label: Label, values: &TraceValues) {
+    if !is_slow(values[0]) {
+        return;
+    }
+    let seq = TRACE_SEQ.fetch_add(1, Relaxed) + 1;
+    let slot = &TRACES[(seq as usize) % TRACE_RING];
+    slot.seq.store(0, std::sync::atomic::Ordering::Release);
+    slot.at_unix_ms.store(unix_ms(), Relaxed);
+    slot.label.store(label as u64, Relaxed);
+    for (target, value) in slot.values.iter().zip(values) {
+        target.store(*value, Relaxed);
+    }
+    slot.seq.store(seq, std::sync::atomic::Ordering::Release);
+}
+
+/// One kept slow call.
+#[derive(Clone, Debug)]
+pub struct SlowTrace {
+    pub seq: u64,
+    pub at_unix_ms: u64,
+    pub label: Label,
+    pub values: TraceValues,
+}
+
+/// Kept slow calls, newest first, and the total ever recorded.
+pub fn slow_traces() -> (Vec<SlowTrace>, u64) {
+    let mut out = Vec::new();
+    for slot in &TRACES {
+        let seq = slot.seq.load(std::sync::atomic::Ordering::Acquire);
+        if seq == 0 {
+            continue;
+        }
+        let at_unix_ms = slot.at_unix_ms.load(Relaxed);
+        let label = Label::from_u8(slot.label.load(Relaxed) as u8);
+        let mut values = [0u64; TRACE_FIELDS.len()];
+        for (value, source) in values.iter_mut().zip(&slot.values) {
+            *value = source.load(Relaxed);
+        }
+        if slot.seq.load(std::sync::atomic::Ordering::Acquire) == seq {
+            out.push(SlowTrace {
+                seq,
+                at_unix_ms,
+                label,
+                values,
+            });
+        }
+    }
+    out.sort_by(|a, b| b.seq.cmp(&a.seq));
+    (out, TRACE_SEQ.load(Relaxed))
+}
+
+// ---------------------------------------------------------------------------
 // Read side
 // ---------------------------------------------------------------------------
 
@@ -1151,6 +1255,21 @@ mod tests {
         assert!(future.as_mut().poll(&mut Context::from_waker(waker)).is_ready());
         assert!(long_poll_total() > before);
         assert!(long_polls().iter().any(|poll| poll.task == "outbox" && poll.duration_ns >= 5_000_000));
+    }
+
+    #[test]
+    fn slow_traces_keep_only_slow_calls() {
+        set_enabled(true);
+        let mut values = [0u64; TRACE_FIELDS.len()];
+        values[0] = 1_000;
+        record_slow_trace(Label::Heartbeat, &values);
+        values[0] = 500_000_000;
+        values[6] = 400_000_000;
+        record_slow_trace(Label::Heartbeat, &values);
+        let (traces, _) = slow_traces();
+        assert!(traces.iter().all(|trace| trace.values[0] >= 100_000_000));
+        assert!(traces.iter().any(|trace| trace.values[6] == 400_000_000
+            && trace.label == Label::Heartbeat));
     }
 
     #[test]

@@ -176,6 +176,35 @@ def render(current, previous=None, seconds=None, stream=sys.stdout):
                    f"{max(rest, 0) / total['mean'] * 100 if total['mean'] else 0:5.1f}%")
         out.append("  share = stage mean / fn.total mean (top-level rows add up). p99s do not add: "
                    "the right column shows which stage alone reaches the total's tail.")
+    slow = current.get("slowTraces") or {}
+    traces = slow.get("recent", [])
+    if previous and traces:
+        last_seq = max((t["seq"] for t in (previous.get("slowTraces") or {}).get("recent", [])), default=0)
+        traces = [t for t in traces if t["seq"] > last_seq]
+    if traces:
+        fields = slow["fields"]
+        out.append("")
+        out.append(f"slowest calls: {len(traces)} reducers over {current['config'].get('slowTraceMs', 100):.0f} ms "
+                   f"in this window (ring keeps 128; {slow.get('total', 0)} since start)")
+        top_fields = ["fn.prepare", "invoke.connect", "invoke.first_frame", "invoke.js",
+                      "db.writer_wait", "db.sql", "fn.finish"]
+        out.append("  mean share of each slow call's own total (per label):")
+        out.append(f"  {'label':<10} {'n':>4} {'total':>8} " + " ".join(f"{f.split('.')[-1][:11]:>11}" for f in top_fields))
+        by_label = {}
+        for trace in traces:
+            by_label.setdefault(trace["label"], []).append(dict(zip(fields, trace["values"])))
+        for label, items in sorted(by_label.items()):
+            mean_total = sum(i["fn.total"] for i in items) / len(items)
+            shares = []
+            for field in top_fields:
+                shares.append(sum(i[field] / i["fn.total"] for i in items if i["fn.total"]) / len(items) * 100)
+            out.append(f"  {label:<10} {len(items):>4} {fmt_ns(mean_total):>8} " + " ".join(f"{v:10.1f}%" for v in shares))
+        out.append("  (writer_wait and sql are inside host_calls; the remainder of host_calls is IPC + other host calls)")
+        out.append("  newest slow calls:")
+        for trace in traces[:5]:
+            item = dict(zip(fields, trace["values"]))
+            parts = " ".join(f"{f.split('.')[-1]}={fmt_ns(item[f]).strip()}" for f in top_fields if item[f])
+            out.append(f"    {trace['label']:<10} {fmt_ns(item['fn.total']).strip():>8}  {parts}  calls={item['invoke.host_call_count']}")
     recent = polls.get("recent", [])[:10]
     if recent:
         out.append("")

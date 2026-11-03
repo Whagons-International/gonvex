@@ -417,6 +417,7 @@ impl Runtime {
         let profile_label = gonvex_profiler::Label::classify("reducer", path);
         let _profile = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
         let mut profile_timer = gonvex_profiler::Timer::start();
+        let profile_started = profile_timer;
         let committed_revisions = access.committed_revisions.clone();
         let module = match access.module {
             Some(module) => module,
@@ -541,7 +542,7 @@ impl Runtime {
             });
         }
         invocation.context.intent_entropy = access.intent_entropy;
-        profile_timer.lap(gonvex_profiler::Stage::FnPrepare, profile_label);
+        let profile_prepare = profile_timer.lap(gonvex_profiler::Stage::FnPrepare, profile_label);
         let result = self
             .inner
             .module_host
@@ -567,8 +568,28 @@ impl Runtime {
                     stored?;
                 }
                 profile_timer.skip();
+                let (invoke_times, writer_wait, sql) = handler.profile_times();
                 let finished = handler.finish_with_revision(true).await;
-                profile_timer.lap(gonvex_profiler::Stage::FnFinish, profile_label);
+                let profile_finish =
+                    profile_timer.lap(gonvex_profiler::Stage::FnFinish, profile_label);
+                let profile_total = profile_started.elapsed_ns();
+                if gonvex_profiler::is_slow(profile_total) {
+                    gonvex_profiler::record_slow_trace(
+                        profile_label,
+                        &[
+                            profile_total,
+                            profile_prepare,
+                            invoke_times.connect,
+                            invoke_times.first_frame,
+                            invoke_times.js,
+                            invoke_times.host_calls,
+                            writer_wait,
+                            sql,
+                            profile_finish,
+                            invoke_times.host_call_count,
+                        ],
+                    );
+                }
                 let committed_revision = finished.map_err(|error| {
                     // A commit lost to the connection is retried under the same
                     // idempotency key: if it did commit, the retry replays it.

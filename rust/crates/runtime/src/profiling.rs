@@ -186,6 +186,7 @@ pub fn profile_json(runtime: &crate::Runtime) -> Value {
             "longPollMs": config.long_poll.as_secs_f64() * 1e3,
             "stallMs": config.stall.as_secs_f64() * 1e3,
             "probeMs": config.probe_interval.as_secs_f64() * 1e3,
+            "slowTraceMs": config.slow_trace.as_secs_f64() * 1e3,
         },
         "bucketLowerBoundsNs": bounds,
         "stageInfo": gonvex_profiler::STAGES.iter().map(|info| json!({
@@ -197,6 +198,23 @@ pub fn profile_json(runtime: &crate::Runtime) -> Value {
         "tokio": tokio_json(),
         "watchdog": {"probeSilentMs": ms(silent_ns), "stalls": stalls},
         "longPolls": {"total": gonvex_profiler::long_poll_total(), "recent": long_polls},
+        "slowTraces": slow_traces_json(),
+    })
+}
+
+/// Reducers slower than `GONVEX_PROFILER_SLOW_MS`, each with its own
+/// per-stage breakdown (newest first, at most 128).
+fn slow_traces_json() -> Value {
+    let (traces, total) = gonvex_profiler::slow_traces();
+    json!({
+        "total": total,
+        "fields": gonvex_profiler::TRACE_FIELDS,
+        "recent": traces.into_iter().map(|trace| json!({
+            "seq": trace.seq,
+            "atUnixMs": trace.at_unix_ms,
+            "label": trace.label.name(),
+            "values": trace.values,
+        })).collect::<Vec<_>>(),
     })
 }
 

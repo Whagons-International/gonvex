@@ -86,9 +86,22 @@ pub struct ModuleHost {
     status: RwLock<ModuleHostStatus>,
 }
 
+/// Runtime-side timing of one module-host invocation (ns), handed to the
+/// handler when the invocation returns (profiler slow traces).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InvokeTimes {
+    pub connect: u64,
+    pub first_frame: u64,
+    pub js: u64,
+    pub host_calls: u64,
+    pub host_call_count: u64,
+}
+
 #[async_trait]
 pub trait HostCallHandler: Send {
     async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String>;
+    /// Receives the invocation's timing when the profiler is on.
+    fn invoke_profiled(&mut self, _times: InvokeTimes) {}
     /// Only stateless, capability-checked work may opt out of serial dispatch.
     /// Database handlers retain the default so transaction calls stay ordered.
     fn concurrent(
@@ -240,6 +253,7 @@ impl ModuleHost {
         let _total = label
             .map(|label| gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::InvokeTotal, label));
         let mut timer = gonvex_profiler::Timer::start();
+        let mut connect_ns = 0;
         let mut stream = self.connect().await?;
         // Invocation provenance carries the per-kind deadline. In particular,
         // an agent Action deliberately has none while awaiting model I/O.
@@ -254,7 +268,7 @@ impl ModuleHost {
         };
         self.write_client_frame(&mut stream, &request).await?;
         if let Some(label) = label {
-            timer.lap(gonvex_profiler::Stage::InvokeConnect, label);
+            connect_ns = timer.lap(gonvex_profiler::Stage::InvokeConnect, label);
         }
         let (reader, writer) = tokio::io::split(stream);
         dispatch_frames_profiled(
@@ -263,6 +277,7 @@ impl ModuleHost {
             self.config.max_frame_bytes,
             handler.take(),
             label,
+            connect_ns,
         )
         .await
     }
@@ -421,7 +436,7 @@ async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     max_frame_bytes: usize,
     handler: Option<&mut dyn HostCallHandler>,
 ) -> Result<ResponsePayload, ModuleHostError> {
-    dispatch_frames_profiled(reader, writer, max_frame_bytes, handler, None).await
+    dispatch_frames_profiled(reader, writer, max_frame_bytes, handler, None, 0).await
 }
 
 /// Splits one module-host invocation into first-frame wait (isolate wait +
@@ -429,6 +444,8 @@ async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 /// seen from the runtime side of the socket. Records on drop (any exit).
 struct InvokeProfile {
     label: Option<gonvex_profiler::Label>,
+    connect: u64,
+    first_frame: u64,
     mark: u64,
     first: bool,
     js: u64,
@@ -437,10 +454,12 @@ struct InvokeProfile {
 }
 
 impl InvokeProfile {
-    fn new(label: Option<gonvex_profiler::Label>) -> Self {
+    fn new(label: Option<gonvex_profiler::Label>, connect: u64) -> Self {
         let label = label.filter(|_| gonvex_profiler::enabled());
         Self {
             label,
+            connect,
+            first_frame: 0,
             mark: if label.is_some() { gonvex_profiler::now_ns() } else { 0 },
             first: true,
             js: 0,
@@ -455,12 +474,23 @@ impl InvokeProfile {
             let gap = now.saturating_sub(self.mark);
             if self.first {
                 gonvex_profiler::record(gonvex_profiler::Stage::InvokeFirstFrame, label, gap);
+                self.first_frame = gap;
                 self.first = false;
             } else {
                 self.js += gap;
             }
             self.mark = now;
         }
+    }
+
+    fn times(&self) -> Option<InvokeTimes> {
+        self.label.map(|_| InvokeTimes {
+            connect: self.connect,
+            first_frame: self.first_frame,
+            js: self.js,
+            host_calls: self.host,
+            host_call_count: self.calls,
+        })
     }
 
     fn host_call_answered(&mut self) {
@@ -490,8 +520,9 @@ async fn dispatch_frames_profiled<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     max_frame_bytes: usize,
     mut handler: Option<&mut dyn HostCallHandler>,
     label: Option<gonvex_profiler::Label>,
+    connect_ns: u64,
 ) -> Result<ResponsePayload, ModuleHostError> {
-    let mut profile = InvokeProfile::new(label);
+    let mut profile = InvokeProfile::new(label, connect_ns);
     let mut pending: FuturesUnordered<BoxFuture<'static, ClientFrame>> = FuturesUnordered::new();
     loop {
         // Preserve partial reads when a network request completes. read_exact
@@ -512,7 +543,12 @@ async fn dispatch_frames_profiled<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             .map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
         match frame {
             ServerFrame::Ready { protocol: 2, .. } => continue,
-            ServerFrame::Response { id: 1, payload } => return Ok(payload),
+            ServerFrame::Response { id: 1, payload } => {
+                if let (Some(times), Some(handler)) = (profile.times(), handler.as_deref_mut()) {
+                    handler.invoke_profiled(times);
+                }
+                return Ok(payload);
+            }
             ServerFrame::Error { id: 1, error } => return Err(remote_error(error)),
             ServerFrame::HostCall {
                 id,
