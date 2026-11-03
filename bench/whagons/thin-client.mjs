@@ -28,9 +28,10 @@ const RETENTION_MS = 250;
 const now = () => performance.timeOrigin + performance.now();
 
 const CAPABILITIES = { replicaNoOldValues: 1, replicaSnapshotPages: 1, replicaNativeRows: 1, replicaSetDigest: 1,
-  tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, queryPagePatch: 1,
+  tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1,
   queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 };
 const CAPABILITIES_LEGACY_ROWS = { ...CAPABILITIES, replicaNativeRows: undefined };
+const withoutBatchFrames = (capabilities) => ({ ...capabilities, replicaBatchFrames: undefined });
 
 function deviceInfo() {
   const n = globalThis.navigator;
@@ -104,11 +105,13 @@ class Subscription {
 export class ThinClient {
   static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0 };
 
-  constructor(url, { project, clientContract = 1, pool = defaultPool, nativeRows = true, ackDelayMs = 0 } = {}) {
+  constructor(url, { project, clientContract = 1, pool = defaultPool, nativeRows = true, ackDelayMs = 0, batchFrames = process.env.LOAD_THIN_BATCH_FRAMES !== '0' } = {}) {
     this.url = url; this.project = project; this.pool = pool;
     // The SDK sends the generated contract's version number.
     this.clientContract = typeof clientContract === 'object' && clientContract !== null ? clientContract.version : clientContract;
-    this.nativeRows = nativeRows; this.ackDelayMs = ackDelayMs;
+    this.nativeRows = nativeRows; this.ackDelayMs = ackDelayMs; this.batchFrames = batchFrames;
+    // Delivery v2: stream token -> subscription ids, scoped to one socket.
+    this.streams = new Map();
     this.auth = { token: undefined, tenant: undefined };
     this.socket = undefined; this.manuallyClosed = false; this.reconnectAttempt = 0; this.reconnectTimer = undefined;
     this.serverCapabilities = {}; this.authReady = false; this.authInFlight = undefined; this.outbox = [];
@@ -122,7 +125,7 @@ export class ThinClient {
     if (this.manuallyClosed) return;
     const socket = new globalThis.WebSocket(this.url);
     socket.binaryType = 'arraybuffer';
-    this.socket = socket; this.authReady = false; this.serverCapabilities = {};
+    this.socket = socket; this.authReady = false; this.serverCapabilities = {}; this.streams = new Map();
     socket.addEventListener('open', () => {
       if (this.socket !== socket) return;
       this.reconnectAttempt = 0;
@@ -188,7 +191,10 @@ export class ThinClient {
     const tenantAuth = !!this.auth.token;
     this.rawSend({ type: 'auth', clientContract: this.clientContract, id, ...(tenantAuth ? { token: this.auth.token } : {}), project: this.project,
       ...(tenantAuth ? { tenant: this.auth.tenant } : {}), controlOnly: !tenantAuth, device: deviceInfo(),
-      capabilities: this.nativeRows ? CAPABILITIES : CAPABILITIES_LEGACY_ROWS });
+      capabilities: (({ nativeRows, batchFrames }) => {
+        const capabilities = nativeRows ? CAPABILITIES : CAPABILITIES_LEGACY_ROWS;
+        return batchFrames ? capabilities : withoutBatchFrames(capabilities);
+      })(this) });
     return id;
   }
 
@@ -316,6 +322,7 @@ export class ThinClient {
       case 'action.error': case 'reducer.error': return this.onCallError(m);
       case 'control.watermark': { const call = this.pending.get(m.id); if (call?.completeAfterControlWatermark) call.completeAfterControlWatermark(); return; }
       case 'replica.watermark': return this.onWatermark(m.revision);
+      case 'replica.batch': return this.onBatch(m);
       case 'replica.snapshotStart': return this.onSnapshotStart(m);
       case 'replica.snapshotEncodedPage': return this.onSnapshotPage(m);
       case 'replica.ready': return this.onReady(m);
@@ -327,6 +334,27 @@ export class ThinClient {
       case 'replica.error': { const sub = this.byId.get(m.id); if (sub) { sub.error = new Error(m.error); sub.notify(); } this.unsupported('replica.error: ' + String(m.error).slice(0, 160)); return; }
       default: this.unsupported(m.type || 'untyped');
     }
+  }
+
+  /** Delivery v2: shared, stream-addressed items, one message per tick (same expansion as the SDK). */
+  onBatch(m) {
+    for (const item of m.items ?? []) {
+      if (item.type === 'replica.stream') {
+        for (const [stream, ids] of this.streams) {
+          if (stream !== item.stream && ids.includes(item.id)) {
+            ids.splice(ids.indexOf(item.id), 1);
+            if (ids.length === 0) this.streams.delete(stream);
+          }
+        }
+        const ids = this.streams.get(item.stream);
+        if (!ids) this.streams.set(item.stream, [item.id]); else if (!ids.includes(item.id)) ids.push(item.id);
+      } else if (item.type === 'replica.delta' || item.type === 'replica.ready') {
+        for (const id of this.streams.get(item.id) ?? []) this.dispatch({ ...item, id });
+      } else {
+        this.dispatch(item);
+      }
+    }
+    if (typeof m.watermark === 'number') this.onWatermark(m.watermark);
   }
 
   onAuthResult(m) {

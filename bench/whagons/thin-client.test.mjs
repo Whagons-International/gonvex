@@ -103,3 +103,27 @@ test('released collections close after the retention delay and rows are shared b
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(pool.size, 0);
 });
+
+test('replica.batch items apply like the separate frames, through stream bindings', async () => {
+  const { c, sent } = connected();
+  const w = c.watchReplica(ref, {}); w.onUpdate(() => {}); await tick();
+  const id = sent.find((m) => m.type === 'replica.openMany').opens[0].id;
+  c.dispatch({ type: 'replica.snapshotStart', id, snapshotId: 's', cursor: { epoch: 'e', revision: 10 }, key: '_id' });
+  c.dispatch({ type: 'replica.snapshotEncodedPage', id, snapshotId: 's', sequence: 0, last: true, canonicalRows: [row('a', 'A')] });
+  c.dispatch({ type: 'replica.ready', id, cursor: { epoch: 'e', revision: 10 }, digest: 'd' });
+  let done = false;
+  const p = c.reducer({ path: 'tasks.rename' }, { taskId: 'a' }).then(() => { done = true; });
+  const call = sent.find((m) => m.type === 'reducer.call');
+  c.dispatch({ type: 'reducer.result', id: call.id, result: null, committedRevision: 11 });
+  c.dispatch({ type: 'replica.batch', tenant: 'x', class: '0', from: 10, items: [
+    { type: 'replica.transactionEncoded', cursor: { epoch: 'e', revision: 11 }, canonicalChanges: [JSON.stringify({ entity: 'tasks', id: 'a', newValue: { _id: 'a', name: 'A2' }, operation: 'update' })] },
+    { type: 'replica.stream', id, stream: '~1' },
+    { type: 'replica.delta', id: '~1', cursor: { epoch: 'e', revision: 11 }, canonicalUpserts: [row('b', 'B')], deleted: [] },
+    { type: 'replica.ready', id: '~1', cursor: { epoch: 'e', revision: 11 }, digest: 'd2' },
+    { type: 'replica.delta', id: '~unbound', cursor: { epoch: 'e', revision: 11 }, canonicalUpserts: [row('z', 'Z')], deleted: [] },
+  ], watermark: 11 });
+  await p; assert.equal(done, true);
+  const byId = Object.fromEntries(w.localReplicaResult().map((r) => [r._id, r.name]));
+  assert.deepEqual(byId, { a: 'A2', b: 'B' });
+  assert.deepEqual(ThinClient.stats.unsupported, {});
+});
