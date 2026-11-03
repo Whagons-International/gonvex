@@ -64,6 +64,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      GONVEX_DB_MAX_OPEN_CONNS: ${GONVEX_DB_MAX_OPEN_CONNS:-2}
+      GONVEX_DB_MAX_IDLE_CONNS: ${GONVEX_DB_MAX_IDLE_CONNS:-2}
+      GONVEX_DB_IDLE_TIMEOUT_MS: ${GONVEX_DB_IDLE_TIMEOUT_MS:-60000}
       GONVEX_ADDR: 0.0.0.0:8080
       GONVEX_CONTROL_PLANE_DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/gonvex_dev?sslmode=disable

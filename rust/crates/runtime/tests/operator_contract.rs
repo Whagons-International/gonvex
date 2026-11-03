@@ -39,6 +39,7 @@ fn test_config(database_url: String) -> Config {
         database_max_total_connections: 8,
         database_max_connections: 4,
         database_max_idle_connections: 1,
+        database_idle_timeout: std::time::Duration::from_secs(60),
         module_host: ModuleHostConfig {
             enabled: false,
             binary: None,
