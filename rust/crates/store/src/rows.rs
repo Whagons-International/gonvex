@@ -88,14 +88,31 @@ pub fn json_value_expr(qualified: &str, kind: JsonKind) -> String {
         JsonKind::Boolean => format!(
             "CASE WHEN {qualified} IS NULL THEN NULL WHEN {qualified} THEN json('true') ELSE json('false') END"
         ),
-        JsonKind::Integer | JsonKind::Real => qualified.to_owned(),
+        // json_object renders REAL with 15 significant digits, which loses
+        // precision: row images (decoded in Rust) carry the exact double, so
+        // two encodings of one row disagreed. 17 digits round-trip.
+        JsonKind::Integer | JsonKind::Real => format!(
+            "CASE WHEN {} THEN {} ELSE {qualified} END",
+            finite_real(qualified),
+            exact_real(qualified)
+        ),
         // json_object rejects BLOB values. Text-like columns (including
         // declared BLOB/BYTEA) encode a BLOB as lowercase hex, exactly as
         // `decode_value` does, so row images and decoded rows agree.
         JsonKind::Text => format!(
-            "CASE WHEN typeof({qualified}) = 'blob' THEN lower(hex({qualified})) ELSE {qualified} END"
+            "CASE WHEN typeof({qualified}) = 'blob' THEN lower(hex({qualified})) WHEN {} THEN {} ELSE {qualified} END",
+            finite_real(qualified),
+            exact_real(qualified)
         ),
     }
+}
+
+fn finite_real(qualified: &str) -> String {
+    format!("typeof({qualified}) = 'real' AND abs({qualified}) <= 1.7976931348623157e308")
+}
+
+fn exact_real(qualified: &str) -> String {
+    format!("json(printf('%!.17g', {qualified}))")
 }
 
 /// `json_object('a', r."a", …)` for the given columns. Bundled SQLite (3.46)

@@ -1,4 +1,10 @@
 //! Production Replica Collection feed budgets, measured after admission.
+//!
+//! Subscriptions hold no rows; what each client holds is modelled by the SDK
+//! client model, which also verifies every digest and reopens collections
+//! the runtime asks to reconcile (`replica.needHashes`).
+#[path = "support/replica_client.rs"]
+mod replica_client;
 use base64::Engine as _;
 use gonvex_store::{
     Account, ControlPlane, Member, PoolLimits, PoolRegistry, RuntimeManifestRecord,
@@ -250,10 +256,72 @@ fn fixture_manifest(legacy: bool) -> (Value, String) {
     (json!({"project":"fanout","module":module}), hash)
 }
 
-struct Connection {
-    member: usize,
+/// One connection's subscriptions and its client's windows.
+struct Held {
     session: TenantSession,
     subscriptions: BTreeMap<String, ReplicaSubscription>,
+    model: replica_client::ClientModel,
+}
+
+impl Held {
+    fn new(session: TenantSession) -> Self {
+        Self {
+            session,
+            subscriptions: BTreeMap::new(),
+            model: replica_client::ClientModel::new(Some(replica_client::DigestKind::Xor)),
+        }
+    }
+
+    async fn open(&mut self, runtime: &Runtime, id: &str, path: &str) {
+        self.model.register(id, path, "", json!({}));
+        self.reopen(runtime, id).await;
+    }
+
+    async fn reopen(&mut self, runtime: &Runtime, id: &str) -> Vec<gonvex_protocol::ServerMessage> {
+        let path = self.model.windows[id].path.clone();
+        let request = self.model.open_request(id, &path, &json!({}));
+        let opened = runtime.open_replica(&self.session, request).await.unwrap();
+        if let Some(subscription) = opened.subscription {
+            self.model.windows.get_mut(id).unwrap().entity = subscription.definition.table.clone();
+            self.subscriptions.insert(id.to_owned(), subscription);
+        }
+        self.model.apply_all(&opened.messages);
+        opened.messages
+    }
+
+    /// Applies `event`, then the reopens it asked for. Returns every frame.
+    async fn apply(&mut self, runtime: &Runtime, event: FeedEvent) -> Vec<gonvex_protocol::ServerMessage> {
+        let revision = match &event {
+            FeedEvent::Transaction { revision, .. } => Some(*revision),
+            _ => None,
+        };
+        let mut messages = runtime
+            .apply_feed_event(&self.session, &mut self.subscriptions, event)
+            .await
+            .unwrap();
+        self.model.apply_all(&messages);
+        if let Some(revision) = revision {
+            self.model.watermark(revision);
+        }
+        for id in self.model.pending_reopens() {
+            messages.extend(self.reopen(runtime, &id).await);
+        }
+        assert!(self.model.mismatches.is_empty(), "{:?}", self.model.mismatches);
+        messages
+    }
+
+    fn has(&self, id: &str, key: &str) -> bool {
+        self.model.windows[id].rows.contains_key(key)
+    }
+
+    fn row(&self, id: &str, key: &str) -> &Value {
+        &self.model.windows[id].rows[key]
+    }
+}
+
+struct Connection {
+    member: usize,
+    held: Held,
 }
 
 async fn deliver(
@@ -264,14 +332,7 @@ async fn deliver(
     let mut worked = Vec::new();
     for connection in connections {
         let before = runtime.visibility_metrics().snapshot();
-        runtime
-            .apply_feed_event(
-                &connection.session,
-                &mut connection.subscriptions,
-                event.clone(),
-            )
-            .await
-            .unwrap();
+        connection.held.apply(runtime, event.clone()).await;
         // In-memory row checks are the expected per-connection cost of a
         // change (changed rows x connections). Budgets govern expensive work.
         let after = runtime.visibility_metrics().snapshot();
@@ -466,26 +527,20 @@ async fn run_visibility_fixture(legacy: bool) {
             delegation: None,
             developer_session: None,
         };
-        let mut subscriptions = BTreeMap::new();
+        let mut held = Held::new(session);
         for (id, path) in [("tasks", "tasks.list"), ("notes", "notes.list")] {
-            let request: ReplicaOpenRequest =
-                serde_json::from_value(json!({"id":id,"path":path,"args":{}})).unwrap();
-            let opened = runtime.open_replica(&session, request).await.unwrap();
-            let subscription = opened
-                .subscription
-                .expect("real collection must remain subscribed");
-            assert!(subscription.rows.is_empty());
-            subscriptions.insert(id.to_owned(), subscription);
+            held.open(&runtime, id, path).await;
+            assert!(
+                held.subscriptions.contains_key(id),
+                "real collection must remain subscribed"
+            );
+            assert!(held.model.windows[id].rows.is_empty());
         }
-        connections.push(Connection {
-            member: i,
-            session,
-            subscriptions,
-        });
+        connections.push(Connection { member: i, held });
     }
     let related = runtime
         .open_live_query(
-            &connections[0].session,
+            &connections[0].held.session,
             "related".into(),
             "tasks.withNotes".into(),
             json!({}),
@@ -499,7 +554,7 @@ async fn run_visibility_fixture(legacy: bool) {
     );
     if !legacy {
         write(&pools, &url, sqlx::query("INSERT INTO members(id,account_id,status,display_name,role) VALUES('admin','admin','active','Admin','admin')")).await;
-        let mut admin_session = connections[0].session.clone();
+        let mut admin_session = connections[0].held.session.clone();
         admin_session.identity.account.id = "admin".into();
         admin_session.member.id = "admin".into();
         admin_session.member.account_id = "admin".into();
@@ -510,7 +565,7 @@ async fn run_visibility_fixture(legacy: bool) {
             .open_replica(&admin_session, request)
             .await
             .expect("role-pruned mask sets must not break admin admission");
-        assert_eq!(opened.subscription.unwrap().rows.len(), 2);
+        assert_eq!(opened.subscription.unwrap().row_count(), 2);
     }
     let mut revision = change_feed::read_clock(&pools, &route)
         .await
@@ -549,9 +604,13 @@ async fn run_visibility_fixture(legacy: bool) {
                 "legacy task writes must reproduce fan-out across every fixture member"
             );
         } else {
-            assert_eq!(
-                counters.visibility_sql_statements, 0,
-                "ordinary task write ran visibility SQL"
+            // Subscriptions hold no rows: a deleted (or hidden) parent's
+            // children are read once per event, shared by every connection
+            // (no visibility predicate), and decided in memory per member.
+            let budget = u64::from(statement.starts_with("DELETE FROM tasks"));
+            assert!(
+                counters.visibility_sql_statements <= budget,
+                "ordinary task write ran visibility SQL: {counters:?}"
             );
             assert_eq!(
                 counters.collection_snapshots, 0,
@@ -578,13 +637,11 @@ async fn run_visibility_fixture(legacy: bool) {
         );
         assert!(runtime.visibility_metrics().snapshot().collection_snapshots > 0);
     } else {
-        assert_eq!(
-            worked
-                .iter()
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([1, 2, 3]),
-            "one team grant must affect exactly its three member recipients"
+        // The granted rows are read once and shared by the recipients (the
+        // read has no visibility predicate); membership is checked below.
+        assert!(
+            !worked.is_empty(),
+            "one team grant must reach its member recipients"
         );
         assert!(
             worked.iter().all(|member| (1..=3).contains(member)),
@@ -593,9 +650,7 @@ async fn run_visibility_fixture(legacy: bool) {
     }
     for connection in &connections {
         assert_eq!(
-            connection.subscriptions["tasks"]
-                .rows
-                .contains_key("granted"),
+            connection.held.has("tasks", "granted"),
             (1..=3).contains(&connection.member)
         );
     }
@@ -634,7 +689,7 @@ async fn run_visibility_fixture(legacy: bool) {
     let member_one_collections = connections
         .iter()
         .filter(|connection| connection.member == 1)
-        .map(|connection| connection.subscriptions.len() as u64)
+        .map(|connection| connection.held.subscriptions.len() as u64)
         .sum::<u64>();
     let rebuilds = runtime.visibility_metrics().snapshot().principal_rebuilds;
     eprintln!(
@@ -670,14 +725,7 @@ async fn run_visibility_fixture(legacy: bool) {
         let statements = sql_capture();
         for connection in &mut connections {
             statements.lock().unwrap().clear();
-            runtime
-                .apply_feed_event(
-                    &connection.session,
-                    &mut connection.subscriptions,
-                    event.clone(),
-                )
-                .await
-                .unwrap();
+            connection.held.apply(&runtime, event.clone()).await;
             let child_fetches = statements
                 .lock()
                 .unwrap()
@@ -699,9 +747,7 @@ async fn run_visibility_fixture(legacy: bool) {
     }
     for connection in &connections {
         assert_eq!(
-            connection.subscriptions["notes"]
-                .rows
-                .contains_key("hidden-note"),
+            connection.held.has("notes", "hidden-note"),
             connection.member == 0,
             "parent transition delivered children to the wrong member"
         );
@@ -722,7 +768,7 @@ async fn run_visibility_fixture(legacy: bool) {
     for connection in connections.iter().take(2) {
         let related = runtime
             .open_live_query(
-                &connection.session,
+                &connection.held.session,
                 "related".into(),
                 "tasks.withNotes".into(),
                 json!({}),
@@ -747,7 +793,7 @@ async fn run_visibility_fixture(legacy: bool) {
         for connection in &connections {
             let opened = runtime
                 .open_live_query(
-                    &connection.session,
+                    &connection.held.session,
                     "related-window".into(),
                     "tasks.withNotes".into(),
                     json!({}),
@@ -756,7 +802,7 @@ async fn run_visibility_fixture(legacy: bool) {
                 .unwrap();
             related_windows.push((
                 connection.member,
-                connection.session.clone(),
+                connection.held.session.clone(),
                 BTreeMap::from([("related-window".to_owned(), opened.subscription)]),
             ));
         }
@@ -842,12 +888,12 @@ async fn run_visibility_fixture(legacy: bool) {
                 ),
             ] {
                 let opened = runtime
-                    .open_live_query(&connection.session, id.into(), path.into(), args)
+                    .open_live_query(&connection.held.session, id.into(), path.into(), args)
                     .await
                     .unwrap();
                 queries.insert(id.to_owned(), opened.subscription);
             }
-            projected_windows.push((connection.member, connection.session.clone(), queries));
+            projected_windows.push((connection.member, connection.held.session.clone(), queries));
         }
         for (statement, recipient, expected_projection, expected_search) in [
             ("INSERT INTO tasks VALUES('lq-projection-hidden','projection-private','Hidden')", None, false, false),
@@ -901,7 +947,7 @@ async fn run_visibility_fixture(legacy: bool) {
         }
         // Views are not CDC sources. Their declared dependency remains live;
         // claiming precise tracked routing here would silently miss updates.
-        let session = &connections[6].session;
+        let session = &connections[6].held.session;
         let opened = runtime
             .open_live_query(
                 session,
@@ -930,7 +976,7 @@ async fn run_visibility_fixture(legacy: bool) {
         // connection receives it. Before the single-writer applier, only
         // Replica connections advanced the shared index, so it froze here and
         // the next applied event jumped the gap.
-        let session = connections[0].session.clone();
+        let session = connections[0].held.session.clone();
         let mut lq_only = BTreeMap::new();
         lq_only.insert(
             "lq-only".to_owned(),
@@ -953,27 +999,14 @@ async fn run_visibility_fixture(legacy: bool) {
         // A brand-new collection after the gap, then a child of the moved
         // parent: decided in memory against the shared tasks index. taskLinks
         // is independent of the derived taskNotes set tested above.
-        let request: ReplicaOpenRequest =
-            serde_json::from_value(json!({"id":"late","path":"links.list","args":{}})).unwrap();
-        let mut late = BTreeMap::new();
-        late.insert(
-            "late".to_owned(),
-            runtime
-                .open_replica(&session, request)
-                .await
-                .unwrap()
-                .subscription
-                .unwrap(),
-        );
+        let mut late = Held::new(session.clone());
+        late.open(&runtime, "late", "links.list").await;
         write(&pools, &url, sqlx::query("INSERT INTO \"taskLinks\" VALUES('granted-link','granted','Now visible')")).await;
         let link = committed(&pools, &route, &mut revision).await;
         runtime.visibility_metrics().reset_for_test();
-        runtime
-            .apply_feed_event(&session, &mut late, link)
-            .await
-            .unwrap();
+        late.apply(&runtime, link).await;
         assert!(
-            late["late"].rows.contains_key("granted-link"),
+            late.has("late", "granted-link"),
             "a child of a parent moved while only a Live Query consumed the feed must be delivered"
         );
         assert_eq!(
@@ -998,26 +1031,13 @@ async fn run_visibility_fixture(legacy: bool) {
                 .iter()
                 .find(|c| c.member == member)
                 .unwrap()
+                .held
                 .session
                 .clone();
-            let mut replicas = BTreeMap::new();
-            replicas.insert(
-                "chain".to_owned(),
-                runtime
-                    .open_replica(
-                        &session,
-                        serde_json::from_value(
-                            json!({"id":"chain","path":"attachments.list","args":{}}),
-                        )
-                        .unwrap(),
-                    )
-                    .await
-                    .unwrap()
-                    .subscription
-                    .unwrap(),
-            );
+            let mut replicas = Held::new(session.clone());
+            replicas.open(&runtime, "chain", "attachments.list").await;
             assert_eq!(
-                replicas["chain"].rows.contains_key("chain-attachment"),
+                replicas.has("chain", "chain-attachment"),
                 member == 4
             );
             let mut queries = BTreeMap::new();
@@ -1047,16 +1067,13 @@ async fn run_visibility_fixture(legacy: bool) {
             let event = committed(&pools, &route, &mut revision).await;
             for (member, session, replicas, queries) in &mut holders {
                 runtime.visibility_metrics().reset_for_test();
-                runtime
-                    .apply_feed_event(session, replicas, event.clone())
-                    .await
-                    .unwrap();
+                replicas.apply(&runtime, event.clone()).await;
                 runtime
                     .apply_live_query_feed_event(session, queries, &event)
                     .await;
                 let visible = *member == 4 && statement.contains("='chain-private'");
                 assert_eq!(
-                    replicas["chain"].rows.contains_key("chain-attachment"),
+                    replicas.has("chain", "chain-attachment"),
                     visible,
                     "two-level inherited replica must follow {statement}"
                 );
@@ -1083,31 +1100,16 @@ async fn run_visibility_fixture(legacy: bool) {
         }
 
         let member_session = holders[0].1.clone();
-        let mut direct_parent = BTreeMap::new();
-        direct_parent.insert(
-            "direct".to_owned(),
-            runtime
-                .open_replica(
-                    &member_session,
-                    serde_json::from_value(json!({"id":"direct","path":"notes.list","args":{}}))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .subscription
-                .unwrap(),
-        );
-        assert!(!direct_parent["direct"].rows.contains_key("chain-note"));
+        let mut direct_parent = Held::new(member_session.clone());
+        direct_parent.open(&runtime, "direct", "notes.list").await;
+        assert!(!direct_parent.has("direct", "chain-note"));
         write(&pools, &url, sqlx::query(
             "INSERT INTO \"taskUsers\" VALUES('chain-grant-again','chain-project','m4',NULL)",
         )).await;
         let grant_again = committed(&pools, &route, &mut revision).await;
-        runtime
-            .apply_feed_event(&member_session, &mut direct_parent, grant_again)
-            .await
-            .unwrap();
+        direct_parent.apply(&runtime, grant_again).await;
         assert!(
-            direct_parent["direct"].rows.contains_key("chain-note"),
+            direct_parent.has("direct", "chain-note"),
             "a direct-parent grant feeding a derived workspace must reveal existing notes"
         );
 
@@ -1122,22 +1124,11 @@ async fn run_visibility_fixture(legacy: bool) {
             .iter()
             .find(|c| c.member == 6)
             .unwrap()
+            .held
             .session
             .clone();
-        let mut lagged = BTreeMap::new();
-        lagged.insert(
-            "lagged".to_owned(),
-            runtime
-                .open_replica(
-                    &lag_session,
-                    serde_json::from_value(json!({"id":"lagged","path":"notes.list","args":{}}))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .subscription
-                .unwrap(),
-        );
+        let mut lagged = Held::new(lag_session.clone());
+        lagged.open(&runtime, "lagged", "notes.list").await;
         write(&pools, &url, sqlx::query(
             "INSERT INTO \"taskNotes\" VALUES('lag-note','lag-parent','must-never-be-delivered')",
         )).await;
@@ -1149,18 +1140,15 @@ async fn run_visibility_fixture(legacy: bool) {
         let clock = change_feed::read_clock(&pools, &route).await.unwrap();
         assert!(
             gonvex_runtime::visibility::indexes_ready(
-                &lagged["lagged"].resolved,
+                &lagged.subscriptions["lagged"].resolved,
                 clock.revision,
                 &clock.epoch
             )
             .await
         );
-        let delivered = runtime
-            .apply_feed_event(&lag_session, &mut lagged, old_note)
-            .await
-            .unwrap();
+        let delivered = lagged.apply(&runtime, old_note).await;
         assert_eq!(
-            lagged["lagged"].rows["lag-note"]["body"],
+            lagged.row("lagged", "lag-note")["body"],
             "Redacted before sharing"
         );
 
@@ -1171,13 +1159,10 @@ async fn run_visibility_fixture(legacy: bool) {
             "future ACL state must never expose an old event payload"
         );
         for event in [redaction, sharing] {
-            runtime
-                .apply_feed_event(&lag_session, &mut lagged, event)
-                .await
-                .unwrap();
+            lagged.apply(&runtime, event).await;
         }
         assert_eq!(
-            lagged["lagged"].rows["lag-note"]["body"],
+            lagged.row("lagged", "lag-note")["body"],
             "Redacted before sharing"
         );
         // Completeness can advance on an unrelated commit without changing any
@@ -1191,18 +1176,15 @@ async fn run_visibility_fixture(legacy: bool) {
         let clock = change_feed::read_clock(&pools, &route).await.unwrap();
         assert!(
             gonvex_runtime::visibility::indexes_ready(
-                &lagged["lagged"].resolved,
+                &lagged.subscriptions["lagged"].resolved,
                 clock.revision,
                 &clock.epoch
             )
             .await
         );
         runtime.visibility_metrics().reset_for_test();
-        runtime
-            .apply_feed_event(&lag_session, &mut lagged, edit)
-            .await
-            .unwrap();
-        assert_eq!(lagged["lagged"].rows["lag-note"]["body"], "Current edit");
+        lagged.apply(&runtime, edit).await;
+        assert_eq!(lagged.row("lagged", "lag-note")["body"], "Current edit");
         let counters = runtime.visibility_metrics().snapshot();
         assert_eq!(
             counters.collection_snapshots, 0,

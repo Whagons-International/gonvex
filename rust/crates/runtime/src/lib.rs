@@ -1,3 +1,4 @@
+#![warn(clippy::redundant_clone)]
 pub mod action_calls;
 pub mod change_feed;
 pub mod config;
