@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+static PEAK_LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Counting wrapper around any global allocator (use mimalloc to match
@@ -55,7 +56,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Relaxed);
         ALLOCATED_BYTES.fetch_add(new_size as u64, Relaxed);
-        LIVE_BYTES.fetch_add(new_size as i64 - layout.size() as i64, Relaxed);
+        let delta = new_size as i64 - layout.size() as i64;
+        let live = LIVE_BYTES.fetch_add(delta, Relaxed) + delta;
+        PEAK_LIVE_BYTES.fetch_max(live, Relaxed);
         self.0.realloc(ptr, layout, new_size)
     }
 }
@@ -67,7 +70,20 @@ fn record_alloc(size: usize) {
     }
     ALLOCATIONS.fetch_add(1, Relaxed);
     ALLOCATED_BYTES.fetch_add(size as u64, Relaxed);
-    LIVE_BYTES.fetch_add(size as i64, Relaxed);
+    let live = LIVE_BYTES.fetch_add(size as i64, Relaxed) + size as i64;
+    PEAK_LIVE_BYTES.fetch_max(live, Relaxed);
+}
+
+/// Restarts peak tracking at the current heap-live bytes, which it returns.
+pub fn reset_peak() -> i64 {
+    let live = LIVE_BYTES.load(Relaxed);
+    PEAK_LIVE_BYTES.store(live, Relaxed);
+    live
+}
+
+/// Highest heap-live bytes since the last [`reset_peak`].
+pub fn peak_live_bytes() -> i64 {
+    PEAK_LIVE_BYTES.load(Relaxed)
 }
 
 /// Process-wide allocator counters at one instant.
@@ -112,14 +128,17 @@ pub fn rss_bytes() -> Option<u64> {
 /// Run it with the value still alive: e.g. open subscriptions and keep them.
 pub async fn retained<T, F: Future<Output = T>>(work: F) -> (T, Retained) {
     let rss_before = rss_bytes();
+    let base = reset_peak();
     let before = AllocSnapshot::now();
     let value = work.await;
     let after = AllocSnapshot::now().since(before);
+    let peak = peak_live_bytes() - base;
     let rss_after = rss_bytes();
     (
         value,
         Retained {
             live_bytes: counting_installed().then_some(after.live_bytes),
+            peak_bytes: counting_installed().then_some(peak),
             rss_bytes: rss_before
                 .zip(rss_after)
                 .map(|(before, after)| after as i64 - before as i64),
@@ -129,7 +148,10 @@ pub async fn retained<T, F: Future<Output = T>>(work: F) -> (T, Retained) {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Retained {
+    /// Heap-live bytes still held after `work` (what it retained).
     pub live_bytes: Option<i64>,
+    /// Peak heap-live growth while `work` ran.
+    pub peak_bytes: Option<i64>,
     pub rss_bytes: Option<i64>,
 }
 
@@ -168,6 +190,9 @@ pub struct BenchResult {
     pub bytes_per_op: Option<f64>,
     /// Heap-live change across all measured iterations, per op.
     pub live_bytes_per_op: Option<f64>,
+    /// Largest heap-live growth above the start of one op, over all
+    /// measured iterations (process-wide, so concurrent work counts too).
+    pub peak_heap_bytes: Option<i64>,
     /// Free-form numbers (rows, payload sizes, retained bytes...).
     pub extra: BTreeMap<String, Value>,
 }
@@ -188,6 +213,7 @@ impl BenchResult {
             "allocationsPerOp": self.allocations_per_op.map(|v| (v * 10.0).round() / 10.0),
             "bytesPerOp": self.bytes_per_op.map(f64::round),
             "liveBytesPerOp": self.live_bytes_per_op.map(f64::round),
+            "peakHeapBytes": self.peak_heap_bytes,
             "extra": self.extra,
         })
     }
@@ -242,20 +268,23 @@ impl Report {
         }
         let mut samples = Vec::with_capacity(config.iterations);
         let mut allocs = AllocSnapshot::default();
+        let mut peak = 0i64;
         for i in 0..config.iterations {
             let index = config.warmup + i;
             let input = setup(index).await;
+            let base = reset_peak();
             let before = AllocSnapshot::now();
             let started = Instant::now();
             op(index, input).await;
             let elapsed = started.elapsed();
+            peak = peak.max(peak_live_bytes() - base);
             let delta = AllocSnapshot::now().since(before);
             allocs.allocations += delta.allocations;
             allocs.allocated_bytes += delta.allocated_bytes;
             allocs.live_bytes += delta.live_bytes;
             samples.push(elapsed);
         }
-        let result = summarize(name, units_per_op, unit, &samples, allocs);
+        let result = summarize(name, units_per_op, unit, &samples, allocs, peak);
         progress(&result);
         self.results.push(result);
         self.results.last_mut()
@@ -302,18 +331,21 @@ impl Report {
         }
         let mut samples = Vec::with_capacity(config.iterations);
         let mut allocs = AllocSnapshot::default();
+        let mut peak = 0i64;
         for i in 0..config.iterations {
+            let base = reset_peak();
             let before = AllocSnapshot::now();
             let started = Instant::now();
             op(config.warmup + i);
             let elapsed = started.elapsed();
+            peak = peak.max(peak_live_bytes() - base);
             let delta = AllocSnapshot::now().since(before);
             allocs.allocations += delta.allocations;
             allocs.allocated_bytes += delta.allocated_bytes;
             allocs.live_bytes += delta.live_bytes;
             samples.push(elapsed);
         }
-        let result = summarize(name, units_per_op, unit, &samples, allocs);
+        let result = summarize(name, units_per_op, unit, &samples, allocs, peak);
         progress(&result);
         self.results.push(result);
         self.results.last_mut()
@@ -338,6 +370,7 @@ impl Report {
             allocations_per_op: None,
             bytes_per_op: None,
             live_bytes_per_op: None,
+            peak_heap_bytes: None,
             extra,
         });
         eprintln!("done {name}");
@@ -412,6 +445,7 @@ fn summarize(
     unit: &str,
     samples: &[Duration],
     allocs: AllocSnapshot,
+    peak: i64,
 ) -> BenchResult {
     let mut ns: Vec<f64> = samples.iter().map(|d| d.as_nanos() as f64).collect();
     ns.sort_by(f64::total_cmp);
@@ -432,6 +466,7 @@ fn summarize(
         allocations_per_op: installed.then(|| allocs.allocations as f64 / n),
         bytes_per_op: installed.then(|| allocs.allocated_bytes as f64 / n),
         live_bytes_per_op: installed.then(|| allocs.live_bytes as f64 / n),
+        peak_heap_bytes: installed.then_some(peak),
         extra: BTreeMap::new(),
     }
 }

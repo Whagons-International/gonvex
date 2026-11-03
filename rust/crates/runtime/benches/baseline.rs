@@ -14,7 +14,7 @@ use gonvex_protocol::ServerMessage;
 use gonvex_runtime::change_feed::FeedEvent;
 use gonvex_runtime::perf_fixture::harness::{retained, BenchConfig, CountingAlloc, Report};
 use gonvex_runtime::perf_fixture::{
-    Encode, Fixture, FixtureOptions, JsTimeMode, MemberKind, WHAGONS_SUBSCRIPTIONS,
+    Delivery, Encode, Fixture, FixtureOptions, JsTimeMode, MemberKind, WHAGONS_SUBSCRIPTIONS,
 };
 use serde_json::{json, Value};
 
@@ -44,6 +44,65 @@ fn changes(event: &FeedEvent) -> &[gonvex_runtime::change_feed::LogChange] {
     }
 }
 
+fn median(mut values: Vec<f64>) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(f64::total_cmp);
+    values[values.len() / 2]
+}
+
+/// Stable per-change fan-out fields: apply/encode split, visibility checks.
+fn delivery_extra(extra: &mut BTreeMap<String, Value>, deliveries: &[Delivery], members: usize) {
+    // Medians include the warmup deliveries (same work as measured ones).
+    let Some(last) = deliveries.last() else {
+        return;
+    };
+    let apply = median(deliveries.iter().map(|d| d.apply_ns as f64).collect());
+    let encode = median(deliveries.iter().map(|d| d.encode_ns as f64).collect());
+    let checks = median(
+        deliveries
+            .iter()
+            .map(|d| d.visibility.in_memory_row_checks as f64)
+            .collect(),
+    );
+    extra.insert("receivers".into(), json!(last.connections_with_messages));
+    extra.insert("messages".into(), json!(last.messages));
+    extra.insert("jsonBytes".into(), json!(last.json_bytes));
+    extra.insert("wireBytes".into(), json!(last.wire_bytes));
+    extra.insert("applyNsMedian".into(), json!(apply.round()));
+    extra.insert(
+        "applyNsPerSubscriber".into(),
+        json!((apply / members as f64).round()),
+    );
+    extra.insert("encodeNsMedian".into(), json!(encode.round()));
+    extra.insert(
+        "encodeNsPerMessage".into(),
+        json!((encode / last.messages.max(1) as f64).round()),
+    );
+    extra.insert("visibilityChecksPerChange".into(), json!(checks));
+    extra.insert(
+        "applyNsPerVisibilityCheck".into(),
+        json!(if checks > 0.0 {
+            (apply / checks).round()
+        } else {
+            0.0
+        }),
+    );
+    extra.insert(
+        "visibilitySqlPerChange".into(),
+        json!(last.visibility.visibility_sql_statements),
+    );
+    extra.insert(
+        "collectionSnapshotsPerChange".into(),
+        json!(last.visibility.collection_snapshots),
+    );
+    extra.insert(
+        "principalRebuildsPerChange".into(),
+        json!(last.visibility.principal_rebuilds),
+    );
+}
+
 fn reducer_ok(message: &ServerMessage) {
     assert!(
         matches!(message, ServerMessage::ReducerResult { .. }),
@@ -69,14 +128,7 @@ async fn run() {
     ] {
         let member = fixture.members_of_kind(BIG, kind)[0];
         let session = fixture.session(BIG, member);
-        let rows = fixture
-            .open_replica(&session, TASKS, TASKS)
-            .await
-            .unwrap()
-            .subscription
-            .unwrap()
-            .rows
-            .len();
+        let rows = fixture.connect(BIG, member).await.unwrap().rows[TASKS];
         let name = format!("snapshot_open/{TASKS}/{kind:?}");
         if let Some(result) = report
             .run_simple(&name, BenchConfig::new(2, 15), 1.0, "open", |_| {
@@ -114,9 +166,11 @@ async fn run() {
     if report.enabled("retained/") {
         let (first, alone) = retained(fixture.connect(BIG, team_member)).await;
         let first = first.unwrap();
-        let tasks_rows = first.subscriptions[TASKS].rows.len();
+        let tasks_rows = first.rows[TASKS];
         let mut extra = BTreeMap::new();
         extra.insert("liveBytes".into(), json!(alone.live_bytes));
+        extra.insert("peakHeapBytes".into(), json!(alone.peak_bytes));
+        extra.insert("rowsPerSubscription".into(), json!(first.rows));
         extra.insert("rssBytes".into(), json!(alone.rss_bytes));
         extra.insert("snapshotRows".into(), json!(first.snapshot_rows));
         extra.insert("taskRows".into(), json!(tasks_rows));
@@ -128,10 +182,7 @@ async fn run() {
     {
         let connections = connections.borrow();
         let rows: usize = connections.iter().map(|c| c.snapshot_rows).sum();
-        let task_rows: usize = connections
-            .iter()
-            .map(|c| c.subscriptions[TASKS].rows.len())
-            .sum();
+        let task_rows: usize = connections.iter().map(|c| c.rows[TASKS]).sum();
         let mut extra = BTreeMap::new();
         extra.insert("members".into(), json!(members));
         extra.insert(
@@ -139,6 +190,7 @@ async fn run() {
             json!(members * WHAGONS_SUBSCRIPTIONS.len()),
         );
         extra.insert("liveBytes".into(), json!(all.live_bytes));
+        extra.insert("peakHeapBytes".into(), json!(all.peak_bytes));
         extra.insert(
             "liveBytesPerMember".into(),
             json!(all.live_bytes.map(|b| b / members as i64)),
@@ -174,7 +226,7 @@ async fn run() {
     ] {
         let name = format!("fanout/task_update/{members}_members/{label}");
         let last = RefCell::new(None);
-        let stats = RefCell::new(None);
+        let stats = RefCell::new(Vec::new());
         if let Some(result) = report
             .run(
                 &name,
@@ -196,23 +248,19 @@ async fn run() {
                     async move {
                         let mut connections = connections.borrow_mut();
                         let delivery = fixture.deliver(&mut connections, &event, encode).await.unwrap();
-                        *stats.borrow_mut() = Some(delivery);
+                        stats.borrow_mut().push(delivery);
                         *last.borrow_mut() = Some(event);
                     }
                 },
             )
             .await
         {
-            if let Some(delivery) = stats.take() {
-                result.extra.insert("receivers".into(), json!(delivery.connections_with_messages));
-                result.extra.insert("messages".into(), json!(delivery.messages));
-                result.extra.insert("jsonBytes".into(), json!(delivery.json_bytes));
-                result.extra.insert("wireBytes".into(), json!(delivery.wire_bytes));
-            }
+            delivery_extra(&mut result.extra, &stats.take(), members);
         }
         sample_event = last.into_inner().or(sample_event);
     }
     let name = format!("fanout/presence_beat/{members}_members/apply+json");
+    let stats = RefCell::new(Vec::new());
     if let Some(result) = report
         .run(
             &name,
@@ -224,20 +272,20 @@ async fn run() {
                 async move { fixture.beat_presence(BIG, i % members).await.unwrap() }
             },
             |_, event| {
-                let (fixture, connections) = (&fixture, &connections);
+                let (fixture, connections, stats) = (&fixture, &connections, &stats);
                 async move {
                     let mut connections = connections.borrow_mut();
-                    std::hint::black_box(
-                        fixture
-                            .deliver(&mut connections, &event, Encode::Json)
-                            .await
-                            .unwrap(),
-                    );
+                    let delivery = fixture
+                        .deliver(&mut connections, &event, Encode::Json)
+                        .await
+                        .unwrap();
+                    stats.borrow_mut().push(delivery);
                 }
             },
         )
         .await
     {
+        delivery_extra(&mut result.extra, &stats.take(), members);
         result.extra.insert(
             "note".into(),
             json!("presence row is public: every member receives it"),
