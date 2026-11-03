@@ -43,12 +43,11 @@ async fn marked_failure_refuses_commit_and_rolls_back() {
         Err(DatabaseError::TransactionAborted(reason)) => assert_eq!(reason, "constraint failed"),
         other => panic!("expected TransactionAborted, got {other:?}"),
     }
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 't')",
-    )
-    .fetch_one(&pools.pool(&url).await.unwrap())
-    .await
-    .unwrap();
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 't')")
+            .fetch_one(&pools.pool(&url).await.unwrap())
+            .await
+            .unwrap();
     assert!(!exists, "nothing from the aborted transaction may persist");
 }
 

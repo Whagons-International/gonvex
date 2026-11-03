@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::time::Instant;
 
 use gonvex_protocol::ServerMessage;
-use gonvex_runtime::perf_fixture::{Fixture, FixtureOptions, MemberKind, SqlValue, WHAGONS_SUBSCRIPTIONS};
+use gonvex_runtime::perf_fixture::{
+    Fixture, FixtureOptions, MemberKind, SqlValue, WHAGONS_SUBSCRIPTIONS,
+};
 use gonvex_runtime::replica::ReplicaSubscription;
 use gonvex_store::TenantSession;
 use replica_client::{ClientModel, DigestKind};
@@ -98,7 +100,9 @@ struct Out {
 
 impl Out {
     fn record(&mut self, name: &str, values: Value) {
-        let Value::Object(values) = values else { unreachable!() };
+        let Value::Object(values) = values else {
+            unreachable!()
+        };
         eprintln!("{name}: {}", Value::Object(values.clone()));
         self.rows.push(Row {
             name: name.into(),
@@ -246,13 +250,22 @@ impl ModelConnection {
                 .map(|row| (replica_client::key_of(row, key), Value::clone(row)))
                 .collect::<BTreeMap<_, _>>();
             if expected != window.rows {
-                let missing = expected.keys().filter(|k| !window.rows.contains_key(*k)).count();
-                let leaked = window.rows.keys().filter(|k| !expected.contains_key(*k)).count();
+                let missing = expected
+                    .keys()
+                    .filter(|k| !window.rows.contains_key(*k))
+                    .count();
+                let leaked = window
+                    .rows
+                    .keys()
+                    .filter(|k| !expected.contains_key(*k))
+                    .count();
                 let stale = expected
                     .iter()
                     .filter(|(k, v)| window.rows.get(*k).is_some_and(|row| row != *v))
                     .count();
-                return Err(format!("{id}: missing {missing} leaked {leaked} stale {stale}"));
+                return Err(format!(
+                    "{id}: missing {missing} leaked {leaked} stale {stale}"
+                ));
             }
         }
         if !self.model.mismatches.is_empty() {
@@ -299,14 +312,23 @@ async fn run() {
     // Marginal cost of one more member once tenant-shared indexes are warm:
     // the 5k projection uses this, not the first-member cost.
     if enabled("retained/marginal") {
-        for kind in [MemberKind::Admin, MemberKind::TeamAllSpots, MemberKind::TeamSpots, MemberKind::GrantOnly] {
+        for kind in [
+            MemberKind::Admin,
+            MemberKind::TeamAllSpots,
+            MemberKind::TeamSpots,
+            MemberKind::GrantOnly,
+        ] {
             let member = fixture.members_of_kind(BIG, kind)[0];
             let (connection, sample) = measure(fixture.connect(BIG, member)).await;
             let connection = connection.unwrap();
             let mut per_path = serde_json::Map::new();
             for path in WHAGONS_SUBSCRIPTIONS {
                 let (subscription, sample) = measure(async {
-                    fixture.open_replica(&connection.session, path, path).await.unwrap().subscription
+                    fixture
+                        .open_replica(&connection.session, path, path)
+                        .await
+                        .unwrap()
+                        .subscription
                 })
                 .await;
                 per_path.insert(path.into(), json!(sample.retained));
@@ -370,7 +392,12 @@ async fn run() {
                 samples.push(sample);
             }
         }
-        out.summarize(&name, &samples, 1.0, json!({"rows": rows, "wire_bytes": bytes}));
+        out.summarize(
+            &name,
+            &samples,
+            1.0,
+            json!({"rows": rows, "wire_bytes": bytes}),
+        );
     }
 
     // ---- Feed apply: one task update to every member's 10 collections ----
@@ -398,7 +425,11 @@ async fn run() {
             } else {
                 let task = spotless[i % spotless.len()];
                 fixture
-                    .update_task(BIG, task, json!({"description": format!("fan-out edit {i} {}", "x".repeat(380))}))
+                    .update_task(
+                        BIG,
+                        task,
+                        json!({"description": format!("fan-out edit {i} {}", "x".repeat(380))}),
+                    )
                     .await
                     .unwrap()
             };
@@ -408,7 +439,11 @@ async fn run() {
                     all.push(
                         fixture
                             .runtime
-                            .apply_feed_event(&connection.session, &mut connection.subscriptions, event.clone())
+                            .apply_feed_event(
+                                &connection.session,
+                                &mut connection.subscriptions,
+                                event.clone(),
+                            )
                             .await
                             .unwrap(),
                     );
@@ -467,7 +502,11 @@ async fn run() {
             for c in 0..changes {
                 let task = spotless[(i * 7919 + c * 31) % spotless.len()];
                 fixture
-                    .update_task(BIG, task, json!({"description": format!("resume edit {i} {c}")}))
+                    .update_task(
+                        BIG,
+                        task,
+                        json!({"description": format!("resume edit {i} {c}")}),
+                    )
                     .await
                     .unwrap();
             }
@@ -519,8 +558,7 @@ async fn run() {
             .cloned()
             .expect("a team the member is not in");
         let session = fixture.session(BIG, member);
-        let mut connection =
-            ModelConnection::open(&fixture, session, &WHAGONS_SUBSCRIPTIONS).await;
+        let mut connection = ModelConnection::open(&fixture, session, &WHAGONS_SUBSCRIPTIONS).await;
         let mut samples = Vec::new();
         let mut gained = Vec::new();
         let mut lost = Vec::new();
@@ -537,14 +575,22 @@ async fn run() {
                     .unwrap()
             } else {
                 fixture
-                    .commit(BIG, r#"DELETE FROM "memberTeams" WHERE "_id"='bench-team-toggle'"#, Vec::new())
+                    .commit(
+                        BIG,
+                        r#"DELETE FROM "memberTeams" WHERE "_id"='bench-team-toggle'"#,
+                        Vec::new(),
+                    )
                     .await
                     .unwrap()
             };
             let before = connection.model.windows[TASKS].rows.len();
             let (bytes, sample) = measure(connection.settle(&fixture, event)).await;
             let after = connection.model.windows[TASKS].rows.len();
-            if i % 2 == 0 { gained.push(after as i64 - before as i64) } else { lost.push(before as i64 - after as i64) }
+            if i % 2 == 0 {
+                gained.push(after as i64 - before as i64)
+            } else {
+                lost.push(before as i64 - after as i64)
+            }
             wire = bytes;
             samples.push(sample);
         }
@@ -567,7 +613,11 @@ async fn run() {
 
     println!("\n| benchmark | values |\n|---|---|");
     for row in &out.rows {
-        println!("| {} | {} |", row.name, serde_json::to_string(&row.values).unwrap());
+        println!(
+            "| {} | {} |",
+            row.name,
+            serde_json::to_string(&row.values).unwrap()
+        );
     }
     fixture.shutdown().await;
 }

@@ -152,7 +152,11 @@ impl Client {
                 self.member
             );
             if let Some(subscription) = self.subscriptions.get(id) {
-                assert_eq!(subscription.row_count(), window.rows.len(), "{context} {id}");
+                assert_eq!(
+                    subscription.row_count(),
+                    window.rows.len(),
+                    "{context} {id}"
+                );
             }
         }
     }
@@ -203,7 +207,11 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let spotted = tasks.iter().find(|task| task.spot_id.is_some()).unwrap().clone();
+    let spotted = tasks
+        .iter()
+        .find(|task| task.spot_id.is_some())
+        .unwrap()
+        .clone();
     let other_workspace = workspaces
         .iter()
         .find(|workspace| **workspace != tasks[0].workspace_id)
@@ -317,7 +325,10 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
         }
     }
     assert!(admin_messages > 0, "an admin sees every task");
-    assert_eq!(clients[grant_index].model.windows[TASKS].cursor, cursor_before);
+    assert_eq!(
+        clients[grant_index].model.windows[TASKS].cursor,
+        cursor_before
+    );
     for client in &clients {
         client.oracle(&fixture, "unseen task edit").await;
     }
@@ -357,7 +368,10 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
             r#"UPDATE "tasks" SET "description"='while offline' WHERE "_id"=$1"#,
             vec![text(&tasks[4].id)],
         ),
-        (r#"DELETE FROM "tasks" WHERE "_id"=$1"#, vec![text(&tasks[5].id)]),
+        (
+            r#"DELETE FROM "tasks" WHERE "_id"=$1"#,
+            vec![text(&tasks[5].id)],
+        ),
         (
             r#"UPDATE "tasks" SET "workspaceId"=$2 WHERE "_id"=$1"#,
             vec![text(&tasks[6].id), text(&other_workspace)],
@@ -428,7 +442,9 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
     )
     .await;
     let resumed = offline_two.resume(&fixture).await;
-    offline_two.oracle(&fixture, "resume outside retention").await;
+    offline_two
+        .oracle(&fixture, "resume outside retention")
+        .await;
     assert!(resumed
         .iter()
         .any(|message| matches!(message, ServerMessage::ReplicaSnapshot { .. })));

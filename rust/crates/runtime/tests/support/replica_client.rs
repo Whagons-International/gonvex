@@ -301,7 +301,9 @@ impl ClientModel {
                     }
                 }
             }
-            ServerMessage::ReplicaReady { id, cursor, digest, .. } => {
+            ServerMessage::ReplicaReady {
+                id, cursor, digest, ..
+            } => {
                 let window = self.windows.get_mut(id).expect("registered window");
                 window.cursor = Some(cursor.clone());
                 window.needs_hashes = false;
@@ -312,7 +314,10 @@ impl ClientModel {
             }
             ServerMessage::ReplicaNeedHashes { id, .. } => {
                 self.need_hashes += 1;
-                self.windows.get_mut(id).expect("registered window").needs_hashes = true;
+                self.windows
+                    .get_mut(id)
+                    .expect("registered window")
+                    .needs_hashes = true;
             }
             ServerMessage::ReplicaReset { id, .. } => {
                 self.resets += 1;

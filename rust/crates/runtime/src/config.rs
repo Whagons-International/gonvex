@@ -886,7 +886,10 @@ mod tests {
         .expect("config");
 
         assert_eq!(config.addr, "0.0.0.0:9090".parse().unwrap());
-        assert_eq!(config.data_dir(), Some(PathBuf::from("/var/lib/gonvex/data")));
+        assert_eq!(
+            config.data_dir(),
+            Some(PathBuf::from("/var/lib/gonvex/data"))
+        );
         assert_eq!(
             config.control_plane_database_url.as_deref(),
             Some("sqlite:///var/lib/gonvex/data/control.db")
@@ -895,7 +898,10 @@ mod tests {
             config.default_database_url.as_deref(),
             Some("sqlite:///var/lib/gonvex/data")
         );
-        assert_eq!(config.tenant_database_urls["tenant-a"], "sqlite:///srv/a.db");
+        assert_eq!(
+            config.tenant_database_urls["tenant-a"],
+            "sqlite:///srv/a.db"
+        );
         assert!(config.require_auth);
         assert_eq!(config.database_max_total_connections, 64);
         assert_eq!(
