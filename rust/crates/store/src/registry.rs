@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -166,6 +167,10 @@ pub struct PoolRegistrySnapshot {
     pub listener_connections: u32,
     pub admission_limit: usize,
     pub admission_active: usize,
+    /// Completed admission attempts, including uncontended successes and timeouts.
+    pub admission_count: u64,
+    pub admission_wait_us: u64,
+    pub admission_wait_max_us: u64,
 }
 
 #[derive(Clone)]
@@ -183,6 +188,9 @@ pub struct PoolRegistry {
     limits: PoolLimits,
     durability: Durability,
     admission: Arc<Semaphore>,
+    admission_count: Arc<AtomicU64>,
+    admission_wait_us: Arc<AtomicU64>,
+    admission_wait_max_us: Arc<AtomicU64>,
     // Per-file initializers. The map lock is held only to find or insert an
     // initializer, never across file I/O, so a slow or suspended open of one
     // file cannot block lookups of every other database.
@@ -230,6 +238,9 @@ impl PoolRegistry {
         let limits = limits.bounded();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
+            admission_count: Arc::default(),
+            admission_wait_us: Arc::default(),
+            admission_wait_max_us: Arc::default(),
             databases: Arc::default(),
             durability,
             limits,
@@ -354,14 +365,19 @@ impl PoolRegistry {
 
     pub async fn admit(&self, database_url: &str) -> Result<AdmissionPermit, DatabaseError> {
         let _ = database_url;
-        tokio::time::timeout(
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
             self.limits.acquire_timeout,
             self.admission.clone().acquire_owned(),
         )
         .await
-        .map_err(|_| DatabaseError::AdmissionTimeout)?
-        .map(|shared| AdmissionPermit { _shared: shared })
         .map_err(|_| DatabaseError::AdmissionTimeout)
+        .and_then(|result| result.map_err(|_| DatabaseError::AdmissionTimeout));
+        let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.admission_count.fetch_add(1, Ordering::Relaxed);
+        self.admission_wait_us.fetch_add(elapsed, Ordering::Relaxed);
+        self.admission_wait_max_us.fetch_max(elapsed, Ordering::Relaxed);
+        result.map(|shared| AdmissionPermit { _shared: shared })
     }
 
     pub async fn listener(&self, database_url: &str) -> Result<DatabaseListener, DatabaseError> {
@@ -427,6 +443,9 @@ impl PoolRegistry {
                 .limits
                 .max_total_connections
                 .saturating_sub(self.admission.available_permits()),
+            admission_count: self.admission_count.load(Ordering::Relaxed),
+            admission_wait_us: self.admission_wait_us.load(Ordering::Relaxed),
+            admission_wait_max_us: self.admission_wait_max_us.load(Ordering::Relaxed),
         }
     }
 

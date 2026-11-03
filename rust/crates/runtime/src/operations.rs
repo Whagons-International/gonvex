@@ -186,6 +186,10 @@ struct SignedSession {
     expires_at: i64,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     access_token: String,
+    #[serde(default)]
+    session_revision: String,
+    #[serde(default)]
+    authority: String,
 }
 
 async fn login(State(runtime): State<Runtime>, Json(request): Json<LoginRequest>) -> Response {
@@ -193,7 +197,7 @@ async fn login(State(runtime): State<Runtime>, Json(request): Json<LoginRequest>
     if email.is_empty() || request.password.is_empty() {
         return error(StatusCode::BAD_REQUEST, "email and password are required");
     }
-    let actor = if runtime
+    let (actor, session_revision, authority) = if runtime
         .inner
         .config
         .dashboard_account
@@ -206,13 +210,17 @@ async fn login(State(runtime): State<Runtime>, Json(request): Json<LoginRequest>
             .as_deref()
             .is_some_and(|password| constant_time_eq(password, &request.password))
     {
-        OperatorActor {
-            email: email.clone(),
-            name: display_name(&email),
-            role: "admin".to_owned(),
-            credential: Credential::Session,
-            permissions: vec!["*".to_owned()],
-        }
+        (
+            OperatorActor {
+                email: email.clone(),
+                name: display_name(&email),
+                role: "admin".to_owned(),
+                credential: Credential::Session,
+                permissions: vec!["*".to_owned()],
+            },
+            configured_session_revision(&runtime).unwrap_or_default(),
+            "configured",
+        )
     } else {
         let Some(control) = runtime.inner.control_plane.read().await.clone() else {
             return error(
@@ -227,7 +235,7 @@ async fn login(State(runtime): State<Runtime>, Json(request): Json<LoginRequest>
             );
         };
         let row = sqlx::query(
-            "SELECT email,name,role,password_hash FROM gonvex_dashboard_accounts WHERE email=$1",
+            "SELECT email,name,role,password_hash,session_revision FROM gonvex_dashboard_accounts WHERE email=$1",
         )
         .bind(&email)
         .fetch_optional(&mut **transaction.transaction())
@@ -238,13 +246,17 @@ async fn login(State(runtime): State<Runtime>, Json(request): Json<LoginRequest>
         if !verify_password(&request.password, &row.get::<String, _>("password_hash")) {
             return error(StatusCode::UNAUTHORIZED, "invalid email or password");
         }
-        OperatorActor {
-            email: row.get("email"),
-            name: row.get("name"),
-            role: row.get("role"),
-            credential: Credential::Session,
-            permissions: vec!["*".to_owned()],
-        }
+        (
+            OperatorActor {
+                email: row.get("email"),
+                name: row.get("name"),
+                role: row.get("role"),
+                credential: Credential::Session,
+                permissions: vec!["*".to_owned()],
+            },
+            row.get::<String, _>("session_revision"),
+            "database",
+        )
     };
     let mut session = SignedSession {
         email: actor.email,
@@ -254,6 +266,8 @@ async fn login(State(runtime): State<Runtime>, Json(request): Json<LoginRequest>
         expires_at: (Utc::now() + chrono::Duration::days(DASHBOARD_SESSION_DAYS))
             .timestamp_millis(),
         access_token: String::new(),
+        session_revision,
+        authority: authority.to_owned(),
     };
     session.access_token = match sign_session(&runtime, &session) {
         Ok(token) => token,
@@ -1662,8 +1676,9 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
         "inUse":database.in_use,
         "idle":database.idle,
         "maxOpenConnections":database.max_open_connections,
-        "waitCount":0,
-        "waitDurationMs":0,
+        "waitCount":database.admission_count,
+        "waitDurationMs":database.admission_wait_us as f64 / 1000.0,
+        "maxWaitDurationMs":database.admission_wait_max_us as f64 / 1000.0,
         "series":[],
     });
     let query_admission = json!({
@@ -1727,6 +1742,14 @@ async fn metrics_stream(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
+            let Ok(actor) = authorize(&runtime, &auth_headers, "projects:read").await else {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            };
+            if !can_access_project(&runtime, &actor, &project).await {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
             let Some(metrics) = metrics_snapshot(&runtime, &project).await else {
                 break;
             };
@@ -2984,7 +3007,7 @@ pub(crate) async fn authenticate(
     headers: &HeaderMap,
 ) -> Result<OperatorActor, Response> {
     let token = bearer(headers);
-    if let Some(actor) = verify_signed_session(runtime, token) {
+    if let Some(actor) = verify_signed_session(runtime, token).await {
         return Ok(actor);
     }
     if let Some(control) = runtime.inner.control_plane.read().await.clone() {
@@ -3204,7 +3227,7 @@ async fn verify_personal_token(runtime: &Runtime, token: &str) -> Option<Operato
     })
 }
 
-fn verify_signed_session(runtime: &Runtime, token: &str) -> Option<OperatorActor> {
+async fn verify_signed_session(runtime: &Runtime, token: &str) -> Option<OperatorActor> {
     let secret = dashboard_secret(runtime)?;
     let (payload, signature) = token.split_once('.')?;
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
@@ -3220,13 +3243,56 @@ fn verify_signed_session(runtime: &Runtime, token: &str) -> Option<OperatorActor
     {
         return None;
     }
+    if session.session_revision.is_empty() {
+        return None;
+    }
+    let (name, role) = match session.authority.as_str() {
+        "configured" => {
+            if runtime.inner.config.dashboard_account.as_deref() != Some(session.email.as_str())
+                || !constant_time_eq(
+                    &session.session_revision,
+                    &configured_session_revision(runtime)?,
+                )
+            {
+                return None;
+            }
+            (display_name(&session.email), "admin".to_owned())
+        }
+        "database" => {
+            let control = runtime.inner.control_plane.read().await.clone()?;
+            let mut transaction = control.begin_control_transaction(true).await.ok()?;
+            let row = sqlx::query("SELECT name,role,session_revision,password_hash FROM gonvex_dashboard_accounts WHERE email=$1")
+                .bind(&session.email)
+                .fetch_optional(&mut **transaction.transaction()).await.ok()??;
+            if !constant_time_eq(
+                &session.session_revision,
+                &row.get::<String, _>("session_revision"),
+            ) || row.get::<String, _>("password_hash").starts_with('!')
+            {
+                return None;
+            }
+            (row.get("name"), row.get("role"))
+        }
+        _ => return None,
+    };
     Some(OperatorActor {
         email: normalize_email(&session.email),
-        name: session.name,
-        role: normalize_role(&session.role).to_owned(),
+        name,
+        role,
         credential: Credential::Session,
         permissions: vec!["*".to_owned()],
     })
+}
+
+// Configured accounts work without Postgres. Bind their sessions to the current
+// configured credentials without exposing a password-derived unkeyed hash.
+fn configured_session_revision(runtime: &Runtime) -> Option<String> {
+    let account = runtime.inner.config.dashboard_account.as_deref()?;
+    let password = runtime.inner.config.dashboard_password.as_deref()?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(dashboard_secret(runtime)?.as_bytes()).ok()?;
+    mac.update(b"gonvex-dashboard-configured-session-v1\0");
+    mac.update(&serde_json::to_vec(&(account, password)).ok()?);
+    Some(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }
 
 fn sign_session(runtime: &Runtime, session: &SignedSession) -> Result<String, &'static str> {
@@ -3393,13 +3459,6 @@ fn display_name(email: &str) -> String {
         .next()
         .unwrap_or(email)
         .replace(['.', '_', '-'], " ")
-}
-fn normalize_role(value: &str) -> &str {
-    if value == "admin" {
-        "admin"
-    } else {
-        "standard"
-    }
 }
 fn random_secret() -> String {
     let mut bytes = [0_u8; 32];

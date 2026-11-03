@@ -223,6 +223,7 @@ impl Runtime {
             max_total_connections: config.database_max_total_connections,
             max_connections_per_database: config.database_max_connections,
             max_idle_connections_per_database: config.database_max_idle_connections,
+            idle_timeout: config.database_idle_timeout,
             ..PoolLimits::default()
         });
         let change_feeds = change_feed::ChangeFeedHub::new(pools.clone());
@@ -4594,6 +4595,7 @@ mod tests {
             database_max_total_connections: 20,
             database_max_connections: 2,
             database_max_idle_connections: 1,
+            database_idle_timeout: std::time::Duration::from_secs(60),
             module_host: ModuleHostConfig {
                 enabled,
                 binary: None,
@@ -5415,6 +5417,60 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
 
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
             assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_dashboard_sessions_revoke_on_credential_change() {
+        let mut original = config(false);
+        original.dashboard_account = Some("operator@example.test".into());
+        original.dashboard_password = Some("original-password".into());
+        let runtime = Runtime::new(original.clone());
+        let response = runtime
+            .router()
+            .oneshot(
+                Request::post("/dev/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"email":"operator@example.test","password":"original-password"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let token = body["session"]["accessToken"].as_str().unwrap();
+        for change in ["unchanged", "password", "removed"] {
+            let mut current = original.clone();
+            if change == "password" {
+                current.dashboard_password = Some("changed-password".into());
+            }
+            if change == "removed" {
+                current.dashboard_account = None;
+                current.dashboard_password = None;
+            }
+            let response = Runtime::new(current)
+                .router()
+                .oneshot(
+                    Request::get("/dev/auth/me")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if change == "unchanged" {
+                    StatusCode::OK
+                } else {
+                    StatusCode::UNAUTHORIZED
+                },
+                "{change}"
+            );
         }
     }
 

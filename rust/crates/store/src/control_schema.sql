@@ -95,8 +95,22 @@ CREATE TABLE IF NOT EXISTS gonvex_dashboard_accounts (
   email TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'standard',
   password_hash TEXT NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
-  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+  updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER)),
+  session_revision TEXT NOT NULL DEFAULT (lower(hex(randomblob(16))))
 );
+-- A random revision also prevents deletion/recreation and role-change rollback
+-- from reviving an old dashboard session. Enforced for every SQL writer.
+-- Older files gain the column with a constant default (ADDITIVE_COLUMNS);
+-- give each such row its own random revision.
+UPDATE gonvex_dashboard_accounts SET session_revision = lower(hex(randomblob(16)))
+  WHERE session_revision = '';
+CREATE TRIGGER IF NOT EXISTS gonvex_dashboard_security_change
+AFTER UPDATE OF password_hash, role ON gonvex_dashboard_accounts
+FOR EACH ROW WHEN NEW.password_hash IS NOT OLD.password_hash OR NEW.role IS NOT OLD.role
+BEGIN
+  UPDATE gonvex_dashboard_accounts SET session_revision = lower(hex(randomblob(16)))
+    WHERE email = NEW.email;
+END;
 CREATE TABLE IF NOT EXISTS gonvex_account_access_tokens (
   id TEXT PRIMARY KEY, owner_email TEXT NOT NULL, name TEXT NOT NULL, token_prefix TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE, permissions JSON NOT NULL DEFAULT '[]',

@@ -184,3 +184,10 @@ Optional faster fixture creation with durability disabled must finish with both
 restored and a checkpoint before any measured traffic. `LOAD_IDLE_MS`,
 `LOAD_MAX_OPEN`, `LOAD_MAX_IDLE` and `LOAD_SHARED` configure the runtime; recreate
 only the runtime between settings and await its health before starting users.
+
+## PostgreSQL baseline
+
+`results/mac-m4.md` records the PostgreSQL runtime on the same Apple M4 (#283),
+measured before the SQLite storage change with the earlier pass rule (zero
+errors; save and task-delivery p95 under 1 s). Its Mac runner targeted the
+PostgreSQL stack and was replaced by the portable lab above.

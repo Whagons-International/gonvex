@@ -27,8 +27,8 @@ use url::Url;
 
 use crate::control::{
     decrypt_control_secret, issue_session, load_auth_account, refresh_session,
-    resolve_external_account, session_result_from_directory, AuthAccount, ControlError,
-    RefreshSessionResult, SessionGrant,
+    resolve_external_account, session_result, session_result_from_directory, AuthAccount,
+    ControlError, RefreshSessionResult, SessionGrant,
 };
 use crate::external_auth::{verify_external_token, ExternalAuthConfiguration};
 use crate::Runtime;
@@ -498,16 +498,14 @@ async fn token(State(runtime): State<Runtime>, Json(request): Json<TokenRequest>
             )
         }
     };
-    let response = match session_result_from_directory(
-        &control,
-        &mut transaction,
-        project,
-        &grant,
-        &account,
-        &requested_tenant,
-    )
-    .await
-    {
+    let result = session_result(&grant, &account, &requested_tenant);
+    if transaction.commit().await.is_err() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "auth session service is unavailable",
+        );
+    }
+    let response = match session_result_from_directory(&control, project, result).await {
         Ok(response) => response,
         Err(_) => {
             return error(
@@ -516,12 +514,6 @@ async fn token(State(runtime): State<Runtime>, Json(request): Json<TokenRequest>
             )
         }
     };
-    if transaction.commit().await.is_err() {
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "auth session service is unavailable",
-        );
-    }
     Json(response).into_response()
 }
 

@@ -56,6 +56,7 @@ fn test_config(database_url: String) -> Config {
         database_max_total_connections: 8,
         database_max_connections: 4,
         database_max_idle_connections: 1,
+        database_idle_timeout: std::time::Duration::from_secs(60),
         module_host: ModuleHostConfig {
             enabled: false,
             binary: None,
@@ -588,4 +589,148 @@ async fn internal_e2e_actor_creation_uses_native_auth_and_tenant_admission() {
     runtime.shutdown().await;
     pools.close().await;
     drop(data);
+}
+
+/// Real sign-ins, including directory routing and tenant-local admission, with
+/// only two control connections and two shared SQL slots.
+#[tokio::test]
+async fn concurrent_signins_complete_with_two_sql_slots() {
+    let (_data, scoped, pools, fixture) = sqlite_fixture("control").await;
+    let control = ControlPlane::connect(&scoped, pools.clone(), BTreeMap::new())
+        .await
+        .unwrap();
+    // Same file for control and tenant also exercises single-database mode.
+    control
+        .clone()
+        .provision_tenant_database(
+            TenantRoute {
+                project_id: "project".into(),
+                tenant_id: "tenant".into(),
+                database_url: scoped.clone(),
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,status,auth_mode) VALUES('project','Project','active','gonvex-native')").execute(&fixture).await.unwrap();
+    sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status) VALUES('tenant','project','tenant','Tenant',$1,'active')").bind(&scoped).execute(&fixture).await.unwrap();
+    let mut hash = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(b"password", b"salt", 1, &mut hash);
+    let encoded = format!(
+        "pbkdf2_sha256$1${}${}",
+        URL_SAFE_NO_PAD.encode(b"salt"),
+        URL_SAFE_NO_PAD.encode(hash)
+    );
+    for i in 0..20 {
+        let id = format!("account-{i}");
+        sqlx::query(
+            "INSERT INTO accounts(id,auth_realm_id,email,name) VALUES($1,'project',$2,'Person')",
+        )
+        .bind(&id)
+        .bind(format!("person{i}@example.test"))
+        .execute(&fixture)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash) VALUES('project',$1,$2)").bind(&id).bind(&encoded).execute(&fixture).await.unwrap();
+        sqlx::query("INSERT INTO members(id,account_id,status) VALUES($1,$1,'active')")
+            .bind(&id)
+            .execute(&fixture)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO account_tenant_index(account_id,tenant_id,member_id,status) VALUES($1,'tenant',$1,'active')").bind(&id).execute(&fixture).await.unwrap();
+    }
+    let mut config = test_config(scoped);
+    config.database_max_connections = 2;
+    config.database_max_idle_connections = 2;
+    config.database_max_total_connections = 2;
+    let runtime = Runtime::new(config);
+    runtime.start().await.unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..20 {
+        let runtime = runtime.clone();
+        tasks.spawn(async move {
+            let connection = ControlConnection { project_id: "project".into(), ..Default::default() };
+            let args = serde_json::json!({"email":format!("person{i}@example.test"),"password":"password"});
+            let key = format!("login-{i}");
+            let result = runtime.execute_control_action(&connection,"control.auth.passwordLogin",&args,&key).await.unwrap();
+            assert_eq!(result["activeTenantId"], "tenant");
+            assert_eq!(result["tenants"][0]["memberId"], format!("account-{i}"));
+            let replay = runtime.execute_control_action(&connection,"control.auth.passwordLogin",&args,&key).await.unwrap();
+            assert_eq!(replay["accessToken"], result["accessToken"]);
+        });
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+    })
+    .await
+    .expect("all 20 sign-ins and idempotent replays must complete without starvation");
+    sqlx::query("UPDATE members SET status='revoked' WHERE account_id='account-0'")
+        .execute(&fixture)
+        .await
+        .unwrap();
+    let replay = runtime
+        .execute_control_action(
+            &ControlConnection {
+                project_id: "project".into(),
+                ..Default::default()
+            },
+            "control.auth.passwordLogin",
+            &serde_json::json!({"email":"person0@example.test","password":"password"}),
+            "login-0",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay["tenants"],
+        serde_json::json!([]),
+        "replays must revalidate current membership"
+    );
+    assert_eq!(replay["activeTenantId"], "");
+    sqlx::query(
+        "UPDATE gonvex_runtime_projects SET owner_email='person1@example.test' WHERE id='project'",
+    )
+    .execute(&fixture)
+    .await
+    .unwrap();
+    let login = runtime
+        .execute_control_action(
+            &ControlConnection {
+                project_id: "project".into(),
+                ..Default::default()
+            },
+            "control.auth.passwordLogin",
+            &serde_json::json!({"email":"person1@example.test","password":"password"}),
+            "login-1",
+        )
+        .await
+        .unwrap();
+    let session = control
+        .authenticate_session(
+            login["accessToken"].as_str().unwrap(),
+            Some("project"),
+            Some("tenant"),
+        )
+        .await
+        .unwrap();
+    let overview = tokio::time::timeout(
+        Duration::from_secs(5),
+        runtime.execute_control_query(
+            &ControlConnection {
+                project_id: "project".into(),
+                identity: Some(session.identity),
+                ..Default::default()
+            },
+            "control.support.listTenants",
+            &serde_json::json!({}),
+        ),
+    )
+    .await
+    .expect("support overview must release control capacity before tenant counts")
+    .unwrap();
+    assert_eq!(overview[0]["userCount"], 19);
+    drop(runtime);
+    pools.close().await;
+    fixture.close().await;
 }

@@ -113,6 +113,20 @@ CREATE TABLE IF NOT EXISTS gonvex_dashboard_accounts (
   password_hash text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- A random revision also prevents deletion/recreation and role-change rollback
+-- from reviving an old dashboard session. Enforce this for every SQL writer.
+ALTER TABLE gonvex_dashboard_accounts ADD COLUMN IF NOT EXISTS session_revision text NOT NULL DEFAULT gen_random_uuid()::text;
+CREATE OR REPLACE FUNCTION gonvex_revoke_dashboard_sessions() RETURNS trigger AS $$
+BEGIN
+  IF NEW.password_hash IS DISTINCT FROM OLD.password_hash OR NEW.role IS DISTINCT FROM OLD.role THEN
+    NEW.session_revision := gen_random_uuid()::text;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER gonvex_dashboard_security_change
+BEFORE UPDATE ON gonvex_dashboard_accounts
+FOR EACH ROW EXECUTE FUNCTION gonvex_revoke_dashboard_sessions();
 CREATE TABLE IF NOT EXISTS gonvex_account_access_tokens (
   id text PRIMARY KEY, owner_email text NOT NULL, name text NOT NULL, token_prefix text NOT NULL,
   token_hash text NOT NULL UNIQUE, permissions jsonb NOT NULL DEFAULT '[]'::jsonb,

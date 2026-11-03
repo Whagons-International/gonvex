@@ -20,7 +20,12 @@ export function passRule({ latencyMs, errors, connectedUsers, targetUsers, abort
   const failed = Object.values(errors || {}).reduce((a, b) => a + b, 0);
   const operations = ['reducer', 'query', 'login'].reduce((a, k) => a + (latencyMs[k]?.samples || 0), 0) + failed;
   const errorRate = operations ? failed / operations : 1;
-  const slow = GATED_KINDS.filter(k => !(latencyMs[k]?.samples > 0) || latencyMs[k].p95 >= p95 || latencyMs[k].p99 >= p99);
+  // Sign-in and the initial task load mostly precede the steady plateau; gate
+  // them when present. Steady operations must have samples.
+  const optional = new Set(['query', 'login']);
+  const slow = GATED_KINDS.filter(k => latencyMs[k]?.samples > 0
+    ? latencyMs[k].p95 >= p95 || latencyMs[k].p99 >= p99
+    : !optional.has(k));
   const passed = !aborted && connectedUsers === targetUsers && errorRate < maxErrorRate && slow.length === 0;
   return { passed, errorRate, failingKinds: slow };
 }

@@ -43,6 +43,7 @@ pub struct Config {
     pub database_max_total_connections: usize,
     pub database_max_connections: u32,
     pub database_max_idle_connections: u32,
+    pub database_idle_timeout: Duration,
     pub module_host: ModuleHostConfig,
     pub runtime_version: String,
     pub sandbox: SandboxConfig,
@@ -266,6 +267,11 @@ impl Config {
                 lookup("GONVEX_DB_MAX_IDLE_CONNS"),
                 4,
             )? as u32,
+            database_idle_timeout: duration_ms(
+                "GONVEX_DB_IDLE_TIMEOUT_MS",
+                lookup("GONVEX_DB_IDLE_TIMEOUT_MS"),
+                60_000,
+            )?,
             module_host: ModuleHostConfig {
                 enabled: boolean(
                     "GONVEX_MODULE_HOST_ENABLED",
@@ -726,6 +732,21 @@ mod tests {
     }
 
     #[test]
+    fn database_idle_timeout_is_configurable() {
+        assert_eq!(
+            config(&[]).unwrap().database_idle_timeout,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1500")])
+                .unwrap()
+                .database_idle_timeout,
+            Duration::from_millis(1500)
+        );
+        assert!(config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "0")]).is_err());
+    }
+
+    #[test]
     fn websocket_compression_config() {
         let defaults = config(&[]).unwrap();
         assert!(defaults.websocket_compression);
@@ -805,6 +826,19 @@ mod tests {
             config(&[("GONVEX_CLIENT_IP_HEADER", "bad header")]).unwrap_err(),
             ConfigError::ClientIpHeader
         );
+    }
+
+    #[test]
+    fn parses_database_idle_timeout_without_changing_pool_defaults() {
+        let defaults = config(&[]).expect("defaults");
+        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(60));
+        let tuned = config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1000")]).expect("timeout");
+        assert_eq!(tuned.database_idle_timeout, Duration::from_secs(1));
+        assert_eq!(
+            tuned.database_max_connections,
+            defaults.database_max_connections
+        );
+        assert!(config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "bad")]).is_err());
     }
 
     #[test]

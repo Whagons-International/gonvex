@@ -33,6 +33,7 @@ fn test_config(control_url: String, data_url: String) -> Config {
         database_max_total_connections: 8,
         database_max_connections: 4,
         database_max_idle_connections: 1,
+        database_idle_timeout: std::time::Duration::from_secs(60),
         module_host: ModuleHostConfig {
             enabled: false,
             binary: None,
@@ -300,4 +301,118 @@ async fn rust_operator_routes_preserve_data_and_membership_contracts() {
     runtime.shutdown().await;
     drop((tenant_fixture, control_fixture));
     pools.close().await;
+}
+
+#[tokio::test]
+async fn dashboard_sessions_follow_account_security_lifecycle() {
+    let data = test_data_dir();
+    let data_url = gonvex_store::database_url(data.path());
+    let url = gonvex_store::database_url(&data.path().join("control.db"));
+    let runtime = Runtime::new(test_config(url.clone(), data_url));
+    runtime.start().await.unwrap();
+    let fixture_pools = PoolRegistry::new(PoolLimits::default());
+    let fixture = fixture_pools.pool(&url).await.unwrap();
+    async fn save(runtime: &Runtime, password: &str, role: &str) {
+        let (status, _) = json_response(runtime, Request::post("/dev/auth/accounts")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"email":"security@example.test", "name":"Security", "password":password,"role":role}).to_string())).unwrap()).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    async fn login_token(runtime: &Runtime, password: &str) -> String {
+        let (status, body) = json_response(
+            runtime,
+            Request::post("/dev/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"email":"security@example.test", "password":password})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        body["session"]["accessToken"].as_str().unwrap().to_owned()
+    }
+    async fn valid(runtime: &Runtime, token: &str, expected: StatusCode) {
+        let (status, _) = json_response(
+            runtime,
+            Request::get("/dev/auth/me")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected);
+    }
+    save(&runtime, "original-password", "admin").await;
+    let first = login_token(&runtime, "original-password").await;
+    valid(&runtime, &first, StatusCode::OK).await;
+    sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status,auth_mode) VALUES('security','Security','multiTenant','active','gonvex-native')")
+        .execute(&fixture).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = runtime.router();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://{address}/dev/metrics/stream?project=security")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        format!("gonvex-dashboard-auth.{first}").parse().unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .is_text());
+    sqlx::query(
+        "UPDATE gonvex_dashboard_accounts SET name='Renamed' WHERE email='security@example.test'",
+    )
+    .execute(&fixture)
+    .await
+    .unwrap();
+    valid(&runtime, &first, StatusCode::OK).await;
+    save(&runtime, "replacement-password", "admin").await;
+    valid(&runtime, &first, StatusCode::UNAUTHORIZED).await;
+    assert!(tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .is_close());
+    server.abort();
+    let second = login_token(&runtime, "replacement-password").await;
+    sqlx::query(
+        "UPDATE gonvex_dashboard_accounts SET role='standard' WHERE email='security@example.test'",
+    )
+    .execute(&fixture)
+    .await
+    .unwrap();
+    valid(&runtime, &second, StatusCode::UNAUTHORIZED).await;
+    sqlx::query(
+        "UPDATE gonvex_dashboard_accounts SET role='admin' WHERE email='security@example.test'",
+    )
+    .execute(&fixture)
+    .await
+    .unwrap();
+    valid(&runtime, &second, StatusCode::UNAUTHORIZED).await;
+    let third = login_token(&runtime, "replacement-password").await;
+    sqlx::query("DELETE FROM gonvex_dashboard_accounts WHERE email='security@example.test'")
+        .execute(&fixture)
+        .await
+        .unwrap();
+    valid(&runtime, &third, StatusCode::UNAUTHORIZED).await;
+    save(&runtime, "replacement-password", "admin").await;
+    valid(&runtime, &third, StatusCode::UNAUTHORIZED).await;
+    let fourth = login_token(&runtime, "replacement-password").await;
+    sqlx::query("UPDATE gonvex_dashboard_accounts SET password_hash='!disabled' WHERE email='security@example.test'")
+        .execute(&fixture).await.unwrap();
+    valid(&runtime, &fourth, StatusCode::UNAUTHORIZED).await;
+    drop(fixture);
+    runtime.shutdown().await;
+    fixture_pools.close().await;
 }

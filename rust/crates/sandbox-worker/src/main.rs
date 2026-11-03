@@ -773,7 +773,7 @@ fn install_network_seccomp() -> Result<(), String> {
         const AUDIT_ARCH: u32 = 0xc000003e;
         #[cfg(target_arch = "aarch64")]
         const AUDIT_ARCH: u32 = 0xc00000b7;
-        let mut denied = vec![
+        let denied = [
             libc::SYS_socket,
             libc::SYS_connect,
             libc::SYS_bind,
@@ -787,6 +787,10 @@ fn install_network_seccomp() -> Result<(), String> {
             libc::SYS_umount2,
             libc::SYS_unshare,
             libc::SYS_setns,
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_fork,
+            #[cfg(target_arch = "x86_64")]
+            libc::SYS_vfork,
             libc::SYS_io_uring_setup,
             libc::SYS_io_uring_enter,
             libc::SYS_io_uring_register,
@@ -796,9 +800,6 @@ fn install_network_seccomp() -> Result<(), String> {
             libc::SYS_add_key,
             libc::SYS_request_key,
         ];
-        // aarch64 has no fork/vfork syscalls; processes are created with clone.
-        #[cfg(target_arch = "x86_64")]
-        denied.extend([libc::SYS_fork, libc::SYS_vfork]);
         let mut filters = vec![
             libc::sock_filter {
                 code: BPF_LD | BPF_W | BPF_ABS,

@@ -89,6 +89,11 @@ impl SqlMigration {
 /// defaults) before `control_schema.sql` runs.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     (
+        "gonvex_dashboard_accounts",
+        "session_revision",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
         "gonvex_runtime_projects",
         "test_tab",
         "BOOLEAN NOT NULL DEFAULT 0",

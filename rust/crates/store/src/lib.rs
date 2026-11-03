@@ -6,6 +6,7 @@
 //! Member admission check on the selected tenant database.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1579,6 +1580,31 @@ fn session_delegation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admission_metrics_include_success_and_timeout() {
+        let limits = PoolLimits {
+            max_total_connections: 1,
+            max_connections_per_database: 1,
+            acquire_timeout: std::time::Duration::from_millis(20),
+            ..PoolLimits::default()
+        };
+        let registry = PoolRegistry::new(limits);
+        let held = registry
+            .admit("sqlite:///nonexistent/admission.db")
+            .await
+            .unwrap();
+        assert!(matches!(
+            registry.admit("sqlite:///nonexistent/admission.db").await,
+            Err(DatabaseError::AdmissionTimeout)
+        ));
+        let snapshot = serde_json::to_value(registry.snapshot().await).unwrap();
+        assert_eq!(snapshot["admissionCount"].as_u64(), Some(2));
+        assert!(snapshot["admissionWaitUs"].as_u64().unwrap_or(0) >= 20_000);
+        assert!(snapshot["admissionWaitMaxUs"].as_u64().unwrap_or(0) >= 20_000);
+        drop(held);
+        assert_eq!(registry.snapshot().await.admission_active, 0);
+    }
 
     #[test]
     fn only_verified_self_developer_grants_expose_developer_metadata() {
