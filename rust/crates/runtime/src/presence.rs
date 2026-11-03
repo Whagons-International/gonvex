@@ -64,6 +64,10 @@ pub struct PresenceConfig {
     /// Pending patches a connection may accumulate before it is resynchronized
     /// with a snapshot instead.
     pub max_pending_batches: usize,
+    /// `GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS` (default 300): how often the
+    /// stored `last_seen_at` of open support/error sessions is refreshed in one
+    /// batched write, so a crash loses at most this much.
+    pub support_refresh: Duration,
 }
 
 impl Default for PresenceConfig {
@@ -77,6 +81,7 @@ impl Default for PresenceConfig {
             legacy_beat_paths: Vec::new(),
             legacy_transition_paths: Vec::new(),
             max_pending_batches: 32,
+            support_refresh: Duration::from_secs(300),
         }
     }
 }
@@ -654,6 +659,19 @@ impl PresenceHub {
     pub fn take_last_seen_flush(&self) -> Vec<SupportLastSeen> {
         std::mem::take(&mut self.lock().last_seen_flush)
     }
+
+    /// Every open support/error session, seen at `last_seen_ms`.
+    pub fn live_support_sessions(&self, last_seen_ms: i64) -> Vec<SupportLastSeen> {
+        self.lock()
+            .support
+            .iter()
+            .map(|(session_id, live)| SupportLastSeen {
+                project_id: live.project.clone(),
+                session_id: session_id.clone(),
+                last_seen_ms,
+            })
+            .collect()
+    }
 }
 
 /// Removes a connection's presence (with grace) and support sessions when
@@ -1066,6 +1084,22 @@ mod tests {
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].session_id, "support_c1");
         assert!(hub.take_last_seen_flush().is_empty());
+    }
+
+    #[test]
+    fn live_support_sessions_lists_every_open_session() {
+        let hub = hub();
+        hub.support_register("support_c1", "p", "c1", "t", "a", Some("1"), Some("e"));
+        hub.support_register("c1", "p", "c1", "t", "a", None, None);
+        hub.support_register("support_c2", "q", "c2", "t", "b", None, None);
+        let mut live = hub.live_support_sessions(42);
+        live.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        assert_eq!(
+            live.iter().map(|s| (s.project_id.as_str(), s.session_id.as_str(), s.last_seen_ms)).collect::<Vec<_>>(),
+            vec![("p", "c1", 42), ("p", "support_c1", 42), ("q", "support_c2", 42)]
+        );
+        hub.disconnect("c1", Instant::now());
+        assert_eq!(hub.live_support_sessions(1).len(), 1);
     }
 
     #[test]

@@ -640,6 +640,11 @@ fn presence_config(
         legacy_beat_paths: path_list(lookup("GONVEX_PRESENCE_LEGACY_BEAT_PATHS")),
         legacy_transition_paths: path_list(lookup("GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS")),
         max_pending_batches: defaults.max_pending_batches,
+        support_refresh: Duration::from_secs(integer(
+            "GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS",
+            lookup("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS"),
+            defaults.support_refresh.as_secs() as usize,
+        )? as u64),
     })
 }
 
@@ -834,6 +839,11 @@ mod tests {
         assert_eq!(defaults.tick, Duration::from_millis(1_000));
         assert_eq!(defaults.offline_grace, Duration::from_secs(10));
         assert!(defaults.legacy_beat_paths.is_empty());
+        assert_eq!(defaults.support_refresh, Duration::from_secs(300));
+        assert_eq!(
+            config(&[("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS", "60")]).unwrap().presence.support_refresh,
+            Duration::from_secs(60)
+        );
         let custom = config(&[
             ("GONVEX_PRESENCE_V2", "off"),
             ("GONVEX_PRESENCE_TICK_MS", "250"),
