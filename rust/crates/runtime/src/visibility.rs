@@ -606,7 +606,7 @@ async fn load_index(
         .begin_tenant_transaction(&session.route, true)
         .await?;
     // Declared types keep JSON and BOOLEAN columns typed in the projection.
-    let kinds = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &shape.table)
+    let kinds = gonvex_store::rows::table_columns(transaction.transaction(), &shape.table)
         .await?
         .into_iter()
         .map(|column| (column.name.clone(), column.kind()))
@@ -635,10 +635,9 @@ async fn load_index(
         quote(&shape.key)?,
         quote(&shape.table)?
     );
-    let clock =
-        sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = 1")
-            .fetch_one(&mut **transaction.transaction())
-            .await?;
+    let clock = sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = 1")
+        .fetch_one(&mut **transaction.transaction())
+        .await?;
     let epoch: String = clock.try_get("epoch")?;
     let revision = clock.try_get::<i64, _>("revision")?.max(0) as u64;
     let rows = sqlx::query(&statement)
@@ -2818,10 +2817,8 @@ mod tests {
                 .iter()
                 .map(|row| {
                     Json(Value::Object(
-                        row_to_object(row, |name| {
-                            (name == "enabled").then_some(JsonKind::Boolean)
-                        })
-                        .unwrap(),
+                        row_to_object(row, |name| (name == "enabled").then_some(JsonKind::Boolean))
+                            .unwrap(),
                     ))
                 })
                 .collect();
@@ -2900,11 +2897,14 @@ mod tests {
         let database_url = gonvex_store::database_url(&directory.path().join("tenant.db"));
         let pools = PoolRegistry::with_durability(PoolLimits::default(), Durability::Normal);
         let fixture = pools.pool(&database_url).await.unwrap();
-        gonvex_store::execute_script(&mut fixture.acquire().await.unwrap(), r#"
+        gonvex_store::execute_script(
+            &mut fixture.acquire().await.unwrap(),
+            r#"
             CREATE TABLE members(id TEXT PRIMARY KEY, account_id TEXT, status TEXT,
                                  role TEXT, permissions JSON);
             INSERT INTO members VALUES('revoked-member','developer-account','revoked','owner','{}');
-        "#)
+        "#,
+        )
         .await
         .unwrap();
         const MEMBERS_JSON: &str = "SELECT json_group_array(json_object('id',id,'account_id',account_id,'status',status,'role',role,'permissions',json(permissions))) FROM (SELECT * FROM members ORDER BY id)";
@@ -3368,7 +3368,6 @@ mod tests {
         assert_eq!(parameters, vec![Value::String("public".to_owned())]);
 
         let plan = VisibilityPlan {
-
             active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
@@ -3802,7 +3801,8 @@ mod mask_tests {
         assert_eq!(join.constraints.len(), 1);
         assert_eq!(join.constraints[0].context, "member.id");
         let (sql, parameters) = compile_set(&join, &member("alice", &[]).direct).unwrap();
-        assert!(sql.starts_with("SELECT DISTINCT CAST(v0.\"teamId\" AS TEXT) FROM \"memberTeams\" AS v0"));
+        assert!(sql
+            .starts_with("SELECT DISTINCT CAST(v0.\"teamId\" AS TEXT) FROM \"memberTeams\" AS v0"));
         assert_eq!(parameters, vec![json!("alice")]);
     }
 

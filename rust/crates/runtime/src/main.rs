@@ -118,9 +118,9 @@ fn lock_data_dir(data_dir: &std::path::Path) -> Result<gonvex_store::DataDirLock
     gonvex_store::DataDir::new(data_dir)
         .lock()
         .map_err(|error| match error {
-            gonvex_store::DatabaseError::DataDirLocked(path) => format!(
-                "another Gonvex runtime holds {path}; stop it before starting this one"
-            ),
+            gonvex_store::DatabaseError::DataDirLocked(path) => {
+                format!("another Gonvex runtime holds {path}; stop it before starting this one")
+            }
             other => other.to_string(),
         })
 }

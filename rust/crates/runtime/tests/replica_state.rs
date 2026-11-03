@@ -24,6 +24,9 @@ const TASKS: &str = "tasks.recentWorkspaceTasks";
 
 struct Client {
     member: usize,
+    /// Old clients never apply the connection watermark: their windows only
+    /// advance with a delta or ready.
+    watermarks: bool,
     session: TenantSession,
     subscriptions: BTreeMap<String, ReplicaSubscription>,
     model: ClientModel,
@@ -33,6 +36,7 @@ impl Client {
     async fn connect(fixture: &Fixture, member: usize) -> Self {
         let mut client = Self {
             member,
+            watermarks: true,
             session: fixture.session(0, member),
             subscriptions: BTreeMap::new(),
             model: ClientModel::new(Some(DigestKind::Xor)),
@@ -74,7 +78,9 @@ impl Client {
             .unwrap();
         self.model.apply_all(&messages);
         if let FeedEvent::Transaction { revision, .. } = event {
-            self.model.watermark(*revision);
+            if self.watermarks {
+                self.model.watermark(*revision);
+            }
         }
         for _ in 0..3 {
             let pending = self.model.pending_reopens();
@@ -146,7 +152,11 @@ impl Client {
                 self.member
             );
             if let Some(subscription) = self.subscriptions.get(id) {
-                assert_eq!(subscription.row_count(), window.rows.len(), "{context} {id}");
+                assert_eq!(
+                    subscription.row_count(),
+                    window.rows.len(),
+                    "{context} {id}"
+                );
             }
         }
     }
@@ -197,7 +207,11 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let spotted = tasks.iter().find(|task| task.spot_id.is_some()).unwrap().clone();
+    let spotted = tasks
+        .iter()
+        .find(|task| task.spot_id.is_some())
+        .unwrap()
+        .clone();
     let other_workspace = workspaces
         .iter()
         .find(|workspace| **workspace != tasks[0].workspace_id)
@@ -270,6 +284,82 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
         }
     }
 
+    // A subscription whose visible rows did not change receives nothing for
+    // that revision (no ready); an old client (no watermark) keeps its older
+    // cursor and still resumes correctly from it.
+    let grant_index = clients
+        .iter()
+        .position(|client| client.member == fixture.members_of_kind(0, MemberKind::GrantOnly)[0])
+        .unwrap();
+    clients[grant_index].watermarks = false;
+    let held = clients[grant_index].model.windows[TASKS].rows.clone();
+    let hidden = tasks
+        .iter()
+        .skip(10)
+        .find(|task| !held.contains_key(&task.id))
+        .unwrap()
+        .clone();
+    let cursor_before = clients[grant_index].model.windows[TASKS].cursor.clone();
+    let event = commit(
+        &fixture,
+        r#"UPDATE "tasks" SET "description"='unseen edit' WHERE "_id"=$1"#,
+        vec![text(&hidden.id)],
+    )
+    .await;
+    let mut admin_messages = 0;
+    for (index, client) in clients.iter_mut().enumerate() {
+        let messages = client.apply(&fixture, &event).await;
+        if index == grant_index {
+            assert!(
+                messages.iter().all(|message| !matches!(
+                    message,
+                    ServerMessage::ReplicaReady { .. } | ServerMessage::ReplicaDelta { .. }
+                )),
+                "an unaffected subscription must receive nothing: {messages:?}"
+            );
+        } else if fixture.tenant(0).members[client.member].kind == MemberKind::Admin {
+            admin_messages += messages
+                .iter()
+                .filter(|message| matches!(message, ServerMessage::ReplicaDelta { id, .. } if id == TASKS))
+                .count();
+        }
+    }
+    assert!(admin_messages > 0, "an admin sees every task");
+    assert_eq!(
+        clients[grant_index].model.windows[TASKS].cursor,
+        cursor_before
+    );
+    for client in &clients {
+        client.oracle(&fixture, "unseen task edit").await;
+    }
+    let mut unaffected = clients.remove(grant_index);
+    unaffected.subscriptions.clear();
+    for (statement, binds) in [
+        (
+            r#"UPDATE "tasks" SET "description"='unseen again' WHERE "_id"=$1"#,
+            vec![text(&hidden.id)],
+        ),
+        (
+            r#"UPDATE "tasks" SET "description"='seen while offline' WHERE "_id"=$1"#,
+            vec![text(held.keys().next().unwrap_or(&hidden.id))],
+        ),
+    ] {
+        let event = commit(&fixture, statement, binds).await;
+        for client in &mut clients {
+            client.apply(&fixture, &event).await;
+        }
+    }
+    let resumed = unaffected.resume(&fixture).await;
+    unaffected
+        .oracle(&fixture, "resume from a cursor older than unseen revisions")
+        .await;
+    assert!(
+        !resumed
+            .iter()
+            .any(|message| matches!(message, ServerMessage::ReplicaSnapshot { .. })),
+        "an older cursor within retention resumes without a snapshot"
+    );
+
     // Resume from the client's cursor after missed changes.
     let mut offline = clients.remove(0);
     let mut offline_two = clients.remove(0);
@@ -278,7 +368,10 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
             r#"UPDATE "tasks" SET "description"='while offline' WHERE "_id"=$1"#,
             vec![text(&tasks[4].id)],
         ),
-        (r#"DELETE FROM "tasks" WHERE "_id"=$1"#, vec![text(&tasks[5].id)]),
+        (
+            r#"DELETE FROM "tasks" WHERE "_id"=$1"#,
+            vec![text(&tasks[5].id)],
+        ),
         (
             r#"UPDATE "tasks" SET "workspaceId"=$2 WHERE "_id"=$1"#,
             vec![text(&tasks[6].id), text(&other_workspace)],
@@ -349,7 +442,9 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
     )
     .await;
     let resumed = offline_two.resume(&fixture).await;
-    offline_two.oracle(&fixture, "resume outside retention").await;
+    offline_two
+        .oracle(&fixture, "resume outside retention")
+        .await;
     assert!(resumed
         .iter()
         .any(|message| matches!(message, ServerMessage::ReplicaSnapshot { .. })));

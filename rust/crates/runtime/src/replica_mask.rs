@@ -122,9 +122,7 @@ impl Runtime {
         let parents = subscription.visibility.inherited_columns();
         let any_parents = visibility::inherits_any(&subscription.visibility)
             .into_iter()
-            .filter_map(|expression| {
-                Some((expression.via.clone()?, expression.table.clone()))
-            })
+            .filter_map(|expression| Some((expression.via.clone()?, expression.table.clone())))
             .collect::<Vec<_>>();
         let mut source = false;
         let mut parent_changes = Vec::new();
@@ -298,10 +296,9 @@ impl Runtime {
                 let image = collapsed
                     .get(&(change.table.as_str(), change.row_id.as_str()))
                     .map_or(&change.old_value, |collapsed| collapsed.old);
-                if overlay
-                    .iter()
-                    .any(|(table, key, _): &(String, String, _)| *table == change.table && *key == change.row_id)
-                {
+                if overlay.iter().any(|(table, key, _): &(String, String, _)| {
+                    *table == change.table && *key == change.row_id
+                }) {
                     continue;
                 }
                 overlay.push((
@@ -318,9 +315,10 @@ impl Runtime {
                 let last = collapsed
                     .get(&(change.table.as_str(), change.row_id.as_str()))
                     .map_or(&change.new_value, |collapsed| collapsed.new);
-                let was = subscription
-                    .visibility
-                    .parent_admits(before, &change.table, was_parent, image);
+                let was =
+                    subscription
+                        .visibility
+                        .parent_admits(before, &change.table, was_parent, image);
                 let now = subscription.visibility.parent_admits(
                     &subscription.resolved,
                     &change.table,
@@ -376,8 +374,9 @@ impl Runtime {
         // collection that this event touches the same way shares it: one
         // read per event, not one per connection.
         type Shared = Option<Arc<Vec<(String, Value)>>>;
-        static RECENT: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<(String, Shared)>>> =
-            std::sync::OnceLock::new();
+        static RECENT: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::VecDeque<(String, Shared)>>,
+        > = std::sync::OnceLock::new();
         let key = format!(
             "{}\u{0}{revision}\u{0}{:p}\u{0}{:p}\u{0}{}",
             session.route.database_url,

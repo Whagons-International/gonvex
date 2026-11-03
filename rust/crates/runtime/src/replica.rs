@@ -230,7 +230,10 @@ fn shared_definition(
     path: &str,
     definition: &ReplicaCollectionDefinition,
 ) -> Arc<ReplicaCollectionDefinition> {
-    type Definitions = std::collections::HashMap<(String, u64, String), std::sync::Weak<ReplicaCollectionDefinition>>;
+    type Definitions = std::collections::HashMap<
+        (String, u64, String),
+        std::sync::Weak<ReplicaCollectionDefinition>,
+    >;
     static DEFINITIONS: std::sync::OnceLock<std::sync::Mutex<Definitions>> =
         std::sync::OnceLock::new();
     let mut definitions = DEFINITIONS.get_or_init(Default::default).lock().unwrap();
@@ -356,7 +359,12 @@ impl Runtime {
             .replica
             .as_ref()
             .ok_or_else(|| ReplicaError::FunctionMissing(request.path.clone()))?;
-        let definition = shared_definition(&module.project_id, module.generation, &request.path, definition);
+        let definition = shared_definition(
+            &module.project_id,
+            module.generation,
+            &request.path,
+            definition,
+        );
         let visibility = module
             .visibility
             .get(&definition.table)
@@ -777,19 +785,30 @@ impl Runtime {
             };
             subscription.cursor.revision = revision;
             for (key, touch) in delta.touches {
-                touches.entry(key).or_default().merge(&subscription.id, touch);
+                touches
+                    .entry(key)
+                    .or_default()
+                    .merge(&subscription.id, touch);
             }
-            if !delta.upserts.is_empty() || !delta.deleted.is_empty() {
-                messages.push(replica_delta(
-                    &subscription.id,
-                    &subscription.path,
-                    subscription.cursor.clone(),
-                    delta.upserts.into_values().collect(),
-                    delta.deleted.into_iter().collect(),
-                    subscription.digest.digest(),
-                    subscription.window.truncated,
-                ));
+            if delta.upserts.is_empty() && delta.deleted.is_empty() {
+                // The client's rows and digest are unchanged: send nothing.
+                // Its cursor stays where it is (or advances with the
+                // connection watermark); a resume from that cursor replays
+                // the log and verifies the digest against SQL, so an older
+                // cursor is always safe. Most members cannot see a given
+                // task, so a per-revision ready to each of them was the
+                // largest per-connection delivery cost.
+                continue;
             }
+            messages.push(replica_delta(
+                &subscription.id,
+                &subscription.path,
+                subscription.cursor.clone(),
+                delta.upserts.into_values().collect(),
+                delta.deleted.into_iter().collect(),
+                subscription.digest.digest(),
+                subscription.window.truncated,
+            ));
             messages.push(replica_ready(
                 &subscription.id,
                 &subscription.path,
@@ -935,7 +954,9 @@ impl EntityTouch {
         if let Some(old) = touch.old {
             self.old_held = true;
             if let Value::Object(old) = old {
-                self.old_value.get_or_insert_with(Default::default).extend(old);
+                self.old_value
+                    .get_or_insert_with(Default::default)
+                    .extend(old);
             }
         }
         self.changed_columns.extend(touch.changed_columns);
@@ -1018,7 +1039,11 @@ pub enum RowDecision {
         bytes: i64,
     },
     /// The client loses the row it held.
-    Delete { old: Value, hash: String, bytes: i64 },
+    Delete {
+        old: Value,
+        hash: String,
+        bytes: i64,
+    },
     /// The window cannot be maintained from the images (reconcile).
     Reconcile,
 }
@@ -1079,7 +1104,11 @@ pub fn decide_row(
     }
     let canonical = |row: Value| {
         let canonical = stable_json(&row);
-        (hex_digest(canonical.as_bytes()), canonical.len() as i64, row)
+        (
+            hex_digest(canonical.as_bytes()),
+            canonical.len() as i64,
+            row,
+        )
     };
     let old = old_in
         .then(|| project_row(old, definition).map(canonical))
@@ -1401,14 +1430,12 @@ async fn declared_columns<'a>(
     definition: &ReplicaCollectionDefinition,
     columns: impl Iterator<Item = &'a String>,
 ) -> Result<Vec<(String, gonvex_store::rows::JsonKind)>, ReplicaError> {
-    let declared = gonvex_store::rows::table_columns(
-        &mut **transaction.transaction(),
-        &definition.table,
-    )
-    .await?
-    .into_iter()
-    .map(|column| (column.name.clone(), column.kind()))
-    .collect::<BTreeMap<_, _>>();
+    let declared =
+        gonvex_store::rows::table_columns(&mut **transaction.transaction(), &definition.table)
+            .await?
+            .into_iter()
+            .map(|column| (column.name.clone(), column.kind()))
+            .collect::<BTreeMap<_, _>>();
     columns
         .map(|column| {
             quote(column)?;
@@ -1456,7 +1483,9 @@ async fn collect_window(
         window.bytes += bytes;
         if ordered {
             last = Some((
-                row.get(&definition.order_by).cloned().unwrap_or(Value::Null),
+                row.get(&definition.order_by)
+                    .cloned()
+                    .unwrap_or(Value::Null),
                 row.get(&definition.key).cloned().unwrap_or(Value::Null),
             ));
         }
@@ -1490,14 +1519,16 @@ fn sql_order(left: &Value, right: &Value) -> std::cmp::Ordering {
             _ => 0.0,
         }
     }
-    class(left).cmp(&class(right)).then_with(|| match (left, right) {
-        (Value::String(left), Value::String(right)) => left.as_bytes().cmp(right.as_bytes()),
-        (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-        (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
-            number(left).total_cmp(&number(right))
-        }
-        _ => left.to_string().cmp(&right.to_string()),
-    })
+    class(left)
+        .cmp(&class(right))
+        .then_with(|| match (left, right) {
+            (Value::String(left), Value::String(right)) => left.as_bytes().cmp(right.as_bytes()),
+            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+            (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
+                number(left).total_cmp(&number(right))
+            }
+            _ => left.to_string().cmp(&right.to_string()),
+        })
 }
 
 /// Does `row` sort at or before the window's last row?
@@ -1507,11 +1538,8 @@ fn within_boundary(
     row: &Value,
 ) -> bool {
     let null = Value::Null;
-    let order = sql_order(
-        row.get(&definition.order_by).unwrap_or(&null),
-        &boundary.0,
-    )
-    .then_with(|| sql_order(row.get(&definition.key).unwrap_or(&null), &boundary.1));
+    let order = sql_order(row.get(&definition.order_by).unwrap_or(&null), &boundary.0)
+        .then_with(|| sql_order(row.get(&definition.key).unwrap_or(&null), &boundary.1));
     if definition.order_direction == "asc" {
         order.is_le()
     } else {
@@ -1721,7 +1749,11 @@ fn write_stable_string(out: &mut String, value: &str) {
     }
     if out[start..].contains(['\u{2028}', '\u{2029}']) {
         let tail = out.split_off(start);
-        out.push_str(&tail.replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029"));
+        out.push_str(
+            &tail
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029"),
+        );
     }
 }
 
@@ -1797,10 +1829,7 @@ fn replica_snapshot_message(
     ]);
     metadata.insert("pageDigest".to_owned(), Value::String(digest.to_owned()));
     if let Some(hashes) = inline_hashes {
-        metadata.insert(
-            "digest".to_owned(),
-            Value::String(hashes_digest(&hashes)),
-        );
+        metadata.insert("digest".to_owned(), Value::String(hashes_digest(&hashes)));
         metadata.insert(
             "hashes".to_owned(),
             Value::Object(
@@ -2802,7 +2831,11 @@ mod tests {
     }
 
     /// A subscription whose client holds `rows` (projections).
-    fn holding(definition: ReplicaCollectionDefinition, args: Value, rows: &[Value]) -> ReplicaSubscription {
+    fn holding(
+        definition: ReplicaCollectionDefinition,
+        args: Value,
+        rows: &[Value],
+    ) -> ReplicaSubscription {
         let (plan, resolved) = public_visibility();
         let mut digest = ReplicaAggregate::new(false);
         let mut window = ReplicaWindow::default();
@@ -2858,7 +2891,10 @@ mod tests {
         assert_eq!(subscription.window.rows, client.len());
         assert_eq!(
             subscription.window.bytes,
-            client.values().map(|row| stable_json(row).len() as i64).sum::<i64>()
+            client
+                .values()
+                .map(|row| stable_json(row).len() as i64)
+                .sum::<i64>()
         );
         Some((
             delta.upserts.into_keys().collect(),
@@ -2868,10 +2904,9 @@ mod tests {
 
     #[test]
     fn feed_deltas_follow_before_and_after_images_without_held_rows() {
-        let definition = collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
-        let row = |id: &str, title: &str, workspace: &str| {
-            serde_json::json!({"id":id, "title":title, "workspaceId":workspace, "rank":1})
-        };
+        let definition =
+            collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
+        let row = |id: &str, title: &str, workspace: &str| serde_json::json!({"id":id, "title":title, "workspaceId":workspace, "rank":1});
         let mut client = BTreeMap::from([
             ("1".to_owned(), row("1", "one", "a")),
             ("2".to_owned(), row("2", "two", "a")),
@@ -2909,7 +2944,11 @@ mod tests {
         let definition = collection(serde_json::json!({}));
         let row = serde_json::json!({"id":"1", "title":"t", "workspaceId":"a", "rank":1});
         let mut client = BTreeMap::from([("1".to_owned(), row.clone())]);
-        let mut subscription = holding(definition, serde_json::json!({}), std::slice::from_ref(&row));
+        let mut subscription = holding(
+            definition,
+            serde_json::json!({}),
+            std::slice::from_ref(&row),
+        );
         let mut wider = row.clone();
         wider["internalNotes"] = "not replicated".into();
         let mut renamed = row.clone();
@@ -2983,19 +3022,20 @@ mod tests {
         assert!(apply_to_model(
             &mut subscription,
             &mut client,
-            &[row_change("1", row("1", "one"), row("1", "a title that is far too large for the budget"))]
+            &[row_change(
+                "1",
+                row("1", "one"),
+                row("1", "a title that is far too large for the budget")
+            )]
         )
         .is_none());
     }
 
     #[test]
     fn truncated_window_moves_only_within_its_boundary() {
-        let row = |id: &str, rank: i64, title: &str| {
-            serde_json::json!({"id":id, "title":title, "workspaceId":"a", "rank":rank})
-        };
-        let definition = collection(
-            serde_json::json!({"maxRows":2, "orderBy":"rank", "orderDirection":"asc"}),
-        );
+        let row = |id: &str, rank: i64, title: &str| serde_json::json!({"id":id, "title":title, "workspaceId":"a", "rank":rank});
+        let definition =
+            collection(serde_json::json!({"maxRows":2, "orderBy":"rank", "orderDirection":"asc"}));
         let held = [row("1", 1, "one"), row("2", 2, "two")];
         let mut client = held
             .iter()
@@ -3033,7 +3073,11 @@ mod tests {
             assert!(apply_to_model(&mut subscription, &mut client.clone(), &[change]).is_none());
         }
         // An unordered truncated window cannot place any visible change.
-        let mut unordered = holding(collection(serde_json::json!({"maxRows":2})), serde_json::json!({}), &held);
+        let mut unordered = holding(
+            collection(serde_json::json!({"maxRows":2})),
+            serde_json::json!({}),
+            &held,
+        );
         unordered.window.truncated = true;
         assert!(apply_to_model(
             &mut unordered,
@@ -3063,10 +3107,9 @@ mod tests {
 
     #[test]
     fn normalized_changes_keep_entities_another_collection_holds() {
-        let row = |workspace: &str| {
-            serde_json::json!({"id":"1", "title":"t", "workspaceId":workspace, "rank":1, "extra":"x"})
-        };
-        let mut narrow = collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
+        let row = |workspace: &str| serde_json::json!({"id":"1", "title":"t", "workspaceId":workspace, "rank":1, "extra":"x"});
+        let mut narrow =
+            collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
         narrow.columns = vec!["id".into(), "workspaceId".into()];
         let wide = collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
         let mut a = holding(
@@ -3078,7 +3121,8 @@ mod tests {
         let mut b = holding(wide, serde_json::json!({"workspace":"b"}), &[]);
         b.id = "b".into();
         let mut subscriptions = BTreeMap::from([("a".to_owned(), a), ("b".to_owned(), b)]);
-        let normalize = |subscriptions: &mut BTreeMap<String, ReplicaSubscription>, change: LogChange| {
+        let normalize = |subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+                         change: LogChange| {
             let changes = [change];
             let collapsed = collapse_changes(&changes);
             let mut touches = BTreeMap::<(String, String), EntityTouch>::new();
@@ -3087,7 +3131,10 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 for (key, touch) in delta.touches {
-                    touches.entry(key).or_default().merge(&subscription.id, touch);
+                    touches
+                        .entry(key)
+                        .or_default()
+                        .merge(&subscription.id, touch);
                 }
             }
             normalize_entity_changes(touches, &collapsed, subscriptions)

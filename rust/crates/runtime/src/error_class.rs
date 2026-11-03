@@ -11,8 +11,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gonvex_module_host::protocol::codes;
-use gonvex_store::DatabaseError;
 pub use gonvex_protocol::ReducerErrorClass;
+use gonvex_store::DatabaseError;
 
 use crate::control::ControlError;
 use crate::execution::ExecutionError;
@@ -79,9 +79,7 @@ pub fn database_error_class(error: &DatabaseError) -> ReducerErrorClass {
         | DatabaseError::Decode(_)
         | DatabaseError::ReferenceIntegrity(_)
         | DatabaseError::TransactionAborted(_)
-        | DatabaseError::Sql(_) => {
-            ReducerErrorClass::Rejected
-        }
+        | DatabaseError::Sql(_) => ReducerErrorClass::Rejected,
     }
 }
 
