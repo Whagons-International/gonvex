@@ -1695,7 +1695,7 @@ async fn websocket(
                                             Ok(Some(message)) => {
                                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                                             }
-                                            Err(()) => return,
+                                            Err(_) => return,
                                         }
                                     }
                                     if let Some(ServerMessage::ReplicaWatermark { revision }) = transaction_watermark {

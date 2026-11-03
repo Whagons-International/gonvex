@@ -406,6 +406,28 @@ mod tests {
             deflate_segment(payload.as_bytes(), window, &mut second).unwrap();
             assert_eq!(first, expected);
             assert_eq!(second, expected);
+            // Same bytes as the pre-reuse implementation (8 KiB scratch loop).
+            let mut codec =
+                Compress::new_with_window_bits(Compression::new(COMPRESSION_LEVEL), false, window);
+            let mut old = Vec::new();
+            let mut scratch = [0; 8192];
+            loop {
+                let before_in = codec.total_in();
+                let before_out = codec.total_out();
+                codec
+                    .compress(
+                        &payload.as_bytes()[before_in as usize..],
+                        &mut scratch,
+                        FlushCompress::Sync,
+                    )
+                    .unwrap();
+                let written = (codec.total_out() - before_out) as usize;
+                old.extend_from_slice(&scratch[..written]);
+                if codec.total_in() as usize == payload.len() && written < scratch.len() {
+                    break;
+                }
+            }
+            assert_eq!(old, expected);
         }
     }
 

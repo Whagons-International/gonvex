@@ -70,6 +70,11 @@ impl BatchConfig {
     }
 }
 
+/// An item could not be encoded or the batch could not be written; the
+/// connection closes, as when a plain send fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryError;
+
 /// Process-wide memo registry, one memo per tenant.
 #[derive(Default)]
 pub struct DeliveryHub {
@@ -152,7 +157,7 @@ impl TenantFrames {
 
     /// The shared encoding of `message` (already stream-addressed). Equal
     /// messages of the same revision and item share one `SharedText`.
-    fn item(&self, key: ItemKey, message: ServerMessage) -> Result<Arc<SharedText>, ()> {
+    fn item(&self, key: ItemKey, message: ServerMessage) -> Result<Arc<SharedText>, DeliveryError> {
         {
             let memo = self.memo.lock().unwrap();
             if let Some(variants) = memo.entries.get(&key) {
@@ -166,7 +171,7 @@ impl TenantFrames {
         if matches!(key.kind, ItemKind::Delta(_)) {
             // The connection appends `,"digest":..,"truncated":..}`.
             if text.pop() != Some('}') {
-                return Err(());
+                return Err(DeliveryError);
             }
         }
         let text = Arc::new(SharedText::new(text));
@@ -224,13 +229,13 @@ pub fn perf_legacy_encode(
     serde_json::to_string(message).ok()
 }
 
-fn encode_item(message: &ServerMessage, native: bool) -> Result<String, ()> {
+fn encode_item(message: &ServerMessage, native: bool) -> Result<String, DeliveryError> {
     if native {
-        if let Some(encoded) = crate::replica::native_control_message(message).map_err(|_| ())? {
-            return serde_json::to_string(&encoded).map_err(|_| ());
+        if let Some(encoded) = crate::replica::native_control_message(message).map_err(|_| DeliveryError)? {
+            return serde_json::to_string(&encoded).map_err(|_| DeliveryError);
         }
     }
-    serde_json::to_string(message).map_err(|_| ())
+    serde_json::to_string(message).map_err(|_| DeliveryError)
 }
 
 /// Stream token of a collection: path and arguments, never the socket.
@@ -336,8 +341,8 @@ impl ReplicaBatcher {
         })
     }
 
-    pub async fn flush(&mut self, socket: &mut WebSocket) -> Result<(), ()> {
-        let result = socket.flush_batch().await.map_err(|_| ());
+    pub async fn flush(&mut self, socket: &mut WebSocket) -> Result<(), DeliveryError> {
+        let result = socket.flush_batch().await.map_err(|_| DeliveryError);
         self.sync(socket.batch());
         result
     }
@@ -473,7 +478,7 @@ impl ReplicaBatcher {
         native: bool,
         replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
         message: ServerMessage,
-    ) -> Result<Option<ServerMessage>, ()> {
+    ) -> Result<Option<ServerMessage>, DeliveryError> {
         let (revision, kind, message) = match message {
             ServerMessage::ReplicaTransaction {
                 cursor,
@@ -519,7 +524,7 @@ impl ReplicaBatcher {
                         tail.push_str(",\"");
                         tail.push_str(key);
                         tail.push_str("\":");
-                        tail.push_str(&serde_json::to_string(&value).map_err(|_| ())?);
+                        tail.push_str(&serde_json::to_string(&value).map_err(|_| DeliveryError)?);
                     }
                 }
                 tail.push('}');
@@ -565,7 +570,7 @@ impl ReplicaBatcher {
                     digest,
                     metadata,
                 })
-                .map_err(|_| ())?;
+                .map_err(|_| DeliveryError)?;
                 self.push_segment(socket, Segment::Inline(Bytes::from(text)));
                 return Ok(None);
             }

@@ -654,9 +654,6 @@ mod tests {
                                 socket.batch_mut().set_tail(Some(bytes::Bytes::from_static(
                                     b",{\"watermark\":7}",
                                 )));
-                                if socket.batch().len() == 0 {
-                                    return;
-                                }
                                 socket
                                     .send(ws::Message::Text("after".into()))
                                     .await
