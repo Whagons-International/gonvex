@@ -27,6 +27,9 @@ use tokio::{sync::mpsc, task::JoinHandle};
 mod inflate;
 use inflate::inflate_message;
 
+/// Initial read buffer of a connection that did not negotiate compression.
+const PLAIN_READ_BUFFER: usize = 4096;
+
 pub async fn upgrade<F, Fut>(
     mut request: Request,
     enabled: bool,
@@ -53,6 +56,9 @@ where
             Ok(upgrade) => upgrade
                 .max_message_size(max_message)
                 .max_frame_size(max_frame)
+                // tungstenite allocates and zero-fills 128 KiB per connection
+                // by default. Frames larger than this still grow the buffer.
+                .read_buffer_size(PLAIN_READ_BUFFER)
                 .on_upgrade(move |socket| callback(WebSocket::Plain(Box::new(socket))))
                 .into_response(),
             Err(error) => error.into_response(),
@@ -85,15 +91,13 @@ where
                     compressed: false,
                 },
             };
-            // Coalesce small frame headers and payloads to avoid delayed-ACK stalls.
+            // FrameLimits coalesces small frame headers and payloads to avoid
+            // delayed-ACK stalls, and frees that buffer after each flush.
             let socket = ratchet_core::WebSocket::from_upgraded(
                 ratchet_core::WebSocketConfig {
                     max_message_size: max_message,
                 },
-                FrameLimits::new(
-                    tokio::io::BufWriter::with_capacity(4096, TokioIo::new(stream)),
-                    max_frame,
-                ),
+                FrameLimits::new(TokioIo::new(stream), max_frame),
                 Some(extension),
                 BytesMut::new(),
                 ratchet_core::Role::Server,
@@ -104,7 +108,7 @@ where
     response.map(|_| axum::body::Body::empty()).into_response()
 }
 
-type IoStream = FrameLimits<tokio::io::BufWriter<TokioIo<hyper::upgrade::Upgraded>>>;
+type IoStream = FrameLimits<TokioIo<hyper::upgrade::Upgraded>>;
 type CompressedSocket = ratchet_core::WebSocket<IoStream, Deflate>;
 
 pub enum WebSocket {

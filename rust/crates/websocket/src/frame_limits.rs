@@ -13,8 +13,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// fragment starts at mask offset zero and keeps the client's masking key.
 pub(crate) const READ_FRAGMENT: usize = 4096;
 
+/// Writes smaller than this are coalesced before reaching the socket.
+pub(crate) const WRITE_COALESCE: usize = 4096;
+
 pub(crate) struct FrameLimits<S> {
     inner: S,
+    write_buf: Vec<u8>,
+    written: usize,
     max_frame: usize,
     /// The wire header being parsed.
     header: [u8; 14],
@@ -36,6 +41,8 @@ impl<S> FrameLimits<S> {
     pub(crate) fn new(inner: S, max_frame: usize) -> Self {
         Self {
             inner,
+            write_buf: Vec::new(),
+            written: 0,
             max_frame,
             header: [0; 14],
             read: 0,
@@ -182,19 +189,63 @@ impl<S: AsyncRead + Unpin> AsyncRead for FrameLimits<S> {
     }
 }
 
+impl<S: AsyncWrite + Unpin> FrameLimits<S> {
+    /// Write out coalesced bytes, then free the buffer: an idle connection
+    /// holds no write buffer.
+    fn poll_write_buffer(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.written < self.write_buf.len() {
+            match Pin::new(&mut self.inner).poll_write(cx, &self.write_buf[self.written..]) {
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
+                Poll::Ready(Ok(n)) => self.written += n,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        self.written = 0;
+        self.write_buf = Vec::new();
+        Poll::Ready(Ok(()))
+    }
+}
+
+// Same policy as `tokio::io::BufWriter::with_capacity(WRITE_COALESCE)`: small
+// frame headers and payloads go out in one write (no delayed-ACK stall), large
+// payloads bypass the buffer. Unlike BufWriter, the buffer exists only while
+// a frame is being written.
 impl<S: AsyncWrite + Unpin> AsyncWrite for FrameLimits<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write(cx, data)
+        let this = self.get_mut();
+        if this.write_buf.len() + data.len() > WRITE_COALESCE {
+            match this.poll_write_buffer(cx) {
+                Poll::Ready(Ok(())) => {}
+                other => return other.map(|result| result.map(|()| 0)),
+            }
+        }
+        if data.len() >= WRITE_COALESCE {
+            return Pin::new(&mut this.inner).poll_write(cx, data);
+        }
+        if this.write_buf.capacity() == 0 {
+            this.write_buf.reserve_exact(WRITE_COALESCE);
+        }
+        this.write_buf.extend_from_slice(data);
+        Poll::Ready(Ok(data.len()))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        let this = self.get_mut();
+        match this.poll_write_buffer(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut this.inner).poll_flush(cx),
+            other => other,
+        }
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        let this = self.get_mut();
+        match this.poll_write_buffer(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut this.inner).poll_shutdown(cx),
+            other => other,
+        }
     }
 }
 
@@ -273,5 +324,24 @@ mod tests {
             .flat_map(|(_, data)| data.clone())
             .collect::<Vec<_>>();
         assert_eq!(joined, payload);
+    }
+
+    #[tokio::test]
+    async fn writes_coalesce_small_frames_and_free_the_buffer_after_flush() {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = FrameLimits::new(Vec::<u8>::new(), 4096);
+        stream.write_all(&[0x81, 3]).await.unwrap();
+        stream.write_all(b"abc").await.unwrap();
+        assert!(stream.inner.is_empty(), "header and payload are coalesced");
+        stream.flush().await.unwrap();
+        assert_eq!(stream.inner, [0x81, 3, b'a', b'b', b'c']);
+        assert_eq!(stream.write_buf.capacity(), 0);
+        let large = vec![7; WRITE_COALESCE + 1];
+        stream.write_all(&[0x82, 126, 0x10, 0x01]).await.unwrap();
+        stream.write_all(&large).await.unwrap();
+        stream.flush().await.unwrap();
+        assert_eq!(stream.inner.len(), 5 + 4 + large.len());
+        assert_eq!(&stream.inner[5..9], [0x82, 126, 0x10, 0x01]);
+        assert_eq!(stream.write_buf.capacity(), 0);
     }
 }
