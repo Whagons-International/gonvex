@@ -245,9 +245,12 @@ encoding.
 **Triggers.** Change-capture, reference-staging and membership-projection
 triggers are dropped for the copy (so copied rows create no change, staging or
 outbox rows) and restored verbatim in the same transaction. Application
-triggers stay active (FTS indexes fill as rows arrive); an application trigger
-that writes into another copied table makes that copy fail with a duplicate
-key. After the copy the store's installer runs again and must accept every
+triggers stay active (FTS indexes fill as rows arrive). A table that an
+application trigger on another copied table writes into (a projection such as
+`taskGridRows`) is copied after the tables whose triggers write it: its copy
+deletes what the triggers derived mid-copy and inserts the source rows, so it
+matches the source exactly. The report lists these moves under
+`copyOrderAdjustments`; tables in a trigger cycle keep their order. After the copy the store's installer runs again and must accept every
 file as current.
 
 **Reference ledger.** The catalog the SQLite migrations declared (or, if they
