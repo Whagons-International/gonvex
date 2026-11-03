@@ -29,6 +29,7 @@ chrono.workspace = true
 cron.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
+libc.workspace = true
 ipnet.workspace = true
 gonvex-module-host = { path = "../module-host" }
 gonvex-module-runtime = { path = "../module-runtime" }
@@ -54,6 +55,10 @@ url.workspace = true
 duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
 
+[lints.clippy]
+# Deep clones on hot paths (perf workstreams).
+redundant_clone = "warn"
+
 [dev-dependencies]
 tempfile = "3"
 tokio-tungstenite = "0.29"
@@ -61,6 +66,11 @@ tower.workspace = true
 
 [[bench]]
 name = "baseline"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "stalls"
 harness = false
 required-features = ["perf-fixture"]
 

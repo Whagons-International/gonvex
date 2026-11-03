@@ -122,24 +122,6 @@ impl ReplicaAggregate {
     }
 }
 
-/// Process-wide bound on concurrent replica snapshot builds
-/// (`GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`, default: available CPUs, min 2).
-fn snapshot_permits() -> &'static tokio::sync::Semaphore {
-    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    PERMITS.get_or_init(|| {
-        let default = std::thread::available_parallelism()
-            .map(|cpus| cpus.get())
-            .unwrap_or(2)
-            .max(2);
-        let permits = std::env::var("GONVEX_REPLICA_SNAPSHOT_CONCURRENCY")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(default);
-        tokio::sync::Semaphore::new(permits)
-    })
-}
-
 /// A replica row shared by every subscription that holds it: its key, content
 /// hash and value, interned by tenant, table, key and hash so identical rows
 /// are stored once. Subscriptions keep pointer-sized map entries (`Arc<str>`
@@ -458,10 +440,17 @@ impl Runtime {
         // so a sign-in burst could otherwise build hundreds of full snapshots
         // at once. Snapshot builds are CPU and memory bound: more of them than
         // cores only multiplies peak memory, so bound them process-wide.
-        let _snapshot_permit = snapshot_permits()
-            .acquire()
-            .await
-            .expect("snapshot semaphore is never closed");
+        // Bounded by count and by an estimated byte budget
+        // (`crate::offload::SnapshotAdmission`).
+        let snapshot_permit = crate::offload::SnapshotAdmission::global()
+            .admit(
+                format!(
+                    "{}\u{0}{}\u{0}{}\u{0}{}",
+                    session.route.database_url, definition.table, session.member.id, args
+                ),
+                &definition.table,
+            )
+            .await;
         let control = self
             .inner
             .control_plane
@@ -523,6 +512,7 @@ impl Runtime {
         };
         let (rows, truncated) =
             query_rows(&mut transaction, definition, plan, &resolved, args).await?;
+        snapshot_permit.observe(&rows);
         let resume_changes = if let Some(after) =
             after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
         {
@@ -1159,11 +1149,14 @@ async fn collect_snapshot_rows(
         if definition.max_rows > 0 && kept.len() >= definition.max_rows {
             return Ok((kept, true));
         }
-        let row_bytes = serde_json::to_vec(&row).unwrap_or_default().len() as i64;
-        if definition.max_bytes > 0 && bytes + row_bytes > definition.max_bytes {
-            return Ok((kept, true));
+        if definition.max_bytes > 0 {
+            // Counted without encoding the row (same length as `to_vec`).
+            let row_bytes = json_byte_len(&row) as i64;
+            if bytes + row_bytes > definition.max_bytes {
+                return Ok((kept, true));
+            }
+            bytes += row_bytes;
         }
-        bytes += row_bytes;
         kept.push(row);
     }
     Ok((kept, false))
@@ -1687,6 +1680,11 @@ impl SnapshotPages {
         pages
     }
 
+    /// Rows not yet paged.
+    pub(crate) fn remaining_rows(&self) -> usize {
+        self.rows.len()
+    }
+
     pub(crate) fn identity(&self) -> (&str, &str) {
         (&self.id, &self.snapshot_id)
     }
@@ -1747,7 +1745,7 @@ impl SnapshotPages {
     }
 }
 
-fn json_byte_len(value: &Value) -> usize {
+pub(crate) fn json_byte_len(value: &Value) -> usize {
     match value {
         Value::Null => 4,
         Value::Bool(true) => 4,

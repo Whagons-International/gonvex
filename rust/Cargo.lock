@@ -1561,6 +1561,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "jsonwebtoken",
+ "libc",
  "mimalloc",
  "pbkdf2",
  "rand 0.8.7",
