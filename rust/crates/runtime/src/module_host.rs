@@ -228,6 +228,18 @@ impl ModuleHost {
         operation: RequestOp,
         mut handler: Option<&mut dyn HostCallHandler>,
     ) -> Result<ResponsePayload, ModuleHostError> {
+        let label = match &operation {
+            RequestOp::Invoke(request) => Some(gonvex_profiler::Label::classify(
+                &request.kind,
+                &request.function,
+            )),
+            _ => None,
+        };
+        let _inflight =
+            gonvex_profiler::gauge(gonvex_profiler::GaugeId::ModuleInflight).guard();
+        let _total = label
+            .map(|label| gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::InvokeTotal, label));
+        let mut timer = gonvex_profiler::Timer::start();
         let mut stream = self.connect().await?;
         // Invocation provenance carries the per-kind deadline. In particular,
         // an agent Action deliberately has none while awaiting model I/O.
@@ -241,8 +253,18 @@ impl ModuleHost {
             payload: operation,
         };
         self.write_client_frame(&mut stream, &request).await?;
+        if let Some(label) = label {
+            timer.lap(gonvex_profiler::Stage::InvokeConnect, label);
+        }
         let (reader, writer) = tokio::io::split(stream);
-        dispatch_frames(reader, writer, self.config.max_frame_bytes, handler.take()).await
+        dispatch_frames_profiled(
+            reader,
+            writer,
+            self.config.max_frame_bytes,
+            handler.take(),
+            label,
+        )
+        .await
     }
 
     async fn write_client_frame(
@@ -392,12 +414,84 @@ fn host_response(id: u64, result: Result<Value, String>) -> ClientFrame {
     }
 }
 
+#[cfg(test)]
 async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: R,
+    writer: W,
+    max_frame_bytes: usize,
+    handler: Option<&mut dyn HostCallHandler>,
+) -> Result<ResponsePayload, ModuleHostError> {
+    dispatch_frames_profiled(reader, writer, max_frame_bytes, handler, None).await
+}
+
+/// Splits one module-host invocation into first-frame wait (isolate wait +
+/// JS before the first host call), later JS gaps and host-call handling, as
+/// seen from the runtime side of the socket. Records on drop (any exit).
+struct InvokeProfile {
+    label: Option<gonvex_profiler::Label>,
+    mark: u64,
+    first: bool,
+    js: u64,
+    host: u64,
+    calls: u64,
+}
+
+impl InvokeProfile {
+    fn new(label: Option<gonvex_profiler::Label>) -> Self {
+        let label = label.filter(|_| gonvex_profiler::enabled());
+        Self {
+            label,
+            mark: if label.is_some() { gonvex_profiler::now_ns() } else { 0 },
+            first: true,
+            js: 0,
+            host: 0,
+            calls: 0,
+        }
+    }
+
+    fn frame_arrived(&mut self) {
+        if let Some(label) = self.label {
+            let now = gonvex_profiler::now_ns();
+            let gap = now.saturating_sub(self.mark);
+            if self.first {
+                gonvex_profiler::record(gonvex_profiler::Stage::InvokeFirstFrame, label, gap);
+                self.first = false;
+            } else {
+                self.js += gap;
+            }
+            self.mark = now;
+        }
+    }
+
+    fn host_call_answered(&mut self) {
+        if self.label.is_some() {
+            let now = gonvex_profiler::now_ns();
+            self.host += now.saturating_sub(self.mark);
+            self.calls += 1;
+            self.mark = now;
+        }
+    }
+}
+
+impl Drop for InvokeProfile {
+    fn drop(&mut self) {
+        if let Some(label) = self.label {
+            use gonvex_profiler::{record, Stage};
+            record(Stage::InvokeJs, label, self.js);
+            record(Stage::InvokeHostCalls, label, self.host);
+            record(Stage::HostCallCount, label, self.calls);
+        }
+    }
+}
+
+async fn dispatch_frames_profiled<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     mut reader: R,
     mut writer: W,
     max_frame_bytes: usize,
     mut handler: Option<&mut dyn HostCallHandler>,
+    label: Option<gonvex_profiler::Label>,
 ) -> Result<ResponsePayload, ModuleHostError> {
+    let mut profile = InvokeProfile::new(label);
     let mut pending: FuturesUnordered<BoxFuture<'static, ClientFrame>> = FuturesUnordered::new();
     loop {
         // Preserve partial reads when a network request completes. read_exact
@@ -413,6 +507,7 @@ async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
             }
         };
+        profile.frame_arrived();
         let frame: ServerFrame = serde_json::from_slice(&frame)
             .map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
         match frame {
@@ -442,6 +537,7 @@ async fn dispatch_frames<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 let bytes = serde_json::to_vec(&host_response(id, result))
                     .map_err(|e| ModuleHostError::InvalidReady(e.to_string()))?;
                 write_frame(&mut writer, &bytes, max_frame_bytes).await?;
+                profile.host_call_answered();
             }
             _ => return Err(ModuleHostError::UnexpectedResponse),
         }

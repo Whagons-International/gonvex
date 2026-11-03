@@ -122,6 +122,11 @@ impl ReplicaAggregate {
     }
 }
 
+/// Free snapshot permits right now (profiler gauge).
+pub(crate) fn snapshot_permits_available() -> usize {
+    snapshot_permits().available_permits()
+}
+
 /// Process-wide bound on concurrent replica snapshot builds
 /// (`GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`, default: available CPUs, min 2).
 fn snapshot_permits() -> &'static tokio::sync::Semaphore {
@@ -454,10 +459,18 @@ impl Runtime {
         // so a sign-in burst could otherwise build hundreds of full snapshots
         // at once. Snapshot builds are CPU and memory bound: more of them than
         // cores only multiplies peak memory, so bound them process-wide.
-        let _snapshot_permit = snapshot_permits()
-            .acquire()
-            .await
-            .expect("snapshot semaphore is never closed");
+        use gonvex_profiler::{gauge, GaugeId, Label, ScopeTimer, Stage, Timer};
+        let _build = ScopeTimer::new(Stage::SnapshotBuild, Label::None);
+        let mut timer = Timer::start();
+        let _snapshot_permit = {
+            let _waiting = gauge(GaugeId::SnapshotWaiting).guard();
+            snapshot_permits()
+                .acquire()
+                .await
+                .expect("snapshot semaphore is never closed")
+        };
+        let _active = gauge(GaugeId::SnapshotActive).guard();
+        timer.lap(Stage::SnapshotPermitWait, Label::None);
         let control = self
             .inner
             .control_plane
@@ -493,10 +506,12 @@ impl Runtime {
             }
             None => visibility::PreparedParentAcl::default(),
         };
+        timer.lap(Stage::SnapshotAcl, Label::None);
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
         let clock = clock_in_transaction(&mut transaction).await?;
+        timer.lap(Stage::SnapshotBegin, Label::None);
         self.inner.visibility_metrics.record_collection_snapshot();
         self.inner
             .visibility_metrics
@@ -517,8 +532,10 @@ impl Runtime {
         } else {
             visibility::resolve(&mut transaction, session, plan, clock.revision).await?
         };
+        timer.lap(Stage::SnapshotVisibility, Label::None);
         let (rows, truncated) =
             query_rows(&mut transaction, definition, plan, &resolved, args).await?;
+        timer.lap(Stage::SnapshotQuery, Label::None);
         let resume_changes = if let Some(after) =
             after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
         {
@@ -529,6 +546,7 @@ impl Runtime {
             Vec::new()
         };
         transaction.commit().await?;
+        timer.skip();
         let mut by_key = BTreeMap::new();
         let mut hashes = BTreeMap::new();
         for (index, row) in rows.iter().enumerate() {
@@ -543,6 +561,7 @@ impl Runtime {
                 return Err(ReplicaError::DuplicateKey(key));
             }
         }
+        timer.lap(Stage::SnapshotIntern, Label::None);
         Ok(Snapshot {
             rows,
             by_key,

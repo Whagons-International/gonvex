@@ -4,6 +4,7 @@ members = [
   "crates/admin-cli",
   "crates/protocol",
   "crates/store",
+  "crates/profiler",
   "crates/runtime",
   "crates/websocket",
   "crates/module-runtime",
