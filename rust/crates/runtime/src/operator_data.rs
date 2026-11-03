@@ -11,11 +11,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use gonvex_store::rows::{json_object_expr, table_columns, ColumnInfo, JsonKind};
+use gonvex_store::TenantTransaction;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::types::Json as SqlJson;
-use gonvex_store::rows::{json_object_expr, table_columns, ColumnInfo, JsonKind};
-use gonvex_store::TenantTransaction;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 
 use crate::{operations, Runtime};
@@ -202,7 +202,7 @@ async fn data_writer(runtime: &Runtime, database_url: &str) -> Result<TenantTran
 
 async fn reader_columns(pool: &SqlitePool, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let mut connection = pool.acquire().await.map_err(|cause| cause.to_string())?;
-    table_columns(&mut *connection, table)
+    table_columns(&mut connection, table)
         .await
         .map_err(|cause| cause.to_string())
 }
@@ -230,9 +230,9 @@ fn text_expr(quoted: &str, kind: JsonKind) -> String {
 fn json_input_expr(name: &str, kind: JsonKind) -> String {
     let path = format!("'$.{name}'");
     match kind {
-        JsonKind::Json => format!(
-            "CASE json_type($1,{path}) WHEN 'null' THEN NULL ELSE $1 -> {path} END"
-        ),
+        JsonKind::Json => {
+            format!("CASE json_type($1,{path}) WHEN 'null' THEN NULL ELSE $1 -> {path} END")
+        }
         JsonKind::Boolean => format!(
             "CASE json_type($1,{path}) WHEN 'true' THEN 1 WHEN 'false' THEN 0 \
              WHEN 'text' THEN CASE lower(json_extract($1,{path})) \
@@ -570,8 +570,7 @@ async fn read_rows(
     let quoted_table = quote_ident(&table).expect("validated identifier");
     let exact_total = query.count != "false" && query.count != "estimate";
     let total = if exact_total {
-        let mut count =
-            QueryBuilder::<Sqlite>::new(format!("SELECT count(*) FROM {quoted_table}"));
+        let mut count = QueryBuilder::<Sqlite>::new(format!("SELECT count(*) FROM {quoted_table}"));
         if let Err(message) = append_where(&mut count, &all_kinds, &query.search, &filters) {
             return error(StatusCode::BAD_REQUEST, message);
         }
@@ -684,7 +683,7 @@ async fn insert_row(
         Ok(transaction) => transaction,
         Err(response) => return response,
     };
-    let all = match table_columns(&mut **transaction.transaction(), &table).await {
+    let all = match table_columns(transaction.transaction(), &table).await {
         Ok(columns) if !columns.is_empty() => columns,
         _ => return error(StatusCode::BAD_REQUEST, "table does not exist"),
     };
@@ -731,11 +730,7 @@ async fn insert_row(
     if let Err(cause) = transaction.commit().await {
         return error(StatusCode::BAD_REQUEST, cause.to_string());
     }
-    (
-        StatusCode::CREATED,
-        Json(json!({"table":table,"row":row})),
-    )
-        .into_response()
+    (StatusCode::CREATED, Json(json!({"table":table,"row":row}))).into_response()
 }
 
 async fn update_row(
@@ -778,7 +773,7 @@ async fn update_row(
         Ok(transaction) => transaction,
         Err(response) => return response,
     };
-    let all = match table_columns(&mut **transaction.transaction(), &table).await {
+    let all = match table_columns(transaction.transaction(), &table).await {
         Ok(columns) if !columns.is_empty() => columns,
         _ => return error(StatusCode::BAD_REQUEST, "table does not exist"),
     };
@@ -847,7 +842,7 @@ async fn delete_row(
         Ok(transaction) => transaction,
         Err(response) => return response,
     };
-    let all = match table_columns(&mut **transaction.transaction(), &table).await {
+    let all = match table_columns(transaction.transaction(), &table).await {
         Ok(columns) => columns,
         Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
     };
@@ -991,9 +986,7 @@ async fn replace_in_transaction(
         .execute(&mut *connection)
         .await
         .map_err(text)?;
-    sqlx::query(&format!(
-        "CREATE TEMP TABLE \"_gonvex_reference_replacements\" (source_id TEXT PRIMARY KEY, replacement_id TEXT NOT NULL)"
-    ))
+    sqlx::query("CREATE TEMP TABLE \"_gonvex_reference_replacements\" (source_id TEXT PRIMARY KEY, replacement_id TEXT NOT NULL)")
     .execute(&mut *connection)
     .await
     .map_err(text)?;
@@ -1030,12 +1023,16 @@ async fn replace_in_transaction(
         let kind = JsonKind::from_declared(&data_type);
         let is_json = kind == JsonKind::Json;
         let is_text = !is_json
-            && (data_type.contains("text") || data_type.contains("char") || data_type.contains("clob"));
-        if !(is_json || is_text) || matches!(column.as_str(), "_id" | "id" | "tenantId" | "tenant_id")
+            && (data_type.contains("text")
+                || data_type.contains("char")
+                || data_type.contains("clob"));
+        if !(is_json || is_text)
+            || matches!(column.as_str(), "_id" | "id" | "tenantId" | "tenant_id")
         {
             continue;
         }
-        let (Ok(table_ident), Ok(column_ident)) = (quote_ident(&table), quote_ident(&column)) else {
+        let (Ok(table_ident), Ok(column_ident)) = (quote_ident(&table), quote_ident(&column))
+        else {
             continue;
         };
         let affected = if is_json {

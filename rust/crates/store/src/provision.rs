@@ -401,7 +401,7 @@ impl ControlPlane {
                 .await?;
             }
         }
-        crate::execute_script(&mut *transaction, include_str!("control_schema.sql")).await?;
+        crate::execute_script(&mut transaction, include_str!("control_schema.sql")).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -933,11 +933,13 @@ pub(crate) fn apply_migrations<'a>(
     })
 }
 
+type AppliedMigrations = (Vec<String>, Vec<CommitNotice>);
+
 fn apply_migrations_locked<'a>(
     connection: &'a mut SqliteConnection,
     migrations: &'a [SqlMigration],
     scope: MigrationScope,
-) -> BoxFuture<'a, Result<(Vec<String>, Vec<CommitNotice>), DatabaseError>> {
+) -> BoxFuture<'a, Result<AppliedMigrations, DatabaseError>> {
     Box::pin(async move {
         if scope == MigrationScope::Tenant {
             super::reference_integrity::install(connection).await?;
@@ -989,7 +991,7 @@ fn apply_migrations_locked<'a>(
             let mut transaction = connection.begin().await?;
             let finished = async {
                 if !migration.no_transaction {
-                    crate::execute_script(&mut *transaction, &migration.sql).await?;
+                    crate::execute_script(&mut transaction, &migration.sql).await?;
                 }
                 if scope == MigrationScope::Tenant {
                     super::reference_integrity::after_migration(&mut transaction).await?;
@@ -1032,7 +1034,7 @@ fn install_tenant_identity(
                 "identity-v2 migration required: tenant members still use user_id",
             ));
         }
-        crate::execute_script(&mut *transaction, TENANT_IDENTITY_SQL).await?;
+        crate::execute_script(&mut transaction, TENANT_IDENTITY_SQL).await?;
         transaction.commit().await?;
         Ok(())
     })
@@ -1054,7 +1056,7 @@ pub(crate) fn install_change_feed_locked(
         if !bootstrap_matches(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?
             || !infrastructure_present(&mut tx).await?
         {
-            crate::execute_script(&mut *tx, SYNC_INFRASTRUCTURE_SQL).await?;
+            crate::execute_script(&mut tx, SYNC_INFRASTRUCTURE_SQL).await?;
             record_bootstrap(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?;
         }
         // One read each for every table's columns, every recorded receipt and
@@ -1064,11 +1066,13 @@ pub(crate) fn install_change_feed_locked(
         let tables = application_tables(&mut tx).await?;
         let mut columns_by_table = all_table_columns(&mut tx).await?;
         let receipts: std::collections::HashMap<String, String> =
-            sqlx::query_as::<_, (String, String)>("SELECT name, digest FROM _gonvex_sync_bootstrap")
-                .fetch_all(&mut *tx)
-                .await?
-                .into_iter()
-                .collect();
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT name, digest FROM _gonvex_sync_bootstrap",
+            )
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
         let triggers: std::collections::HashMap<(String, String), String> =
             sqlx::query_as::<_, (String, String, Option<String>)>(
                 "SELECT tbl_name, name, sql FROM sqlite_schema WHERE type='trigger'",
@@ -1089,10 +1093,10 @@ pub(crate) fn install_change_feed_locked(
                 })?;
             let script = feed::capture_triggers_sql(&table, &key, &columns);
             let receipt = format!("table:{table}");
-            let receipt_matches =
-                receipts.get(&receipt).map(String::as_str) == Some(bootstrap_digest(&script).as_str());
+            let receipt_matches = receipts.get(&receipt).map(String::as_str)
+                == Some(bootstrap_digest(&script).as_str());
             if !receipt_matches || !triggers_match(&triggers, &table, &script) {
-                crate::execute_script(&mut *tx, &script).await?;
+                crate::execute_script(&mut tx, &script).await?;
                 record_bootstrap(&mut tx, &receipt, &script).await?;
             }
         }

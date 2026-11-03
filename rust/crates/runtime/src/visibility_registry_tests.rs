@@ -409,7 +409,7 @@ async fn real_feed_maintains_index_without_consumers_and_without_nested_admissio
         let mut transaction = gonvex_store::begin_transaction(pools, url, false)
             .await
             .unwrap();
-        gonvex_store::execute_script(&mut **transaction.transaction(), sql)
+        gonvex_store::execute_script(transaction.transaction(), sql)
             .await
             .unwrap();
         transaction.commit().await.unwrap();

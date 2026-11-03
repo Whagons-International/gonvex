@@ -51,7 +51,7 @@ pub(crate) fn install(
     Box::pin(async move {
         let mut transaction = connection.begin().await?;
         crate::execute_script(
-            &mut *transaction,
+            &mut transaction,
             include_str!("reference_integrity/schema.sql"),
         )
         .await?;
