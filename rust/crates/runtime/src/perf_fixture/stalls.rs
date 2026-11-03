@@ -35,7 +35,7 @@ use crate::replica::ReplicaSubscription;
 use crate::Runtime;
 
 static NETWORK_THREAD: OnceLock<ThreadId> = OnceLock::new();
-static POLLS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static POLLS: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
 static RECORDING: AtomicBool = AtomicBool::new(false);
 
 /// Records the calling thread as the network worker. Call from a task on the
@@ -64,11 +64,25 @@ impl<F: Future> Future for Timed<F> {
             return self.0.as_mut().poll(context);
         }
         let started = Instant::now();
+        let cpu = thread_cpu_ns();
         let result = self.0.as_mut().poll(context);
         let micros = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-        POLLS.lock().unwrap().push(micros);
+        let cpu_micros = ((thread_cpu_ns() - cpu) / 1000).min(u32::MAX as u64) as u32;
+        POLLS.lock().unwrap().push((micros, cpu_micros));
         result
     }
+}
+
+/// CPU time of the calling thread (excludes time the OS ran other threads,
+/// so it is the work a poll did, independent of machine load).
+pub fn thread_cpu_ns() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64
 }
 
 /// Starts a measurement window: clears recorded polls.
@@ -77,8 +91,9 @@ pub fn start_recording() {
     RECORDING.store(true, Relaxed);
 }
 
-/// Ends the window and returns the recorded poll durations (microseconds).
-pub fn stop_recording() -> Vec<u32> {
+/// Ends the window and returns the recorded polls: (wall, thread CPU) in
+/// microseconds.
+pub fn stop_recording() -> Vec<(u32, u32)> {
     RECORDING.store(false, Relaxed);
     std::mem::take(&mut *POLLS.lock().unwrap())
 }

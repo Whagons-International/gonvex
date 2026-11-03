@@ -1465,7 +1465,8 @@ async fn websocket(
     let mut feed_scheduler = FeedFirstScheduler::default();
     let mut sent_replica_revision = 0u64;
     let mut sent_zero_bootstrap_watermark = false;
-    let mut replicas = BTreeMap::new();
+    // Removed and dropped subscriptions are freed on the offload pool.
+    let mut replicas = offload::RetiringMap::default();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     // Retain at most one decoded, transport-size-bounded frame. While it waits
     // for preparation capacity, stop reading further frames (TCP backpressure).

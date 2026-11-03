@@ -513,7 +513,10 @@ impl ParentAclRegistry {
                 previous.poison();
             }
         }
-        tokio::spawn(run_applier(receiver, index.clone(), shape));
+        tokio::spawn(gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::Feed,
+            run_applier(receiver, index.clone(), shape),
+        ));
         Ok(index)
     }
 

@@ -103,7 +103,8 @@ async fn stop_probes(probes: Probes, name: &str, mut extra: serde_json::Map<Stri
         .unwrap();
     let polls = stalls::stop_recording();
     let profiler = profiler_view();
-    let polls = Summary::of(polls.into_iter().map(u64::from).collect());
+    let poll_cpu = Summary::of(polls.iter().map(|poll| u64::from(poll.1)).collect());
+    let polls = Summary::of(polls.into_iter().map(|poll| u64::from(poll.0)).collect());
     let lag = Summary::of(lag);
     let echo = Summary::of(echo);
     let pool = offload();
@@ -116,6 +117,7 @@ async fn stop_probes(probes: Probes, name: &str, mut extra: serde_json::Map<Stri
         "lag": lag.to_json(),
         "echo": echo.to_json(),
         "networkPolls": polls.to_json(),
+        "networkPollsCpu": poll_cpu.to_json(),
         "profiler": profiler,
         "extra": extra,
     });
@@ -130,7 +132,10 @@ async fn stop_probes(probes: Probes, name: &str, mut extra: serde_json::Map<Stri
         polls.max_us,
         polls.over_5ms
     );
-    println!("{name:<28} profiler {profiler}");
+    println!(
+        "{name:<28} poll CPU p99 {} us max {} us >5ms {} | profiler {profiler}",
+        poll_cpu.p99_us, poll_cpu.max_us, poll_cpu.over_5ms
+    );
     println!("STALL_JSON {line}");
     if let Ok(path) = std::env::var("BENCH_JSON_OUT") {
         use std::io::Write;
@@ -219,6 +224,8 @@ async fn run() {
                     .lock()
                     .unwrap()
                     .push(started.elapsed().as_micros() as u64);
+                // A closed subscription is freed as the socket loop frees it.
+                gonvex_runtime::offload::retire(opened.subscription);
                 opened.rows
             }))));
         }
@@ -238,7 +245,9 @@ async fn run() {
     if scenarios.contains("fanout") {
         // (b) task updates into the 78-member tenant, every member holding
         // all 10 subscriptions, each connection its own task.
-        let rate: f64 = env("STALL_UPDATE_RATE", 4.0);
+        // STALL_FANOUT=presence: presence beats (the 89% case) instead.
+        let presence = std::env::var("STALL_FANOUT").is_ok_and(|kind| kind == "presence");
+        let rate: f64 = env("STALL_UPDATE_RATE", if presence { 20.0 } else { 4.0 });
         let connections = fixture.connect_all(BIG).await.unwrap();
         let (sender, _) = tokio::sync::broadcast::channel(256);
         let counters = Arc::new(stalls::FanoutCounters::default());
@@ -270,11 +279,15 @@ async fn run() {
         let mut updates = 0;
         while Instant::now() < deadline {
             interval.tick().await;
-            let task = (updates * 7919 + 13) % tasks;
-            let event = fixture
-                .update_task(BIG, task, json!({"description": format!("update {updates}")}))
-                .await
-                .unwrap();
+            let event = if presence {
+                fixture.beat_presence(BIG, updates % members).await.unwrap()
+            } else {
+                let task = (updates * 7919 + 13) % tasks;
+                fixture
+                    .update_task(BIG, task, json!({"description": format!("update {updates}")}))
+                    .await
+                    .unwrap()
+            };
             let _ = sender.send((Instant::now(), event));
             updates += 1;
         }
@@ -292,7 +305,8 @@ async fn run() {
         extra.insert("messages".into(), json!(counters.messages.load(Relaxed)));
         extra.insert("errors".into(), json!(counters.errors.load(Relaxed)));
         extra.insert("deliveryLatency".into(), Summary::of(latencies).to_json());
-        stop_probes(probes, &format!("stall/fanout_{rate}_updates_per_s"), extra).await;
+        let kind = if presence { "presence_beats" } else { "task_updates" };
+        stop_probes(probes, &format!("stall/fanout_{rate}_{kind}_per_s"), extra).await;
         drop(sender);
         for handle in loops {
             drop(handle.await.unwrap());

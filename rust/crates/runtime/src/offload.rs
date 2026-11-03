@@ -17,9 +17,9 @@
 //!   exist for the comparison in docs/performance/offload.md.
 //! - `GONVEX_OFFLOAD_THREADS`: pool threads (default: available CPUs, 1..=4).
 //! - `GONVEX_OFFLOAD_NICE`: nice increment of pool threads (default 10, 0 off).
-//! - `GONVEX_OFFLOAD_MIN_US`: feed applications whose measured average for the
+//! - `GONVEX_OFFLOAD_MIN_US`: feed applications whose recent maximum for the
 //!   same set of tables is below this run inline (default 250 us): a pool round
-//!   trip costs tens of microseconds, more than a small presence delta.
+//!   trip costs ~6-12 us plus a session clone, more than a small presence delta.
 //! - `GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`: concurrent snapshot builds
 //!   (default: available CPUs, min 2).
 //! - `GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES`: estimated decoded snapshot JSON
@@ -75,7 +75,8 @@ pub struct Offload {
     runtime: Option<tokio::runtime::Runtime>,
     blocking: Arc<tokio::sync::Semaphore>,
     jobs: Option<Mutex<std::sync::mpsc::Sender<Job>>>,
-    /// Average feed-application time per table set (see `GONVEX_OFFLOAD_MIN_US`).
+    /// Decaying maximum feed-application time per table set
+    /// (see `GONVEX_OFFLOAD_MIN_US`).
     apply_cost: Mutex<HashMap<Box<str>, Duration>>,
 }
 
@@ -260,6 +261,21 @@ impl Offload {
         }
     }
 
+    /// Runs `work` on the pool without waiting for it (never cancelled).
+    pub fn detach<W: FnOnce() + Send + 'static>(&self, work: W) {
+        match self.strategy {
+            Strategy::Inline => work(),
+            Strategy::Runtime => {
+                drop(self.runtime.as_ref().unwrap().spawn(async move { work() }));
+            }
+            Strategy::Blocking => match tokio::runtime::Handle::try_current() {
+                Ok(handle) => drop(handle.spawn_blocking(work)),
+                Err(_) => work(),
+            },
+            Strategy::Threads => self.submit(Box::new(work)),
+        }
+    }
+
     fn submit(&self, job: Job) {
         self.jobs
             .as_ref()
@@ -286,8 +302,11 @@ impl Offload {
             costs.clear();
         }
         let cost = costs.entry(tables.into()).or_insert(elapsed);
-        // Exponential average, weight 1/8 for the newest sample.
-        *cost = (*cost * 7 + elapsed) / 8;
+        // A slowly decaying maximum, not an average: the same table set is
+        // cheap for most connections and tens of milliseconds for a few (an
+        // average let those run inline). One slow sample keeps the set
+        // offloaded for ~5,000 applications at the default threshold.
+        *cost = elapsed.max(*cost - *cost / 1024);
     }
 }
 
@@ -379,6 +398,58 @@ impl Runtime {
         pool.record_apply(&tables, elapsed);
         *subscriptions = owned;
         result
+    }
+}
+
+/// Frees `value` on the pool. Dropping a replica subscription frees its row
+/// maps and, for its last holder, the interned rows: up to ~100 ms of CPU for
+/// a 9,000-row collection, which must not run on the network thread.
+pub fn retire<T: Send + 'static>(value: T) {
+    offload().detach(move || drop(value));
+}
+
+/// A socket's replica subscriptions. `clear`, `remove` and dropping the map
+/// hand the removed subscriptions to [`retire`]; everything else is the map.
+pub(crate) struct RetiringMap<K: Ord + Send + 'static, V: Send + 'static>(BTreeMap<K, V>);
+
+impl<K: Ord + Send + 'static, V: Send + 'static> Default for RetiringMap<K, V> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+impl<K: Ord + Send + 'static, V: Send + 'static> RetiringMap<K, V> {
+    pub(crate) fn clear(&mut self) {
+        if !self.0.is_empty() {
+            retire(std::mem::take(&mut self.0));
+        }
+    }
+
+    pub(crate) fn remove<Q>(&mut self, key: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.0.remove(key).map(retire).is_some()
+    }
+}
+
+impl<K: Ord + Send + 'static, V: Send + 'static> std::ops::Deref for RetiringMap<K, V> {
+    type Target = BTreeMap<K, V>;
+    fn deref(&self) -> &BTreeMap<K, V> {
+        &self.0
+    }
+}
+
+impl<K: Ord + Send + 'static, V: Send + 'static> std::ops::DerefMut for RetiringMap<K, V> {
+    fn deref_mut(&mut self) -> &mut BTreeMap<K, V> {
+        &mut self.0
+    }
+}
+
+impl<K: Ord + Send + 'static, V: Send + 'static> Drop for RetiringMap<K, V> {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
