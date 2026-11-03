@@ -47,12 +47,13 @@ const result = {
   targetUsers: sum('targetUsers'),
   connectedUsers: sum('connectedUsers'),
   snapshots: parts.flatMap(p => p.snapshots || []),
+  visibilityChecks: parts.reduce((a, p) => { for (const [k, v] of Object.entries(p.visibilityChecks || {})) a[k] = (a[k] || 0) + v; return a; }, {}),
   pathLatencyMs: Object.fromEntries(Object.entries(paths).map(([k, p]) => [k, { samples: p.durations.length, errors: p.errors, ...quantiles(p.durations) }])),
   errors,
   latencyMs,
   steadyLatencyMs,
 };
 const rule = passRule({ ...result, latencyMs: steadyLatencyMs });
-Object.assign(result, { clientSloPassed: rule.passed, errorRate: rule.errorRate, failingKinds: rule.failingKinds });
+Object.assign(result, { clientSloPassed: rule.passed && !(result.visibilityChecks.mismatched > 0), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
 writeFileSync(partial ? out + '.partial.json' : out, JSON.stringify(result, null, 2));
 console.log(JSON.stringify({ merged: parts.length, of: count, connectedUsers: result.connectedUsers, passed: result.clientSloPassed }));

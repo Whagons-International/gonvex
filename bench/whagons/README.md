@@ -191,3 +191,69 @@ only the runtime between settings and await its health before starting users.
 measured before the SQLite storage change with the earlier pass rule (zero
 errors; save and task-delivery p95 under 1 s). Its Mac runner targeted the
 PostgreSQL stack and was replaced by the portable lab above.
+
+## Action mix and fixture (2026-11-03)
+
+Derived from the load-realism audit of 14 days of production client telemetry
+(765k events, read-only) and the production-v2 tenant sizes, then made heavier
+than production on the expensive paths at Gabriel's direction: editing,
+creating, approvals and permission changes. Production peaks near 12
+concurrent web clients, so every lab point above that is already a stress
+multiple.
+
+**Tenants.** Task counts follow production-v2: 8,850 / 4,038 / 4,010 / 3,273 /
+3,073 / 3,043 / 2,178 / 2,130 / 2,005 / 1,866 / 930 / 700, then 14 small
+tenants. Synthetic rows carry a ~400-byte description. Users are spread with
+the production write skew 39/39/11/6/2/2/1 % over the first seven tenants;
+`LOAD_ALL_TENANTS_ACTIVE=true` spreads them evenly over all 26 as a stress
+profile.
+
+**Visibility.** `fill.py` adds per tenant 4 parent spots with 3 children
+each, teams T1–T3, a second workspace B (teams T2/T3; A has T0/T1) and an
+approval category whose rule (`ON_CREATE`) has three user approvers. 30 % of
+tasks live in B and 15 % have no spot. `staff.py` makes, per tenant, two
+admins (all teams, all spots), three approvers, and members with one or two
+teams and one or two parent spots; about one in seven sees all spots.
+
+**Foreground mix** (weights in percent, after the think time measured in
+production; heartbeats, support heartbeats and presence transitions run on
+their own timers as in the app):
+
+| Group | Actions |
+|---|---|
+| Reads 25 | task details 15 (subscribes task, notes, logs, views, approvals, findings, assignees, custom fields for a dwell, then unsubscribes; records the view), workspace switch 4, notifications 3, workspace chat 3 |
+| Edits 40 | description 8, due date via `tasks.update` 6, rename 4, priority 4, reschedule 4, start 5, status transition 4, tag add/remove 3, spot move 2 |
+| Assignments 5 | `taskResources.assignUser` to another member (grants visibility) |
+| Creates 20 | task 6 (A or B, with a spot), comment 8, relation 2, workspace chat message 4 |
+| Approvals 10 | task in the approval category 6, approver decision 4 |
+
+Not modelled: forms, signatures, findings and uploads need fixture rows or
+storage the lab does not seed (forms, storage objects).
+
+**Permission changes.** Each admin makes one change every 2–5 minutes against
+an ordinary member in the same generator process: add/remove a spot,
+add/remove a team, share a task the member cannot see (half revoked a minute
+later), assign it to them, or move one of their tasks to another spot. One
+reorganization per run reassigns ~50 tasks to one member and adds them to
+another team.
+
+**Visibility oracle.** After every change, a fresh session for the affected
+member computes their rows from scratch; their long-lived replica must
+converge to exactly that set. `visibility` samples the time from the change to
+convergence when the change altered the member's rows. A difference after
+15 s (leaked or missing rows) is an error and fails the run regardless of the
+error budget. `visibilityChecks` counts checks, convergences, no-op changes and
+mismatches.
+
+**Reconnect wave.** About 30 % of users drop and re-open their session within
+10 s at the middle of the plateau (`reconnect` measures sign-in to a complete
+task replica).
+
+**Measures.** Capacity uses the challenge rule on the steady plateau
+(p95 < 500 ms, p99 < 1 s per kind, < 1 % failed operations, every user
+connected, no visibility mismatch). `show.py` also reports fixed-load targets
+(save and reducer p95 < 50 ms / p99 < 100 ms, delivery p95 < 100 ms, heartbeat
+p95 < 20 ms) and the initial task load against a 1 s target. On Docker Desktop
+for macOS, `fdatasync` on the state volume measured p50 0.43 ms / p95 1.9 ms,
+far below a Linux server's disk, so save latency there understates the cost of
+durable commits.

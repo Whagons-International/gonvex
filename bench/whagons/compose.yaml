@@ -84,7 +84,9 @@ services:
   # while the runtime is stopped.
   tools:
     profiles: [tools]
-    image: python:3.13-slim-bookworm
+    # trixie ships SQLite 3.46; bookworm's 3.40 overflows its parser stack on
+    # the Whagons task grid projection schema.
+    image: python:3.13-slim-trixie
     container_name: gvsq-tools
     network_mode: none
     user: '${LOAD_UID:-0}:${LOAD_GID:-0}'
