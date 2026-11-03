@@ -102,7 +102,9 @@ With `module.split`, `gonvex` emits next to the unchanged `module.javascript` (c
 
 - The bundler generates a virtual entry that imports each Query/Reducer export from its defining file
   and re-exports it **under its exact function path** (`export { beat as "presence.beat" }`), so
-  rolldown drops Action-only exports and whatever only they import.
+  rolldown drops Action-only exports and whatever only they import. The reducer build treats
+  `action(...)` calls as pure (`treeshake.manualPureFunctions`), so unused Action definitions in a
+  file that also holds Reducers drop out; the complete bundle still evaluates and validates them.
 - Hosts resolve `reducerBundle` functions **by path only**. (The complete bundle's resolver tries the
   `export` name on the entry namespace first; in Whagons 41 replica Queries such as `calling.settings`
   collide with an unrelated top-level namespace (`settings`). They are runtime-served replica Queries,
