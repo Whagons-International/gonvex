@@ -1709,7 +1709,7 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
         "reactiveDelayedByBootstrap":0,
     });
     Some(
-        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs,"profiler":crate::profiling::summary_json(runtime)}),
+        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs,"profiler":crate::profiling::summary_json()}),
     )
 }
 

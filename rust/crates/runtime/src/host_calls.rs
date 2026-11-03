@@ -1193,6 +1193,8 @@ mod tests {
             deferred_ordinals: BTreeMap::new(),
             fault: Default::default(),
             aborted: false,
+            profile_label: gonvex_profiler::Label::None,
+            writer_wait_ns: 0,
         };
         let mut calls = calls;
         assert_eq!(
@@ -1229,6 +1231,8 @@ mod tests {
             deferred_ordinals: BTreeMap::new(),
             fault: Default::default(),
             aborted: false,
+            profile_label: gonvex_profiler::Label::None,
+            writer_wait_ns: 0,
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());

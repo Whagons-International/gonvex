@@ -201,7 +201,7 @@ pub fn profile_json(runtime: &crate::Runtime) -> Value {
 }
 
 /// Compact summary embedded in `/dev/metrics` (no buckets, no ring).
-pub fn summary_json(runtime: &crate::Runtime) -> Value {
+pub fn summary_json() -> Value {
     let stages = gonvex_profiler::snapshot()
         .into_iter()
         .map(|stage| {
@@ -224,4 +224,24 @@ pub fn summary_json(runtime: &crate::Runtime) -> Value {
         "watchdog": {"probeSilentMs": ms(silent_ns), "stalls": stalls},
         "longPolls": gonvex_profiler::long_poll_total(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn summary_reports_recorded_stages_and_gauges() {
+        gonvex_profiler::set_enabled(true);
+        gonvex_profiler::record(
+            gonvex_profiler::Stage::FnTotal,
+            gonvex_profiler::Label::Heartbeat,
+            2_000_000,
+        );
+        let summary = super::summary_json();
+        let stages = summary["stages"].as_array().unwrap();
+        assert!(stages
+            .iter()
+            .any(|stage| stage["stage"] == "fn.total" && stage["label"] == "heartbeat"));
+        assert!(summary["gauges"]["module_host.inflight"]["current"].is_i64());
+        assert!(summary["gauges"]["snapshot.permits_available"]["current"].is_u64());
+    }
 }
