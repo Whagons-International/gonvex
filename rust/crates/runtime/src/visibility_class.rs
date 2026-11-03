@@ -476,6 +476,11 @@ impl CompiledPlan {
         &self.columns
     }
 
+    /// Whether the plan inherits visibility from parent rows.
+    pub fn has_inherits(&self) -> bool {
+        !self.inherits.is_empty()
+    }
+
     /// Why this plan falls back to the interpreted evaluator, if it does.
     pub fn unsupported(&self) -> Option<&str> {
         self.unsupported.as_deref()
@@ -1442,6 +1447,27 @@ impl MemberVisibility {
                 .sum::<usize>()
     }
 
+    /// Whether any member atom exists (here or on an inherited parent). A
+    /// member without one is never hit: it always sees its class default.
+    pub fn has_member_atoms(&self) -> bool {
+        self.has_member_atoms
+    }
+
+    /// `hit` for a change row that outlives `memo` (decoded once per scope).
+    pub fn hit_memo(&self, memo: &mut EvalMemo, row: &Value) -> bool {
+        if !self.has_member_atoms {
+            return false;
+        }
+        let scope = &self.class.scope;
+        let row_key = row as *const Value as usize;
+        let decoded = memo
+            .rows
+            .entry((Arc::as_ptr(scope) as usize, row_key))
+            .or_insert_with(|| AclRow::from_value(row, &self.class.plan.columns).into_owned());
+        decoded.current(scope);
+        self.hit(decoded)
+    }
+
     /// Is some member atom true on this row (directly or on a parent row)?
     /// When false, the member sees exactly what its class's default sees.
     pub fn hit(&self, row: &AclRow<'_>) -> bool {
@@ -1882,6 +1908,11 @@ pub struct ScopeStats {
 pub struct HandleCache(Option<MemberHandle>);
 
 impl HandleCache {
+    /// The cached binding, if one was built.
+    pub fn peek(&self) -> Option<&MemberHandle> {
+        self.0.as_ref()
+    }
+
     pub fn get(
         &mut self,
         plan: &VisibilityPlan,
