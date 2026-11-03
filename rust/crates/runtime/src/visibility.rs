@@ -40,7 +40,14 @@ pub struct VisibilityPlan {
 /// asked for it per subscription per change, walking the whole predicate
 /// each time (the largest CPU cost at 200 Whagons users).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ActiveSetsCache(Arc<std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>>);
+pub(crate) struct ActiveSetsCache(Arc<PlanCaches>);
+
+#[derive(Debug, Default)]
+pub(crate) struct PlanCaches {
+    sets: std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>,
+    /// `inherited_columns`, fixed per plan; read per subscription per change.
+    inherited: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1163,6 +1170,14 @@ impl VisibilityPlan {
 
     /// Child columns that reference each directly inherited parent table.
     pub fn inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+        self.active_sets_cache
+            .0
+            .inherited
+            .get_or_init(|| self.compute_inherited_columns())
+            .clone()
+    }
+
+    fn compute_inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
         fn visit(
             expression: &VisibilityExpression,
             output: &mut BTreeMap<String, BTreeSet<String>>,
@@ -1381,7 +1396,7 @@ fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool
 /// Sets a predicate references for this role, plus every set a `derived`
 /// set maps from, transitively.
 fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
-    let cache = &plan.active_sets_cache.0;
+    let cache = &plan.active_sets_cache.0.sets;
     if let Some(sets) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(role) {
         return sets.clone();
     }
