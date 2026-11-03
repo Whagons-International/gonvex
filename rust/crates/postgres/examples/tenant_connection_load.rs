@@ -85,7 +85,7 @@ async fn main() {
         max_total_connections: 20,
         max_connections_per_database: if single { 1 } else { 2 },
         max_idle_connections_per_database: if warm_two { 2 } else { 1 },
-        idle_timeout: Duration::from_secs(1),
+        idle_timeout: PoolLimits::default().idle_timeout,
         acquire_timeout: Duration::from_secs(30),
     });
     let mut listeners = Vec::new();

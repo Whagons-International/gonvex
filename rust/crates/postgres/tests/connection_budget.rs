@@ -106,3 +106,35 @@ async fn listeners_are_counted_without_pinning_sql_admission() {
     assert_eq!(registry.snapshot().await.listener_connections, 0);
     registry.close().await;
 }
+
+#[tokio::test]
+async fn default_pools_reuse_both_connections_across_idle_bursts() {
+    let Some(base) = local_url() else { return };
+    let registry = PoolRegistry::new(PoolLimits::default());
+    let pool = registry.pool(&base).await.unwrap();
+    let mut first = Vec::new();
+    for burst in 0..3 {
+        let mut a = pool.acquire().await.unwrap();
+        let mut b = pool.acquire().await.unwrap();
+        let mut pids = vec![
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&mut *a)
+                .await
+                .unwrap(),
+            sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+                .fetch_one(&mut *b)
+                .await
+                .unwrap(),
+        ];
+        pids.sort();
+        if burst == 0 {
+            first = pids;
+        } else {
+            assert_eq!(pids, first, "idle bursts must reuse both backend sessions");
+        }
+        drop((a, b));
+        // Cross the former one-second expiry on each burst.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+    registry.close().await;
+}

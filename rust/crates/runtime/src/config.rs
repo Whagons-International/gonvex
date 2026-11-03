@@ -30,6 +30,7 @@ pub struct Config {
     pub database_max_total_connections: usize,
     pub database_max_connections: u32,
     pub database_max_idle_connections: u32,
+    pub database_idle_timeout: Duration,
     pub module_host: ModuleHostConfig,
     pub runtime_version: String,
     pub sandbox: SandboxConfig,
@@ -228,6 +229,11 @@ impl Config {
                 lookup("GONVEX_DB_MAX_IDLE_CONNS"),
                 2,
             )? as u32,
+            database_idle_timeout: duration_ms(
+                "GONVEX_DB_IDLE_TIMEOUT_MS",
+                lookup("GONVEX_DB_IDLE_TIMEOUT_MS"),
+                60_000,
+            )?,
             module_host: ModuleHostConfig {
                 enabled: boolean(
                     "GONVEX_MODULE_HOST_ENABLED",
@@ -650,6 +656,21 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_owned()))
         })
+    }
+
+    #[test]
+    fn database_idle_timeout_is_configurable() {
+        assert_eq!(
+            config(&[]).unwrap().database_idle_timeout,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1500")])
+                .unwrap()
+                .database_idle_timeout,
+            Duration::from_millis(1500)
+        );
+        assert!(config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "0")]).is_err());
     }
 
     #[test]

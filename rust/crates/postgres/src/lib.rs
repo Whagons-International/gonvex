@@ -46,7 +46,7 @@ impl Default for PoolLimits {
             max_total_connections: DEFAULT_MAX_TOTAL_CONNECTIONS,
             max_connections_per_database: DEFAULT_MAX_CONNECTIONS_PER_DATABASE,
             max_idle_connections_per_database: 2,
-            idle_timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(60),
             acquire_timeout: Duration::from_secs(30),
         }
     }

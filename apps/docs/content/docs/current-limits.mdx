@@ -91,7 +91,10 @@ Query pools default to two connections per database and zero minimum connections
 `GONVEX_DB_MAX_IDLE_CONNS` defaults to two and is enforced on release, including
 concurrent releases. The release check conservatively counts active connections,
 so a busy pool may close a released connection even before it becomes idle.
-Idle connections expire after one second; connection lifetime is 30 minutes.
+Idle connections expire after 60 seconds by default, configurable with
+`GONVEX_DB_IDLE_TIMEOUT_MS`. Retain idle connections equal to the pool maximum
+for bursty traffic; a smaller idle cap closes connections on release and can
+force reconnection on every burst. Connection lifetime is 30 minutes.
 
 LISTEN sessions use dedicated connections outside SQL admission. Metrics include
 these in `openConnections` and report them separately as `listenerConnections`.

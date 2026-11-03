@@ -220,6 +220,7 @@ impl Runtime {
             max_total_connections: config.database_max_total_connections,
             max_connections_per_database: config.database_max_connections,
             max_idle_connections_per_database: config.database_max_idle_connections,
+            idle_timeout: config.database_idle_timeout,
             ..PoolLimits::default()
         });
         let change_feeds = change_feed::ChangeFeedHub::new(pools.clone());
@@ -4573,6 +4574,7 @@ mod tests {
             database_max_total_connections: 20,
             database_max_connections: 2,
             database_max_idle_connections: 1,
+            database_idle_timeout: std::time::Duration::from_secs(60),
             module_host: ModuleHostConfig {
                 enabled,
                 binary: None,
