@@ -4358,7 +4358,7 @@ mod tests {
                         key: "id".into(),
                         cursor: cursor.clone(),
                         result: (0..1000)
-                            .map(|id| serde_json::json!({"id":id,"body":"x".repeat(1000)}))
+                            .map(|id| std::sync::Arc::new(serde_json::json!({"id":id,"body":"x".repeat(1000)})))
                             .collect(),
                         metadata: std::collections::BTreeMap::from([(
                             "pageDigest".into(),
