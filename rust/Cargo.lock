@@ -1520,6 +1520,7 @@ dependencies = [
  "deno_core",
  "futures-util",
  "gonvex-module-runtime",
+ "libc",
  "pkcs1",
  "rand 0.8.7",
  "ring",

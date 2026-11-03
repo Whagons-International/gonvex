@@ -64,6 +64,12 @@ type ProjectConfig = {
     /** Project-relative ESM output path under gonvex/_build. */
     bundle?: string;
     /**
+     * Also emit a Query/Reducer-only bundle (`reducerBundle`) so hosts can run
+     * Queries and Reducers without loading Action-only code. Actions keep
+     * running from the complete bundle. Default false.
+     */
+    split?: boolean;
+    /**
      * Project-relative tsconfig whose compiler options (paths, module
      * resolution) apply to the backend. Used by the local Reducer dependency
      * analysis; defaults to gonvex/tsconfig.json, then tsconfig.json.
@@ -1285,6 +1291,7 @@ async function buildManifest(root: string, sources: BackendSources, projectID: s
       migrations: await migrationFiles(join(root, "migrations")),
       entrypoint: sources.config.module?.entrypoint,
       bundle: sources.config.module?.bundle,
+      split: sources.config.module?.split === true,
     });
   const functions = moduleManifestFunctions(module);
   await applyLocalDependencies(root, sources, functions);
