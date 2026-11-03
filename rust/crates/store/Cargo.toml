@@ -19,3 +19,9 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+# Thread-model comparison in examples/sqlite_writer_bench.rs only; links the
+# same libsqlite3-sys as sqlx.
+rusqlite = { version = "=0.32.1", default-features = false }
