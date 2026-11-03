@@ -250,6 +250,14 @@ pub struct RuntimeManifestRecord {
     pub manifest: Value,
 }
 
+/// Which outbox rows `claim_outbox` may claim.
+#[derive(Clone, Copy, Debug)]
+pub enum OutboxClaim<'a> {
+    Any,
+    Path(&'a str),
+    NotPath(&'a str),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClaimedAction {
     pub id: String,
@@ -1111,6 +1119,51 @@ impl ControlPlane {
         &self,
         route: &TenantRoute,
     ) -> Result<Option<ClaimedAction>, DatabaseError> {
+        self.claim_outbox(route, OutboxClaim::Any).await
+    }
+
+    /// Whether due (or lease-expired) outbox rows exist: `(rows whose path
+    /// is `path`, all other rows)`. Read-only; lets the drainer skip writer
+    /// claims for a tenant with nothing to do.
+    pub async fn outbox_due(
+        &self,
+        route: &TenantRoute,
+        path: &str,
+    ) -> Result<(bool, bool), DatabaseError> {
+        let pool = self.pools.pool(&route.database_url).await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
+        let row = sqlx::query(concat!(
+            r#"SELECT COALESCE(MAX(action_path = $1), 0) AS matching,
+                      COALESCE(MAX(action_path <> $1), 0) AS other
+               FROM _gonvex_action_outbox
+               WHERE (status = 'pending' AND available_at <= "#,
+            now_ms!(),
+            r#")
+                  OR (status = 'processing' AND locked_at < "#,
+            now_ms!(),
+            r#" - 300000)"#
+        ))
+        .bind(path)
+        .fetch_one(&pool)
+        .await?;
+        Ok((
+            row.get::<i64, _>("matching") != 0,
+            row.get::<i64, _>("other") != 0,
+        ))
+    }
+
+    /// Claims the next due outbox row of one kind: `Path(p)` only rows whose
+    /// path is `p`, `NotPath(p)` every other row.
+    pub async fn claim_outbox(
+        &self,
+        route: &TenantRoute,
+        claim: OutboxClaim<'_>,
+    ) -> Result<Option<ClaimedAction>, DatabaseError> {
+        let (path, want_match) = match claim {
+            OutboxClaim::Any => (None, true),
+            OutboxClaim::Path(path) => (Some(path), true),
+            OutboxClaim::NotPath(path) => (Some(path), false),
+        };
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
         let row = sqlx::query(concat!(
@@ -1119,18 +1172,21 @@ impl ControlPlane {
             r#", attempts = attempts + 1
                WHERE id = (
                  SELECT id FROM _gonvex_action_outbox
-                 WHERE (status = 'pending' AND available_at <= "#,
+                 WHERE ((status = 'pending' AND available_at <= "#,
             now_ms!(),
             r#")
                     OR (status = 'processing' AND locked_at < "#,
             now_ms!(),
-            r#" - 300000)
+            r#" - 300000))
+                   AND ($1 IS NULL OR (action_path = $1) = $2)
                  ORDER BY available_at, created_at LIMIT 1)
                RETURNING id, action_path, args,
                          COALESCE(actor_user_id, '') AS actor_account_id,
                          COALESCE(actor_email, '') AS actor_email,
                          attempts AS next_attempt, provenance"#
         ))
+        .bind(path)
+        .bind(want_match)
         .fetch_optional(&pool)
         .await?;
         Ok(row.map(|row| ClaimedAction {

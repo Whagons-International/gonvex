@@ -140,6 +140,8 @@ pub(crate) struct ScheduledLane {
     permits: Arc<Semaphore>,
     tenants: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     handle: OnceLock<Option<tokio::runtime::Handle>>,
+    /// Dropping the lane drops this sender, which ends the thread.
+    stop_thread: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl ScheduledLane {
@@ -149,6 +151,7 @@ impl ScheduledLane {
             config,
             tenants: Mutex::new(HashMap::new()),
             handle: OnceLock::new(),
+            stop_thread: Mutex::new(None),
         }
     }
 
@@ -201,6 +204,11 @@ impl ScheduledLane {
             return None;
         }
         let nice = self.config.nice;
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        *self
+            .stop_thread
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(stop);
         let (sender, receiver) = std::sync::mpsc::channel();
         let started = std::thread::Builder::new()
             .name("gonvex-scheduled".to_owned())
@@ -219,7 +227,8 @@ impl ScheduledLane {
                     }
                 };
                 let _ = sender.send(Some(runtime.handle().clone()));
-                runtime.block_on(std::future::pending::<()>());
+                // Until the lane (and so its runtime) is dropped.
+                let _ = runtime.block_on(stopped);
             });
         match started {
             Ok(_) => receiver.recv().ok().flatten(),

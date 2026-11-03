@@ -292,6 +292,42 @@ impl Drop for IsolateWorker {
     }
 }
 
+/// Isolate threads alive now (started, not yet torn down), process-wide.
+static LIVE_ISOLATES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Of those, isolates of a complete bundle (an unsplit artifact, or the
+/// on-demand Action bundle of a split one).
+static LIVE_COMPLETE_ISOLATES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// `(all, complete bundle)` isolate threads alive in this process.
+pub fn live_isolates() -> (usize, usize) {
+    (
+        LIVE_ISOLATES.load(Ordering::Relaxed),
+        LIVE_COMPLETE_ISOLATES.load(Ordering::Relaxed),
+    )
+}
+
+struct LiveIsolate(bool);
+
+impl LiveIsolate {
+    fn enter(complete: bool) -> Self {
+        LIVE_ISOLATES.fetch_add(1, Ordering::Relaxed);
+        if complete {
+            LIVE_COMPLETE_ISOLATES.fetch_add(1, Ordering::Relaxed);
+        }
+        Self(complete)
+    }
+}
+
+impl Drop for LiveIsolate {
+    fn drop(&mut self) {
+        LIVE_ISOLATES.fetch_sub(1, Ordering::Relaxed);
+        if self.0 {
+            LIVE_COMPLETE_ISOLATES.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn worker_main(
     source: Arc<ModuleSource>,
     config: V8Config,
@@ -302,6 +338,7 @@ fn worker_main(
     // Declared first, so the runtime and test teardown guard drop before this
     // releases the retired worker's permit, including on early return/panic.
     let _exit = WorkerExit(Arc::clone(&control));
+    let _live = LiveIsolate::enter(!source.resolve_by_path);
     #[cfg(test)]
     let _lifetime = {
         source.probe.started.fetch_add(1, Ordering::SeqCst);

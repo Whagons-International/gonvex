@@ -119,6 +119,10 @@ fn parse_options() -> Result<Option<Options>, String> {
         }
     }
 
+    if let Ok(value) = std::env::var("GONVEX_MODULE_HOST_ON_DEMAND_ACTIONS") {
+        config.v8.on_demand_actions = !matches!(value.trim(), "0" | "false" | "off");
+    }
+
     let mut args = std::env::args().skip(1);
     while let Some(argument) = args.next() {
         let mut value = || {

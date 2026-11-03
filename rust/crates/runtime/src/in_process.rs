@@ -47,6 +47,15 @@ pub(crate) fn host_state(config: &ModuleHostConfig) -> Arc<HostState> {
             execution_timeout: config.execution_timeout,
             action_execution_timeout: config.action_execution_timeout,
             isolate_pool_size: config.isolate_pool_size,
+            // Same knobs as the separate module host's environment.
+            on_demand_idle_ttl: std::env::var("GONVEX_MODULE_HOST_ON_DEMAND_IDLE_MS")
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map_or(defaults.on_demand_idle_ttl, Duration::from_millis),
+            on_demand_actions: std::env::var("GONVEX_MODULE_HOST_ON_DEMAND_ACTIONS")
+                .map_or(defaults.on_demand_actions, |value| {
+                    !matches!(value.trim(), "0" | "false" | "off")
+                }),
             ..defaults
         },
     })

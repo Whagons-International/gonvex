@@ -1,4 +1,5 @@
 pub mod action_calls;
+mod action_gate;
 #[cfg(test)]
 mod bridge_bench;
 pub mod change_feed;
@@ -103,6 +104,10 @@ struct RuntimeInner {
     public_limiter: Arc<public_functions::PublicLimiter>,
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
+    /// Process-wide root-Action admission (`action_gate.rs`).
+    action_gate: Arc<action_gate::ActionGate>,
+    /// Tenants whose Action outbox the single drainer should visit.
+    outbox_queue: Arc<action_gate::OutboxQueue>,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -269,6 +274,8 @@ impl Runtime {
                 public_limiter: Arc::new(public_functions::PublicLimiter::default()),
                 visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 parent_acl: visibility::ParentAclRegistry::default(),
+                action_gate: action_gate::ActionGate::from_env(),
+                outbox_queue: Arc::default(),
             }),
         }
     }
@@ -4813,6 +4820,7 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    mod action_depth;
     mod receipt_guarantee_tests;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {

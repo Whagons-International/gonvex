@@ -184,6 +184,19 @@ impl Scheduler {
         });
     }
 
+    /// Runs work on the scheduled-work thread (low priority, never the
+    /// network worker).
+    pub(crate) fn spawn_on_lane<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.inner.lane.spawn(future);
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        *self.inner.stop.borrow()
+    }
+
     pub fn shutdown(&self) {
         let _ = self.inner.stop.send(true);
         self.inner.wake.notify_waiters();
@@ -534,7 +547,13 @@ impl Scheduler {
             .ok_or_else(|| "scheduled tenant is unavailable".to_owned())?;
         let mut provenance = serde_json::from_value::<InvocationProvenance>(job.provenance.clone())
             .unwrap_or_default();
-        let session = if let Some(account_id) = provenance.actor_account_id.as_deref() {
+        // Work queued by system work (a cron run's `runAfter`) carries the
+        // system actor, which has no account row to resolve.
+        let session = if let Some(account_id) = provenance
+            .actor_account_id
+            .as_deref()
+            .filter(|account| *account != crate::execution::SYSTEM_ACCOUNT_ID)
+        {
             control
                 .tenant_session_for_account(&job.project_id, &job.tenant_id, account_id)
                 .await
@@ -563,7 +582,11 @@ impl Scheduler {
         provenance.parent_command_id = Some(provenance.command_id.clone());
         provenance.command_id = job.id.clone();
         provenance.channel = InvocationChannel::Scheduler;
-        provenance.depth = provenance.depth.saturating_add(1);
+        // A durable hop: a fresh call at depth 0 (its parent finished and
+        // holds no isolate), counted so self-rescheduling chains still end.
+        provenance
+            .durable_hop(crate::execution::max_durable_hops())
+            .map_err(|error| error.to_string())?;
         match definition.kind.as_str() {
             "reducer" => runtime
                 .execute_tenant_reducer_with_access(

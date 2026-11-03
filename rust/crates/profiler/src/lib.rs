@@ -509,6 +509,8 @@ gauges! {
     WsSending => "ws.sending", "Connections blocked in an outbound socket write";
     OutboundFrames => "ws.outbound_frames", "Frames built for delivery but not yet written (sum over connections)";
     OutboundBatch => "ws.outbound_batch", "Largest per-connection delivery batch (peak only; current is always 0)";
+    ActionRunning => "action.running", "Root Actions holding the process-wide Action permit";
+    ActionWaiting => "action.waiting", "Root Actions waiting for the Action permit (outbox drains wait before claiming)";
 }
 
 pub const GAUGE_COUNT: usize = GAUGES_INFO.len();

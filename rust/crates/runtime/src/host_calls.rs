@@ -566,8 +566,11 @@ impl DatabaseHostCalls {
                 let provenance = self.provenance.clone();
                 let allocated_id = self.deferred_id("action");
                 let fault = self.fault.clone();
+                // The lazy Reducer writer opens here when the enqueue is the
+                // invocation's first write.
                 let id = self
-                    .transaction()?
+                    .ensure_transaction()
+                    .await?
                     .enqueue_action_with_id(
                         &allocated_id,
                         function,

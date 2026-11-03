@@ -336,6 +336,7 @@ impl ActionHostCalls {
                         provenance: Some(provenance),
                         module: Some(self.module.clone()),
                         committed_revisions: Some(self.committed_revisions.clone()),
+                        action_permit: None,
                     },
                 )
                 .await
@@ -357,6 +358,7 @@ impl ActionHostCalls {
                         provenance: Some(provenance),
                         module: Some(self.module.clone()),
                         committed_revisions: Some(self.committed_revisions.clone()),
+                        action_permit: None,
                     },
                 )
                 .await
