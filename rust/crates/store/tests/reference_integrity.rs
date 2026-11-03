@@ -86,7 +86,7 @@ impl Fixture {
 
     async fn run_on(&self, route: &TenantRoute, sql: &str) -> Result<(), DatabaseError> {
         let mut transaction = self.control.begin_tenant_transaction(route, false).await?;
-        execute_script(&mut **transaction.transaction(), sql).await?;
+        execute_script(transaction.transaction(), sql).await?;
         transaction.commit().await
     }
 
@@ -143,7 +143,7 @@ impl Fixture {
             .control
             .begin_tenant_transaction(&self.route, false)
             .await?;
-        reference_integrity::declare(&mut **transaction.transaction(), catalog).await?;
+        reference_integrity::declare(transaction.transaction(), catalog).await?;
         transaction.commit().await
     }
 

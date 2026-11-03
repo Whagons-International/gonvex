@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
 use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
 use gonvex_runtime::Runtime;
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
 use serde_json::Value;
 use sqlx::Row;
 use tower::ServiceExt;
@@ -93,9 +93,8 @@ async fn rust_operator_routes_preserve_data_and_membership_contracts() {
     let data = test_data_dir();
     let data_url = gonvex_store::database_url(data.path());
     let control_url = gonvex_store::database_url(&data.path().join("control.db"));
-    let tenant_url = gonvex_store::database_url(
-        &data.path().join("projects/project/tenants/tenant.db"),
-    );
+    let tenant_url =
+        gonvex_store::database_url(&data.path().join("projects/project/tenants/tenant.db"));
     let pools = PoolRegistry::new(PoolLimits::default());
     let control = ControlPlane::connect(&control_url, pools.clone(), BTreeMap::new())
         .await
@@ -378,12 +377,22 @@ async fn dashboard_sessions_follow_account_security_lifecycle() {
     valid(&runtime, &first, StatusCode::OK).await;
     save(&runtime, "replacement-password", "admin").await;
     valid(&runtime, &first, StatusCode::UNAUTHORIZED).await;
-    assert!(tokio::time::timeout(Duration::from_secs(10), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
-        .is_close());
+    // The rename may still deliver an update frame before the revoked session
+    // is closed; skip data frames until the close arrives.
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(frame)) if frame.is_text() => continue,
+                other => return other,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(closed, Some(Ok(ref frame)) if frame.is_close()),
+        "expected close, got {closed:?}"
+    );
     server.abort();
     let second = login_token(&runtime, "replacement-password").await;
     sqlx::query(

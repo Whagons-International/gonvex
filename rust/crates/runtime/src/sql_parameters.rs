@@ -159,9 +159,7 @@ mod tests {
         let values = serde_json::json!([" a ", "b"]);
         let rows = Parameters::scalars([&values])
             .unwrap()
-            .bind(sqlx::query(
-                "SELECT value FROM json_each($1) ORDER BY key",
-            ))
+            .bind(sqlx::query("SELECT value FROM json_each($1) ORDER BY key"))
             .fetch_all(&mut connection)
             .await
             .unwrap();
@@ -206,9 +204,21 @@ mod tests {
             sqlx::query(&format!("INSERT INTO {table} VALUES (0,'seed'),(1,'seed'),(7017280452245743464,'seed'),(4702394921427289928,'seed')"))
                 .execute(&mut connection).await.unwrap();
             let (statement, first, second) = match operation {
-                "delete" => (format!("DELETE FROM {table} WHERE id=$1"), vec![Value::from(0)], vec![Value::from("abcdefgh")]),
-                "update" => (format!("UPDATE {table} SET v=$1 WHERE id=$2 RETURNING *"), vec![Value::from("valid"),Value::from(0)], vec![Value::from("wrong"),Value::from("abcdefgh")]),
-                _ => (format!("DELETE FROM {table} WHERE id IN ($1,$2)"), vec![Value::from(0),Value::from(1)], vec![Value::from("abcdefgh"),Value::from("ABCDEFGH")]),
+                "delete" => (
+                    format!("DELETE FROM {table} WHERE id=$1"),
+                    vec![Value::from(0)],
+                    vec![Value::from("abcdefgh")],
+                ),
+                "update" => (
+                    format!("UPDATE {table} SET v=$1 WHERE id=$2 RETURNING *"),
+                    vec![Value::from("valid"), Value::from(0)],
+                    vec![Value::from("wrong"), Value::from("abcdefgh")],
+                ),
+                _ => (
+                    format!("DELETE FROM {table} WHERE id IN ($1,$2)"),
+                    vec![Value::from(0), Value::from(1)],
+                    vec![Value::from("abcdefgh"), Value::from("ABCDEFGH")],
+                ),
             };
             let mut transaction = connection.begin().await.unwrap();
             Parameters::scalars(&first)

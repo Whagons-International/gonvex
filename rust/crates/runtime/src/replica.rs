@@ -2,16 +2,16 @@
 
 #[path = "replica_mask.rs"]
 mod mask;
-use std::sync::Arc;
 use mask::MaskStep;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
-use gonvex_store::{TenantSession, TenantTransaction};
 use gonvex_protocol::replica_digest::ReplicaSetDigest;
 use gonvex_protocol::{
     PublicInvocationProvenance, ReplicaChange, ReplicaCursor, ReplicaOpenRequest, ServerMessage,
 };
+use gonvex_store::{TenantSession, TenantTransaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -171,14 +171,36 @@ pub struct ReplicaEntry {
     pub hash: RowHash,
     /// Shared with snapshot messages that send this row.
     pub row: Arc<Value>,
+    /// Encoded JSON length of `row`, computed once so byte budgets do not
+    /// re-serialize every row on every change.
+    pub bytes: i64,
+}
+
+/// Encoded JSON length of `value` without allocating the encoding.
+pub(crate) fn json_len(value: &Value) -> i64 {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0 as i64
 }
 
 impl ReplicaEntry {
-    /// An entry outside the interner (size projections and tests).
+    /// An entry outside the interner (tests).
+    #[cfg(test)]
     pub(crate) fn detached(key: &str, row: Value) -> SharedRow {
         Arc::new(Self {
             key: key.into(),
             hash: row_hash(&row).into(),
+            bytes: json_len(&row),
             row: Arc::new(row),
         })
     }
@@ -212,7 +234,13 @@ fn row_interner() -> &'static std::sync::Mutex<Interner> {
 
 /// The shared entry for `row` (identified by database, table, key and hash).
 /// A new row is moved in; a row some subscription already holds is dropped.
-pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row: Value) -> SharedRow {
+pub(crate) fn intern_row(
+    database: &str,
+    table: &str,
+    key: &str,
+    hash: &str,
+    row: Value,
+) -> SharedRow {
     let identity: Box<str> = format!("{database}\u{0}{table}\u{0}{key}\u{0}{hash}").into();
     let mut rows = row_interner().lock().unwrap();
     if let Some(shared) = rows.get(&identity).and_then(std::sync::Weak::upgrade) {
@@ -225,17 +253,11 @@ pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row
     let shared = Arc::new(ReplicaEntry {
         key: key.into(),
         hash: hash.into(),
+        bytes: json_len(&row),
         row: Arc::new(row),
     });
     rows.insert(identity, Arc::downgrade(&shared));
     shared
-}
-
-/// The key/hash map of `rows` (pointers into the shared entries).
-pub(crate) fn row_hashes(rows: &RowMap) -> RowHashes {
-    rows.values()
-        .map(|entry| (entry.key.clone(), entry.hash.clone()))
-        .collect()
 }
 
 struct Snapshot {
@@ -267,7 +289,11 @@ impl Runtime {
             .replica_snapshot(session, definition, visibility, args)
             .await?;
         Ok(Value::Array(
-            snapshot.rows.into_iter().map(Arc::unwrap_or_clone).collect(),
+            snapshot
+                .rows
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect(),
         ))
     }
 
@@ -561,7 +587,13 @@ impl Runtime {
             let hash = row_hash(&row);
             // Moves the decoded row into the interner (or drops it when an
             // identical row is already held), so it is never held twice.
-            let shared = intern_row(&session.route.database_url, &definition.table, &key, &hash, row);
+            let shared = intern_row(
+                &session.route.database_url,
+                &definition.table,
+                &key,
+                &hash,
+                row,
+            );
             hashes.insert(shared.key.clone(), shared.hash.clone());
             shared_rows.push(shared.row.clone());
             if by_key.insert(shared.key.clone(), shared).is_some() {
@@ -744,7 +776,10 @@ impl Runtime {
                             entity: subscription.definition.table.clone(),
                             id: key.clone(),
                             operation: "delete".to_owned(),
-                            old_value: subscription.rows.get(key.as_str()).map(|row| (*row.row).clone()),
+                            old_value: subscription
+                                .rows
+                                .get(key.as_str())
+                                .map(|row| (*row.row).clone()),
                             new_value: None,
                             changed_columns: Vec::new(),
                         },
@@ -1083,14 +1118,11 @@ async fn query_rows_filtered(
         quote(column)?;
     }
     // Declared types decide how each column is encoded (JSON, BOOLEAN).
-    let declared = gonvex_store::rows::table_columns(
-        &mut **transaction.transaction(),
-        &definition.table,
-    )
-    .await?
-    .into_iter()
-    .map(|column| (column.name.clone(), column.kind()))
-    .collect::<BTreeMap<_, _>>();
+    let declared = gonvex_store::rows::table_columns(transaction.transaction(), &definition.table)
+        .await?
+        .into_iter()
+        .map(|column| (column.name.clone(), column.kind()))
+        .collect::<BTreeMap<_, _>>();
     let columns = definition
         .columns
         .iter()
@@ -1128,11 +1160,10 @@ async fn query_rows_filtered(
     if let Some(expected) = expected_revision {
         // One read transaction sees one WAL snapshot, so the clock read here
         // is the clock of the rows below (SQLite has no LATERAL join).
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1",
-        )
-        .fetch_one(&mut **transaction.transaction())
-        .await?;
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1")
+                .fetch_one(&mut **transaction.transaction())
+                .await?;
         if revision.max(0) as u64 != expected {
             return Err(ReplicaError::SnapshotAdvanced);
         }
@@ -1176,7 +1207,7 @@ async fn collect_snapshot_rows(
         if definition.max_rows > 0 && kept.len() >= definition.max_rows {
             return Ok((kept, true));
         }
-        let row_bytes = serde_json::to_vec(&row).unwrap_or_default().len() as i64;
+        let row_bytes = json_len(&row);
         if definition.max_bytes > 0 && bytes + row_bytes > definition.max_bytes {
             return Ok((kept, true));
         }
@@ -1271,13 +1302,12 @@ fn source_update_requires_snapshot<'a>(
         return Ok(true);
     }
     if definition.max_bytes > 0 {
-        let size = |row: &Value| serde_json::to_vec(row).unwrap_or_default().len() as i64;
         let bytes = rows
             .iter()
             .filter(|(id, _)| !overlay.contains_key(id.as_ref()))
-            .map(|(_, row)| size(&row.row))
+            .map(|(_, row)| row.bytes)
             .sum::<i64>()
-            + overlay.values().flatten().map(size).sum::<i64>();
+            + overlay.values().flatten().map(json_len).sum::<i64>();
         if bytes > definition.max_bytes {
             return Ok(true);
         }
@@ -1519,7 +1549,11 @@ fn write_stable_string(out: &mut String, value: &str) {
     }
     if out[start..].contains(['\u{2028}', '\u{2029}']) {
         let tail = out.split_off(start);
-        out.push_str(&tail.replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029"));
+        out.push_str(
+            &tail
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029"),
+        );
     }
 }
 
@@ -1990,10 +2024,28 @@ fn hex_digest(value: &[u8]) -> String {
 mod tests {
     fn shared_rows(rows: std::collections::BTreeMap<String, serde_json::Value>) -> super::RowMap {
         rows.into_iter()
-            .map(|(key, row)| (key.as_str().into(), super::ReplicaEntry::detached(&key, row)))
+            .map(|(key, row)| {
+                (
+                    key.as_str().into(),
+                    super::ReplicaEntry::detached(&key, row),
+                )
+            })
             .collect()
     }
     use super::*;
+
+    #[test]
+    fn cached_row_bytes_match_the_encoded_row() {
+        let row =
+            serde_json::json!({"_id":"a","name":"ñandú \"q\"","n":[1,2.5,null],"o":{"x":true}});
+        let encoded = serde_json::to_vec(&row).unwrap().len() as i64;
+        assert_eq!(json_len(&row), encoded);
+        assert_eq!(ReplicaEntry::detached("a", row.clone()).bytes, encoded);
+        assert_eq!(
+            intern_row("db", "t", "a", "h-bytes-test", row).bytes,
+            encoded
+        );
+    }
 
     #[tokio::test]
     async fn snapshot_stream_stops_after_row_or_byte_budget_lookahead() {
@@ -2464,7 +2516,10 @@ mod tests {
             Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         let (upserts, deleted) = diff_rows(
-            &shared_rows(BTreeMap::from([("1".into(), new.clone()), ("2".into(), inserted.clone())])),
+            &shared_rows(BTreeMap::from([
+                ("1".into(), new.clone()),
+                ("2".into(), inserted.clone()),
+            ])),
             &current,
             &prior,
             &["1".to_owned(), "3".to_owned()],

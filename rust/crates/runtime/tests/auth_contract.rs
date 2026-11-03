@@ -6,13 +6,13 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
+use gonvex_runtime::control::{ControlConnection, ControlError};
+use gonvex_runtime::Runtime;
 use gonvex_store::{
     token_hash, Account, ControlPlane, Member, PoolLimits, PoolRegistry, SessionIdentity,
     TenantRoute, TenantSession,
 };
-use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
-use gonvex_runtime::control::{ControlConnection, ControlError};
-use gonvex_runtime::Runtime;
 use pbkdf2::pbkdf2_hmac;
 use serde_json::Value;
 use sha2::Sha256;
@@ -415,7 +415,10 @@ async fn refresh_token_reuse_commits_family_revocation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn internal_e2e_actor_creation_uses_native_auth_and_tenant_admission() {
-    let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::new("debug")).with_test_writer().try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))
+        .with_test_writer()
+        .try_init();
     let data = tempfile::tempdir().unwrap();
     let control_url = gonvex_store::database_url(&data.path().join("control.db"));
     let tenant_url = gonvex_store::database_url(&data.path().join("tenant.db"));
