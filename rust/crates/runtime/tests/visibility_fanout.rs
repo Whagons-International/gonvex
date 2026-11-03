@@ -171,6 +171,27 @@ fn fixture_manifest(legacy: bool) -> (Value, String) {
         }}
     });
     if !legacy {
+        for (path, search, view) in [
+            ("tasks.projected", false, false),
+            ("tasks.projectedSearch", true, false),
+            ("tasks.projectedView", false, true),
+        ] {
+            let mut plan = json!({
+                "table":"tasks","key":"id","columns":["id"],"resultPath":["rows"],
+                "index":{"table":if view { "taskProjectionView" } else { "taskProjection" },
+                    "key":"taskId","columns":["title"],
+                    "dependencies":if view { vec!["taskProjection"] } else { vec!["hints"] }},
+                "window":{"offsetArgument":"offset","limitArgument":"limit",
+                    "defaultLimit":50,"maxLimit":50,"count":"exact"}
+            });
+            if search {
+                plan["search"] = json!({"argument":"search","columns":["title"],"sources":[{
+                    "table":"taskSearchDocuments","key":"taskId","column":"searchText","dependencies":["hints"]
+                }]});
+            }
+            functions[path] = json!({"kind":"query","handler":"list","file":"test.js","delivery":"live",
+                "args":{"kind":"any"},"result":{"kind":"any"},"dependencies":{"liveQueryPlan":plan}});
+        }
         functions["attachments.list"] = json!({"kind":"query","handler":"list","file":"test.js",
             "delivery":"replica","args":{"kind":"object","fields":{}},"result":{"kind":"any"},
             "replica":{"table":"attachments","key":"id","columns":["id","noteId","body"],
@@ -336,6 +357,23 @@ async fn run_visibility_fixture(legacy: bool) {
         CREATE TABLE projects(id text PRIMARY KEY, "workspaceId" text);
         CREATE TABLE attachments(id text PRIMARY KEY, "noteId" text, body text);
         CREATE TABLE "taskLinks"(id text PRIMARY KEY, "taskId" text, label text);
+        CREATE TABLE "taskProjection"("taskId" text PRIMARY KEY, title text);
+        CREATE VIEW "taskProjectionView" AS SELECT * FROM "taskProjection";
+        CREATE TABLE "taskSearchDocuments"(source text, "sourceId" text, "taskId" text, "searchText" text,
+            PRIMARY KEY(source,"sourceId"));
+        CREATE TABLE hints(id text PRIMARY KEY, label text);
+        CREATE FUNCTION fixture_project_task() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                DELETE FROM "taskProjection" WHERE "taskId"=OLD.id;
+            ELSE
+                INSERT INTO "taskProjection" VALUES(NEW.id,NEW.title)
+                    ON CONFLICT("taskId") DO UPDATE SET title=excluded.title;
+            END IF;
+            RETURN NULL;
+        END; $$;
+        CREATE TRIGGER fixture_project_task AFTER INSERT OR UPDATE OR DELETE ON tasks
+            FOR EACH ROW EXECUTE FUNCTION fixture_project_task();
         CREATE TABLE "taskUsers"(id text PRIMARY KEY, "taskId" text, "userId" text, "teamId" text);
         CREATE TABLE "memberTeams"(id text PRIMARY KEY, "memberId" text, "teamId" text);
         INSERT INTO tasks VALUES('hidden','private','Hidden'),('granted','private-grant','Granted');
@@ -704,6 +742,191 @@ async fn run_visibility_fixture(legacy: bool) {
                 json!([])
             },
             "related visibility must follow only this member's current parent grants"
+        );
+    }
+    if !legacy {
+        // All 201 Live Query connections consume only this feed path. Hidden
+        // relation writes must not turn a table-name dependency into SQL for
+        // every member, while grants must still change exact query results.
+        let mut related_windows = Vec::new();
+        for connection in &connections {
+            let opened = runtime
+                .open_live_query(
+                    &connection.session,
+                    "related-window".into(),
+                    "tasks.withNotes".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            related_windows.push((
+                connection.member,
+                connection.session.clone(),
+                BTreeMap::from([("related-window".to_owned(), opened.subscription)]),
+            ));
+        }
+        for (statement, recipient) in [
+            (
+                "INSERT INTO tasks VALUES('lq-hidden','never-visible','Hidden relation')",
+                None,
+            ),
+            (
+                "INSERT INTO \"taskNotes\" VALUES('lq-hidden-note','lq-hidden','Before')",
+                None,
+            ),
+            (
+                "UPDATE \"taskNotes\" SET body='After' WHERE id='lq-hidden-note'",
+                None,
+            ),
+            ("DELETE FROM \"taskNotes\" WHERE id='lq-hidden-note'", None),
+            (
+                "BEGIN; INSERT INTO tasks VALUES('lq-granted','lq-private','Granted relation'); \
+              INSERT INTO \"taskNotes\" VALUES('lq-granted-note','lq-granted','Shared note'); \
+              INSERT INTO \"taskUsers\" VALUES('lq-grant','lq-granted','m6',NULL); COMMIT",
+                Some(6),
+            ),
+            ("DELETE FROM \"taskUsers\" WHERE id='lq-grant'", Some(6)),
+            (
+                "UPDATE \"taskNotes\" SET body='Revoked' WHERE id='lq-granted-note'",
+                None,
+            ),
+            ("DELETE FROM \"taskNotes\" WHERE id='lq-granted-note'", None),
+        ] {
+            sqlx::raw_sql(statement).execute(&db).await.unwrap();
+            let event = committed(&pools, &route, &mut revision).await;
+            runtime.visibility_metrics().reset_for_test();
+            let mut worked = Vec::new();
+            for (member, session, queries) in &mut related_windows {
+                let before = runtime.visibility_metrics().snapshot().live_query_reruns;
+                runtime
+                    .apply_live_query_feed_event(session, queries, &event)
+                    .await;
+                if runtime.visibility_metrics().snapshot().live_query_reruns != before {
+                    worked.push(*member);
+                }
+                if statement.starts_with("BEGIN") || statement.contains("WHERE id='lq-grant'") {
+                    let present = queries["related-window"].last_result["rows"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["id"] == "lq-granted");
+                    assert_eq!(
+                        present,
+                        statement.starts_with("BEGIN") && *member == 6,
+                        "Live Query grant/revocation must match the SQL-visible result"
+                    );
+                }
+            }
+            assert_eq!(
+                worked,
+                recipient.into_iter().collect::<Vec<_>>(),
+                "related Live Query writes must wake only their observable member: {statement}"
+            );
+            if recipient.is_none() {
+                assert_eq!(
+                    runtime
+                        .visibility_metrics()
+                        .snapshot()
+                        .visibility_sql_statements,
+                    0,
+                    "hidden relation writes must issue no visibility SQL for 201 connections"
+                );
+            }
+        }
+    }
+    if !legacy {
+        let mut projected_windows = Vec::new();
+        for connection in &connections {
+            let mut queries = BTreeMap::new();
+            for (id, path, args) in [
+                ("projected", "tasks.projected", json!({})),
+                (
+                    "search",
+                    "tasks.projectedSearch",
+                    json!({"search":"needle"}),
+                ),
+            ] {
+                let opened = runtime
+                    .open_live_query(&connection.session, id.into(), path.into(), args)
+                    .await
+                    .unwrap();
+                queries.insert(id.to_owned(), opened.subscription);
+            }
+            projected_windows.push((connection.member, connection.session.clone(), queries));
+        }
+        for (statement, recipient, expected_projection, expected_search) in [
+            ("INSERT INTO tasks VALUES('lq-projection-hidden','projection-private','Hidden')", None, false, false),
+            ("INSERT INTO \"taskSearchDocuments\" VALUES('notes','hidden','lq-projection-hidden','needle')", None, false, false),
+            ("UPDATE tasks SET title='Still hidden' WHERE id='lq-projection-hidden'", None, false, false),
+            ("INSERT INTO hints VALUES('no-effect','No projection changed')", None, false, false),
+            ("BEGIN; INSERT INTO tasks VALUES('lq-projection-visible','projection-private','Visible'); \
+              INSERT INTO \"taskUsers\" VALUES('projection-grant','lq-projection-visible','m6',NULL); \
+              INSERT INTO \"taskSearchDocuments\" VALUES('notes','visible','lq-projection-visible','needle'); COMMIT", Some(6), true, true),
+            ("UPDATE \"taskSearchDocuments\" SET \"searchText\"='gone' WHERE \"sourceId\"='visible'", Some(6), true, false),
+            ("BEGIN; UPDATE \"taskSearchDocuments\" SET \"searchText\"='needle again' WHERE \"sourceId\"='visible'; \
+              UPDATE \"taskSearchDocuments\" SET \"searchText\"='last hidden row' WHERE \"sourceId\"='hidden'; COMMIT", Some(6), true, true),
+            ("UPDATE \"taskSearchDocuments\" SET \"taskId\"='lq-projection-hidden' WHERE \"sourceId\"='visible'", Some(6), true, false),
+            ("UPDATE \"taskSearchDocuments\" SET \"taskId\"='lq-projection-visible' WHERE \"sourceId\"='visible'", Some(6), true, true),
+            ("DELETE FROM \"taskProjection\" WHERE \"taskId\"='lq-projection-visible'", Some(6), false, false),
+            ("INSERT INTO \"taskProjection\" VALUES('lq-projection-visible','Visible')", Some(6), true, true),
+            ("UPDATE hints SET label='Still no effect' WHERE id='no-effect'", None, true, true),
+            ("DELETE FROM \"taskUsers\" WHERE id='projection-grant'", Some(6), false, false),
+            ("UPDATE \"taskSearchDocuments\" SET \"searchText\"='Revoked' WHERE \"sourceId\"='visible'", None, false, false),
+            ("UPDATE tasks SET title='Revoked' WHERE id='lq-projection-visible'", None, false, false),
+        ] {
+            sqlx::raw_sql(statement).execute(&db).await.unwrap();
+            let event = committed(&pools, &route, &mut revision).await;
+            if statement.contains("last hidden row") {
+                let FeedEvent::Transaction { changes, .. } = &event else { unreachable!() };
+                let documents = changes.iter().filter(|change| change.table == "taskSearchDocuments").collect::<Vec<_>>();
+                assert_eq!(documents.len(), 2);
+                assert_eq!(documents[0].row_id, documents[1].row_id,
+                    "composite-key prefixes collide, so routing must use each payload's taskId");
+            }
+            runtime.visibility_metrics().reset_for_test();
+            let mut worked = Vec::new();
+            for (member, session, queries) in &mut projected_windows {
+                let before = runtime.visibility_metrics().snapshot().live_query_reruns;
+                let messages = runtime.apply_live_query_feed_event(session, queries, &event).await;
+                assert!(!messages.iter().any(|message| matches!(message, gonvex_protocol::ServerMessage::QueryError { .. })), "{messages:?}");
+                if runtime.visibility_metrics().snapshot().live_query_reruns != before { worked.push(*member); }
+                for (id, expected) in [("projected",expected_projection),("search",expected_search)] {
+                    let rows = queries[id].last_result["rows"].as_array().unwrap();
+                    let present = rows.iter().any(|row| row["id"] == "lq-projection-visible");
+                    assert_eq!(present, *member == 6 && expected,
+                        "projection/search membership must match SQL: {statement} / {id} / {member}");
+                }
+            }
+            assert_eq!(worked, recipient.into_iter().collect::<Vec<_>>(),
+                "projection/search writes must wake only the visible root's member: {statement}");
+            if recipient.is_none() {
+                assert_eq!(runtime.visibility_metrics().snapshot().visibility_sql_statements, 0,
+                    "hidden projections and unchanged hints must schedule no visibility SQL");
+            }
+        }
+        // Views are not CDC sources. Their declared dependency remains live;
+        // claiming precise tracked routing here would silently miss updates.
+        let session = &connections[6].session;
+        let opened = runtime
+            .open_live_query(
+                session,
+                "view".into(),
+                "tasks.projectedView".into(),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        let mut queries = BTreeMap::from([("view".into(), opened.subscription)]);
+        sqlx::query("UPDATE \"taskProjection\" SET title='View dependency' WHERE \"taskId\"='lq-projection-hidden'").execute(&db).await.unwrap();
+        let event = committed(&pools, &route, &mut revision).await;
+        runtime.visibility_metrics().reset_for_test();
+        runtime
+            .apply_live_query_feed_event(session, &mut queries, &event)
+            .await;
+        assert_eq!(
+            runtime.visibility_metrics().snapshot().live_query_reruns,
+            1,
+            "untracked view dependencies must retain their conservative wake"
         );
     }
     if !legacy {
