@@ -99,8 +99,10 @@ for phase in sys.argv[2:]:
             stats['steadyAccountSamples'] = len(steady)
             stats['minSteadyAuthenticatedAccounts'] = min(steady)
             # The reconnect wave drops ~30% of sessions on purpose. Outside its
-            # window (plus 30 s for those users to sign in and reload), every
-            # user must be connected in every sample, and at the end.
+            # window (plus 30 s for those users to sign in and reload), at
+            # least 99% of users must be authenticated in every sample (a
+            # client re-authenticating its session shows as a momentary dip),
+            # and every user at the end. Lost users also fail the client rule.
             target_users = r.get('targetUsers', 0)
             # Older results lack the window; the wave starts at the plateau midpoint.
             middle = (r.get('steadyStartMs', 0) + r.get('steadyEndMs', 0)) / 2
@@ -109,7 +111,8 @@ for phase in sys.argv[2:]:
                        if not window[0] <= x['at'] <= window[1] + 30000]
             stats['fullyConnectedSampleShare'] = sum(x >= target_users for x in steady) / len(steady)
             stats['disconnectedSamplesOutsideReconnectWave'] = sum(x < target_users for x in outside)
-            if stats['disconnectedSamplesOutsideReconnectWave'] or steady[-1] < target_users:
+            stats['minConnectedShareOutsideReconnectWave'] = min(outside) / target_users if outside and target_users else None
+            if any(x < 0.99 * target_users for x in outside) or steady[-1] < target_users:
                 stats['capacityPassed'] = False
             first = metrics[0]['metrics']['database']
             last = metrics[-1]['metrics']['database']
