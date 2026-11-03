@@ -339,6 +339,20 @@ impl ClientModel {
         }
     }
 
+    /// The connection-level `replica.watermark` after a feed event: every
+    /// settled window is current through `revision` (the SDK checkpoints
+    /// ready windows to the watermark).
+    pub fn watermark(&mut self, revision: u64) {
+        for window in self.windows.values_mut() {
+            if window.needs_hashes || window.needs_reopen {
+                continue;
+            }
+            if let Some(cursor) = &mut window.cursor {
+                cursor.revision = cursor.revision.max(revision);
+            }
+        }
+    }
+
     /// Windows that must be reopened (needHashes or reset), by id.
     pub fn pending_reopens(&self) -> Vec<String> {
         self.windows

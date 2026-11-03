@@ -708,7 +708,7 @@ impl Drop for Fixture {
 /// Rows held by a subscription (the one place the fixture reads replica
 /// internals for counting; adapt here if `ReplicaSubscription` changes).
 fn subscription_rows(subscription: &ReplicaSubscription) -> usize {
-    subscription.rows.len()
+    subscription.row_count()
 }
 
 fn now_ms() -> i64 {

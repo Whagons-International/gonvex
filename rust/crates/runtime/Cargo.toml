@@ -72,3 +72,7 @@ required-features = ["perf-fixture"]
 [[test]]
 name = "perf_fixture_smoke"
 required-features = ["perf-fixture"]
+
+[[test]]
+name = "replica_state"
+required-features = ["perf-fixture"]

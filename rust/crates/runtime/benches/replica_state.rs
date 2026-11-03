@@ -109,17 +109,16 @@ impl Out {
         let mut nanos = samples.iter().map(|s| s.nanos).collect::<Vec<_>>();
         nanos.sort_by(f64::total_cmp);
         let median = nanos[nanos.len() / 2];
+        let mut retained = samples.iter().map(|s| s.retained).collect::<Vec<_>>();
+        retained.sort();
+        let retained_median = retained[retained.len() / 2];
         let mut values = json!({
             "iterations": samples.len(),
             "median_ms": median / 1e6,
             "per_unit_us": median / units / 1e3,
             "allocations_per_op": samples.iter().map(|s| s.allocations).sum::<u64>() as f64 / samples.len() as f64,
             "peak_heap_bytes_max": samples.iter().map(|s| s.peak).max().unwrap_or(0),
-            "retained_bytes_median": {
-                let mut r = samples.iter().map(|s| s.retained).collect::<Vec<_>>();
-                r.sort();
-                r[r.len() / 2]
-            },
+            "retained_bytes_median": retained_median,
         });
         if let (Value::Object(values), Value::Object(extra)) = (&mut values, extra) {
             values.extend(extra);
@@ -177,7 +176,7 @@ impl ModelConnection {
         let request_bytes = serde_json::to_string(&request).unwrap().len();
         let opened = fixture
             .runtime
-            .open_replica_negotiated(&self.session, request, false)
+            .open_replica(&self.session, request)
             .await
             .unwrap();
         if let Some(subscription) = opened.subscription {
@@ -197,6 +196,10 @@ impl ModelConnection {
         fixture: &Fixture,
         event: gonvex_runtime::change_feed::FeedEvent,
     ) -> (usize, usize) {
+        let revision = match &event {
+            gonvex_runtime::change_feed::FeedEvent::Transaction { revision, .. } => Some(*revision),
+            _ => None,
+        };
         let messages = fixture
             .runtime
             .apply_feed_event(&self.session, &mut self.subscriptions, event)
@@ -205,6 +208,9 @@ impl ModelConnection {
         let mut up = 0;
         let mut down = wire_bytes(&messages);
         self.model.apply_all(&messages);
+        if let Some(revision) = revision {
+            self.model.watermark(revision);
+        }
         for _ in 0..4 {
             let pending = self.model.pending_reopens();
             if pending.is_empty() {
@@ -224,11 +230,10 @@ impl ModelConnection {
         for (id, window) in &self.model.windows {
             let opened = fixture
                 .runtime
-                .open_replica_negotiated(
+                .open_replica(
                     &self.session,
                     serde_json::from_value(json!({"id": id, "path": window.path, "args": {}}))
                         .unwrap(),
-                    false,
                 )
                 .await
                 .unwrap();
@@ -291,6 +296,33 @@ async fn run() {
             "peak_heap_bytes": sample.peak,
         }),
     );
+    // Marginal cost of one more member once tenant-shared indexes are warm:
+    // the 5k projection uses this, not the first-member cost.
+    if enabled("retained/marginal") {
+        for kind in [MemberKind::Admin, MemberKind::TeamAllSpots, MemberKind::TeamSpots, MemberKind::GrantOnly] {
+            let member = fixture.members_of_kind(BIG, kind)[0];
+            let (connection, sample) = measure(fixture.connect(BIG, member)).await;
+            let connection = connection.unwrap();
+            let mut per_path = serde_json::Map::new();
+            for path in WHAGONS_SUBSCRIPTIONS {
+                let (subscription, sample) = measure(async {
+                    fixture.open_replica(&connection.session, path, path).await.unwrap().subscription
+                })
+                .await;
+                per_path.insert(path.into(), json!(sample.retained));
+                drop(subscription);
+            }
+            out.record(
+                &format!("retained/marginal_member/{kind:?}"),
+                json!({
+                    "retained_bytes": sample.retained,
+                    "projected_1950_members_bytes": sample.retained * 1950,
+                    "per_subscription": per_path,
+                }),
+            );
+            drop(connection);
+        }
+    }
     {
         let session = fixture.session(BIG, team_member);
         let (connection, sample) =
@@ -409,6 +441,7 @@ async fn run() {
         let mut up = 0;
         let mut down = 0;
         let mut oracle = Ok(());
+        let mut connection_need_hashes = 0;
         for i in 0..iterations(8) + 1 {
             let mut connection = ModelConnection::open(&fixture, session.clone(), &[TASKS]).await;
             connection.subscriptions.clear();
@@ -419,9 +452,26 @@ async fn run() {
                     .await
                     .unwrap();
             }
-            let ((request, response), sample) = measure(connection.reopen(&fixture, TASKS)).await;
+            let ((request, response), sample) = measure(async {
+                // Settle like the SDK: reopen whatever the server asks to reconcile.
+                let mut totals = connection.reopen(&fixture, TASKS).await;
+                for _ in 0..3 {
+                    let pending = connection.model.pending_reopens();
+                    if pending.is_empty() {
+                        break;
+                    }
+                    for id in pending {
+                        let (request, response) = connection.reopen(&fixture, &id).await;
+                        totals.0 += request;
+                        totals.1 += response;
+                    }
+                }
+                totals
+            })
+            .await;
             up = request;
             down = response;
+            connection_need_hashes = connection.model.need_hashes;
             if i == 0 {
                 oracle = connection.oracle(&fixture).await;
             } else {
@@ -432,7 +482,7 @@ async fn run() {
             &name,
             &samples,
             1.0,
-            json!({"request_bytes": up, "response_bytes": down, "oracle": format!("{oracle:?}")}),
+            json!({"request_bytes": up, "response_bytes": down, "need_hashes": connection_need_hashes, "oracle": format!("{oracle:?}")}),
         );
     }
 
