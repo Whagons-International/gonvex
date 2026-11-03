@@ -103,6 +103,10 @@ def run_case(binary, host, output, mode, damage=False):
         if damage:
             require(mode == "committed", "the evidence control requires a committed receipt")
             with sqlite3.connect(database) as connection:
+                # Captured tables' triggers call gonvex_capture, which only the
+                # runtime registers (it rejects foreign writers). This control
+                # damages business rows on purpose, outside the runtime.
+                connection.create_function("gonvex_capture", 3, lambda table, rowid, op: None)
                 connection.execute("DELETE FROM receipt_records")
         log = output / (label + ".log")
         with log.open("w") as stream:
