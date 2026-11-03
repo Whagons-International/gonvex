@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+gonvex-profiler = { path = "../profiler" }
 # Same library sqlx links; used only to read result-column declared types.
 libsqlite3-sys = { version = "=0.30.1", default-features = false }
 base64.workspace = true

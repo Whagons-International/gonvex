@@ -126,8 +126,10 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
             // The socket may await a query that needs a connection held by a
             // preparation. Keep SQL progress independent of polling next().
             // The queue owns cancellation and remains the only publisher.
-            self.active
-                .push(crate::offload::offload().spawn(async move { (bulk, job.future.await) }));
+            self.active.push(crate::offload::offload().spawn(gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::Snapshot,
+                async move { (bulk, job.future.await) },
+            )));
         }
     }
     pub async fn next(&mut self) -> Option<T> {

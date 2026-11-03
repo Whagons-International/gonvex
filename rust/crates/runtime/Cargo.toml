@@ -16,6 +16,7 @@ duckdb = ["dep:duckdb", "dep:calamine"]
 perf-fixture = ["gonvex-websocket/perf-fixture"]
 
 [dependencies]
+gonvex-profiler = { path = "../profiler" }
 # Process allocator: lower fragmentation under bursty multi-threaded snapshot
 # work, and freed memory is returned to the OS promptly.
 mimalloc = { version = "=0.1.48", default-features = false }

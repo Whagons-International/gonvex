@@ -1,0 +1,9 @@
+[package]
+name = "gonvex-profiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Always-on, allocation-free stage latency histograms, gauges and stall detection for the gonvex runtime."
+
+# Deliberately dependency-free: store, websocket and runtime all record into it.
+[dependencies]

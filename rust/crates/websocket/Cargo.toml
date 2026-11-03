@@ -9,6 +9,7 @@ license.workspace = true
 perf-fixture = []
 
 [dependencies]
+gonvex-profiler = { path = "../profiler" }
 axum.workspace = true
 bytes = "1"
 futures-util.workspace = true

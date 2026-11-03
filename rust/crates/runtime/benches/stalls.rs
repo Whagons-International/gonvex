@@ -29,6 +29,33 @@ use serde_json::{json, Value};
 static GLOBAL: CountingAlloc<mimalloc::MiMalloc> = CountingAlloc(mimalloc::MiMalloc);
 
 const BIG: usize = 0;
+static LONG_POLL_BASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The profiler's view of the window: `tokio.sched_lag` (its own 10 ms probe)
+/// and long polls (>= 5 ms) by task kind. Long polls include pool threads.
+fn profiler_view() -> Value {
+    let lag = gonvex_profiler::snapshot()
+        .into_iter()
+        .find(|stage| stage.name() == "tokio.sched_lag");
+    let base = LONG_POLL_BASE.load(Relaxed);
+    let total = gonvex_profiler::long_poll_total() - base;
+    let mut by_task = std::collections::BTreeMap::<String, (u64, u64)>::new();
+    for poll in gonvex_profiler::long_polls() {
+        if poll.seq <= base || poll.source != "poll" {
+            continue;
+        }
+        let entry = by_task.entry(poll.task.to_owned()).or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.max(poll.duration_ns / 1000);
+    }
+    json!({
+        "schedLagP99Us": lag.as_ref().map_or(0, |stage| stage.quantile(0.99) / 1000),
+        "schedLagMaxUs": lag.as_ref().map_or(0, |stage| stage.max / 1000),
+        "schedLagCount": lag.as_ref().map_or(0, |stage| stage.count),
+        "longPolls": total,
+        "longPollsByTask": by_task.into_iter().map(|(task, (count, max))| (task, json!({"count": count, "maxUs": max}))).collect::<serde_json::Map<_, _>>(),
+    })
+}
 const TASKS: &str = "tasks.recentWorkspaceTasks";
 
 fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -56,6 +83,9 @@ struct Probes {
 
 async fn start_probes() -> Probes {
     let stop = Arc::new(AtomicBool::new(false));
+    gonvex_profiler::reset();
+    let long_polls_before = gonvex_profiler::long_poll_total();
+    LONG_POLL_BASE.store(long_polls_before, Relaxed);
     stalls::start_recording();
     Probes {
         lag: stalls::lag_probe(stop.clone()),
@@ -72,6 +102,7 @@ async fn stop_probes(probes: Probes, name: &str, mut extra: serde_json::Map<Stri
         .await
         .unwrap();
     let polls = stalls::stop_recording();
+    let profiler = profiler_view();
     let polls = Summary::of(polls.into_iter().map(u64::from).collect());
     let lag = Summary::of(lag);
     let echo = Summary::of(echo);
@@ -85,6 +116,7 @@ async fn stop_probes(probes: Probes, name: &str, mut extra: serde_json::Map<Stri
         "lag": lag.to_json(),
         "echo": echo.to_json(),
         "networkPolls": polls.to_json(),
+        "profiler": profiler,
         "extra": extra,
     });
     println!(
@@ -98,6 +130,7 @@ async fn stop_probes(probes: Probes, name: &str, mut extra: serde_json::Map<Stri
         polls.max_us,
         polls.over_5ms
     );
+    println!("{name:<28} profiler {profiler}");
     println!("STALL_JSON {line}");
     if let Ok(path) = std::env::var("BENCH_JSON_OUT") {
         use std::io::Write;
@@ -176,7 +209,7 @@ async fn run() {
             let latencies = latencies.clone();
             let member = n % members;
             n += 1;
-            handles.push(tokio::spawn(timed(async move {
+            handles.push(tokio::spawn(timed(gonvex_profiler::instrument(gonvex_profiler::TaskKind::WsConnection, async move {
                 let started = Instant::now();
                 let opened =
                     stalls::socket_open(&fixture.runtime, &fixture.session(BIG, member), TASKS)
@@ -187,7 +220,7 @@ async fn run() {
                     .unwrap()
                     .push(started.elapsed().as_micros() as u64);
                 opened.rows
-            })));
+            }))));
         }
         let mut rows = 0;
         for handle in handles {
@@ -211,11 +244,14 @@ async fn run() {
         let counters = Arc::new(stalls::FanoutCounters::default());
         let mut loops = Vec::new();
         for connection in connections {
-            loops.push(tokio::spawn(timed(stalls::connection_loop(
-                fixture.runtime.clone(),
-                connection,
-                sender.subscribe(),
-                counters.clone(),
+            loops.push(tokio::spawn(timed(gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::WsConnection,
+                stalls::connection_loop(
+                    fixture.runtime.clone(),
+                    connection,
+                    sender.subscribe(),
+                    counters.clone(),
+                ),
             ))));
         }
         // Warm the apply-cost averages with two updates.
@@ -277,14 +313,14 @@ async fn run() {
             let mut handles = Vec::new();
             for n in 0..burst {
                 let fixture = fixture.clone();
-                handles.push(tokio::spawn(timed(async move {
+                handles.push(tokio::spawn(timed(gonvex_profiler::instrument(gonvex_profiler::TaskKind::WsConnection, async move {
                     let opened_at = Instant::now();
                     let opened =
                         stalls::socket_open(&fixture.runtime, &fixture.session(BIG, n % members), TASKS)
                             .await
                             .unwrap();
                     (opened, opened_at.elapsed().as_micros() as u64)
-                })));
+                }))));
             }
             let mut held = Vec::new();
             let mut latencies = Vec::new();

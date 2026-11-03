@@ -57,6 +57,7 @@ pub fn router() -> Router<Runtime> {
         .route("/dev/auth/notifications/read", post(read_notifications))
         .route("/dev/manifest", get(manifest))
         .route("/dev/metrics", get(metrics))
+        .route("/dev/profile", get(profile))
         .route("/dev/metrics/stream", get(metrics_stream))
         .route("/dev/logs/stream", get(log_stream))
         .route("/dev/logs", delete(clear_logs))
@@ -1549,12 +1550,27 @@ async fn manifest(
 struct MetricsQuery {
     #[serde(default)]
     project: String,
+    /// `profile` returns the profiler dump instead (no project needed).
+    #[serde(default)]
+    format: String,
 }
+
+/// Profiler dump (`docs/performance/profiler.md`). Operators only.
+async fn profile(State(runtime): State<Runtime>, headers: HeaderMap) -> Response {
+    if let Err(response) = authorize(&runtime, &headers, "projects:read").await {
+        return response;
+    }
+    Json(crate::profiling::profile_json(&runtime)).into_response()
+}
+
 async fn metrics(
     State(runtime): State<Runtime>,
     headers: HeaderMap,
     Query(query): Query<MetricsQuery>,
 ) -> Response {
+    if query.format == "profile" {
+        return profile(State(runtime), headers).await;
+    }
     let project = if query.project.trim().is_empty() {
         headers
             .get("x-gonvex-project-id")
@@ -1693,7 +1709,7 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
         "reactiveDelayedByBootstrap":0,
     });
     Some(
-        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs}),
+        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs,"profiler":crate::profiling::summary_json()}),
     )
 }
 

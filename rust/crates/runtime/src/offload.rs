@@ -235,7 +235,11 @@ impl Offload {
             Strategy::Inline => {
                 Offloaded::Ready(Some(std::panic::catch_unwind(AssertUnwindSafe(work))))
             }
-            Strategy::Runtime => Offloaded::Join(self.runtime.as_ref().unwrap().spawn(async move { work() })),
+            Strategy::Runtime => Offloaded::Join(self.runtime.as_ref().unwrap().spawn(
+                gonvex_profiler::instrument(gonvex_profiler::TaskKind::Other, async move {
+                    work()
+                }),
+            )),
             Strategy::Blocking | Strategy::Threads => {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let (abort, _registration) = AbortHandle::new_pair();
@@ -363,11 +367,14 @@ impl Runtime {
         let runtime = self.clone();
         let session = session.clone();
         let (owned, result, elapsed) = pool
-            .spawn(async move {
-                let started = Instant::now();
-                let result = runtime.apply_feed_event(&session, &mut owned, event).await;
-                (owned, result, started.elapsed())
-            })
+            .spawn(gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::Feed,
+                async move {
+                    let started = Instant::now();
+                    let result = runtime.apply_feed_event(&session, &mut owned, event).await;
+                    (owned, result, started.elapsed())
+                },
+            ))
             .await;
         pool.record_apply(&tables, elapsed);
         *subscriptions = owned;
@@ -544,6 +551,11 @@ impl SnapshotAdmission {
     pub fn take_peak_reserved_bytes(&self) -> usize {
         let current = self.reserved_kib.load(Relaxed);
         self.peak_reserved_kib.swap(current, Relaxed) * 1024
+    }
+
+    /// Free count permits right now.
+    pub fn available_permits(&self) -> usize {
+        self.count.available_permits()
     }
 
     pub fn budget_bytes(&self) -> usize {

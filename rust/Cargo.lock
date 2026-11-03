@@ -1532,6 +1532,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gonvex-profiler"
+version = "0.1.0"
+
+[[package]]
 name = "gonvex-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1555,6 +1559,7 @@ dependencies = [
  "futures-util",
  "gonvex-module-host",
  "gonvex-module-runtime",
+ "gonvex-profiler",
  "gonvex-protocol",
  "gonvex-store",
  "gonvex-websocket",
@@ -1611,6 +1616,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "gonvex-profiler",
  "libsqlite3-sys",
  "rand 0.8.7",
  "serde",
@@ -1632,6 +1638,7 @@ dependencies = [
  "bytes",
  "flate2",
  "futures-util",
+ "gonvex-profiler",
  "hyper",
  "hyper-util",
  "ratchet_core",
