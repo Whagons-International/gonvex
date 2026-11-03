@@ -70,6 +70,8 @@ services:
       GONVEX_MODULE_HOST_BINARY: /binhost/gonvex-module-host
       GONVEX_SANDBOX_WORKER_BINARY: /binhost/gonvex-sandbox-worker
       GONVEX_DB_MAX_OPEN_CONNS: ${LOAD_READERS:-4}
+      GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE: ${LOAD_ISOLATES:-4}
+      GONVEX_MODULE_HOST_MAX_CONCURRENT_CALLS: ${LOAD_MODULE_CONCURRENCY:-32}
       GONVEX_DB_MAX_TOTAL_CONNS: ${LOAD_SHARED:-64}
       RUST_LOG: warn
     healthcheck:
@@ -92,7 +94,7 @@ services:
       - ${WHAGONS_CHECKOUT:?set WHAGONS_CHECKOUT}:${WHAGONS_CHECKOUT}:ro
       - ${LOAD_DEPS_ROOT:?set LOAD_DEPS_ROOT}:${LOAD_DEPS_ROOT}:ro
       # Locally linked SDK packages (pnpm link: overrides) resolve outside the checkout.
-      - ${LOAD_GONVEX_PACKAGES:-/mnt/data/work/gonvex-sqlite/packages}:${LOAD_GONVEX_PACKAGES:-/mnt/data/work/gonvex-sqlite/packages}:ro
+      - ${LOAD_GONVEX_PACKAGES:?set LOAD_GONVEX_PACKAGES}:${LOAD_GONVEX_PACKAGES}:ro
       - ${LOAD_LAB_ROOT}:/state
       - .:/harness:ro
     environment:

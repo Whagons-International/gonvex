@@ -5,7 +5,7 @@
 set -euo pipefail
 bench=$(cd "$(dirname "$0")" && pwd)
 lab=$(realpath -m "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
-case "$lab" in /mnt/data/*) ;; *) echo 'LOAD_LAB_ROOT must be on /mnt/data' >&2; exit 2;; esac
+case "$lab" in /mnt/data/*|/home/gabriel/work/*) ;; *) echo 'LOAD_LAB_ROOT must be under /home/gabriel/work' >&2; exit 2;; esac
 users=${1:-100}
 compose=(docker compose -f "$bench/compose.yaml")
 headroom() { until /home/gabriel/.local/bin/build-headroom "$lab"; do sleep 30; done; }

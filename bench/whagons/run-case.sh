@@ -5,7 +5,7 @@
 set -euo pipefail
 bench=$(cd "$(dirname "$0")" && pwd)
 lab=$(realpath -m "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
-case "$lab" in /mnt/data/*) ;; *) echo 'LOAD_LAB_ROOT must be on /mnt/data' >&2;exit 2;; esac
+case "$lab" in /mnt/data/*|/home/gabriel/work/*) ;; *) echo 'LOAD_LAB_ROOT must be under /home/gabriel/work' >&2;exit 2;; esac
 label=${LOAD_LABEL:?set a unique LOAD_LABEL}
 [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
 mkdir -p "$lab/$label"

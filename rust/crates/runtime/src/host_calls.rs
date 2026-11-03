@@ -27,6 +27,33 @@ use crate::sql_parameters::{Parameter, Parameters};
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
 const ABORTED: &str = "current transaction is aborted, commands ignored until end of transaction block";
+/// Returned to module code when a lazily opened Reducer transaction finds its
+/// idempotency key already claimed; the caller replays the stored result.
+pub(crate) const RECEIPT_REPLAY: &str = "idempotency key already committed; replaying the stored result";
+
+/// Provenance recorded on a Reducer transaction when it opens.
+pub(crate) struct WriteAttribution {
+    pub root_command_id: String,
+    pub root_channel: &'static str,
+    pub channel: &'static str,
+    pub actor_account_id: Option<String>,
+    pub actor_member_id: Option<String>,
+    pub on_behalf_of_member_id: Option<String>,
+    pub agent_execution_id: Option<String>,
+}
+
+/// A Reducer write transaction opened on first use. Each tenant has one
+/// SQLite writer, so a Reducer must not hold it while it queues for a V8
+/// isolate; it opens the transaction at its first database host call (or
+/// when its receipt is stored), when its JavaScript is already running.
+pub(crate) struct PendingWrite {
+    pub control: gonvex_store::ControlPlane,
+    pub route: gonvex_store::TenantRoute,
+    pub command_id: String,
+    pub attribution: WriteAttribution,
+    /// `(subject, idempotency key, receipt path)` claimed when it opens.
+    pub claim: Option<(String, String, String)>,
+}
 
 // Same seed and UUID layout as module-sdk reducerRowId.
 fn intent_deferred_id(
@@ -79,6 +106,8 @@ pub enum DatabaseCapability {
 pub struct DatabaseHostCalls {
     storage_context: Option<(crate::Runtime, gonvex_store::TenantSession)>,
     transaction: Option<TenantTransaction>,
+    pending: Option<PendingWrite>,
+    claim_conflict: bool,
     capability: DatabaseCapability,
     schema: Value,
     tables: BTreeMap<String, Arc<TableCatalog>>,
@@ -101,6 +130,8 @@ impl DatabaseHostCalls {
         Self {
             storage_context: None,
             transaction: Some(transaction),
+            pending: None,
+            claim_conflict: false,
             capability,
             schema: Value::Null,
             tables: BTreeMap::new(),
@@ -114,6 +145,82 @@ impl DatabaseHostCalls {
             fault: Arc::default(),
             aborted: false,
         }
+    }
+
+    /// A Reducer handler whose write transaction opens on first use.
+    pub(crate) fn lazy_reducer(pending: PendingWrite) -> Self {
+        let mut handler = Self {
+            storage_context: None,
+            transaction: None,
+            pending: Some(pending),
+            claim_conflict: false,
+            capability: DatabaseCapability::Reducer,
+            schema: Value::Null,
+            tables: BTreeMap::new(),
+            schedulable_functions: BTreeSet::new(),
+            actor_account_id: String::new(),
+            actor_email: String::new(),
+            provenance: Value::Null,
+            intent_tenant: String::new(),
+            intent_command: String::new(),
+            deferred_ordinals: BTreeMap::new(),
+            fault: Arc::default(),
+            aborted: false,
+        };
+        handler.transaction = None;
+        handler
+    }
+
+    /// Whether opening the transaction found the idempotency key claimed.
+    pub(crate) fn claim_conflict(&self) -> bool {
+        self.claim_conflict
+    }
+
+    /// The invocation transaction, opening a pending Reducer write first.
+    pub(crate) async fn ensure_transaction(&mut self) -> Result<&mut TenantTransaction, String> {
+        if self.claim_conflict {
+            return Err(RECEIPT_REPLAY.to_owned());
+        }
+        if self.transaction.is_none() {
+            if let Some(pending) = self.pending.take() {
+                let fault = self.fault.clone();
+                let mut transaction = pending
+                    .control
+                    .begin_tenant_transaction(&pending.route, false)
+                    .await
+                    .map_err(|error| fault.database(error))?;
+                transaction
+                    .set_command_id(&pending.command_id)
+                    .await
+                    .map_err(|error| fault.database(error))?;
+                let a = &pending.attribution;
+                transaction
+                    .set_invocation_provenance(gonvex_store::TransactionAttribution {
+                        root_command_id: &a.root_command_id,
+                        root_channel: a.root_channel,
+                        channel: a.channel,
+                        actor_account_id: a.actor_account_id.as_deref(),
+                        actor_member_id: a.actor_member_id.as_deref(),
+                        on_behalf_of_member_id: a.on_behalf_of_member_id.as_deref(),
+                        agent_execution_id: a.agent_execution_id.as_deref(),
+                    })
+                    .await
+                    .map_err(|error| fault.database(error))?;
+                if let Some((subject, key, path)) = &pending.claim {
+                    let claimed = transaction
+                        .claim_reducer(subject, key, path)
+                        .await
+                        .map_err(|error| fault.database(error))?;
+                    if !claimed {
+                        transaction.rollback().await.map_err(|error| fault.database(error))?;
+                        self.claim_conflict = true;
+                        return Err(RECEIPT_REPLAY.to_owned());
+                    }
+                }
+                self.transaction = Some(transaction);
+            }
+        }
+        self.transaction()
     }
 
     pub fn with_storage(
@@ -186,6 +293,13 @@ impl DatabaseHostCalls {
     /// Commits (Reducer success) or rolls back, returning the revision the
     /// commit published, if it changed tracked rows.
     pub async fn finish_with_revision(mut self, success: bool) -> Result<Option<u64>, String> {
+        if self.claim_conflict {
+            return Err(RECEIPT_REPLAY.to_owned());
+        }
+        if self.transaction.is_none() && self.pending.take().is_some() {
+            // The Reducer never touched the database: nothing to commit.
+            return Ok(None);
+        }
         let transaction = self
             .transaction
             .take()
@@ -270,7 +384,7 @@ impl HostCallHandler for DatabaseHostCalls {
                 runtime
                     .inner
                     .storage
-                    .reducer_metadata(&session, self.transaction_mut(), file_id)
+                    .reducer_metadata(&session, self.ensure_transaction().await?, file_id)
                     .await
             }
 
@@ -403,7 +517,7 @@ impl DatabaseHostCalls {
         let email = self.actor_email.clone();
         let provenance = self.provenance.clone();
         let fault = self.fault.clone();
-        self.transaction()?
+        self.ensure_transaction().await?
             .enqueue_action(
                 SCHEDULE_OUTBOX_PATH,
                 &payload,
@@ -449,7 +563,7 @@ impl DatabaseHostCalls {
             _ => None,
         };
         let query = Parameters::new(parameters).bind(sqlx::query(statement.trim()));
-        let transaction = self.transaction()?.transaction();
+        let transaction = self.ensure_transaction().await?.transaction();
         // Exact declared types of the result columns (sqlx reports `JSON` as
         // NULL). A statement that fails to prepare fails again below with the
         // real error, so a describe failure only means "unknown".
@@ -524,7 +638,7 @@ impl DatabaseHostCalls {
             .map(|(column, value)| catalog.parameter(column, value))
             .collect::<Result<Vec<_>, _>>()?;
         let query = Parameters::new(parameters).bind(sqlx::query(&statement));
-        let transaction = self.transaction()?.transaction();
+        let transaction = self.ensure_transaction().await?.transaction();
         let row = query.fetch_optional(&mut **transaction).await;
         let row = row.map_err(|error| self.sql_failure(error))?;
         row.map(|row| catalog.row_to_json(&row))
@@ -564,7 +678,7 @@ impl DatabaseHostCalls {
             .collect::<Result<Vec<_>, _>>()?;
         parameters.push(Parameter::scalar(&id)?);
         let query = Parameters::new(parameters).bind(sqlx::query(&statement));
-        let transaction = self.transaction()?.transaction();
+        let transaction = self.ensure_transaction().await?.transaction();
         let row = query.fetch_optional(&mut **transaction).await;
         let row = row.map_err(|error| self.sql_failure(error))?;
         row.map(|row| catalog.row_to_json(&row))
@@ -579,7 +693,7 @@ impl DatabaseHostCalls {
         require_row_id(&id)?;
         let statement = format!("DELETE FROM {table} WHERE {key} = $1");
         let query = Parameters::scalars(std::iter::once(&id))?.bind(sqlx::query(&statement));
-        let transaction = self.transaction()?.transaction();
+        let transaction = self.ensure_transaction().await?.transaction();
         let result = query.execute(&mut **transaction).await;
         let result = result.map_err(|error| self.sql_failure(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
@@ -608,7 +722,7 @@ impl DatabaseHostCalls {
         );
         let query = Parameters::new(vec![Parameter::Json(Value::Array(ids.clone()).to_string())])
             .bind(sqlx::query(&statement));
-        let transaction = self.transaction()?.transaction();
+        let transaction = self.ensure_transaction().await?.transaction();
         let result = query.execute(&mut **transaction).await;
         let result = result.map_err(|error| self.sql_failure(error))?;
         Ok(serde_json::json!({ "deleted": result.rows_affected() }))
@@ -655,7 +769,7 @@ impl DatabaseHostCalls {
         )
         .bind(table_name)
         .bind(schema_name)
-        .fetch_all(&mut **self.transaction()?.transaction())
+        .fetch_all(&mut **self.ensure_transaction().await?.transaction())
         .await;
         let rows = rows.map_err(|error| self.sql_failure(error))?;
         let mut columns = BTreeMap::new();
@@ -1008,6 +1122,8 @@ mod tests {
         assert_eq!(declared_table_key(&schema, "tasks").unwrap(), Some("_id"));
 
         let calls = DatabaseHostCalls {
+            pending: None,
+            claim_conflict: false,
             storage_context: None,
             transaction: None,
             capability: DatabaseCapability::Reducer,
@@ -1042,6 +1158,8 @@ mod tests {
             }
         });
         let calls = DatabaseHostCalls {
+            pending: None,
+            claim_conflict: false,
             storage_context: None,
             transaction: None,
             capability: DatabaseCapability::Reducer,

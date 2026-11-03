@@ -1495,6 +1495,11 @@ pub async fn execute_script(
 ) -> Result<(), DatabaseError> {
     use sqlx::Executor as _;
     connection.execute(sqlx::raw_sql(sql)).await?;
+    // Scripts that create or drop triggers can change which tables a writer
+    // captures; keep its capture catalog in step (no-op on other connections).
+    if sql.to_ascii_uppercase().contains("TRIGGER") {
+        capture::refresh(connection).await?;
+    }
     Ok(())
 }
 

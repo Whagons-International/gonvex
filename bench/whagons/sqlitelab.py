@@ -4,7 +4,7 @@ $LOAD_LAB_ROOT/runtime/data, and only while the runtime container is stopped
 import json, os, sqlite3, subprocess, urllib.parse
 
 LAB = os.path.realpath(os.environ['LOAD_LAB_ROOT'])
-assert LAB.startswith('/mnt/data/'), 'LOAD_LAB_ROOT must be on /mnt/data'
+assert LAB.startswith(('/mnt/data/', '/home/gabriel/work/')), 'LOAD_LAB_ROOT must be under /home/gabriel/work'
 HOST_STATE = os.path.join(LAB, 'runtime')        # mounted at /state in the runtime
 CONTAINER_STATE = '/state'
 RUNTIME = os.environ.get('LOAD_RUNTIME_CONTAINER', 'gvsq-runtime')

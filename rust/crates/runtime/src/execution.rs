@@ -438,52 +438,14 @@ impl Runtime {
         if idempotency_key.is_some() {
             control.ensure_reducer_idempotency(&session.route).await?;
         }
-        let mut transaction = control
-            .begin_tenant_transaction(&session.route, false)
-            .await?;
-        transaction.set_command_id(command_id).await?;
-        let receipt_path = access.receipt_path.as_deref().unwrap_or(path);
-        if let Some(key) = idempotency_key {
-            let claimed = transaction
-                .claim_reducer(&session.identity.account.id, key, receipt_path)
-                .await?;
-            if !claimed {
-                transaction.rollback().await?;
-                let value = control
-                    .replay_reducer_result(
-                        &session.route,
-                        &session.identity.account.id,
-                        key,
-                        receipt_path,
-                    )
-                    .await?;
-                // The retained receipt is visible only after its transaction
-                // commits. This database's monotonic clock therefore provides
-                // a sufficient barrier, even with a new transport ID or after
-                // the original command's change-feed rows have been pruned.
-                let committed_revision = Some(
-                    crate::change_feed::read_clock(&self.inner.pools, &session.route)
-                        .await?
-                        .revision,
-                );
-                if let Some(tracker) = committed_revisions.as_ref() {
-                    tracker.observe(committed_revision);
-                }
-                return Ok(ReducerExecution {
-                    value,
-                    committed_revision,
-                });
-            }
-        }
+        let receipt_path = access.receipt_path.as_deref().unwrap_or(path).to_owned();
         if let (Some(expected), Some(active)) = (access.client_contract, module.client_contract) {
             if expected != active {
-                transaction.rollback().await?;
                 return Err(ExecutionError::ClientUpdateRequired { expected, active });
             }
         }
         if let Some(expected) = access.expected_artifact_hash.as_ref() {
             if !module.accepts_client_artifact(expected, access.client_contract) {
-                transaction.rollback().await?;
                 return Err(ExecutionError::StaleReducerArtifact {
                     expected: expected.clone(),
                     active: module.artifact_hash.clone(),
@@ -506,18 +468,28 @@ impl Runtime {
             )
         });
         install_execution_deadline(self, &mut provenance, false);
-        transaction
-            .set_invocation_provenance(TransactionAttribution {
-                root_command_id: &provenance.root_command_id,
+        // The tenant's single SQLite writer is taken at the Reducer's first
+        // database call, never while it waits for a V8 isolate. The receipt
+        // claim happens when the transaction opens; a key already claimed by a
+        // committed call replays its stored result below.
+        let pending = crate::host_calls::PendingWrite {
+            control: control.clone(),
+            route: session.route.clone(),
+            command_id: command_id.to_owned(),
+            attribution: crate::host_calls::WriteAttribution {
+                root_command_id: provenance.root_command_id.clone(),
                 root_channel: invocation_channel_name(provenance.root_channel),
                 channel: invocation_channel_name(provenance.channel),
-                actor_account_id: provenance.actor_account_id.as_deref(),
-                actor_member_id: provenance.actor_member_id.as_deref(),
-                on_behalf_of_member_id: provenance.on_behalf_of_member_id.as_deref(),
-                agent_execution_id: provenance.agent_execution_id.as_deref(),
-            })
-            .await?;
-        let mut handler = DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
+                actor_account_id: provenance.actor_account_id.clone(),
+                actor_member_id: provenance.actor_member_id.clone(),
+                on_behalf_of_member_id: provenance.on_behalf_of_member_id.clone(),
+                agent_execution_id: provenance.agent_execution_id.clone(),
+            },
+            claim: idempotency_key.map(|key| {
+                (session.identity.account.id.clone(), key.to_owned(), receipt_path.clone())
+            }),
+        };
+        let mut handler = DatabaseHostCalls::lazy_reducer(pending)
             .with_intent(&session.route.tenant_id, command_id)
             .with_schema(&module.schema)
             .with_schedulable_functions(
@@ -570,10 +542,20 @@ impl Runtime {
         match result {
             Ok(value) => {
                 if let Some(key) = idempotency_key {
-                    handler
-                        .transaction_mut()
-                        .store_reducer_result(&session.identity.account.id, key, &value)
-                        .await?;
+                    let stored = match handler.ensure_transaction().await {
+                        Ok(transaction) => transaction
+                            .store_reducer_result(&session.identity.account.id, key, &value)
+                            .await
+                            .map_err(ExecutionError::from),
+                        Err(error) => Err(ExecutionError::HostCall(error)),
+                    };
+                    if handler.claim_conflict() {
+                        let _ = handler.finish(false).await;
+                        return self
+                            .replay_receipt(&control, session, key, &receipt_path, committed_revisions)
+                            .await;
+                    }
+                    stored?;
                 }
                 let committed_revision = handler.finish_with_revision(true).await.map_err(|error| {
                     // A commit lost to the connection is retried under the same
@@ -599,6 +581,12 @@ impl Runtime {
                 })
             }
             Err(error) => {
+                if let (true, Some(key)) = (handler.claim_conflict(), idempotency_key) {
+                    let _ = handler.finish(false).await;
+                    return self
+                        .replay_receipt(&control, session, key, &receipt_path, committed_revisions)
+                        .await;
+                }
                 // A rollback that fails means the connection itself is gone.
                 let rolled_back = handler.finish(false).await.is_ok();
                 let error = ExecutionError::from(error);
@@ -609,6 +597,35 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    /// Replays the stored result of an idempotency key whose Reducer already
+    /// committed. The retained receipt is visible only after its transaction
+    /// commits, so the database's monotonic clock is a sufficient barrier,
+    /// even with a new transport ID or after its change rows were pruned.
+    async fn replay_receipt(
+        &self,
+        control: &gonvex_store::ControlPlane,
+        session: &TenantSession,
+        key: &str,
+        receipt_path: &str,
+        committed_revisions: Option<CommittedRevisionTracker>,
+    ) -> Result<ReducerExecution, ExecutionError> {
+        let value = control
+            .replay_reducer_result(&session.route, &session.identity.account.id, key, receipt_path)
+            .await?;
+        let committed_revision = Some(
+            crate::change_feed::read_clock(&self.inner.pools, &session.route)
+                .await?
+                .revision,
+        );
+        if let Some(tracker) = committed_revisions.as_ref() {
+            tracker.observe(committed_revision);
+        }
+        Ok(ReducerExecution {
+            value,
+            committed_revision,
+        })
     }
 
     pub async fn execute_tenant_action(
