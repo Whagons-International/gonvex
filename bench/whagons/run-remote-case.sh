@@ -89,8 +89,17 @@ if [ "${LOAD_PERF:-1}" != 0 ] && command -v perf >/dev/null; then
  rpid=$(docker inspect "$prefix-runtime" --format '{{.State.Pid}}')
  perf buildid-cache -a "$LOAD_BIN_DIR/gonvex-runtime" 2>/dev/null || true
  ( sleep "${LOAD_PERF_AT:-$(( ${LOAD_RAMP_SECONDS:-60} + 45 ))}"
-   "$bench/../profiler/perf-oncpu.sh" "$rpid" 30 "$out/oncpu.svg" > "$out/perf-oncpu.log" 2>&1
-   "$bench/../profiler/offcpu.sh" "$rpid" 30 "$out/offcpu.svg" > "$out/perf-offcpu.log" 2>&1 ) & perfjob=$!
+   ps=${LOAD_PERF_SECONDS:-30}; export TMPDIR="$out"  # perf.data on disk, not tmpfs
+   # LOAD_PERF_PARALLEL=1: on- and off-CPU over the same window (e.g. across a :00
+   # boundary), off-CPU keeps its per-switch timeline.
+   if [ "${LOAD_PERF_PARALLEL:-0}" = 1 ]; then
+    PERF_FREQ=${PERF_FREQ:-99} "$bench/../profiler/perf-oncpu.sh" "$rpid" "$ps" "$out/oncpu.svg" > "$out/perf-oncpu.log" 2>&1 &
+    PERF_KEEP_SWITCHES=1 "$bench/../profiler/offcpu.sh" "$rpid" "$ps" "$out/offcpu.svg" > "$out/perf-offcpu.log" 2>&1
+    wait
+   else
+    "$bench/../profiler/perf-oncpu.sh" "$rpid" "$ps" "$out/oncpu.svg" > "$out/perf-oncpu.log" 2>&1
+    "$bench/../profiler/offcpu.sh" "$rpid" "$ps" "$out/offcpu.svg" > "$out/perf-offcpu.log" 2>&1
+   fi ) & perfjob=$!
 fi
 status=0
 ssh "$remote" "cd $rroot && env WHAGONS_CHECKOUT=$rroot/app LOAD_STATE=$rroot/fixture.json LOAD_ADMIN_KEY=local-load-admin \
