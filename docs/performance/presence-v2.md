@@ -367,4 +367,44 @@ connection.
 
 ## 9. Measurements
 
-See section 9 results below (filled from `presence_bench`).
+`cargo build --release -p gonvex-runtime --example presence_bench && target/release/examples/presence_bench`
+(arch3 workstation, 2026-11-03, while ~12 other agent builds were running, so
+absolute times are noisy; base `claude/sqlite-storage-lab` 72e6d30 merged).
+1,950 users in one tenant. The old path excludes V8: the Reducer's invoke and
+its two `ctx.db` host calls over the module-host socket are not in these
+numbers (measured separately at ~1.5 ms per Reducer on the Mac lab).
+
+Per beat / per transition:
+
+| path | host calls | tenant writer hold | latency (mean / p95 / p99) | allocations |
+|---|---|---|---|---|
+| old `presence.beat`: admission + SELECT + UPDATE + capture + `synchronous=FULL` commit | 2 (+1 invoke) | 41.3 ms mean, p95 76 ms, p99 117 ms | 41.6 / 76.5 / 117 ms | 227 |
+| old fan-out: encode the replica frame for 1,950 subscribers (lower bound: no visibility, no socket) | — | — | 5.8 / 7.1 / 8.3 ms | 101,400 |
+| new: v2 client beat | none sent | 0 | 0 | 0 |
+| new: old client's beat short-circuited in Rust (hub lookup) | 0 | 0 | 138 ns / 170 ns / 291 ns | 1 |
+| new: `presence.set` transition (hub update) | 0 | 0 | 482 ns / 621 ns / 922 ns | 2 |
+| new: one tick publishing 1 / 5 / 20 transitions to 1,950 subscribers (encode once + 1,950 slot pushes) | 0 | 0 | 95 / 88 / 95 µs | ~1,960–2,040 |
+| new: draining all 1,950 slots (1 / 5 / 20 transitions per frame) | 0 | 0 | 145 / 131 / 261 µs | 1,950 |
+
+A first run (same build) measured the old writer hold at 30.9 ms mean
+(p99 76 ms). On this disk, under this load, one tenant writer completes ~25–30
+beat commits per second; the 1,950-user tenant needs 84/s of presence commits
+alone.
+
+Resident hub state: 1.67 MB for 1,950 online Members, each with one
+subscribed connection (858 B per user).
+
+1,950-user tenant, 30 s beats, transitions with 101 s mean gaps, 30 simulated
+minutes:
+
+| | old | new, tick 1 s (default) | new, tick 250 ms |
+|---|---|---|---|
+| durable commits/s for presence + support | 149.3 (65 beats + 65 support + 19.3 transitions) | 0 | 0 |
+| presence deliveries/s | 164,387 row deliveries (126,750 from beats + 37,637 from transitions) | 1,950 frames carrying 37,282 Member changes | 7,734 frames carrying 37,539 Member changes |
+| presence bytes/s on the wire (before compression) | not measured (~250 B per row frame → ~41 MB/s estimated) | 2.1 MB/s | 2.5 MB/s |
+| hub CPU per wall second (set + tick + drain) | — | 0.35 ms | 0.90 ms |
+
+Not measured: V8 time, socket writes and compression, visibility evaluation
+on the old fan-out, the Control Plane side of the old support heartbeat
+(`notify_control_changed` re-runs every project connection's live Control
+queries), and end-to-end latency under the full Whagons load.
