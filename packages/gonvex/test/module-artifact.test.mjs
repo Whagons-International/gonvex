@@ -190,6 +190,70 @@ export const rename = reducer<RenameArgs, RenameResult>({
   assert.deepEqual(functions.rename.result, { kind: "object", fields: { ok: { kind: "boolean" } } });
 });
 
+test("split artifacts add a Query/Reducer bundle without Action-only code", async (t) => {
+  const definitions = `
+export const schema = {
+  string: () => ({ kind: "string" }),
+  object: (fields) => ({ kind: "object", fields }),
+};
+export const query = (definition) => ({ kind: "query", ...definition });
+export const reducer = (definition) => ({ kind: "reducer", ...definition });
+export const action = (definition) => ({ kind: "action", ...definition });
+`;
+  const project = await moduleProject(t, `
+export * as tasks from "./tasks.ts";
+export * as assistant from "./assistant.ts";
+`, {
+    "sdk.ts": definitions,
+    "heavy.ts": "export const heavyModel = () => 'HEAVY_ACTION_ONLY_DEPENDENCY';\n",
+    "tasks.ts": `
+import { query, reducer, schema } from "./sdk.ts";
+export const get = query({ args: schema.object({}), result: schema.string(), run: async () => "task" });
+export const rename = reducer({ name: "tasks.rename", args: schema.object({ title: schema.string() }), result: schema.string(), run: async (_ctx, args) => args.title });
+`,
+    "assistant.ts": `
+import { action, query, schema } from "./sdk.ts";
+import { heavyModel } from "./heavy.ts";
+export const status = query({ args: schema.object({}), result: schema.string(), run: async () => "ready" });
+export const ask = action({ args: schema.object({}), result: schema.string(), run: async () => heavyModel() });
+`,
+  });
+  const files = ["index.ts", "sdk.ts", "heavy.ts", "tasks.ts", "assistant.ts"].map((name) => join(project.backendDir, name));
+  const unsplit = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files, migrations: [] });
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files, migrations: [], split: true });
+
+  assert.equal(unsplit.reducerBundle, undefined);
+  assert.notEqual(artifact.hash, unsplit.hash, "the reducer bundle is part of the signed contract");
+  assert.equal(artifact.javascript.hash, unsplit.javascript.hash, "the complete bundle is unchanged");
+  assert.equal(artifact.reducerBundle.path, "gonvex/_build/module.reducers.js");
+  assert.deepEqual(artifact.reducerBundle.functions, ["assistant.status", "tasks.get", "tasks.rename"]);
+  const reducerCode = Buffer.from(artifact.reducerBundle.code, "base64").toString("utf8");
+  assert.doesNotMatch(reducerCode, /HEAVY_ACTION_ONLY_DEPENDENCY/);
+  assert.match(Buffer.from(artifact.javascript.code, "base64").toString("utf8"), /HEAVY_ACTION_ONLY_DEPENDENCY/);
+  assert.equal(await readFile(join(project.backendDir, "_build", "module.reducers.js"), "utf8"), reducerCode);
+
+  // Hosts resolve split functions by exact path on the bundle namespace.
+  const namespace = await import(`data:text/javascript;base64,${artifact.reducerBundle.code}`);
+  assert.deepEqual(Object.keys(namespace).sort(), ["assistant.status", "tasks.get", "tasks.rename"]);
+  assert.equal(await namespace["tasks.rename"].run({}, { title: "x" }), "x");
+
+  const artifactFile = join(project.root, "artifact.json");
+  await writeFile(artifactFile, JSON.stringify(artifact));
+  const repositoryRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+  const verify = () => execFileSync("cargo", [
+    "run", "--quiet", "--manifest-path", join(repositoryRoot, "rust", "Cargo.toml"),
+    "-p", "gonvex-runtime", "--", "verify-module-artifact", "--file", artifactFile,
+  ], { cwd: repositoryRoot, encoding: "utf8", stdio: "pipe" }).trim();
+  assert.equal(verify(), artifact.hash, "TypeScript CLI and Rust runtime must hash the same split contract");
+  for (const tampered of [
+    { ...artifact, reducerBundle: { ...artifact.reducerBundle, functions: ["tasks.get"] } },
+    { ...artifact, reducerBundle: { ...artifact.reducerBundle, hash: unsplit.javascript.hash } },
+  ]) {
+    await writeFile(artifactFile, JSON.stringify(tampered));
+    assert.throws(verify, /Command failed/);
+  }
+});
+
 test("literal agent metadata is signed and checkout-path independent", async (t) => {
   const source = `
 const schema = { object: (fields) => ({ kind: "object", fields }), string: () => ({ kind: "string" }) };

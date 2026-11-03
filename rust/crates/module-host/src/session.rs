@@ -396,7 +396,13 @@ async fn handle_request(
             protocol: PROTOCOL_VERSION,
             version: env!("CARGO_PKG_VERSION").to_owned(),
         }),
-        RequestOp::Load(request) => handle_load(state, request).await,
+        RequestOp::Load(request) => {
+            let loaded = handle_load(state, request).await;
+            // The load frame carried the whole artifact (base64 bundles and
+            // function schemas); give those pages back once it is decoded.
+            gonvex_module_runtime_v8::trim_native_heap();
+            loaded
+        }
         RequestOp::Activate(request) => handle_activate(state, request),
         RequestOp::Describe(request) => handle_describe(state, request),
         RequestOp::Unload(request) => handle_unload(state, request).await,
@@ -424,7 +430,12 @@ async fn handle_load(
         .map_err(|err| registry_error(&module_id, err))?;
 
     let decoded = artifact::decode(&module_id, generation, request.artifact)?;
-    let engine = V8ModuleEngine::from_artifact(decoded.artifact, state.config.v8.clone()).map_err(
+    let engine = V8ModuleEngine::from_split_artifact(
+        decoded.artifact,
+        decoded.reducer_bundle,
+        state.config.v8.clone(),
+    )
+    .map_err(
         |err| {
             WireError::new(
                 codes::MODULE_LOAD_FAILED,
@@ -442,12 +453,14 @@ async fn handle_load(
         )
     })?;
 
+    let split = engine.is_split();
     state
         .modules
         .stage(&module_id, generation, Arc::new(engine));
     log(&format!(
-        "loaded module {module_id} generation {generation} with {} functions",
-        decoded.summaries.len()
+        "loaded module {module_id} generation {generation} with {} functions{}",
+        decoded.summaries.len(),
+        if split { " (split: Queries/Reducers warm, complete bundle on demand)" } else { "" }
     ));
     Ok(ResponsePayload::Loaded {
         module_id,
