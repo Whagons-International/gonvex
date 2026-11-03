@@ -159,8 +159,10 @@ impl WebSocket {
             let mut payload = BytesMut::new();
             loop {
                 let result = match receiver.read(&mut payload).await {
+                    // Hand over the whole buffer: `split()` would leave an empty
+                    // view that keeps the message's allocation alive while idle.
                     Ok(ratchet_core::Message::Text) => {
-                        match ws::Utf8Bytes::try_from(payload.split().freeze()) {
+                        match ws::Utf8Bytes::try_from(std::mem::take(&mut payload).freeze()) {
                             Ok(text) => Ok(ws::Message::Text(text)),
                             Err(error) => {
                                 let _ = receiver
@@ -174,7 +176,7 @@ impl WebSocket {
                         }
                     }
                     Ok(ratchet_core::Message::Binary) => {
-                        Ok(ws::Message::Binary(payload.split().freeze()))
+                        Ok(ws::Message::Binary(std::mem::take(&mut payload).freeze()))
                     }
                     Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
                     Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
@@ -334,6 +336,12 @@ impl ExtensionEncoder for Encode {
     }
 }
 
+/// Benchmark hook: the exact per-message compressor the encoder runs.
+#[doc(hidden)]
+pub fn bench_compress_text(payload: &[u8], window_bits: u8) -> io::Result<Option<Vec<u8>>> {
+    compress_text(payload, window_bits, 0)
+}
+
 fn compress_text(payload: &[u8], window_bits: u8, threshold: usize) -> io::Result<Option<Vec<u8>>> {
     if payload.len() < threshold {
         return Ok(None);
@@ -470,13 +478,16 @@ mod tests {
         net::TcpStream,
     };
 
-    async fn echo(State((enabled, threshold)): State<(bool, usize)>, request: Request) -> Response {
+    async fn echo(
+        State((enabled, threshold, limit)): State<(bool, usize, usize)>,
+        request: Request,
+    ) -> Response {
         upgrade(
             request,
             enabled,
             threshold,
-            4096,
-            4096,
+            limit,
+            limit,
             move |mut socket| async move {
                 assert_eq!(
                     socket.compression_threshold(),
@@ -550,6 +561,15 @@ mod tests {
         offer: Option<&str>,
         threshold: usize,
     ) -> (TcpStream, String, JoinHandle<()>) {
+        connect_with_limit(enabled, offer, threshold, 4096).await
+    }
+
+    async fn connect_with_limit(
+        enabled: bool,
+        offer: Option<&str>,
+        threshold: usize,
+        limit: usize,
+    ) -> (TcpStream, String, JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -557,7 +577,7 @@ mod tests {
                 listener,
                 Router::new()
                     .route("/ws", get(echo))
-                    .with_state((enabled, threshold)),
+                    .with_state((enabled, threshold, limit)),
             )
             .await
             .unwrap();
@@ -582,9 +602,12 @@ mod tests {
         let mut frame = vec![opcode];
         if payload.len() < 126 {
             frame.push(128 | payload.len() as u8);
-        } else {
+        } else if payload.len() <= 0xffff {
             frame.push(128 | 126);
             frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        } else {
+            frame.push(128 | 127);
+            frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
         }
         frame.extend_from_slice(&[1, 2, 3, 4]);
         frame.extend(
@@ -724,6 +747,63 @@ mod tests {
             read(&mut stream).await,
             (0x81, b"fragmented JSON message".to_vec())
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn frames_larger_than_the_read_fragment_round_trip() {
+        let mut seed = 9u32;
+        let text = (0..60_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                b"abcdefghijklmnopqrstuvwxyz0123456789 {}:,"[(seed % 41) as usize]
+            })
+            .collect::<Vec<_>>();
+        let (mut stream, headers, server) = connect_with_limit(
+            true,
+            Some("permessage-deflate; client_max_window_bits"),
+            1024,
+            1 << 20,
+        )
+        .await;
+        assert!(headers.contains("permessage-deflate"));
+        let (mut encoder, mut decoder) = codecs();
+        let compressed = encoder.prepare_message(&text).unwrap().commit();
+        assert!(compressed.len() > 2 * frame_limits::READ_FRAGMENT);
+        let split = compressed.len() / 3 * 2 + 1;
+        for frames in [
+            vec![masked(0x81, &text)],
+            vec![masked(0xc1, &compressed)],
+            // A fragmented compressed message with a ping between fragments.
+            vec![
+                masked(0x41, &compressed[..split]),
+                masked(0x89, b"ping"),
+                masked(0x80, &compressed[split..]),
+            ],
+            // Uneven sizes: one byte past a fragment, and a tiny final fragment.
+            vec![
+                masked(0x01, &text[..frame_limits::READ_FRAGMENT + 1]),
+                masked(0x00, &text[frame_limits::READ_FRAGMENT + 1..text.len() - 3]),
+                masked(0x80, &text[text.len() - 3..]),
+            ],
+        ] {
+            let mut wire = Vec::new();
+            for frame in &frames {
+                wire.extend_from_slice(frame);
+            }
+            // Byte-sized writes exercise partial headers and payloads.
+            for chunk in wire.chunks(7919) {
+                stream.write_all(chunk).await.unwrap();
+            }
+            if frames.len() == 3 && frames[1][0] == 0x89 {
+                assert_eq!(read(&mut stream).await, (0x8a, b"ping".to_vec()));
+            }
+            let (opcode, data) = read(&mut stream).await;
+            assert_eq!(opcode, 0xc1);
+            assert_eq!(decoder.decompress(&data, true, 1 << 20).unwrap(), text);
+        }
         server.abort();
     }
 

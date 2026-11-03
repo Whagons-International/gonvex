@@ -1552,6 +1552,7 @@ dependencies = [
  "chrono",
  "cron",
  "duckdb",
+ "flate2",
  "futures-util",
  "gonvex-module-host",
  "gonvex-module-runtime",
