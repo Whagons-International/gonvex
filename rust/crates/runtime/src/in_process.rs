@@ -146,7 +146,7 @@ impl gonvex_module_runtime::ModuleHost for DirectHost<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::time::Instant;
 
     use base64::Engine as _;
@@ -212,6 +212,7 @@ export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1
             },
             functions: ["read", "fail", "spin", "hog"].map(function).into(),
             metadata: Default::default(),
+            reducer_bundle: None,
         }
     }
 
@@ -249,14 +250,42 @@ export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1
         host
     }
 
-    fn run(test: impl std::future::Future<Output = ()>) {
-        gonvex_module_runtime_v8::initialize_v8_platform();
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
+    /// Like module-runtime-v8's `run_v8_test`: initialize V8 and run every
+    /// test from one persistent parent thread, never from libtest's
+    /// short-lived threads (V8 crashes when the platform's thread is gone).
+    pub(crate) fn run(test: impl std::future::Future<Output = ()> + Send + 'static) {
+        type Job = Box<dyn FnOnce() + Send>;
+        static RUNNER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
+            std::sync::OnceLock::new();
+        let runner = RUNNER.get_or_init(|| {
+            let (sender, jobs) = std::sync::mpsc::channel::<Job>();
+            std::thread::spawn(move || {
+                gonvex_module_runtime_v8::initialize_v8_platform();
+                for job in jobs {
+                    job();
+                }
+            });
+            std::sync::Mutex::new(sender)
+        });
+        let (done, result) = std::sync::mpsc::channel();
+        runner
+            .lock()
             .unwrap()
-            .block_on(test);
+            .send(Box::new(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(test);
+                }));
+                done.send(outcome).unwrap();
+            }))
+            .unwrap();
+        if let Err(panic) = result.recv().unwrap() {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]

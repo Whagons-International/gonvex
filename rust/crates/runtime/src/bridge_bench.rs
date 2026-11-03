@@ -19,6 +19,12 @@
 //!   invoke rolls back so every sample sees the same rows; commit (fsync) cost
 //!   is therefore excluded from the hold time and is the same in both modes.
 //!
+//! `BRIDGE_BENCH_SPLIT=<artifact.json>` replaces the manifest's module with a
+//! split artifact (reducer-only bundle, perf/v8-memory). In socket mode the
+//! socket path lives in `TMPDIR`, so keep it short (Unix sockets allow ~107
+//! bytes). Results in docs/performance/module-host-bridge.md were taken with
+//! `taskset -c <cpu>` to model one vCPU.
+//!
 //! Example:
 //!   BRIDGE_BENCH_MODE=in-process BRIDGE_BENCH_MANIFEST=... BRIDGE_BENCH_DB=... \
 //!   cargo test --release -p gonvex-runtime bridge_bench -- --ignored --nocapture
@@ -302,15 +308,18 @@ fn invoke_request(function: &str, args: &Value, command: &str, member: &Value, h
     .unwrap()
 }
 
-fn runtime() -> tokio::runtime::Runtime {
-    gonvex_module_runtime_v8::initialize_v8_platform();
-    // The production runtime on a 1-CPU container has one Tokio worker.
-    let workers = env("BRIDGE_BENCH_WORKERS").and_then(|v| v.parse().ok()).unwrap_or(1);
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers)
-        .enable_all()
-        .build()
-        .unwrap()
+/// One Tokio worker, as the production runtime has on a 1-CPU container, on
+/// the persistent V8 parent thread shared with the in-process tests.
+struct BenchRuntime;
+
+impl BenchRuntime {
+    fn block_on(self, test: impl std::future::Future<Output = ()> + Send + 'static) {
+        crate::in_process::tests::run(test);
+    }
+}
+
+fn runtime() -> BenchRuntime {
+    BenchRuntime
 }
 
 #[test]
@@ -346,6 +355,7 @@ export const loop = async (ctx, args) => {
                 metadata: Default::default(),
             }],
             metadata: Default::default(),
+            reducer_bundle: None,
         };
         let host = ModuleHost::new(host_config());
         start(&host, artifact).await;
@@ -437,6 +447,12 @@ fn whagons_artifact(manifest: &Value) -> ModuleArtifactWire {
         javascript: serde_json::from_value(module["javascript"].clone()).unwrap(),
         functions,
         metadata: Default::default(),
+        // A split artifact (perf/v8-memory) serves Queries and Reducers from
+        // the reducer-only bundle.
+        reducer_bundle: module
+            .get("reducerBundle")
+            .filter(|_| env("BRIDGE_BENCH_NO_SPLIT").is_none())
+            .map(|bundle| serde_json::from_value(bundle.clone()).unwrap()),
     }
 }
 
@@ -445,7 +461,11 @@ fn whagons_artifact(manifest: &Value) -> ModuleArtifactWire {
 fn bridge_bench_whagons() {
     runtime().block_on(async {
         let manifest_path = env("BRIDGE_BENCH_MANIFEST").expect("BRIDGE_BENCH_MANIFEST");
-        let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        if let Some(split) = env("BRIDGE_BENCH_SPLIT") {
+            let artifact: Value = serde_json::from_slice(&std::fs::read(split).unwrap()).unwrap();
+            manifest["module"] = artifact["module"].clone();
+        }
         let hash = manifest["module"]["hash"].as_str().unwrap_or_default().to_owned();
         let schedulable: Vec<String> = manifest["module"]["functions"]
             .as_object()
@@ -481,7 +501,7 @@ fn bridge_bench_whagons() {
         .unwrap();
         drop(reader);
         let iterations: usize = env("BRIDGE_BENCH_CALLS").and_then(|v| v.parse().ok()).unwrap_or(200);
-        type Args = Box<dyn Fn(usize) -> Value>;
+        type Args = Box<dyn Fn(usize) -> Value + Send + Sync>;
         let workloads: Vec<(&str, Args)> = vec![
             ("tasks.update", Box::new({ let tasks = tasks.clone(); move |i| json!({"taskId": tasks[i % tasks.len()].0, "updates": {"dueDate": 1_800_000_000_000i64 + i as i64 * 86_400_000}}) })),
             ("tasks.updateDescription", Box::new({ let tasks = tasks.clone(); move |i| json!({"taskId": tasks[i % tasks.len()].0, "description": format!("bench description {i}")}) })),

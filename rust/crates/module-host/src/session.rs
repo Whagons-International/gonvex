@@ -599,7 +599,11 @@ pub async fn handle_local(
             protocol: PROTOCOL_VERSION,
             version: env!("CARGO_PKG_VERSION").to_owned(),
         }),
-        RequestOp::Load(request) => handle_load(state, request).await,
+        RequestOp::Load(request) => {
+            let loaded = handle_load(state, request).await;
+            gonvex_module_runtime_v8::trim_native_heap();
+            loaded
+        }
         RequestOp::Activate(request) => handle_activate(state, request),
         RequestOp::Describe(request) => handle_describe(state, request),
         RequestOp::Unload(request) => handle_unload(state, request).await,

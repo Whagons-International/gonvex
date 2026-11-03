@@ -70,4 +70,80 @@ behind `TenantTransaction`.
 
 ## Measurements
 
-See the tables below (filled from `bridge_bench.rs`).
+Harness: `rust/crates/runtime/src/bridge_bench.rs` (ignored tests, release build). It runs the
+runtime's own `ModuleHost` client with one Tokio worker, pinned to one CPU (`taskset -c 5`, so the
+runtime, the isolate thread and, in socket mode, the module-host process share one core, as in a
+1-vCPU container). Socket mode is the unchanged base transport (one Unix socket connection per
+invoke, JSON frames, base `gonvex-module-host` binary). Host calls are answered by the real
+`DatabaseHostCalls` on a copy of the lab tenant SQLite file (`v8-lab/tenant`, 9k-task tenant) and
+the real Whagons bundle (`v8-lab/manifest.json`, the complete bundle). Each invoke **rolls back**,
+so every sample sees the same rows. Commit/fsync time is therefore not in the hold time (it is the
+same in both modes). The writer hold runs from the first database host call (when the lazy
+writer opens) to the end of the transaction. "handler" is time inside host-call handlers (SQLite
+through sqlx). "bridge+JS" is invoke time minus handler time. CPU counts the runtime process plus
+its module-host child. 300 samples after 20 warm-up calls per function. The workstation was
+shared with other agents' builds (load average 11-14 on 14 cores), so p95 values are noisy.
+The `perf/fixture` fake module host was not used; the synthetic bundle below plays that role.
+
+### Per host call (synthetic Reducer: `n` awaited `ctx.db.query`, 1 CPU)
+
+| | socket (base) | in-process | speed-up |
+|---|---:|---:|---:|
+| Marginal cost of one host call, null handler (no SQLite) | 82 µs | 14 µs | 5.9x |
+| 30 queries, null handler, invoke mean | 2.74 ms | 0.52 ms | 5.3x |
+| 30 real SQLite point reads, invoke mean | 4.84 ms | 1.51 ms | 3.2x |
+| 30 real SQLite point reads, writer hold p50 | 4.28 ms | 1.41 ms | 3.0x |
+
+### Whagons Reducers (complete bundle, 1 CPU)
+
+Host calls per invoke are the same in both modes: tasks.update 27 (24 dbQuery, 1 dbUpdate,
+1 dbInsert, 1 actionEnqueue), tasks.updateDescription 27, taskResources.createNote 27
+(24 dbQuery, 2 dbInsert, 1 actionEnqueue), tasks.create 31 (28 dbQuery, 2 dbInsert, 1 schedule).
+
+| Reducer | invoke p50 socket → in-process | writer hold p50 | writer hold p95 | bridge+JS per invoke | CPU per invoke (runtime + host) |
+|---|---|---|---|---|---|
+| tasks.update | 8.35 → 4.92 ms (-41%) | 7.93 → 4.84 ms (-39%) | 11.59 → 6.96 ms | 5.23 → 1.90 ms | 9.22 → 5.72 ms (-38%) |
+| tasks.updateDescription | 10.36 → 5.14 ms (-50%) | 9.81 → 5.08 ms (-48%) | 13.46 → 7.63 ms | 6.04 → 1.91 ms | 10.72 → 5.72 ms (-47%) |
+| taskResources.createNote | 8.46 → 3.95 ms (-53%) | 7.86 → 3.87 ms (-51%) | 11.13 → 5.84 ms | 5.29 → 1.62 ms | 8.75 → 4.47 ms (-49%) |
+| tasks.create | 10.65 → 5.81 ms (-45%) | 9.83 → 5.56 ms (-43%) | 11.88 → 7.82 ms | 7.22 → 2.62 ms | 10.97 → 6.50 ms (-41%) |
+
+An earlier run with the same binaries at lower machine load gave the same picture: tasks.update
+p50 7.87 → 4.56 ms, hold 7.40 → 4.49 ms, CPU 8.78 → 5.19 ms.
+
+With the reducer-only bundle from `perf/v8-memory` (`v8-lab/split/whagons-split.json`) in process:
+tasks.update p50 4.69 ms, hold 4.59 ms; createNote 3.62 / 3.53 ms. That is within noise of the
+complete bundle; the split matters for memory, not latency.
+
+### Memory (1 isolate, after load and 1,280 calls)
+
+| | runtime RSS | module-host RSS | total |
+|---|---:|---:|---:|
+| socket (base) | 173 MB | 181 MB | 354 MB |
+| in-process, complete bundle | 268 MB | 0 | 268 MB (-86 MB) |
+
+The runtime RSS includes the SQLite pools and caches opened by the calls (+58 MB in socket mode
+between load and the end of the calls). In process, the isolate and its bundle add about 95 MB to
+the runtime (268 vs 173 MB). The `perf/v8-memory` merge adds `malloc_trim` after isolate start/stop
+and after Load, and the in-process Load path calls it too. The split-bundle run is not comparable on
+RSS: the harness holds the 22 MB manifest and the split artifact as parsed JSON (+90 MB before
+load). The V8-memory agent measured the V8 heap per isolate at 38 MB (complete) and 25 MB (reducer
+bundle).
+
+### What is left in the writer hold
+
+For tasks.update in process, about 64% of the hold is inside the host-call handlers (24 SQLite
+reads through sqlx, about 110 µs each including the sqlx thread hand-off). About 36% is JavaScript
+plus the remaining bridge: isolate thread → Tokio task → handler and back, two cross-thread wake-ups
+per call, plus JSON encoding in the op. Next steps, in order of size:
+
+1. SQLite on a dedicated connection thread without sqlx's per-query hand-off (`perf/sqlite-writer`),
+   or run the reads on the isolate thread itself. That removes the remaining two hops per call.
+2. The double JSON encoding of host-call results in `op_gonvex_host_call` (the value travels as a
+   JSON string inside a JSON envelope).
+
+**OCC (10d).** After in-process execution, a task edit holds the writer for about 4.5-5 ms
+(rollback measured, plus the commit). At the 5k budget's ≈23 task writes/s in the largest tenant,
+that is ≈11% writer utilization before commit, with presence moved out of V8. Queueing on the
+writer is small at that utilization, so OCC is not needed for that rate. Recommend it only if
+commit time (`synchronous=full` fsync, not measured here) or bursty writes push utilization well
+above that, and do (1) first, because it cuts the same hold time with no semantic change.
