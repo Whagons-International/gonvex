@@ -27,8 +27,10 @@ macro_rules! now_ms {
 }
 
 pub mod capture;
+pub mod checkpoint;
 mod data_dir;
 mod sync_barrier;
+pub use sync_barrier::WAL_SYNCS;
 pub mod feed;
 mod registry;
 pub mod rows;
@@ -37,6 +39,7 @@ pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
     database_path, database_url, AdmissionPermit, DatabaseListener, Durability, KeyedLock,
     Notification, PoolLimits, PoolRegistry, PoolRegistrySnapshot, WriterQueue, WriterStats,
+    sqlite_cache_budget_mib, sqlite_memory_used,
 };
 
 mod provision;

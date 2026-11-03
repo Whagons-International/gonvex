@@ -50,14 +50,37 @@ Every database file has:
   `REPEATABLE READ READ ONLY`.
 
 Pragmas on every connection: `journal_mode=WAL`, `foreign_keys=ON`,
-`busy_timeout=5000`, `synchronous` from `GONVEX_SQLITE_SYNCHRONOUS`
-(`full` default; `normal` is allowed and loses at most the last commits on
-power loss, never on a process crash), `cache_size=-65536`,
-`temp_store=MEMORY`. Automatic checkpoints stay on (1,000 pages).
+`busy_timeout=5000`, `synchronous=NORMAL`, `cache_size` from
+`GONVEX_SQLITE_CACHE_KIB` (default 8 MiB per connection), `mmap_size` from
+`GONVEX_SQLITE_MMAP_MIB` (default 256 MiB, shared and file-backed),
+`temp_store=MEMORY`.
+
+Durability comes from `GONVEX_SQLITE_SYNCHRONOUS` (`full` default), not from
+the connection pragma: COMMIT itself never syncs while holding the writer;
+with `full` a committed write transaction then waits on the database's
+batched WAL sync (`sync_barrier`: one `fdatasync` covers every commit that
+finished before it started) before it is acknowledged or its revision is
+published. This is the tenant writer's group commit; each transaction stays
+its own SQLite transaction. With `normal` the ack does not wait: a process
+crash loses nothing, a power loss can lose the last acknowledged commits
+(the database stays consistent).
+
+Checkpoints run off the writer (`checkpoint`): a WAL hook on the writer asks
+one process-wide thread to run `PASSIVE` checkpoints every 1,000 frames
+(`GONVEX_SQLITE_CHECKPOINT_PAGES`); the writer checkpoints inline only when
+the WAL reaches `GONVEX_SQLITE_WAL_CAP_PAGES` (16,000 frames, ~64 MiB).
+`GONVEX_SQLITE_CHECKPOINT=writer` restores SQLite's automatic checkpoint.
+
+SQLite's heap (page caches, parsed schemas, statements of every connection
+of every file) has one process-wide soft limit,
+`GONVEX_SQLITE_CACHE_BUDGET_MB` (default 128; 0 disables): past it page
+caches recycle instead of growing. Idle readers close after
+`database_idle_timeout` (runtime default 15 s).
 
 `TenantTransaction::commit` finalizes the change feed inside the same
-transaction (see below), commits, and only then publishes the revision. A
-caller never sees a revision that did not commit.
+transaction (see below), commits, waits for durability, and only then
+publishes the revision. A caller never sees a revision that did not commit.
+Measurements: `docs/performance/sqlite-writer.md`.
 
 ## Change feed
 
