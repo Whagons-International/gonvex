@@ -185,6 +185,8 @@ class FakeTenant:
             return self._row(table, updated) if updated else None
         if kind in ("dbDelete", "dbDeleteMany"):
             return None
+        if kind == "toolInvoke":
+            return {"connected": False, "configured": False}
         if kind in ("actionEnqueue", "scheduleAfter", "scheduleAt"):
             self.counter += 1
             return f"job_{self.counter}"
@@ -247,6 +249,9 @@ def main():
     parser.add_argument("--second-generation", action="store_true")
     parser.add_argument("--bundle", help="replace the manifest bundle with this JS file")
     parser.add_argument("--no-split", action="store_true", help="drop reducerBundle from the artifact")
+    parser.add_argument("--action", help="also invoke this Action (on-demand isolate in split mode)")
+    parser.add_argument("--idle-wait", type=float, default=0.0,
+                        help="seconds to wait after the Action before sampling RSS again")
     parser.add_argument("--json")
     options = parser.parse_args()
 
@@ -347,6 +352,34 @@ def main():
                 "p50": percentile(samples, 0.50), "p95": percentile(samples, 0.95),
                 "p99": percentile(samples, 0.99), "mean": sum(samples) / len(samples)}
         result["mem_after_calls"] = proc_mem(pid)
+
+        if options.action:
+            spec = manifest["module"]["functions"][options.action]
+            tools = sorted((spec.get("actionCapabilities") or {}).get("tools", {}))
+
+            def invoke_action(index):
+                ctx = context(f"action-{index}")
+                ctx["actionTools"] = tools
+                ctx["capabilities"] = {"actionTools": True, "actionOutbox": True, "scheduler": True,
+                                       "functions": True, "secrets": True, "network": True, "storage": True}
+                started = time.perf_counter()
+                try:
+                    payload, _ = host.request(
+                        {"op": "invoke", "moduleId": "whagons", "function": options.action,
+                         "kind": "action", "args": "{}", "context": ctx}, tenant.handle)
+                    outcome = str(payload)[:160]
+                except RuntimeError as error:
+                    outcome = "error: " + str(error)[:160]
+                return (time.perf_counter() - started) * 1000, outcome
+
+            result["action_first_ms"], result["action_outcome"] = invoke_action(0)
+            result["action_second_ms"], _ = invoke_action(1)
+            result["mem_action_warm"] = proc_mem(pid)
+            for i in range(50):
+                invoke("presence.beat", {}, 20_000 + i)
+            if options.idle_wait:
+                time.sleep(options.idle_wait)
+                result["mem_after_action_idle"] = proc_mem(pid)
 
         if options.second_generation:
             load_payload["generation"] = 2

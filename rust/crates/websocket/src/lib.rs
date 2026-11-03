@@ -31,6 +31,9 @@ use tokio::{sync::mpsc, task::JoinHandle};
 mod inflate;
 use inflate::inflate_message;
 
+/// Initial read buffer of a connection that did not negotiate compression.
+const PLAIN_READ_BUFFER: usize = 4096;
+
 pub async fn upgrade<F, Fut>(
     mut request: Request,
     enabled: bool,
@@ -57,6 +60,9 @@ where
             Ok(upgrade) => upgrade
                 .max_message_size(max_message)
                 .max_frame_size(max_frame)
+                // tungstenite allocates and zero-fills 128 KiB per connection
+                // by default. Frames larger than this still grow the buffer.
+                .read_buffer_size(PLAIN_READ_BUFFER)
                 .on_upgrade(move |socket| callback(WebSocket::plain(socket)))
                 .into_response(),
             Err(error) => error.into_response(),
@@ -91,15 +97,13 @@ where
                     compressed: false,
                 },
             };
-            // Coalesce small frame headers and payloads to avoid delayed-ACK stalls.
+            // FrameLimits coalesces small frame headers and payloads to avoid
+            // delayed-ACK stalls, and frees that buffer after each flush.
             let socket = ratchet_core::WebSocket::from_upgraded(
                 ratchet_core::WebSocketConfig {
                     max_message_size: max_message,
                 },
-                FrameLimits::new(
-                    tokio::io::BufWriter::with_capacity(4096, TokioIo::new(stream)),
-                    max_frame,
-                ),
+                FrameLimits::new(TokioIo::new(stream), max_frame),
                 Some(extension),
                 BytesMut::new(),
                 ratchet_core::Role::Server,
@@ -117,7 +121,7 @@ where
     response.map(|_| axum::body::Body::empty()).into_response()
 }
 
-type IoStream = FrameLimits<tokio::io::BufWriter<TokioIo<hyper::upgrade::Upgraded>>>;
+type IoStream = FrameLimits<TokioIo<hyper::upgrade::Upgraded>>;
 type CompressedSocket = ratchet_core::WebSocket<IoStream, Deflate>;
 
 /// A server WebSocket: the transport plus at most one pending batched
@@ -245,44 +249,53 @@ impl WebSocket {
         let (tx, rx) = mpsc::channel(1);
         // Ratchet reads are not cancellation safe. Keep them in an owned task;
         // the runtime can cancel channel receives without losing a partial frame.
-        let reader = tokio::spawn(gonvex_profiler::instrument(gonvex_profiler::TaskKind::WsReader, async move {
-            let mut payload = BytesMut::new();
-            loop {
-                let result = match receiver.read(&mut payload).await {
-                    Ok(ratchet_core::Message::Text) => {
-                        match ws::Utf8Bytes::try_from(payload.split().freeze()) {
-                            Ok(text) => Ok(ws::Message::Text(text)),
-                            Err(error) => {
-                                let _ = receiver
-                                    .close(ratchet_core::CloseReason::new(
-                                        ratchet_core::CloseCode::Invalid,
-                                        None,
-                                    ))
-                                    .await;
-                                Err(axum::Error::new(error))
+        let reader = tokio::spawn(gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::WsReader,
+            async move {
+                let mut payload = BytesMut::new();
+                loop {
+                    let result = match receiver.read(&mut payload).await {
+                        // Hand over the whole buffer: `split()` would leave an empty
+                        // view that keeps the message's allocation alive while idle.
+                        Ok(ratchet_core::Message::Text) => {
+                            match ws::Utf8Bytes::try_from(std::mem::take(&mut payload).freeze()) {
+                                Ok(text) => Ok(ws::Message::Text(text)),
+                                Err(error) => {
+                                    let _ = receiver
+                                        .close(ratchet_core::CloseReason::new(
+                                            ratchet_core::CloseCode::Invalid,
+                                            None,
+                                        ))
+                                        .await;
+                                    Err(axum::Error::new(error))
+                                }
                             }
                         }
+                        Ok(ratchet_core::Message::Binary) => {
+                            Ok(ws::Message::Binary(std::mem::take(&mut payload).freeze()))
+                        }
+                        Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
+                        Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
+                        Ok(ratchet_core::Message::Close(reason)) => {
+                            Ok(ws::Message::Close(reason.map(|reason| ws::CloseFrame {
+                                code: reason.code.into(),
+                                reason: reason.description.unwrap_or_default().into(),
+                            })))
+                        }
+                        Err(error) => Err(axum::Error::new(error)),
+                    };
+                    let done = result.is_err() || matches!(result, Ok(ws::Message::Close(_)));
+                    let read_at = if gonvex_profiler::enabled() {
+                        gonvex_profiler::now_ns()
+                    } else {
+                        0
+                    };
+                    if tx.send((read_at, result)).await.is_err() || done {
+                        break;
                     }
-                    Ok(ratchet_core::Message::Binary) => {
-                        Ok(ws::Message::Binary(payload.split().freeze()))
-                    }
-                    Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
-                    Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
-                    Ok(ratchet_core::Message::Close(reason)) => {
-                        Ok(ws::Message::Close(reason.map(|reason| ws::CloseFrame {
-                            code: reason.code.into(),
-                            reason: reason.description.unwrap_or_default().into(),
-                        })))
-                    }
-                    Err(error) => Err(axum::Error::new(error)),
-                };
-                let done = result.is_err() || matches!(result, Ok(ws::Message::Close(_)));
-                let read_at = if gonvex_profiler::enabled() { gonvex_profiler::now_ns() } else { 0 };
-                if tx.send((read_at, result)).await.is_err() || done {
-                    break;
                 }
-            }
-        }));
+            },
+        ));
         Self {
             transport: Transport::Compressed(Box::new(Compressed {
                 threshold,
@@ -491,6 +504,12 @@ pub fn perf_compress_text_fresh(
     Ok((encoded.len() < payload.len()).then_some(encoded))
 }
 
+/// Benchmark hook: the exact per-message compressor the encoder runs.
+#[doc(hidden)]
+pub fn bench_compress_text(payload: &[u8], window_bits: u8) -> io::Result<Option<Vec<u8>>> {
+    compress_text(payload, window_bits, 0)
+}
+
 fn compress_text(payload: &[u8], window_bits: u8, threshold: usize) -> io::Result<Option<Vec<u8>>> {
     if payload.len() < threshold {
         return Ok(None);
@@ -609,13 +628,16 @@ mod tests {
         net::TcpStream,
     };
 
-    async fn echo(State((enabled, threshold)): State<(bool, usize)>, request: Request) -> Response {
+    async fn echo(
+        State((enabled, threshold, limit)): State<(bool, usize, usize)>,
+        request: Request,
+    ) -> Response {
         upgrade(
             request,
             enabled,
             threshold,
-            4096,
-            4096,
+            limit,
+            limit,
             move |mut socket| async move {
                 assert_eq!(
                     socket.compression_threshold(),
@@ -723,6 +745,15 @@ mod tests {
         offer: Option<&str>,
         threshold: usize,
     ) -> (TcpStream, String, JoinHandle<()>) {
+        connect_with_limit(enabled, offer, threshold, 4096).await
+    }
+
+    async fn connect_with_limit(
+        enabled: bool,
+        offer: Option<&str>,
+        threshold: usize,
+        limit: usize,
+    ) -> (TcpStream, String, JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -730,7 +761,7 @@ mod tests {
                 listener,
                 Router::new()
                     .route("/ws", get(echo))
-                    .with_state((enabled, threshold)),
+                    .with_state((enabled, threshold, limit)),
             )
             .await
             .unwrap();
@@ -755,9 +786,12 @@ mod tests {
         let mut frame = vec![opcode];
         if payload.len() < 126 {
             frame.push(128 | payload.len() as u8);
-        } else {
+        } else if payload.len() <= 0xffff {
             frame.push(128 | 126);
             frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        } else {
+            frame.push(128 | 127);
+            frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
         }
         frame.extend_from_slice(&[1, 2, 3, 4]);
         frame.extend(
@@ -938,6 +972,63 @@ mod tests {
             read(&mut stream).await,
             (0x81, b"fragmented JSON message".to_vec())
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn frames_larger_than_the_read_fragment_round_trip() {
+        let mut seed = 9u32;
+        let text = (0..60_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                b"abcdefghijklmnopqrstuvwxyz0123456789 {}:,"[(seed % 41) as usize]
+            })
+            .collect::<Vec<_>>();
+        let (mut stream, headers, server) = connect_with_limit(
+            true,
+            Some("permessage-deflate; client_max_window_bits"),
+            1024,
+            1 << 20,
+        )
+        .await;
+        assert!(headers.contains("permessage-deflate"));
+        let (mut encoder, mut decoder) = codecs();
+        let compressed = encoder.prepare_message(&text).unwrap().commit();
+        assert!(compressed.len() > 2 * frame_limits::READ_FRAGMENT);
+        let split = compressed.len() / 3 * 2 + 1;
+        for frames in [
+            vec![masked(0x81, &text)],
+            vec![masked(0xc1, &compressed)],
+            // A fragmented compressed message with a ping between fragments.
+            vec![
+                masked(0x41, &compressed[..split]),
+                masked(0x89, b"ping"),
+                masked(0x80, &compressed[split..]),
+            ],
+            // Uneven sizes: one byte past a fragment, and a tiny final fragment.
+            vec![
+                masked(0x01, &text[..frame_limits::READ_FRAGMENT + 1]),
+                masked(0x00, &text[frame_limits::READ_FRAGMENT + 1..text.len() - 3]),
+                masked(0x80, &text[text.len() - 3..]),
+            ],
+        ] {
+            let mut wire = Vec::new();
+            for frame in &frames {
+                wire.extend_from_slice(frame);
+            }
+            // Byte-sized writes exercise partial headers and payloads.
+            for chunk in wire.chunks(7919) {
+                stream.write_all(chunk).await.unwrap();
+            }
+            if frames.len() == 3 && frames[1][0] == 0x89 {
+                assert_eq!(read(&mut stream).await, (0x8a, b"ping".to_vec()));
+            }
+            let (opcode, data) = read(&mut stream).await;
+            assert_eq!(opcode, 0xc1);
+            assert_eq!(decoder.decompress(&data, true, 1 << 20).unwrap(), text);
+        }
         server.abort();
     }
 

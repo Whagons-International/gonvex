@@ -227,7 +227,10 @@ Rows that migrations seeded into a copied table are replaced by the source
 rows. A Postgres table or column with no SQLite counterpart stops the export
 unless `--allow-drop-tables` / `--allow-drop-columns` is given; a SQLite
 column missing in Postgres takes its default (a `NOT NULL` column without a
-default stops the export).
+default stops the export). A source table with no rows in the export
+snapshot is the exception: both column mismatches are recorded in the table's
+`relaxedForEmptySource` report entry instead of stopping the export, since no
+row can be lost or invented (an old Control Plane table shape, for example).
 
 **Change feed.** History is not copied. Old change rows hold Postgres-encoded
 row images (ISO timestamps, `t`/`f`) that would disagree with the converted

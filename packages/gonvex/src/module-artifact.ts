@@ -12,6 +12,7 @@ import { builtinModules } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { rolldown, type OutputChunk, type RolldownPlugin } from "rolldown";
+import { parseAst } from "rolldown/parseAst";
 import { projectLocalSchema } from "./local-bindings.js";
 
 import type {
@@ -684,7 +685,80 @@ function canonicalJson(value: unknown): string {
 
 async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint: string): Promise<ModuleJavaScript> {
   const outputPath = moduleBundleOutputPath(options);
-  return writeBundle(options, entrypoint, outputPath, [], entrypoint);
+  return writeBundle(options, entrypoint, outputPath, [], entrypoint, options.split === true);
+}
+
+/**
+ * Rewrites every character above U+00FF as a `\uXXXX` escape so V8 can store
+ * the bundle source as a one-byte string. One such character anywhere makes
+ * V8 keep the whole multi-megabyte source as UTF-16 in every isolate heap.
+ *
+ * Escapes are equivalent in string and template literals (cooked values),
+ * regular expressions, identifiers and comments. A tagged template exposes
+ * its raw text, so tagged quasis are left alone (the bundle then stays
+ * two-byte). The result is re-parsed and every string literal and template
+ * cooked value is compared with the original; any difference keeps the
+ * original source. Only `Function.prototype.toString` text can differ.
+ */
+export function latin1JavaScript(code: string): { code: string; latin1: boolean } {
+  if (!/[^\u0000-\u00ff]/.test(code)) return { code, latin1: true };
+  let original: ReturnType<typeof parseAst>;
+  try {
+    original = parseAst(code);
+  } catch {
+    return { code, latin1: false };
+  }
+  const tagged: Array<[number, number]> = [];
+  visitAst(original, (node) => {
+    if (node.type === "TaggedTemplateExpression") {
+      const quasi = node.quasi as { start: number; end: number };
+      tagged.push([quasi.start, quasi.end]);
+    }
+  });
+  tagged.sort((left, right) => left[0] - right[0]);
+  let output = "";
+  let last = 0;
+  let next = 0;
+  const pattern = /[^\u0000-\u00ff]/g;
+  for (let match = pattern.exec(code); match; match = pattern.exec(code)) {
+    const at = match.index;
+    while (next < tagged.length && tagged[next]![1] <= at) next += 1;
+    if (next < tagged.length && tagged[next]![0] <= at) continue;
+    output += code.slice(last, at) + `\\u${code.charCodeAt(at).toString(16).padStart(4, "0")}`;
+    last = at + 1;
+  }
+  output += code.slice(last);
+  try {
+    if (JSON.stringify(literalValues(parseAst(output))) !== JSON.stringify(literalValues(original))) {
+      return { code, latin1: false };
+    }
+  } catch {
+    return { code, latin1: false };
+  }
+  return { code: output, latin1: !/[^\u0000-\u00ff]/.test(output) };
+}
+
+function literalValues(ast: ReturnType<typeof parseAst>): unknown[] {
+  const values: unknown[] = [];
+  visitAst(ast, (node) => {
+    if (node.type === "Literal" && typeof node.value === "string") values.push(node.value);
+    if (node.type === "TemplateElement") values.push((node.value as { cooked?: string | null }).cooked ?? null);
+  });
+  return values;
+}
+
+function visitAst(node: unknown, visit: (node: Record<string, unknown> & { type: string }) => void): void {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const child of node) visitAst(child, visit);
+    return;
+  }
+  const record = node as Record<string, unknown>;
+  if (typeof record.type === "string") visit(record as Record<string, unknown> & { type: string });
+  for (const key in record) {
+    const child = record[key];
+    if (child && typeof child === "object") visitAst(child, visit);
+  }
 }
 
 function moduleBundleOutputPath(options: ModuleArtifactOptions): string {
@@ -732,7 +806,13 @@ async function bundleReducerJavaScript(
     name: "gonvex-reducer-entry",
     resolveId: (id) => (id === reducerEntryId ? reducerEntryId : null),
     load: (id) => (id === reducerEntryId ? entrySource : null),
-  }], "reducer bundle");
+  }], "reducer bundle", true, {
+    // An unused `action({...})` definition is dead in this bundle. Treating
+    // the SDK declaration as pure lets its handler (and what only it
+    // imports) drop out; the complete bundle still evaluates and validates
+    // every Action when the artifact loads.
+    manualPureFunctions: ["action"],
+  });
   return { ...javascript, functions: served.map(([path]) => path) };
 }
 
@@ -742,6 +822,8 @@ async function writeBundle(
   outputPath: string,
   plugins: RolldownPlugin[],
   label: string,
+  oneByteSource = false,
+  treeshake: { manualPureFunctions?: string[] } = {},
 ): Promise<ModuleJavaScript> {
   await mkdir(dirname(outputPath), { recursive: true });
   let bundle: Awaited<ReturnType<typeof rolldown>>;
@@ -759,6 +841,7 @@ async function writeBundle(
         mainFields: ["browser", "module", "main"],
       },
       plugins: [...plugins, rejectNodeBuiltinsPlugin()],
+      ...(treeshake.manualPureFunctions ? { treeshake: { manualPureFunctions: treeshake.manualPureFunctions } } : {}),
     });
   } catch (error) {
     throw moduleBundleError(label, error);
@@ -783,8 +866,9 @@ async function writeBundle(
     }
     if (!chunk.code.trim()) throw new Error("module bundle is empty");
 
-    await writeFile(outputPath, chunk.code, "utf8");
-    const code = Buffer.from(chunk.code, "utf8");
+    const source = oneByteSource ? latin1JavaScript(chunk.code).code : chunk.code;
+    await writeFile(outputPath, source, "utf8");
+    const code = Buffer.from(source, "utf8");
     return {
       path: projectPath(options.root, outputPath),
       hash: createHash("sha256").update(code).digest("hex"),

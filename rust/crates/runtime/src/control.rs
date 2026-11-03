@@ -2381,13 +2381,35 @@ impl Runtime {
                 .bind(&connection.project_id)
                 .fetch_all(&mut **transaction.transaction())
                 .await?;
-                Ok(Value::Array(rows.into_iter().map(|row| serde_json::json!({
-                    "id":row.get::<String,_>("id"),"tenantId":row.get::<String,_>("tenant_id"),
-                    "accountId":row.get::<String,_>("account_id"),
-                    "release":row.get::<String,_>("release"),
-                    "environment":row.get::<String,_>("environment"),
-                    "lastSeenAt":timestamp(row_time(&row, "last_seen_at")),
-                })).collect()))
+                // Presence v2 does not refresh `last_seen_at` per heartbeat:
+                // a session whose connection is open here is seen now.
+                let live = self.inner.presence.support_live_ids(&connection.project_id);
+                let now = Utc::now();
+                let mut sessions: Vec<(chrono::DateTime<Utc>, Value)> = rows
+                    .into_iter()
+                    .map(|row| {
+                        let id = row.get::<String, _>("id");
+                        let seen = if live.contains(&id) {
+                            now
+                        } else {
+                            row_time(&row, "last_seen_at")
+                        };
+                        (
+                            seen,
+                            serde_json::json!({
+                                "id":id,"tenantId":row.get::<String,_>("tenant_id"),
+                                "accountId":row.get::<String,_>("account_id"),
+                                "release":row.get::<String,_>("release"),
+                                "environment":row.get::<String,_>("environment"),
+                                "lastSeenAt":timestamp(seen),
+                            }),
+                        )
+                    })
+                    .collect();
+                sessions.sort_by(|a, b| b.0.cmp(&a.0));
+                Ok(Value::Array(
+                    sessions.into_iter().map(|(_, session)| session).collect(),
+                ))
             }
             "control.support.listTenants" => unreachable!(),
             "control.support.getSession" => {
@@ -2402,12 +2424,22 @@ impl Runtime {
                 .fetch_optional(&mut **transaction.transaction())
                 .await?
                 .ok_or_else(|| ControlError::InvalidArguments("support session not found".to_owned()))?;
+                let seen = if self
+                    .inner
+                    .presence
+                    .support_live_ids(&connection.project_id)
+                    .contains(id)
+                {
+                    Utc::now()
+                } else {
+                    row_time(&row, "last_seen_at")
+                };
                 Ok(serde_json::json!({
                     "id":row.get::<String,_>("id"),"tenantId":row.get::<String,_>("tenant_id"),
                     "accountId":row.get::<String,_>("account_id"),
                     "connectionId":row.get::<String,_>("connection_id"),
                     "release":row.get::<String,_>("release"),"environment":row.get::<String,_>("environment"),
-                    "lastSeenAt":timestamp(row_time(&row, "last_seen_at")),
+                    "lastSeenAt":timestamp(seen),
                     "createdAt":timestamp(row_time(&row, "created_at")),
                 }))
             }
@@ -3221,8 +3253,17 @@ impl Runtime {
                             "olderThanSeconds must be between 60 and 31536000".to_owned(),
                         )
                     })?;
-                let deleted = sqlx::query("DELETE FROM gonvex_support_sessions WHERE project_id=$1 AND last_seen_at < CAST(unixepoch('subsec')*1000 AS INTEGER)-($2*1000)")
-                    .bind(&connection.project_id).bind(seconds).execute(&mut **transaction.transaction()).await?.rows_affected();
+                // Sessions whose connection is open here are live even though
+                // presence v2 leaves their stored `last_seen_at` untouched.
+                let live: Vec<String> = self
+                    .inner
+                    .presence
+                    .support_live_ids(&connection.project_id)
+                    .into_iter()
+                    .collect();
+                let deleted = sqlx::query("DELETE FROM gonvex_support_sessions WHERE project_id=$1 AND last_seen_at < CAST(unixepoch('subsec')*1000 AS INTEGER)-($2*1000) AND id NOT IN (SELECT value FROM json_each($3))")
+                    .bind(&connection.project_id).bind(seconds).bind(serde_json::to_string(&live).unwrap_or_else(|_| "[]".to_owned()))
+                    .execute(&mut **transaction.transaction()).await?.rows_affected();
                 Ok(serde_json::json!({"deleted":deleted}))
             }
             "control.demos.resetPassword" => {

@@ -414,7 +414,8 @@ impl Runtime {
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
         let profile_label = gonvex_profiler::Label::classify("reducer", path);
-        let _profile = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
+        let _profile =
+            gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
         let mut profile_timer = gonvex_profiler::Timer::start();
         let profile_started = profile_timer;
         let committed_revisions = access.committed_revisions.clone();

@@ -41,9 +41,9 @@ pub mod rows;
 pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
-    database_path, database_url, AdmissionPermit, DatabaseListener, Durability, KeyedLock,
-    Notification, PoolLimits, PoolRegistry, PoolRegistrySnapshot, WriterQueue, WriterStats,
-    sqlite_cache_budget_mib, sqlite_memory_used,
+    database_path, database_url, sqlite_cache_budget_mib, sqlite_memory_used, AdmissionPermit,
+    DatabaseListener, Durability, KeyedLock, Notification, PoolLimits, PoolRegistry,
+    PoolRegistrySnapshot, WriterQueue, WriterStats,
 };
 
 mod provision;

@@ -208,6 +208,8 @@ export type ServerCapabilities = {
   controlWatermark?: 1;
   /** Server sends replica feed frames in `replica.batch` messages (delivery v2) when the client also advertises version 1. */
   replicaBatchFrames?: 1;
+  /** Presence v2: in-memory, transition-only presence (`presence.*` frames). The runtime also answers support/error heartbeats from memory, so clients stop periodic heartbeats. */
+  presence?: 1;
 };
 
 /** Reserved tenant Query for reconciling an already accepted durable intent. */
@@ -284,6 +286,8 @@ export type ClientCapabilities = {
 	queryResultBatch?: 1;
   /** Client accepts `replica.batch` messages: stream-addressed shared items, one message per tick. */
   replicaBatchFrames?: 1;
+  /** Presence v2: reports state with `presence.set` transitions; liveness is the socket. */
+  presence?: 1;
 };
 
 export type KeyedCollectionPatch = {
@@ -300,6 +304,17 @@ export type GonvexManifest = {
   generatedAt: string;
   functions: Record<string, FunctionManifestEntry>;
   schema: Record<string, JsonValue>;
+};
+
+/** Aggregated Member presence state; `offline` only appears in `presence.patch`. */
+export type PresenceState = "active" | "idle" | "offline";
+/** A connection's own reported state. `offline` leaves immediately (page hide). */
+export type PresenceReportedState = "active" | "idle" | "offline";
+export type PresenceMember = {
+  memberId: string;
+  state: PresenceState;
+  /** Server time (Unix ms) at which the Member entered `state`. */
+  since: number;
 };
 
 export type ClientMessage =
@@ -344,6 +359,10 @@ export type ClientMessage =
   | { type: "error.register"; id: string; release?: string; environment?: string }
   | { type: "error.envelope"; id: string; events: JsonValue[] }
   | { type: "error.heartbeat"; id: string }
+  /** Presence v2: this connection's own state, sent on transitions and after every auth.result. */
+  | { type: "presence.set"; state: PresenceReportedState }
+  | { type: "presence.subscribe"; id: string }
+  | { type: "presence.unsubscribe" }
   | { type: "telemetry.batch"; events: Array<Omit<Extract<ClientMessage, { type: "telemetry.event" }>, "type">> }
   | {
     type: "telemetry.event";
@@ -418,6 +437,11 @@ export type ServerMessage =
   | { type: "auth.error"; id: string; error: string; code?: string }
   | { type: "error.ack"; id: string; accepted?: number; fingerprints?: string[]; error?: string }
   | { type: "support.command"; id: string; result: JsonValue }
+  /** Presence v2: every online Member of the tenant (replaces the client's map). */
+  | { type: "presence.snapshot"; id: string; serverTime: number; members: PresenceMember[] }
+  /** Presence v2: coalesced Member transitions since the previous frame. */
+  | { type: "presence.patch"; serverTime: number; changes: PresenceMember[] }
+  | { type: "presence.error"; id: string; error: string }
   | {
     type: "query.result";
     id: string;

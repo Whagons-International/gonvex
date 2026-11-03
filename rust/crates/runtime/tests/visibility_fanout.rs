@@ -144,6 +144,7 @@ fn test_config(database_url: String) -> Config {
         storage: StorageConfig::default(),
         service_principals: Vec::new(),
         public_functions: Default::default(),
+        presence: Default::default(),
     }
 }
 

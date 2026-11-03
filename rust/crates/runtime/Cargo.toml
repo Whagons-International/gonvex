@@ -63,8 +63,9 @@ bytes = "1"
 redundant_clone = "warn"
 
 [dev-dependencies]
-tempfile = "3"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+socket2 = "0.6"
+tempfile = "3"
 tokio-tungstenite = "0.29"
 tower.workspace = true
 

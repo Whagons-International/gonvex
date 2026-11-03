@@ -58,7 +58,9 @@ async fn probe(handle: tokio::runtime::Handle, interval: Duration) {
             WORKERS.store(workers as u64, Relaxed);
             ALIVE_TASKS.store(metrics.num_alive_tasks() as u64, Relaxed);
             PARKS_TOTAL.store(
-                (0..workers).map(|worker| metrics.worker_park_count(worker)).sum(),
+                (0..workers)
+                    .map(|worker| metrics.worker_park_count(worker))
+                    .sum(),
                 Relaxed,
             );
         }

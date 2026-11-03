@@ -435,14 +435,12 @@ async fn handle_load(
         decoded.reducer_bundle,
         state.config.v8.clone(),
     )
-    .map_err(
-        |err| {
-            WireError::new(
-                codes::MODULE_LOAD_FAILED,
-                format!("module {module_id} generation {generation} failed to load: {err}"),
-            )
-        },
-    )?;
+    .map_err(|err| {
+        WireError::new(
+            codes::MODULE_LOAD_FAILED,
+            format!("module {module_id} generation {generation} failed to load: {err}"),
+        )
+    })?;
     // Warming here is what makes activation safe to do atomically: a bundle
     // that throws while it evaluates fails the load instead of failing the
     // first user call after the swap.
@@ -460,7 +458,11 @@ async fn handle_load(
     log(&format!(
         "loaded module {module_id} generation {generation} with {} functions{}",
         decoded.summaries.len(),
-        if split { " (split: Queries/Reducers warm, complete bundle on demand)" } else { "" }
+        if split {
+            " (split: Queries/Reducers warm, complete bundle on demand)"
+        } else {
+            ""
+        }
     ));
     Ok(ResponsePayload::Loaded {
         module_id,

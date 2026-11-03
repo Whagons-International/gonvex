@@ -47,7 +47,9 @@ use crate::host_calls::{DatabaseCapability, DatabaseHostCalls};
 use crate::module_host::{HostCallHandler, ModuleHost};
 
 fn env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn in_process() -> bool {
@@ -378,7 +380,12 @@ fn stat_cpu(path: &str) -> (u64, u64) {
         .rsplit_once(')')
         .map(|(_, rest)| rest.split_whitespace().collect())
         .unwrap_or_default();
-    let number = |index: usize| fields.get(index).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let number = |index: usize| {
+        fields
+            .get(index)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
     (number(11) + number(12), number(1))
 }
 
@@ -404,7 +411,9 @@ fn child_rss_kb() -> u64 {
     let mut total = 0;
     for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.chars().all(|c| c.is_ascii_digit()) && stat_cpu(&format!("/proc/{name}/stat")).1 == me {
+        if name.chars().all(|c| c.is_ascii_digit())
+            && stat_cpu(&format!("/proc/{name}/stat")).1 == me
+        {
             total += std::fs::read_to_string(format!("/proc/{name}/status"))
                 .unwrap_or_default()
                 .lines()
@@ -443,7 +452,13 @@ async fn start(host: &ModuleHost, artifact: ModuleArtifactWire) {
     .unwrap();
 }
 
-fn invoke_request(function: &str, args: &Value, command: &str, member: &Value, hash: &str) -> InvokeRequest {
+fn invoke_request(
+    function: &str,
+    args: &Value,
+    command: &str,
+    member: &Value,
+    hash: &str,
+) -> InvokeRequest {
     serde_json::from_value(json!({
         "moduleId": "bench",
         "function": function,
@@ -567,16 +582,34 @@ fn whagons_artifact(manifest: &Value) -> ModuleArtifactWire {
     let mut functions = Vec::new();
     for (path, function) in module["functions"].as_object().unwrap() {
         let mut metadata = serde_json::Map::new();
-        for name in ["public", "actionProfile", "offline", "optimistic", "interactive", "classification", "description", "agent", "actionCapabilities"] {
+        for name in [
+            "public",
+            "actionProfile",
+            "offline",
+            "optimistic",
+            "interactive",
+            "classification",
+            "description",
+            "agent",
+            "actionCapabilities",
+        ] {
             if let Some(value) = function.get(name) {
                 metadata.insert(name.into(), value.clone());
             }
         }
-        let text = |name: &str| function.get(name).and_then(Value::as_str).map(str::to_owned);
+        let text = |name: &str| {
+            function
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
         functions.push(FunctionWire {
             path: path.clone(),
             kind: text("kind").unwrap(),
-            internal: function.get("internal").and_then(Value::as_bool).unwrap_or(false),
+            internal: function
+                .get("internal")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             delivery: text("delivery"),
             handler: text("handler"),
             export: text("export"),

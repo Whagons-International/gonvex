@@ -17,6 +17,14 @@
  * SDK's 250 ms retention, and lost connections reconnect with the SDK's
  * backoff and re-open every collection from a full snapshot.
  *
+ * Presence v2 (runtime capability `presence`): like the SDK, the client
+ * advertises `presence: 1`, reports its own state with `presence.set` only on
+ * transitions (re-sent after every auth.result), subscribes with
+ * `presence.subscribe` and applies `presence.snapshot`/`presence.patch`.
+ * Liveness is the socket: the runtime Pings it and Node's WebSocket answers.
+ * Callers check `presenceSupported()` and then send no presence/support
+ * heartbeat Reducers (see docs/performance/presence-v2.md).
+ *
  * Unsupported server frames are counted in `ThinClient.stats.unsupported` and
  * reported by the harness, so a protocol drift cannot pass silently.
  */
@@ -29,7 +37,7 @@ const now = () => performance.timeOrigin + performance.now();
 
 const CAPABILITIES = { replicaNoOldValues: 1, replicaSnapshotPages: 1, replicaNativeRows: 1, replicaSetDigest: 1,
   tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1,
-  queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1 };
+  queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 };
 const CAPABILITIES_LEGACY_ROWS = { ...CAPABILITIES, replicaNativeRows: undefined };
 const withoutBatchFrames = (capabilities) => ({ ...capabilities, replicaBatchFrames: undefined });
 
@@ -103,7 +111,8 @@ class Subscription {
 }
 
 export class ThinClient {
-  static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0 };
+  static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0,
+    presence: { snapshots: 0, patches: 0, changes: 0 } };
 
   constructor(url, { project, clientContract = 1, pool = defaultPool, nativeRows = true, ackDelayMs = 0, batchFrames = process.env.LOAD_THIN_BATCH_FRAMES !== '0' } = {}) {
     this.url = url; this.project = project; this.pool = pool;
@@ -118,6 +127,10 @@ export class ThinClient {
     this.pending = new Map(); this.subscriptions = new Map(); this.byId = new Map(); this.pendingOpens = new Set(); this.openFlushTimer = undefined;
     this.processedWatermark = 0; this.deferredWatermark = undefined;
     this.telemetry = new Set();
+    // Presence v2, same state machine as the SDK's PresenceFeed.
+    this.presenceReported = undefined; this.presenceListeners = new Set(); this.presenceMembers = new Map();
+    this.presenceSubscriptionId = undefined; this.presenceCounter = 0; this.presenceReady = false;
+    this.presenceView = { supported: false, ready: false, members: this.presenceMembers };
   }
 
   // ---- transport -------------------------------------------------------------
@@ -135,6 +148,7 @@ export class ThinClient {
     socket.addEventListener('close', () => {
       if (this.socket !== socket) return;
       this.socket = undefined; this.authReady = false;
+      this.presenceDisconnected();
       this.dropConnectionState();
       if (!this.manuallyClosed) this.scheduleReconnect();
     });
@@ -208,6 +222,70 @@ export class ThinClient {
       this.authWaiter = { resolve, reject };
       if (this.socket && this.socket.readyState === 1) { this.authReady = false; this.sendAuth(); }
     });
+  }
+
+  // ---- presence v2 (SDK: presenceSupported/setPresence/subscribePresence/presenceSnapshot)
+  presenceSupported() { return this.serverCapabilities.presence === 1; }
+  presenceCanSend() { return this.authReady && this.socket?.readyState === 1; }
+  setPresence(state) {
+    if (this.presenceReported === state) return;
+    this.presenceReported = state;
+    if (this.presenceSupported() && this.presenceCanSend()) this.rawSend({ type: 'presence.set', state });
+  }
+  subscribePresence(listener) {
+    this.presenceListeners.add(listener);
+    if (this.presenceListeners.size === 1) this.presenceSendSubscribe();
+    return () => {
+      if (!this.presenceListeners.delete(listener) || this.presenceListeners.size > 0) return;
+      if (this.presenceSubscriptionId && this.presenceSupported() && this.presenceCanSend()) this.rawSend({ type: 'presence.unsubscribe' });
+      this.presenceSubscriptionId = undefined; this.presenceReady = false; this.presenceMembers = new Map();
+      this.presencePublish(false);
+    };
+  }
+  presenceSnapshot() {
+    if (this.presenceView.supported !== this.presenceSupported()) this.presencePublish(false);
+    return this.presenceView;
+  }
+  presenceSendSubscribe() {
+    if (!this.presenceSupported() || !this.presenceCanSend()) return;
+    this.presenceSubscriptionId = `presence-${++this.presenceCounter}`;
+    this.rawSend({ type: 'presence.subscribe', id: this.presenceSubscriptionId });
+  }
+  presenceAuthenticated() {
+    this.presenceReady = false; this.presenceSubscriptionId = undefined;
+    if (!this.presenceSupported()) { this.presencePublish(); return; }
+    if (this.presenceReported) this.rawSend({ type: 'presence.set', state: this.presenceReported });
+    if (this.presenceListeners.size > 0) this.presenceSendSubscribe();
+    this.presencePublish();
+  }
+  presenceDisconnected() {
+    this.presenceSubscriptionId = undefined;
+    if (!this.presenceReady) return;
+    this.presenceReady = false;
+    this.presencePublish();
+  }
+  presencePublish(notify = true) {
+    this.presenceView = { supported: this.presenceSupported(), ready: this.presenceReady, members: this.presenceMembers };
+    if (notify) for (const listener of [...this.presenceListeners]) listener();
+  }
+  onPresence(m) {
+    const stats = ThinClient.stats.presence;
+    if (m.type === 'presence.snapshot') {
+      if (m.id !== this.presenceSubscriptionId) return;
+      stats.snapshots++;
+      const members = new Map();
+      for (const member of m.members) if (member.state !== 'offline') members.set(member.memberId, member);
+      this.presenceMembers = members; this.presenceReady = true; this.presencePublish();
+    } else if (m.type === 'presence.patch') {
+      if (!this.presenceSubscriptionId || !this.presenceReady || m.changes.length === 0) return;
+      stats.patches++; stats.changes += m.changes.length;
+      const members = new Map(this.presenceMembers);
+      for (const change of m.changes) { if (change.state === 'offline') members.delete(change.memberId); else members.set(change.memberId, change); }
+      this.presenceMembers = members; this.presencePublish();
+    } else if (m.id === this.presenceSubscriptionId) {
+      this.presenceSubscriptionId = undefined; this.presenceReady = false; this.presencePublish();
+      this.unsupported('presence.error: ' + String(m.error).slice(0, 160));
+    }
   }
 
   action(ref, args) { return this.call('action', ref, args); }
@@ -330,6 +408,7 @@ export class ThinClient {
       case 'replica.delta': return this.onDelta(m);
       case 'replica.transactionEncoded': return this.onTransaction(m);
       case 'replica.closed': return;
+      case 'presence.snapshot': case 'presence.patch': case 'presence.error': return this.onPresence(m);
       case 'replica.reset': { ThinClient.stats.resets++; const sub = this.byId.get(m.id); if (sub) { this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); this.openSubscription(sub); sub.notify(); } return; }
       case 'replica.error': { const sub = this.byId.get(m.id); if (sub) { sub.error = new Error(m.error); sub.notify(); } this.unsupported('replica.error: ' + String(m.error).slice(0, 160)); return; }
       default: this.unsupported(m.type || 'untyped');
@@ -360,6 +439,7 @@ export class ThinClient {
   onAuthResult(m) {
     if (m.id !== this.authInFlight) return;
     this.authInFlight = undefined; this.authReady = true;
+    this.presenceAuthenticated();
     const waiter = this.authWaiter; this.authWaiter = undefined;
     if (this.auth.token && !m.result?.subscriptionsPreserved) this.reopenAll();
     this.flushOutbox();
@@ -370,6 +450,7 @@ export class ThinClient {
       if (['revoked', 'member_removed', 'account_disabled'].includes(m.code ?? '')) { this.unsupported('auth.revoked'); return; }
       // Same as the SDK: authenticate again on this socket, then re-open collections.
       this.authReady = false;
+      this.presenceDisconnected();
       for (const sub of this.subscriptions.values()) { if (sub.id) this.byId.delete(sub.id); sub.id = undefined; sub.opening = false; sub.isUpToDate = false; sub.dropStaging(); sub.notify(); }
       this.processedWatermark = 0; this.deferredWatermark = undefined;
       if (this.socket?.readyState === 1) this.sendAuth();
