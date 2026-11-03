@@ -74,6 +74,7 @@ struct Probe {
     handler: Duration,
     first: Option<Instant>,
     kinds: BTreeMap<&'static str, u32>,
+    schedulable: Vec<String>,
 }
 
 impl Probe {
@@ -85,6 +86,7 @@ impl Probe {
             handler: Duration::ZERO,
             first: None,
             kinds: BTreeMap::new(),
+            schedulable: Vec::new(),
         }
     }
 
@@ -132,7 +134,8 @@ impl HostCallHandler for Probe {
                         DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
                             .with_schema(schema)
                             .with_intent(TENANT, command)
-                            .with_actor("bench-account", "bench@example.test"),
+                            .with_actor("bench-account", "bench@example.test")
+                            .with_schedulable_functions(self.schedulable.clone()),
                     );
                 }
                 match self.inner.as_mut() {
@@ -216,17 +219,49 @@ impl Samples {
     }
 }
 
-fn cpu_time() -> Duration {
-    // Process CPU (user + system) from /proc, so the socket mode's module host
-    // child is not included; reported separately where relevant.
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+fn stat_cpu(path: &str) -> (u64, u64) {
+    // (utime + stime ticks, parent pid)
+    let stat = std::fs::read_to_string(path).unwrap_or_default();
     let fields: Vec<&str> = stat
         .rsplit_once(')')
         .map(|(_, rest)| rest.split_whitespace().collect())
         .unwrap_or_default();
-    let ticks: u64 = fields.get(11).and_then(|v| v.parse().ok()).unwrap_or(0)
-        + fields.get(12).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let number = |index: usize| fields.get(index).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    (number(11) + number(12), number(1))
+}
+
+/// CPU of this process plus its live children (the socket mode's module host
+/// process), so both transports are charged for all the work they cause.
+fn cpu_time() -> Duration {
+    let me = std::process::id() as u64;
+    let mut ticks = stat_cpu("/proc/self/stat").0;
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
+            let (cpu, parent) = stat_cpu(&format!("/proc/{}/stat", name.to_string_lossy()));
+            if parent == me {
+                ticks += cpu;
+            }
+        }
+    }
     Duration::from_millis(ticks * 10)
+}
+
+fn child_rss_kb() -> u64 {
+    let me = std::process::id() as u64;
+    let mut total = 0;
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.chars().all(|c| c.is_ascii_digit()) && stat_cpu(&format!("/proc/{name}/stat")).1 == me {
+            total += std::fs::read_to_string(format!("/proc/{name}/status"))
+                .unwrap_or_default()
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|value| value.split_whitespace().next()?.parse::<u64>().ok())
+                .unwrap_or(0);
+        }
+    }
+    total
 }
 
 fn rss_kb() -> u64 {
@@ -412,6 +447,13 @@ fn bridge_bench_whagons() {
         let manifest_path = env("BRIDGE_BENCH_MANIFEST").expect("BRIDGE_BENCH_MANIFEST");
         let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
         let hash = manifest["module"]["hash"].as_str().unwrap_or_default().to_owned();
+        let schedulable: Vec<String> = manifest["module"]["functions"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, f)| matches!(f["kind"].as_str(), Some("reducer" | "action")))
+            .map(|(path, _)| path.clone())
+            .collect();
         let rss_before = rss_kb();
         let host = ModuleHost::new(host_config());
         let load_started = Instant::now();
@@ -454,6 +496,7 @@ fn bridge_bench_whagons() {
             for i in 0..(iterations + 20) {
                 let command = format!("cmd-{function}-{i}");
                 let mut probe = Probe::new(Some((pools.clone(), url.clone(), schema.clone(), command.clone())));
+                probe.schedulable = schedulable.clone();
                 let request = invoke_request(function, &args(i), &command, &member, &hash);
                 let started = Instant::now();
                 let result = host.invoke(request, &mut probe).await;
@@ -483,7 +526,7 @@ fn bridge_bench_whagons() {
                 continue;
             }
             let mut report = samples.report(function);
-            report["runtimeProcessCpuMsPerInvoke"] = json!(cpu.as_secs_f64() * 1000.0 / (iterations + 20) as f64);
+            report["cpuMsPerInvokeRuntimePlusHost"] = json!(cpu.as_secs_f64() * 1000.0 / (iterations + 20) as f64);
             report["failures"] = json!(failures);
             reports.push(report);
         }
@@ -491,6 +534,7 @@ fn bridge_bench_whagons() {
             "mode": if in_process() { "in-process" } else { "socket" },
             "loadMs": load_ms,
             "runtimeRssKb": {"beforeLoad": rss_before, "afterLoad": rss_loaded, "afterCalls": rss_kb()},
+            "moduleHostChildRssKb": child_rss_kb(),
             "reports": reports,
         });
         println!("BRIDGE_BENCH_SUMMARY {summary}");

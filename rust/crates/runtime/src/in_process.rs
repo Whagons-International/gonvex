@@ -144,3 +144,181 @@ impl gonvex_module_runtime::ModuleHost for DirectHost<'_> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use base64::Engine as _;
+    use gonvex_module_host::protocol::{
+        ActivateRequest, FunctionWire, InvokeRequest, JavaScriptWire, LoadRequest,
+        ModuleArtifactWire,
+    };
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+    use crate::module_host::{ModuleHost, ModuleHostError};
+
+    const CODE: &str = r#"
+export const read = async (ctx, args) => (await ctx.db.query("SELECT $1 AS v", [args.v])).length;
+export const fail = async (ctx) => { try { await ctx.db.query("bad", []); } catch (e) { return String(e.message); } return "no error"; };
+export const spin = async () => { for (;;) {} };
+export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1 << 16).fill(keep.length)); };
+"#;
+
+    struct Recorder {
+        calls: Vec<HostCallFrame>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostCallHandler for Recorder {
+        async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
+            let answer = match &call {
+                HostCallFrame::DbQuery { statement, parameters } if statement != "bad" => {
+                    Ok(json!([{ "v": parameters[0] }]))
+                }
+                _ => Err("refused by test".to_owned()),
+            };
+            self.calls.push(call);
+            answer
+        }
+    }
+
+    fn artifact() -> ModuleArtifactWire {
+        let function = |name: &str| FunctionWire {
+            path: format!("t.{name}"),
+            kind: "reducer".into(),
+            internal: false,
+            delivery: None,
+            handler: Some(name.into()),
+            export: Some(name.into()),
+            file: None,
+            args: Some(json!({"kind": "any"})),
+            result: Some(json!({"kind": "any"})),
+            metadata: Default::default(),
+        };
+        ModuleArtifactWire {
+            language: "typescript".into(),
+            entrypoint: "t.js".into(),
+            hash: String::new(),
+            javascript: JavaScriptWire {
+                path: "t.js".into(),
+                hash: Sha256::digest(CODE.as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                code: base64::engine::general_purpose::STANDARD.encode(CODE),
+            },
+            functions: ["read", "fail", "spin", "hog"].map(function).into(),
+            metadata: Default::default(),
+        }
+    }
+
+    fn request(function: &str, args: Value) -> InvokeRequest {
+        serde_json::from_value(json!({
+            "moduleId": "t", "function": format!("t.{function}"), "kind": "reducer",
+            "args": args.to_string(),
+            "context": {"tenantId": "tenant", "capabilities": {"dbRead": true, "dbWrite": true}},
+        }))
+        .unwrap()
+    }
+
+    async fn host() -> std::sync::Arc<ModuleHost> {
+        let host = ModuleHost::new(ModuleHostConfig {
+            enabled: true,
+            in_process: true,
+            max_heap_bytes: 16 << 20,
+            binary: None,
+            endpoint: None,
+            start_timeout: Duration::from_secs(10),
+            shutdown_timeout: Duration::from_secs(2),
+            max_frame_bytes: 1 << 20,
+            max_concurrent_calls: 4,
+            isolate_pool_size: 1,
+            execution_timeout: Duration::from_millis(300),
+            action_execution_timeout: Duration::from_secs(5),
+        });
+        host.start().await.unwrap();
+        host.load(LoadRequest { module_id: "t".into(), generation: Some(1), artifact: artifact() })
+            .await
+            .unwrap();
+        host.activate(ActivateRequest { module_id: "t".into(), generation: 1, drain_ms: None })
+            .await
+            .unwrap();
+        host
+    }
+
+    fn run(test: impl std::future::Future<Output = ()>) {
+        gonvex_module_runtime_v8::initialize_v8_platform();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(test);
+    }
+
+    #[test]
+    fn host_calls_reach_the_invocation_handler_in_order() {
+        run(async {
+            let host = host().await;
+            let mut recorder = Recorder { calls: Vec::new() };
+            let value = host.invoke(request("read", json!({"v": 7})), &mut recorder).await.unwrap();
+            assert_eq!(value, json!(1));
+            assert!(matches!(&recorder.calls[..], [HostCallFrame::DbQuery { parameters, .. }] if parameters == &json!([7])));
+            // A failed host call reaches module code with the socket transport's text.
+            let message = host.invoke(request("fail", json!(null)), &mut recorder).await.unwrap();
+            assert!(
+                message.as_str().unwrap().contains("db_read host call failed [host_call_failed]: refused by test"),
+                "{message}"
+            );
+            host.shutdown().await;
+        });
+    }
+
+    #[test]
+    fn runaway_and_heap_hungry_scripts_fail_without_taking_the_runtime_down() {
+        run(async {
+            let host = host().await;
+            let mut recorder = Recorder { calls: Vec::new() };
+            let started = Instant::now();
+            let error = host.invoke(request("spin", json!(null)), &mut recorder).await.unwrap_err();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(
+                matches!(&error, ModuleHostError::Remote { code, .. } if code == "budget_exceeded"),
+                "{error}"
+            );
+            let error = host.invoke(request("hog", json!(null)), &mut recorder).await.unwrap_err();
+            assert!(
+                matches!(&error, ModuleHostError::Remote { code, message, .. } if code == "budget_exceeded" && message.contains("heap")),
+                "{error}"
+            );
+            // The retired isolates are replaced; the next call is served.
+            let value = host.invoke(request("read", json!({"v": 1})), &mut recorder).await.unwrap();
+            assert_eq!(value, json!(1));
+            host.shutdown().await;
+        });
+    }
+
+    #[test]
+    fn invocations_without_a_dispatcher_and_before_start_fail_closed() {
+        run(async {
+            let host = ModuleHost::new(ModuleHostConfig {
+                enabled: true,
+                in_process: true,
+                max_heap_bytes: 16 << 20,
+                binary: None,
+                endpoint: None,
+                start_timeout: Duration::from_secs(1),
+                shutdown_timeout: Duration::from_secs(1),
+                max_frame_bytes: 1 << 20,
+                max_concurrent_calls: 1,
+                isolate_pool_size: 1,
+                execution_timeout: Duration::from_secs(1),
+                action_execution_timeout: Duration::from_secs(1),
+            });
+            assert!(matches!(host.ping().await, Err(ModuleHostError::NotReady)));
+        });
+    }
+}
