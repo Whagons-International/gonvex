@@ -31,7 +31,16 @@ pub struct VisibilityPlan {
     pub sets: BTreeMap<String, VisibilitySet>,
     #[serde(rename = "where")]
     pub predicate: VisibilityExpression,
+    /// Active sets per role (see `active_sets`), shared by clones of the plan.
+    #[serde(skip)]
+    pub(crate) active_sets_cache: ActiveSetsCache,
 }
+
+/// `active_sets` depends only on the plan and the role, but change routing
+/// asked for it per subscription per change, walking the whole predicate
+/// each time (the largest CPU cost at 200 Whagons users).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ActiveSetsCache(Arc<std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>>);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1372,6 +1381,19 @@ fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool
 /// Sets a predicate references for this role, plus every set a `derived`
 /// set maps from, transitively.
 fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
+    let cache = &plan.active_sets_cache.0;
+    if let Some(sets) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(role) {
+        return sets.clone();
+    }
+    let active = compute_active_sets(plan, role);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(role.to_owned(), active.clone());
+    active
+}
+
+fn compute_active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
     let mut active = BTreeSet::new();
     active_visibility_sets(&plan.predicate, role, &mut active);
     let mut pending = active.iter().cloned().collect::<Vec<_>>();
@@ -3245,6 +3267,8 @@ mod tests {
         assert_eq!(parameters, vec![Value::String("public".to_owned())]);
 
         let plan = VisibilityPlan {
+
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: "boards".to_owned(),
@@ -3291,6 +3315,7 @@ mod tests {
     #[test]
     fn composite_predicates_are_grouped_before_callers_append_filters() {
         let plan = VisibilityPlan {
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: "tasks".to_owned(),
@@ -3366,6 +3391,7 @@ mod tests {
     #[test]
     fn dependency_columns_resolve_aliases_to_physical_tables() {
         let plan = VisibilityPlan {
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: "tasks".to_owned(),

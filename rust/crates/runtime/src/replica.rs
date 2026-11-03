@@ -2585,6 +2585,7 @@ mod tests {
 
     fn visibility_with_task_dependency(source: &str) -> VisibilityPlan {
         VisibilityPlan {
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: source.to_owned(),
@@ -2684,6 +2685,7 @@ mod tests {
     fn public_visibility() -> (VisibilityPlan, ResolvedVisibility) {
         (
             VisibilityPlan {
+                active_sets_cache: Default::default(),
                 version: None,
                 permission_tables: Vec::new(),
                 table: "tasks".to_owned(),
@@ -2908,6 +2910,7 @@ mod tests {
             retention_ms: 0,
         };
         let plan = VisibilityPlan {
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: "tasks".to_owned(),
