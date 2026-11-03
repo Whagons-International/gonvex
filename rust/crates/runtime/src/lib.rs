@@ -1,6 +1,7 @@
 // Deep clones on hot paths are bugs here (workstream 7, Gabriel 2026-11-03).
 #![warn(clippy::redundant_clone)]
 
+pub mod accept;
 pub mod action_calls;
 #[cfg(test)]
 mod bridge_bench;
@@ -1486,13 +1487,17 @@ async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response 
 
 async fn websocket_upgrade(
     State(runtime): State<Runtime>,
+    accepted: Option<axum::Extension<axum::extract::ConnectInfo<accept::AcceptedSocket>>>,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
     request: axum::extract::Request,
 ) -> Response {
-    let peer = peer
-        .map(|peer| peer.0 .0.ip())
+    let accepted = accepted.map(|accepted| accepted.0 .0);
+    let socket_fd = accepted.and_then(|accepted| accepted.fd);
+    let peer = accepted
+        .map(|accepted| accepted.peer.ip())
+        .or_else(|| peer.map(|peer| peer.0 .0.ip()))
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let limits = &runtime.inner.config.public_functions;
     let ip = public_functions::client_ip(peer, &headers, limits);
@@ -1534,12 +1539,17 @@ async fn websocket_upgrade(
     } else {
         16 << 20
     };
-    websocket_transport::upgrade(
-        request,
-        runtime.inner.config.websocket_compression,
-        runtime.inner.config.websocket_compression_threshold,
+    let options = websocket_transport::UpgradeOptions {
+        compression: runtime.inner.config.websocket_compression,
+        threshold: runtime.inner.config.websocket_compression_threshold,
         max_message,
         max_frame,
+        outbound: runtime.inner.config.connection.outbound,
+        socket_fd,
+    };
+    websocket_transport::upgrade(
+        request,
+        options,
         move |socket| {
             gonvex_profiler::instrument(
                 gonvex_profiler::TaskKind::WsConnection,
@@ -1595,6 +1605,7 @@ async fn websocket(
     let mut presence_slot: Option<Arc<presence::PresenceSlot>> = None;
     let mut presence_negotiated = false;
     let mut last_inbound = tokio::time::Instant::now();
+    let socket_watch = socket.watch();
     let mut presence_ping = tokio::time::interval(presence_hub.config().ping_interval);
     presence_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     presence_ping.tick().await;
@@ -1604,6 +1615,11 @@ async fn websocket(
     };
     let mut feed = None;
     let mut feed_scheduler = FeedFirstScheduler::default();
+    // Delivery v3, slow readers: a feed event taken while merging that could
+    // not be merged (processed next), and whether the socket fell behind
+    // since the feed receiver was last drained.
+    let mut pending_feed: Option<Result<change_feed::FeedEvent, broadcast::error::RecvError>> = None;
+    let mut catching_up = false;
     let mut sent_replica_revision = 0u64;
     let mut sent_zero_bootstrap_watermark = false;
     // Removed and dropped subscriptions are freed on the offload pool.
@@ -1697,10 +1713,20 @@ async fn websocket(
             // forever for capacity that can never exist.
             bytes > replica_open_queue::MAX_BYTES || replica_opens.has_capacity(&request.id, bytes)
         });
-        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
-        let batch_deadline = batcher.deadline(socket.batch());
-        let presence_wait = presence_slot.clone();
+        // While the client is behind, produce nothing new: presence keeps
+        // merging per member in its slot, feed events stay in the shared
+        // broadcast ring (lagging it resets and resyncs the subscription) and
+        // the pending replica batch is not queued, so the client gets fewer,
+        // newer updates once it catches up (feed events that waited are
+        // merged into one, see `next_socket_or_feed`). The transport bounds
+        // queued bytes and resets a connection whose writes stop progressing.
+        let backlogged = socket_watch.is_backlogged();
+        catching_up |= backlogged;
+        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
+        let batch_deadline = if backlogged { None } else { batcher.deadline(socket.batch()) };
+        let presence_wait = presence_slot.clone().filter(|_| !backlogged);
         let message = tokio::select! {
+            _ = socket_watch.writable(), if backlogged => continue,
             // Delivery v2: one frame per connection per tick.
             _ = async { tokio::time::sleep_until(batch_deadline.unwrap()).await }, if batch_deadline.is_some() => {
                 if batcher.flush(&mut socket).await.is_err() { return; }
@@ -1795,6 +1821,7 @@ async fn websocket(
             // the existing reset, never a silently missed transaction.
             transport = async {
                 if defer_feed { ScheduledTransport::Socket(socket.next().await) }
+                else if let Some(event) = pending_feed.take() { ScheduledTransport::Feed(event) }
                 else { next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler).await }
             }, if pending_replica_opens.is_empty() => {
                 match transport {
@@ -1805,6 +1832,13 @@ async fn websocket(
                     }
                     ScheduledTransport::Feed(event) => match event {
                     Ok(event) => {
+                        // A connection that fell behind takes every feed event
+                        // waiting for it as one: each row's newest state once.
+                        let event = if catching_up {
+                            let merged = delivery::merge_waiting_feed(event, &mut feed, &mut pending_feed, &replicas, live_queries.is_empty() && batcher.enabled());
+                            if feed.as_ref().is_none_or(|receiver| receiver.is_empty()) { catching_up = false; }
+                            merged
+                        } else { event };
                         let (feed_revision, feed_key) = match &event {
                             change_feed::FeedEvent::Transaction { revision, database_epoch, .. } => (
                                 Some(*revision),
@@ -1888,7 +1922,7 @@ async fn websocket(
                                                     let result = if let Some(patch) = patch {
                                                         socket.send_best_text(&full, &patch).await
                                                     } else {
-                                                        socket.send(Message::Text(full.into())).await
+                                                        socket.send(gonvex_websocket::text_message(full)).await
                                                     };
                                                     if result.is_err() { return; }
                                                     continue;
@@ -1903,7 +1937,7 @@ async fn websocket(
                                             encode_timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
                                             match compact {
                                                 Ok(Some(encoded)) => {
-                                                    if socket.send(Message::Text(encoded.into())).await.is_err() { return; }
+                                                    if socket.send(gonvex_websocket::text_message(encoded)).await.is_err() { return; }
                                                     continue;
                                                 }
                                                 Ok(None) => {}
@@ -2009,7 +2043,7 @@ async fn websocket(
                                 if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
                             }
                             _ => {
-                                if socket.send(Message::Text(frame.into())).await.is_err() { return; }
+                                if socket.send(gonvex_websocket::text_message(frame)).await.is_err() { return; }
                             }
                         }
                     }
@@ -2017,7 +2051,14 @@ async fn websocket(
                 continue;
             }
             _ = presence_ping.tick(), if presence_negotiated => {
-                if last_inbound.elapsed() >= presence_hub.config().liveness_timeout {
+                // Inbound frames, a blocked write resuming (the client is
+                // draining a large send) and the server's own read
+                // backpressure all count; a client that reads nothing does
+                // not. Stuck writes are reset by the transport's stall timeout.
+                let alive = socket_watch
+                    .last_activity()
+                    .map_or(last_inbound, |activity| activity.max(last_inbound));
+                if alive.elapsed() >= presence_hub.config().liveness_timeout {
                     let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 4000, reason: "presence liveness timeout".into(),
                     }))).await;
@@ -3309,7 +3350,7 @@ async fn websocket(
                             })
                             .unwrap_or_default(),
                         };
-                    if socket.send(Message::Text(response.into())).await.is_err() {
+                    if socket.send(gonvex_websocket::text_message(response)).await.is_err() {
                         break;
                     }
                 }
@@ -4933,7 +4974,7 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
         gonvex_profiler::Label::None,
     );
     socket
-        .send(Message::Text(encoded.into()))
+        .send(gonvex_websocket::text_message(encoded))
         .await
         .map_err(|_| ())
 }
@@ -4952,7 +4993,7 @@ mod tests {
             "/proof",
             axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async {
                 upgrade.on_upgrade(|socket| async move {
-                    let mut socket = super::WebSocket::plain(socket);
+                    let mut socket = super::WebSocket::from_axum(socket, Default::default());
                     let mut delivery = super::snapshot_delivery::SnapshotDelivery::default();
                     let cursor = ReplicaCursor {
                         epoch: "e".into(),
@@ -5233,6 +5274,7 @@ mod tests {
             service_principals: Vec::new(),
             public_functions: Default::default(),
             presence: Default::default(),
+            connection: Default::default(),
         }
     }
 

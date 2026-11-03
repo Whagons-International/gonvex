@@ -7,7 +7,10 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use futures_util::{SinkExt, StreamExt};
-use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
+use gonvex_runtime::accept::{AcceptedSocket, SocketTuning, TunedListener};
+use gonvex_runtime::config::{
+    Config, ConnectionConfig, ModuleHostConfig, SandboxConfig, StorageConfig,
+};
 use gonvex_runtime::control::ControlConnection;
 use gonvex_runtime::presence::PresenceConfig;
 use gonvex_runtime::Runtime;
@@ -22,7 +25,11 @@ type Socket =
 const TICK: Duration = Duration::from_millis(50);
 const GRACE: Duration = Duration::from_millis(600);
 
-fn test_config(database_url: String, presence: PresenceConfig) -> Config {
+fn test_config(
+    database_url: String,
+    presence: PresenceConfig,
+    connection: ConnectionConfig,
+) -> Config {
     let data_dir = gonvex_store::DataDir::parse(&database_url);
     Config {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -66,6 +73,7 @@ fn test_config(database_url: String, presence: PresenceConfig) -> Config {
         service_principals: Vec::new(),
         public_functions: Default::default(),
         presence,
+        connection,
     }
 }
 
@@ -79,6 +87,11 @@ struct Fixture {
 }
 
 async fn fixture(presence: PresenceConfig) -> Fixture {
+    fixture_with(presence, ConnectionConfig::default()).await
+}
+
+/// Serves like `main.rs`: tuned sockets and their descriptors as connect info.
+async fn fixture_with(presence: PresenceConfig, connection: ConnectionConfig) -> Fixture {
     let data = tempfile::tempdir().unwrap();
     let control_url = gonvex_store::database_url(&data.path().join("control.db"));
     let pools = PoolRegistry::new(PoolLimits::default());
@@ -121,15 +134,15 @@ async fn fixture(presence: PresenceConfig) -> Fixture {
         .await
         .unwrap();
     }
-    let runtime = Runtime::new(test_config(control_url.clone(), presence));
+    let runtime = Runtime::new(test_config(control_url.clone(), presence, connection));
     runtime.start().await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let router = runtime.router();
     let server = tokio::spawn(async move {
         axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
+            TunedListener::new(listener, connection.socket),
+            router.into_make_service_with_connect_info::<AcceptedSocket>(),
         )
         .await
         .unwrap();
@@ -200,23 +213,54 @@ impl Fixture {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.address))
             .await
             .unwrap();
-        let ready = next_json(&mut socket).await;
+        self.authenticate(&mut socket, token, tenant, capabilities).await;
+        socket
+    }
+
+    async fn connect_with_receive_buffer(
+        &self,
+        token: &str,
+        tenant: &str,
+        receive_buffer: Option<u32>,
+    ) -> Socket {
+        let tcp = tokio::net::TcpSocket::new_v4().unwrap();
+        if let Some(bytes) = receive_buffer {
+            tcp.set_recv_buffer_size(bytes).unwrap();
+        }
+        let stream = tcp.connect(self.address).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::client_async(
+            format!("ws://{}/ws", self.address),
+            tokio_tungstenite::MaybeTlsStream::Plain(stream),
+        )
+        .await
+        .unwrap();
+        self.authenticate(
+            &mut socket,
+            token,
+            tenant,
+            json!({"preserveSubscriptions":1,"presence":1}),
+        )
+        .await;
+        socket
+    }
+
+    async fn authenticate(&self, socket: &mut Socket, token: &str, tenant: &str, capabilities: Value) {
+        let ready = next_json(socket).await;
         assert_eq!(ready["type"], "session.ready");
         assert_eq!(ready["capabilities"]["presence"], 1);
         send(
-            &mut socket,
+            socket,
             json!({"type":"auth","id":"auth","token":token,"project":"project","tenant":tenant,"capabilities":capabilities}),
         )
         .await;
         loop {
-            let frame = next_json(&mut socket).await;
+            let frame = next_json(socket).await;
             match frame["type"].as_str() {
                 Some("auth.result") => break,
                 Some("auth.error") => panic!("auth failed: {frame}"),
                 _ => {}
             }
         }
-        socket
     }
 }
 
@@ -737,4 +781,161 @@ async fn presence_patches_ride_in_the_replica_batch() {
     let items = batch["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "{batch}");
     assert_eq!(changes(&items[0]), vec![(alice.clone(), "active".into())]);
+}
+
+/// Small kernel send buffers and a short stall timeout, as for slow readers.
+fn slow_reader_connection(stall: Duration) -> ConnectionConfig {
+    ConnectionConfig {
+        socket: SocketTuning {
+            send_buffer: Some(16 << 10),
+            receive_buffer: None,
+            notsent_lowat: Some(8 << 10),
+        },
+        outbound: gonvex_websocket::OutboundLimits {
+            max_bytes: 64 << 10,
+            max_frames: 64,
+            low_water: 16 << 10,
+            stall_timeout: stall,
+        },
+    }
+}
+
+/// A request whose error reply echoes about `bytes` of its id.
+fn large_reply_request(index: usize, bytes: usize) -> Message {
+    let id = format!("big-{index}-{}", "x".repeat(bytes));
+    Message::Text(
+        json!({"type":"query.subscribe","id":id,"path":"missing.query","args":{}})
+            .to_string()
+            .into(),
+    )
+}
+
+#[tokio::test]
+async fn a_client_that_stops_reading_is_reset_by_the_send_stall_timeout() {
+    let fixture = fixture_with(
+        PresenceConfig {
+            // Liveness alone would take 30 s; the stall timeout is 1 s.
+            ping_interval: Duration::from_secs(15),
+            liveness_timeout: Duration::from_secs(30),
+            ..config()
+        },
+        slow_reader_connection(Duration::from_secs(1)),
+    )
+    .await;
+    let (alice, alice_token) = fixture.member("tenant-a", "alice@example.test").await;
+    let (_bob, bob_token) = fixture.member("tenant-a", "bob@example.test").await;
+    let mut bob = fixture.connect(&bob_token, "tenant-a", true).await;
+    send(&mut bob, json!({"type":"presence.subscribe","id":"watch"})).await;
+    next_presence(&mut bob).await;
+    let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
+    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "active".into())]
+    );
+    // Alice asks for ~2 MB of replies and never reads them.
+    for index in 0..64 {
+        if alice_socket
+            .send(large_reply_request(index, 32 << 10))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let started = std::time::Instant::now();
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "offline".into())]
+    );
+    // Stall timeout + offline grace, far below the 30 s liveness timeout.
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    // Alice's socket was reset: reading ends in an error or EOF, never a
+    // liveness close.
+    let ended = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match alice_socket.next().await {
+                Some(Ok(Message::Close(Some(close)))) => {
+                    panic!("unexpected close {close:?}")
+                }
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => return,
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok());
+    fixture.server.abort();
+    fixture.runtime.shutdown().await;
+    fixture.pools.close().await;
+}
+
+#[tokio::test]
+async fn a_client_draining_a_large_send_outlives_the_liveness_timeout() {
+    let fixture = fixture_with(
+        PresenceConfig {
+            ping_interval: Duration::from_secs(1),
+            liveness_timeout: Duration::from_secs(2),
+            ..config()
+        },
+        ConnectionConfig {
+            outbound: gonvex_websocket::OutboundLimits {
+                // Room for the last 8 replies: the server reads the final
+                // request while those are still queued.
+                max_bytes: 300 << 10,
+                ..slow_reader_connection(Duration::from_secs(3)).outbound
+            },
+            ..slow_reader_connection(Duration::from_secs(3))
+        },
+    )
+    .await;
+    let (_alice, alice_token) = fixture.member("tenant-a", "alice@example.test").await;
+    // A small client receive buffer keeps the unread data on the server
+    // side, as a slow network does.
+    let mut alice = fixture
+        .connect_with_receive_buffer(&alice_token, "tenant-a", Some(8 << 10))
+        .await;
+    let total = 24;
+    for index in 0..total {
+        alice.send(large_reply_request(index, 32 << 10)).await.unwrap();
+    }
+    // Read the first replies quickly, then the last 8 at one per 800 ms: the
+    // server has read every request by then, and the client's Pong replies
+    // queue behind the unread data, so no inbound frame arrives for ~6 s.
+    let mut replies = 0;
+    let started = std::time::Instant::now();
+    while replies < total {
+        match tokio::time::timeout(Duration::from_secs(10), alice.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if text.contains("\"big-") {
+                    replies += 1;
+                    if replies >= total - 8 {
+                        tokio::time::sleep(Duration::from_millis(800)).await;
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Close(close)))) => {
+                panic!("closed while draining after {replies} replies: {close:?}")
+            }
+            Ok(Some(Ok(_))) => {}
+            other => panic!("socket ended after {replies} replies: {other:?}"),
+        }
+    }
+    assert!(started.elapsed() > Duration::from_secs(5));
+    // Still connected and answering.
+    send(&mut alice, json!({"type":"presence.set","state":"active"})).await;
+    let echo = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match alice.next().await {
+                Some(Ok(Message::Text(text))) if text.contains("presence.") => return true,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return false,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert_ne!(echo, Ok(false), "connection survived the drain");
+    fixture.server.abort();
+    fixture.runtime.shutdown().await;
+    fixture.pools.close().await;
 }

@@ -57,6 +57,7 @@ url.workspace = true
 duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
 bytes = "1"
+socket2 = { version = "0.6", features = ["all"] }
 
 [lints.clippy]
 # Deep clones on hot paths (perf workstreams).
@@ -64,7 +65,6 @@ redundant_clone = "warn"
 
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-socket2 = "0.6"
 tempfile = "3"
 tokio-tungstenite = "0.29"
 tower.workspace = true

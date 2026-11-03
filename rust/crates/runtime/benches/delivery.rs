@@ -704,10 +704,14 @@ async fn loopback_socket() -> (gonvex_websocket::WebSocket, std::thread::JoinHan
             async move {
                 gonvex_websocket::upgrade(
                     request,
-                    true,
-                    THRESHOLD,
-                    64 << 20,
-                    16 << 20,
+                    gonvex_websocket::UpgradeOptions {
+                        compression: true,
+                        threshold: THRESHOLD,
+                        max_message: 64 << 20,
+                        max_frame: 16 << 20,
+                        outbound: Default::default(),
+                        socket_fd: None,
+                    },
                     move |socket| async move {
                         if let Some(tx) = tx.lock().unwrap().take() {
                             let _ = tx.send(socket);

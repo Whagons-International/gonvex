@@ -19,6 +19,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 ratchet_core = { version = "1.2.1", features = ["split"] }
 ratchet_ext = "1.2.1"
 tokio.workspace = true
+tokio-tungstenite = { version = "0.29", default-features = false }
+socket2 = { version = "0.6", features = ["all"] }
+tracing.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

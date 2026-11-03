@@ -315,6 +315,56 @@ pub fn prewarm(
     }
 }
 
+/// Delivery v3: `event` merged with the transactions already waiting in the
+/// receiver (`crate::change_feed::merge_transactions`), when every subscription's
+/// cursor is before them. A waiting event that cannot be merged (a reset,
+/// another epoch, lag) is left in `pending` for the next turn.
+pub fn merge_waiting_feed(
+    event: crate::change_feed::FeedEvent,
+    receiver: &mut Option<tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>>,
+    pending: &mut Option<Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>>,
+    replicas: &std::collections::BTreeMap<String, crate::replica::ReplicaSubscription>,
+    allowed: bool,
+) -> crate::change_feed::FeedEvent {
+    const MAX_MERGED: usize = 256;
+    let (Some(receiver), Some(first)) = (receiver.as_mut(), crate::change_feed::first_revision(&event)) else {
+        return event;
+    };
+    if !allowed
+        || pending.is_some()
+        || receiver.is_empty()
+        || replicas.values().any(|subscription| subscription.cursor.revision >= first)
+    {
+        return event;
+    }
+    let mut events = vec![event];
+    while events.len() < MAX_MERGED {
+        match receiver.try_recv() {
+            Ok(next @ crate::change_feed::FeedEvent::Transaction { .. }) => {
+                events.push(next);
+                if crate::change_feed::merge_transactions(&events[events.len() - 2..]).is_none() {
+                    *pending = events.pop().map(Ok);
+                    break;
+                }
+            }
+            Ok(other) => {
+                *pending = Some(Ok(other));
+                break;
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                *pending = Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)));
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    if events.len() == 1 {
+        return events.pop().unwrap();
+    }
+    // Pairwise checked above: one epoch, ascending revisions.
+    crate::change_feed::merge_transactions(&events).expect("mergeable transactions")
+}
+
 /// Stream token of a collection: path and arguments, never the socket.
 fn stream_identity(subscription: &ReplicaSubscription) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
