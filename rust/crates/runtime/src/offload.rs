@@ -375,6 +375,7 @@ impl Runtime {
         session: &TenantSession,
         subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
         event: FeedEvent,
+        prewarm: Option<(bool, Option<u8>)>,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let pool = offload();
         let tables = feed_tables(&event);
@@ -395,6 +396,18 @@ impl Runtime {
                 async move {
                     let started = Instant::now();
                     let result = runtime.apply_feed_event(&session, &mut owned, event).await;
+                    // Delivery v3: encode and compress the shared items here,
+                    // not at push time on the network thread.
+                    if let (Ok(messages), Some((native, window))) = (&result, prewarm) {
+                        crate::delivery::prewarm(
+                            &runtime.inner.delivery,
+                            &session.route.tenant_id,
+                            native,
+                            window,
+                            &owned,
+                            messages,
+                        );
+                    }
                     (owned, result, started.elapsed())
                 },
             ))

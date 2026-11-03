@@ -9,6 +9,7 @@ pub mod config;
 pub mod control;
 mod dashboard;
 pub mod delivery;
+pub mod feed_share;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
 #[cfg(not(feature = "duckdb"))]
@@ -1839,7 +1840,8 @@ async fn websocket(
                             {
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
-                            let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event).await;
+                            let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
+                            let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm).await;
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
                             match applied {
                                 Ok(messages) if batcher.enabled() => {

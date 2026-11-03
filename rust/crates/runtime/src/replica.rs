@@ -768,6 +768,15 @@ impl Runtime {
         // Change rows decoded once and class defaults evaluated once per
         // visibility class for the whole event (`changes` outlives it).
         let mut memo = crate::visibility_class::EvalMemo::default();
+        // Delivery v3: the same, plus per-class row decisions, shared by every
+        // connection of the tenant (`feed_share`).
+        let share = self
+            .inner
+            .delivery
+            .tenant(&session.route.tenant_id)
+            .events
+            .share(&database_epoch, revision, &changes);
+        let mut shared_stats = crate::visibility_class::EvalStats::default();
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
@@ -799,12 +808,39 @@ impl Runtime {
                 }
                 Step::Apply(context) => context,
             };
-            let Some(delta) = apply_rows_with(
-                subscription,
-                &context,
-                &collapsed,
-                Some((&mut memo, session.route.database_url.as_str())),
-            )?
+            let shared = share
+                .as_deref()
+                .filter(|_| shareable_plan(&subscription.visibility));
+            let applied = match shared {
+                Some(share) => {
+                    let mut guard = share.memo.lock().unwrap();
+                    let before = guard.stats;
+                    let applied = apply_rows_with(
+                        subscription,
+                        &context,
+                        &collapsed,
+                        Some((&mut guard, session.route.database_url.as_str())),
+                        Some(share),
+                    );
+                    let after = guard.stats;
+                    drop(guard);
+                    shared_stats.compiled_checks += after.compiled_checks - before.compiled_checks;
+                    shared_stats.class_evaluations +=
+                        after.class_evaluations - before.class_evaluations;
+                    shared_stats.member_evaluations +=
+                        after.member_evaluations - before.member_evaluations;
+                    shared_stats.fallback_checks += after.fallback_checks - before.fallback_checks;
+                    applied
+                }
+                None => apply_rows_with(
+                    subscription,
+                    &context,
+                    &collapsed,
+                    Some((&mut memo, session.route.database_url.as_str())),
+                    None,
+                ),
+            };
+            let Some(delta) = applied?
             else {
                 self.resync(subscription, Resync::Window, &mut messages, &mut resynced);
                 continue;
@@ -874,6 +910,7 @@ impl Runtime {
             );
         }
         self.inner.visibility_metrics.record_eval_stats(&memo.stats);
+        self.inner.visibility_metrics.record_eval_stats(&shared_stats);
         Ok(messages)
     }
 
@@ -1014,7 +1051,15 @@ fn apply_rows(
     context: &ApplyContext,
     collapsed: &CollapsedChanges<'_>,
 ) -> Result<Option<SubscriptionDelta>, ReplicaError> {
-    apply_rows_with(subscription, context, collapsed, None)
+    apply_rows_with(subscription, context, collapsed, None, None)
+}
+
+/// Whether a plan's row decisions may be shared per visibility class: version
+/// 2 plans without inherited (parent-row) visibility.
+fn shareable_plan(plan: &VisibilityPlan) -> bool {
+    plan.version == Some(2)
+        && plan.inherited_columns().is_empty()
+        && visibility::inherits_any(plan).is_empty()
 }
 
 /// `compiled`: the event's memo and the tenant database (class scope). With
@@ -1024,6 +1069,7 @@ fn apply_rows_with(
     context: &ApplyContext,
     collapsed: &CollapsedChanges<'_>,
     mut compiled: Option<(&mut crate::visibility_class::EvalMemo, &str)>,
+    share: Option<&crate::feed_share::EventShare>,
 ) -> Result<Option<SubscriptionDelta>, ReplicaError> {
     if context.before.is_some() {
         // The event changed this principal in memory: rebind.
@@ -1034,8 +1080,33 @@ fn apply_rows_with(
             .mask
             .get(&subscription.visibility, &subscription.resolved, scope)
     });
+    // Per-class decisions apply only when nothing about this subscription
+    // but its class decides: the principal did not move in this event, no
+    // affected-row read, complete window, compiled plan.
+    let class_key = match (share, handle.as_ref()) {
+        (Some(_), Some(crate::visibility_class::MemberHandle::Compiled(member)))
+            if context.before.is_none()
+                && context.overlay.is_none()
+                && !subscription.window.truncated =>
+        {
+            Some((
+                member.class().id(),
+                Arc::as_ptr(&subscription.definition) as usize,
+                Arc::<str>::from(
+                    serde_json::to_string(&subscription.args)
+                        .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?,
+                ),
+                Arc::<str>::from(subscription.definition.table.as_str()),
+            ))
+        }
+        _ => None,
+    };
     let mut compiled = match (compiled.as_mut(), handle.as_ref()) {
-        (Some((memo, _)), Some(handle)) => Some(Compiled { memo, handle }),
+        (Some((memo, _)), Some(handle)) => Some(Compiled {
+            memo,
+            handle,
+            share: share.zip(class_key.as_ref()),
+        }),
         _ => None,
     };
     let mut delta = SubscriptionDelta::default();
@@ -1089,7 +1160,7 @@ fn apply_rows_with(
 /// after the event, and the window: every subscription of the same
 /// collection and visibility class gets the same decision, so a delivery
 /// layer can decide once per class and apply the result per subscriber.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RowDecision {
     /// The client neither held nor may hold the row.
     Outside,
@@ -1238,6 +1309,12 @@ pub(crate) fn decide_row_with(
 struct Compiled<'a> {
     memo: &'a mut crate::visibility_class::EvalMemo,
     handle: &'a crate::visibility_class::MemberHandle,
+    /// The event share and this subscription's (class, definition, args,
+    /// table) when its decisions may be shared per class.
+    share: Option<(
+        &'a crate::feed_share::EventShare,
+        &'a (u64, usize, Arc<str>, Arc<str>),
+    )>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1256,6 +1333,34 @@ fn row_step(
     // decided by it only when the principal and the parents did not move.
     let same_principal = context.before.is_none() && context.overlay.is_none();
     let mut compiled = compiled;
+    // A class-shared decision: only for change rows (memoized images) that
+    // hit no member atom of this subscription's member.
+    let shared_key = match compiled.as_deref_mut() {
+        Some(Compiled {
+            memo,
+            handle: crate::visibility_class::MemberHandle::Compiled(member),
+            share: Some((share, (class, definition, args, table))),
+        }) if memoize && same_principal => {
+            let hit = (!old.is_null() && member.hit_memo(memo, old))
+                || (!new.is_null() && member.hit_memo(memo, new));
+            (!hit).then(|| {
+                (
+                    *share,
+                    crate::feed_share::DecisionKey {
+                        class: *class,
+                        definition: *definition,
+                        args: Arc::clone(args),
+                        table: Arc::clone(table),
+                        row: Arc::from(id),
+                    },
+                )
+            })
+        }
+        _ => None,
+    };
+    let cached = shared_key
+        .as_ref()
+        .and_then(|(share, key)| share.decision(key));
     let mut check = |row: &Value, is_old: bool| -> Option<bool> {
         use crate::visibility_class::{MemberHandle, RowView};
         let compiled = compiled.as_deref_mut()?;
@@ -1274,18 +1379,27 @@ fn row_step(
             }
         }
     };
-    let decision = decide_row_with(
-        &subscription.definition,
-        &subscription.args,
-        &subscription.visibility,
-        context.before.as_ref().unwrap_or(&subscription.resolved),
-        &subscription.resolved,
-        &context.overlay,
-        &subscription.window,
-        old,
-        new,
-        &mut check,
-    )?;
+    let decision = match cached {
+        Some(decision) => RowDecision::clone(&decision),
+        None => {
+            let decision = decide_row_with(
+                &subscription.definition,
+                &subscription.args,
+                &subscription.visibility,
+                context.before.as_ref().unwrap_or(&subscription.resolved),
+                &subscription.resolved,
+                &context.overlay,
+                &subscription.window,
+                old,
+                new,
+                &mut check,
+            )?;
+            if let Some((share, key)) = shared_key {
+                share.insert(key, Arc::new(decision.clone()));
+            }
+            decision
+        }
+    };
     let (changed, old, new) = match decision {
         RowDecision::Outside => return Ok(true),
         RowDecision::Reconcile => return Ok(false),

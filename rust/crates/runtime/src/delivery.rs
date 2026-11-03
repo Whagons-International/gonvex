@@ -133,6 +133,8 @@ pub struct MemoStats {
 /// Encoded replica items of one tenant, shared by its connections.
 #[derive(Default)]
 pub struct TenantFrames {
+    /// Delivery v3: per-event shared decisions (`feed_share`).
+    pub events: crate::feed_share::EventShares,
     memo: Mutex<Memo>,
     hits: AtomicU64,
     encodes: AtomicU64,
@@ -236,6 +238,81 @@ fn encode_item(message: &ServerMessage, native: bool) -> Result<String, Delivery
         }
     }
     serde_json::to_string(message).map_err(|_| DeliveryError)
+}
+
+/// Encodes (and, for `window`, compresses) the shared items of one
+/// connection's feed frames ahead of `ReplicaBatcher::push`, so the push on
+/// the network thread finds them memoized. Runs on the offload pool with the
+/// feed apply. Uses the default stream token; a socket that needed a suffixed
+/// token simply encodes at push time.
+pub fn prewarm(
+    hub: &DeliveryHub,
+    tenant_id: &str,
+    native: bool,
+    window: Option<u8>,
+    replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
+    messages: &[ServerMessage],
+) {
+    let frames = hub.tenant(tenant_id);
+    for message in messages {
+        let item = match message {
+            ServerMessage::ReplicaTransaction {
+                cursor,
+                origin_command_id,
+                provenance,
+                changes,
+            } => {
+                let mut changes = changes.clone();
+                for change in &mut changes {
+                    change.old_value = None;
+                }
+                (
+                    ItemKey {
+                        revision: cursor.revision,
+                        native,
+                        kind: ItemKind::Transaction,
+                    },
+                    ServerMessage::ReplicaTransaction {
+                        cursor: cursor.clone(),
+                        origin_command_id: origin_command_id.clone(),
+                        provenance: provenance.clone(),
+                        changes,
+                    },
+                )
+            }
+            ServerMessage::ReplicaDelta {
+                id,
+                cursor,
+                payload,
+            } => {
+                let Some(subscription) = replicas.get(id) else {
+                    continue;
+                };
+                let token: Arc<str> = Arc::from(format!("~{:016x}", stream_identity(subscription)));
+                let mut payload = payload.clone();
+                payload.remove("digest");
+                payload.remove("truncated");
+                (
+                    ItemKey {
+                        revision: cursor.revision,
+                        native,
+                        kind: ItemKind::Delta(Arc::clone(&token)),
+                    },
+                    ServerMessage::ReplicaDelta {
+                        id: token.to_string(),
+                        cursor: cursor.clone(),
+                        payload,
+                    },
+                )
+            }
+            _ => continue,
+        };
+        if let Ok(text) = frames.item(item.0, item.1) {
+            if let Some(window) = window {
+                let _ = text.deflated(window);
+            }
+        }
+    }
 }
 
 /// Stream token of a collection: path and arguments, never the socket.
@@ -614,17 +691,33 @@ impl ReplicaBatcher {
     }
 }
 
-/// Stand-in visibility class of a connection until shared visibility classes
-/// land: a hash of its subscriptions' resolved visibility fingerprints. It is
-/// informational (frame header); sharing is decided by content equality.
+/// The connection's visibility class for the batch header: the
+/// `VisibilityClass::stable_id()` of its subscriptions' compiled bindings
+/// (identical across processes and restarts). A connection whose
+/// subscriptions are all bound to one class sends that class id as is; one
+/// spanning several classes (one per plan) sends a hash of their sorted ids;
+/// an uncompiled (fallback) binding contributes its principal fingerprint.
+/// Informational (edge layer, diagnostics): which bytes a connection gets is
+/// decided per subscription by its own class or its own decision.
 fn class_id(replicas: &std::collections::BTreeMap<String, ReplicaSubscription>) -> u64 {
-    let mut fingerprints: Vec<&str> = replicas
+    use crate::visibility_class::MemberHandle;
+    let mut ids: Vec<u64> = replicas
         .values()
-        .map(|subscription| subscription.resolved.fingerprint.as_str())
+        .map(|subscription| match subscription.mask.peek() {
+            Some(MemberHandle::Compiled(member)) => member.class().stable_id(),
+            _ => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                subscription.resolved.fingerprint.hash(&mut hasher);
+                hasher.finish()
+            }
+        })
         .collect();
-    fingerprints.sort_unstable();
-    fingerprints.dedup();
+    ids.sort_unstable();
+    ids.dedup();
+    if let [only] = ids.as_slice() {
+        return *only;
+    }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    fingerprints.hash(&mut hasher);
+    ids.hash(&mut hasher);
     hasher.finish()
 }
