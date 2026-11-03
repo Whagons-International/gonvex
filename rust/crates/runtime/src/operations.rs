@@ -1640,8 +1640,9 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
         "inUse":database.in_use,
         "idle":database.idle,
         "maxOpenConnections":database.max_open_connections,
-        "waitCount":0,
-        "waitDurationMs":0,
+        "waitCount":database.admission_count,
+        "waitDurationMs":database.admission_wait_us as f64 / 1000.0,
+        "maxWaitDurationMs":database.admission_wait_max_us as f64 / 1000.0,
         "series":[],
     });
     let query_admission = json!({

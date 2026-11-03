@@ -756,6 +756,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_database_idle_timeout_without_changing_pool_defaults() {
+        let defaults = config(&[]).expect("defaults");
+        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(60));
+        let tuned = config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1000")]).expect("timeout");
+        assert_eq!(tuned.database_idle_timeout, Duration::from_secs(1));
+        assert_eq!(
+            tuned.database_max_connections,
+            defaults.database_max_connections
+        );
+        assert!(config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "bad")]).is_err());
+    }
+
+    #[test]
     fn reads_the_existing_runtime_environment_contract() {
         let config = config(&[
             ("GONVEX_ADDR", ":9090"),
