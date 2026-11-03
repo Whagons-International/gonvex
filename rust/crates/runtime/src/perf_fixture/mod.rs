@@ -191,6 +191,9 @@ pub struct MemberConnection {
     pub subscriptions: BTreeMap<String, ReplicaSubscription>,
     /// Rows delivered by the snapshots that opened `subscriptions`.
     pub snapshot_rows: usize,
+    /// Rows per subscription id at open time. Benches should read these
+    /// instead of `ReplicaSubscription` internals.
+    pub rows: BTreeMap<String, usize>,
 }
 
 /// How [`Fixture::deliver`] encodes the messages `apply_feed_event` returns.
@@ -211,6 +214,14 @@ pub struct Delivery {
     pub messages: usize,
     pub json_bytes: usize,
     pub wire_bytes: usize,
+    /// Wall time inside `apply_feed_event`, summed over connections.
+    pub apply_ns: u64,
+    /// Wall time encoding the resulting messages (JSON, deflate).
+    pub encode_ns: u64,
+    /// Visibility counter deltas over the delivery (`in_memory_row_checks`,
+    /// `visibility_sql_statements`, `collection_snapshots`, ...). Process-wide
+    /// counters: deliver nothing concurrently while measuring.
+    pub visibility: crate::visibility_metrics::VisibilityMetricsSnapshot,
 }
 
 /// The running fixture. Dropping it deletes the run directory (set
@@ -398,13 +409,13 @@ impl Fixture {
     pub async fn connect(&self, tenant: usize, member: usize) -> FixtureResult<MemberConnection> {
         let session = self.session(tenant, member);
         let mut subscriptions = BTreeMap::new();
-        let mut snapshot_rows = 0;
+        let mut rows = BTreeMap::new();
         for path in WHAGONS_SUBSCRIPTIONS {
             let opened = self.open_replica(&session, path, path).await?;
             let subscription = opened
                 .subscription
                 .ok_or_else(|| format!("{path} did not stay subscribed"))?;
-            snapshot_rows += subscription.rows.len();
+            rows.insert(path.to_owned(), subscription_rows(&subscription));
             subscriptions.insert(path.to_owned(), subscription);
         }
         Ok(MemberConnection {
@@ -412,7 +423,8 @@ impl Fixture {
             member,
             session,
             subscriptions,
-            snapshot_rows,
+            snapshot_rows: rows.values().sum(),
+            rows,
         })
     }
 
@@ -516,7 +528,9 @@ impl Fixture {
         encode: Encode,
     ) -> FixtureResult<Delivery> {
         let mut delivery = Delivery::default();
+        let before = self.runtime.visibility_metrics().snapshot();
         for connection in connections.iter_mut() {
+            let started = std::time::Instant::now();
             let messages = self
                 .runtime
                 .apply_feed_event(
@@ -525,6 +539,7 @@ impl Fixture {
                     event.clone(),
                 )
                 .await?;
+            delivery.apply_ns += started.elapsed().as_nanos() as u64;
             if !messages.is_empty() {
                 delivery.connections_with_messages += 1;
             }
@@ -532,6 +547,7 @@ impl Fixture {
             if encode == Encode::None {
                 continue;
             }
+            let started = std::time::Instant::now();
             for message in &messages {
                 let text = serde_json::to_string(message)?;
                 delivery.json_bytes += text.len();
@@ -546,7 +562,18 @@ impl Fixture {
                     text.len()
                 };
             }
+            delivery.encode_ns += started.elapsed().as_nanos() as u64;
         }
+        let after = self.runtime.visibility_metrics().snapshot();
+        delivery.visibility = crate::visibility_metrics::VisibilityMetricsSnapshot {
+            visibility_sql_statements: after.visibility_sql_statements
+                - before.visibility_sql_statements,
+            collection_snapshots: after.collection_snapshots - before.collection_snapshots,
+            live_query_reruns: after.live_query_reruns - before.live_query_reruns,
+            principal_rebuilds: after.principal_rebuilds - before.principal_rebuilds,
+            consistency_rebuilds: after.consistency_rebuilds - before.consistency_rebuilds,
+            in_memory_row_checks: after.in_memory_row_checks - before.in_memory_row_checks,
+        };
         Ok(delivery)
     }
 
@@ -627,6 +654,10 @@ impl Fixture {
         }
     }
 
+    /// Reads subscription visibility internals, so it may need updating when
+    /// the mask representation changes; `Delivery::visibility` counters are
+    /// the stable measure.
+    ///
     /// The in-memory visibility work of one change for every connection's
     /// `subscription`: does it concern the member's principal, and does the
     /// new row match the member's mask. Returns how many admit the row.
@@ -672,6 +703,12 @@ impl Drop for Fixture {
             let _ = std::fs::remove_dir_all(&self.run_dir);
         }
     }
+}
+
+/// Rows held by a subscription (the one place the fixture reads replica
+/// internals for counting; adapt here if `ReplicaSubscription` changes).
+fn subscription_rows(subscription: &ReplicaSubscription) -> usize {
+    subscription.rows.len()
 }
 
 fn now_ms() -> i64 {
