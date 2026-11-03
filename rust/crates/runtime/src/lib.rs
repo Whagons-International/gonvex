@@ -89,6 +89,9 @@ struct RuntimeInner {
     membership_projector: membership_projector::MembershipProjector,
     metrics: metrics::RuntimeMetrics,
     presence: presence::PresenceHub,
+    /// Project-wide Control change notifications sent (each one makes every
+    /// connection of the project refresh its live Control queries).
+    control_notifications: std::sync::atomic::AtomicU64,
     public_limiter: Arc<public_functions::PublicLimiter>,
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
@@ -237,6 +240,7 @@ impl Runtime {
         Self {
             inner: Arc::new(RuntimeInner {
                 presence,
+                control_notifications: std::sync::atomic::AtomicU64::new(0),
                 config,
                 module_host,
                 pools,
@@ -278,6 +282,7 @@ impl Runtime {
                     .tick(std::time::Instant::now(), presence::now_ms());
             }
         });
+        // Closed sessions: their final `last_seen_at`, batched every 5 s.
         let weak = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -286,32 +291,55 @@ impl Runtime {
                 interval.tick().await;
                 let Some(inner) = weak.upgrade() else { return };
                 let pending = inner.presence.take_last_seen_flush();
-                if pending.is_empty() {
-                    continue;
-                }
-                let Some(control) = inner.control_plane.read().await.clone() else {
-                    continue;
-                };
-                let result = async {
-                    let mut transaction = control.begin_control_transaction(false).await?;
-                    for seen in &pending {
-                        sqlx::query(
-                            "UPDATE gonvex_support_sessions SET last_seen_at=MAX(last_seen_at,$3) WHERE project_id=$1 AND id=$2",
-                        )
-                        .bind(&seen.project_id)
-                        .bind(&seen.session_id)
-                        .bind(seen.last_seen_ms)
-                        .execute(&mut **transaction.transaction())
-                        .await?;
-                    }
-                    transaction.commit().await
-                }
-                .await;
-                if let Err(error) = result {
+                if let Err(error) = write_support_last_seen(&inner, &pending).await {
                     tracing::debug!(%error, sessions = pending.len(), "support last-seen flush failed");
                 }
             }
         });
+        // Open sessions: one batched refresh per interval, so a crash loses at
+        // most one interval. The first run is at a random offset inside the
+        // interval, so it does not coincide with other periodic work.
+        let weak = Arc::downgrade(&self.inner);
+        let every = self.inner.presence.config().support_refresh;
+        let offset = every.mul_f64(rand::random::<f64>());
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + offset, every);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else { return };
+                let runtime = Runtime { inner };
+                runtime.refresh_support_sessions().await;
+            }
+        });
+    }
+
+    /// Writes `last_seen_at = now` for every open support/error session in one
+    /// batched Control Plane transaction. No idempotency rows, no Control
+    /// change notification, no query refresh. Returns the sessions written.
+    pub async fn refresh_support_sessions(&self) -> usize {
+        let live = self.inner.presence.live_support_sessions(presence::now_ms());
+        match write_support_last_seen(&self.inner, &live).await {
+            Ok(()) => live.len(),
+            Err(error) => {
+                tracing::debug!(%error, sessions = live.len(), "support last-seen refresh failed");
+                0
+            }
+        }
+    }
+
+    /// Shutdown: the final `last_seen_at` of closed sessions not yet flushed
+    /// and `now` for every session still open, in one batched transaction.
+    pub async fn flush_support_sessions(&self) -> usize {
+        let mut sessions = self.inner.presence.take_last_seen_flush();
+        sessions.extend(self.inner.presence.live_support_sessions(presence::now_ms()));
+        match write_support_last_seen(&self.inner, &sessions).await {
+            Ok(()) => sessions.len(),
+            Err(error) => {
+                tracing::warn!(%error, sessions = sessions.len(), "support last-seen shutdown flush failed");
+                0
+            }
+        }
     }
 
     pub async fn start(&self) -> Result<(), RuntimeStartError> {
@@ -444,6 +472,13 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) {
+        // Before any pool closes: record end times of open support sessions.
+        // Bounded so a slow disk cannot eat the container's stop grace.
+        match tokio::time::timeout(SUPPORT_SHUTDOWN_FLUSH_TIMEOUT, self.flush_support_sessions()).await {
+            Ok(written) if written > 0 => tracing::info!(sessions = written, "support session end times recorded"),
+            Ok(_) => {}
+            Err(_) => tracing::warn!("support session end-time flush timed out"),
+        }
         self.inner.scheduler.shutdown();
         self.inner.membership_projector.shutdown();
         self.inner.sandboxes.shutdown().await;
@@ -3382,8 +3417,18 @@ impl Runtime {
         Ok(())
     }
 
+    /// Diagnostics: project-wide Control change notifications sent so far.
+    pub fn control_notification_count(&self) -> u64 {
+        self.inner
+            .control_notifications
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn notify_control_changed(&self, project_id: &str) {
         if !project_id.is_empty() {
+            self.inner
+                .control_notifications
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = self
                 .inner
                 .runtime_events
@@ -4131,6 +4176,46 @@ fn presence_member_scope(
 }
 
 const SUPPORT_HEARTBEAT: &str = "control.support.heartbeat";
+
+/// Upper bound for the shutdown flush of support-session end times.
+pub const SUPPORT_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One batched update of support-session `last_seen_at` values (never moves
+/// a stored value backwards). Up to 500 sessions per statement, one
+/// transaction per call.
+async fn write_support_last_seen(
+    inner: &RuntimeInner,
+    sessions: &[presence::SupportLastSeen],
+) -> Result<(), gonvex_store::DatabaseError> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let Some(control) = inner.control_plane.read().await.clone() else {
+        return Ok(());
+    };
+    let mut transaction = control.begin_control_transaction(false).await?;
+    for chunk in sessions.chunks(500) {
+        let batch = serde_json::Value::Array(
+            chunk
+                .iter()
+                .map(|s| serde_json::json!({"i": s.session_id, "p": s.project_id, "t": s.last_seen_ms}))
+                .collect(),
+        )
+        .to_string();
+        sqlx::query(
+            r#"UPDATE gonvex_support_sessions
+               SET last_seen_at = MAX(gonvex_support_sessions.last_seen_at, s.t)
+               FROM (SELECT json_extract(value,'$.i') AS id, json_extract(value,'$.p') AS p,
+                            CAST(json_extract(value,'$.t') AS INTEGER) AS t
+                     FROM json_each($1)) AS s
+               WHERE gonvex_support_sessions.id = s.id AND gonvex_support_sessions.project_id = s.p"#,
+        )
+        .bind(batch)
+        .execute(&mut **transaction.transaction())
+        .await?;
+    }
+    transaction.commit().await
+}
 
 fn support_heartbeat_fields(args: &serde_json::Value) -> (String, String) {
     let field = |name: &str| {

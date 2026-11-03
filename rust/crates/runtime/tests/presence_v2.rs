@@ -512,3 +512,127 @@ async fn repeated_support_heartbeats_are_answered_without_writes() {
     fixture.runtime.shutdown().await;
     fixture.pools.close().await;
 }
+
+async fn register_support_sessions(socket: &mut Socket) -> Vec<String> {
+    send(
+        socket,
+        json!({"type":"reducer.call","id":"hb","path":"control.support.heartbeat","scope":"control",
+               "idempotencyKey":"hb","args":{"release":"1.2.3","environment":"production"}}),
+    )
+    .await;
+    let mut support = String::new();
+    loop {
+        let frame = next_json(socket).await;
+        if frame["type"] == "reducer.result" {
+            support = frame["result"]["sessionId"].as_str().unwrap().to_owned();
+        }
+        if frame["type"] == "control.watermark" {
+            break;
+        }
+    }
+    // The SDK error reporter's session (id = connection id).
+    send(socket, json!({"type":"error.register","id":"err","release":"1.2.3","environment":"production"})).await;
+    loop {
+        let frame = next_json(socket).await;
+        if frame["type"] == "error.ack" {
+            assert!(frame.get("error").is_none(), "{frame}");
+            break;
+        }
+    }
+    let connection = support.trim_start_matches("support_").to_owned();
+    vec![support, connection]
+}
+
+async fn last_seen(pool: &sqlx::SqlitePool, id: &str) -> i64 {
+    sqlx::query_scalar("SELECT last_seen_at FROM gonvex_support_sessions WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn shutdown_records_end_times_of_open_support_sessions() {
+    let fixture = fixture(config()).await;
+    let (_alice, alice_token) = fixture.member("tenant-a", "alice@example.test").await;
+    let (_bob, bob_token) = fixture.member("tenant-a", "bob@example.test").await;
+    let mut alice = fixture.connect(&alice_token, "tenant-a", true).await;
+    let mut bob = fixture.connect(&bob_token, "tenant-a", true).await;
+    let mut sessions = register_support_sessions(&mut alice).await;
+    sessions.extend(register_support_sessions(&mut bob).await);
+    let control = fixture.pools.pool(&fixture.control_url).await.unwrap();
+    let mut before = Vec::new();
+    for id in &sessions {
+        before.push(last_seen(&control, id).await);
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    // Sockets stay open: this is a stop signal, not a disconnect.
+    let started = std::time::Instant::now();
+    assert_eq!(fixture.runtime.flush_support_sessions().await, 4);
+    fixture.runtime.shutdown().await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    for (id, before) in sessions.iter().zip(before) {
+        assert!(last_seen(&control, id).await > before, "end time recorded for {id}");
+    }
+    drop((alice, bob, control));
+    fixture.server.abort();
+    fixture.pools.close().await;
+}
+
+#[tokio::test]
+async fn periodic_refresh_updates_open_sessions_without_control_fanout() {
+    let fixture = fixture(PresenceConfig {
+        support_refresh: Duration::from_secs(1),
+        ..config()
+    })
+    .await;
+    let (_alice, alice_token) = fixture.member("tenant-a", "alice@example.test").await;
+    let mut alice = fixture.connect(&alice_token, "tenant-a", true).await;
+    let sessions = register_support_sessions(&mut alice).await;
+    let control = fixture.pools.pool(&fixture.control_url).await.unwrap();
+    let idempotency = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM gonvex_control_idempotency")
+            .fetch_one(&control)
+            .await
+            .unwrap()
+    };
+    let registered: Vec<i64> = {
+        let mut values = Vec::new();
+        for id in &sessions {
+            values.push(last_seen(&control, id).await);
+        }
+        values
+    };
+    let notifications = fixture.runtime.control_notification_count();
+    let rows = idempotency().await;
+    // The background task (1 s interval, random first offset) refreshes both
+    // sessions while the socket stays open.
+    let refreshed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut all = true;
+            for (id, registered) in sessions.iter().zip(&registered) {
+                all &= last_seen(&control, id).await > *registered;
+            }
+            if all {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(refreshed.is_ok(), "open sessions refreshed");
+    // A direct refresh is one batched write of every open session.
+    assert_eq!(fixture.runtime.refresh_support_sessions().await, 2);
+    assert_eq!(fixture.runtime.control_notification_count(), notifications, "no Control fan-out");
+    assert_eq!(idempotency().await, rows, "no idempotency rows");
+    // Nothing was pushed to the open connection either.
+    if let Ok(Some(Ok(Message::Text(text)))) =
+        tokio::time::timeout(Duration::from_millis(300), alice.next()).await
+    {
+        panic!("refresh pushed a frame: {text}");
+    }
+    drop(control);
+    fixture.server.abort();
+    fixture.runtime.shutdown().await;
+    fixture.pools.close().await;
+}

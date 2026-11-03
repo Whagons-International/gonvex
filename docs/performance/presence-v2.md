@@ -234,8 +234,16 @@ commands need it); only its refresh changes. With presence v2 on:
   repeat is acknowledged with `error.ack` without a write.
 * `last_seen_at` is no longer refreshed per heartbeat. While the connection is
   open, `listSessions`/`getSession` report it as seen *now*, and
-  `pruneSessions` never deletes it. When the connection closes, `last_seen_at`
-  is written once, batched every 5 s.
+  `pruneSessions` never deletes it. The stored value is written:
+  * when the connection closes (its final value, batched every 5 s);
+  * every `GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS` (default 300) for all
+    open sessions, in one batched transaction (≤ 500 sessions per statement),
+    with no idempotency rows, no Control change notification and no query
+    refresh. The first refresh runs at a random offset inside the interval so
+    it does not coincide with other periodic work;
+  * on a clean stop (SIGTERM or Ctrl-C), as `now` for every open session plus
+    any closed session not yet flushed, in one batched transaction before the
+    pools close (bounded to 3 s).
 * Clients on a presence v2 runtime should register the support session once
   per connection (on connect/reconnect) instead of every 30 s, and the SDK
   error reporter stops its 30 s `error.heartbeat`.
@@ -276,9 +284,23 @@ function names. For Whagons set both (see 5).
 Presence is not durable. After a runtime restart every client reconnects and
 re-announces within its reconnect delay; until then Members appear offline.
 Whagons displays no last-seen time, so nothing needs to survive a restart.
-Support sessions keep their durable row (written on first heartbeat) and get
-their final `last_seen_at` when the connection closes (lost on a crash; then
-the stored value is the registration time).
+Support sessions keep their durable row (written on first heartbeat). Their
+`last_seen_at` is written when the connection closes, refreshed every 5
+minutes while open, and written for every open session on a clean stop. A
+crash (SIGKILL, OOM, power loss) therefore loses at most one refresh interval.
+
+Clean stop and deploys. The runtime handles SIGTERM as well as SIGINT. It runs
+as PID 1 in its container with no init, and the kernel does not apply a
+default action to signals sent to PID 1, so before this change SIGTERM was
+ignored: every stop-first redeploy waited out the stop grace and ended in
+SIGKILL without closing pools. Now, after the signal, the listener stops
+accepting, in-flight HTTP requests get at most 4 s (open WebSockets are not
+waited for), support-session end times are written (at most 3 s), then the
+module host stops and the pools close. Measured with an open WebSocket and an
+empty data directory: exit 0 in 0.03 s after SIGTERM. The worst case (about
+7 s plus pool close) fits the Docker default stop timeout of 10 s that a
+Coolify Dockerfile Application gets unless configured otherwise, and the 30 s
+`stop_grace_period` in `docker-compose.production.yml`.
 
 ## 5. Migration (Whagons)
 
@@ -312,6 +334,7 @@ the stored value is the registration time).
 | `GONVEX_PRESENCE_LIVENESS_SECONDS` | `60` | liveness timeout (≥ 2 × Ping) |
 | `GONVEX_PRESENCE_LEGACY_BEAT_PATHS` | empty | comma list of keepalive Reducers answered in Rust |
 | `GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS` | empty | comma list of `{state}` transition Reducers mirrored into the feed |
+| `GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS` | `300` | batched refresh of open support/error sessions' stored `last_seen_at` |
 
 ## 7. Simulator checklist (one v2 user)
 

@@ -101,16 +101,60 @@ async fn main() -> ExitCode {
             .router()
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = signal::ctrl_c().await;
-    });
-    let result = server.await;
+    .with_graceful_shutdown(shutdown_signal());
+    // After the signal the listener stops accepting. In-flight HTTP requests
+    // get a bounded drain; upgraded WebSockets are not waited for. Then the
+    // runtime records support-session end times and closes its pools, all
+    // well inside the container's stop grace (Docker default 10 s; the
+    // production compose sets 30 s).
+    let server = tokio::spawn(async move { server.await });
+    let result = {
+        let mut server = server;
+        tokio::select! {
+            joined = &mut server => joined.unwrap_or_else(|error| Err(std::io::Error::other(error))),
+            _ = async {
+                shutdown_signal().await;
+                tokio::time::sleep(SHUTDOWN_DRAIN).await;
+            } => {
+                info!("HTTP drain timed out; shutting down with connections open");
+                server.abort();
+                Ok(())
+            }
+        }
+    };
     runtime.shutdown().await;
     if let Err(error) = result {
         error!(%error, "Gonvex Rust runtime stopped");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Maximum wait for in-flight HTTP requests after a stop signal.
+const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// SIGINT (Ctrl-C) or SIGTERM (`docker stop`, Coolify redeploy). As PID 1 in
+/// the container the runtime receives SIGTERM with no default handler, so
+/// without this a stop waited out the grace period and ended in SIGKILL.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate = match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(terminate) => terminate,
+            Err(_) => {
+                let _ = signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = signal::ctrl_c().await;
+    }
 }
 
 /// Takes the store's exclusive `{data}/.gonvex.lock`, held until dropped.
