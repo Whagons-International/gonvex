@@ -184,3 +184,77 @@ users in the full workload, of memory pressure), not the trigger. Off-CPU
 (`base2-path-heartbeat-50/offcpu.svg`): SQLite worker threads dominate blocked time
 (waiting for work); threads named `tokio-rt-worker` (the worker and the blocking pool
 share this name) spend 12 s of 30 s in Btrfs `fdatasync` (`btrfs_sync_log`).
+
+### Cron :00 window at 150 users (base-cron-150, base + profiler)
+
+200 users OOM-killed the base runtime before :00 (`base-cron-200` above), so the :00
+window was measured at **150 users** (thin + 8 SDK, 2 Mac shards, 60 s ramp, plateau
+13:49:52–14:06:52 crossing 14:00:00, on-CPU perf 13:59:45–14:00:15, off-CPU
+14:00:15–14:00:45). Binary as Step 0.
+
+Harness note: both cron runs hung in generator teardown after the plateau (a load job
+awaiting a reply that never came); `base-cron-200` was killed with no raw samples. For
+`base-cron-150` the raw samples were salvaged from the live shard processes through the
+Node inspector (`<lab>/base-cron-150.salvage.shard-{0,1}`, same fields as a shard
+result) before killing them; the merged summary is therefore partial. run.ts now bounds
+teardown (`LOAD_TEARDOWN_MS`, default 90 s, stuck jobs counted as errors) and its SIGTERM
+partial result carries raw samples.
+
+User latency per op kind, minute before vs two minutes after 14:00
+(`window-report.py <lab>/cron150 x <14:00 epoch> 60 120`):
+
+| kind | before n | before p50 | before p95 | before p99 | after n | after p50 | after p95 | after p99 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| heartbeat | 682 | 167 | 4,708 | 5,849 | 1262 | 216 | 29,576 | 35,656 |
+| reducer | 728 | 167 | 4,737 | 5,836 | 1354 | 220 | 30,166 | 36,445 |
+| save | 43 | 215 | 4,739 | 7,077 | 88 | 250 | 32,974 | 44,671 |
+| delivery | 9236 | 123 | 4,176 | 5,893 | 15937 | 157 | 22,035 | 28,200 |
+| taskDelivery | 220 | 269 | 6,328 | 6,408 | 542 | 246 | 29,625 | 41,651 |
+| query | 11 | 152 | 4,805 | 4,805 | 22 | 205 | 21,724 | 27,713 |
+| permission | 3 | 169 | 180 | 180 | 4 | 1,173 | 12,343 | 12,343 |
+| reconnect | 342 | 153 | 352 | 1,104 | 480 | 137 | 357 | 788 |
+
+Per minute (heartbeat / save p95, ms): 13:54 1,942 / 2,980; **13:55 16,144 / 25,703**
+(the */5 jobs); 13:56 737 / 1,236; 13:57 2,140 / 1,713; 13:58 1,370 / 1,929; 13:59
+4,708 / 4,739; **14:00 31,804 / 39,407; 14:01 25,985 / 32,974; 14:02 52,023 / 58,677**;
+14:03 651 / 2,746; 14:04 327 / 368 (users leaving). Base fails at 150 users even
+outside the herd (p95 0.7–4.7 s); the herd adds three minutes of 25–60 s.
+
+Runtime side (`/dev/profile` deltas; dumps nearest :58:00, :00:00, :02:00, :05:00 in
+`base-cron-150/profile/`), p50 / p99 (max):
+
+| stage | 13:58–14:00 | 14:00–14:02 | 14:02–14:05 |
+|---|---|---|---|
+| worker busy / globalQ peak | 62 % / 13 | 51 % / 107 | 33 % / 107 |
+| fn.total heartbeat | 54 ms / 1.43 s | 123 ms / 18.7 s | 57 ms / 5.97 s |
+| fn.total action | 0.8 ms / 328 ms | 1.8 ms / 32.5 s | 0.4 ms / 2.85 s |
+| invoke.js heartbeat | 3.0 ms / 1.25 s | 25 ms / 17.5 s | 2.4 ms / 5.87 s |
+| db.writer_wait heartbeat | 0.3 / 151 ms | 0.7 ms / 403 ms (18.3 s) | 0.2 / 101 ms |
+| commit.fsync heartbeat | 33 ms / 1.07 s | 22 / 403 ms | 31 / 193 ms |
+| delivery.queue_wait | 7 ms / 612 ms | 8 ms / 4.21 s | 7 ms / 15.3 s |
+| ws.inbound_wait | 0.01 ms / 1.05 s | 0.01 ms / 20.1 s | 0.01 ms / 6.24 s |
+| snapshot.permit_wait | 21 / 184 ms | 20 / 198 ms (29 s) | 8 ms / 10.0 s (38 s) |
+| tokio.sched_lag | 1.3 / 65 ms (1.9 s) | 1.5 / 94 ms (**17.2 s**) | 1.2 / 55 ms (**37.5 s**) |
+
+Runtime cgroup (2 GiB, 1 vCPU): anon 1,399 MiB / page cache 313 MiB at 14:00:00;
+`memory.events max` 344 → 914 (14:00:01) → 1,966 (14:01) → 6,324 (14:02) → 24,116
+(14:04); page cache evicted to 15 MiB at 14:01; **module host RSS 395 → 788 MiB** by
+14:02 (the :00 Actions), runtime RSS 1.0–1.3 GiB. On-CPU 13:59:45–14:00:15: 26 % in
+`native_queued_spin_lock_slowpath` under `try_to_free_pages → shrink_node →
+evict_folios` (direct reclaim) plus `clear_highpages`/LRU frames, 63 % of samples on
+`sqlx-sqlite-worker` threads (they fault and reclaim), 33 % on `tokio-rt-worker`.
+
+Long polls: the worst single poll of the run was the **`outbox` task, 33.7 s, ending
+14:02:40** (the action-outbox drain spawned after each reducer commit,
+`execution.rs` `drain_action_outbox`), then `ws_connection` 706 ms (14:01:12) and `feed`
+493 ms (14:02:04). With one tokio worker that one poll is the 17–37 s `sched_lag` max and
+the 14:02 spike (every socket waits). Whether that poll was blocked in reclaim/page
+faults or in synchronous work inside the Action path is not determined (perf did not
+cover 14:02); it needs a perf capture at 14:01–14:03 on the next :00 run.
+
+**Binding constraint at :00 (base): memory.** The :00 Actions double the module host's
+RSS, the cgroup sits at `memory.max`, direct reclaim eats the vCPU, the module host
+cannot answer (`invoke.js` p99 17.5 s, `budget_exceeded … waiting for a module isolate`),
+and one 33.7 s `outbox` poll stalls the single worker. Inputs for the scheduled-load
+workstream: Action memory in the module host at :00, and the outbox drain must not run
+on the network worker.

@@ -176,7 +176,7 @@ async function main() {
  const periodicTimers:ReturnType<typeof setInterval>[]=[];
  const users:any[]=[];const snapshots:any[]=[];const pending=new Map<string,number>();const pendingTasks=new Map<string,{at:number,matches:(row:any,at:number)=>boolean}>();
  const started=Date.now();let stopping=false;let aborted=false;let deadline=Infinity;let remaining=myTarget;
- process.on('SIGTERM',()=>{aborted=true;stopping=true;deadline=Date.now();const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';writeFileSync(partial+'.tmp',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}]))}));renameSync(partial+'.tmp',partial);});
+ process.on('SIGTERM',()=>{const plateauEnd=deadline;aborted=true;stopping=true;deadline=Date.now();const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';writeFileSync(partial+'.tmp',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),steadyStartMs:plateauEnd-seconds*1000,rawSamples:samples,rawPaths:perPath}));renameSync(partial+'.tmp',partial);});
  const ready=()=>{if(--remaining===0)deadline=Date.now()+seconds*1000;};
  // Preserve the seven observed tenant weights. An optional stress profile
  // activates the other nineteen tenants too; it is not the observed mix.
@@ -396,7 +396,11 @@ async function main() {
   if(!extras.ready())error(new Error('Metadata subscription never became current'));
   disconnect();
  })().catch(e=>{error(e);ready();}));
- await Promise.all(jobs);clearInterval(metricTimer);stopping=true;for(const timer of periodicTimers)clearInterval(timer);for(const c of users)c.close();
+ // Bounded teardown: a job stuck on a reply that never comes (seen at the end of
+ // 150-200 user plateaus) must not hang the shard; count it and write the result.
+ {let settled=0;const drainMs=Number(process.env.LOAD_TEARDOWN_MS||90000);await Promise.race([Promise.all(jobs.map(j=>j.finally(()=>settled++))),(async()=>{while(Date.now()<deadline)await pause(1000);await pause(drainMs);})()]);
+  if(settled<jobs.length)for(let k=settled;k<jobs.length;k++)error(new Error(`Load job still pending ${Math.round(drainMs/1000)} s after the plateau (teardown)`));}
+ clearInterval(metricTimer);stopping=true;for(const timer of periodicTimers)clearInterval(timer);for(const c of users)c.close();
  if(!measurements.delivery.length) error(new Error('No update delivery samples'));
  clearInterval(costTimer);{const u=process.cpuUsage(cpuAtStart);Object.assign(generatorCost,{cpuSeconds:(u.user+u.system)/1e6,wallSeconds:(performance.now()-wallAtStart)/1000});}
  const lateSorted=scheduleStats.lateMs.sort((a,b)=>a-b);const schedule={kind:scheduleStats.kind,fired:scheduleStats.fired,overflow:scheduleStats.overflow,skippedDuringReconnect:scheduleStats.skippedDuringReconnect,startLateMs:quantiles(lateSorted)};
@@ -406,5 +410,6 @@ async function main() {
  const q:any=steadyLatencyMs;
  {const rule=passRule({latencyMs:q,errors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed&&visibilityChecks.mismatched===0,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
  console.log(JSON.stringify(result));await writeFile(process.env.LOAD_RESULT||state+'.result',JSON.stringify(result,null,2));
+ process.exit(0);
 }
 main().catch(e=>{console.error(e);process.exit(1);});
