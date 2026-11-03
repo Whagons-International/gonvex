@@ -1,3 +1,4 @@
+#![warn(clippy::redundant_clone)]
 pub mod action_calls;
 #[cfg(test)]
 mod bridge_bench;
@@ -38,6 +39,8 @@ mod snapshot_ack;
 mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
+// Kept for the Verus proof and benchmark in verification/; unused by the SQLite store.
+#[allow(dead_code)]
 mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;

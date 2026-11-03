@@ -186,8 +186,79 @@ pub struct InheritedParent {
 impl InheritedParent {
     /// The parent's projected ACL row, or None when the parent does not exist.
     pub fn row(&self, key: &str) -> Option<Arc<Value>> {
+        if let Some(row) = overlaid_parent_row(&self.plan.table, key) {
+            return row;
+        }
         self.index.read().ok()?.get(key)
     }
+}
+
+/// One shared copy of a module's plan for every subscription and inherited
+/// parent that uses it (a plan is tens of KB once parsed; every Replica
+/// subscription used to clone its own). Clones of a module plan share its
+/// `active_sets_cache`, which identifies the plan.
+pub(crate) fn shared_plan(plan: &VisibilityPlan) -> Arc<VisibilityPlan> {
+    type Plans = Vec<(std::sync::Weak<PlanCaches>, std::sync::Weak<VisibilityPlan>)>;
+    static PLANS: std::sync::OnceLock<std::sync::Mutex<Plans>> = std::sync::OnceLock::new();
+    let mut plans = PLANS.get_or_init(Default::default).lock().unwrap();
+    for (caches, shared) in plans.iter() {
+        if caches
+            .upgrade()
+            .is_some_and(|caches| Arc::ptr_eq(&caches, &plan.active_sets_cache.0))
+        {
+            if let Some(shared) = shared.upgrade() {
+                return shared;
+            }
+        }
+    }
+    plans.retain(|(caches, shared)| caches.strong_count() > 0 && shared.strong_count() > 0);
+    let shared = Arc::new(plan.clone());
+    plans.push((
+        Arc::downgrade(&plan.active_sets_cache.0),
+        Arc::downgrade(&shared),
+    ));
+    shared
+}
+
+/// Parent rows as they were before the transaction being applied, keyed by
+/// (parent table, key); `None` = the parent did not exist. Set only while a
+/// replica subscription evaluates the before-images of a transaction, so the
+/// shared (already advanced) parent index answers with the old parent rows.
+type ParentOverlay = Vec<(String, String, Option<Arc<Value>>)>;
+
+thread_local! {
+    static PARENT_OVERLAY: std::cell::RefCell<Option<Arc<ParentOverlay>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn overlaid_parent_row(table: &str, key: &str) -> Option<Option<Arc<Value>>> {
+    PARENT_OVERLAY.with(|overlay| {
+        overlay.borrow().as_ref().and_then(|rows| {
+            rows.iter()
+                .find(|(parent, parent_key, _)| parent == table && parent_key == key)
+                .map(|(_, _, row)| row.clone())
+        })
+    })
+}
+
+/// Runs the synchronous `evaluate` with `rows` overriding parent index rows.
+/// `evaluate` must not await (the override is thread-local).
+pub(crate) fn with_parent_overlay<R>(
+    rows: &Option<Arc<ParentOverlay>>,
+    evaluate: impl FnOnce() -> R,
+) -> R {
+    let Some(rows) = rows else {
+        return evaluate();
+    };
+    struct Restore(Option<Arc<ParentOverlay>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            PARENT_OVERLAY.with(|overlay| *overlay.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(PARENT_OVERLAY.with(|overlay| overlay.replace(Some(rows.clone()))));
+    evaluate()
 }
 
 impl std::fmt::Debug for InheritedParent {
@@ -535,7 +606,7 @@ async fn load_index(
         .begin_tenant_transaction(&session.route, true)
         .await?;
     // Declared types keep JSON and BOOLEAN columns typed in the projection.
-    let kinds = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &shape.table)
+    let kinds = gonvex_store::rows::table_columns(transaction.transaction(), &shape.table)
         .await?
         .into_iter()
         .map(|column| (column.name.clone(), column.kind()))
@@ -1636,7 +1707,7 @@ pub fn resolve_with_parents<'a>(
             resolved.inherited.insert(
                 table,
                 InheritedParent {
-                    plan: Arc::new(parent.clone()),
+                    plan: shared_plan(parent),
                     resolved: Arc::new(parent_resolved),
                     index,
                 },

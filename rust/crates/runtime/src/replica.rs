@@ -1,8 +1,18 @@
 //! Replica Collection snapshots, resumable membership, and transaction routing.
+//!
+//! A subscription keeps no copy of the rows its client holds (see
+//! `docs/performance/replica-state.md`). It keeps the client's cursor, its
+//! resolved principal, the integrity aggregate of the client's rows and the
+//! window counters of a bounded collection. Feed deltas come from the change
+//! feed's before and after images: visible(old) / visible(new) decide insert,
+//! update or delete, and the aggregate subtracts the old row's hash and adds
+//! the new one. Anything that cannot be decided from the images (a principal
+//! change, a truncated window that moves, an index that is not at the event's
+//! revision) asks the client for its row hashes (`replica.needHashes`) and
+//! reconciles that one collection against SQL on the reopen.
 
 #[path = "replica_mask.rs"]
 mod mask;
-use mask::MaskStep;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -12,6 +22,7 @@ use gonvex_protocol::{
     PublicInvocationProvenance, ReplicaChange, ReplicaCursor, ReplicaOpenRequest, ServerMessage,
 };
 use gonvex_store::{TenantSession, TenantTransaction};
+use mask::{ApplyContext, Resync, Step};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -59,70 +70,181 @@ pub struct ReplicaOpenResult {
     pub subscription: Option<ReplicaSubscription>,
 }
 
+/// One open Replica Collection of one connection. Holds no rows: the client's
+/// membership is defined by `resolved` (and `window` for a bounded
+/// collection), and `digest` is the integrity aggregate of the rows the
+/// client holds at `cursor`.
 pub struct ReplicaSubscription {
     pub id: String,
     pub path: String,
     pub args: Value,
-    pub definition: ReplicaCollectionDefinition,
-    /// Shared by every subscription to this module version and table: the
-    /// v2 mask plans are large (17-26 KB as JSON, several times that as
-    /// structs) and a deep copy per subscription cost ~1 MB per user.
+    /// Shared by every subscription of this collection (module generation).
+    pub definition: Arc<ReplicaCollectionDefinition>,
+    /// Shared by every subscription and inherited parent using this plan.
     pub visibility: Arc<VisibilityPlan>,
     pub visibility_scope: String,
     pub cursor: ReplicaCursor,
-    pub rows: RowMap,
-    /// Tenant database the rows come from (interning scope).
-    pub database_url: String,
-    pub hashes: RowHashes,
-    pub aggregate: Option<ReplicaAggregate>,
-    pub truncated: bool,
     pub resolved: ResolvedVisibility,
+    pub(crate) digest: ReplicaAggregate,
+    pub(crate) window: ReplicaWindow,
+}
+
+/// Counters of the rows a client holds, and for a truncated ordered window
+/// the (order value, key) of its last row: rows ordered after it are not held.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReplicaWindow {
+    pub rows: usize,
+    /// Canonical JSON bytes of the held projections (budget accounting).
+    pub bytes: i64,
+    pub truncated: bool,
+    pub boundary: Option<Box<(Value, Value)>>,
 }
 
 impl ReplicaSubscription {
+    /// Rows the client holds.
+    pub fn row_count(&self) -> usize {
+        self.window.rows
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.window.truncated
+    }
+
+    /// The integrity digest of the rows the client holds.
+    pub fn digest(&self) -> String {
+        self.digest.digest()
+    }
+
     pub(crate) fn require_legacy_digest(&mut self) {
-        if matches!(self.aggregate, Some(ReplicaAggregate::Sum(_))) {
-            self.aggregate = Some(ReplicaAggregate::Legacy(aggregate_bytes(&self.hashes)));
+        if let ReplicaAggregate::Sum(state) = &self.digest {
+            self.digest = ReplicaAggregate::Legacy(legacy_bytes(state));
         }
+    }
+
+    fn bounded(&self) -> bool {
+        self.definition.max_rows > 0 || self.definition.max_bytes > 0
+    }
+
+    fn over_budget(&self) -> bool {
+        (self.definition.max_rows > 0 && self.window.rows > self.definition.max_rows)
+            || (self.definition.max_bytes > 0 && self.window.bytes > self.definition.max_bytes)
+    }
+
+    /// Whether a truncated window's boundary admits `row` (a full or
+    /// projected source row). None when the window has no usable boundary.
+    fn window_admits(&self, row: &Value) -> Option<bool> {
+        if !self.window.truncated {
+            return Some(true);
+        }
+        if self.definition.order_by.is_empty() {
+            return None;
+        }
+        let boundary = self.window.boundary.as_deref()?;
+        Some(within_boundary(&self.definition, boundary, row))
+    }
+
+    /// Does this collection's client window hold `row` after the event?
+    /// None when that cannot be decided without the client's membership.
+    fn holds(&self, row: &Value) -> Option<bool> {
+        if row.is_null() {
+            return Some(false);
+        }
+        if !row_in_collection(
+            row,
+            &self.args,
+            &self.definition,
+            &self.visibility,
+            &self.resolved,
+        ) {
+            return Some(false);
+        }
+        self.window_admits(row)
     }
 }
 
+/// Integrity aggregate over the hashes of the rows a client holds: `xor1`
+/// (the SDK) or negotiated `sum128-v1`. Both are reversible, so a row's old
+/// hash is removed and its new hash added without the row set.
+#[derive(Clone)]
 pub enum ReplicaAggregate {
     Legacy([u8; 32]),
     Sum(Box<ReplicaSetDigest>),
 }
+
 impl ReplicaAggregate {
-    fn from_hashes<K: Ord, V: AsRef<str>>(hashes: &BTreeMap<K, V>, sum: bool) -> Self {
+    fn new(sum: bool) -> Self {
         if sum {
-            let mut state = Box::<ReplicaSetDigest>::default();
-            for hash in hashes.values() {
-                state.add(hash.as_ref()).expect("server-generated SHA-256");
-            }
-            Self::Sum(state)
+            Self::Sum(Box::default())
         } else {
-            Self::Legacy(aggregate_bytes(hashes))
+            Self::Legacy([0; 32])
         }
     }
+
+    fn add(&mut self, hash: &str) {
+        self.change(hash, false)
+    }
+
+    fn remove(&mut self, hash: &str) {
+        self.change(hash, true)
+    }
+
     fn change(&mut self, hash: &str, remove: bool) {
         match self {
             Self::Legacy(bytes) => xor_hash(bytes, hash),
-            Self::Sum(state) => if remove {
-                state.remove(hash)
-            } else {
-                state.add(hash)
+            Self::Sum(state) => {
+                // A removal of a row this aggregate never added cannot happen
+                // for a client that applied every delta; if it does, the
+                // digest disagrees and the client reconciles.
+                let _ = if remove {
+                    state.remove(hash)
+                } else {
+                    state.add(hash)
+                };
             }
-            .expect("server-generated row hash and membership"),
         }
     }
+
     fn digest(&self) -> String {
         match self {
             Self::Legacy(bytes) => format_aggregate(bytes),
             Self::Sum(state) => state.digest(),
         }
     }
-    fn is_sum(&self) -> bool {
-        matches!(self, Self::Sum(_))
+}
+
+fn legacy_bytes(state: &ReplicaSetDigest) -> [u8; 32] {
+    let digest = state.legacy_digest();
+    let hex = digest.trim_start_matches("xor1:");
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap_or(0);
     }
+    bytes
+}
+
+/// One shared copy of a collection definition per (project, module
+/// generation, path) for every subscription of it.
+fn shared_definition(
+    project: &str,
+    generation: u64,
+    path: &str,
+    definition: &ReplicaCollectionDefinition,
+) -> Arc<ReplicaCollectionDefinition> {
+    type Definitions = std::collections::HashMap<
+        (String, u64, String),
+        std::sync::Weak<ReplicaCollectionDefinition>,
+    >;
+    static DEFINITIONS: std::sync::OnceLock<std::sync::Mutex<Definitions>> =
+        std::sync::OnceLock::new();
+    let mut definitions = DEFINITIONS.get_or_init(Default::default).lock().unwrap();
+    let key = (project.to_owned(), generation, path.to_owned());
+    if let Some(shared) = definitions.get(&key).and_then(std::sync::Weak::upgrade) {
+        return shared;
+    }
+    definitions.retain(|_, shared| shared.strong_count() > 0);
+    let shared = Arc::new(definition.clone());
+    definitions.insert(key, Arc::downgrade(&shared));
+    shared
 }
 
 /// Free snapshot permits right now (profiler gauge).
@@ -148,116 +270,20 @@ fn snapshot_permits() -> &'static tokio::sync::Semaphore {
     })
 }
 
-/// The module's visibility plan for `table`, shared per module version.
-fn shared_visibility(
-    module: &crate::modules::ProjectModule,
-    table: &str,
-) -> Option<Arc<VisibilityPlan>> {
-    type Plans = std::collections::HashMap<(String, String), Arc<VisibilityPlan>>;
-    static PLANS: std::sync::OnceLock<std::sync::Mutex<Plans>> = std::sync::OnceLock::new();
-    let key = (module.artifact_hash.clone(), table.to_owned());
-    let mut plans = PLANS.get_or_init(Default::default).lock().unwrap();
-    if let Some(plan) = plans.get(&key) {
-        return Some(plan.clone());
-    }
-    let plan = Arc::new(module.visibility.get(table)?.clone());
-    plans.insert(key, plan.clone());
-    Some(plan)
+/// One row of a collection scan: its key, decoded projection and canonical
+/// hash. The scan visitor owns it (moves, no clones).
+pub(crate) struct ScannedRow {
+    pub key: String,
+    pub row: Value,
+    pub hash: String,
 }
 
-/// A replica row shared by every subscription that holds it: its key, content
-/// hash and value, interned by tenant, table, key and hash so identical rows
-/// are stored once. Subscriptions keep pointer-sized map entries (`Arc<str>`
-/// key and hash shared with this entry) instead of their own key and hash
-/// strings; a 9,000-row subscription previously held ~2.5 MB of copies.
-#[derive(Debug, PartialEq)]
-pub struct ReplicaEntry {
-    pub key: RowKey,
-    pub hash: RowHash,
-    /// Shared with snapshot messages that send this row.
-    pub row: Arc<Value>,
-}
-
-impl ReplicaEntry {
-    /// An entry outside the interner (size projections and tests).
-    pub(crate) fn detached(key: &str, row: Value) -> SharedRow {
-        Arc::new(Self {
-            key: key.into(),
-            hash: row_hash(&row).into(),
-            row: Arc::new(row),
-        })
-    }
-}
-
-impl serde::Serialize for ReplicaEntry {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.row.serialize(serializer)
-    }
-}
-
-impl std::ops::Deref for ReplicaEntry {
-    type Target = Value;
-    fn deref(&self) -> &Value {
-        &self.row
-    }
-}
-
-pub type RowKey = Arc<str>;
-pub type RowHash = Arc<str>;
-pub type SharedRow = Arc<ReplicaEntry>;
-pub type RowMap = BTreeMap<RowKey, SharedRow>;
-pub type RowHashes = BTreeMap<RowKey, RowHash>;
-
-type Interner = std::collections::HashMap<Box<str>, std::sync::Weak<ReplicaEntry>>;
-
-fn row_interner() -> &'static std::sync::Mutex<Interner> {
-    static ROWS: std::sync::OnceLock<std::sync::Mutex<Interner>> = std::sync::OnceLock::new();
-    ROWS.get_or_init(Default::default)
-}
-
-/// The shared entry for `row` (identified by database, table, key and hash).
-/// A new row is moved in; a row some subscription already holds is dropped.
-pub(crate) fn intern_row(
-    database: &str,
-    table: &str,
-    key: &str,
-    hash: &str,
-    row: Value,
-) -> SharedRow {
-    let identity: Box<str> = format!("{database}\u{0}{table}\u{0}{key}\u{0}{hash}").into();
-    let mut rows = row_interner().lock().unwrap();
-    if let Some(shared) = rows.get(&identity).and_then(std::sync::Weak::upgrade) {
-        return shared;
-    }
-    // Sweep dead entries occasionally so the map tracks live rows only.
-    if rows.len() > 1024 && rows.len().is_power_of_two() {
-        rows.retain(|_, weak| weak.strong_count() > 0);
-    }
-    let shared = Arc::new(ReplicaEntry {
-        key: key.into(),
-        hash: hash.into(),
-        row: Arc::new(row),
-    });
-    rows.insert(identity, Arc::downgrade(&shared));
-    shared
-}
-
-/// The key/hash map of `rows` (pointers into the shared entries).
-pub(crate) fn row_hashes(rows: &RowMap) -> RowHashes {
-    rows.values()
-        .map(|entry| (entry.key.clone(), entry.hash.clone()))
-        .collect()
-}
-
-struct Snapshot {
-    /// The interned rows (shared with `by_key`), in query order.
-    rows: Vec<Arc<Value>>,
-    by_key: RowMap,
-    hashes: RowHashes,
-    truncated: bool,
+/// A read transaction positioned at one clock with the member's principal.
+struct CollectionRead {
+    transaction: TenantTransaction,
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
-    resume_changes: Vec<LogChange>,
+    _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
 // Small and normal application collections can carry their integrity map with
@@ -265,6 +291,15 @@ struct Snapshot {
 // hashing and rewriting it again when the immediately following ready arrives.
 // Large replicas keep the digest/need-hashes resume path to bound wire overhead.
 const INLINE_SNAPSHOT_HASH_LIMIT: usize = 2_048;
+
+enum DigestRequest {
+    /// `xor1:` / `sum128-v1:` aggregate with no hashes: resume from the log.
+    Aggregate,
+    /// A legacy whole-set SHA-256 digest with no hashes.
+    WholeSet,
+    /// Keys and hashes (or nothing): reconcile against SQL.
+    Reconcile,
+}
 
 impl Runtime {
     pub(crate) async fn execute_replica_collection_query(
@@ -274,16 +309,24 @@ impl Runtime {
         visibility: &VisibilityPlan,
         args: &Value,
     ) -> Result<Value, ReplicaError> {
-        let snapshot = self
-            .replica_snapshot(session, definition, visibility, args)
+        let mut read = self
+            .begin_collection_read(session, definition, visibility)
             .await?;
-        Ok(Value::Array(
-            snapshot
-                .rows
-                .into_iter()
-                .map(Arc::unwrap_or_clone)
-                .collect(),
-        ))
+        let mut rows = Vec::new();
+        scan_window(
+            &mut read.transaction,
+            definition,
+            visibility,
+            &read.resolved,
+            args,
+            |row| {
+                rows.push(row.row);
+                Ok(())
+            },
+        )
+        .await?;
+        read.transaction.commit().await?;
+        Ok(Value::Array(rows))
     }
 
     pub async fn open_replica(
@@ -319,9 +362,18 @@ impl Runtime {
             .ok_or_else(|| ReplicaError::FunctionMissing(request.path.clone()))?;
         let definition = function
             .replica
-            .clone()
+            .as_ref()
             .ok_or_else(|| ReplicaError::FunctionMissing(request.path.clone()))?;
-        let visibility = shared_visibility(&module, &definition.table)
+        let definition = shared_definition(
+            &module.project_id,
+            module.generation,
+            &request.path,
+            definition,
+        );
+        let visibility = module
+            .visibility
+            .get(&definition.table)
+            .map(visibility::shared_plan)
             .ok_or_else(|| ReplicaError::VisibilityMissing(definition.table.clone()))?;
         let directive = module.replica_directive(
             &session.route.tenant_id,
@@ -329,68 +381,226 @@ impl Runtime {
             &session.identity.account.id,
             &session.member.permissions,
         );
-        let aggregate = request
-            .digest
-            .as_deref()
-            .is_some_and(|digest| digest.starts_with("xor1:") || sum);
-        let mut snapshot = self
-            .replica_snapshot_for_resume(
-                session,
-                &definition,
-                &visibility,
-                &request.args,
-                if aggregate {
-                    request.cursor.as_ref().map(|cursor| cursor.revision)
+        drop(module);
+        let requested = match request.digest.as_deref() {
+            Some(digest)
+                if !digest.is_empty() && !request.full_integrity && request.hashes.is_empty() =>
+            {
+                if digest.starts_with("xor1:") || sum {
+                    DigestRequest::Aggregate
                 } else {
-                    None
-                },
-            )
-            .await?;
-        let cursor = cursor_for(&snapshot.clock, &definition, &directive.visibility_scope);
-        let resume_aggregate =
-            aggregate.then(|| ReplicaAggregate::from_hashes(&snapshot.hashes, sum));
-        let digest = if let Some(aggregate) = &resume_aggregate {
-            aggregate.digest()
-        } else {
-            hashes_digest(&snapshot.hashes)
+                    DigestRequest::WholeSet
+                }
+            }
+            _ => DigestRequest::Reconcile,
         };
-        let mut messages = Vec::new();
+        let need_hashes = |request: &ReplicaOpenRequest| ReplicaOpenResult {
+            messages: vec![ServerMessage::ReplicaNeedHashes {
+                id: request.id.clone(),
+                path: Some(request.path.clone()),
+            }],
+            subscription: None,
+        };
+        let mut read = self
+            .begin_collection_read(session, &definition, &visibility)
+            .await?;
+        let cursor = cursor_for(&read.clock, &definition, &directive.visibility_scope);
         let resumable = cursor_resumable(
             request.cursor.as_ref(),
             &cursor,
-            snapshot.clock.retained_revision,
+            read.clock.retained_revision,
         );
-        if resumable {
-            if !request.digest.as_deref().unwrap_or_default().is_empty()
-                && !request.full_integrity
-                && request.hashes.is_empty()
-            {
-                let prior_hashes = if !aggregate || request.cursor.as_ref() == Some(&cursor) {
-                    Some(snapshot.hashes.clone())
-                } else {
-                    resume_hashes(
-                        &snapshot.hashes,
-                        &snapshot.resume_changes,
-                        &request.args,
+        let mut digest = ReplicaAggregate::new(sum);
+        let mut messages = Vec::new();
+        let window;
+        if !resumable {
+            // Cold open: stream rows into the snapshot message. Nothing is
+            // retained after it is sent.
+            let mut rows = Vec::new();
+            let mut inline = Some(BTreeMap::new());
+            window = scan_window(
+                &mut read.transaction,
+                &definition,
+                &visibility,
+                &read.resolved,
+                &request.args,
+                |row| {
+                    digest.add(&row.hash);
+                    if let Some(hashes) = &mut inline {
+                        if hashes.len() < INLINE_SNAPSHOT_HASH_LIMIT {
+                            hashes.insert(row.key, row.hash);
+                        } else {
+                            inline = None;
+                        }
+                    }
+                    rows.push(Arc::new(row.row));
+                    Ok(())
+                },
+            )
+            .await?;
+            read.transaction.commit().await?;
+            messages.push(replica_snapshot_message(
+                &request,
+                &definition,
+                rows,
+                inline,
+                window.truncated,
+                cursor.clone(),
+                &directive.scope,
+                &directive.visibility_scope,
+                &digest.digest(),
+            ));
+        } else {
+            match requested {
+                DigestRequest::Aggregate => {
+                    let after = request.cursor.as_ref().map_or(0, |cursor| cursor.revision);
+                    let changes = if after < read.clock.revision {
+                        let mut tables = visibility
+                            .resolved_dependency_columns(&read.resolved)
+                            .tables();
+                        tables.insert(definition.table.clone());
+                        resume_changes(&mut read.transaction, after, read.clock.revision, tables)
+                            .await?
+                    } else {
+                        Vec::new()
+                    };
+                    let dependencies = visibility.resolved_dependency_columns(&read.resolved);
+                    if bounded_sql_visibility(&definition, &visibility, &read.resolved)
+                        || table_change_relevance(&definition.table, &dependencies, changes.iter())
+                            .1
+                    {
+                        // Visibility inputs moved since the cursor: the log's
+                        // row images cannot say what the client holds.
+                        tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, "resume reconciles: visibility inputs changed since the cursor");
+                        read.transaction.commit().await?;
+                        return Ok(need_hashes(&request));
+                    }
+                    // The current aggregate is computed from SQL (it verifies
+                    // the client's claim); no row is retained.
+                    window = scan_window(
+                        &mut read.transaction,
                         &definition,
                         &visibility,
-                        &snapshot.resolved,
-                    )?
-                };
-                if let Some(message) =
-                    verify_resume_hashes(&request, prior_hashes.as_ref(), aggregate)
-                {
-                    messages.push(message);
-                    return Ok(ReplicaOpenResult {
-                        messages,
-                        subscription: None,
-                    });
+                        &read.resolved,
+                        &request.args,
+                        |row| {
+                            digest.add(&row.hash);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                    read.transaction.commit().await?;
+                    let mut prior = digest.clone();
+                    let mut upserts = BTreeMap::new();
+                    let mut deleted = BTreeSet::new();
+                    for (id, change) in collapse_changes(&changes) {
+                        if id.0 != definition.table {
+                            continue;
+                        }
+                        let image = |row: &Value| -> Result<Option<(Value, String)>, ReplicaError> {
+                            if !row_in_collection(
+                                row,
+                                &request.args,
+                                &definition,
+                                &visibility,
+                                &read.resolved,
+                            ) {
+                                return Ok(None);
+                            }
+                            let projection = project_row(row, &definition)?;
+                            let hash = row_hash(&projection);
+                            Ok(Some((projection, hash)))
+                        };
+                        let old = image(change.old)?;
+                        let new = image(change.new)?;
+                        if let Some((_, hash)) = &new {
+                            prior.remove(hash);
+                        }
+                        if let Some((_, hash)) = &old {
+                            prior.add(hash);
+                        }
+                        match (old, new) {
+                            (Some((_, old)), Some((row, new))) if old != new => {
+                                upserts.insert(id.1.to_owned(), row);
+                            }
+                            (None, Some((row, _))) => {
+                                upserts.insert(id.1.to_owned(), row);
+                            }
+                            (Some(_), None) => {
+                                deleted.insert(id.1.to_owned());
+                            }
+                            _ => {}
+                        }
+                    }
+                    if (window.truncated && (!upserts.is_empty() || !deleted.is_empty()))
+                        || request.digest.as_deref() != Some(prior.digest().as_str())
+                    {
+                        tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, "resume reconciles: client digest does not match the log");
+                        return Ok(need_hashes(&request));
+                    }
+                    if !upserts.is_empty()
+                        || !deleted.is_empty()
+                        || request.cursor.as_ref() != Some(&cursor)
+                    {
+                        messages.push(replica_delta(
+                            &request.id,
+                            &request.path,
+                            cursor.clone(),
+                            upserts.into_values().collect(),
+                            deleted.into_iter().collect(),
+                            digest.digest(),
+                            window.truncated,
+                        ));
+                    }
                 }
-                if aggregate {
-                    let prior_hashes = prior_hashes.unwrap();
-                    let keys = prior_hashes.keys().cloned().collect::<Vec<_>>();
-                    let (upserts, deleted) =
-                        diff_rows(&snapshot.by_key, &snapshot.hashes, &prior_hashes, &keys);
+                DigestRequest::WholeSet => {
+                    let mut hashes = BTreeMap::new();
+                    window = scan_window(
+                        &mut read.transaction,
+                        &definition,
+                        &visibility,
+                        &read.resolved,
+                        &request.args,
+                        |row| {
+                            digest.add(&row.hash);
+                            hashes.insert(row.key, row.hash);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                    read.transaction.commit().await?;
+                    if request.digest.as_deref() != Some(hashes_digest(&hashes).as_str()) {
+                        return Ok(need_hashes(&request));
+                    }
+                }
+                DigestRequest::Reconcile => {
+                    // The client sent its keys and hashes: send only rows
+                    // whose hash differs and the keys SQL no longer returns.
+                    let mut upserts = Vec::new();
+                    let mut seen = BTreeSet::new();
+                    window = scan_window(
+                        &mut read.transaction,
+                        &definition,
+                        &visibility,
+                        &read.resolved,
+                        &request.args,
+                        |row| {
+                            digest.add(&row.hash);
+                            if request.hashes.get(&row.key) != Some(&row.hash) {
+                                upserts.push(row.row);
+                            }
+                            seen.insert(row.key);
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                    read.transaction.commit().await?;
+                    let deleted = request
+                        .keys
+                        .iter()
+                        .filter(|key| !seen.contains(key.as_str()))
+                        .cloned()
+                        .collect::<Vec<_>>();
                     if !upserts.is_empty()
                         || !deleted.is_empty()
                         || request.cursor.as_ref() != Some(&cursor)
@@ -401,51 +611,20 @@ impl Runtime {
                             cursor.clone(),
                             upserts,
                             deleted,
-                            digest.clone(),
-                            snapshot.truncated,
+                            digest.digest(),
+                            window.truncated,
                         ));
                     }
                 }
-            } else {
-                let (upserts, deleted) = diff_rows(
-                    &snapshot.by_key,
-                    &snapshot.hashes,
-                    &request.hashes,
-                    &request.keys,
-                );
-                if !upserts.is_empty()
-                    || !deleted.is_empty()
-                    || request.cursor.as_ref() != Some(&cursor)
-                {
-                    messages.push(replica_delta(
-                        &request.id,
-                        &request.path,
-                        cursor.clone(),
-                        upserts,
-                        deleted,
-                        digest.clone(),
-                        snapshot.truncated,
-                    ));
-                }
             }
-        } else {
-            messages.push(replica_snapshot_message(
-                &request,
-                &definition,
-                &mut snapshot,
-                cursor.clone(),
-                &directive.scope,
-                &directive.visibility_scope,
-                &digest,
-            ));
         }
         messages.push(replica_ready(
             &request.id,
             &request.path,
             &definition,
             cursor.clone(),
-            digest,
-            snapshot.truncated,
+            digest.digest(),
+            window.truncated,
         ));
         Ok(ReplicaOpenResult {
             messages,
@@ -457,50 +636,37 @@ impl Runtime {
                 visibility,
                 visibility_scope: directive.visibility_scope,
                 cursor,
-                rows: snapshot.by_key,
-                database_url: session.route.database_url.clone(),
-                aggregate: resume_aggregate,
-                hashes: snapshot.hashes,
-                truncated: snapshot.truncated,
-                resolved: snapshot.resolved,
+                resolved: read.resolved,
+                digest,
+                window,
             }),
         })
     }
 
-    async fn replica_snapshot(
+    /// Opens a read transaction for one collection scan and resolves the
+    /// member's principal at its clock.
+    async fn begin_collection_read(
         &self,
         session: &TenantSession,
         definition: &ReplicaCollectionDefinition,
         plan: &VisibilityPlan,
-        args: &Value,
-    ) -> Result<Snapshot, ReplicaError> {
-        self.replica_snapshot_for_resume(session, definition, plan, args, None)
-            .await
-    }
-
-    async fn replica_snapshot_for_resume(
-        &self,
-        session: &TenantSession,
-        definition: &ReplicaCollectionDefinition,
-        plan: &VisibilityPlan,
-        args: &Value,
-        after: Option<u64>,
-    ) -> Result<Snapshot, ReplicaError> {
+    ) -> Result<CollectionRead, ReplicaError> {
         // Each WebSocket queues up to REPLICA_OPEN_CONCURRENCY preparations,
-        // so a sign-in burst could otherwise build hundreds of full snapshots
-        // at once. Snapshot builds are CPU and memory bound: more of them than
-        // cores only multiplies peak memory, so bound them process-wide.
-        use gonvex_profiler::{gauge, GaugeId, Label, ScopeTimer, Stage, Timer};
-        let _build = ScopeTimer::new(Stage::SnapshotBuild, Label::None);
+        // so a sign-in burst could otherwise scan hundreds of collections at
+        // once. Scans are CPU bound: more of them than cores only multiplies
+        // peak memory, so bound them process-wide.
+        // Profiler: snapshot.permit_wait / acl / begin / visibility. After the
+        // replica-state merge, rows stream from the read (no snapshot.query /
+        // snapshot.intern / snapshot.build stages here).
+        use gonvex_profiler::{gauge, GaugeId, Label, Stage, Timer};
         let mut timer = Timer::start();
-        let _snapshot_permit = {
+        let permit = {
             let _waiting = gauge(GaugeId::SnapshotWaiting).guard();
             snapshot_permits()
                 .acquire()
                 .await
                 .expect("snapshot semaphore is never closed")
         };
-        let _active = gauge(GaugeId::SnapshotActive).guard();
         timer.lap(Stage::SnapshotPermitWait, Label::None);
         let control = self
             .inner
@@ -564,53 +730,11 @@ impl Runtime {
             visibility::resolve(&mut transaction, session, plan, clock.revision).await?
         };
         timer.lap(Stage::SnapshotVisibility, Label::None);
-        let (rows, truncated) =
-            query_rows(&mut transaction, definition, plan, &resolved, args).await?;
-        timer.lap(Stage::SnapshotQuery, Label::None);
-        let resume_changes = if let Some(after) =
-            after.filter(|after| *after >= clock.retained_revision && *after < clock.revision)
-        {
-            let mut tables = plan.resolved_dependency_columns(&resolved).tables();
-            tables.insert(definition.table.clone());
-            resume_changes(&mut transaction, after, clock.revision, tables).await?
-        } else {
-            Vec::new()
-        };
-        transaction.commit().await?;
-        timer.skip();
-        let mut by_key = BTreeMap::new();
-        let mut hashes = BTreeMap::new();
-        let mut shared_rows = Vec::with_capacity(rows.len());
-        for (index, row) in rows.into_iter().enumerate() {
-            if index % 32 == 0 {
-                tokio::task::yield_now().await;
-            }
-            let key = row_key(&row, &definition.key)?;
-            let hash = row_hash(&row);
-            // Moves the decoded row into the interner (or drops it when an
-            // identical row is already held), so it is never held twice.
-            let shared = intern_row(
-                &session.route.database_url,
-                &definition.table,
-                &key,
-                &hash,
-                row,
-            );
-            hashes.insert(shared.key.clone(), shared.hash.clone());
-            shared_rows.push(shared.row.clone());
-            if by_key.insert(shared.key.clone(), shared).is_some() {
-                return Err(ReplicaError::DuplicateKey(key));
-            }
-        }
-        timer.lap(Stage::SnapshotIntern, Label::None);
-        Ok(Snapshot {
-            rows: shared_rows,
-            by_key,
-            hashes,
-            truncated,
+        Ok(CollectionRead {
+            transaction,
             clock,
             resolved,
-            resume_changes,
+            _permit: permit,
         })
     }
 
@@ -637,287 +761,85 @@ impl Runtime {
                 })
                 .collect());
         };
+        let collapsed = collapse_changes(&changes);
         let mut messages = Vec::new();
-        let mut entity_changes = BTreeMap::<(String, String), ReplicaChange>::new();
+        let mut touches = BTreeMap::<(String, String), EntityTouch>::new();
+        let mut resynced = BTreeSet::new();
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
             }
-            let mut force_snapshot = false;
-            // In-memory mask evaluation needs every bound parent ACL index to
-            // be complete through this revision. A poisoned or foreign-epoch
-            // index cannot be: re-snapshot, which rebinds through `ensure`.
-            let indexes_ready = subscription.visibility.version != Some(2)
-                || visibility::indexes_ready(&subscription.resolved, revision, &database_epoch)
-                    .await;
-            if !indexes_ready {
-                self.inner.visibility_metrics.record_consistency_rebuild();
-                force_snapshot = true;
-            } else if subscription.visibility.version == Some(2) {
-                match self
-                    .apply_mask_feed(
-                        session,
-                        subscription,
-                        revision,
-                        &changes,
-                        &mut entity_changes,
-                        &mut messages,
-                    )
-                    .await?
+            let step = if subscription.visibility.version == Some(2) {
+                if !visibility::indexes_ready(&subscription.resolved, revision, &database_epoch)
+                    .await
                 {
-                    MaskStep::Skip => {
-                        subscription.cursor.revision = revision;
-                        continue;
-                    }
-                    MaskStep::Applied => {
-                        messages.push(replica_ready(
-                            &subscription.id,
-                            &subscription.path,
-                            &subscription.definition,
-                            subscription.cursor.clone(),
-                            subscription_digest(subscription),
-                            subscription.truncated,
-                        ));
-                        continue;
-                    }
-                    MaskStep::Rebuild => {
-                        self.inner.visibility_metrics.record_principal_rebuild();
-                        force_snapshot = true;
-                    }
-                    MaskStep::Refresh => {
-                        self.inner.visibility_metrics.record_consistency_rebuild();
-                        force_snapshot = true;
-                    }
-                }
-            }
-            let dependencies = subscription
-                .visibility
-                .resolved_dependency_columns(&subscription.resolved);
-            let (source_changed, dependency_changed) = table_change_relevance(
-                &subscription.definition.table,
-                &dependencies,
-                changes.iter().filter(|change| {
-                    change.table == subscription.definition.table
-                        || subscription.visibility.change_concerns_member(
-                            &subscription.resolved,
-                            &change.table,
-                            &change.old_value,
-                            &change.new_value,
-                        )
-                }),
-            );
-            // Budgets and progressive delivery only make a source-table or
-            // visibility-dependency change window-sensitive. Re-running every
-            // bounded collection for every unrelated transaction made one task
-            // update queue full snapshots for the entire application replica,
-            // leaving the changed task stale behind minutes of irrelevant SQL.
-            if !force_snapshot && !source_changed && !dependency_changed {
-                // Keep the server-side subscription cursor current for resume
-                // bookkeeping, but do not emit one `replica.ready` per open
-                // collection. The rows and visibility inputs did not change,
-                // so the collection remains authoritative at its existing
-                // client cursor. Per-collection ready fan-out made each client
-                // re-hash and persist every window for unrelated presence,
-                // preference, and notification transactions.
-                subscription.cursor.revision = revision;
-                continue;
-            }
-            let source_changes = changes
-                .iter()
-                .filter(|change| change.table == subscription.definition.table)
-                .collect::<Vec<_>>();
-            if force_snapshot
-                || dependency_changed
-                || bounded_sql_visibility(
-                    &subscription.definition,
-                    &subscription.visibility,
-                    &subscription.resolved,
-                )
-                || source_update_requires_snapshot(
-                    &subscription.rows,
-                    subscription.truncated,
-                    &subscription.definition,
-                    &subscription.args,
-                    &subscription.visibility,
-                    &subscription.resolved,
-                    source_changes.iter().copied(),
-                )?
-            {
-                let snapshot = self
-                    .replica_snapshot(
-                        session,
-                        &subscription.definition,
-                        &subscription.visibility,
-                        &subscription.args,
-                    )
-                    .await?;
-                let (upserts, deleted) = diff_rows(
-                    &snapshot.by_key,
-                    &snapshot.hashes,
-                    &subscription.hashes,
-                    &subscription.rows.keys().cloned().collect::<Vec<_>>(),
-                );
-                for row in &upserts {
-                    let key = row_key(row, &subscription.definition.key)?;
-                    let existed = subscription.rows.contains_key(key.as_str());
-                    entity_changes.insert(
-                        (subscription.definition.table.clone(), key.clone()),
-                        ReplicaChange {
-                            entity: subscription.definition.table.clone(),
-                            id: key,
-                            operation: if existed { "update" } else { "insert" }.to_owned(),
-                            old_value: None,
-                            new_value: Some(row.clone()),
-                            changed_columns: Vec::new(),
-                        },
-                    );
-                }
-                for key in &deleted {
-                    entity_changes.insert(
-                        (subscription.definition.table.clone(), key.clone()),
-                        ReplicaChange {
-                            entity: subscription.definition.table.clone(),
-                            id: key.clone(),
-                            operation: "delete".to_owned(),
-                            old_value: subscription
-                                .rows
-                                .get(key.as_str())
-                                .map(|row| (*row.row).clone()),
-                            new_value: None,
-                            changed_columns: Vec::new(),
-                        },
-                    );
-                }
-                subscription.rows = snapshot.by_key;
-                subscription.hashes = snapshot.hashes;
-                if subscription.aggregate.is_some() {
-                    let sum = subscription.aggregate.as_ref().unwrap().is_sum();
-                    subscription.aggregate =
-                        Some(ReplicaAggregate::from_hashes(&subscription.hashes, sum));
-                }
-                subscription.truncated = snapshot.truncated;
-                subscription.resolved = snapshot.resolved;
-                subscription.cursor.revision = snapshot.clock.revision;
-                if !upserts.is_empty() || !deleted.is_empty() {
-                    messages.push(replica_delta(
-                        &subscription.id,
-                        &subscription.path,
-                        subscription.cursor.clone(),
-                        upserts,
-                        deleted,
-                        subscription_digest(subscription),
-                        subscription.truncated,
-                    ));
+                    // In-memory mask evaluation needs every bound parent ACL
+                    // index complete through this revision.
+                    Step::Resync(Resync::Consistency)
+                } else {
+                    self.mask_step(session, subscription, revision, &changes, &collapsed)
+                        .await?
                 }
             } else {
-                let mut upserts = BTreeMap::new();
-                let mut deleted = BTreeSet::new();
-                for change in source_changes {
-                    let old_visible = row_in_collection(
-                        &change.old_value,
-                        &subscription.args,
-                        &subscription.definition,
-                        &subscription.visibility,
-                        &subscription.resolved,
-                    );
-                    let new_visible = row_in_collection(
-                        &change.new_value,
-                        &subscription.args,
-                        &subscription.definition,
-                        &subscription.visibility,
-                        &subscription.resolved,
-                    );
-                    let operation = match (old_visible, new_visible) {
-                        (true, true) => Some("update"),
-                        (false, true) => Some("insert"),
-                        (true, false) => Some("delete"),
-                        (false, false) => None,
-                    };
-                    let Some(operation) = operation else {
-                        continue;
-                    };
-                    let old_projection = old_visible
-                        .then(|| project_row(&change.old_value, &subscription.definition))
-                        .transpose()?;
-                    let new_projection = new_visible
-                        .then(|| project_row(&change.new_value, &subscription.definition))
-                        .transpose()?;
-                    let new_hash = new_projection.as_ref().map(row_hash);
-                    if let Some(aggregate) = &mut subscription.aggregate {
-                        if let Some(previous) = subscription.hashes.get(change.row_id.as_str()) {
-                            aggregate.change(previous, true);
-                        }
-                        if let Some(hash) = &new_hash {
-                            aggregate.change(hash, false);
-                        }
-                    }
-                    if new_visible {
-                        let new_projection = new_projection
-                            .as_ref()
-                            .expect("visible source rows have a projection");
-                        let hash = new_hash.unwrap();
-                        let shared = intern_row(
-                            &subscription.database_url,
-                            &subscription.definition.table,
-                            &change.row_id,
-                            &hash,
-                            new_projection.clone(),
-                        );
-                        subscription
-                            .hashes
-                            .insert(shared.key.clone(), shared.hash.clone());
-                        subscription.rows.insert(shared.key.clone(), shared);
-                    } else {
-                        subscription.rows.remove(change.row_id.as_str());
-                        subscription.hashes.remove(change.row_id.as_str());
-                    }
-                    accumulate_projection_delta(
-                        &mut upserts,
-                        &mut deleted,
-                        &change.row_id,
-                        new_projection.as_ref(),
-                    );
-                    entity_changes.insert(
-                        (change.table.clone(), change.row_id.clone()),
-                        ReplicaChange {
-                            entity: change.table.clone(),
-                            id: change.row_id.clone(),
-                            operation: operation.to_owned(),
-                            old_value: old_projection,
-                            new_value: new_projection,
-                            changed_columns: change.changed_columns.clone(),
-                        },
-                    );
+                legacy_step(subscription, &changes)
+            };
+            let context = match step {
+                Step::Skip => {
+                    // Rows and visibility inputs did not change; keep the
+                    // cursor current without a per-collection ready.
+                    subscription.cursor.revision = revision;
+                    continue;
                 }
-                subscription.cursor.revision = revision;
-                if !upserts.is_empty() || !deleted.is_empty() {
-                    messages.push(replica_delta(
-                        &subscription.id,
-                        &subscription.path,
-                        subscription.cursor.clone(),
-                        upserts.into_values().collect(),
-                        deleted.into_iter().collect(),
-                        subscription_digest(subscription),
-                        subscription.truncated,
-                    ));
+                Step::Resync(reason) => {
+                    self.resync(subscription, reason, &mut messages, &mut resynced);
+                    continue;
                 }
+                Step::Apply(context) => context,
+            };
+            let Some(delta) = apply_rows(subscription, &context, &collapsed)? else {
+                self.resync(subscription, Resync::Window, &mut messages, &mut resynced);
+                continue;
+            };
+            subscription.cursor.revision = revision;
+            for (key, touch) in delta.touches {
+                touches
+                    .entry(key)
+                    .or_default()
+                    .merge(&subscription.id, touch);
             }
+            if delta.upserts.is_empty() && delta.deleted.is_empty() {
+                // The client's rows and digest are unchanged: send nothing.
+                // Its cursor stays where it is (or advances with the
+                // connection watermark); a resume from that cursor replays
+                // the log and verifies the digest against SQL, so an older
+                // cursor is always safe. Most members cannot see a given
+                // task, so a per-revision ready to each of them was the
+                // largest per-connection delivery cost.
+                continue;
+            }
+            messages.push(replica_delta(
+                &subscription.id,
+                &subscription.path,
+                subscription.cursor.clone(),
+                delta.upserts.into_values().collect(),
+                delta.deleted.into_iter().collect(),
+                subscription.digest.digest(),
+                subscription.window.truncated,
+            ));
             messages.push(replica_ready(
                 &subscription.id,
                 &subscription.path,
                 &subscription.definition,
                 subscription.cursor.clone(),
-                subscription_digest(subscription),
-                subscription.truncated,
+                subscription.digest.digest(),
+                subscription.window.truncated,
             ));
         }
+        // The client reopens these with their row hashes; until then they
+        // receive nothing.
+        subscriptions.retain(|id, _| !resynced.contains(id));
+        let entity_changes = normalize_entity_changes(touches, &collapsed, subscriptions);
         if !entity_changes.is_empty() {
-            normalize_entity_changes(
-                &mut entity_changes,
-                subscriptions.values().map(|subscription| {
-                    (subscription.definition.table.as_str(), &subscription.rows)
-                }),
-            );
             let origin_command_id = changes.iter().find_map(|change| {
                 (!change.origin_command_id.is_empty()).then(|| change.origin_command_id.clone())
             });
@@ -938,45 +860,427 @@ impl Runtime {
                         on_behalf_of_member_id: change.provenance.on_behalf_of_member_id.clone(),
                         agent_execution_id: change.provenance.agent_execution_id.clone(),
                     }),
-                    changes: entity_changes.into_values().collect(),
+                    changes: entity_changes,
                 },
             );
         }
         Ok(messages)
     }
+
+    fn resync(
+        &self,
+        subscription: &ReplicaSubscription,
+        reason: Resync,
+        messages: &mut Vec<ServerMessage>,
+        resynced: &mut BTreeSet<String>,
+    ) {
+        match reason {
+            Resync::Principal => self.inner.visibility_metrics.record_principal_rebuild(),
+            Resync::Consistency | Resync::Window => {
+                self.inner.visibility_metrics.record_consistency_rebuild()
+            }
+        }
+        messages.push(ServerMessage::ReplicaNeedHashes {
+            id: subscription.id.clone(),
+            path: Some(subscription.path.clone()),
+        });
+        resynced.insert(subscription.id.clone());
+    }
 }
 
-// Each subscription owns a projection and membership. The normalized entity
-// owns their union; the last subscription visited must not erase another one's
-// fields or delete an entity still present in a different collection.
-fn normalize_entity_changes<'a>(
-    changes: &mut BTreeMap<(String, String), ReplicaChange>,
-    collections: impl Iterator<Item = (&'a str, &'a RowMap)>,
-) {
-    let collections: Vec<_> = collections.collect();
-    for ((table, id), change) in changes.iter_mut() {
-        let mut fields = serde_json::Map::new();
-        for (collection_table, rows) in &collections {
-            if *collection_table != table {
-                continue;
-            }
-            if let Some(row) = rows.get(id.as_str()).and_then(|row| row.as_object()) {
-                fields.extend(row.clone());
+/// One row's net change in a transaction: its first before-image and last
+/// after-image (intermediate states are never published).
+pub(crate) struct CollapsedChange<'a> {
+    pub old: &'a Value,
+    pub new: &'a Value,
+    pub changed_columns: BTreeSet<&'a str>,
+}
+
+pub(crate) type CollapsedChanges<'a> = BTreeMap<(&'a str, &'a str), CollapsedChange<'a>>;
+
+pub(crate) fn collapse_changes(changes: &[LogChange]) -> CollapsedChanges<'_> {
+    let mut collapsed = CollapsedChanges::new();
+    for change in changes {
+        let entry = collapsed
+            .entry((change.table.as_str(), change.row_id.as_str()))
+            .or_insert_with(|| CollapsedChange {
+                old: &change.old_value,
+                new: &change.new_value,
+                changed_columns: BTreeSet::new(),
+            });
+        entry.new = &change.new_value;
+        entry
+            .changed_columns
+            .extend(change.changed_columns.iter().map(String::as_str));
+    }
+    collapsed
+}
+
+/// Version 1 plans: SQL visibility. Source changes are decided in memory;
+/// a visibility input change reconciles the collection.
+fn legacy_step(subscription: &ReplicaSubscription, changes: &[LogChange]) -> Step {
+    let dependencies = subscription
+        .visibility
+        .resolved_dependency_columns(&subscription.resolved);
+    let (source_changed, dependency_changed) = table_change_relevance(
+        &subscription.definition.table,
+        &dependencies,
+        changes.iter().filter(|change| {
+            change.table == subscription.definition.table
+                || subscription.visibility.change_concerns_member(
+                    &subscription.resolved,
+                    &change.table,
+                    &change.old_value,
+                    &change.new_value,
+                )
+        }),
+    );
+    if !source_changed && !dependency_changed {
+        return Step::Skip;
+    }
+    if dependency_changed {
+        return Step::Resync(Resync::Principal);
+    }
+    if bounded_sql_visibility(
+        &subscription.definition,
+        &subscription.visibility,
+        &subscription.resolved,
+    ) {
+        return Step::Resync(Resync::Window);
+    }
+    Step::Apply(ApplyContext::default())
+}
+
+/// What one subscription did with one entity (table, key) in this event.
+#[derive(Default)]
+pub(crate) struct EntityTouch {
+    /// Some subscription sent an upsert or delete for it.
+    changed: bool,
+    /// Some subscription held it before the event.
+    old_held: bool,
+    old_value: Option<serde_json::Map<String, Value>>,
+    changed_columns: BTreeSet<String>,
+    /// Per subscription id: its projection when it holds the row after the
+    /// event, None when it does not.
+    decided: BTreeMap<String, Option<Value>>,
+}
+
+impl EntityTouch {
+    fn merge(&mut self, subscription: &str, touch: RowTouch) {
+        self.changed |= touch.changed;
+        if let Some(old) = touch.old {
+            self.old_held = true;
+            if let Value::Object(old) = old {
+                self.old_value
+                    .get_or_insert_with(Default::default)
+                    .extend(old);
             }
         }
-        if fields.is_empty() {
-            change.operation = "delete".to_owned();
-            change.new_value = None;
-        } else {
-            change.operation = if change.old_value.is_some() {
-                "update"
-            } else {
-                "insert"
-            }
-            .to_owned();
-            change.new_value = Some(Value::Object(fields));
+        self.changed_columns.extend(touch.changed_columns);
+        self.decided.insert(subscription.to_owned(), touch.new);
+    }
+}
+
+pub(crate) struct RowTouch {
+    changed: bool,
+    old: Option<Value>,
+    new: Option<Value>,
+    changed_columns: Vec<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct SubscriptionDelta {
+    upserts: BTreeMap<String, Value>,
+    deleted: BTreeSet<String>,
+    touches: Vec<((String, String), RowTouch)>,
+}
+
+/// Applies the event's source rows (and rows a visibility change affected)
+/// to one subscription's digest and window. None when the change cannot be
+/// represented without the client's membership (the caller reconciles).
+fn apply_rows(
+    subscription: &mut ReplicaSubscription,
+    context: &ApplyContext,
+    collapsed: &CollapsedChanges<'_>,
+) -> Result<Option<SubscriptionDelta>, ReplicaError> {
+    let mut delta = SubscriptionDelta::default();
+    let table = subscription.definition.table.clone();
+    for ((_, id), change) in collapsed
+        .range((table.as_str(), "")..)
+        .take_while(|((source, _), _)| *source == table)
+    {
+        let changed_columns = change
+            .changed_columns
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect();
+        if !row_step(
+            subscription,
+            context,
+            id,
+            change.old,
+            change.new,
+            changed_columns,
+            &mut delta,
+        )? {
+            return Ok(None);
         }
     }
+    for (id, row) in &context.affected {
+        if !row_step(subscription, context, id, row, row, Vec::new(), &mut delta)? {
+            return Ok(None);
+        }
+    }
+    if subscription.bounded() && !subscription.window.truncated && subscription.over_budget() {
+        return Ok(None);
+    }
+    Ok(Some(delta))
+}
+
+/// What one row change means for one collection window. A pure function of
+/// the collection (definition, arguments, plan), the principal before and
+/// after the event, and the window: every subscription of the same
+/// collection and visibility class gets the same decision, so a delivery
+/// layer can decide once per class and apply the result per subscriber.
+#[derive(Debug, PartialEq)]
+pub enum RowDecision {
+    /// The client neither held nor may hold the row.
+    Outside,
+    /// The client held the row and keeps it unchanged.
+    Unchanged { row: Value },
+    /// The client gains or replaces the row (`old` is what it held).
+    Upsert {
+        old: Option<(Value, String, i64)>,
+        row: Value,
+        hash: String,
+        bytes: i64,
+    },
+    /// The client loses the row it held.
+    Delete {
+        old: Value,
+        hash: String,
+        bytes: i64,
+    },
+    /// The window cannot be maintained from the images (reconcile).
+    Reconcile,
+}
+
+/// Decides one row change (`old`/`new` full or projected source images,
+/// `Value::Null` when absent) for a window. `before` is the principal the
+/// client's rows were authorized with (with `overlay` restoring the parents'
+/// before-images); `after` the principal after the event.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_row(
+    definition: &ReplicaCollectionDefinition,
+    args: &Value,
+    plan: &VisibilityPlan,
+    before: &ResolvedVisibility,
+    after: &ResolvedVisibility,
+    overlay: &Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
+    window: &ReplicaWindow,
+    old: &Value,
+    new: &Value,
+) -> Result<RowDecision, ReplicaError> {
+    let old_visible = !old.is_null()
+        && visibility::with_parent_overlay(overlay, || {
+            row_in_collection(old, args, definition, plan, before)
+        });
+    let new_visible = !new.is_null() && row_in_collection(new, args, definition, plan, after);
+    if !old_visible && !new_visible {
+        return Ok(RowDecision::Outside);
+    }
+    let (mut old_in, mut new_in) = (old_visible, new_visible);
+    if window.truncated {
+        let admits = |row: &Value| {
+            if definition.order_by.is_empty() {
+                return None;
+            }
+            window
+                .boundary
+                .as_deref()
+                .map(|boundary| within_boundary(definition, boundary, row))
+        };
+        let (Some(old_admitted), Some(new_admitted)) = (admits(old), admits(new)) else {
+            return Ok(RowDecision::Reconcile);
+        };
+        old_in &= old_admitted;
+        new_in &= new_admitted;
+        if old_in != new_in {
+            // The window gains or loses a row: its other edge moves too.
+            return Ok(RowDecision::Reconcile);
+        }
+        if !old_in {
+            return Ok(RowDecision::Outside);
+        }
+        let boundary = window.boundary.as_deref().expect("admitted");
+        if new.get(&definition.key) == Some(&boundary.1)
+            && new.get(&definition.order_by) != Some(&boundary.0)
+        {
+            return Ok(RowDecision::Reconcile);
+        }
+    }
+    let canonical = |row: Value| {
+        let canonical = stable_json(&row);
+        (
+            hex_digest(canonical.as_bytes()),
+            canonical.len() as i64,
+            row,
+        )
+    };
+    let old = old_in
+        .then(|| project_row(old, definition).map(canonical))
+        .transpose()?;
+    let new = new_in
+        .then(|| project_row(new, definition).map(canonical))
+        .transpose()?;
+    Ok(match (old, new) {
+        (Some((old_hash, _, row)), Some((hash, _, _))) if old_hash == hash => {
+            RowDecision::Unchanged { row }
+        }
+        (old, Some((hash, bytes, row))) => RowDecision::Upsert {
+            old: old.map(|(hash, bytes, row)| (row, hash, bytes)),
+            row,
+            hash,
+            bytes,
+        },
+        (Some((hash, bytes, old)), None) => RowDecision::Delete { old, hash, bytes },
+        (None, None) => RowDecision::Outside,
+    })
+}
+
+/// One row's transition for one subscription. Returns false when the window
+/// cannot be maintained from the images alone.
+fn row_step(
+    subscription: &mut ReplicaSubscription,
+    context: &ApplyContext,
+    id: &str,
+    old: &Value,
+    new: &Value,
+    changed_columns: Vec<String>,
+    delta: &mut SubscriptionDelta,
+) -> Result<bool, ReplicaError> {
+    let decision = decide_row(
+        &subscription.definition,
+        &subscription.args,
+        &subscription.visibility,
+        context.before.as_ref().unwrap_or(&subscription.resolved),
+        &subscription.resolved,
+        &context.overlay,
+        &subscription.window,
+        old,
+        new,
+    )?;
+    let (changed, old, new) = match decision {
+        RowDecision::Outside => return Ok(true),
+        RowDecision::Reconcile => return Ok(false),
+        RowDecision::Unchanged { row } => (false, Some(row.clone()), Some(row)),
+        RowDecision::Upsert {
+            old,
+            row,
+            hash,
+            bytes,
+        } => {
+            let old = old.map(|(old, hash, bytes)| {
+                subscription.digest.remove(&hash);
+                subscription.window.rows = subscription.window.rows.saturating_sub(1);
+                subscription.window.bytes -= bytes;
+                old
+            });
+            subscription.digest.add(&hash);
+            subscription.window.rows += 1;
+            subscription.window.bytes += bytes;
+            delta.deleted.remove(id);
+            delta.upserts.insert(id.to_owned(), row.clone());
+            (true, old, Some(row))
+        }
+        RowDecision::Delete { old, hash, bytes } => {
+            subscription.digest.remove(&hash);
+            subscription.window.rows = subscription.window.rows.saturating_sub(1);
+            subscription.window.bytes -= bytes;
+            delta.upserts.remove(id);
+            delta.deleted.insert(id.to_owned());
+            (true, Some(old), None)
+        }
+    };
+    delta.touches.push((
+        (subscription.definition.table.clone(), id.to_owned()),
+        RowTouch {
+            changed,
+            old,
+            new,
+            changed_columns,
+        },
+    ));
+    Ok(true)
+}
+
+/// One normalized entity change per (table, key): the union of the
+/// projections every collection of this connection holds after the event.
+/// A collection that did not decide the row in this event is asked through
+/// its in-memory membership; an entity is deleted only when no collection of
+/// the connection holds it (the SDK removes a deleted entity from every
+/// window of that entity).
+fn normalize_entity_changes(
+    touches: BTreeMap<(String, String), EntityTouch>,
+    collapsed: &CollapsedChanges<'_>,
+    subscriptions: &BTreeMap<String, ReplicaSubscription>,
+) -> Vec<ReplicaChange> {
+    let mut changes = Vec::new();
+    for ((table, id), touch) in touches {
+        if !touch.changed {
+            continue;
+        }
+        let image = collapsed
+            .get(&(table.as_str(), id.as_str()))
+            .map(|change| change.new);
+        let mut fields = serde_json::Map::new();
+        let mut unknown = false;
+        for subscription in subscriptions
+            .values()
+            .filter(|subscription| subscription.definition.table == table)
+        {
+            if let Some(decided) = touch.decided.get(&subscription.id) {
+                if let Some(Value::Object(row)) = decided {
+                    fields.extend(row.clone());
+                }
+                continue;
+            }
+            match image.map(|row| (row, subscription.holds(row))) {
+                Some((row, Some(true))) => {
+                    if let Ok(Value::Object(row)) = project_row(row, &subscription.definition) {
+                        fields.extend(row);
+                    }
+                }
+                Some((_, Some(false))) => {}
+                _ => unknown = true,
+            }
+        }
+        let changed_columns = touch.changed_columns.into_iter().collect();
+        if fields.is_empty() {
+            if unknown {
+                // Another collection may still hold it: its delta decides.
+                continue;
+            }
+            changes.push(ReplicaChange {
+                entity: table,
+                id,
+                operation: "delete".to_owned(),
+                old_value: touch.old_value.map(Value::Object),
+                new_value: None,
+                changed_columns,
+            });
+        } else {
+            changes.push(ReplicaChange {
+                entity: table,
+                id,
+                operation: if touch.old_held { "update" } else { "insert" }.to_owned(),
+                old_value: touch.old_value.map(Value::Object),
+                new_value: Some(Value::Object(fields)),
+                changed_columns,
+            });
+        }
+    }
+    changes
 }
 
 async fn resume_changes(
@@ -993,14 +1297,6 @@ async fn resume_changes(
              WHERE revision > $1 AND revision <= $2 AND table_name IN (SELECT value FROM json_each($3))
              ORDER BY revision, ordinal",
         ).bind(after as i64).bind(through as i64).bind(tables).fetch_all(&mut **transaction.transaction()).await?;
-    // Row images and changed columns are JSON text written by the triggers.
-    let json = |row: &sqlx::sqlite::SqliteRow, column: &str| -> Result<Value, ReplicaError> {
-        match row.try_get::<Option<String>, _>(column)? {
-            Some(text) => serde_json::from_str(&text)
-                .map_err(|error| ReplicaError::InvalidIdentifier(format!("{column}: {error}"))),
-            None => Ok(Value::Null),
-        }
-    };
     rows.iter()
         .map(|row| {
             Ok(LogChange {
@@ -1009,20 +1305,29 @@ async fn resume_changes(
                 table: row.try_get("table_name")?,
                 row_id: row.try_get("row_id")?,
                 operation: row.try_get("operation")?,
-                changed_columns: match json(row, "changed_columns")? {
+                changed_columns: match log_json(row, "changed_columns")? {
                     Value::Array(values) => values
                         .into_iter()
                         .filter_map(|value| value.as_str().map(str::to_owned))
                         .collect(),
                     _ => Vec::new(),
                 },
-                old_value: json(row, "old_value")?,
-                new_value: json(row, "new_value")?,
+                old_value: log_json(row, "old_value")?,
+                new_value: log_json(row, "new_value")?,
                 origin_command_id: String::new(),
                 provenance: Default::default(),
             })
         })
         .collect()
+}
+
+/// Row images and changed columns are JSON text written by the triggers.
+fn log_json(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Value, ReplicaError> {
+    match row.try_get::<Option<String>, _>(column)? {
+        Some(text) => serde_json::from_str(&text)
+            .map_err(|error| ReplicaError::InvalidIdentifier(format!("{column}: {error}"))),
+        None => Ok(Value::Null),
+    }
 }
 
 async fn clock_in_transaction(
@@ -1040,6 +1345,8 @@ async fn clock_in_transaction(
     })
 }
 
+/// The visible rows of a collection and whether a budget truncated them.
+#[cfg(test)]
 pub(super) async fn query_rows(
     transaction: &mut TenantTransaction,
     definition: &ReplicaCollectionDefinition,
@@ -1047,56 +1354,30 @@ pub(super) async fn query_rows(
     resolved: &ResolvedVisibility,
     args: &Value,
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
-    query_rows_filtered(transaction, definition, plan, resolved, args, None, None).await
+    let mut rows = Vec::new();
+    let window = scan_window(transaction, definition, plan, resolved, args, |row| {
+        rows.push(row.row);
+        Ok(())
+    })
+    .await?;
+    Ok((rows, window.truncated))
 }
 
-/// Visible rows of the collection whose `column` is one of `values`: the
-/// targeted fetch for rows a grant or parent newly revealed to one member.
-pub(super) async fn query_rows_where(
+/// Streams the collection's visible rows (in order, within its budgets) to
+/// `visit` one at a time and returns the resulting window. Nothing but the
+/// visitor's own state outlives a row.
+pub(crate) async fn scan_window(
     transaction: &mut TenantTransaction,
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
     args: &Value,
-    filter: Option<(&str, &BTreeSet<String>)>,
-    revision: u64,
-) -> Result<Vec<Value>, ReplicaError> {
-    Ok(query_rows_filtered(
-        transaction,
-        definition,
-        plan,
-        resolved,
-        args,
-        filter,
-        Some(revision),
-    )
-    .await?
-    .0)
-}
-
-async fn query_rows_filtered(
-    transaction: &mut TenantTransaction,
-    definition: &ReplicaCollectionDefinition,
-    plan: &VisibilityPlan,
-    resolved: &ResolvedVisibility,
-    args: &Value,
-    filter: Option<(&str, &BTreeSet<String>)>,
-    expected_revision: Option<u64>,
-) -> Result<(Vec<Value>, bool), ReplicaError> {
+    visit: impl FnMut(ScannedRow) -> Result<(), ReplicaError>,
+) -> Result<ReplicaWindow, ReplicaError> {
     let args = args.as_object().ok_or(ReplicaError::InvalidArguments)?;
     let mut parameters = Vec::new();
     let visibility = visibility::compile_predicate(plan, resolved, "r", &mut parameters)?;
     let mut predicates = vec![visibility];
-    if let Some((column, values)) = filter {
-        parameters.push(Value::Array(
-            values.iter().cloned().map(Value::String).collect(),
-        ));
-        predicates.push(format!(
-            "r.{} IN (SELECT value FROM json_each(${}))",
-            quote(column)?,
-            parameters.len()
-        ));
-    }
     // Verified support principals have no persisted Member. Keep the live
     // membership check for ordinary sessions, including concurrent revocation.
     if !resolved.ephemeral_member {
@@ -1117,29 +1398,7 @@ async fn query_rows_filtered(
         parameters.push(value);
         predicates.push(format!("r.{} = ${}", quote(column)?, parameters.len()));
     }
-    for column in &definition.columns {
-        quote(column)?;
-    }
-    // Declared types decide how each column is encoded (JSON, BOOLEAN).
-    let declared =
-        gonvex_store::rows::table_columns(&mut **transaction.transaction(), &definition.table)
-            .await?
-            .into_iter()
-            .map(|column| (column.name.clone(), column.kind()))
-            .collect::<BTreeMap<_, _>>();
-    let columns = definition
-        .columns
-        .iter()
-        .map(|column| {
-            (
-                column.clone(),
-                declared
-                    .get(column)
-                    .copied()
-                    .unwrap_or(gonvex_store::rows::JsonKind::Text),
-            )
-        })
-        .collect::<Vec<_>>();
+    let columns = declared_columns(transaction, definition, definition.columns.iter()).await?;
     let mut statement = format!(
         "SELECT {} FROM {} AS r WHERE {}",
         gonvex_store::rows::json_object_expr("r", &columns),
@@ -1152,25 +1411,16 @@ async fn query_rows_filtered(
         } else {
             "DESC"
         };
+        // The key breaks ties so a truncated window has one exact boundary.
         statement.push_str(&format!(
-            " ORDER BY r.{} {direction}",
-            quote(&definition.order_by)?
+            " ORDER BY r.{} {direction}, r.{} {direction}",
+            quote(&definition.order_by)?,
+            quote(&definition.key)?
         ));
     }
     if definition.max_rows > 0 {
         parameters.push(Value::from((definition.max_rows + 1) as u64));
         statement.push_str(&format!(" LIMIT ${}", parameters.len()));
-    }
-    if let Some(expected) = expected_revision {
-        // One read transaction sees one WAL snapshot, so the clock read here
-        // is the clock of the rows below (SQLite has no LATERAL join).
-        let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1")
-                .fetch_one(&mut **transaction.transaction())
-                .await?;
-        if revision.max(0) as u64 != expected {
-            return Err(ReplicaError::SnapshotAdvanced);
-        }
     }
     let parameters = Parameters::scalars(&parameters).map_err(ReplicaError::InvalidIdentifier)?;
     let query = parameters.bind(sqlx::query(&statement));
@@ -1188,19 +1438,47 @@ async fn query_rows_filtered(
             .transpose()
         })
         .filter_map(|row| std::future::ready(row.transpose()));
-    collect_snapshot_rows(rows, definition).await
+    collect_window(rows, definition, visit).await
 }
 
-async fn collect_snapshot_rows(
+/// `columns` with their declared kinds (JSON, BOOLEAN decide the encoding).
+async fn declared_columns<'a>(
+    transaction: &mut TenantTransaction,
+    definition: &ReplicaCollectionDefinition,
+    columns: impl Iterator<Item = &'a String>,
+) -> Result<Vec<(String, gonvex_store::rows::JsonKind)>, ReplicaError> {
+    let declared =
+        gonvex_store::rows::table_columns(&mut **transaction.transaction(), &definition.table)
+            .await?
+            .into_iter()
+            .map(|column| (column.name.clone(), column.kind()))
+            .collect::<BTreeMap<_, _>>();
+    columns
+        .map(|column| {
+            quote(column)?;
+            Ok((
+                column.clone(),
+                declared
+                    .get(column)
+                    .copied()
+                    .unwrap_or(gonvex_store::rows::JsonKind::Text),
+            ))
+        })
+        .collect()
+}
+
+async fn collect_window(
     rows: impl Stream<Item = Result<Value, ReplicaError>>,
     definition: &ReplicaCollectionDefinition,
-) -> Result<(Vec<Value>, bool), ReplicaError> {
+    mut visit: impl FnMut(ScannedRow) -> Result<(), ReplicaError>,
+) -> Result<ReplicaWindow, ReplicaError> {
     futures_util::pin_mut!(rows);
-    let mut kept = Vec::new();
-    let mut bytes = 0i64;
-    let mut seen = BTreeSet::new();
+    let mut window = ReplicaWindow::default();
+    let mut seen = std::collections::HashSet::new();
+    let mut last = None;
+    let ordered = !definition.order_by.is_empty();
     while let Some(row) = rows.next().await {
-        if kept.len() % 32 == 0 {
+        if window.rows % 32 == 0 {
             tokio::task::yield_now().await;
         }
         let row = row?;
@@ -1208,17 +1486,82 @@ async fn collect_snapshot_rows(
         if !seen.insert(key.clone()) {
             return Err(ReplicaError::DuplicateKey(key));
         }
-        if definition.max_rows > 0 && kept.len() >= definition.max_rows {
-            return Ok((kept, true));
+        if definition.max_rows > 0 && window.rows >= definition.max_rows {
+            window.truncated = true;
+            break;
         }
-        let row_bytes = serde_json::to_vec(&row).unwrap_or_default().len() as i64;
-        if definition.max_bytes > 0 && bytes + row_bytes > definition.max_bytes {
-            return Ok((kept, true));
+        let canonical = stable_json(&row);
+        let bytes = canonical.len() as i64;
+        if definition.max_bytes > 0 && window.bytes + bytes > definition.max_bytes {
+            window.truncated = true;
+            break;
         }
-        bytes += row_bytes;
-        kept.push(row);
+        window.rows += 1;
+        window.bytes += bytes;
+        if ordered {
+            last = Some((
+                row.get(&definition.order_by)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                row.get(&definition.key).cloned().unwrap_or(Value::Null),
+            ));
+        }
+        visit(ScannedRow {
+            key,
+            hash: hex_digest(canonical.as_bytes()),
+            row,
+        })?;
     }
-    Ok((kept, false))
+    if window.truncated {
+        window.boundary = last.map(Box::new);
+    }
+    Ok(window)
+}
+
+/// SQLite's ordering of the JSON scalars a collection orders by: NULL, then
+/// numbers (booleans are integers), then text (binary collation).
+fn sql_order(left: &Value, right: &Value) -> std::cmp::Ordering {
+    fn class(value: &Value) -> u8 {
+        match value {
+            Value::Null => 0,
+            Value::Bool(_) | Value::Number(_) => 1,
+            Value::String(_) => 2,
+            _ => 3,
+        }
+    }
+    fn number(value: &Value) -> f64 {
+        match value {
+            Value::Bool(value) => f64::from(u8::from(*value)),
+            Value::Number(value) => value.as_f64().unwrap_or_default(),
+            _ => 0.0,
+        }
+    }
+    class(left)
+        .cmp(&class(right))
+        .then_with(|| match (left, right) {
+            (Value::String(left), Value::String(right)) => left.as_bytes().cmp(right.as_bytes()),
+            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+            (Value::Bool(_) | Value::Number(_), Value::Bool(_) | Value::Number(_)) => {
+                number(left).total_cmp(&number(right))
+            }
+            _ => left.to_string().cmp(&right.to_string()),
+        })
+}
+
+/// Does `row` sort at or before the window's last row?
+fn within_boundary(
+    definition: &ReplicaCollectionDefinition,
+    boundary: &(Value, Value),
+    row: &Value,
+) -> bool {
+    let null = Value::Null;
+    let order = sql_order(row.get(&definition.order_by).unwrap_or(&null), &boundary.0)
+        .then_with(|| sql_order(row.get(&definition.key).unwrap_or(&null), &boundary.1));
+    if definition.order_direction == "asc" {
+        order.is_le()
+    } else {
+        order.is_ge()
+    }
 }
 
 fn row_in_collection(
@@ -1228,31 +1571,35 @@ fn row_in_collection(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> bool {
-    let (Some(row), Some(args)) = (row.as_object(), args.as_object()) else {
+    let (Some(object), Some(args)) = (row.as_object(), args.as_object()) else {
         return false;
     };
     if definition
         .exclude_when_set
         .iter()
-        .any(|column| row.get(column).is_some_and(|value| !value.is_null()))
+        .any(|column| object.get(column).is_some_and(|value| !value.is_null()))
     {
         return false;
     }
     if definition
         .equal_filters
         .iter()
-        .any(|(column, argument)| row.get(column) != args.get(argument))
+        .any(|(column, argument)| object.get(column) != args.get(argument))
     {
         return false;
     }
-    visibility::row_matches(plan, resolved, &Value::Object(row.clone()))
+    visible(plan, resolved, row)
 }
 
-/// Returns whether a source-table transaction can no longer be represented by
-/// incremental row changes. A complete collection remains complete when the
-/// projected post-transaction rows fit its budgets, including for progressive
-/// delivery. Once a collection is truncated, its missing rows are unknown and
-/// the next source change must rebuild the window from the database.
+/// The one call into the in-memory visibility evaluator (workstream 7 swaps
+/// its implementation in here).
+#[inline]
+fn visible(plan: &VisibilityPlan, resolved: &ResolvedVisibility, row: &Value) -> bool {
+    visibility::row_matches(plan, resolved, row)
+}
+
+/// Version 1 plans whose sets stay in SQL cannot decide bounded windows in
+/// memory.
 fn bounded_sql_visibility(
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,
@@ -1261,63 +1608,6 @@ fn bounded_sql_visibility(
     plan.version != Some(2)
         && (definition.max_rows > 0 || definition.max_bytes > 0)
         && plan.needs_materialized_sets(resolved)
-}
-
-fn source_update_requires_snapshot<'a>(
-    rows: &RowMap,
-    truncated: bool,
-    definition: &ReplicaCollectionDefinition,
-    args: &Value,
-    plan: &VisibilityPlan,
-    resolved: &ResolvedVisibility,
-    changes: impl Iterator<Item = &'a LogChange>,
-) -> Result<bool, ReplicaError> {
-    if truncated {
-        return Ok(true);
-    }
-
-    // With no budgets, a complete collection can always apply source changes
-    // directly. The delivery mode controls initial loading, not correctness
-    // of subsequent source-table deltas.
-    if definition.max_rows == 0 && definition.max_bytes <= 0 {
-        return Ok(false);
-    }
-
-    // Only the changed rows differ from `rows`: overlay them instead of
-    // copying the whole collection per change per subscription.
-    let mut overlay: BTreeMap<&str, Option<Value>> = BTreeMap::new();
-    for change in changes {
-        let new_visible = row_in_collection(&change.new_value, args, definition, plan, resolved);
-        let projection = if new_visible {
-            Some(project_row(&change.new_value, definition)?)
-        } else {
-            None
-        };
-        overlay.insert(change.row_id.as_str(), projection);
-    }
-    let count = overlay.iter().fold(rows.len() as i64, |count, (id, row)| {
-        match (rows.contains_key(*id), row.is_some()) {
-            (false, true) => count + 1,
-            (true, false) => count - 1,
-            _ => count,
-        }
-    });
-    if definition.max_rows > 0 && count > definition.max_rows as i64 {
-        return Ok(true);
-    }
-    if definition.max_bytes > 0 {
-        let size = |row: &Value| serde_json::to_vec(row).unwrap_or_default().len() as i64;
-        let bytes = rows
-            .iter()
-            .filter(|(id, _)| !overlay.contains_key(id.as_ref()))
-            .map(|(_, row)| size(&row.row))
-            .sum::<i64>()
-            + overlay.values().flatten().map(size).sum::<i64>();
-        if bytes > definition.max_bytes {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn project_row(
@@ -1364,45 +1654,13 @@ fn row_hash(row: &Value) -> String {
     hex_digest(stable_json(row).as_bytes())
 }
 
-fn verify_resume_hashes<K: Ord + AsRef<str>, V: AsRef<str>>(
-    request: &ReplicaOpenRequest,
-    hashes: Option<&BTreeMap<K, V>>,
-    aggregate: bool,
-) -> Option<ServerMessage> {
-    if hashes.is_some_and(|hashes| {
-        request.digest.as_deref()
-            == Some(
-                if aggregate {
-                    if request
-                        .digest
-                        .as_deref()
-                        .is_some_and(|digest| digest.starts_with("sum128-v1:"))
-                    {
-                        ReplicaAggregate::from_hashes(hashes, true).digest()
-                    } else {
-                        aggregate_digest(hashes)
-                    }
-                } else {
-                    hashes_digest(hashes)
-                }
-                .as_str(),
-            )
-    }) {
-        None
-    } else {
-        Some(ServerMessage::ReplicaNeedHashes {
-            id: request.id.clone(),
-            path: Some(request.path.clone()),
-        })
-    }
-}
-
 fn xor_hash(aggregate: &mut [u8; 32], hash: &str) {
     for (index, byte) in aggregate.iter_mut().enumerate() {
         *byte ^= u8::from_str_radix(&hash[index * 2..index * 2 + 2], 16).unwrap_or(0);
     }
 }
 
+#[cfg(test)]
 fn aggregate_bytes<K: Ord, V: AsRef<str>>(hashes: &BTreeMap<K, V>) -> [u8; 32] {
     let mut aggregate = [0u8; 32];
     for hash in hashes.values() {
@@ -1411,6 +1669,7 @@ fn aggregate_bytes<K: Ord, V: AsRef<str>>(hashes: &BTreeMap<K, V>) -> [u8; 32] {
     aggregate
 }
 
+#[cfg(test)]
 fn aggregate_digest<K: Ord, V: AsRef<str>>(hashes: &BTreeMap<K, V>) -> String {
     format_aggregate(&aggregate_bytes(hashes))
 }
@@ -1423,53 +1682,6 @@ fn format_aggregate(aggregate: &[u8; 32]) -> String {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     )
-}
-
-fn subscription_digest(subscription: &ReplicaSubscription) -> String {
-    if let Some(aggregate) = &subscription.aggregate {
-        aggregate.digest()
-    } else {
-        hashes_digest(&subscription.hashes)
-    }
-}
-
-// Reconstruct the cursor's membership from retained before-images. Visibility
-// dependency changes require reconciliation rather than trusting old visibility.
-fn resume_hashes<K: Ord + AsRef<str>, V: AsRef<str>>(
-    current: &BTreeMap<K, V>,
-    changes: &[LogChange],
-    args: &Value,
-    definition: &ReplicaCollectionDefinition,
-    plan: &VisibilityPlan,
-    resolved: &ResolvedVisibility,
-) -> Result<Option<RowHashes>, ReplicaError> {
-    if bounded_sql_visibility(definition, plan, resolved) {
-        // Retained before-images cannot evaluate an unmaterialized SQL set.
-        // Reconcile the bounded snapshot instead of trusting missing IDs.
-        return Ok(None);
-    }
-    let dependencies = plan.resolved_dependency_columns(resolved);
-    if table_change_relevance(&definition.table, &dependencies, changes.iter()).1 {
-        return Ok(None);
-    }
-    let mut prior: RowHashes = current
-        .iter()
-        .map(|(key, hash)| (key.as_ref().into(), hash.as_ref().into()))
-        .collect();
-    for change in changes
-        .iter()
-        .rev()
-        .filter(|change| change.table == definition.table)
-    {
-        prior.remove(change.row_id.as_str());
-        if row_in_collection(&change.old_value, args, definition, plan, resolved) {
-            prior.insert(
-                change.row_id.as_str().into(),
-                row_hash(&project_row(&change.old_value, definition)?).into(),
-            );
-        }
-    }
-    Ok(Some(prior))
 }
 
 fn hashes_digest<K: Ord + AsRef<str>, V: AsRef<str>>(hashes: &BTreeMap<K, V>) -> String {
@@ -1597,39 +1809,13 @@ fn cursor_for(
     }
 }
 
-fn diff_rows<H, G, K, V, C>(
-    current_rows: &RowMap,
-    current_hashes: &BTreeMap<H, G>,
-    client_hashes: &BTreeMap<K, V>,
-    client_keys: &[C],
-) -> (Vec<Value>, Vec<String>)
-where
-    H: Ord + std::borrow::Borrow<str>,
-    G: AsRef<str>,
-    K: Ord + std::borrow::Borrow<str>,
-    V: AsRef<str>,
-    C: AsRef<str>,
-{
-    let upserts = current_rows
-        .iter()
-        .filter(|(key, _)| {
-            client_hashes.get(key.as_ref()).map(AsRef::as_ref)
-                != current_hashes.get(key.as_ref()).map(AsRef::as_ref)
-        })
-        .map(|(_, row)| (*row.row).clone())
-        .collect();
-    let deleted = client_keys
-        .iter()
-        .filter(|key| !current_rows.contains_key(key.as_ref()))
-        .map(|key| key.as_ref().to_owned())
-        .collect();
-    (upserts, deleted)
-}
-
+#[allow(clippy::too_many_arguments)]
 fn replica_snapshot_message(
     request: &ReplicaOpenRequest,
     definition: &ReplicaCollectionDefinition,
-    snapshot: &mut Snapshot,
+    rows: Vec<Arc<Value>>,
+    inline_hashes: Option<BTreeMap<String, String>>,
+    truncated: bool,
     cursor: ReplicaCursor,
     scope: &str,
     visibility_scope: &str,
@@ -1656,22 +1842,24 @@ fn replica_snapshot_message(
             Value::from(definition.max_rows as u64),
         ),
         ("maxBytes".to_owned(), Value::from(definition.max_bytes)),
-        ("truncated".to_owned(), Value::Bool(snapshot.truncated)),
+        ("truncated".to_owned(), Value::Bool(truncated)),
     ]);
     metadata.insert("pageDigest".to_owned(), Value::String(digest.to_owned()));
-    if snapshot.hashes.len() <= INLINE_SNAPSHOT_HASH_LIMIT {
+    if let Some(hashes) = inline_hashes {
+        metadata.insert("digest".to_owned(), Value::String(hashes_digest(&hashes)));
         metadata.insert(
             "hashes".to_owned(),
-            serde_json::to_value(&snapshot.hashes).unwrap_or_default(),
-        );
-        metadata.insert(
-            "digest".to_owned(),
-            Value::String(hashes_digest(&snapshot.hashes)),
+            Value::Object(
+                hashes
+                    .into_iter()
+                    .map(|(key, hash)| (key, Value::String(hash)))
+                    .collect(),
+            ),
         );
     }
     ServerMessage::ReplicaSnapshot {
         id: request.id.clone(),
-        result: std::mem::take(&mut snapshot.rows),
+        result: rows,
         cursor,
         key: definition.key.clone(),
         metadata,
@@ -1988,21 +2176,6 @@ fn replica_ready(
     }
 }
 
-fn accumulate_projection_delta(
-    upserts: &mut BTreeMap<String, Value>,
-    deleted: &mut BTreeSet<String>,
-    id: &str,
-    row: Option<&Value>,
-) {
-    if let Some(row) = row {
-        deleted.remove(id);
-        upserts.insert(id.to_owned(), row.clone());
-    } else {
-        upserts.remove(id);
-        deleted.insert(id.to_owned());
-    }
-}
-
 fn quote(value: &str) -> Result<String, ReplicaError> {
     if !value.is_empty()
         && value.len() <= 63
@@ -2027,72 +2200,7 @@ fn hex_digest(value: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    fn shared_rows(rows: std::collections::BTreeMap<String, serde_json::Value>) -> super::RowMap {
-        rows.into_iter()
-            .map(|(key, row)| {
-                (
-                    key.as_str().into(),
-                    super::ReplicaEntry::detached(&key, row),
-                )
-            })
-            .collect()
-    }
     use super::*;
-
-    #[tokio::test]
-    async fn snapshot_stream_stops_after_row_or_byte_budget_lookahead() {
-        let rows = vec![
-            serde_json::json!({"id":"a"}),
-            serde_json::json!({"id":"b"}),
-            serde_json::json!({"id":"c"}),
-        ];
-        for (max_rows, max_bytes) in [
-            (2, 0),
-            (0, serde_json::to_vec(&rows[0]).unwrap().len() as i64 * 2),
-        ] {
-            let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
-                "table":"tasks", "key":"id", "columns":["id"], "maxRows":max_rows, "maxBytes":max_bytes
-            })).unwrap();
-            let source = futures_util::stream::iter(rows.clone().into_iter().map(Ok)).chain(
-                futures_util::stream::once(async { panic!("read beyond budget lookahead") }),
-            );
-            let (kept, truncated) = collect_snapshot_rows(source, &definition).await.unwrap();
-            assert_eq!(kept, rows[..2]);
-            assert!(truncated);
-        }
-    }
-
-    #[tokio::test]
-    async fn snapshot_stream_distinguishes_exact_boundary_from_truncation_and_errors() {
-        let row = serde_json::json!({"id":"a", "text":"café 東京"});
-        let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
-            "table":"tasks", "key":"id", "columns":["id","text"], "maxRows":1,
-            "maxBytes":serde_json::to_vec(&row).unwrap().len()
-        }))
-        .unwrap();
-        let (kept, truncated) =
-            collect_snapshot_rows(futures_util::stream::iter([Ok(row.clone())]), &definition)
-                .await
-                .unwrap();
-        assert_eq!(kept, vec![row.clone()]);
-        assert!(!truncated);
-        assert!(matches!(
-            collect_snapshot_rows(
-                futures_util::stream::iter([Ok(row.clone()), Ok(row)]),
-                &definition
-            )
-            .await,
-            Err(ReplicaError::DuplicateKey(_))
-        ));
-        assert!(matches!(
-            collect_snapshot_rows(
-                futures_util::stream::iter([Err(ReplicaError::InvalidArguments)]),
-                &definition
-            )
-            .await,
-            Err(ReplicaError::InvalidArguments)
-        ));
-    }
 
     fn paged_fixture(rows: Vec<Value>) -> ServerMessage {
         let hashes = rows
@@ -2443,143 +2551,6 @@ mod tests {
     }
 
     #[test]
-    fn sdk_resume_delta_verifies_before_images_and_detects_mismatch() -> Result<(), ReplicaError> {
-        let definition = ReplicaCollectionDefinition {
-            table: "tasks".into(),
-            key: "id".into(),
-            columns: vec!["id".into(), "title".into()],
-            equal_filters: BTreeMap::new(),
-            exclude_when_set: Vec::new(),
-            visibility_tables: Vec::new(),
-            visibility_plan_hash: String::new(),
-            order_by: String::new(),
-            order_direction: String::new(),
-            mode: "eager".into(),
-            max_rows: 100,
-            max_bytes: 10000,
-            retention_ms: 0,
-        };
-        let (plan, resolved) = public_visibility();
-        let old = serde_json::json!({"id":"1", "title":"old"});
-        let new = serde_json::json!({"id":"1", "title":"new"});
-        let inserted = serde_json::json!({"id":"2", "title":"inserted"});
-        let removed = serde_json::json!({"id":"3", "title":"removed"});
-        let original = BTreeMap::<String, String>::from([
-            ("1".into(), row_hash(&old)),
-            ("3".into(), row_hash(&removed)),
-        ]);
-        let current = BTreeMap::<String, String>::from([
-            ("1".into(), row_hash(&new)),
-            ("2".into(), row_hash(&inserted)),
-        ]);
-        let mut insertion = source_change(Value::Null, inserted.clone());
-        insertion.row_id = "2".into();
-        let mut deletion = source_change(removed, Value::Null);
-        deletion.row_id = "3".into();
-        let intermediate = serde_json::json!({"id":"1", "title":"intermediate"});
-        let changes = vec![
-            source_change(old, intermediate.clone()),
-            source_change(intermediate, new.clone()),
-            insertion,
-            deletion,
-        ];
-        let prior = resume_hashes(
-            &current,
-            &changes,
-            &serde_json::json!({}),
-            &definition,
-            &plan,
-            &resolved,
-        )?
-        .unwrap();
-        assert_eq!(aggregate_digest(&prior), aggregate_digest(&original));
-        let mut request: ReplicaOpenRequest = serde_json::from_value(serde_json::json!({
-            "id":"r", "path":"tasks.list", "args":{}, "digest":aggregate_digest(&original)
-        }))
-        .unwrap();
-        assert!(verify_resume_hashes(&request, Some(&prior), true).is_none());
-        request.digest = Some(aggregate_digest(&BTreeMap::<String, String>::new()));
-        assert!(matches!(
-            verify_resume_hashes(&request, Some(&prior), true),
-            Some(ServerMessage::ReplicaNeedHashes { .. })
-        ));
-        assert!(matches!(
-            verify_resume_hashes::<String, String>(&request, None, true),
-            Some(ServerMessage::ReplicaNeedHashes { .. })
-        ));
-        let (upserts, deleted) = diff_rows(
-            &shared_rows(BTreeMap::from([
-                ("1".into(), new.clone()),
-                ("2".into(), inserted.clone()),
-            ])),
-            &current,
-            &prior,
-            &["1".to_owned(), "3".to_owned()],
-        );
-        assert_eq!(upserts, vec![new, inserted]);
-        assert_eq!(deleted, vec!["3"]);
-        // A bounded snapshot may omit an unchanged row displaced since the
-        // cursor. Its reconstructed checksum must request reconciliation.
-        let bounded_prior = BTreeMap::<String, String>::from([("3".into(), original["3"].clone())]);
-        request.digest = Some(aggregate_digest(&original));
-        assert!(matches!(
-            verify_resume_hashes(&request, Some(&bounded_prior), true),
-            Some(ServerMessage::ReplicaNeedHashes { .. })
-        ));
-        let dependency = visibility_with_task_dependency("tasks");
-        assert!(resume_hashes(
-            &current,
-            &[routing_change("tasks", "update", &["createdBy"])],
-            &serde_json::json!({}),
-            &definition,
-            &dependency,
-            &resolved
-        )?
-        .is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn negotiated_sum_digest_resume_and_incremental_changes() {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../packages/protocol/fixtures/replica-set-digest.json"
-        ))
-        .unwrap();
-        let mut hashes: BTreeMap<String, String> = BTreeMap::new();
-        let mut aggregate = ReplicaAggregate::from_hashes(&hashes, true);
-        for (i, mutation) in fixture["mutations"].as_array().unwrap().iter().enumerate() {
-            let hash = mutation["hash"].as_str().unwrap();
-            let remove = mutation["op"] == "remove";
-            aggregate.change(hash, remove);
-            if remove {
-                hashes.retain(|_, value| value != hash);
-            } else {
-                hashes.insert(i.to_string(), hash.to_owned());
-            }
-            assert_eq!(
-                aggregate.digest(),
-                ReplicaAggregate::from_hashes(&hashes, true).digest()
-            );
-        }
-        assert_eq!(aggregate.digest(), fixture["digest"].as_str().unwrap());
-        let mut request:ReplicaOpenRequest=serde_json::from_value(serde_json::json!({"id":"sum","path":"tasks.all","args":{},"digest":aggregate.digest()})).unwrap();
-        assert!(matches!(
-            requested_sum_digest(&request, false),
-            Err(ReplicaError::DigestNotNegotiated)
-        ));
-        assert!(requested_sum_digest(&request, true).unwrap());
-        assert!(verify_resume_hashes(&request, Some(&hashes), true).is_none());
-        request.digest = Some(format!("sum128-v1:{}", "00".repeat(16)));
-        assert!(matches!(
-            verify_resume_hashes(&request, Some(&hashes), true),
-            Some(ServerMessage::ReplicaNeedHashes { .. })
-        ));
-        request.digest = Some(aggregate_digest(&hashes));
-        assert!(!requested_sum_digest(&request, false).unwrap());
-        assert!(verify_resume_hashes(&request, Some(&hashes), true).is_none());
-    }
-
-    #[test]
     fn sdk_resume_aggregate_matches_client_xor_fixture() {
         let hashes: BTreeMap<String, String> =
             BTreeMap::from([("a".into(), "01".repeat(32)), ("b".into(), "03".repeat(32))]);
@@ -2606,61 +2577,6 @@ mod tests {
             format_aggregate(&aggregate),
             format!("xor1:{}", "05".repeat(32))
         );
-    }
-
-    #[test]
-    fn repeated_writes_publish_only_the_final_collection_membership() {
-        let mut upserts = BTreeMap::new();
-        let mut deleted = BTreeSet::new();
-        let intermediate = serde_json::json!({"id":"a","categoryId":null,"deletedAt":null});
-        // One atomic cleanup first clears references and then soft-deletes the
-        // same row. Sending both entries resurrects its intermediate projection
-        // on clients and makes the transaction's integrity digest disagree.
-        accumulate_projection_delta(&mut upserts, &mut deleted, "a", Some(&intermediate));
-        accumulate_projection_delta(&mut upserts, &mut deleted, "a", None);
-        assert!(upserts.is_empty());
-        assert_eq!(deleted, BTreeSet::from(["a".to_owned()]));
-        // A later write in the same intent can also restore visibility.
-        accumulate_projection_delta(&mut upserts, &mut deleted, "a", Some(&intermediate));
-        assert!(deleted.is_empty());
-        assert_eq!(upserts.get("a"), Some(&intermediate));
-    }
-
-    #[test]
-    fn normalized_changes_union_visible_projections_and_preserve_other_memberships() {
-        let key = ("tasks".to_owned(), "a".to_owned());
-        let mut changes = BTreeMap::from([(
-            key.clone(),
-            ReplicaChange {
-                entity: "tasks".to_owned(),
-                id: "a".to_owned(),
-                operation: "delete".to_owned(),
-                old_value: Some(serde_json::json!({"id":"a","status":"new"})),
-                new_value: None,
-                changed_columns: vec!["status".to_owned()],
-            },
-        )]);
-        let empty = BTreeMap::new();
-        let names = BTreeMap::from([("a".to_owned(), serde_json::json!({"id":"a","name":"Task"}))]);
-        let statuses = BTreeMap::from([(
-            "a".to_owned(),
-            serde_json::json!({"id":"a","status":"working","note":null}),
-        )]);
-        let statuses = shared_rows(statuses.clone());
-        let names = shared_rows(names.clone());
-        let empty = shared_rows(empty.clone());
-        normalize_entity_changes(
-            &mut changes,
-            [("tasks", &empty), ("tasks", &names), ("tasks", &statuses)].into_iter(),
-        );
-        assert_eq!(changes[&key].operation, "update");
-        assert_eq!(
-            changes[&key].new_value,
-            Some(serde_json::json!({"id":"a","name":"Task","status":"working","note":null}))
-        );
-        normalize_entity_changes(&mut changes, [("tasks", &empty)].into_iter());
-        assert_eq!(changes[&key].operation, "delete");
-        assert_eq!(changes[&key].new_value, None);
     }
 
     fn visibility_with_task_dependency(source: &str) -> VisibilityPlan {
@@ -2816,163 +2732,6 @@ mod tests {
     }
 
     #[test]
-    fn complete_progressive_collection_stays_incremental_within_budgets() -> Result<(), ReplicaError>
-    {
-        let definition = ReplicaCollectionDefinition {
-            table: "tasks".to_owned(),
-            key: "id".to_owned(),
-            columns: vec!["id".to_owned(), "title".to_owned()],
-            equal_filters: BTreeMap::new(),
-            exclude_when_set: Vec::new(),
-            visibility_tables: Vec::new(),
-            visibility_plan_hash: String::new(),
-            order_by: String::new(),
-            order_direction: String::new(),
-            mode: "progressive".to_owned(),
-            max_rows: 2,
-            max_bytes: 1_000,
-            retention_ms: 0,
-        };
-        let (plan, resolved) = public_visibility();
-        let old = serde_json::json!({"id": "1", "title": "old"});
-        let new = serde_json::json!({"id": "1", "title": "new"});
-        let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
-        let change = source_change(old, new);
-
-        let rows = shared_rows(rows.clone());
-        assert!(!source_update_requires_snapshot(
-            &rows,
-            false,
-            &definition,
-            &Value::Object(serde_json::Map::new()),
-            &plan,
-            &resolved,
-            std::iter::once(&change),
-        )?);
-        Ok(())
-    }
-
-    #[test]
-    fn incremental_projection_ignores_unrequested_columns_for_delta_and_budget(
-    ) -> Result<(), ReplicaError> {
-        let definition = ReplicaCollectionDefinition {
-            table: "tasks".to_owned(),
-            key: "id".to_owned(),
-            columns: vec!["id".to_owned(), "title".to_owned()],
-            equal_filters: BTreeMap::new(),
-            exclude_when_set: Vec::new(),
-            visibility_tables: Vec::new(),
-            visibility_plan_hash: String::new(),
-            order_by: String::new(),
-            order_direction: String::new(),
-            mode: "progressive".to_owned(),
-            max_rows: 2,
-            max_bytes: 30,
-            retention_ms: 0,
-        };
-        let (plan, resolved) = public_visibility();
-        let old = serde_json::json!({"id": "1", "title": "old", "internalNotes": "old"});
-        let new = serde_json::json!({
-            "id": "1",
-            "title": "new",
-            "internalNotes": "a source column that is not replicated"
-        });
-        let rows = BTreeMap::from([("1".to_owned(), project_row(&old, &definition)?)]);
-        let change = source_change(old, new.clone());
-
-        let rows = shared_rows(rows.clone());
-        assert!(!source_update_requires_snapshot(
-            &rows,
-            false,
-            &definition,
-            &Value::Object(serde_json::Map::new()),
-            &plan,
-            &resolved,
-            std::iter::once(&change),
-        )?);
-        assert_eq!(
-            project_row(&new, &definition)?,
-            serde_json::json!({"id": "1", "title": "new"}),
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn complete_collection_snapshots_when_projected_rows_cross_row_budget(
-    ) -> Result<(), ReplicaError> {
-        let definition = ReplicaCollectionDefinition {
-            table: "tasks".to_owned(),
-            key: "id".to_owned(),
-            columns: vec!["id".to_owned(), "title".to_owned()],
-            equal_filters: BTreeMap::new(),
-            exclude_when_set: Vec::new(),
-            visibility_tables: Vec::new(),
-            visibility_plan_hash: String::new(),
-            order_by: String::new(),
-            order_direction: String::new(),
-            mode: "progressive".to_owned(),
-            max_rows: 1,
-            max_bytes: 1_000,
-            retention_ms: 0,
-        };
-        let (plan, resolved) = public_visibility();
-        let old = serde_json::json!({"id": "1", "title": "old"});
-        let new = serde_json::json!({"id": "2", "title": "new"});
-        let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
-        let mut change = source_change(old, new);
-        change.row_id = "2".to_owned();
-
-        let rows = shared_rows(rows.clone());
-        assert!(source_update_requires_snapshot(
-            &rows,
-            false,
-            &definition,
-            &Value::Object(serde_json::Map::new()),
-            &plan,
-            &resolved,
-            std::iter::once(&change),
-        )?);
-        Ok(())
-    }
-
-    #[test]
-    fn complete_collection_snapshots_when_projected_rows_cross_byte_budget(
-    ) -> Result<(), ReplicaError> {
-        let definition = ReplicaCollectionDefinition {
-            table: "tasks".to_owned(),
-            key: "id".to_owned(),
-            columns: vec!["id".to_owned(), "title".to_owned()],
-            equal_filters: BTreeMap::new(),
-            exclude_when_set: Vec::new(),
-            visibility_tables: Vec::new(),
-            visibility_plan_hash: String::new(),
-            order_by: String::new(),
-            order_direction: String::new(),
-            mode: "progressive".to_owned(),
-            max_rows: 2,
-            max_bytes: 30,
-            retention_ms: 0,
-        };
-        let (plan, resolved) = public_visibility();
-        let old = serde_json::json!({"id": "1", "title": "old"});
-        let new = serde_json::json!({"id": "1", "title": "a title too large"});
-        let rows = BTreeMap::from([("1".to_owned(), old.clone())]);
-        let change = source_change(old, new);
-
-        let rows = shared_rows(rows.clone());
-        assert!(source_update_requires_snapshot(
-            &rows,
-            false,
-            &definition,
-            &Value::Object(serde_json::Map::new()),
-            &plan,
-            &resolved,
-            std::iter::once(&change),
-        )?);
-        Ok(())
-    }
-
-    #[test]
     fn transition_filter_is_old_and_new_aware() {
         let definition = ReplicaCollectionDefinition {
             table: "tasks".to_owned(),
@@ -3075,5 +2834,490 @@ mod tests {
             hashes_digest(&hashes),
             "6c26345fc47f53ca1caae1985bcb1547d3f6099dfe999b8b58e516086c42bf4f"
         );
+    }
+
+    fn collection(value: Value) -> ReplicaCollectionDefinition {
+        let mut definition = serde_json::json!({
+            "table":"tasks", "key":"id", "columns":["id","title","workspaceId","rank"]
+        });
+        definition
+            .as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
+        serde_json::from_value(definition).unwrap()
+    }
+
+    /// A subscription whose client holds `rows` (projections).
+    fn holding(
+        definition: ReplicaCollectionDefinition,
+        args: Value,
+        rows: &[Value],
+    ) -> ReplicaSubscription {
+        let (plan, resolved) = public_visibility();
+        let mut digest = ReplicaAggregate::new(false);
+        let mut window = ReplicaWindow::default();
+        for row in rows {
+            let canonical = stable_json(row);
+            digest.add(&hex_digest(canonical.as_bytes()));
+            window.rows += 1;
+            window.bytes += canonical.len() as i64;
+        }
+        ReplicaSubscription {
+            id: "s".into(),
+            path: "tasks.list".into(),
+            args,
+            definition: Arc::new(definition),
+            visibility: Arc::new(plan),
+            visibility_scope: String::new(),
+            cursor: ReplicaCursor {
+                epoch: "e".into(),
+                revision: 1,
+            },
+            resolved,
+            digest,
+            window,
+        }
+    }
+
+    fn row_change(id: &str, old: Value, new: Value) -> LogChange {
+        let mut change = source_change(old, new);
+        change.row_id = id.into();
+        change
+    }
+
+    /// Applies one event to `subscription` and to a model of its client's
+    /// rows; checks the digest and counters against the model.
+    fn apply_to_model(
+        subscription: &mut ReplicaSubscription,
+        client: &mut BTreeMap<String, Value>,
+        changes: &[LogChange],
+    ) -> Option<(Vec<String>, Vec<String>)> {
+        let collapsed = collapse_changes(changes);
+        let delta = apply_rows(subscription, &ApplyContext::default(), &collapsed).unwrap()?;
+        for (id, row) in &delta.upserts {
+            client.insert(id.clone(), row.clone());
+        }
+        for id in &delta.deleted {
+            client.remove(id);
+        }
+        let hashes = client
+            .values()
+            .map(|row| (row_key(row, "id").unwrap(), row_hash(row)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(subscription.digest.digest(), aggregate_digest(&hashes));
+        assert_eq!(subscription.window.rows, client.len());
+        assert_eq!(
+            subscription.window.bytes,
+            client
+                .values()
+                .map(|row| stable_json(row).len() as i64)
+                .sum::<i64>()
+        );
+        Some((
+            delta.upserts.into_keys().collect(),
+            delta.deleted.into_iter().collect(),
+        ))
+    }
+
+    #[test]
+    fn feed_deltas_follow_before_and_after_images_without_held_rows() {
+        let definition =
+            collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
+        let row = |id: &str, title: &str, workspace: &str| serde_json::json!({"id":id, "title":title, "workspaceId":workspace, "rank":1});
+        let mut client = BTreeMap::from([
+            ("1".to_owned(), row("1", "one", "a")),
+            ("2".to_owned(), row("2", "two", "a")),
+        ]);
+        let held = client.values().cloned().collect::<Vec<_>>();
+        let mut subscription = holding(definition, serde_json::json!({"workspace":"a"}), &held);
+        let (upserts, deleted) = apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[
+                row_change("1", row("1", "one", "a"), row("1", "uno", "a")),
+                row_change("3", Value::Null, row("3", "three", "a")),
+                row_change("2", row("2", "two", "a"), Value::Null),
+                // Never held (other workspace): no delete is published.
+                row_change("9", row("9", "nine", "b"), Value::Null),
+                // Leaves the collection by moving workspace.
+                row_change("4", row("4", "four", "b"), row("4", "four", "c")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(upserts, ["1", "3"]);
+        assert_eq!(deleted, ["2"]);
+        let (upserts, deleted) = apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[row_change("1", row("1", "uno", "a"), row("1", "uno", "b"))],
+        )
+        .unwrap();
+        assert!(upserts.is_empty());
+        assert_eq!(deleted, ["1"]);
+    }
+
+    #[test]
+    fn unprojected_changes_and_net_noops_publish_nothing() {
+        let definition = collection(serde_json::json!({}));
+        let row = serde_json::json!({"id":"1", "title":"t", "workspaceId":"a", "rank":1});
+        let mut client = BTreeMap::from([("1".to_owned(), row.clone())]);
+        let mut subscription = holding(
+            definition,
+            serde_json::json!({}),
+            std::slice::from_ref(&row),
+        );
+        let mut wider = row.clone();
+        wider["internalNotes"] = "not replicated".into();
+        let mut renamed = row.clone();
+        renamed["title"] = "intermediate".into();
+        let mut deleted = renamed.clone();
+        deleted["title"] = "gone".into();
+        let (upserts, removed) = apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[
+                row_change("1", row.clone(), wider),
+                // Inserted and deleted within one transaction.
+                row_change("5", Value::Null, renamed.clone()),
+                row_change("5", renamed, Value::Null),
+            ],
+        )
+        .unwrap();
+        assert!(upserts.is_empty() && removed.is_empty());
+        // One atomic cleanup first edits and then soft-deletes the same row:
+        // only the final membership is published.
+        let mut definition = collection(serde_json::json!({"excludeWhenSet":["deletedAt"]}));
+        definition.columns.push("deletedAt".into());
+        let mut subscription = holding(definition, serde_json::json!({}), &[row.clone()]);
+        let mut client = BTreeMap::from([("1".to_owned(), row.clone())]);
+        let mut edited = row.clone();
+        edited["title"] = "edited".into();
+        let mut soft_deleted = edited.clone();
+        soft_deleted["deletedAt"] = 5.into();
+        let (upserts, removed) = apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[
+                row_change("1", row, edited.clone()),
+                row_change("1", edited, soft_deleted),
+            ],
+        )
+        .unwrap();
+        assert!(upserts.is_empty());
+        assert_eq!(removed, ["1"]);
+    }
+
+    #[test]
+    fn complete_bounded_collection_stays_incremental_until_a_budget_is_crossed() {
+        let row = |id: &str, title: &str| serde_json::json!({"id":id, "title":title, "workspaceId":"a", "rank":1});
+        let held = [row("1", "one")];
+        let mut client = BTreeMap::from([("1".to_owned(), row("1", "one"))]);
+        let mut subscription = holding(
+            collection(serde_json::json!({"maxRows":2, "maxBytes":1000, "mode":"progressive"})),
+            serde_json::json!({}),
+            &held,
+        );
+        assert!(apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[row_change("2", Value::Null, row("2", "two"))]
+        )
+        .is_some());
+        // A third row crosses maxRows: the window must be rebuilt.
+        assert!(apply_to_model(
+            &mut subscription,
+            &mut client.clone(),
+            &[row_change("3", Value::Null, row("3", "three"))]
+        )
+        .is_none());
+        let mut subscription = holding(
+            collection(serde_json::json!({"maxRows":5, "maxBytes":80})),
+            serde_json::json!({}),
+            &held,
+        );
+        let mut client = BTreeMap::from([("1".to_owned(), row("1", "one"))]);
+        assert!(apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[row_change(
+                "1",
+                row("1", "one"),
+                row("1", "a title that is far too large for the budget")
+            )]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn truncated_window_moves_only_within_its_boundary() {
+        let row = |id: &str, rank: i64, title: &str| serde_json::json!({"id":id, "title":title, "workspaceId":"a", "rank":rank});
+        let definition =
+            collection(serde_json::json!({"maxRows":2, "orderBy":"rank", "orderDirection":"asc"}));
+        let held = [row("1", 1, "one"), row("2", 2, "two")];
+        let mut client = held
+            .iter()
+            .map(|row| (row_key(row, "id").unwrap(), row.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut subscription = holding(definition, serde_json::json!({}), &held);
+        subscription.window.truncated = true;
+        subscription.window.boundary = Some(Box::new((2.into(), "2".into())));
+        // Beyond the boundary: the client never held it.
+        let (upserts, deleted) = apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[
+                row_change("7", row("7", 7, "x"), row("7", 8, "y")),
+                row_change("8", row("8", 9, "z"), Value::Null),
+            ],
+        )
+        .unwrap();
+        assert!(upserts.is_empty() && deleted.is_empty());
+        // In place inside the window.
+        let (upserts, _) = apply_to_model(
+            &mut subscription,
+            &mut client,
+            &[row_change("1", row("1", 1, "one"), row("1", 1, "uno"))],
+        )
+        .unwrap();
+        assert_eq!(upserts, ["1"]);
+        // Entering, leaving, or moving the boundary row rebuilds the window.
+        for change in [
+            row_change("0", Value::Null, row("0", 0, "zero")),
+            row_change("1", row("1", 1, "uno"), row("1", 5, "uno")),
+            row_change("1", row("1", 1, "uno"), Value::Null),
+            row_change("2", row("2", 2, "two"), row("2", 0, "two")),
+        ] {
+            assert!(apply_to_model(&mut subscription, &mut client.clone(), &[change]).is_none());
+        }
+        // An unordered truncated window cannot place any visible change.
+        let mut unordered = holding(
+            collection(serde_json::json!({"maxRows":2})),
+            serde_json::json!({}),
+            &held,
+        );
+        unordered.window.truncated = true;
+        assert!(apply_to_model(
+            &mut unordered,
+            &mut client,
+            &[row_change("9", Value::Null, row("9", 9, "x"))]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sql_order_matches_sqlite_storage_classes() {
+        use std::cmp::Ordering::*;
+        assert_eq!(sql_order(&Value::Null, &1.into()), Less);
+        assert_eq!(sql_order(&2.into(), &"1".into()), Less);
+        assert_eq!(sql_order(&1.5.into(), &2.into()), Less);
+        assert_eq!(sql_order(&true.into(), &1.into()), Equal);
+        assert_eq!(sql_order(&"B".into(), &"a".into()), Less);
+        let definition = collection(serde_json::json!({"orderBy":"rank", "orderDirection":"desc"}));
+        let boundary = (Value::from(5), Value::from("m"));
+        let row = |rank: i64, id: &str| serde_json::json!({"id":id, "rank":rank});
+        assert!(within_boundary(&definition, &boundary, &row(6, "a")));
+        assert!(within_boundary(&definition, &boundary, &row(5, "z")));
+        assert!(within_boundary(&definition, &boundary, &row(5, "m")));
+        assert!(!within_boundary(&definition, &boundary, &row(5, "a")));
+        assert!(!within_boundary(&definition, &boundary, &row(4, "z")));
+    }
+
+    #[test]
+    fn normalized_changes_keep_entities_another_collection_holds() {
+        let row = |workspace: &str| serde_json::json!({"id":"1", "title":"t", "workspaceId":workspace, "rank":1, "extra":"x"});
+        let mut narrow =
+            collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
+        narrow.columns = vec!["id".into(), "workspaceId".into()];
+        let wide = collection(serde_json::json!({"equalFilters":{"workspaceId":"workspace"}}));
+        let mut a = holding(
+            narrow,
+            serde_json::json!({"workspace":"a"}),
+            &[serde_json::json!({"id":"1", "workspaceId":"a"})],
+        );
+        a.id = "a".into();
+        let mut b = holding(wide, serde_json::json!({"workspace":"b"}), &[]);
+        b.id = "b".into();
+        let mut subscriptions = BTreeMap::from([("a".to_owned(), a), ("b".to_owned(), b)]);
+        let normalize = |subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+                         change: LogChange| {
+            let changes = [change];
+            let collapsed = collapse_changes(&changes);
+            let mut touches = BTreeMap::<(String, String), EntityTouch>::new();
+            for subscription in subscriptions.values_mut() {
+                let delta = apply_rows(subscription, &ApplyContext::default(), &collapsed)
+                    .unwrap()
+                    .unwrap();
+                for (key, touch) in delta.touches {
+                    touches
+                        .entry(key)
+                        .or_default()
+                        .merge(&subscription.id, touch);
+                }
+            }
+            normalize_entity_changes(touches, &collapsed, subscriptions)
+        };
+        // Leaves collection a for collection b: an update with b's fields.
+        let changes = normalize(&mut subscriptions, row_change("1", row("a"), row("b")));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].operation, "update");
+        assert_eq!(
+            changes[0].new_value,
+            Some(serde_json::json!({"id":"1", "title":"t", "workspaceId":"b", "rank":1}))
+        );
+        // Leaves every collection of the connection: a delete.
+        let changes = normalize(&mut subscriptions, row_change("1", row("b"), row("c")));
+        assert_eq!(changes[0].operation, "delete");
+        assert_eq!(changes[0].new_value, None);
+        // A collection that did not decide the row is asked in memory.
+        let narrow = (*subscriptions["a"].definition).clone();
+        let wide = (*subscriptions["b"].definition).clone();
+        let mut a = holding(
+            narrow,
+            serde_json::json!({"workspace":"a"}),
+            &[serde_json::json!({"id":"1", "workspaceId":"a"})],
+        );
+        a.id = "a".into();
+        let mut b = holding(wide, serde_json::json!({"workspace":"b"}), &[]);
+        b.id = "b".into();
+        let changes = [row_change("1", row("a"), row("b"))];
+        let collapsed = collapse_changes(&changes);
+        let mut touches = BTreeMap::<(String, String), EntityTouch>::new();
+        let delta = apply_rows(&mut a, &ApplyContext::default(), &collapsed)
+            .unwrap()
+            .unwrap();
+        for (key, touch) in delta.touches {
+            touches.entry(key).or_default().merge("a", touch);
+        }
+        let both = BTreeMap::from([("a".to_owned(), a), ("b".to_owned(), b)]);
+        let changes = normalize_entity_changes(touches, &collapsed, &both);
+        assert_eq!(changes[0].operation, "update");
+        assert_eq!(changes[0].new_value.as_ref().unwrap()["title"], "t");
+    }
+
+    #[test]
+    fn negotiated_sum_digest_is_maintained_incrementally() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../packages/protocol/fixtures/replica-set-digest.json"
+        ))
+        .unwrap();
+        let mut hashes: BTreeMap<String, String> = BTreeMap::new();
+        let mut aggregate = ReplicaAggregate::new(true);
+        let fresh = |hashes: &BTreeMap<String, String>| {
+            let mut fresh = ReplicaAggregate::new(true);
+            for hash in hashes.values() {
+                fresh.add(hash);
+            }
+            fresh.digest()
+        };
+        for (i, mutation) in fixture["mutations"].as_array().unwrap().iter().enumerate() {
+            let hash = mutation["hash"].as_str().unwrap();
+            if mutation["op"] == "remove" {
+                aggregate.remove(hash);
+                hashes.retain(|_, value| value != hash);
+            } else {
+                aggregate.add(hash);
+                hashes.insert(i.to_string(), hash.to_owned());
+            }
+            assert_eq!(aggregate.digest(), fresh(&hashes));
+        }
+        assert_eq!(aggregate.digest(), fixture["digest"].as_str().unwrap());
+        // A renegotiation without sum128 keeps the same membership as xor1.
+        let ReplicaAggregate::Sum(state) = &aggregate else {
+            unreachable!()
+        };
+        assert_eq!(
+            format_aggregate(&legacy_bytes(state)),
+            aggregate_digest(&hashes)
+        );
+        let request: ReplicaOpenRequest = serde_json::from_value(serde_json::json!({
+            "id":"sum","path":"tasks.all","args":{},"digest":aggregate.digest()
+        }))
+        .unwrap();
+        assert!(matches!(
+            requested_sum_digest(&request, false),
+            Err(ReplicaError::DigestNotNegotiated)
+        ));
+        assert!(requested_sum_digest(&request, true).unwrap());
+    }
+
+    async fn collect(
+        rows: impl Stream<Item = Result<Value, ReplicaError>>,
+        definition: &ReplicaCollectionDefinition,
+    ) -> Result<(Vec<Value>, ReplicaWindow), ReplicaError> {
+        let mut kept = Vec::new();
+        let window = collect_window(rows, definition, |row| {
+            assert_eq!(row.hash, row_hash(&row.row));
+            kept.push(row.row);
+            Ok(())
+        })
+        .await?;
+        Ok((kept, window))
+    }
+
+    #[tokio::test]
+    async fn snapshot_stream_stops_after_row_or_byte_budget_lookahead() {
+        let rows = vec![
+            serde_json::json!({"id":"a"}),
+            serde_json::json!({"id":"b"}),
+            serde_json::json!({"id":"c"}),
+        ];
+        for (max_rows, max_bytes) in [
+            (2, 0),
+            (0, serde_json::to_vec(&rows[0]).unwrap().len() as i64 * 2),
+        ] {
+            let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+                "table":"tasks", "key":"id", "columns":["id"], "maxRows":max_rows, "maxBytes":max_bytes,
+                "orderBy":"id", "orderDirection":"asc"
+            })).unwrap();
+            let source = futures_util::stream::iter(rows.clone().into_iter().map(Ok)).chain(
+                futures_util::stream::once(async { panic!("read beyond budget lookahead") }),
+            );
+            let (kept, window) = collect(source, &definition).await.unwrap();
+            assert_eq!(kept, rows[..2]);
+            assert!(window.truncated);
+            assert_eq!(window.rows, 2);
+            assert_eq!(window.boundary, Some(Box::new(("b".into(), "b".into()))));
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_stream_distinguishes_exact_boundary_from_truncation_and_errors() {
+        let row = serde_json::json!({"id":"a", "text":"café 東京"});
+        let definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+            "table":"tasks", "key":"id", "columns":["id","text"], "maxRows":1,
+            "maxBytes":serde_json::to_vec(&row).unwrap().len()
+        }))
+        .unwrap();
+        let (kept, window) = collect(futures_util::stream::iter([Ok(row.clone())]), &definition)
+            .await
+            .unwrap();
+        assert_eq!(kept, vec![row.clone()]);
+        assert!(!window.truncated);
+        assert_eq!(window.bytes, stable_json(&row).len() as i64);
+        assert!(matches!(
+            collect(
+                futures_util::stream::iter([Ok(row.clone()), Ok(row)]),
+                &definition
+            )
+            .await,
+            Err(ReplicaError::DuplicateKey(_))
+        ));
+        assert!(matches!(
+            collect(
+                futures_util::stream::iter([Err(ReplicaError::InvalidArguments)]),
+                &definition
+            )
+            .await,
+            Err(ReplicaError::InvalidArguments)
+        ));
+    }
+
+    #[test]
+    fn subscription_state_is_small() {
+        // Everything a subscription keeps besides its plan and principal.
+        let state = std::mem::size_of::<ReplicaCursor>()
+            + std::mem::size_of::<ReplicaAggregate>()
+            + std::mem::size_of::<ReplicaWindow>();
+        assert!(state <= 128, "{state}");
     }
 }

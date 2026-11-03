@@ -202,7 +202,7 @@ async fn data_writer(runtime: &Runtime, database_url: &str) -> Result<TenantTran
 
 async fn reader_columns(pool: &SqlitePool, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let mut connection = pool.acquire().await.map_err(|cause| cause.to_string())?;
-    table_columns(&mut *connection, table)
+    table_columns(&mut connection, table)
         .await
         .map_err(|cause| cause.to_string())
 }
@@ -683,7 +683,7 @@ async fn insert_row(
         Ok(transaction) => transaction,
         Err(response) => return response,
     };
-    let all = match table_columns(&mut **transaction.transaction(), &table).await {
+    let all = match table_columns(transaction.transaction(), &table).await {
         Ok(columns) if !columns.is_empty() => columns,
         _ => return error(StatusCode::BAD_REQUEST, "table does not exist"),
     };
@@ -773,7 +773,7 @@ async fn update_row(
         Ok(transaction) => transaction,
         Err(response) => return response,
     };
-    let all = match table_columns(&mut **transaction.transaction(), &table).await {
+    let all = match table_columns(transaction.transaction(), &table).await {
         Ok(columns) if !columns.is_empty() => columns,
         _ => return error(StatusCode::BAD_REQUEST, "table does not exist"),
     };
@@ -842,7 +842,7 @@ async fn delete_row(
         Ok(transaction) => transaction,
         Err(response) => return response,
     };
-    let all = match table_columns(&mut **transaction.transaction(), &table).await {
+    let all = match table_columns(transaction.transaction(), &table).await {
         Ok(columns) => columns,
         Err(cause) => return error(StatusCode::BAD_REQUEST, cause.to_string()),
     };
@@ -986,9 +986,7 @@ async fn replace_in_transaction(
         .execute(&mut *connection)
         .await
         .map_err(text)?;
-    sqlx::query(&format!(
-        "CREATE TEMP TABLE \"_gonvex_reference_replacements\" (source_id TEXT PRIMARY KEY, replacement_id TEXT NOT NULL)"
-    ))
+    sqlx::query("CREATE TEMP TABLE \"_gonvex_reference_replacements\" (source_id TEXT PRIMARY KEY, replacement_id TEXT NOT NULL)")
     .execute(&mut *connection)
     .await
     .map_err(text)?;

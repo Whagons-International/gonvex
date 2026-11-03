@@ -649,7 +649,7 @@ impl DatabaseHostCalls {
         // Exact declared types of the result columns (sqlx reports `JSON` as
         // NULL). A statement that fails to prepare fails again below with the
         // real error, so a describe failure only means "unknown".
-        let kinds = rows::result_column_kinds(&mut **transaction, statement.trim())
+        let kinds = rows::result_column_kinds(transaction, statement.trim())
             .await
             .ok();
         let rows = query.fetch_all(&mut **transaction).await;

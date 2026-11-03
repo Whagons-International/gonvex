@@ -29,11 +29,11 @@ macro_rules! now_ms {
 pub mod capture;
 pub mod checkpoint;
 mod data_dir;
-mod sync_barrier;
-pub use sync_barrier::WAL_SYNCS;
 pub mod feed;
 mod registry;
 pub mod rows;
+mod sync_barrier;
+pub use sync_barrier::WAL_SYNCS;
 pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
@@ -1054,7 +1054,7 @@ impl ControlPlane {
             .await?;
         }
         crate::execute_script(
-            &mut *transaction,
+            &mut transaction,
             concat!(
                 r#"CREATE TABLE IF NOT EXISTS _gonvex_reducer_idempotency (
                  subject TEXT NOT NULL DEFAULT '',

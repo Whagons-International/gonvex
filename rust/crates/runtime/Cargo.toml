@@ -68,6 +68,15 @@ name = "baseline"
 harness = false
 required-features = ["perf-fixture"]
 
+[[bench]]
+name = "replica_state"
+harness = false
+required-features = ["perf-fixture"]
+
 [[test]]
 name = "perf_fixture_smoke"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "replica_state"
 required-features = ["perf-fixture"]

@@ -380,12 +380,22 @@ async fn dashboard_sessions_follow_account_security_lifecycle() {
     valid(&runtime, &first, StatusCode::OK).await;
     save(&runtime, "replacement-password", "admin").await;
     valid(&runtime, &first, StatusCode::UNAUTHORIZED).await;
-    assert!(tokio::time::timeout(Duration::from_secs(10), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
-        .is_close());
+    // The rename may still deliver an update frame before the revoked session
+    // is closed; skip data frames until the close arrives.
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(frame)) if frame.is_text() => continue,
+                other => return other,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(closed, Some(Ok(ref frame)) if frame.is_close()),
+        "expected close, got {closed:?}"
+    );
     server.abort();
     let second = login_token(&runtime, "replacement-password").await;
     sqlx::query(
