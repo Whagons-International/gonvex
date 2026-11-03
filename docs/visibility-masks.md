@@ -696,28 +696,58 @@ sees a row is outside the candidates).
 ### Measurements (2026-11-03, arch3, 1 tokio worker, bench profile)
 
 One task update evaluated for every subscriber of `tasks.recentWorkspaceTasks`
-(`principal_change_concerns` + row check per subscriber), same binary and run:
+(`principal_change_concerns` + row check per subscriber), same binary and run
+(`benches/visibility_classes.rs`, final run on the branch merged with
+`perf/replica-state`; the shared machine varied up to 3x between runs, so
+compare columns within a row):
 
 | Tenant | interpreted | compiled | per subscriber | class evaluations / change |
 | --- | --- | --- | --- | --- |
-| fixture, 78 members | 199.8 µs | 22.3 µs | 2.6 µs → 0.29 µs | 45 (2 members alone) |
-| 9,000 tasks, 1,950 members | 42.4 ms | 2.82 ms | 21.8 µs → 1.4 µs | 758 (5 members alone) |
+| fixture, 78 members | 147.9 µs | 21.1 µs | 1.9 µs → 0.27 µs | 45 (2 members alone) |
+| 9,000 tasks, 1,950 members | 10.54 ms | 0.517 ms | 5.4 µs → 0.27 µs | 758 (5 members alone) |
 
-Routing with `candidates` on the 1,950-member tenant: 196 classes+members
-visited per change on average (of 759 classes and 1,950 members), 136-225 µs
-including the O(members) tally the bench does.
+"Interpreted" already includes this branch's `principal_change_concerns`
+early exit; on the unmodified base `visibility/task_update/78_members` was
+371 µs (same session) and 0.50 ms in the fixture baseline. Routing with
+`candidates` on the 1,950-member tenant visits 196 classes+members per change
+on average (of 759 classes and 1,950 members); 111 µs including the
+O(members) tally the bench does. Decoding ACL columns: 0.26-0.29 µs from a
+`Value`, 1.8 µs from raw JSON bytes (a 1.4 KB row is scanned in full).
 
 Class distribution with the shared fixture's member mix: 47 classes for 78
 members, 759 for 1,950 (largest 527; 667 singletons, almost all `TeamSpots`
-members whose 1-3 random spots from a 104-spot tree are unique). Memory: ~900
-bytes per class, 520 bytes per member binding (vs ~5.7 KB of
-`ResolvedVisibility` token sets per member, which still exist), interner
-~0.6 MB for 8,969 tokens (grant task ids included).
+members whose 1-3 random spots from a 104-spot tree are unique; admins differ
+by the team sets of the personal-team-workspace rule). Memory: ~900 bytes per
+class, 520 bytes per member binding, interner ~0.6 MB for 8,969 tokens (grant
+task ids included).
 
-Whole feed path (`baseline` bench, 78 members, same machine and session):
-`visibility/task_update/78_members` 371 µs → 141 µs; `fanout/presence_beat`
-11.4 ms → 5.25 ms; `fanout/task_update/apply` 182 ms → 170 ms with 82k → 47k
-allocations per change (its time is dominated by work other than visibility).
+Sharing identical parent resolutions (taskUsers and taskTags each held a deep
+copy of the member's tasks principal) on top of `perf/replica-state`
+(`benches/replica_state.rs`, retained): 426 → 410 KB per member for 78
+members × 10 collections; marginal member Admin 128 → 92 KB, TeamAllSpots
+131 → 91 KB, TeamSpots 123 → 87 KB, GrantOnly 83 → 66 KB.
+
+Whole feed path, `baseline` bench, 78 members: on this branch before the
+`perf/replica-state` merge (same session as the unmodified base):
+`visibility/task_update/78_members` 371 µs → 141 µs, `fanout/presence_beat`
+11.4 → 5.25 ms, `fanout/task_update/apply` 182 → 170 ms with 82k → 47k
+allocations. After the merge: `fanout/task_update/apply` 4.85 ms (62 µs per
+subscriber), presence beat 2.67 ms.
+
+### Class ids for per-class frames
+
+`VisibilityClass::stable_id()` (u64, print as 16 hex chars) is a content hash
+of the plan, the residual of the member's bits and the token text of the sets
+that residual consults (and the parents' stable ids). It is equal for every
+member whose rows decide identically under the compiled rule, in every
+process and after restarts. It changes exactly when the member's binding
+changes: a principal rebuild (team/spot/role/permission rows naming the
+member), an in-memory grant or derived-set patch (`HandleCache::clear`), or a
+module install with a different plan. Grant and context atoms (assignments,
+shares, `createdBy`) are member atoms, not class inputs: a frame decided for a
+class applies to every member of it except the members `candidates` reports as
+hit, which need their own decision. Not done: running `apply_feed_event`'s
+decision once per (class, collection) in `perf/delivery`.
 
 ## Permission bits (implemented 2026-11-03)
 
