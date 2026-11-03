@@ -257,3 +257,61 @@ p95 < 20 ms) and the initial task load against a 1 s target. On Docker Desktop
 for macOS, `fdatasync` on the state volume measured p50 0.43 ms / p95 1.9 ms,
 far below a Linux server's disk, so save latency there understates the cost of
 durable commits.
+
+## Thin protocol clients
+
+Ported from `bench/thin-generator` (e15a1ebf) onto this lab's workload.
+`LOAD_CLIENT=thin` drives the same `run.ts` workload (tenants, action mix,
+timers, permission changes, visibility oracle, reconnect wave, pass rule, raw
+samples) through `thin-client.mjs` instead of the full SDK. It sends the SDK's
+frames at the same points: auth with the same capabilities, `action.call`,
+`reducer.call`, batched `replica.openMany`, `replica.close` after the SDK's
+250 ms retention, and re-auth plus full re-open after `membership-changed` or a
+dropped connection. Reducer and action promises settle only after the covering
+replica or control watermark; watermarks are deferred while a collection
+opens; frames that arrive while a snapshot is staging apply after activation.
+It skips LocalReplica storage, staging and digest verification, and shares
+parsed rows between users (`RowPool`).
+
+Rows: by default both clients use **legacy JSON rows** (`replica.snapshotPage`,
+`replica.snapshot`, `replica.transaction`, `replica.delta`; no ACKs). That is
+what the Whagons app's SDK (`0.5.2-staging.31` + patch `b75f898a`) negotiates:
+it enables native rows only with a staging adapter, which the app does not
+configure. `LOAD_NATIVE_ROWS=true` switches thin clients and SDK users (with
+in-memory staging, no fsync) to native rows (`replica.snapshotEncodedPage`
+with `replica.snapshotAck`, `replica.transactionEncoded`).
+
+Options:
+
+- `LOAD_SDK_USERS=N`: N measured users, spread evenly, keep the real SDK.
+- `LOAD_ORACLE_CLIENT=sdk|thin` (default `sdk`): client for visibility-oracle
+  sessions.
+- `LOAD_OPEN_LOOP=true|false` (default `true` for thin, `false` for sdk): with
+  the open loop, foreground actions and heartbeats fire on their planned
+  schedule whether or not earlier ones finished, and the first measurement of
+  each action counts from its planned start. `LOAD_MAX_INFLIGHT_PER_USER` (16)
+  bounds one user's in-flight actions; overflow counts as an error.
+- `LOAD_THIN_ACK_DELAY_MS`: delay each native snapshot ACK (slow client storage).
+- `LOAD_WIRE_RECORD=/path.jsonl` (`LOAD_WIRE_RECORD_FULL=true` for payloads):
+  record every frame either client sends and receives.
+
+Results add `client` (kind, rows, thin counters including `unsupported`, which
+must stay empty), `schedule` and `generatorCost` (CPU seconds, RSS samples).
+
+Checks: `node --test thin-client.test.mjs` (protocol unit tests, native and
+legacy rows) and `node thin-conformance.ts` in the lab (`LOAD_STATE`,
+`LOAD_PREPARED_USERS` = users passed to `prepare`): signs the same admin and
+member in through the SDK and the thin client, applies scripted changes from a
+third session and compares every collection's keys and projected values plus
+the frames each client sent, after every step.
+
+`paths.ts` (run with `node`) connects `LOAD_USERS` thin users with the
+standard collections and drives one operation at a fixed Poisson rate
+(`LOAD_RATE`/s), timed from each operation's planned start:
+`LOAD_SCENARIO=heartbeat` (`presence.beat`), `snapshot` (open and close a
+five-collection task detail window) or `edit` (`tasks.rename` in the largest
+tenant, plus delivery to every other connected user who sees the task).
+
+Second lab on one host: `LOAD_PREFIX` and `LOAD_COMPOSE_PROJECT` rename the
+containers, volume, network and compose project; `LOAD_COMPOSE_OVERRIDE` adds a
+compose file (for example host library mounts for host-built binaries).

@@ -53,6 +53,15 @@ const result = {
   latencyMs,
   steadyLatencyMs,
 };
+// Generator self-cost and thin-client counters, per shard and summed.
+if (parts.some(p => p.client?.kind !== first.client?.kind || p.schedule?.kind !== first.schedule?.kind)) errors['shards ran different client kinds or schedules'] = 1;
+result.generatorCostByShard = parts.map((p, k) => ({ shard: k, users: p.targetUsers, cpuSeconds: p.generatorCost?.cpuSeconds, wallSeconds: p.generatorCost?.wallSeconds, peakRssBytes: p.generatorCost?.peakRssBytes }));
+result.generatorCost = { cpuSeconds: parts.reduce((n, p) => n + (p.generatorCost?.cpuSeconds || 0), 0), peakRssBytesSum: parts.reduce((n, p) => n + (p.generatorCost?.peakRssBytes || 0), 0) };
+if (first.schedule) result.schedule = { kind: first.schedule.kind, ...Object.fromEntries(['fired', 'overflow', 'skippedDuringReconnect'].map(k => [k, parts.reduce((n, p) => n + (p.schedule?.[k] || 0), 0)])), startLateMsByShard: parts.map(p => p.schedule?.startLateMs) };
+if (first.client?.thin) {
+  const sumObj = (get) => parts.reduce((a, p) => { for (const [k, v] of Object.entries(get(p) || {})) if (typeof v === 'number') a[k] = (a[k] || 0) + v; return a; }, {});
+  result.client = { ...first.client, sdkUsers: parts.reduce((n, p) => n + (p.client?.sdkUsers || 0), 0), thin: { ...sumObj(p => p.client?.thin), unsupported: sumObj(p => p.client?.thin?.unsupported) } };
+}
 const rule = passRule({ ...result, latencyMs: steadyLatencyMs });
 Object.assign(result, { clientSloPassed: rule.passed && !(result.visibilityChecks.mismatched > 0), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
 writeFileSync(partial ? out + '.partial.json' : out, JSON.stringify(result, null, 2));

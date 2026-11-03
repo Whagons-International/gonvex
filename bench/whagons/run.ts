@@ -4,10 +4,14 @@ import { readFile, writeFile, appendFile, realpath } from 'node:fs/promises';
 import { writeFileSync, renameSync } from 'node:fs';
 import { randomUUID, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { loopback, quantiles, passRule } from './safety.mjs';
+import { memorySnapshotStaging } from './native-stage.mjs';
+import { installWireRecorder } from './wire-record.mjs';
+import { ThinClient, defaultPool as thinRowPool } from './thin-client.mjs';
 
 async function main() {
- const profileHash=createHash('sha256').update(await readFile(process.argv[1])).digest('hex');
+ const profileHash=createHash('sha256').update((await Promise.all([process.argv[1],new URL('thin-client.mjs',import.meta.url)].map(name=>readFile(name)))).map(b=>b.toString()).join('\n')).digest('hex');
  const app=process.env.WHAGONS_CHECKOUT!;
  if(!app) throw Error('WHAGONS_CHECKOUT is required');
  const require=createRequire(app+'/package.json');
@@ -36,7 +40,34 @@ async function main() {
  let project:any;
  let fixtures:any[]=[];
  let projectId='';
- const client=()=>{const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false}});c.connect();return c;};
+ installWireRecorder(process.env.LOAD_WIRE_RECORD,{full:process.env.LOAD_WIRE_RECORD_FULL==='true'});
+ // LOAD_CLIENT=thin drives the same workload through a protocol-level client
+ // (thin-client.mjs) instead of the full SDK. It sends the same frames but
+ // skips browser-side replica storage, so one process can hold many more users.
+ const clientKind=process.env.LOAD_CLIENT||'sdk';
+ if(!['sdk','thin'].includes(clientKind))throw Error('Unknown LOAD_CLIENT');
+ const thin=clientKind==='thin';
+ // Mixed mode: LOAD_SDK_USERS measured users (spread evenly) keep the real SDK
+ // so client-side behaviour stays covered. Visibility oracle sessions use
+ // LOAD_ORACLE_CLIENT (default sdk), independent of the thin client.
+ const sdkUsers=thin?Number(process.env.LOAD_SDK_USERS||0):Infinity;
+ const oracleKind=process.env.LOAD_ORACLE_CLIENT||'sdk';
+ if(!['sdk','thin'].includes(oracleKind)||!(sdkUsers>=0))throw Error('Invalid LOAD_SDK_USERS or LOAD_ORACLE_CLIENT');
+ const userKind=(i:number,target:number)=>!thin?'sdk':Math.floor((i+1)*Math.min(sdkUsers,target)/target)>Math.floor(i*Math.min(sdkUsers,target)/target)?'sdk':'thin';
+ // Row encoding. Default: legacy JSON rows, as the Whagons app's SDK
+ // negotiates without a native staging adapter. LOAD_NATIVE_ROWS=true makes
+ // thin clients and SDK users (with in-memory staging, no fsync) use native rows.
+ const nativeRequested=process.env.LOAD_NATIVE_ROWS==='true';
+ const sdkStaging=nativeRequested?memorySnapshotStaging():undefined;
+ // Open-loop schedule (default for thin runs): foreground actions and
+ // heartbeats fire at planned times whether or not earlier ones finished, and
+ // latency counts from the planned start. LOAD_OPEN_LOOP=false keeps the
+ // earlier closed loop for comparison with older runs.
+ const openLoop=(process.env.LOAD_OPEN_LOOP??(thin?'true':'false'))==='true';
+ const maxInFlightPerUser=Number(process.env.LOAD_MAX_INFLIGHT_PER_USER||16);
+ const plannedStart=new AsyncLocalStorage<{at:number,used:boolean}>();
+ const scheduleStats={kind:openLoop?'open':'closed',fired:0,overflow:0,skippedDuringReconnect:0,lateMs:[] as number[]};
+ const client=(kind:string=clientKind)=>{if(kind==='thin'){const c=new ThinClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,nativeRows:nativeRequested,ackDelayMs:Number(process.env.LOAD_THIN_ACK_DELAY_MS||0)});c.connect();return c;}const staging=sdkStaging?.client();const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false},...(staging?{nativeSnapshotStaging:staging.staging}:{})});c.connect();return c;};
  let recordReducer:((path:string,ms:number,failed:boolean)=>void)|undefined;
  const reducer=async(c:any,ref:any,args:any)=>{const at=performance.now();try{const value=await c.reducer({...ref,localExecution:undefined},args,{offline:'reject'});recordReducer?.(ref.path,performance.now()-at,false);return value;}catch(e){recordReducer?.(ref.path,performance.now()-at,true);throw e;}};
  const identity=async(email:string)=>{
@@ -45,8 +76,8 @@ async function main() {
   if(!r.ok) r=await fetch(auth+'/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=local',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   const b:any=await r.json();if(!r.ok) throw Error('Emulator identity failed');return b.idToken;
  };
- const login=async(email:string,tenant?:string)=>{
-  const c=client();
+ const login=async(email:string,tenant?:string,kind:string=clientKind)=>{
+  const c=client(kind);
   try {
    const grant=await c.action(control.auth.exchangeExternalToken,{provider:'firebase',token:await identity(email),...(tenant?{tenantId:tenant}:{})});
    if(tenant) await c.authenticate({project:projectId,token:grant.accessToken,tenant});
@@ -137,7 +168,9 @@ async function main() {
  const samples:Record<string,{at:number,ms:number}[]>={};
  const sample=(kind:string,ms:number,at=Date.now()-ms)=>{measurements[kind].push(ms);(samples[kind]??=[]).push({at,ms});};
  const error=(e:any)=>{const key=String(e?.message||e).slice(0,240);errors[key]=(errors[key]||0)+1;};
- const timed=async(kind:string,fn:()=>Promise<any>)=>{const t=performance.now();try{const v=await fn();sample(kind,performance.now()-t);return v;}catch(e){error(e);return undefined;}};
+ // The first measurement an action takes starts at its planned time (open loop).
+ const startTime=()=>{const p=plannedStart.getStore();if(p&&!p.used){p.used=true;return p.at;}return performance.now();};
+ const timed=async(kind:string,fn:()=>Promise<any>)=>{const t=startTime();try{const v=await fn();sample(kind,performance.now()-t);return v;}catch(e){error(e);return undefined;}};
  const perPath:Record<string,{durations:number[],errors:number}>={};
  recordReducer=(path,ms,failed)=>{const p=perPath[path]??={durations:[],errors:0};if(failed)p.errors++;else{p.durations.push(ms);sample('reducer',ms);}};
  const periodicTimers:ReturnType<typeof setInterval>[]=[];
@@ -170,6 +203,9 @@ async function main() {
   for(let k=0;k<fixtures.length;k++) {for(let j=0;j<(k<3?80:4);j++){const email=`load-filler-${k}-${j}@example.invalid`;const b=await login(email);b.c.close();await post('/dev/internal/e2e/members',{projectId,tenantId:fixtures[k].tenant,email});}}
   console.log(JSON.stringify({preparedUsers:target}));return;
  }
+ // Generator self-cost, so SDK and thin clients can be compared per user.
+ const generatorCost={samples:[] as any[],peakRssBytes:0,peakHeapUsedBytes:0} as any;const cpuAtStart=process.cpuUsage();const wallAtStart=performance.now();
+ const costTimer=setInterval(()=>{const m=process.memoryUsage(),u=process.cpuUsage(cpuAtStart);generatorCost.peakRssBytes=Math.max(generatorCost.peakRssBytes,m.rss);generatorCost.peakHeapUsedBytes=Math.max(generatorCost.peakHeapUsedBytes,m.heapUsed);generatorCost.samples.push({at:Date.now(),rss:m.rss,heapUsed:m.heapUsed,cpuMs:(u.user+u.system)/1000});},5000);costTimer.unref();
  const metricTimer=shard!==0?undefined:setInterval(()=>{void fetch(url+'/dev/metrics?project='+encodeURIComponent(projectId),{headers:{authorization:'Bearer '+admin}}).then(r=>r.json()).then(x=>appendFile((process.env.LOAD_RESULT||state)+'.metrics.jsonl',JSON.stringify({at:Date.now(),metrics:{websocket:{accounts:x.websocket?.accounts,connections:x.websocket?.connections,subscriptions:x.websocket?.subscriptions},database:x.database,queryAdmission:x.queryAdmission}})+'\n')).catch(error);},10000);
  const tenantCounts=new Map<string,number>();const ordinals=Array.from({length:target},(_,i)=>{const f=chooseTenant(i);const n=tenantCounts.get(f.tenant)||0;tenantCounts.set(f.tenant,n+1);return n;});
  // ---- Simulated users (load-realism audit 2026-11-03 plus Gabriel's direction:
@@ -190,7 +226,7 @@ async function main() {
   if(target.busy)return;target.busy=true;visibilityChecks.checked++;
   let fresh:any;let stop=()=>{};
   try{
-   fresh=await login(target.email,target.tenant);
+   fresh=await login(target.email,target.tenant,oracleKind);
    const fw=fresh.c.watchReplica(api.tasks.recentWorkspaceTasks,{});stop=fw.onUpdate(()=>{});
    const complete=(w:any)=>w.status().isUpToDate&&w.localReplicaState()?.completeness==='complete';
    if(!await until(()=>complete(fw),60000)){error(new Error('Visibility oracle snapshot never completed'));return;}
@@ -220,7 +256,7 @@ async function main() {
   let initial=true,presenceReadyAt=Infinity,actionAt=Infinity,subscribedAt=Infinity;
   const seen=new Map<string,number>(),seenTasks=new Map<string,number>(),firstSeen=new Map<string,number>();
   const connect=async(kind:string)=>{
-   const session=await timed(kind,()=>login(email,f.tenant));if(!session)return false;
+   const session=await timed(kind,()=>login(email,f.tenant,userKind(i,target)));if(!session)return false;
    c=session.c;member=session.grant.tenants.find((t:any)=>t.id===f.tenant)?.memberId;
    const watch=c.watchReplica(api.presence.list,{});presenceReadyAt=Infinity;
    stopPresence=watch.onUpdate(()=>{try{
@@ -245,13 +281,16 @@ async function main() {
   const periodicPending=new Set<Promise<unknown>>();
   const launch=(fn:()=>Promise<unknown>)=>{const p=fn();periodicPending.add(p);void p.finally(()=>periodicPending.delete(p));};
   let beatInFlight=false,supportInFlight=false,transitionInFlight=false,idle=false,reconnecting=false;
-  const sendBeat=async()=>{if(stopping||reconnecting||Date.now()>=deadline||beatInFlight)return;beatInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.beat,{}));}finally{beatInFlight=false;}};
-  const sendSupport=async()=>{if(stopping||reconnecting||Date.now()>=deadline||supportInFlight)return;supportInFlight=true;try{await timed('heartbeat',()=>reducer(c,control.support.heartbeat,{release:'synthetic-local',environment:'test'}));}finally{supportInFlight=false;}};
+  const sendBeat=async()=>{if(stopping||reconnecting||Date.now()>=deadline||(beatInFlight&&!openLoop))return;beatInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.beat,{}));}finally{beatInFlight=false;}};
+  const sendSupport=async()=>{if(stopping||reconnecting||Date.now()>=deadline||(supportInFlight&&!openLoop))return;supportInFlight=true;try{await timed('heartbeat',()=>reducer(c,control.support.heartbeat,{release:'synthetic-local',environment:'test'}));}finally{supportInFlight=false;}};
   let transitionAt=Date.now()-Math.log(Math.max(transitionRandom(),.000001))*101000;
-  const sendTransition=async(state:string)=>{if(stopping||reconnecting||Date.now()>=deadline||transitionInFlight)return;transitionInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.transition,{state}));}finally{transitionInFlight=false;transitionAt=Date.now()-Math.log(Math.max(transitionRandom(),.000001))*101000;}};
+  const sendTransition=async(state:string)=>{if(stopping||reconnecting||Date.now()>=deadline||(transitionInFlight&&!openLoop))return;transitionInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.transition,{state}));}finally{transitionInFlight=false;if(!openLoop)transitionAt=Date.now()-Math.log(Math.max(transitionRandom(),.000001))*101000;}};
   // Match the independent app providers: fixed 30-second ticks, skip an
   // overlapping heartbeat, and continue them while foreground saves await.
-  const sessionTimers=[setInterval(()=>launch(sendBeat),30000),setInterval(()=>launch(sendSupport),30000),setInterval(()=>{if(Date.now()>=transitionAt&&!transitionInFlight){idle=!idle;launch(()=>sendTransition(idle?'idle':'active'));}},200)];
+  // Open loop: a timer's call starts its clock at the planned tick, and the
+  // next transition is planned from the previous plan, not its completion.
+  const planned=(fn:()=>Promise<unknown>,dueWall=Date.now())=>()=>plannedStart.run({at:performance.now()-Math.max(0,Date.now()-dueWall),used:false},fn);
+  const sessionTimers=[setInterval(()=>launch(planned(sendBeat)),30000),setInterval(()=>launch(planned(sendSupport)),30000),setInterval(()=>{if(Date.now()>=transitionAt&&(!transitionInFlight||openLoop)){idle=!idle;const due=transitionAt;if(openLoop)transitionAt=due-Math.log(Math.max(transitionRandom(),.000001))*101000;launch(planned(()=>sendTransition(idle?'idle':'active'),openLoop?due:Date.now()));}},openLoop?20:200)];
   periodicTimers.push(...sessionTimers);launch(sendSupport);launch(()=>sendTransition('active'));
   const detailWindows=new Set<any>();
   const dwell=(win:any)=>{detailWindows.add(win);setTimeout(()=>{win.close();detailWindows.delete(win);},Math.min(think(),120000));};
@@ -265,10 +304,10 @@ async function main() {
   // Weighted foreground actions for every user (weights in percent).
   const actions:[number,()=>Promise<unknown>][]=[
    // Reads (25): task detail dwell, workspace switch, notifications, chat.
-   [15,async()=>{const t=pick(rows(),random);if(!t)return;const win=watchAll(c,[[api.tasks.get,{id:t._id}],[api.taskResources.listTaskNotes,{taskId:t._id}],[api.taskResources.listTaskLogs,{taskId:t._id}],[api.taskResources.listTaskViewsByTaskId,{taskId:t._id}],[api.approvals.listTaskApprovals,{taskId:t._id}],[api.taskFindings.listForTask,{taskId:t._id}],[api.taskResources.listTaskUsers,{taskId:t._id}],[api.customFields.listTaskValues,{taskId:t._id}]]);const q=performance.now();if(await until(win.ready,30000))sample('query',performance.now()-q);else error(new Error('Task detail queries never became current'));dwell(win);if(!t.firstViewedAt)expectTask(t._id,(row,at)=>row.firstViewedAt>=at);await save(api.taskResources.recordTaskViewByTaskId,{taskId:t._id});}],
-   [4,async()=>{const win=watchAll(c,[[api.statuses.statuses,{}],[api.priorities.list,{}],[api.taskWorkspaceContexts.contexts,{}],[api.roles.memberTeams,{}],[api.taskResources.recentTaskAcknowledgments,{}]]);const q=performance.now();if(await until(win.ready,30000))sample('query',performance.now()-q);dwell(win);}],
-   [3,async()=>{const win=watchAll(c,[[api.notifications.listNotifications,{}]]);const q=performance.now();if(await until(win.ready,30000))sample('query',performance.now()-q);dwell(win);if(random()<.3)await save(api.notifications.markAllRead,{});}],
-   [3,async()=>{const win=watchAll(c,[[api.chat.workspaceChat,{}]]);const q=performance.now();if(await until(win.ready,30000))sample('query',performance.now()-q);dwell(win);}],
+   [15,async()=>{const t=pick(rows(),random);if(!t)return;const win=watchAll(c,[[api.tasks.get,{id:t._id}],[api.taskResources.listTaskNotes,{taskId:t._id}],[api.taskResources.listTaskLogs,{taskId:t._id}],[api.taskResources.listTaskViewsByTaskId,{taskId:t._id}],[api.approvals.listTaskApprovals,{taskId:t._id}],[api.taskFindings.listForTask,{taskId:t._id}],[api.taskResources.listTaskUsers,{taskId:t._id}],[api.customFields.listTaskValues,{taskId:t._id}]]);const q=startTime();if(await until(win.ready,30000))sample('query',performance.now()-q);else error(new Error('Task detail queries never became current'));dwell(win);if(!t.firstViewedAt)expectTask(t._id,(row,at)=>row.firstViewedAt>=at);await save(api.taskResources.recordTaskViewByTaskId,{taskId:t._id});}],
+   [4,async()=>{const win=watchAll(c,[[api.statuses.statuses,{}],[api.priorities.list,{}],[api.taskWorkspaceContexts.contexts,{}],[api.roles.memberTeams,{}],[api.taskResources.recentTaskAcknowledgments,{}]]);const q=startTime();if(await until(win.ready,30000))sample('query',performance.now()-q);dwell(win);}],
+   [3,async()=>{const win=watchAll(c,[[api.notifications.listNotifications,{}]]);const q=startTime();if(await until(win.ready,30000))sample('query',performance.now()-q);dwell(win);if(random()<.3)await save(api.notifications.markAllRead,{});}],
+   [3,async()=>{const win=watchAll(c,[[api.chat.workspaceChat,{}]]);const q=startTime();if(await until(win.ready,30000))sample('query',performance.now()-q);dwell(win);}],
    // Edits (40): field edits fan out to every subscriber that can see the task.
    [8,async()=>{const t=pick(open(),random);if(!t)return;const description='Updated '+randomUUID()+' '+(t.description||'').slice(0,300);expectTask(t._id,row=>row.description===description);await save(api.tasks.updateDescription,{taskId:t._id,description});}],
    [6,async()=>{const t=pick(open(),random);if(!t)return;const dueDate=Date.now()+Math.floor(random()*14)*86400000;expectTask(t._id,row=>row.dueDate===dueDate);await save(api.tasks.update,{taskId:t._id,updates:{dueDate}});}],
@@ -324,14 +363,28 @@ async function main() {
   };
   // Reconnect wave: ~30% of users reconnect within 10 s, mid-plateau.
   const reconnectTime=random()<.3?reconnectAt(.5)+random()*10000:Infinity;
+  // Open loop: the next action is planned from the previous plan, not from
+  // when the previous action finished, so a slow server cannot lower load.
+  let foregroundTimer:ReturnType<typeof setTimeout>|undefined,foregroundInFlight=0;const foregroundPending=new Set<Promise<unknown>>();
+  const fireForeground=(due:number)=>{
+   if(stopping||Date.now()>=deadline)return;
+   if(reconnecting){scheduleStats.skippedDuringReconnect++;return;}
+   if(foregroundInFlight>=maxInFlightPerUser){scheduleStats.overflow++;error(Error(`Open-loop overflow: ${maxInFlightPerUser} actions already in flight for one user`));return;}
+   scheduleStats.fired++;if(scheduleStats.lateMs.length<200000)scheduleStats.lateMs.push(Date.now()-due);foregroundInFlight++;
+   const p=Promise.resolve().then(planned(()=>act(),due)).catch(error).finally(()=>{foregroundInFlight--;foregroundPending.delete(p);});foregroundPending.add(p);
+  };
+  let foregroundArmed=false;
+  const armForeground=()=>{if(stopping||Date.now()>=deadline)return;if(!foregroundArmed){foregroundArmed=true;if(actionAt<Date.now())actionAt=Date.now();}const due=actionAt;foregroundTimer=setTimeout(()=>{actionAt=due+think();fireForeground(due);armForeground();},Math.max(0,due-Date.now()));};
   while(!stopping&&Date.now()<deadline){
-   if(Date.now()>=reconnectTime&&!reconnecting&&!initial){reconnecting=true;disconnect();const connected=await connect('reconnect');reconnecting=false;if(!connected)break;}
+   if(openLoop&&!initial&&!foregroundTimer)armForeground();
+   if(Date.now()>=reconnectTime&&!reconnecting&&!initial){reconnecting=true;await Promise.all([...periodicPending,...foregroundPending]);disconnect();const connected=await connect('reconnect');reconnecting=false;if(!connected)break;}
    else if(admin&&!initial&&!reorgDone&&shard===0&&Date.now()>=reconnectAt(.3)&&(tenantUsers.get(f.tenant)||[]).find(h=>h.admin)===handle){reorgDone=true;await reorg();}
    else if(admin&&!initial&&Date.now()>=permissionAt){await changePermission();permissionAt=Date.now()+(120+random()*180)*1000;}
-   else if(!initial&&Date.now()>=actionAt){await act();actionAt=Date.now()+think();}
+   else if(!openLoop&&!initial&&Date.now()>=actionAt){await act();actionAt=Date.now()+think();}
    await pause(200);
   }
   for(const timer of sessionTimers)clearInterval(timer);
+  clearTimeout(foregroundTimer);await Promise.all([...foregroundPending]);
   await Promise.all([...periodicPending]);
   for(const win of detailWindows)win.close();
   await pause(1000);
@@ -345,7 +398,9 @@ async function main() {
  })().catch(e=>{error(e);ready();}));
  await Promise.all(jobs);clearInterval(metricTimer);stopping=true;for(const timer of periodicTimers)clearInterval(timer);for(const c of users)c.close();
  if(!measurements.delivery.length) error(new Error('No update delivery samples'));
- const result={sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,snapshots,visibilityChecks,reconnectWindowMs:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
+ clearInterval(costTimer);{const u=process.cpuUsage(cpuAtStart);Object.assign(generatorCost,{cpuSeconds:(u.user+u.system)/1e6,wallSeconds:(performance.now()-wallAtStart)/1000});}
+ const lateSorted=scheduleStats.lateMs.sort((a,b)=>a-b);const schedule={kind:scheduleStats.kind,fired:scheduleStats.fired,overflow:scheduleStats.overflow,skippedDuringReconnect:scheduleStats.skippedDuringReconnect,startLateMs:quantiles(lateSorted)};
+ const result={schedule,generatorCost,client:{kind:clientKind,rows:nativeRequested?'native':'legacy',sdkUsers:Array.from({length:target},(_,i)=>i).filter(i=>mine(i)&&userKind(i,target)==='sdk').length,oracle:oracleKind,...(thin?{thin:{...ThinClient.stats,rowPool:{distinctRows:thinRowPool.size,...thinRowPool.stats}}}:{})},sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'production-skew',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,snapshots,visibilityChecks,reconnectWindowMs:[reconnectAt(.5),reconnectAt(.5)+10000],targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{rawSamples:samples,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const steadyLatencyMs=Object.fromEntries(Object.keys(measurements).map(kind=>{const xs=(samples[kind]||[]).filter(x=>x.at>=deadline-seconds*1000&&x.at<deadline).map(x=>x.ms);return [kind,{samples:xs.length,...quantiles(xs)}];}));
  Object.assign(result,{steadyLatencyMs,qualificationLatencyScope:'steady plateau; operations started with all users connected'});
  const q:any=steadyLatencyMs;

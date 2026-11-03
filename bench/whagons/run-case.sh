@@ -12,23 +12,25 @@ label=${LOAD_LABEL:?set a unique LOAD_LABEL}
 mkdir -p "$lab/$label"
 [ ! -e "$lab/$label-summary.json" ] || { echo 'Refusing to overwrite a measured case' >&2;exit 2; }
 headroom() { until ${LOAD_HEADROOM_CHECK:-true} "$lab"; do sleep 30;done; }
-compose=(docker compose -f "$bench/compose.yaml")
+prefix=${LOAD_PREFIX:-gvsq} project=${LOAD_COMPOSE_PROJECT:-gonvex-sqlite-load}
+# LOAD_COMPOSE_OVERRIDE: optional extra compose file (for example host library mounts).
+compose=(docker compose -f "$bench/compose.yaml" ${LOAD_COMPOSE_OVERRIDE:+-f "$LOAD_COMPOSE_OVERRIDE"})
 export LOAD_LAB_ROOT="$lab"
 headroom
 "${compose[@]}" stop -t 20 runtime > "$lab/$label/runtime-stop.log" 2>&1 || true
 "${compose[@]}" run --rm --no-deps tools reset.py /lab/fixture.json > "$lab/$label/reset.log" 2>&1
 "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 runtime > "$lab/$label/runtime-start.log" 2>&1
 for name in runtime auth; do
- [ "$(docker inspect "gvsq-$name" --format '{{index .Config.Labels "com.docker.compose.project"}}')" = gonvex-sqlite-load ] || exit 2
+ [ "$(docker inspect "$prefix-$name" --format '{{index .Config.Labels "com.docker.compose.project"}}')" = "$project" ] || exit 2
 done
-[ "$(docker network inspect gonvex-sqlite-load_isolated --format '{{.Internal}}')" = true ] || exit 2
-durability=$(docker inspect gvsq-runtime --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^GONVEX_SQLITE_SYNCHRONOUS=//p')
+[ "$(docker network inspect "${project}_isolated" --format '{{.Internal}}')" = true ] || exit 2
+durability=$(docker inspect $prefix-runtime --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^GONVEX_SQLITE_SYNCHRONOUS=//p')
 case "$durability" in full|normal) ;; *) echo 'Durability preflight failed' >&2;exit 2;; esac
 printf '%s\n' "$durability" > "$lab/$label/durability"
-"${compose[@]}" run -d --rm --no-deps --name gvsq-monitor monitor "/lab/$label" > /dev/null
+"${compose[@]}" run -d --rm --no-deps --name $prefix-monitor monitor "/lab/$label" > /dev/null
 finish() {
- docker stop -t 5 gvsq-monitor >/dev/null 2>&1 || true
- if [ "$(docker inspect gvsq-generator --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)" = gonvex-sqlite-load ]; then docker stop -t 2 gvsq-generator >/dev/null 2>&1 || true;fi
+ docker stop -t 5 $prefix-monitor >/dev/null 2>&1 || true
+ if [ "$(docker inspect $prefix-generator --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)" = "$project" ]; then docker stop -t 2 $prefix-generator >/dev/null 2>&1 || true;fi
 }
 trap finish EXIT
 trap 'exit 130' INT
@@ -36,9 +38,9 @@ trap 'exit 143' TERM
 headroom
 status=0
 [ ! -e "$lab/$label/STOPPED_MEMORY_PRESSURE" ] || exit 125
-"${compose[@]}" run --name gvsq-generator --rm --no-deps generator > "$lab/$label/generator.log" 2>&1 || status=$?
+"${compose[@]}" run --name $prefix-generator --rm --no-deps generator > "$lab/$label/generator.log" 2>&1 || status=$?
 finish
 trap - EXIT INT TERM
 printf '%s\n' "$status" > "$lab/$label.exit"
-python3 "$bench/summarize.py" "$lab" "$label" > "$lab/$label-summary.json"
+LOAD_CONTAINER_PREFIX="$prefix-" python3 "$bench/summarize.py" "$lab" "$label" > "$lab/$label-summary.json"
 exit "$status"

@@ -1,23 +1,25 @@
 # One private network namespace. No published ports and no external route.
-name: gonvex-sqlite-load
+# LOAD_COMPOSE_PROJECT and LOAD_PREFIX give a second lab on the same host its
+# own project, network, volume and container names (defaults: the gvsq lab).
+name: ${LOAD_COMPOSE_PROJECT:-gonvex-sqlite-load}
 services:
   namespace:
     image: alpine:latest
-    container_name: gvsq-pod
+    container_name: ${LOAD_PREFIX:-gvsq}-pod
     command: [sleep, infinity]
     networks: [isolated]
     cpus: 0.1
     mem_limit: 64m
   valkey:
     image: valkey/valkey:8-alpine
-    container_name: gvsq-valkey
+    container_name: ${LOAD_PREFIX:-gvsq}-valkey
     network_mode: service:namespace
     command: [valkey-server, --bind, 127.0.0.1]
     cpus: 0.5
     mem_limit: 256m
   auth:
     image: node:26-bookworm-slim
-    container_name: gvsq-auth
+    container_name: ${LOAD_PREFIX:-gvsq}-auth
     network_mode: service:namespace
     cpus: 1
     mem_limit: 768m
@@ -46,7 +48,7 @@ services:
     # LOAD_RUNTIME_COMMAND="heaptrack -o /state/heap /binhost/gonvex-runtime"
     # with a LOAD_FEATURES=gonvex-runtime/system-alloc build.
     image: ${LOAD_RUNTIME_IMAGE:-debian:bookworm-slim}
-    container_name: gvsq-runtime
+    container_name: ${LOAD_PREFIX:-gvsq}-runtime
     network_mode: service:namespace
     user: '${LOAD_UID:-0}:${LOAD_GID:-0}'
     cpus: ${LOAD_RUNTIME_CPUS:-4}
@@ -93,7 +95,7 @@ services:
     # trixie ships SQLite 3.46; bookworm's 3.40 overflows its parser stack on
     # the Whagons task grid projection schema.
     image: python:3.13-slim-trixie
-    container_name: gvsq-tools
+    container_name: ${LOAD_PREFIX:-gvsq}-tools
     network_mode: none
     user: '${LOAD_UID:-0}:${LOAD_GID:-0}'
     working_dir: /harness
@@ -112,19 +114,35 @@ services:
       dockerfile_inline: |
         FROM docker:28-cli
         RUN apk add --no-cache python3
-    container_name: gvsq-monitor
+    container_name: ${LOAD_PREFIX:-gvsq}-monitor
     pid: host
     cgroup: host
     privileged: true
     entrypoint: [python3, /harness/monitor.py]
+    environment:
+      LOAD_PREFIX: ${LOAD_PREFIX:-gvsq}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${LOAD_LAB_ROOT}:/lab
       - .:/harness:ro
+  # Remote generator access (remote-proxy.py): Unix sockets in
+  # LOAD_LAB_ROOT/proxy, forwarded by the host over SSH. No published ports.
+  remote-proxy:
+    profiles: [remote]
+    image: python:3.13-slim-trixie
+    container_name: ${LOAD_PREFIX:-gvsq}-remote-proxy
+    network_mode: service:namespace
+    user: '${LOAD_UID:-1000}:${LOAD_GID:-1000}'
+    cpus: ${LOAD_PROXY_CPUS:-2}
+    mem_limit: 256m
+    entrypoint: [python3, /harness/remote-proxy.py, /proxy]
+    volumes:
+      - ${LOAD_LAB_ROOT}/proxy:/proxy
+      - .:/harness:ro
   generator:
     profiles: [load]
     image: node:26-bookworm-slim
-    container_name: gvsq-generator
+    container_name: ${LOAD_PREFIX:-gvsq}-generator
     network_mode: service:namespace
     depends_on:
       auth: {condition: service_healthy}
@@ -155,7 +173,7 @@ services:
     entrypoint: [/bin/sh, /harness/shards.sh]
 volumes:
   state:
-    name: gvsq-state
+    name: ${LOAD_PREFIX:-gvsq}-state
 networks:
   isolated:
     internal: true
