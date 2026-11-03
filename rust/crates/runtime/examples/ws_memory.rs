@@ -180,10 +180,38 @@ fn compress_cost() {
 /// Pseudo-JSON identifier text: words and numbers, no characters that need escaping.
 fn filler(size: usize, seed: &mut u32) -> String {
     const WORDS: [&str; 32] = [
-        "task", "status", "open", "closed", "team", "spot", "member", "title", "priority",
-        "high", "low", "medium", "due", "created", "updated", "owner", "workspace", "tenant",
-        "category", "form", "field", "value", "approval", "pending", "done", "note", "user",
-        "tag", "template", "shift", "board", "lane",
+        "task",
+        "status",
+        "open",
+        "closed",
+        "team",
+        "spot",
+        "member",
+        "title",
+        "priority",
+        "high",
+        "low",
+        "medium",
+        "due",
+        "created",
+        "updated",
+        "owner",
+        "workspace",
+        "tenant",
+        "category",
+        "form",
+        "field",
+        "value",
+        "approval",
+        "pending",
+        "done",
+        "note",
+        "user",
+        "tag",
+        "template",
+        "shift",
+        "board",
+        "lane",
     ];
     let mut out = String::with_capacity(size + 16);
     while out.len() < size {
@@ -216,6 +244,8 @@ mod server {
         let compression = arg(args, "--compression", "on") == "on";
         let port_file = arg(args, "--port-file", "");
         let data = arg(args, "--data", "");
+        let sndbuf: usize = arg(args, "--sndbuf", "0").parse().unwrap();
+        let rcvbuf: usize = arg(args, "--rcvbuf", "0").parse().unwrap();
         let mem = Router::new().route("/__mem", get(|| async { mem_json() }));
         let (app, _guard) = match mode.as_str() {
             "transport" => (
@@ -237,8 +267,15 @@ mod server {
         std::fs::write(&port_file, port.to_string()).unwrap();
         eprintln!("ws_memory server mode={mode} compression={compression} port={port}");
         axum::serve(
-            listener.tap_io(|stream| {
+            listener.tap_io(move |stream| {
                 let _ = stream.set_nodelay(true);
+                // Optional SO_SNDBUF/SO_RCVBUF caps (each disables that direction's autotuning).
+                if sndbuf > 0 {
+                    let _ = socket2::SockRef::from(&*stream).set_send_buffer_size(sndbuf);
+                }
+                if rcvbuf > 0 {
+                    let _ = socket2::SockRef::from(&*stream).set_recv_buffer_size(rcvbuf);
+                }
             }),
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
@@ -270,10 +307,7 @@ mod server {
         .await
     }
 
-    async fn runtime_fixture(
-        data: &str,
-        compression: bool,
-    ) -> (gonvex_runtime::Runtime, String) {
+    async fn runtime_fixture(data: &str, compression: bool) -> (gonvex_runtime::Runtime, String) {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
         use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
@@ -394,6 +428,9 @@ mod client {
     #[derive(Clone, Debug)]
     enum Command {
         Send(usize),
+        /// Send `count` messages of `size` without reading any reply: a client
+        /// that stopped reading. Server replies back up into socket buffers.
+        Stall(usize, usize),
         Close,
     }
 
@@ -464,6 +501,20 @@ mod client {
                 &Sample::take(port, pid).await,
             );
         }
+        let stall: usize = arg(args, "--stall", "0").parse().unwrap();
+        if stall > 0 {
+            shared.done.store(0, Ordering::Relaxed);
+            commands.send(Command::Stall(65536, stall)).unwrap();
+            wait(&shared, n).await;
+            tokio::time::sleep(settle).await;
+            report(
+                &label,
+                &format!("stalled_{stall}x65536"),
+                n,
+                &base,
+                &Sample::take(port, pid).await,
+            );
+        }
         shared.done.store(0, Ordering::Relaxed);
         commands.send(Command::Close).unwrap();
         for task in tasks {
@@ -483,7 +534,11 @@ mod client {
         }
     }
 
-    async fn connection(index: usize, shared: Arc<Shared>, mut commands: broadcast::Receiver<Command>) {
+    async fn connection(
+        index: usize,
+        shared: Arc<Shared>,
+        mut commands: broadcast::Receiver<Command>,
+    ) {
         let permit = shared.gate.acquire().await.unwrap();
         let mut socket = match open(&shared, index).await {
             Ok(socket) => socket,
@@ -505,7 +560,9 @@ mod client {
                     let marker = format!("m-{index}-{sequence}-");
                     let body = filler(size.saturating_sub(160), &mut seed);
                     let text = match &shared.token {
-                        Some(token) => format!(r#"{{"type":"auth","id":"{marker}{body}","token":"{token}","project":"project","tenant":"tenant"}}"#),
+                        Some(token) => format!(
+                            r#"{{"type":"auth","id":"{marker}{body}","token":"{token}","project":"project","tenant":"tenant"}}"#
+                        ),
                         None => format!(r#"{{"type":"echo","id":"{marker}","data":"{body}"}}"#),
                     };
                     let ok = socket.send(0x1, text.as_bytes()).await.is_ok()
@@ -517,6 +574,28 @@ mod client {
                         shared.failed.fetch_add(1, Ordering::Relaxed);
                         return;
                     }
+                }
+                Command::Stall(size, count) => {
+                    for _ in 0..count {
+                        sequence += 1;
+                        let body = filler(size.saturating_sub(160), &mut seed);
+                        let text = match &shared.token {
+                            Some(token) => format!(
+                                r#"{{"type":"auth","id":"s-{index}-{sequence}-{body}","token":"{token}","project":"project","tenant":"tenant"}}"#
+                            ),
+                            None => format!(
+                                r#"{{"type":"echo","id":"s-{index}-{sequence}","data":"{body}"}}"#
+                            ),
+                        };
+                        let write = socket.send(0x1, text.as_bytes());
+                        if tokio::time::timeout(Duration::from_secs(2), write)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    shared.done.fetch_add(1, Ordering::Relaxed);
                 }
                 Command::Close => {
                     let _ = socket.send(0x8, &1000u16.to_be_bytes()).await;
@@ -549,7 +628,9 @@ mod client {
         }
         let response = String::from_utf8_lossy(&response).to_lowercase();
         if !response.starts_with("http/1.1 101") {
-            return Err(std::io::Error::other(format!("handshake {index}: {response}")));
+            return Err(std::io::Error::other(format!(
+                "handshake {index}: {response}"
+            )));
         }
         let negotiated = response.contains("permessage-deflate");
         if negotiated {
@@ -562,7 +643,9 @@ mod client {
         if let Some(token) = &shared.token {
             socket.until("session.ready").await?;
             let id = format!("auth-{index}");
-            let auth = format!(r#"{{"type":"auth","id":"{id}","token":"{token}","project":"project","tenant":"tenant"}}"#);
+            let auth = format!(
+                r#"{{"type":"auth","id":"{id}","token":"{token}","project":"project","tenant":"tenant"}}"#
+            );
             socket.send(0x1, auth.as_bytes()).await?;
             let reply = socket.until(&format!("\"{id}\"")).await?;
             if !reply.contains("auth.result") {
@@ -716,7 +799,12 @@ mod client {
     /// f (forward alloc), w (wmem_queued) for established sockets on `port`.
     fn skmem(port: u16) -> ([i64; 4], i64) {
         let output = std::process::Command::new("ss")
-            .args(["-tmnH", "state", "established", &format!("( sport = :{port} )")])
+            .args([
+                "-tmnH",
+                "state",
+                "established",
+                &format!("( sport = :{port} )"),
+            ])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
@@ -750,7 +838,9 @@ mod client {
     async fn http_get(port: u16, path: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         stream
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
             .await
             .unwrap();
         let mut response = String::new();
