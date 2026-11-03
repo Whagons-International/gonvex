@@ -204,6 +204,10 @@ pub struct PoolRegistrySnapshot {
 
 #[derive(Clone)]
 pub(crate) struct Database {
+    /// Prepared statements of the writer connection (see `direct`). Declared
+    /// before `writer`: when the last handle drops, they are finalized while
+    /// the connection is still open.
+    pub(crate) statements: Arc<crate::direct::WriterStatements>,
     pub(crate) writer: SqlitePool,
     pub(crate) reader: SqlitePool,
     notify: broadcast::Sender<Notification>,
@@ -289,7 +293,9 @@ impl PoolRegistry {
         // `PRAGMA journal_mode` takes a lock, so issuing it on every reader
         // open made reader opens wait behind the writer's transactions.
         if !read_only {
-            options = options.journal_mode(SqliteJournalMode::Wal);
+            // Serialized mode: direct sessions finalize their cached
+            // statements on the writer from any thread (see `direct`).
+            options = options.journal_mode(SqliteJournalMode::Wal).serialized(true);
         }
         let options = options
             // COMMIT never syncs while holding the single writer; Full
@@ -370,6 +376,7 @@ impl PoolRegistry {
             .connect_lazy_with(self.options(&path, true)?);
         let (notify, _) = broadcast::channel(NOTIFY_CAPACITY);
         let database = Database {
+            statements: crate::direct::WriterStatements::new(),
             writer,
             reader,
             notify,
@@ -401,6 +408,14 @@ impl PoolRegistry {
     /// The writer pool (one connection). Every write must use it.
     pub async fn pool(&self, database_url: &str) -> Result<SqlitePool, DatabaseError> {
         Ok(self.database(database_url).await?.writer)
+    }
+
+    /// Prepared-statement counters of the writer's direct sessions.
+    pub async fn writer_statement_stats(
+        &self,
+        database_url: &str,
+    ) -> Result<crate::direct::StatementStats, DatabaseError> {
+        Ok(self.database(database_url).await?.statements.stats())
     }
 
     /// The read-only pool. Each transaction sees one WAL snapshot.
@@ -498,6 +513,7 @@ impl PoolRegistry {
         let cells = std::mem::take(&mut *self.databases.lock().unwrap());
         for database in cells.into_values().filter_map(|cell| cell.get().cloned()) {
             database.reader.close().await;
+            database.statements.close();
             database.writer.close().await;
             if let Some(wal) = &database.wal {
                 wal.close().await;
@@ -509,6 +525,7 @@ impl PoolRegistry {
         let cell = self.databases.lock().unwrap().remove(&key(database_url));
         if let Some(database) = cell.and_then(|cell| cell.get().cloned()) {
             database.reader.close().await;
+            database.statements.close();
             database.writer.close().await;
             if let Some(wal) = &database.wal {
                 wal.close().await;

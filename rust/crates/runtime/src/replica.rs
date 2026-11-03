@@ -1121,21 +1121,29 @@ async fn query_rows_filtered(
         }
     }
     let parameters = Parameters::scalars(&parameters).map_err(ReplicaError::InvalidIdentifier)?;
-    let query = parameters.bind(sqlx::query(&statement));
-    // Decode and admit one row at a time. SQL still uses maxRows + 1;
-    // a byte-limited source must not first allocate its entire SQL result.
-    let rows = query
-        .fetch(&mut **transaction.transaction())
-        .map(|row| {
-            let row = row?;
-            let raw: Option<String> = row.try_get(0)?;
-            raw.map(|raw| {
-                serde_json::from_str(&raw)
-                    .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
-            })
-            .transpose()
+    // Rows stream as JSON text from a blocking thread on the snapshot's own
+    // reader connection (`TenantTransaction::stream_json_rows`), in batches,
+    // and are decoded and admitted one at a time. SQL still uses
+    // maxRows + 1; a byte-limited source must not first allocate its entire
+    // SQL result.
+    let rows = transaction
+        .stream_json_rows(statement, parameters.into_owned_binds())
+        .await?;
+    let rows = futures_util::stream::unfold(rows, |mut rows| async move {
+        rows.next_batch().await.map(|batch| (batch, rows))
+    })
+    .flat_map(|batch| {
+        futures_util::stream::iter(match batch {
+            Ok(batch) => batch
+                .rows()
+                .map(|row| {
+                    serde_json::from_slice::<Value>(row)
+                        .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => vec![Err(ReplicaError::from(error))],
         })
-        .filter_map(|row| std::future::ready(row.transpose()));
+    });
     collect_snapshot_rows(rows, definition).await
 }
 
@@ -1159,11 +1167,13 @@ async fn collect_snapshot_rows(
         if definition.max_rows > 0 && kept.len() >= definition.max_rows {
             return Ok((kept, true));
         }
-        let row_bytes = serde_json::to_vec(&row).unwrap_or_default().len() as i64;
-        if definition.max_bytes > 0 && bytes + row_bytes > definition.max_bytes {
-            return Ok((kept, true));
+        if definition.max_bytes > 0 {
+            let row_bytes = serde_json::to_vec(&row).unwrap_or_default().len() as i64;
+            if bytes + row_bytes > definition.max_bytes {
+                return Ok((kept, true));
+            }
+            bytes += row_bytes;
         }
-        bytes += row_bytes;
         kept.push(row);
     }
     Ok((kept, false))

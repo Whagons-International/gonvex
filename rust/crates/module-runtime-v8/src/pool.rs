@@ -243,6 +243,7 @@ mod tests {
                             timeout: None,
                             max_result_bytes: 1024,
                             host,
+                            inline: None,
                         },
                     })
                     .unwrap();

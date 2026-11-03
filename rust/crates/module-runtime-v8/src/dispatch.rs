@@ -308,7 +308,23 @@ pub(crate) enum HostCallOutcome {
 impl HostCallOutcome {
     /// Encoding here rather than through serde_v8 keeps the op's return type a
     /// plain string, so the module boundary stays one shape in both directions.
+    ///
+    /// A successful value is the host's JSON text, embedded as is: the module
+    /// parses one envelope instead of an envelope plus a JSON string inside it
+    /// (which cost an escape pass here and a second parse in the isolate). An
+    /// empty value means `undefined` and is left out.
     pub(crate) fn encode(&self) -> String {
+        if let Self::Ok { value } = self {
+            if value.is_empty() {
+                return r#"{"status":"ok"}"#.to_owned();
+            }
+            const HEAD: &str = r#"{"status":"ok","value":"#;
+            let mut encoded = String::with_capacity(HEAD.len() + value.len() + 1);
+            encoded.push_str(HEAD);
+            encoded.push_str(value);
+            encoded.push('}');
+            return encoded;
+        }
         serde_json::to_string(self).unwrap_or_else(|_| {
             r#"{"status":"failed","message":"host call outcome could not be encoded"}"#.to_owned()
         })

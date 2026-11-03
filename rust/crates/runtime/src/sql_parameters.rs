@@ -54,6 +54,27 @@ impl Parameter {
         }
     }
 
+    /// The value as a direct-session bind (`gonvex_store::direct`).
+    pub(crate) fn as_bind(&self) -> gonvex_store::direct::Bind<'_> {
+        use gonvex_store::direct::Bind;
+        match self {
+            Self::Null => Bind::Null,
+            Self::Text(value) | Self::Json(value) => Bind::Text(value),
+            Self::Integer(value) => Bind::Integer(*value),
+            Self::Real(value) => Bind::Real(*value),
+        }
+    }
+
+    pub(crate) fn into_owned_bind(self) -> gonvex_store::direct::OwnedBind {
+        use gonvex_store::direct::OwnedBind;
+        match self {
+            Self::Null => OwnedBind::Null,
+            Self::Text(value) | Self::Json(value) => OwnedBind::Text(value),
+            Self::Integer(value) => OwnedBind::Integer(value),
+            Self::Real(value) => OwnedBind::Real(value),
+        }
+    }
+
     pub(crate) fn bind<'q>(
         self,
         query: Query<'q, Sqlite, SqliteArguments<'q>>,
@@ -70,6 +91,7 @@ impl Parameter {
 pub(crate) struct Parameters(Vec<Parameter>);
 
 impl Parameters {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(values: Vec<Parameter>) -> Self {
         Self(values)
     }
@@ -80,6 +102,10 @@ impl Parameters {
             .map(Parameter::scalar)
             .collect::<Result<Vec<_>, _>>()
             .map(Self)
+    }
+
+    pub(crate) fn into_owned_binds(self) -> Vec<gonvex_store::direct::OwnedBind> {
+        self.0.into_iter().map(Parameter::into_owned_bind).collect()
     }
 
     pub(crate) fn bind<'q>(

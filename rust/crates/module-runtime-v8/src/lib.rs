@@ -449,6 +449,7 @@ impl EngineInner {
                 timeout,
                 max_result_bytes: self.config.max_result_bytes,
                 host: host_sender,
+                inline: host.inline(),
             },
             reply,
         })?;

@@ -101,6 +101,20 @@ pub trait HostCallHandler: Send {
     ) -> Option<BoxFuture<'static, Result<Value, String>>> {
         None
     }
+
+    /// The response as the JSON bytes the module receives. Handlers that
+    /// produce JSON directly (module SQL) override this to skip a `Value`.
+    async fn handle_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        let value = self.handle(call).await?;
+        serde_json::to_vec(&value)
+            .map_err(|error| format!("host response could not be re-encoded: {error}"))
+    }
+
+    /// Calls the in-process engine may answer on the isolate's own thread
+    /// (see `gonvex_module_runtime::InlineHost`). Socket transport ignores it.
+    fn inline_host(&self) -> Option<std::sync::Arc<dyn gonvex_module_runtime::InlineHost>> {
+        None
+    }
 }
 
 impl ModuleHost {

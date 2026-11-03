@@ -452,6 +452,24 @@ pub trait ModuleHost: Send + Sync {
         context: &'a InvocationContext,
         call: HostCall,
     ) -> BoxFuture<'a, Result<HostResponse, HostError>>;
+
+    /// Host calls this invocation may answer synchronously on the thread that
+    /// runs the module (see [`InlineHost`]). `None` sends every call through
+    /// [`ModuleHost::call`].
+    fn inline(&self) -> Option<std::sync::Arc<dyn InlineHost>> {
+        None
+    }
+}
+
+/// The synchronous part of a host: calls it can answer on the engine's own
+/// thread without a hop to the task that owns the invocation (in-process
+/// database work on a connection the host leased to this invocation). The
+/// engine still checks capabilities first, and only offers a call when no
+/// other ordered host call is outstanding, so call order is preserved.
+pub trait InlineHost: Send + Sync {
+    /// Answers `call`, or hands it back (`Err`) to go through
+    /// [`ModuleHost::call`].
+    fn call_inline(&self, call: HostCall) -> Result<Result<HostResponse, HostError>, HostCall>;
 }
 
 #[derive(Debug, Error)]
