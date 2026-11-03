@@ -53,6 +53,7 @@ fn test_config(control_url: String, data_url: String) -> Config {
         storage: StorageConfig::default(),
         service_principals: Vec::new(),
         public_functions: Default::default(),
+        presence: Default::default(),
     }
 }
 
