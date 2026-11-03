@@ -22,6 +22,7 @@ mod metrics;
 pub mod module_host;
 pub mod modules;
 mod native_auth;
+pub mod offload;
 mod operations;
 mod operator_data;
 #[cfg(feature = "perf-fixture")]
@@ -1592,7 +1593,8 @@ async fn websocket(
     let mut feed_scheduler = FeedFirstScheduler::default();
     let mut sent_replica_revision = 0u64;
     let mut sent_zero_bootstrap_watermark = false;
-    let mut replicas = BTreeMap::new();
+    // Removed and dropped subscriptions are freed on the offload pool.
+    let mut replicas = offload::RetiringMap::default();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     // Retain at most one decoded, transport-size-bounded frame. While it waits
     // for preparation capacity, stop reading further frames (TCP backpressure).
@@ -1713,7 +1715,8 @@ async fn websocket(
             }
             _ = tokio::task::yield_now(), if !legacy_snapshot_delivery.is_empty() => {
                 for page in legacy_snapshot_delivery.next() {
-                    if send_json(&mut socket,&page).await.is_err() {return;}
+                    let Ok(page) = offload::encode_snapshot_json(page).await else { return; };
+                    if socket.send(Message::Text(page.into())).await.is_err() {return;}
                 }
                 continue;
             }
@@ -1816,7 +1819,7 @@ async fn websocket(
                             {
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
-                            let applied = runtime.apply_feed_event(session, &mut replicas, event).await;
+                            let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event).await;
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
                             match applied {
                                 Ok(messages) => {
@@ -4731,12 +4734,23 @@ async fn send_replica_open(
     if paged && matches!(message, ServerMessage::ReplicaSnapshot { .. }) {
         // Feed events stay queued while these pages are sent. The installed
         // subscription resumes from the materialized repeatable-read cursor.
-        for page in replica::SnapshotPages::new(message) {
-            send_json(socket, &page).await?;
+        // Pages are encoded one at a time, on the offload pool when large.
+        let mut pages = offload::PageEncoder::new(replica::SnapshotPages::new(message));
+        while let Some(page) = pages.next().await {
+            let page = page.map_err(|_| ())?;
+            socket.send(Message::Text(page.into())).await.map_err(|_| ())?;
         }
         Ok(())
     } else {
-        send_connection_json(delivery, socket, &replica::legacy_snapshot_frame(message)).await
+        let message = replica::legacy_snapshot_frame(message);
+        if matches!(message, ServerMessage::ReplicaSnapshot { .. }) && !delivery.native() {
+            let encoded = offload::encode_snapshot_json(message).await.map_err(|_| ())?;
+            return socket
+                .send(Message::Text(encoded.into()))
+                .await
+                .map_err(|_| ());
+        }
+        send_connection_json(delivery, socket, &message).await
     }
 }
 
@@ -4744,7 +4758,20 @@ async fn send_snapshot_frames(
     socket: &mut WebSocket,
     delivery: &mut snapshot_delivery::SnapshotDelivery,
 ) -> Result<(), ()> {
-    let batch = delivery.pump();
+    // `pump` encodes up to eight frames of rows; large ones on the pool.
+    let batch = if offload::offload().is_inline() || !delivery.has_bulk_pending() {
+        delivery.pump()
+    } else {
+        let mut owned = std::mem::take(delivery);
+        let (owned, batch) = offload::offload()
+            .run(move || {
+                let batch = owned.pump();
+                (owned, batch)
+            })
+            .await;
+        *delivery = owned;
+        batch
+    };
     for start in batch.starts {
         send_json(socket, &start).await?;
     }
@@ -4891,8 +4918,13 @@ mod tests {
             .unwrap();
         let mut pages = Vec::new();
         let mut start = None;
-        while let Ok(Some(message)) =
-            tokio::time::timeout(std::time::Duration::from_millis(100), socket.next()).await
+        // Frames are encoded on the offload pool: wait generously for the
+        // first one, then 100 ms for the server to stop on its credit window.
+        while let Ok(Some(message)) = tokio::time::timeout(
+            std::time::Duration::from_millis(if pages.is_empty() { 10_000 } else { 100 }),
+            socket.next(),
+        )
+        .await
         {
             let message = message.unwrap();
             if message.is_text() {

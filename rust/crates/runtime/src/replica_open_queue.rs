@@ -6,9 +6,6 @@ use futures_util::{
     FutureExt, StreamExt,
 };
 use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 /// Per-socket bound on pending preparations. Large tenants (El Rey) open far more
 /// than 256 windows on a fresh replica; hitting the bound failed the page render.
@@ -16,25 +13,9 @@ const MAX_ENTRIES: usize = 8192;
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 type Completion<T> = (String, u64, bool, T);
-struct Preparation<T>(tokio::task::JoinHandle<(bool, Option<Completion<T>>)>);
-impl<T> Future for Preparation<T> {
-    type Output = (bool, Option<Completion<T>>);
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.0).poll(context) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(value)) => Poll::Ready(value),
-            Poll::Ready(Err(error)) if error.is_panic() => {
-                std::panic::resume_unwind(error.into_panic())
-            }
-            Poll::Ready(Err(error)) => panic!("replica preparation task failed: {error}"),
-        }
-    }
-}
-impl<T> Drop for Preparation<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
+/// Preparations run on the offload pool (`crate::offload`), not on the
+/// socket's runtime; dropping one cancels it.
+type Preparation<T> = crate::offload::Offloaded<(bool, Option<Completion<T>>)>;
 struct Entry {
     ticket: u64,
     bytes: usize,
@@ -145,11 +126,10 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
             // The socket may await a query that needs a connection held by a
             // preparation. Keep SQL progress independent of polling next().
             // The queue owns cancellation and remains the only publisher.
-            self.active
-                .push(Preparation(tokio::spawn(gonvex_profiler::instrument(
-                    gonvex_profiler::TaskKind::Snapshot,
-                    async move { (bulk, job.future.await) },
-                ))));
+            self.active.push(crate::offload::offload().spawn(gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::Snapshot,
+                async move { (bulk, job.future.await) },
+            )));
         }
     }
     pub async fn next(&mut self) -> Option<T> {

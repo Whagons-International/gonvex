@@ -30,6 +30,7 @@ chrono.workspace = true
 cron.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
+libc.workspace = true
 ipnet.workspace = true
 gonvex-module-host = { path = "../module-host" }
 gonvex-module-runtime = { path = "../module-runtime" }
@@ -56,6 +57,10 @@ url.workspace = true
 duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
 
+[lints.clippy]
+# Deep clones on hot paths (perf workstreams).
+redundant_clone = "warn"
+
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 socket2 = "0.6"
@@ -71,6 +76,15 @@ required-features = ["perf-fixture"]
 [[bench]]
 name = "replica_state"
 harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "stalls"
+harness = false
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "offload_equivalence"
 required-features = ["perf-fixture"]
 
 [[test]]

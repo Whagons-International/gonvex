@@ -249,25 +249,7 @@ fn shared_definition(
 
 /// Free snapshot permits right now (profiler gauge).
 pub(crate) fn snapshot_permits_available() -> usize {
-    snapshot_permits().available_permits()
-}
-
-/// Process-wide bound on concurrent replica snapshot builds
-/// (`GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`, default: available CPUs, min 2).
-fn snapshot_permits() -> &'static tokio::sync::Semaphore {
-    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    PERMITS.get_or_init(|| {
-        let default = std::thread::available_parallelism()
-            .map(|cpus| cpus.get())
-            .unwrap_or(2)
-            .max(2);
-        let permits = std::env::var("GONVEX_REPLICA_SNAPSHOT_CONCURRENCY")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(default);
-        tokio::sync::Semaphore::new(permits)
-    })
+    crate::offload::SnapshotAdmission::global().available_permits()
 }
 
 /// One row of a collection scan: its key, decoded projection and canonical
@@ -283,7 +265,7 @@ struct CollectionRead {
     transaction: TenantTransaction,
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
-    _permit: tokio::sync::SemaphorePermit<'static>,
+    _permit: crate::offload::SnapshotPermit,
 }
 
 // Small and normal application collections can carry their integrity map with
@@ -660,12 +642,19 @@ impl Runtime {
         // snapshot.intern / snapshot.build stages here).
         use gonvex_profiler::{gauge, GaugeId, Label, Stage, Timer};
         let mut timer = Timer::start();
+        // Bounded by count and by an estimated byte budget
+        // (`crate::offload::SnapshotAdmission`).
         let permit = {
             let _waiting = gauge(GaugeId::SnapshotWaiting).guard();
-            snapshot_permits()
-                .acquire()
+            crate::offload::SnapshotAdmission::global()
+                .admit(
+                    format!(
+                        "{}\u{0}{}\u{0}{}",
+                        session.route.database_url, definition.table, session.member.id
+                    ),
+                    &definition.table,
+                )
                 .await
-                .expect("snapshot semaphore is never closed")
         };
         timer.lap(Stage::SnapshotPermitWait, Label::None);
         let control = self
@@ -1931,6 +1920,11 @@ impl SnapshotPages {
         pages
     }
 
+    /// Rows not yet paged.
+    pub(crate) fn remaining_rows(&self) -> usize {
+        self.rows.len()
+    }
+
     pub(crate) fn identity(&self) -> (&str, &str) {
         (&self.id, &self.snapshot_id)
     }
@@ -1991,7 +1985,7 @@ impl SnapshotPages {
     }
 }
 
-fn json_byte_len(value: &Value) -> usize {
+pub(crate) fn json_byte_len(value: &Value) -> usize {
     match value {
         Value::Null => 4,
         Value::Bool(true) => 4,
