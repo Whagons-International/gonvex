@@ -592,6 +592,17 @@
       });
     }
     if (granted.dbRead || granted.dbWrite) context.db = Object.freeze(db);
+    if (granted.dbRead) {
+      // Committed permission bits of the invoking member (one per permission
+      // and scope), answered in memory by the host. "" is the tenant-wide scope.
+      context.permissions = Object.freeze({
+        has: (permission, scope) => hostCall({
+          kind: "permissionsHas",
+          permission: text("permission", permission),
+          scope: scope === undefined || scope === null ? "" : String(scope),
+        }),
+      });
+    }
 
     if (granted.actionOutbox) {
       context.actions = Object.freeze({

@@ -10,8 +10,9 @@ pub(super) async fn resolve_derived(
 ) -> Result<usize, VisibilityError> {
     let mut statements = 0;
     let mut pending = active_sets(plan, &resolved.role)
-        .into_iter()
-        .filter(|name| plan.sets[name].kind == "derived")
+        .iter()
+        .filter(|name| plan.sets[*name].kind == "derived")
+        .cloned()
         .collect::<BTreeSet<_>>();
     while !pending.is_empty() {
         let name = pending

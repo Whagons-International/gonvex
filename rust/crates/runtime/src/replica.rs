@@ -74,6 +74,9 @@ pub struct ReplicaSubscription {
     pub aggregate: Option<ReplicaAggregate>,
     pub truncated: bool,
     pub resolved: ResolvedVisibility,
+    /// Compiled visibility binding of `resolved` (`visibility_class`).
+    /// Cleared whenever `resolved` changes.
+    pub(crate) mask: crate::visibility_class::HandleCache,
 }
 
 impl ReplicaSubscription {
@@ -431,6 +434,7 @@ impl Runtime {
                 hashes: snapshot.hashes,
                 truncated: snapshot.truncated,
                 resolved: snapshot.resolved,
+                mask: Default::default(),
             }),
         })
     }
@@ -587,6 +591,10 @@ impl Runtime {
         };
         let mut messages = Vec::new();
         let mut entity_changes = BTreeMap::<(String, String), ReplicaChange>::new();
+        // Change rows decoded once and class defaults evaluated once per
+        // visibility class for this event (`changes` outlives the memo).
+        // Counted into metrics after the loop (an error return drops them).
+        let mut memo = crate::visibility_class::EvalMemo::default();
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
@@ -608,6 +616,7 @@ impl Runtime {
                         subscription,
                         revision,
                         &changes,
+                        &mut memo,
                         &mut entity_changes,
                         &mut messages,
                     )
@@ -742,6 +751,7 @@ impl Runtime {
                 }
                 subscription.truncated = snapshot.truncated;
                 subscription.resolved = snapshot.resolved;
+                subscription.mask.clear();
                 subscription.cursor.revision = snapshot.clock.revision;
                 if !upserts.is_empty() || !deleted.is_empty() {
                     messages.push(replica_delta(
@@ -856,6 +866,7 @@ impl Runtime {
                 subscription.truncated,
             ));
         }
+        self.inner.visibility_metrics.record_eval_stats(&memo.stats);
         if !entity_changes.is_empty() {
             normalize_entity_changes(
                 &mut entity_changes,
@@ -1176,24 +1187,57 @@ fn row_in_collection(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> bool {
+    collection_filters_admit(row, args, definition) && visibility::row_matches(plan, resolved, row)
+}
+
+/// The collection's own filters (exclusions and argument equalities).
+fn collection_filters_admit(
+    row: &Value,
+    args: &Value,
+    definition: &ReplicaCollectionDefinition,
+) -> bool {
     let (Some(row), Some(args)) = (row.as_object(), args.as_object()) else {
         return false;
     };
-    if definition
+    !definition
         .exclude_when_set
         .iter()
         .any(|column| row.get(column).is_some_and(|value| !value.is_null()))
-    {
+        && !definition
+            .equal_filters
+            .iter()
+            .any(|(column, argument)| row.get(column) != args.get(argument))
+}
+
+/// `row_in_collection` through the subscription's compiled visibility class.
+/// `memoize` only for change rows that outlive `memo` unchanged (the feed
+/// event's own changes); other rows are evaluated without the memo.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn row_in_collection_compiled(
+    row: &Value,
+    args: &Value,
+    definition: &ReplicaCollectionDefinition,
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    handle: &crate::visibility_class::MemberHandle,
+    memo: &mut crate::visibility_class::EvalMemo,
+    memoize: bool,
+) -> bool {
+    use crate::visibility_class::{MemberHandle, RowView};
+    if !collection_filters_admit(row, args, definition) {
         return false;
     }
-    if definition
-        .equal_filters
-        .iter()
-        .any(|(column, argument)| row.get(column) != args.get(argument))
-    {
-        return false;
+    match handle {
+        MemberHandle::Compiled(member) if memoize => member.visible_memo(memo, row),
+        MemberHandle::Compiled(member) => {
+            memo.stats.compiled_checks += 1;
+            member.visible(RowView::Value(row))
+        }
+        MemberHandle::Fallback => {
+            memo.stats.fallback_checks += 1;
+            visibility::row_matches(plan, resolved, row)
+        }
     }
-    visibility::row_matches(plan, resolved, &Value::Object(row.clone()))
 }
 
 /// Returns whether a source-table transaction can no longer be represented by

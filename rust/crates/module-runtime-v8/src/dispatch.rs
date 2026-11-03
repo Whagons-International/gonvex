@@ -191,6 +191,11 @@ pub(crate) enum HostCallRequest {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    PermissionsHas {
+        permission: String,
+        #[serde(default)]
+        scope: String,
+    },
 }
 
 impl HostCallRequest {
@@ -290,6 +295,9 @@ impl HostCallRequest {
                 operation,
                 payload: encode(payload)?,
             },
+            Self::PermissionsHas { permission, scope } => {
+                HostCall::PermissionsHas { permission, scope }
+            }
         })
     }
 }
@@ -426,6 +434,33 @@ mod tests {
         assert!(!effective_capabilities(&FunctionKind::Query, &granted).scheduler);
         assert!(effective_capabilities(&FunctionKind::Reducer, &granted).scheduler);
         assert!(effective_capabilities(&FunctionKind::Action, &granted).scheduler);
+    }
+
+    #[test]
+    fn permissions_request_lowers_to_a_db_read_host_call() {
+        let request: HostCallRequest = serde_json::from_value(serde_json::json!({
+            "kind": "permissionsHas",
+            "permission": "edit-tasks",
+            "scope": "workspace-1"
+        }))
+        .expect("permissions request should decode");
+        let call = request.into_host_call().expect("permissions request should lower");
+        assert_eq!(call.capability(), "db_read");
+        assert_eq!(
+            call,
+            HostCall::PermissionsHas {
+                permission: "edit-tasks".to_owned(),
+                scope: "workspace-1".to_owned(),
+            }
+        );
+        let tenant_wide: HostCallRequest = serde_json::from_value(serde_json::json!({
+            "kind": "permissionsHas", "permission": "view"
+        }))
+        .expect("scope defaults to tenant-wide");
+        assert!(matches!(
+            tenant_wide.into_host_call(),
+            Ok(HostCall::PermissionsHas { scope, .. }) if scope.is_empty()
+        ));
     }
 
     #[test]

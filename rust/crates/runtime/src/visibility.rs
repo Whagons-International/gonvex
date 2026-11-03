@@ -40,16 +40,19 @@ pub struct VisibilityPlan {
 /// asked for it per subscription per change, walking the whole predicate
 /// each time (the largest CPU cost at 200 Whagons users).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ActiveSetsCache(Arc<PlanCaches>);
+pub(crate) struct ActiveSetsCache(pub(crate) Arc<PlanCaches>);
 
 #[derive(Debug, Default)]
 pub(crate) struct PlanCaches {
-    sets: std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>,
+    sets: std::sync::Mutex<BTreeMap<String, Arc<BTreeSet<String>>>>,
     /// `inherited_columns`, fixed per plan; read per subscription per change.
     inherited: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
-    /// Whether the plan has any `inheritsAny`; most plans have none, and
-    /// change routing asks per subscription per change.
-    has_inherits_any: std::sync::OnceLock<bool>,
+    /// The plan's `inheritsAny` expressions; change routing asks per
+    /// subscription per change, and re-walking the predicate each time was
+    /// 4.9% of runtime CPU at 200 Whagons users.
+    inherits_any: std::sync::OnceLock<Vec<VisibilityExpression>>,
+    /// The compiled program (`visibility_class`), built on first use.
+    pub(crate) compiled: std::sync::OnceLock<Arc<crate::visibility_class::CompiledPlan>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -720,17 +723,12 @@ pub fn via_index_name(via: &VisibilityVia, column: &str) -> String {
     format!("via\u{0}{}\u{0}{}", via.table, column)
 }
 
-/// Every `inheritsAny` expression of a plan.
-pub fn inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
-    let has_any = plan
-        .active_sets_cache
+/// Every `inheritsAny` expression of a plan (cached on the plan).
+pub fn inherits_any(plan: &VisibilityPlan) -> &[VisibilityExpression] {
+    plan.active_sets_cache
         .0
-        .has_inherits_any
-        .get_or_init(|| !collect_inherits_any(plan).is_empty());
-    if !*has_any {
-        return Vec::new();
-    }
-    collect_inherits_any(plan)
+        .inherits_any
+        .get_or_init(|| collect_inherits_any(plan).into_iter().cloned().collect())
 }
 
 fn collect_inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
@@ -943,7 +941,7 @@ impl VisibilityPlan {
         resolved: &ResolvedVisibility,
     ) -> VisibilityDependencies {
         let sets = active_sets(self, &resolved.role);
-        self.dependency_columns_for_sets(Some(&sets))
+        self.dependency_columns_for_sets(Some(sets.as_ref()))
     }
 
     /// Conservative row routing for legacy declarations. A changed occurrence
@@ -970,8 +968,8 @@ impl VisibilityPlan {
             }
         }
         let active = active_sets(self, &resolved.role);
-        for name in active {
-            let set = &self.sets[&name];
+        for name in active.iter() {
+            let set = &self.sets[name];
             let base = if set.alias.is_empty() {
                 set.table.as_str()
             } else {
@@ -1056,7 +1054,7 @@ impl VisibilityPlan {
             }
         }
         let active = active_sets(self, &resolved.role);
-        for name in &active {
+        for name in active.iter() {
             let set = &self.sets[name];
             // Derived inputs are data rows, routed through their source tokens
             // by derived_change_concerns. They never reload every principal.
@@ -1184,12 +1182,11 @@ impl VisibilityPlan {
     }
 
     /// Child columns that reference each directly inherited parent table.
-    pub fn inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+    pub fn inherited_columns(&self) -> &BTreeMap<String, BTreeSet<String>> {
         self.active_sets_cache
             .0
             .inherited
             .get_or_init(|| self.compute_inherited_columns())
-            .clone()
     }
 
     fn compute_inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
@@ -1410,12 +1407,12 @@ fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool
 
 /// Sets a predicate references for this role, plus every set a `derived`
 /// set maps from, transitively.
-fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
+fn active_sets(plan: &VisibilityPlan, role: &str) -> Arc<BTreeSet<String>> {
     let cache = &plan.active_sets_cache.0.sets;
     if let Some(sets) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(role) {
         return sets.clone();
     }
-    let active = compute_active_sets(plan, role);
+    let active = Arc::new(compute_active_sets(plan, role));
     cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1562,7 +1559,7 @@ async fn resolve_member(
     let mut sets = BTreeMap::new();
     let mut active = BTreeSet::new();
     if materialize || plan.version == Some(2) {
-        active.extend(active_sets(plan, &role));
+        active.extend(active_sets(plan, &role).iter().cloned());
     }
     for (name, set) in &plan.sets {
         if !active.contains(name) || set.kind == "derived" {
@@ -1650,13 +1647,13 @@ pub fn resolve_with_parents<'a>(
                 resolved.indexes.insert(via_index_name(via, column), index);
             }
         }
-        for name in active_sets(plan, &resolved.role) {
-            let set = &plan.sets[&name];
+        for name in active_sets(plan, &resolved.role).iter() {
+            let set = &plan.sets[name];
             if set.kind != "derived" {
                 continue;
             }
             let index = acl.get(&set.table, &set.key)?;
-            resolved.indexes.insert(name, index);
+            resolved.indexes.insert(name.clone(), index);
         }
         for _ in 0..snapshot::resolve_derived(transaction, plan, &mut resolved).await? {
             metrics.record_visibility_sql_statement();
@@ -2673,6 +2670,11 @@ fn context_key(value: &str) -> Result<(), VisibilityError> {
             "unsupported context {value:?}"
         )))
     }
+}
+
+/// Whether `value` is a plain SQL identifier the runtime may quote.
+pub(crate) fn identifier_ok(value: &str) -> Result<(), VisibilityError> {
+    identifier(value).map(|_| ())
 }
 
 fn identifier(value: &str) -> Result<&str, VisibilityError> {

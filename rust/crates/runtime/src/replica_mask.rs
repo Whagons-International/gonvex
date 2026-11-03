@@ -98,6 +98,7 @@ impl Runtime {
         subscription: &mut ReplicaSubscription,
         revision: u64,
         changes: &[LogChange],
+        memo: &mut crate::visibility_class::EvalMemo,
         entity_changes: &mut BTreeMap<(String, String), ReplicaChange>,
         messages: &mut Vec<ServerMessage>,
     ) -> Result<MaskStep, ReplicaError> {
@@ -105,7 +106,7 @@ impl Runtime {
         let parents = subscription.visibility.inherited_columns();
         // (child key column, association, parent table) per inheritsAny.
         let any_parents = visibility::inherits_any(&subscription.visibility)
-            .into_iter()
+            .iter()
             .filter_map(|expression| {
                 Some((
                     expression.column.clone(),
@@ -307,6 +308,15 @@ impl Runtime {
                 }
             }
         }
+        if !granted.is_empty() || derived_touched {
+            // The principal (or a parent's) changed in memory above.
+            subscription.mask.clear();
+        }
+        let handle = subscription.mask.get(
+            &subscription.visibility,
+            &subscription.resolved,
+            &subscription.database_url,
+        );
         for change in &parent_changes {
             let Some(parent) = subscription.resolved.inherited.get(&change.table) else {
                 continue;
@@ -414,12 +424,15 @@ impl Runtime {
                         row.get(column)
                             .map(|value| crate::visibility_mask::scalar(Some(value)))
                             == Some(key.clone())
-                    }) && !row_in_collection(
+                    }) && !row_in_collection_compiled(
                         row,
                         &subscription.args,
                         &subscription.definition,
                         &subscription.visibility,
                         &subscription.resolved,
+                        &handle,
+                        memo,
+                        false,
                     )
                 })
                 .map(|(id, _)| id.clone())
@@ -433,12 +446,15 @@ impl Runtime {
         let source = source
             .into_iter()
             .map(|change| {
-                let now = row_in_collection(
+                let now = row_in_collection_compiled(
                     &change.new_value,
                     &subscription.args,
                     &subscription.definition,
                     &subscription.visibility,
                     &subscription.resolved,
+                    &handle,
+                    memo,
+                    true,
                 );
                 (change, now)
             })
