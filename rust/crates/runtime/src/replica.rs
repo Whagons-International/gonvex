@@ -70,7 +70,7 @@ pub struct ReplicaSubscription {
     pub rows: RowMap,
     /// Tenant database the rows come from (interning scope).
     pub database_url: String,
-    pub hashes: BTreeMap<String, String>,
+    pub hashes: RowHashes,
     pub aggregate: Option<ReplicaAggregate>,
     pub truncated: bool,
     pub resolved: ResolvedVisibility,
@@ -89,11 +89,11 @@ pub enum ReplicaAggregate {
     Sum(Box<ReplicaSetDigest>),
 }
 impl ReplicaAggregate {
-    fn from_hashes(hashes: &BTreeMap<String, String>, sum: bool) -> Self {
+    fn from_hashes<K: Ord, V: AsRef<str>>(hashes: &BTreeMap<K, V>, sum: bool) -> Self {
         if sum {
             let mut state = Box::<ReplicaSetDigest>::default();
             for hash in hashes.values() {
-                state.add(hash).expect("server-generated SHA-256");
+                state.add(hash.as_ref()).expect("server-generated SHA-256");
             }
             Self::Sum(state)
         } else {
@@ -140,26 +140,59 @@ fn snapshot_permits() -> &'static tokio::sync::Semaphore {
     })
 }
 
-/// A replica row shared by every subscription that holds it. Each
-/// subscription keeps its collection's rows for diffs and old values; with
-/// owned rows, N subscribers to a 9,000-task tenant held N full copies
-/// (~50 MB per Whagons user). Rows are interned by tenant, table, key and
-/// content hash, so identical rows are stored once.
-pub type SharedRow = Arc<Value>;
-pub type RowMap = BTreeMap<String, SharedRow>;
+/// A replica row shared by every subscription that holds it: its key, content
+/// hash and value, interned by tenant, table, key and hash so identical rows
+/// are stored once. Subscriptions keep pointer-sized map entries (`Arc<str>`
+/// key and hash shared with this entry) instead of their own key and hash
+/// strings; a 9,000-row subscription previously held ~2.5 MB of copies.
+#[derive(Debug, PartialEq)]
+pub struct ReplicaEntry {
+    pub key: RowKey,
+    pub hash: RowHash,
+    pub row: Value,
+}
 
-type RowIdentity = (String, String, String, String);
+impl ReplicaEntry {
+    /// An entry outside the interner (size projections and tests).
+    pub(crate) fn detached(key: &str, row: Value) -> SharedRow {
+        Arc::new(Self {
+            key: key.into(),
+            hash: row_hash(&row).into(),
+            row,
+        })
+    }
+}
 
-fn row_interner() -> &'static std::sync::Mutex<std::collections::HashMap<RowIdentity, std::sync::Weak<Value>>> {
-    static ROWS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<RowIdentity, std::sync::Weak<Value>>>,
-    > = std::sync::OnceLock::new();
+impl serde::Serialize for ReplicaEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.row.serialize(serializer)
+    }
+}
+
+impl std::ops::Deref for ReplicaEntry {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.row
+    }
+}
+
+pub type RowKey = Arc<str>;
+pub type RowHash = Arc<str>;
+pub type SharedRow = Arc<ReplicaEntry>;
+pub type RowMap = BTreeMap<RowKey, SharedRow>;
+pub type RowHashes = BTreeMap<RowKey, RowHash>;
+
+type Interner = std::collections::HashMap<Box<str>, std::sync::Weak<ReplicaEntry>>;
+
+fn row_interner() -> &'static std::sync::Mutex<Interner> {
+    static ROWS: std::sync::OnceLock<std::sync::Mutex<Interner>> = std::sync::OnceLock::new();
     ROWS.get_or_init(Default::default)
 }
 
-/// The shared copy of `row` (identified by database, table, key and hash).
+/// The shared entry for `row` (identified by database, table, key and hash).
+/// Only a row not already held by some subscription is copied.
 pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row: &Value) -> SharedRow {
-    let identity = (database.to_owned(), table.to_owned(), key.to_owned(), hash.to_owned());
+    let identity: Box<str> = format!("{database}\u{0}{table}\u{0}{key}\u{0}{hash}").into();
     let mut rows = row_interner().lock().unwrap();
     if let Some(shared) = rows.get(&identity).and_then(std::sync::Weak::upgrade) {
         return shared;
@@ -168,15 +201,26 @@ pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row
     if rows.len() > 1024 && rows.len().is_power_of_two() {
         rows.retain(|_, weak| weak.strong_count() > 0);
     }
-    let shared = Arc::new(row.clone());
+    let shared = Arc::new(ReplicaEntry {
+        key: key.into(),
+        hash: hash.into(),
+        row: row.clone(),
+    });
     rows.insert(identity, Arc::downgrade(&shared));
     shared
+}
+
+/// The key/hash map of `rows` (pointers into the shared entries).
+pub(crate) fn row_hashes(rows: &RowMap) -> RowHashes {
+    rows.values()
+        .map(|entry| (entry.key.clone(), entry.hash.clone()))
+        .collect()
 }
 
 struct Snapshot {
     rows: Vec<Value>,
     by_key: RowMap,
-    hashes: BTreeMap<String, String>,
+    hashes: RowHashes,
     truncated: bool,
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
@@ -494,10 +538,10 @@ impl Runtime {
             let key = row_key(row, &definition.key)?;
             let hash = row_hash(row);
             let shared = intern_row(&session.route.database_url, &definition.table, &key, &hash, row);
-            if by_key.insert(key.clone(), shared).is_some() {
+            hashes.insert(shared.key.clone(), shared.hash.clone());
+            if by_key.insert(shared.key.clone(), shared).is_some() {
                 return Err(ReplicaError::DuplicateKey(key));
             }
-            hashes.insert(key, hash);
         }
         Ok(Snapshot {
             rows,
@@ -655,7 +699,7 @@ impl Runtime {
                 );
                 for row in &upserts {
                     let key = row_key(row, &subscription.definition.key)?;
-                    let existed = subscription.rows.contains_key(&key);
+                    let existed = subscription.rows.contains_key(key.as_str());
                     entity_changes.insert(
                         (subscription.definition.table.clone(), key.clone()),
                         ReplicaChange {
@@ -675,7 +719,7 @@ impl Runtime {
                             entity: subscription.definition.table.clone(),
                             id: key.clone(),
                             operation: "delete".to_owned(),
-                            old_value: subscription.rows.get(key).map(|row| (**row).clone()),
+                            old_value: subscription.rows.get(key.as_str()).map(|row| row.row.clone()),
                             new_value: None,
                             changed_columns: Vec::new(),
                         },
@@ -737,7 +781,7 @@ impl Runtime {
                         .transpose()?;
                     let new_hash = new_projection.as_ref().map(row_hash);
                     if let Some(aggregate) = &mut subscription.aggregate {
-                        if let Some(previous) = subscription.hashes.get(&change.row_id) {
+                        if let Some(previous) = subscription.hashes.get(change.row_id.as_str()) {
                             aggregate.change(previous, true);
                         }
                         if let Some(hash) = &new_hash {
@@ -756,11 +800,13 @@ impl Runtime {
                             &hash,
                             new_projection,
                         );
-                        subscription.rows.insert(change.row_id.clone(), shared);
-                        subscription.hashes.insert(change.row_id.clone(), hash);
+                        subscription
+                            .hashes
+                            .insert(shared.key.clone(), shared.hash.clone());
+                        subscription.rows.insert(shared.key.clone(), shared);
                     } else {
-                        subscription.rows.remove(&change.row_id);
-                        subscription.hashes.remove(&change.row_id);
+                        subscription.rows.remove(change.row_id.as_str());
+                        subscription.hashes.remove(change.row_id.as_str());
                     }
                     accumulate_projection_delta(
                         &mut upserts,
@@ -851,7 +897,7 @@ fn normalize_entity_changes<'a>(
             if *collection_table != table {
                 continue;
             }
-            if let Some(row) = rows.get(id).and_then(|row| row.as_object()) {
+            if let Some(row) = rows.get(id.as_str()).and_then(|row| row.as_object()) {
                 fields.extend(row.clone());
             }
         }
@@ -1183,11 +1229,11 @@ fn source_update_requires_snapshot<'a>(
         let new_visible = row_in_collection(&change.new_value, args, definition, plan, resolved);
         if new_visible {
             projected.insert(
-                change.row_id.clone(),
-                Arc::new(project_row(&change.new_value, definition)?),
+                change.row_id.as_str().into(),
+                ReplicaEntry::detached(&change.row_id, project_row(&change.new_value, definition)?),
             );
-        } else if old_visible || projected.contains_key(&change.row_id) {
-            projected.remove(&change.row_id);
+        } else if old_visible || projected.contains_key(change.row_id.as_str()) {
+            projected.remove(change.row_id.as_str());
         }
     }
 
@@ -1250,9 +1296,9 @@ fn row_hash(row: &Value) -> String {
     hex_digest(stable_json(row).as_bytes())
 }
 
-fn verify_resume_hashes(
+fn verify_resume_hashes<K: Ord + AsRef<str>, V: AsRef<str>>(
     request: &ReplicaOpenRequest,
-    hashes: Option<&BTreeMap<String, String>>,
+    hashes: Option<&BTreeMap<K, V>>,
     aggregate: bool,
 ) -> Option<ServerMessage> {
     if hashes.is_some_and(|hashes| {
@@ -1289,15 +1335,15 @@ fn xor_hash(aggregate: &mut [u8; 32], hash: &str) {
     }
 }
 
-fn aggregate_bytes(hashes: &BTreeMap<String, String>) -> [u8; 32] {
+fn aggregate_bytes<K: Ord, V: AsRef<str>>(hashes: &BTreeMap<K, V>) -> [u8; 32] {
     let mut aggregate = [0u8; 32];
     for hash in hashes.values() {
-        xor_hash(&mut aggregate, hash);
+        xor_hash(&mut aggregate, hash.as_ref());
     }
     aggregate
 }
 
-fn aggregate_digest(hashes: &BTreeMap<String, String>) -> String {
+fn aggregate_digest<K: Ord, V: AsRef<str>>(hashes: &BTreeMap<K, V>) -> String {
     format_aggregate(&aggregate_bytes(hashes))
 }
 
@@ -1321,14 +1367,14 @@ fn subscription_digest(subscription: &ReplicaSubscription) -> String {
 
 // Reconstruct the cursor's membership from retained before-images. Visibility
 // dependency changes require reconciliation rather than trusting old visibility.
-fn resume_hashes(
-    current: &BTreeMap<String, String>,
+fn resume_hashes<K: Ord + AsRef<str>, V: AsRef<str>>(
+    current: &BTreeMap<K, V>,
     changes: &[LogChange],
     args: &Value,
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
-) -> Result<Option<BTreeMap<String, String>>, ReplicaError> {
+) -> Result<Option<RowHashes>, ReplicaError> {
     if bounded_sql_visibility(definition, plan, resolved) {
         // Retained before-images cannot evaluate an unmaterialized SQL set.
         // Reconcile the bounded snapshot instead of trusting missing IDs.
@@ -1338,76 +1384,109 @@ fn resume_hashes(
     if table_change_relevance(&definition.table, &dependencies, changes.iter()).1 {
         return Ok(None);
     }
-    let mut prior = current.clone();
+    let mut prior: RowHashes = current
+        .iter()
+        .map(|(key, hash)| (key.as_ref().into(), hash.as_ref().into()))
+        .collect();
     for change in changes
         .iter()
         .rev()
         .filter(|change| change.table == definition.table)
     {
-        prior.remove(&change.row_id);
+        prior.remove(change.row_id.as_str());
         if row_in_collection(&change.old_value, args, definition, plan, resolved) {
             prior.insert(
-                change.row_id.clone(),
-                row_hash(&project_row(&change.old_value, definition)?),
+                change.row_id.as_str().into(),
+                row_hash(&project_row(&change.old_value, definition)?).into(),
             );
         }
     }
     Ok(Some(prior))
 }
 
-fn hashes_digest(hashes: &BTreeMap<String, String>) -> String {
-    let pairs = Value::Array(
-        hashes
-            .iter()
-            .map(|(key, hash)| {
-                Value::Array(vec![
-                    Value::String(key.clone()),
-                    Value::String(hash.clone()),
-                ])
-            })
-            .collect(),
-    );
-    hex_digest(stable_json(&pairs).as_bytes())
+fn hashes_digest<K: Ord + AsRef<str>, V: AsRef<str>>(hashes: &BTreeMap<K, V>) -> String {
+    // Same bytes as stable_json([[key, hash], ...]) without building Values.
+    let mut out = String::with_capacity(2 + hashes.len() * 100);
+    out.push('[');
+    for (index, (key, hash)) in hashes.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        write_stable_string(&mut out, key.as_ref());
+        out.push(',');
+        write_stable_string(&mut out, hash.as_ref());
+        out.push(']');
+    }
+    out.push(']');
+    hex_digest(out.as_bytes())
 }
 
 fn stable_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_stable_json(&mut out, value);
+    out
+}
+
+/// Canonical JSON (sorted object keys, JS number formatting, U+2028/U+2029
+/// escaped) written into one buffer. Row hashes hash these bytes, so the
+/// output must not change; it runs for every row of every snapshot.
+fn write_stable_json(out: &mut String, value: &Value) {
     match value {
-        Value::Null => "null".to_owned(),
-        Value::Bool(value) => value.to_string(),
+        Value::Null => out.push_str("null"),
+        Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
         Value::Number(value) => {
+            use std::fmt::Write as _;
             if let Some(value) = value.as_i64() {
-                value.to_string()
+                let _ = write!(out, "{value}");
             } else if let Some(value) = value.as_u64() {
-                value.to_string()
+                let _ = write!(out, "{value}");
             } else if let Some(value) = value.as_f64() {
-                ryu_js::Buffer::new().format(value).to_owned()
+                out.push_str(ryu_js::Buffer::new().format(value));
             } else {
-                "null".to_owned()
+                out.push_str("null");
             }
         }
-        Value::String(value) => serde_json::to_string(value)
-            .unwrap_or_else(|_| "\"\"".to_owned())
-            .replace('\u{2028}', "\\u2028")
-            .replace('\u{2029}', "\\u2029"),
-        Value::Array(values) => format!(
-            "[{}]",
-            values.iter().map(stable_json).collect::<Vec<_>>().join(",")
-        ),
+        Value::String(value) => write_stable_string(out, value),
+        Value::Array(values) => {
+            out.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_stable_json(out, value);
+            }
+            out.push(']');
+        }
         Value::Object(values) => {
             let mut keys = values.keys().collect::<Vec<_>>();
             keys.sort_unstable();
-            format!(
-                "{{{}}}",
-                keys.into_iter()
-                    .map(|key| format!(
-                        "{}:{}",
-                        stable_json(&Value::String(key.clone())),
-                        stable_json(&values[key])
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
+            out.push('{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_stable_string(out, key);
+                out.push(':');
+                write_stable_json(out, &values[key]);
+            }
+            out.push('}');
         }
+    }
+}
+
+fn write_stable_string(out: &mut String, value: &str) {
+    let start = out.len();
+    // serde_json escapes quotes, backslashes and control characters and
+    // writes valid UTF-8, so the buffer stays a valid String.
+    let bytes = unsafe { out.as_mut_vec() };
+    if serde_json::to_writer(&mut *bytes, value).is_err() {
+        bytes.truncate(start);
+        bytes.extend_from_slice(b"\"\"");
+    }
+    if out[start..].contains(['\u{2028}', '\u{2029}']) {
+        let tail = out.split_off(start);
+        out.push_str(&tail.replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029"));
     }
 }
 
@@ -1446,21 +1525,31 @@ fn cursor_for(
     }
 }
 
-fn diff_rows(
+fn diff_rows<H, G, K, V, C>(
     current_rows: &RowMap,
-    current_hashes: &BTreeMap<String, String>,
-    client_hashes: &BTreeMap<String, String>,
-    client_keys: &[String],
-) -> (Vec<Value>, Vec<String>) {
+    current_hashes: &BTreeMap<H, G>,
+    client_hashes: &BTreeMap<K, V>,
+    client_keys: &[C],
+) -> (Vec<Value>, Vec<String>)
+where
+    H: Ord + std::borrow::Borrow<str>,
+    G: AsRef<str>,
+    K: Ord + std::borrow::Borrow<str>,
+    V: AsRef<str>,
+    C: AsRef<str>,
+{
     let upserts = current_rows
         .iter()
-        .filter(|(key, _)| client_hashes.get(*key) != current_hashes.get(*key))
-        .map(|(_, row)| (**row).clone())
+        .filter(|(key, _)| {
+            client_hashes.get(key.as_ref()).map(AsRef::as_ref)
+                != current_hashes.get(key.as_ref()).map(AsRef::as_ref)
+        })
+        .map(|(_, row)| row.row.clone())
         .collect();
     let deleted = client_keys
         .iter()
-        .filter(|key| !current_rows.contains_key(*key))
-        .cloned()
+        .filter(|key| !current_rows.contains_key(key.as_ref()))
+        .map(|key| key.as_ref().to_owned())
         .collect();
     (upserts, deleted)
 }
@@ -1867,7 +1956,9 @@ fn hex_digest(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     fn shared_rows(rows: std::collections::BTreeMap<String, serde_json::Value>) -> super::RowMap {
-        rows.into_iter().map(|(key, row)| (key, std::sync::Arc::new(row))).collect()
+        rows.into_iter()
+            .map(|(key, row)| (key.as_str().into(), super::ReplicaEntry::detached(&key, row)))
+            .collect()
     }
     use super::*;
 
@@ -2296,11 +2387,11 @@ mod tests {
         let new = serde_json::json!({"id":"1", "title":"new"});
         let inserted = serde_json::json!({"id":"2", "title":"inserted"});
         let removed = serde_json::json!({"id":"3", "title":"removed"});
-        let original = BTreeMap::from([
+        let original = BTreeMap::<String, String>::from([
             ("1".into(), row_hash(&old)),
             ("3".into(), row_hash(&removed)),
         ]);
-        let current = BTreeMap::from([
+        let current = BTreeMap::<String, String>::from([
             ("1".into(), row_hash(&new)),
             ("2".into(), row_hash(&inserted)),
         ]);
@@ -2330,26 +2421,26 @@ mod tests {
         }))
         .unwrap();
         assert!(verify_resume_hashes(&request, Some(&prior), true).is_none());
-        request.digest = Some(aggregate_digest(&BTreeMap::new()));
+        request.digest = Some(aggregate_digest(&BTreeMap::<String, String>::new()));
         assert!(matches!(
             verify_resume_hashes(&request, Some(&prior), true),
             Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         assert!(matches!(
-            verify_resume_hashes(&request, None, true),
+            verify_resume_hashes::<String, String>(&request, None, true),
             Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         let (upserts, deleted) = diff_rows(
             &shared_rows(BTreeMap::from([("1".into(), new.clone()), ("2".into(), inserted.clone())])),
             &current,
             &prior,
-            &["1".into(), "3".into()],
+            &["1".to_owned(), "3".to_owned()],
         );
         assert_eq!(upserts, vec![new, inserted]);
         assert_eq!(deleted, vec!["3"]);
         // A bounded snapshot may omit an unchanged row displaced since the
         // cursor. Its reconstructed checksum must request reconciliation.
-        let bounded_prior = BTreeMap::from([("3".into(), original["3"].clone())]);
+        let bounded_prior = BTreeMap::<String, String>::from([("3".into(), original["3"].clone())]);
         request.digest = Some(aggregate_digest(&original));
         assert!(matches!(
             verify_resume_hashes(&request, Some(&bounded_prior), true),
@@ -2374,7 +2465,7 @@ mod tests {
             "../../../../packages/protocol/fixtures/replica-set-digest.json"
         ))
         .unwrap();
-        let mut hashes = BTreeMap::new();
+        let mut hashes: BTreeMap<String, String> = BTreeMap::new();
         let mut aggregate = ReplicaAggregate::from_hashes(&hashes, true);
         for (i, mutation) in fixture["mutations"].as_array().unwrap().iter().enumerate() {
             let hash = mutation["hash"].as_str().unwrap();
@@ -2410,13 +2501,14 @@ mod tests {
 
     #[test]
     fn sdk_resume_aggregate_matches_client_xor_fixture() {
-        let hashes = BTreeMap::from([("a".into(), "01".repeat(32)), ("b".into(), "03".repeat(32))]);
+        let hashes: BTreeMap<String, String> =
+            BTreeMap::from([("a".into(), "01".repeat(32)), ("b".into(), "03".repeat(32))]);
         assert_eq!(
             aggregate_digest(&hashes),
             format!("xor1:{}", "02".repeat(32))
         );
         assert_eq!(
-            aggregate_digest(&BTreeMap::new()),
+            aggregate_digest(&BTreeMap::<String, String>::new()),
             format!("xor1:{}", "00".repeat(32))
         );
         let mut aggregate = aggregate_bytes(&hashes);
@@ -2424,7 +2516,7 @@ mod tests {
         xor_hash(&mut aggregate, &"05".repeat(32));
         assert_eq!(
             format_aggregate(&aggregate),
-            aggregate_digest(&BTreeMap::from([
+            aggregate_digest(&BTreeMap::<String, String>::from([
                 ("a".into(), "05".repeat(32)),
                 ("b".into(), "03".repeat(32)),
             ]))

@@ -448,7 +448,7 @@ impl Runtime {
                 || !hidden_removals.is_empty()
                 || source
                     .iter()
-                    .any(|(change, now)| *now || subscription.rows.contains_key(&change.row_id)))
+                    .any(|(change, now)| *now || subscription.rows.contains_key(change.row_id.as_str())))
         {
             return Ok(MaskStep::Refresh);
         }
@@ -507,13 +507,13 @@ impl Runtime {
         }
         for (change, now) in source {
             metrics.record_in_memory_row_check();
-            if !now && !subscription.rows.contains_key(&change.row_id) {
+            if !now && !subscription.rows.contains_key(change.row_id.as_str()) {
                 continue;
             }
             let projection = now
                 .then(|| project_row(&change.new_value, &subscription.definition))
                 .transpose()?;
-            inserted |= now && !subscription.rows.contains_key(&change.row_id);
+            inserted |= now && !subscription.rows.contains_key(change.row_id.as_str());
             self.mask_apply_row(
                 subscription,
                 &change.row_id,
@@ -529,7 +529,7 @@ impl Runtime {
             for row in rows {
                 let key = row_key(&row, &subscription.definition.key)?;
                 present.insert(key.clone());
-                inserted |= !subscription.rows.contains_key(&key);
+                inserted |= !subscription.rows.contains_key(key.as_str());
                 self.mask_apply_row(
                     subscription,
                     &key,
@@ -545,7 +545,7 @@ impl Runtime {
                 .rows
                 .iter()
                 .filter(|(id, row)| {
-                    !present.contains(*id)
+                    !present.contains(id.as_ref())
                         && row.get(&column).is_some_and(|value| {
                             values.contains(&crate::visibility_mask::scalar(Some(value)))
                         })
@@ -605,7 +605,7 @@ impl Runtime {
         if old.is_none() && projection.is_none() {
             return Ok(());
         }
-        if old.is_some() && old.as_deref() == projection.as_ref() {
+        if old.is_some() && old.as_ref().map(|entry| &entry.row) == projection.as_ref() {
             return Ok(());
         }
         let new_hash = projection.as_ref().map(row_hash);
@@ -626,8 +626,10 @@ impl Runtime {
                     &hash,
                     row,
                 );
-                subscription.rows.insert(id.to_owned(), shared);
-                subscription.hashes.insert(id.to_owned(), hash);
+                subscription
+                    .hashes
+                    .insert(shared.key.clone(), shared.hash.clone());
+                subscription.rows.insert(shared.key.clone(), shared);
             }
             _ => {
                 subscription.rows.remove(id);
