@@ -36,6 +36,32 @@ use inflate::inflate_message;
 /// Initial read buffer of a connection that did not negotiate compression.
 const PLAIN_READ_BUFFER: usize = 4096;
 
+/// Growing writers (`BytesMut` reassembly, `serde_json::to_string`) double
+/// their buffer, so a 65 KB message can sit in a 128 KiB allocation. Queued and
+/// handed-over messages keep that whole allocation alive, which is what a
+/// stalled client pins; above this much slack the message is moved to an
+/// exact-size allocation (one copy, only for large messages).
+fn has_slack(len: usize, capacity: usize) -> bool {
+    capacity - len > (len / 4).max(4096)
+}
+
+fn exact(payload: BytesMut) -> bytes::Bytes {
+    if has_slack(payload.len(), payload.capacity()) {
+        bytes::Bytes::copy_from_slice(&payload)
+    } else {
+        payload.freeze()
+    }
+}
+
+/// A text message whose allocation is no larger than its content (see
+/// `has_slack`). Use it for large encoded frames before `send`.
+pub fn text_message(mut text: String) -> ws::Message {
+    if has_slack(text.len(), text.capacity()) {
+        text.shrink_to_fit();
+    }
+    ws::Message::Text(text.into())
+}
+
 /// The upgraded byte stream.
 trait Io: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> Io for T {}
@@ -201,8 +227,9 @@ async fn read_ratchet(
         let result = match receiver.read(&mut payload).await {
             // Hand over the whole buffer: `split()` would leave an empty
             // view that keeps the message's allocation alive while idle.
+            // `exact` drops growth slack before the message waits anywhere.
             Ok(ratchet_core::Message::Text) => {
-                match ws::Utf8Bytes::try_from(std::mem::take(&mut payload).freeze()) {
+                match ws::Utf8Bytes::try_from(exact(std::mem::take(&mut payload))) {
                     Ok(text) => Ok(ws::Message::Text(text)),
                     Err(error) => {
                         let _ = receiver
@@ -216,7 +243,7 @@ async fn read_ratchet(
                 }
             }
             Ok(ratchet_core::Message::Binary) => {
-                Ok(ws::Message::Binary(std::mem::take(&mut payload).freeze()))
+                Ok(ws::Message::Binary(exact(std::mem::take(&mut payload))))
             }
             Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
             Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
@@ -458,6 +485,32 @@ mod outbound_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_messages_do_not_keep_growth_slack() {
+        // A 65 KB reassembled message in a doubled 128 KiB buffer.
+        let mut grown = BytesMut::with_capacity(128 << 10);
+        grown.extend_from_slice(&[b'x'; 65_000]);
+        let bytes = exact(grown);
+        assert_eq!(bytes.len(), 65_000);
+        // The copy owns an exact allocation: converting back is free and
+        // reports no spare capacity.
+        let vec: Vec<u8> = bytes.into();
+        assert!(vec.capacity() - vec.len() < 4096);
+        // Small slack is kept (no copy for ordinary messages).
+        let mut small = BytesMut::with_capacity(4096);
+        small.extend_from_slice(b"hello");
+        assert_eq!(exact(small).len(), 5);
+
+        let mut text = String::with_capacity(128 << 10);
+        text.push_str(&"y".repeat(65_000));
+        let ws::Message::Text(text) = text_message(text) else {
+            unreachable!()
+        };
+        let vec: Vec<u8> = bytes::Bytes::from(text).into();
+        assert_eq!(vec.len(), 65_000);
+        assert!(vec.capacity() - vec.len() < 4096);
+    }
 
     #[test]
     fn alternative_selection_compares_compressed_bytes_and_reuses_the_winner() {

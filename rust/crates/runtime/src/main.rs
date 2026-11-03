@@ -73,6 +73,7 @@ async fn run() -> ExitCode {
         };
     }
 
+    raise_open_file_limit();
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {
@@ -100,7 +101,7 @@ async fn run() -> ExitCode {
         error!(%error, "Gonvex runtime startup failed");
         return ExitCode::FAILURE;
     }
-    let listener = match tokio::net::TcpListener::bind(addr).await {
+    let listener = match gonvex_runtime::accept::bind(addr) {
         Ok(listener) => listener,
         Err(error) => {
             error!(%error, %addr, "failed to bind Gonvex runtime");
@@ -111,8 +112,7 @@ async fn run() -> ExitCode {
 
     info!(%addr, "starting Gonvex Rust runtime");
     // Nagle off plus per-socket kernel buffer caps on every accepted socket.
-    let listener =
-        gonvex_runtime::accept::TunedListener::new(listener, runtime_socket_tuning);
+    let listener = gonvex_runtime::accept::TunedListener::new(listener, runtime_socket_tuning);
     let server = axum::serve(
         listener,
         runtime
@@ -172,6 +172,31 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = signal::ctrl_c().await;
+    }
+}
+
+/// Every WebSocket holds a descriptor. Some Docker daemons start containers
+/// with a soft `nofile` of 1024 (hard 524288), which caps a runtime at about a
+/// thousand connections; raise the soft limit to the hard limit.
+fn raise_open_file_limit() {
+    #[cfg(unix)]
+    unsafe {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max
+        {
+            let previous = limit.rlim_cur;
+            limit.rlim_cur = limit.rlim_max;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) == 0 {
+                info!(
+                    from = previous,
+                    to = limit.rlim_cur,
+                    "raised the open file limit"
+                );
+            }
+        }
     }
 }
 

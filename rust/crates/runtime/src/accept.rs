@@ -54,6 +54,25 @@ impl SocketTuning {
     }
 }
 
+/// Listen backlog: room for a reconnect wave (every client of a runtime
+/// reconnecting after a deploy). The kernel clamps it to
+/// `net.core.somaxconn` (4096 by default since Linux 5.4); tokio's own
+/// `TcpListener::bind` uses 1024.
+pub const LISTEN_BACKLOG: u32 = 4096;
+
+/// Binds the runtime's listener with `SO_REUSEADDR` and `LISTEN_BACKLOG`.
+pub fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
+}
+
 /// A TCP listener that tunes every accepted socket.
 pub struct TunedListener {
     inner: TcpListener,
@@ -127,15 +146,11 @@ mod tests {
             receive_buffer: Some(32 << 10),
             notsent_lowat: Some(16 << 10),
         };
-        let mut listener = TunedListener::new(
-            TcpListener::bind("127.0.0.1:0").await.unwrap(),
-            tuning,
-        );
+        let mut listener =
+            TunedListener::new(TcpListener::bind("127.0.0.1:0").await.unwrap(), tuning);
         let address = listener.local_addr().unwrap();
-        let (client, (accepted, _)) = tokio::join!(
-            TcpStream::connect(address),
-            Listener::accept(&mut listener)
-        );
+        let (client, (accepted, _)) =
+            tokio::join!(TcpStream::connect(address), Listener::accept(&mut listener));
         let _client = client.unwrap();
         assert!(accepted.nodelay().unwrap());
         let socket = socket2::SockRef::from(&accepted);
@@ -148,13 +163,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_listens_and_accepts() {
+        let listener = bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        client.unwrap();
+        accepted.unwrap();
+    }
+
+    #[tokio::test]
     async fn unset_values_keep_platform_defaults() {
         let plain = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = plain.local_addr().unwrap();
         let (client, accepted) = tokio::join!(TcpStream::connect(address), plain.accept());
         let _client = client.unwrap();
         let (accepted, _) = accepted.unwrap();
-        let default_send = socket2::SockRef::from(&accepted).send_buffer_size().unwrap();
+        let default_send = socket2::SockRef::from(&accepted)
+            .send_buffer_size()
+            .unwrap();
         SocketTuning {
             send_buffer: None,
             receive_buffer: None,
@@ -163,7 +189,9 @@ mod tests {
         .apply(&accepted)
         .unwrap();
         assert_eq!(
-            socket2::SockRef::from(&accepted).send_buffer_size().unwrap(),
+            socket2::SockRef::from(&accepted)
+                .send_buffer_size()
+                .unwrap(),
             default_send
         );
     }

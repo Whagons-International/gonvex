@@ -15,7 +15,8 @@ const KERNEL_BUFFER: usize = 16 << 10;
 /// test server also shrinks the socket's send buffer here.
 #[derive(Clone, Copy)]
 struct Fd(i32);
-impl<'a> axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, tokio::net::TcpListener>>
+impl<'a>
+    axum::extract::connect_info::Connected<axum::serve::IncomingStream<'a, tokio::net::TcpListener>>
     for Fd
 {
     fn connect_info(stream: axum::serve::IncomingStream<'a, tokio::net::TcpListener>) -> Self {
@@ -63,12 +64,9 @@ async fn fixture(compressed: bool, limits: OutboundLimits) -> Fixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<Fd>(),
-        )
-        .await
-        .unwrap();
+        axum::serve(listener, app.into_make_service_with_connect_info::<Fd>())
+            .await
+            .unwrap();
     });
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.set_recv_buffer_size(KERNEL_BUFFER as u32).unwrap();
@@ -216,7 +214,11 @@ async fn small_writes_into_an_idle_socket_are_not_liveness() {
     // A client that reads nothing: Pings fit in the kernel buffer, so they
     // never block and are no evidence that the client is alive.
     for _ in 0..3 {
-        fixture.socket.send(ws::Message::Ping(bytes::Bytes::new())).await.unwrap();
+        fixture
+            .socket
+            .send(ws::Message::Ping(bytes::Bytes::new()))
+            .await
+            .unwrap();
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(fixture.socket.last_activity(), None);
@@ -249,7 +251,10 @@ async fn a_reader_waiting_on_the_application_is_alive() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(fixture.socket.last_activity().unwrap() > first);
     for _ in 0..2 {
-        assert!(matches!(fixture.socket.next().await, Some(Ok(ws::Message::Text(_)))));
+        assert!(matches!(
+            fixture.socket.next().await,
+            Some(Ok(ws::Message::Text(_)))
+        ));
     }
     tokio::time::sleep(Duration::from_millis(10)).await;
     let settled = fixture.socket.last_activity().unwrap();

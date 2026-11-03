@@ -1847,7 +1847,7 @@ async fn websocket(
                                                     let result = if let Some(patch) = patch {
                                                         socket.send_best_text(&full, &patch).await
                                                     } else {
-                                                        socket.send(Message::Text(full.into())).await
+                                                        socket.send(gonvex_websocket::text_message(full)).await
                                                     };
                                                     if result.is_err() { return; }
                                                     continue;
@@ -1862,7 +1862,7 @@ async fn websocket(
                                             encode_timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
                                             match compact {
                                                 Ok(Some(encoded)) => {
-                                                    if socket.send(Message::Text(encoded.into())).await.is_err() { return; }
+                                                    if socket.send(gonvex_websocket::text_message(encoded)).await.is_err() { return; }
                                                     continue;
                                                 }
                                                 Ok(None) => {}
@@ -1960,7 +1960,7 @@ async fn websocket(
             } => {
                 if let Some(slot) = presence_slot.as_ref() {
                     if let Some(frame) = presence_hub.drain(&connection_id, slot) {
-                        if socket.send(Message::Text(frame.into())).await.is_err() { return; }
+                        if socket.send(gonvex_websocket::text_message(frame)).await.is_err() { return; }
                     }
                 }
                 continue;
@@ -3241,7 +3241,7 @@ async fn websocket(
                             })
                             .unwrap_or_default(),
                         };
-                    if socket.send(Message::Text(response.into())).await.is_err() {
+                    if socket.send(gonvex_websocket::text_message(response)).await.is_err() {
                         break;
                     }
                 }
@@ -4828,7 +4828,7 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
         gonvex_profiler::Label::None,
     );
     socket
-        .send(Message::Text(encoded.into()))
+        .send(gonvex_websocket::text_message(encoded))
         .await
         .map_err(|_| ())
 }

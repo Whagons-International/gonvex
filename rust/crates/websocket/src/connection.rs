@@ -54,7 +54,7 @@ pub struct OutboundLimits {
 impl Default for OutboundLimits {
     fn default() -> Self {
         Self {
-            max_bytes: 512 << 10,
+            max_bytes: 256 << 10,
             max_frames: 1024,
             low_water: 64 << 10,
             stall_timeout: Duration::from_secs(30),
@@ -81,7 +81,10 @@ pub enum TrySendError {
 pub(crate) enum Outbound {
     Message(ws::Message),
     /// Send whichever of the two text messages is smaller on the wire.
-    BestText { full: String, patch: String },
+    BestText {
+        full: String,
+        patch: String,
+    },
 }
 
 impl Outbound {
@@ -280,7 +283,12 @@ impl Writer {
                 let message = match outbound {
                     Outbound::Message(message) => message,
                     Outbound::BestText { full, patch } => ws::Message::Text(
-                        if patch.len() < full.len() { patch } else { full }.into(),
+                        if patch.len() < full.len() {
+                            patch
+                        } else {
+                            full
+                        }
+                        .into(),
                     ),
                 };
                 sink.send(message).await
@@ -658,25 +666,25 @@ pub(crate) mod plain {
 
     pub(crate) fn to_tungstenite(message: ws::Message) -> ts::Message {
         // SAFETY (both unchecked conversions): axum's Utf8Bytes is valid UTF-8.
-        let text = |text: ws::Utf8Bytes| unsafe { ts::Utf8Bytes::from_bytes_unchecked(Bytes::from(text)) };
+        let text =
+            |text: ws::Utf8Bytes| unsafe { ts::Utf8Bytes::from_bytes_unchecked(Bytes::from(text)) };
         match message {
             ws::Message::Text(value) => ts::Message::Text(text(value)),
             ws::Message::Binary(bytes) => ts::Message::Binary(bytes),
             ws::Message::Ping(bytes) => ts::Message::Ping(bytes),
             ws::Message::Pong(bytes) => ts::Message::Pong(bytes),
-            ws::Message::Close(Some(frame)) => {
-                ts::Message::Close(Some(ts::protocol::CloseFrame {
-                    code: CloseCode::from(frame.code),
-                    reason: text(frame.reason),
-                }))
-            }
+            ws::Message::Close(Some(frame)) => ts::Message::Close(Some(ts::protocol::CloseFrame {
+                code: CloseCode::from(frame.code),
+                reason: text(frame.reason),
+            })),
             ws::Message::Close(None) => ts::Message::Close(None),
         }
     }
 
     pub(crate) fn from_tungstenite(message: ts::Message) -> Option<ws::Message> {
         // tungstenite validated UTF-8 already; axum re-checks on conversion.
-        let text = |text: ts::Utf8Bytes| ws::Utf8Bytes::try_from(Bytes::from(text)).unwrap_or_default();
+        let text =
+            |text: ts::Utf8Bytes| ws::Utf8Bytes::try_from(Bytes::from(text)).unwrap_or_default();
         Some(match message {
             ts::Message::Text(value) => ws::Message::Text(text(value)),
             ts::Message::Binary(bytes) => ws::Message::Binary(bytes),

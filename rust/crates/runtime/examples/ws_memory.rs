@@ -247,17 +247,26 @@ mod server {
         // a 0 buffer/lowat keeps the platform default (the old behaviour).
         let mut connection = gonvex_runtime::config::ConnectionConfig::default();
         let bytes = |name: &str, default: Option<usize>| -> Option<usize> {
-            let value: usize = arg(args, name, &default.unwrap_or(0).to_string()).parse().unwrap();
+            let value: usize = arg(args, name, &default.unwrap_or(0).to_string())
+                .parse()
+                .unwrap();
             (value > 0).then_some(value)
         };
         connection.socket.send_buffer = bytes("--sndbuf", connection.socket.send_buffer);
         connection.socket.receive_buffer = bytes("--rcvbuf", connection.socket.receive_buffer);
-        connection.socket.notsent_lowat =
-            bytes("--notsent", connection.socket.notsent_lowat.map(|v| v as usize)).map(|v| v as u32);
+        connection.socket.notsent_lowat = bytes(
+            "--notsent",
+            connection.socket.notsent_lowat.map(|v| v as usize),
+        )
+        .map(|v| v as u32);
         connection.outbound.stall_timeout = Duration::from_secs(
-            arg(args, "--stall-seconds", &connection.outbound.stall_timeout.as_secs().to_string())
-                .parse()
-                .unwrap(),
+            arg(
+                args,
+                "--stall-seconds",
+                &connection.outbound.stall_timeout.as_secs().to_string(),
+            )
+            .parse()
+            .unwrap(),
         );
         eprintln!("ws_memory server connection config: {connection:?}");
         let mem = Router::new().route("/__mem", get(|| async { mem_json() }));
@@ -290,7 +299,9 @@ mod server {
 
     async fn transport(
         State((compression, outbound)): State<(bool, gonvex_websocket::OutboundLimits)>,
-        accepted: Option<axum::Extension<axum::extract::ConnectInfo<gonvex_runtime::accept::AcceptedSocket>>>,
+        accepted: Option<
+            axum::Extension<axum::extract::ConnectInfo<gonvex_runtime::accept::AcceptedSocket>>,
+        >,
         request: Request,
     ) -> Response {
         let options = gonvex_websocket::UpgradeOptions {
@@ -452,6 +463,31 @@ mod client {
         Close,
     }
 
+    /// Round-trip times (microseconds) and wire bytes received, per phase.
+    static LATENCIES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    static RX_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn phase_stats(label: &str, phase: &str, n: usize) {
+        let mut latencies = std::mem::take(&mut *LATENCIES.lock().unwrap());
+        latencies.sort_unstable();
+        let at = |q: f64| {
+            latencies
+                .get(((latencies.len() as f64 * q) as usize).min(latencies.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(0)
+        };
+        let rx = RX_BYTES.swap(0, Ordering::Relaxed);
+        println!(
+            "{label} {phase}: rtt_us p50={} p95={} p99={} max={} samples={} wire_rx_bytes/conn={}",
+            at(0.5),
+            at(0.95),
+            at(0.99),
+            latencies.last().copied().unwrap_or(0),
+            latencies.len(),
+            rx / n.max(1) as u64,
+        );
+    }
+
     struct Shared {
         port: u16,
         deflate: bool,
@@ -506,6 +542,7 @@ mod client {
         );
         tokio::time::sleep(settle).await;
         report(&label, "idle", n, &base, &Sample::take(port, pid).await);
+        RX_BYTES.store(0, Ordering::Relaxed);
         for size in sizes {
             shared.done.store(0, Ordering::Relaxed);
             commands.send(Command::Send(size)).unwrap();
@@ -518,20 +555,86 @@ mod client {
                 &base,
                 &Sample::take(port, pid).await,
             );
+            phase_stats(&label, &format!("after_{size}"), n);
         }
         let stall: usize = arg(args, "--stall", "0").parse().unwrap();
         if stall > 0 {
+            // Every client sends `stall` 64 KB requests and reads nothing.
+            // Sample once a second until the server has dropped them all.
+            let watch = Duration::from_secs(arg(args, "--watch-seconds", "120").parse().unwrap());
             shared.done.store(0, Ordering::Relaxed);
+            let started = Instant::now();
             commands.send(Command::Stall(65536, stall)).unwrap();
-            wait(&shared, n).await;
-            tokio::time::sleep(settle).await;
-            report(
-                &label,
-                &format!("stalled_{stall}x65536"),
-                n,
-                &base,
-                &Sample::take(port, pid).await,
+            let (mut peak_sock, mut peak_anon, mut peak_rss) = (0i64, 0i64, 0i64);
+            let mut gone = None;
+            let mut reported_mid = false;
+            let mut server_gone = false;
+            while started.elapsed() < watch {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                    println!(
+                        "{label} stall: server process exited (OOM kill?) after {:?}",
+                        started.elapsed()
+                    );
+                    server_gone = true;
+                    break;
+                }
+                // A server killed mid-run (OOM) answers nothing.
+                let probe = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tokio::spawn(async move { http_get(port, "/__mem").await }),
+                )
+                .await;
+                if !matches!(&probe, Ok(Ok(body)) if serde_json::from_str::<serde_json::Value>(body).is_ok())
+                {
+                    println!(
+                        "{label} stall: server unreachable (OOM kill?) after {:?}",
+                        started.elapsed()
+                    );
+                    server_gone = true;
+                    break;
+                }
+                let now = Sample::take(port, pid).await;
+                if !reported_mid && started.elapsed() >= Duration::from_secs(15) {
+                    // Size classes while every client is still stalled.
+                    reported_mid = true;
+                    report(&label, "stalled_mid", n, &base, &now);
+                }
+                let stat = |key: &str| {
+                    now.stat.get(key).copied().unwrap_or(0)
+                        - base.stat.get(key).copied().unwrap_or(0)
+                };
+                peak_sock = peak_sock.max(stat("sock"));
+                peak_anon = peak_anon.max(stat("anon"));
+                peak_rss = peak_rss.max(now.rss - base.rss);
+                println!(
+                    "{label} stall t={:>3}s server_sockets={} sock={} anon={} rss={} heap={}",
+                    started.elapsed().as_secs(),
+                    now.sockets,
+                    stat("sock"),
+                    stat("anon"),
+                    now.rss - base.rss,
+                    now.heap - base.heap,
+                );
+                if now.sockets == 0 {
+                    gone = Some(started.elapsed());
+                    break;
+                }
+            }
+            println!(
+                "{label} stalled_{stall}x65536: disconnected_after={:?} peak sock={} ({} per conn) peak anon={} ({} per conn) peak rss delta={} ({} per conn)",
+                gone,
+                peak_sock,
+                peak_sock / n as i64,
+                peak_anon,
+                peak_anon / n as i64,
+                peak_rss,
+                peak_rss / n as i64,
             );
+            if server_gone {
+                std::process::exit(0);
+            }
+            wait(&shared, n).await;
         }
         shared.done.store(0, Ordering::Relaxed);
         commands.send(Command::Close).unwrap();
@@ -583,8 +686,15 @@ mod client {
                         ),
                         None => format!(r#"{{"type":"echo","id":"{marker}","data":"{body}"}}"#),
                     };
+                    let started = Instant::now();
                     let ok = socket.send(0x1, text.as_bytes()).await.is_ok()
                         && socket.until(&marker).await.is_ok();
+                    if ok {
+                        LATENCIES
+                            .lock()
+                            .unwrap()
+                            .push(started.elapsed().as_micros().min(u32::MAX as u128) as u32);
+                    }
                     drop(permit);
                     if ok {
                         shared.done.fetch_add(1, Ordering::Relaxed);
@@ -616,7 +726,9 @@ mod client {
                     shared.done.fetch_add(1, Ordering::Relaxed);
                 }
                 Command::Close => {
-                    let _ = socket.send(0x8, &1000u16.to_be_bytes()).await;
+                    let code = 1000u16.to_be_bytes();
+                    let close = socket.send(0x8, &code);
+                    let _ = tokio::time::timeout(Duration::from_secs(2), close).await;
                     let _ = tokio::time::timeout(Duration::from_secs(2), socket.drain()).await;
                     return;
                 }
@@ -731,6 +843,17 @@ mod client {
                 };
                 let mut part = vec![0; len];
                 self.stream.read_exact(&mut part).await?;
+                RX_BYTES.fetch_add(
+                    (2 + len
+                        + if len >= 0x10000 {
+                            8
+                        } else if len >= 126 {
+                            2
+                        } else {
+                            0
+                        }) as u64,
+                    Ordering::Relaxed,
+                );
                 let opcode = b0 & 0x0f;
                 if opcode >= 0x8 {
                     if first.is_none() {
