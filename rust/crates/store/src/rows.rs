@@ -88,7 +88,13 @@ pub fn json_value_expr(qualified: &str, kind: JsonKind) -> String {
         JsonKind::Boolean => format!(
             "CASE WHEN {qualified} IS NULL THEN NULL WHEN {qualified} THEN json('true') ELSE json('false') END"
         ),
-        JsonKind::Integer | JsonKind::Real | JsonKind::Text => qualified.to_owned(),
+        JsonKind::Integer | JsonKind::Real => qualified.to_owned(),
+        // json_object rejects BLOB values. Text-like columns (including
+        // declared BLOB/BYTEA) encode a BLOB as lowercase hex, exactly as
+        // `decode_value` does, so row images and decoded rows agree.
+        JsonKind::Text => format!(
+            "CASE WHEN typeof({qualified}) = 'blob' THEN lower(hex({qualified})) ELSE {qualified} END"
+        ),
     }
 }
 
@@ -156,10 +162,8 @@ pub fn decode_value(value: SqliteValueRef<'_>, kind: JsonKind) -> Result<Value, 
         (_, "TEXT") => Value::String(text()?),
         (_, "BLOB") => {
             let bytes = sqlx::Value::try_decode::<Vec<u8>>(&owned).map_err(decode_error)?;
-            Value::String(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                bytes,
-            ))
+            // Lowercase hex, matching json_value_expr's encoding in row images.
+            Value::String(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
         }
         _ => Value::String(text()?),
     })
@@ -333,5 +337,42 @@ mod result_kind_tests {
             .unwrap();
         let value = decode_value(sqlx::Row::try_get_raw(&row, 0).unwrap(), kinds[0].unwrap()).unwrap();
         assert_eq!(value, serde_json::json!(r#"{"not":"json"}"#));
+    }
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+    use sqlx::{Connection, Row};
+
+    #[tokio::test]
+    async fn blob_values_encode_identically_in_sql_images_and_decoded_rows() {
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE f (id TEXT PRIMARY KEY, data BLOB, note TEXT)")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO f VALUES ('a', x'00ff10', x'ab')")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let kinds = vec![
+            ("id".to_owned(), JsonKind::Text),
+            ("data".to_owned(), JsonKind::from_declared("BLOB")),
+            ("note".to_owned(), JsonKind::Text),
+        ];
+        let image: String = sqlx::query_scalar(&format!(
+            "SELECT {} FROM f AS r",
+            json_object_expr("r", &kinds)
+        ))
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        let image: Value = serde_json::from_str(&image).unwrap();
+        let row = sqlx::query("SELECT id, data, note FROM f").fetch_one(&mut connection).await.unwrap();
+        let decoded = Value::Object(row_to_object(&row, |_| None).unwrap());
+        assert_eq!(image, serde_json::json!({"id":"a","data":"00ff10","note":"ab"}));
+        assert_eq!(decoded, image);
+        let _ = row.get::<String, _>(0);
     }
 }

@@ -1478,6 +1478,8 @@ name = "gonvex-admin"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
+ "gonvex-store",
  "serde",
  "serde_json",
  "sha2",

@@ -76,6 +76,25 @@ impl Durability {
     }
 }
 
+/// Private page cache per connection in KiB (`GONVEX_SQLITE_CACHE_KIB`,
+/// default 8 MiB).
+fn sqlite_cache_kib() -> u64 {
+    env_u64("GONVEX_SQLITE_CACHE_KIB", 8 * 1024)
+}
+
+/// Shared memory-mapped window per database file in MiB
+/// (`GONVEX_SQLITE_MMAP_MIB`, default 256; 0 disables mmap).
+fn sqlite_mmap_mib() -> u64 {
+    env_u64("GONVEX_SQLITE_MMAP_MIB", 256)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 /// A notification published on one database's in-process channel.
 #[derive(Clone, Debug)]
 pub struct Notification {
@@ -218,7 +237,12 @@ impl PoolRegistry {
             })
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5))
-            .pragma("cache_size", "-65536")
+            // Private page cache per connection. Many tenants times several
+            // connections each makes a large private cache expensive, so the
+            // shared memory map below holds hot pages once for all
+            // connections (file-backed, reclaimable by the kernel).
+            .pragma("cache_size", format!("-{}", sqlite_cache_kib()))
+            .pragma("mmap_size", (sqlite_mmap_mib() * 1024 * 1024).to_string())
             .pragma("temp_store", "MEMORY")
             // Module SQL may use `col REGEXP $n` (Rust `regex` syntax).
             .with_regexp()

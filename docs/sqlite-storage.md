@@ -148,10 +148,115 @@ migration history is not replayed.
 
 ## Moving existing data
 
-`gonvex-admin export-sqlite` reads a Postgres tenant or Control Plane
-database and writes the equivalent SQLite file, converting timestamps to
-milliseconds, booleans to integers and `jsonb` to JSON text, then verifies row
-counts per table.
+`gonvex-admin export-sqlite` moves a Postgres deployment into a data
+directory: the Control Plane becomes `control.db`, and every project or tenant
+database becomes its file under `projects/`.
+
+```sh
+gonvex-admin export-sqlite \
+  --control-plane-url "$OLD_GONVEX_CONTROL_PLANE_DATABASE_URL" \
+  --data-dir /srv/gonvex/data \
+  --migrations ./migrations            # the app's SQLite migrations
+# options:
+#   --migrations PROJECT_ID=DIR   per-project migrations (repeatable)
+#   --project ID / --tenant ID    export only these databases (repeatable)
+#   --no-control-plane            keep an existing control.db; export databases only
+#   --force                       replace existing control.db / database files
+#   --allow-drop-columns          skip Postgres columns that have no SQLite column
+#   --allow-drop-tables           skip Postgres tables that have no SQLite table
+#   --keep-epoch                  keep the source sync epoch (see below)
+#   --sample-rows N               rows compared per table (default 200; 0 = off)
+#   --source-url-map FROM=TO      rewrite a source URL prefix (e.g. a Docker host)
+#   --report FILE                 also write the JSON report to FILE
+```
+
+Stop the Postgres runtime first. The tool reads each source database in one
+`REPEATABLE READ READ ONLY` snapshot, holds the data-directory lock while it
+runs, and refuses to overwrite `control.db` or a database file without
+`--force`.
+
+**Schema.** The tool never translates DDL. It builds each file with the
+runtime's own provisioning: `ControlPlane::connect` (Control Plane schema)
+plus the control-plane-scoped migrations, then `provision_tenant_database`
+(members, reference ledger, the app's tenant migrations, change capture).
+Each file is exactly what the runtime would create; only rows are copied.
+
+**Routing.** `gonvex_runtime_projects` rows point at
+`projects/{project}/project.db`; a tenant routed to its project's database
+(single-database projects) shares that file; any other tenant gets
+`projects/{project}/tenants/{tenant}.db`. `database_url` becomes the
+`sqlite://` URL and `database_name` the path relative to the data directory,
+so no Postgres URL or password survives in `control.db`. Deleted tenants are
+rewritten but not exported. Two live tenants sharing one Postgres database
+cannot be split into files and are refused.
+
+**What is copied.**
+
+| Copied | Not copied |
+|---|---|
+| Every Control Plane table | `gonvex_migrations` (the SQLite ledger lists the SQLite migrations) |
+| Every application table, including `members` | `_gonvex_sync_changes`, `_gonvex_sync_transactions` |
+| `_gonvex_action_outbox` (pending and in-flight rows) | `_gonvex_reference_*` (rebuilt, below) |
+| `_gonvex_reducer_idempotency` (or legacy `_gonvex_mutation_idempotency`) | |
+| `_gonvex_control_plane_membership_outbox`, `_gonvex_files` | |
+
+Rows that migrations seeded into a copied table are replaced by the source
+rows. A Postgres table or column with no SQLite counterpart stops the export
+unless `--allow-drop-tables` / `--allow-drop-columns` is given; a SQLite
+column missing in Postgres takes its default (a `NOT NULL` column without a
+default stops the export).
+
+**Change feed.** History is not copied. Old change rows hold Postgres-encoded
+row images (ISO timestamps, `t`/`f`) that would disagree with the converted
+rows, and replaying them would need Postgres transaction ids. The clock keeps
+the source revision with `retained_revision = revision` and an empty
+`_gonvex_sync_changes`, and a new epoch, so every client cursor is outside the
+retained window and the client resyncs with a snapshot of converted rows.
+`--keep-epoch` keeps the epoch; clients already at the head revision then keep
+their cached (Postgres-encoded) rows, so use it only when nothing changed
+encoding.
+
+**Triggers.** Change-capture, reference-staging and membership-projection
+triggers are dropped for the copy (so copied rows create no change, staging or
+outbox rows) and restored verbatim in the same transaction. Application
+triggers stay active (FTS indexes fill as rows arrive); an application trigger
+that writes into another copied table makes that copy fail with a duplicate
+key. After the copy the store's installer runs again and must accept every
+file as current.
+
+**Reference ledger.** The catalog the SQLite migrations declared (or, if they
+declared none, the Postgres catalog) is re-declared with
+`reference_integrity::declare`, which inventories the copied rows. Legacy
+dangling references stay visible in `gonvex_reference_violations` without
+blocking.
+
+**Conversion** is decided by the SQLite column's declared type:
+
+| Postgres | SQLite column | Stored |
+|---|---|---|
+| `timestamptz`, `timestamp` (as UTC) | INTEGER | Unix ms (microseconds floored) |
+| `timestamptz` | TEXT | RFC 3339 (`…Z`) |
+| `date` | INTEGER / TEXT | Unix ms of UTC midnight / `YYYY-MM-DD` |
+| `boolean` | BOOLEAN / INTEGER | `0` / `1` |
+| `jsonb`, `json`, arrays | JSON | minified JSON text (`json()`); arrays via `array_to_json` |
+| `numeric` | REAL / TEXT / INTEGER | number / exact text / integer only if integral |
+| `uuid`, enums, `text`, other | TEXT | `::text` |
+| `bytea` | BLOB | bytes |
+
+A value that cannot be stored exactly (a fractional numeric in an INTEGER
+column, `NaN`, an integer above 2^53 in a REAL column, unparsable text in a
+BOOLEAN column) stops the export with the table and column. Text in a JSON
+column is kept if it is valid JSON and stored as a JSON string otherwise.
+Change capture and the reference ledger encode rows with `json_object`, which
+rejects BLOB values, so application tables must not declare BLOB columns.
+
+**Verification.** For every copied table, against the same snapshot: row
+counts must match, and `--sample-rows` rows (stable pseudo-random order by
+primary-key hash) are converted again and compared with the stored SQLite row
+as canonical JSON. Each file must pass `PRAGMA integrity_check` and
+`PRAGMA foreign_key_check`, have no staged change rows, and be the file
+`control.db` routes its tenant to. The tool prints a JSON
+report and exits non-zero on any finding.
 
 ## Module SDK statements
 

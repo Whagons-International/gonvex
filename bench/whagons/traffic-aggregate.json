@@ -1,0 +1,78 @@
+{
+  "foreground_gap_quantiles_seconds": {
+    "25": 5.163474082946777,
+    "50": 12.731570959091187,
+    "75": 44.77355599403381,
+    "95": 735.9713110923767
+  },
+  "foreground_gap_samples": 113,
+  "observed_heartbeat_person_minutes": 349.41014383633933,
+  "foreground_calls_per_observed_person_minute": 0.360607733412048,
+  "peak_5min_traces": 224,
+  "mean_5min_traces": 38.48135112930284,
+  "traces": 3783,
+  "accounts": 13,
+  "tenants": 7,
+  "observed_accounts_per_tenant_desc": [
+    6,
+    5,
+    4,
+    3,
+    2,
+    2,
+    1
+  ],
+  "path_counts": {
+    "control.developer.status": 126,
+    "control.auth.publicSettings": 957,
+    "userLiveLocations.upsert": 3,
+    "presence.transition": 287,
+    "presence.beat": 964,
+    "tasks.listWindow": 32,
+    "workspacePreferences.save": 29,
+    "calls.acknowledgeRoomSignals": 11,
+    "calls.acknowledgeSignals": 4,
+    "notifications.markAllRead": 8,
+    "members.setMySettings": 2,
+    "gamification.recordDailyLogin": 54,
+    "control.support.heartbeat": 898,
+    "pushNotifications.registerToken": 14,
+    "calls.sendSignal": 1,
+    "members.markMyOnboardingTourSeen": 12,
+    "files.getFileUrls": 148,
+    "tasks.grid": 23,
+    "taskResources.recordTaskViewByTaskId": 72,
+    "files.getFileUrl": 56,
+    "memberAuthStates.recordMyAccountEmail": 15,
+    "tasks.acknowledgeTaskWorkspaceContext": 6,
+    "tasks.start": 6,
+    "tasks.requestTransition": 4,
+    "tasks.create": 5,
+    "tasks.bulkArchive": 3,
+    "tags.create": 3,
+    "taskResources.addTagByTaskId": 7,
+    "members.saveProfileAndTeams": 2,
+    "members.updateMember": 1,
+    "control.auth.memberProviders": 1,
+    "control.invitations.list": 1,
+    "taskResources.removeTagByTaskId": 3,
+    "notifications.clearAllNotifications": 1,
+    "assistant.rewriteText": 13,
+    "chat.markPendingMessagesDelivered": 1,
+    "templates.create": 2,
+    "taskResources.generateUploadUrl": 3,
+    "taskResources.createNote": 3,
+    "workflows.acknowledgmentSpotFollowUps": 2
+  },
+  "heartbeat_gaps": {
+    "presence.beat": {
+      "samples": 950,
+      "median_seconds": 29.539661407470703
+    },
+    "control.support.heartbeat": {
+      "samples": 883,
+      "median_seconds": 29.996465921401978
+    }
+  },
+  "warning": "Observed traces do not establish complete traffic rates or concurrent users."
+}

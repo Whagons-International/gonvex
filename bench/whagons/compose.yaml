@@ -1,0 +1,113 @@
+# One private network namespace. No published ports and no external route.
+name: gonvex-sqlite-load
+services:
+  namespace:
+    image: alpine:latest
+    container_name: gvsq-pod
+    command: [sleep, infinity]
+    networks: [isolated]
+    cpus: 0.1
+    mem_limit: 64m
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: gvsq-valkey
+    network_mode: service:namespace
+    command: [valkey-server, --bind, 127.0.0.1]
+    cpus: 0.5
+    mem_limit: 256m
+  auth:
+    image: node:26-bookworm-slim
+    container_name: gvsq-auth
+    network_mode: service:namespace
+    cpus: 1
+    mem_limit: 768m
+    environment:
+      CI: '1'
+      FIREBASE_CLI_DISABLE_USAGE: 'true'
+    volumes:
+      - ${LOAD_NPM_CACHE:?set LOAD_NPM_CACHE}:/root/.npm
+      - ${LOAD_LAB_ROOT}:/state
+      - ./auth.json:/firebase.json:ro
+    entrypoint: [/bin/sh, -c]
+    command:
+      - >-
+        if [ -d /state/auth-export ]; then set -- --import /state/auth-export; else set --; fi;
+        exec npx --offline --yes firebase-tools@15.11.0 emulators:start --only auth
+        --project demo-whagons-e2e --config /firebase.json
+        --export-on-exit /state/auth-export "$$@"
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:9099').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 1s
+      timeout: 2s
+      retries: 120
+  runtime:
+    image: alpine:latest
+    container_name: gvsq-runtime
+    network_mode: service:namespace
+    # Run as the lab owner so fill/reset scripts can open the SQLite files.
+    user: '${LOAD_UID:-1000}:${LOAD_GID:-1000}'
+    cpus: 4
+    mem_limit: 4g
+    working_dir: /state
+    command: [/binhost/gonvex-runtime]
+    volumes:
+      - ${LOAD_BIN_DIR:?set LOAD_BIN_DIR}:/binhost:ro
+      # Locally built Arch Linux ELF binaries need the workstation's loader.
+      - /usr/lib:/usr/lib:ro
+      - /usr/lib64:/usr/lib64:ro
+      - /lib64:/lib64:ro
+      - ${LOAD_LAB_ROOT}/runtime:/state
+    environment:
+      GONVEX_ADDR: 127.0.0.1:8080
+      GONVEX_ENV: test
+      GONVEX_TEST_AUTH_EMULATOR: 'true'
+      FIREBASE_AUTH_EMULATOR_HOST: 127.0.0.1:9099
+      GONVEX_DATA_DIR: /state/data
+      GONVEX_SQLITE_SYNCHRONOUS: ${LOAD_SQLITE_SYNCHRONOUS:-full}
+      GONVEX_ADMIN_KEY: local-load-admin
+      GONVEX_REQUIRE_AUTH: 'true'
+      GONVEX_MODULE_HOST_ENABLED: 'true'
+      GONVEX_MODULE_HOST_BINARY: /binhost/gonvex-module-host
+      GONVEX_SANDBOX_WORKER_BINARY: /binhost/gonvex-sandbox-worker
+      GONVEX_DB_MAX_OPEN_CONNS: ${LOAD_READERS:-4}
+      GONVEX_DB_MAX_TOTAL_CONNS: ${LOAD_SHARED:-64}
+      RUST_LOG: warn
+    healthcheck:
+      test: [CMD, wget, -q, -O, '-', http://127.0.0.1:8080/healthz]
+      interval: 1s
+      timeout: 2s
+      retries: 120
+  generator:
+    profiles: [load]
+    image: node:26-bookworm-slim
+    container_name: gvsq-generator
+    network_mode: service:namespace
+    depends_on:
+      auth: {condition: service_healthy}
+      runtime: {condition: service_healthy}
+    cpus: 2
+    mem_limit: 2g
+    user: '${LOAD_UID:-1000}:${LOAD_GID:-1000}'
+    volumes:
+      - ${WHAGONS_CHECKOUT:?set WHAGONS_CHECKOUT}:${WHAGONS_CHECKOUT}:ro
+      - ${LOAD_DEPS_ROOT:?set LOAD_DEPS_ROOT}:${LOAD_DEPS_ROOT}:ro
+      # Locally linked SDK packages (pnpm link: overrides) resolve outside the checkout.
+      - ${LOAD_GONVEX_PACKAGES:-/mnt/data/work/gonvex-sqlite/packages}:${LOAD_GONVEX_PACKAGES:-/mnt/data/work/gonvex-sqlite/packages}:ro
+      - ${LOAD_LAB_ROOT}:/state
+      - .:/harness:ro
+    environment:
+      WHAGONS_CHECKOUT: ${WHAGONS_CHECKOUT}
+      LOAD_DEPS_ROOT: ${LOAD_DEPS_ROOT}
+      LOAD_URL: http://127.0.0.1:8080
+      LOAD_AUTH_URL: http://127.0.0.1:9099
+      LOAD_STATE: /state/fixture.json
+      LOAD_ADMIN_KEY: local-load-admin
+      LOAD_USERS: ${LOAD_USERS:-26}
+      LOAD_SECONDS: ${LOAD_SECONDS:-180}
+      LOAD_RAMP_SECONDS: ${LOAD_RAMP_SECONDS:-60}
+      LOAD_ALL_TENANTS_ACTIVE: ${LOAD_ALL_TENANTS_ACTIVE:-false}
+      LOAD_RESULT: /state/${LOAD_LABEL:-step}.json
+    entrypoint: [/bin/sh, -c, 'exec "$$LOAD_DEPS_ROOT/.bin/tsx" /harness/run.ts "$$@"', load-runner]
+networks:
+  isolated:
+    internal: true
