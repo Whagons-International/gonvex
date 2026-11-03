@@ -372,6 +372,57 @@ impl Runtime {
         revision: u64,
         collapsed: &CollapsedChanges<'_>,
     ) -> Result<Option<Vec<(String, Value)>>, ReplicaError> {
+        // The read has no visibility predicate, so every subscriber of the
+        // collection that this event touches the same way shares it: one
+        // read per event, not one per connection.
+        type Shared = Option<Arc<Vec<(String, Value)>>>;
+        static RECENT: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<(String, Shared)>>> =
+            std::sync::OnceLock::new();
+        let key = format!(
+            "{}\u{0}{revision}\u{0}{:p}\u{0}{:p}\u{0}{}",
+            session.route.database_url,
+            Arc::as_ptr(&subscription.definition),
+            Arc::as_ptr(&subscription.visibility),
+            serde_json::to_string(affected).unwrap_or_default()
+        );
+        let recent = RECENT.get_or_init(Default::default);
+        let cached = recent
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(cached, _)| *cached == key)
+            .map(|(_, rows)| rows.clone());
+        let rows = match cached {
+            Some(rows) => rows,
+            None => {
+                let rows = self
+                    .read_affected_rows(session, subscription, affected, revision)
+                    .await?
+                    .map(Arc::new);
+                let mut recent = recent.lock().unwrap();
+                if recent.len() >= 64 {
+                    recent.pop_front();
+                }
+                recent.push_back((key, rows.clone()));
+                rows
+            }
+        };
+        let table = subscription.definition.table.as_str();
+        Ok(rows.map(|rows| {
+            rows.iter()
+                .filter(|(id, _)| !collapsed.contains_key(&(table, id.as_str())))
+                .cloned()
+                .collect()
+        }))
+    }
+
+    async fn read_affected_rows(
+        &self,
+        session: &TenantSession,
+        subscription: &ReplicaSubscription,
+        affected: &BTreeMap<String, BTreeSet<String>>,
+        revision: u64,
+    ) -> Result<Option<Vec<(String, Value)>>, ReplicaError> {
         let definition = &subscription.definition;
         let control = self
             .inner
@@ -459,12 +510,6 @@ impl Runtime {
             }
         }
         transaction.commit().await?;
-        Ok(Some(
-            rows.into_iter()
-                .filter(|(id, _)| {
-                    !collapsed.contains_key(&(definition.table.as_str(), id.as_str()))
-                })
-                .collect(),
-        ))
+        Ok(Some(rows.into_iter().collect()))
     }
 }
