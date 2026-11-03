@@ -17,7 +17,10 @@ fn main() -> ExitCode {
     // In-process module isolates need the V8 platform initialized on this
     // thread before Tokio starts its workers (see gonvex-module-host main).
     gonvex_module_runtime_v8::initialize_v8_platform();
-    match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime.block_on(run()),
         Err(error) => {
             eprintln!("gonvex-runtime: failed to start async runtime: {error}");
@@ -130,9 +133,9 @@ fn lock_data_dir(data_dir: &std::path::Path) -> Result<gonvex_store::DataDirLock
     gonvex_store::DataDir::new(data_dir)
         .lock()
         .map_err(|error| match error {
-            gonvex_store::DatabaseError::DataDirLocked(path) => format!(
-                "another Gonvex runtime holds {path}; stop it before starting this one"
-            ),
+            gonvex_store::DatabaseError::DataDirLocked(path) => {
+                format!("another Gonvex runtime holds {path}; stop it before starting this one")
+            }
             other => other.to_string(),
         })
 }

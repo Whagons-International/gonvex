@@ -46,12 +46,19 @@ async fn tenant(durability: Durability) -> (TestDir, PoolRegistry, String) {
     let pools = PoolRegistry::with_durability(PoolLimits::default(), durability);
     let writer = pools.pool(&url).await.unwrap();
     let mut connection = writer.acquire().await.unwrap();
-    execute_script(&mut connection, SYNC_INFRASTRUCTURE_SQL).await.unwrap();
-    execute_script(&mut connection, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)")
+    execute_script(&mut connection, SYNC_INFRASTRUCTURE_SQL)
         .await
         .unwrap();
+    execute_script(
+        &mut connection,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL)",
+    )
+    .await
+    .unwrap();
     let columns = table_columns(&mut connection, "t").await.unwrap();
-    execute_script(&mut connection, &capture_triggers_sql("t", "id", &columns)).await.unwrap();
+    execute_script(&mut connection, &capture_triggers_sql("t", "id", &columns))
+        .await
+        .unwrap();
     drop(connection);
     (dir, pools, url)
 }
@@ -89,17 +96,25 @@ async fn concurrent_commits_share_syncs_and_keep_their_own_revisions() {
     revisions.sort_unstable();
     revisions.dedup();
     assert_eq!(revisions.len(), 60, "one revision per transaction");
-    assert!(syncs >= 1, "Full durability syncs the WAL before acknowledging");
-    assert!(syncs < 60, "concurrent commits shared WAL syncs ({syncs} for 60)");
+    assert!(
+        syncs >= 1,
+        "Full durability syncs the WAL before acknowledging"
+    );
+    assert!(
+        syncs < 60,
+        "concurrent commits shared WAL syncs ({syncs} for 60)"
+    );
     let reader = pools.reader(&url).await.unwrap();
-    let per_revision: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT revision, count(*) FROM _gonvex_sync_changes GROUP BY revision",
-    )
-    .fetch_all(&reader)
-    .await
-    .unwrap();
+    let per_revision: Vec<(i64, i64)> =
+        sqlx::query_as("SELECT revision, count(*) FROM _gonvex_sync_changes GROUP BY revision")
+            .fetch_all(&reader)
+            .await
+            .unwrap();
     assert_eq!(per_revision.len(), 60);
-    assert!(per_revision.iter().all(|(_, rows)| *rows == 1), "each revision holds only its own change");
+    assert!(
+        per_revision.iter().all(|(_, rows)| *rows == 1),
+        "each revision holds only its own change"
+    );
     let commands: i64 =
         sqlx::query_scalar("SELECT count(DISTINCT command_id) FROM _gonvex_sync_changes")
             .fetch_one(&reader)
@@ -149,7 +164,10 @@ async fn a_failed_or_cancelled_transaction_does_not_affect_concurrent_commits() 
     assert_eq!(values(&pools, &url).await, expected);
     // The writer is still usable and the feed has no orphaned changes.
     let mut tx = begin_transaction(&pools, &url, false).await.unwrap();
-    sqlx::query("INSERT INTO t VALUES (1000, 'after')").execute(&mut **tx.transaction()).await.unwrap();
+    sqlx::query("INSERT INTO t VALUES (1000, 'after')")
+        .execute(&mut **tx.transaction())
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     let pending: i64 =
         sqlx::query_scalar("SELECT count(*) FROM _gonvex_sync_changes WHERE revision IS NULL")
@@ -190,7 +208,9 @@ async fn checkpoints_run_off_the_writer_and_the_wal_stays_bounded() {
     // that meets a running background one retries on the next commit, and
     // the WAL restarts only when the writer's next transaction starts on a
     // fully copied WAL, so allow a few multiples of it.
-    let wal = std::fs::metadata(dir.0.join("tenant.db-wal")).unwrap().len();
+    let wal = std::fs::metadata(dir.0.join("tenant.db-wal"))
+        .unwrap()
+        .len();
     let page: i64 = sqlx::query_scalar("PRAGMA page_size")
         .fetch_one(&pools.reader(&url).await.unwrap())
         .await

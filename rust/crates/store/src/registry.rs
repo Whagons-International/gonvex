@@ -520,7 +520,8 @@ impl PoolRegistry {
         let elapsed = u64::try_from(waited.as_micros()).unwrap_or(u64::MAX);
         self.admission_count.fetch_add(1, Ordering::Relaxed);
         self.admission_wait_us.fetch_add(elapsed, Ordering::Relaxed);
-        self.admission_wait_max_us.fetch_max(elapsed, Ordering::Relaxed);
+        self.admission_wait_max_us
+            .fetch_max(elapsed, Ordering::Relaxed);
         result.map(|shared| AdmissionPermit { _shared: shared })
     }
 

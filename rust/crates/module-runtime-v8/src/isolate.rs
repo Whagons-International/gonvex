@@ -369,7 +369,11 @@ async fn worker_loop(
         let healthy = reply.healthy;
         served += 1;
         if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
-            log_heap_statistics(&mut isolate.runtime, &source.specifier, &format!("after-{served}-calls"));
+            log_heap_statistics(
+                &mut isolate.runtime,
+                &source.specifier,
+                &format!("after-{served}-calls"),
+            );
         }
         let _ = call.reply.send(reply);
         if !healthy {
@@ -614,17 +618,17 @@ fn log_heap_statistics(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, mom
 /// of the freshly initialized isolate for offline attribution.
 fn write_heap_snapshot(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, directory: &str) {
     use std::io::Write as _;
-    let name = specifier
-        .path()
-        .trim_matches('/')
-        .replace('/', "-");
+    let name = specifier.path().trim_matches('/').replace('/', "-");
     let path = std::path::Path::new(directory).join(format!(
         "{name}-{}-{:?}.heapsnapshot",
         std::process::id(),
         thread::current().id()
     ));
     let Ok(file) = std::fs::File::create(&path) else {
-        eprintln!("[gonvex-module-host] cannot write heap snapshot {}", path.display());
+        eprintln!(
+            "[gonvex-module-host] cannot write heap snapshot {}",
+            path.display()
+        );
         return;
     };
     let mut file = std::io::BufWriter::new(file);

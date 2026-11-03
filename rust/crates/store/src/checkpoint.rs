@@ -119,13 +119,15 @@ impl WalState {
         // Past the cap the writer checkpoints itself; a concurrent background
         // checkpoint would only make it fail with SQLITE_BUSY.
         if frames < self.cap && frames >= self.next_request.load(Ordering::Relaxed) {
-            self.next_request.store(frames + self.every, Ordering::Relaxed);
+            self.next_request
+                .store(frames + self.every, Ordering::Relaxed);
             if !self.queued.swap(true, Ordering::AcqRel) {
                 checkpointer().send(Message::Checkpoint(self.clone())).ok();
             }
         }
         if frames >= self.next_inline.load(Ordering::Relaxed) {
-            self.next_inline.store(frames + self.every, Ordering::Relaxed);
+            self.next_inline
+                .store(frames + self.every, Ordering::Relaxed);
             return true;
         }
         false
@@ -183,7 +185,13 @@ fn open(path: &CString) -> Option<Connection> {
     }
     // The checkpoint copies pages straight from the WAL; it needs no cache.
     unsafe {
-        ffi::sqlite3_exec(db, c"PRAGMA cache_size = -64".as_ptr(), None, std::ptr::null_mut(), std::ptr::null_mut());
+        ffi::sqlite3_exec(
+            db,
+            c"PRAGMA cache_size = -64".as_ptr(),
+            None,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
     }
     Some(Connection(db))
 }
@@ -198,7 +206,9 @@ fn run(receiver: mpsc::Receiver<Message>) {
                     continue;
                 }
                 if !connections.contains_key(&state.path) {
-                    let Some(connection) = open(&state.path) else { continue };
+                    let Some(connection) = open(&state.path) else {
+                        continue;
+                    };
                     connections.insert(state.path.clone(), (Arc::downgrade(&state), connection));
                 }
                 let (_, connection) = &connections[&state.path];
@@ -290,7 +300,9 @@ pub(crate) async fn install(
         );
         if rc != ffi::SQLITE_OK {
             drop(Box::from_raw(data));
-            return Err(DatabaseError::Decode(format!("register WAL state: code {rc}")));
+            return Err(DatabaseError::Decode(format!(
+                "register WAL state: code {rc}"
+            )));
         }
         ffi::sqlite3_wal_hook(db, Some(wal_hook), data.cast());
     }

@@ -168,7 +168,10 @@ async fn old_writer(users: usize, beats: usize) -> (Measured, Measured) {
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     drop(control);
     pools.close().await;
-    (summarize(hold, allocations), summarize(end_to_end, allocations))
+    (
+        summarize(hold, allocations),
+        summarize(end_to_end, allocations),
+    )
 }
 
 /// Per-subscriber encode of the replica frame one beat produces. The runtime
@@ -205,7 +208,14 @@ fn hub_with_subscribers(users: usize) -> (PresenceHub, ScopeKey, Vec<(String, Ar
     let mut slots = Vec::with_capacity(users);
     for user in 0..users {
         let connection = format!("connection-{user}");
-        hub.set_state(&connection, &scope, &format!("member-{user}"), PresenceState::Active, false, now);
+        hub.set_state(
+            &connection,
+            &scope,
+            &format!("member-{user}"),
+            PresenceState::Active,
+            false,
+            now,
+        );
         let (slot, _) = hub.subscribe(&connection, &scope, "presence", now);
         slots.push((connection, slot));
     }
@@ -237,7 +247,13 @@ fn new_paths(users: usize, ops: usize) {
 
     // presence.set transition (in-memory update, no publish yet).
     let mut current = vec![PresenceState::Active; users];
-    let flip = |state: PresenceState| if state == PresenceState::Idle { PresenceState::Active } else { PresenceState::Idle };
+    let flip = |state: PresenceState| {
+        if state == PresenceState::Idle {
+            PresenceState::Active
+        } else {
+            PresenceState::Idle
+        }
+    };
     let mut samples = Vec::with_capacity(ops);
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     for op in 0..ops {
@@ -245,7 +261,14 @@ fn new_paths(users: usize, ops: usize) {
         let state = flip(current[user]);
         current[user] = state;
         let started = Instant::now();
-        hub.set_state(&slots[user].0, &scope, &format!("member-{user}"), state, false, now);
+        hub.set_state(
+            &slots[user].0,
+            &scope,
+            &format!("member-{user}"),
+            state,
+            false,
+            now,
+        );
         samples.push(started.elapsed().as_nanos() as f64);
     }
     print(
@@ -269,7 +292,14 @@ fn new_paths(users: usize, ops: usize) {
                 let user = (round * k + i) % users;
                 let state = flip(current[user]);
                 current[user] = state;
-                hub.set_state(&slots[user].0, &scope, &format!("member-{user}"), state, false, now);
+                hub.set_state(
+                    &slots[user].0,
+                    &scope,
+                    &format!("member-{user}"),
+                    state,
+                    false,
+                    now,
+                );
             }
             let started = Instant::now();
             let stats = hub.tick(now, 2 + round as i64);
@@ -298,7 +328,10 @@ fn new_paths(users: usize, ops: usize) {
 /// Simulated tenant: every user beats every 30 s (old: presence + support)
 /// and alternates idle/active with exponential gaps averaging 101 s.
 fn simulate(users: usize, seconds: usize, tick: Duration) {
-    let config = PresenceConfig { tick, ..PresenceConfig::default() };
+    let config = PresenceConfig {
+        tick,
+        ..PresenceConfig::default()
+    };
     let hub = PresenceHub::new(config);
     let scope = ScopeKey::new("project", "tenant");
     let start = Instant::now();
@@ -314,7 +347,14 @@ fn simulate(users: usize, seconds: usize, tick: Duration) {
     };
     for user in 0..users {
         let connection = format!("connection-{user}");
-        hub.set_state(&connection, &scope, &format!("member-{user}"), PresenceState::Active, false, start);
+        hub.set_state(
+            &connection,
+            &scope,
+            &format!("member-{user}"),
+            PresenceState::Active,
+            false,
+            start,
+        );
         let (slot, _) = hub.subscribe(&connection, &scope, "presence", start);
         slots.push((connection, slot));
         next_transition.push(-random().max(1e-6).ln() * 101.0);
@@ -333,8 +373,19 @@ fn simulate(users: usize, seconds: usize, tick: Duration) {
         for user in 0..users {
             while next_transition[user] <= now_s {
                 idle[user] = !idle[user];
-                let state = if idle[user] { PresenceState::Idle } else { PresenceState::Active };
-                hub.set_state(&slots[user].0, &scope, &format!("member-{user}"), state, false, start);
+                let state = if idle[user] {
+                    PresenceState::Idle
+                } else {
+                    PresenceState::Active
+                };
+                hub.set_state(
+                    &slots[user].0,
+                    &scope,
+                    &format!("member-{user}"),
+                    state,
+                    false,
+                    start,
+                );
                 transitions += 1;
                 next_transition[user] += -random().max(1e-6).ln() * 101.0;
             }
@@ -384,10 +435,16 @@ fn main() {
         .unwrap();
     println!("users per tenant {users}; writer samples {beats}");
     let (hold, total) = runtime.block_on(old_writer(users, beats));
-    print("old: writer hold per beat (SELECT+UPDATE+capture+FULL commit)", &hold);
+    print(
+        "old: writer hold per beat (SELECT+UPDATE+capture+FULL commit)",
+        &hold,
+    );
     print("old: begin..commit incl. admission per beat", &total);
     let fanout = old_fanout(users, 200.min(beats));
-    print(&format!("old: encode replica frame for {users} subscribers per beat"), &fanout);
+    print(
+        &format!("old: encode replica frame for {users} subscribers per beat"),
+        &fanout,
+    );
     new_paths(users, 200_000);
     let live_before = LIVE_BYTES.load(Ordering::Relaxed);
     let (hub, _, slots) = hub_with_subscribers(users);

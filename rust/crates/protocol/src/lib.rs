@@ -993,7 +993,9 @@ mod tests {
         round_trip_server(
             r#"{"type":"presence.patch","serverTime":9,"changes":[{"memberId":"m1","state":"offline","since":9}]}"#,
         );
-        round_trip_server(r#"{"type":"presence.error","id":"p1","error":"no tenant member session"}"#);
+        round_trip_server(
+            r#"{"type":"presence.error","id":"p1","error":"no tenant member session"}"#,
+        );
     }
 
     fn round_trip_server(source: &str) {

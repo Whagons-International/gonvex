@@ -269,7 +269,9 @@ unsafe fn declared_kinds(
         if !stmt.is_null() {
             ffi::sqlite3_finalize(stmt);
         }
-        return Err(DatabaseError::Decode(format!("describe statement: {message}")));
+        return Err(DatabaseError::Decode(format!(
+            "describe statement: {message}"
+        )));
     }
     let count = ffi::sqlite3_column_count(stmt);
     let mut kinds = Vec::with_capacity(count.max(0) as usize);
@@ -294,11 +296,15 @@ mod result_kind_tests {
 
     #[tokio::test]
     async fn result_columns_keep_json_and_boolean_declared_types() {
-        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap();
-        sqlx::query(r#"CREATE TABLE t (id TEXT PRIMARY KEY, meta JSON, done BOOLEAN, n BIGINT, note TEXT)"#)
-            .execute(&mut connection)
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
             .await
             .unwrap();
+        sqlx::query(
+            r#"CREATE TABLE t (id TEXT PRIMARY KEY, meta JSON, done BOOLEAN, n BIGINT, note TEXT)"#,
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
         let kinds = result_column_kinds(
             &mut connection,
             r#"SELECT id, meta, done, n, note, n + 1 AS expr FROM t AS r WHERE id = $1"#,
@@ -335,7 +341,8 @@ mod result_kind_tests {
         let kinds = result_column_kinds(&mut connection, "SELECT note FROM t WHERE id = 'a'")
             .await
             .unwrap();
-        let value = decode_value(sqlx::Row::try_get_raw(&row, 0).unwrap(), kinds[0].unwrap()).unwrap();
+        let value =
+            decode_value(sqlx::Row::try_get_raw(&row, 0).unwrap(), kinds[0].unwrap()).unwrap();
         assert_eq!(value, serde_json::json!(r#"{"not":"json"}"#));
     }
 }
@@ -347,7 +354,9 @@ mod blob_tests {
 
     #[tokio::test]
     async fn blob_values_encode_identically_in_sql_images_and_decoded_rows() {
-        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE f (id TEXT PRIMARY KEY, data BLOB, note TEXT)")
             .execute(&mut connection)
             .await
@@ -369,9 +378,15 @@ mod blob_tests {
         .await
         .unwrap();
         let image: Value = serde_json::from_str(&image).unwrap();
-        let row = sqlx::query("SELECT id, data, note FROM f").fetch_one(&mut connection).await.unwrap();
+        let row = sqlx::query("SELECT id, data, note FROM f")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
         let decoded = Value::Object(row_to_object(&row, |_| None).unwrap());
-        assert_eq!(image, serde_json::json!({"id":"a","data":"00ff10","note":"ab"}));
+        assert_eq!(
+            image,
+            serde_json::json!({"id":"a","data":"00ff10","note":"ab"})
+        );
         assert_eq!(decoded, image);
         let _ = row.get::<String, _>(0);
     }

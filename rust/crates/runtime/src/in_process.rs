@@ -175,9 +175,10 @@ export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1
     impl HostCallHandler for Recorder {
         async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
             let answer = match &call {
-                HostCallFrame::DbQuery { statement, parameters } if statement != "bad" => {
-                    Ok(json!([{ "v": parameters[0] }]))
-                }
+                HostCallFrame::DbQuery {
+                    statement,
+                    parameters,
+                } if statement != "bad" => Ok(json!([{ "v": parameters[0] }])),
                 _ => Err("refused by test".to_owned()),
             };
             self.calls.push(call);
@@ -241,12 +242,20 @@ export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1
             action_execution_timeout: Duration::from_secs(5),
         });
         host.start().await.unwrap();
-        host.load(LoadRequest { module_id: "t".into(), generation: Some(1), artifact: artifact() })
-            .await
-            .unwrap();
-        host.activate(ActivateRequest { module_id: "t".into(), generation: 1, drain_ms: None })
-            .await
-            .unwrap();
+        host.load(LoadRequest {
+            module_id: "t".into(),
+            generation: Some(1),
+            artifact: artifact(),
+        })
+        .await
+        .unwrap();
+        host.activate(ActivateRequest {
+            module_id: "t".into(),
+            generation: 1,
+            drain_ms: None,
+        })
+        .await
+        .unwrap();
         host
     }
 
@@ -293,13 +302,24 @@ export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1
         run(async {
             let host = host().await;
             let mut recorder = Recorder { calls: Vec::new() };
-            let value = host.invoke(request("read", json!({"v": 7})), &mut recorder).await.unwrap();
+            let value = host
+                .invoke(request("read", json!({"v": 7})), &mut recorder)
+                .await
+                .unwrap();
             assert_eq!(value, json!(1));
-            assert!(matches!(&recorder.calls[..], [HostCallFrame::DbQuery { parameters, .. }] if parameters == &json!([7])));
-            // A failed host call reaches module code with the socket transport's text.
-            let message = host.invoke(request("fail", json!(null)), &mut recorder).await.unwrap();
             assert!(
-                message.as_str().unwrap().contains("db_read host call failed [host_call_failed]: refused by test"),
+                matches!(&recorder.calls[..], [HostCallFrame::DbQuery { parameters, .. }] if parameters == &json!([7]))
+            );
+            // A failed host call reaches module code with the socket transport's text.
+            let message = host
+                .invoke(request("fail", json!(null)), &mut recorder)
+                .await
+                .unwrap();
+            assert!(
+                message
+                    .as_str()
+                    .unwrap()
+                    .contains("db_read host call failed [host_call_failed]: refused by test"),
                 "{message}"
             );
             host.shutdown().await;
@@ -312,19 +332,28 @@ export const hog = async () => { const keep = []; for (;;) keep.push(new Array(1
             let host = host().await;
             let mut recorder = Recorder { calls: Vec::new() };
             let started = Instant::now();
-            let error = host.invoke(request("spin", json!(null)), &mut recorder).await.unwrap_err();
+            let error = host
+                .invoke(request("spin", json!(null)), &mut recorder)
+                .await
+                .unwrap_err();
             assert!(started.elapsed() < Duration::from_secs(5));
             assert!(
                 matches!(&error, ModuleHostError::Remote { code, .. } if code == "budget_exceeded"),
                 "{error}"
             );
-            let error = host.invoke(request("hog", json!(null)), &mut recorder).await.unwrap_err();
+            let error = host
+                .invoke(request("hog", json!(null)), &mut recorder)
+                .await
+                .unwrap_err();
             assert!(
                 matches!(&error, ModuleHostError::Remote { code, message, .. } if code == "budget_exceeded" && message.contains("heap")),
                 "{error}"
             );
             // The retired isolates are replaced; the next call is served.
-            let value = host.invoke(request("read", json!({"v": 1})), &mut recorder).await.unwrap();
+            let value = host
+                .invoke(request("read", json!({"v": 1})), &mut recorder)
+                .await
+                .unwrap();
             assert_eq!(value, json!(1));
             host.shutdown().await;
         });

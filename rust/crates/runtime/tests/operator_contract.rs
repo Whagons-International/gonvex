@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
 use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
 use gonvex_runtime::Runtime;
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
 use serde_json::Value;
 use sqlx::Row;
 use tower::ServiceExt;
@@ -96,9 +96,8 @@ async fn rust_operator_routes_preserve_data_and_membership_contracts() {
     let data = test_data_dir();
     let data_url = gonvex_store::database_url(data.path());
     let control_url = gonvex_store::database_url(&data.path().join("control.db"));
-    let tenant_url = gonvex_store::database_url(
-        &data.path().join("projects/project/tenants/tenant.db"),
-    );
+    let tenant_url =
+        gonvex_store::database_url(&data.path().join("projects/project/tenants/tenant.db"));
     let pools = PoolRegistry::new(PoolLimits::default());
     let control = ControlPlane::connect(&control_url, pools.clone(), BTreeMap::new())
         .await

@@ -160,46 +160,53 @@ impl WebSocket {
         let (tx, rx) = mpsc::channel(1);
         // Ratchet reads are not cancellation safe. Keep them in an owned task;
         // the runtime can cancel channel receives without losing a partial frame.
-        let reader = tokio::spawn(gonvex_profiler::instrument(gonvex_profiler::TaskKind::WsReader, async move {
-            let mut payload = BytesMut::new();
-            loop {
-                let result = match receiver.read(&mut payload).await {
-                    // Hand over the whole buffer: `split()` would leave an empty
-                    // view that keeps the message's allocation alive while idle.
-                    Ok(ratchet_core::Message::Text) => {
-                        match ws::Utf8Bytes::try_from(std::mem::take(&mut payload).freeze()) {
-                            Ok(text) => Ok(ws::Message::Text(text)),
-                            Err(error) => {
-                                let _ = receiver
-                                    .close(ratchet_core::CloseReason::new(
-                                        ratchet_core::CloseCode::Invalid,
-                                        None,
-                                    ))
-                                    .await;
-                                Err(axum::Error::new(error))
+        let reader = tokio::spawn(gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::WsReader,
+            async move {
+                let mut payload = BytesMut::new();
+                loop {
+                    let result = match receiver.read(&mut payload).await {
+                        // Hand over the whole buffer: `split()` would leave an empty
+                        // view that keeps the message's allocation alive while idle.
+                        Ok(ratchet_core::Message::Text) => {
+                            match ws::Utf8Bytes::try_from(std::mem::take(&mut payload).freeze()) {
+                                Ok(text) => Ok(ws::Message::Text(text)),
+                                Err(error) => {
+                                    let _ = receiver
+                                        .close(ratchet_core::CloseReason::new(
+                                            ratchet_core::CloseCode::Invalid,
+                                            None,
+                                        ))
+                                        .await;
+                                    Err(axum::Error::new(error))
+                                }
                             }
                         }
+                        Ok(ratchet_core::Message::Binary) => {
+                            Ok(ws::Message::Binary(std::mem::take(&mut payload).freeze()))
+                        }
+                        Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
+                        Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
+                        Ok(ratchet_core::Message::Close(reason)) => {
+                            Ok(ws::Message::Close(reason.map(|reason| ws::CloseFrame {
+                                code: reason.code.into(),
+                                reason: reason.description.unwrap_or_default().into(),
+                            })))
+                        }
+                        Err(error) => Err(axum::Error::new(error)),
+                    };
+                    let done = result.is_err() || matches!(result, Ok(ws::Message::Close(_)));
+                    let read_at = if gonvex_profiler::enabled() {
+                        gonvex_profiler::now_ns()
+                    } else {
+                        0
+                    };
+                    if tx.send((read_at, result)).await.is_err() || done {
+                        break;
                     }
-                    Ok(ratchet_core::Message::Binary) => {
-                        Ok(ws::Message::Binary(std::mem::take(&mut payload).freeze()))
-                    }
-                    Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
-                    Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
-                    Ok(ratchet_core::Message::Close(reason)) => {
-                        Ok(ws::Message::Close(reason.map(|reason| ws::CloseFrame {
-                            code: reason.code.into(),
-                            reason: reason.description.unwrap_or_default().into(),
-                        })))
-                    }
-                    Err(error) => Err(axum::Error::new(error)),
-                };
-                let done = result.is_err() || matches!(result, Ok(ws::Message::Close(_)));
-                let read_at = if gonvex_profiler::enabled() { gonvex_profiler::now_ns() } else { 0 };
-                if tx.send((read_at, result)).await.is_err() || done {
-                    break;
                 }
-            }
-        }));
+            },
+        ));
         Self::Compressed(Box::new(Compressed {
             threshold,
             alternative,
@@ -229,7 +236,10 @@ impl WebSocket {
     /// it does not recompress the winner. Plain connections compare raw bytes.
     pub async fn send_best_text(&mut self, full: &str, patch: &str) -> Result<(), axum::Error> {
         let _sending = gonvex_profiler::gauge(gonvex_profiler::GaugeId::WsSending).guard();
-        let _write = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::WsWrite, gonvex_profiler::Label::None);
+        let _write = gonvex_profiler::ScopeTimer::new(
+            gonvex_profiler::Stage::WsWrite,
+            gonvex_profiler::Label::None,
+        );
         match self {
             Self::Plain(socket) => {
                 socket
@@ -256,7 +266,10 @@ impl WebSocket {
 
     pub async fn send(&mut self, message: ws::Message) -> Result<(), axum::Error> {
         let _sending = gonvex_profiler::gauge(gonvex_profiler::GaugeId::WsSending).guard();
-        let _write = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::WsWrite, gonvex_profiler::Label::None);
+        let _write = gonvex_profiler::ScopeTimer::new(
+            gonvex_profiler::Stage::WsWrite,
+            gonvex_profiler::Label::None,
+        );
         let Self::Compressed(socket) = self else {
             if let Self::Plain(socket) = self {
                 return socket.send(message).await;

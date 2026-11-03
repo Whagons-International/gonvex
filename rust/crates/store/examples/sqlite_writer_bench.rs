@@ -26,7 +26,10 @@ const PRESENCE_ROWS: i64 = 2_000;
 const TASK_ROWS: i64 = 9_000;
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 fn main() {
@@ -122,9 +125,11 @@ impl Report {
 // ------------------------------------------------------------------ fixture
 
 fn bench_dir() -> PathBuf {
-    let dir = std::env::var_os("BENCH_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("gonvex-writer-bench-{}", std::process::id()))
-    });
+    let dir = std::env::var_os("BENCH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("gonvex-writer-bench-{}", std::process::id()))
+        });
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -145,11 +150,15 @@ CREATE TABLE IF NOT EXISTS task_events (
 /// Creates a tenant-shaped database (change feed, capture triggers, presence
 /// and `tasks` rows of ~400-byte descriptions) through the writer.
 async fn provision(connection: &mut SqliteConnection, tasks: i64, presence: i64) {
-    execute_script(connection, SYNC_INFRASTRUCTURE_SQL).await.unwrap();
+    execute_script(connection, SYNC_INFRASTRUCTURE_SQL)
+        .await
+        .unwrap();
     execute_script(connection, TENANT_SCHEMA).await.unwrap();
     for (table, key) in [("presence", "id"), ("tasks", "id"), ("task_events", "id")] {
         let columns = table_columns(connection, table).await.unwrap();
-        execute_script(connection, &capture_triggers_sql(table, key, &columns)).await.unwrap();
+        execute_script(connection, &capture_triggers_sql(table, key, &columns))
+            .await
+            .unwrap();
     }
     let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks")
         .fetch_one(&mut *connection)
@@ -187,7 +196,11 @@ fn finalize_rusqlite(conn: &rusqlite::Connection, command: &str) -> rusqlite::Re
 }
 
 /// `finalize_rusqlite` with optional per-statement wall time (ns).
-fn finalize_timed(conn: &rusqlite::Connection, command: &str, times: &mut Option<[u64; 9]>) -> rusqlite::Result<Option<i64>> {
+fn finalize_timed(
+    conn: &rusqlite::Connection,
+    command: &str,
+    times: &mut Option<[u64; 9]>,
+) -> rusqlite::Result<Option<i64>> {
     let mut clock = Instant::now();
     let mut slot = 0usize;
     let mut tick = |times: &mut Option<[u64; 9]>| {
@@ -235,7 +248,9 @@ fn finalize_timed(conn: &rusqlite::Connection, command: &str, times: &mut Option
     .execute(rusqlite::params![revision, command])?;
     tick(times);
     let mut tables = conn.prepare_cached("SELECT DISTINCT table_name FROM _gonvex_sync_changes WHERE revision = $1 ORDER BY table_name")?;
-    let _tables: Vec<String> = tables.query_map([revision], |row| row.get(0))?.collect::<Result<_, _>>()?;
+    let _tables: Vec<String> = tables
+        .query_map([revision], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
     drop(tables);
     tick(times);
     conn.prepare_cached(
@@ -290,7 +305,9 @@ async fn thread_model() {
         // Isolate per-statement overhead from fsync.
         .synchronous(sqlx::sqlite::SqliteSynchronous::Off);
     let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
-    gonvex_store::capture::install(&mut connection).await.unwrap();
+    gonvex_store::capture::install(&mut connection)
+        .await
+        .unwrap();
     provision(&mut connection, 1_000, PRESENCE_ROWS).await;
     let n: u64 = env_or("BENCH_OPS", 20_000);
     let provenance = Provenance {
@@ -300,19 +317,32 @@ async fn thread_model() {
 
     // Warm statement caches.
     for i in 0..200 {
-        sqlx::query(POINT_READ).bind(format!("p{}", i % 100 + 1)).fetch_optional(&mut connection).await.unwrap();
+        sqlx::query(POINT_READ)
+            .bind(format!("p{}", i % 100 + 1))
+            .fetch_optional(&mut connection)
+            .await
+            .unwrap();
     }
 
     // (a) point read, one statement per round trip
     let report = |label: &str, ops, wall, lat_ns, before, after| Report {
-        label: label.into(), ops, wall, lat_ns, before, after,
+        label: label.into(),
+        ops,
+        wall,
+        lat_ns,
+        before,
+        after,
     };
     {
         let mut lat = Vec::with_capacity(n as usize);
         let (u0, t0) = (usage(), Instant::now());
         for i in 0..n {
             let s = Instant::now();
-            sqlx::query(POINT_READ).bind(format!("p{}", i % 2000 + 1)).fetch_optional(&mut connection).await.unwrap();
+            sqlx::query(POINT_READ)
+                .bind(format!("p{}", i % 2000 + 1))
+                .fetch_optional(&mut connection)
+                .await
+                .unwrap();
             lat.push(s.elapsed().as_nanos() as u64);
         }
         report("stmt point-read sqlx", n, t0.elapsed(), lat, u0, usage()).print();
@@ -324,12 +354,26 @@ async fn thread_model() {
         for i in 0..n {
             let s = Instant::now();
             let mut tx = connection.begin().await.unwrap();
-            sqlx::query(HEARTBEAT).bind(i as i64).bind("online").bind(format!("p{}", i % 2000 + 1)).execute(&mut *tx).await.unwrap();
+            sqlx::query(HEARTBEAT)
+                .bind(i as i64)
+                .bind("online")
+                .bind(format!("p{}", i % 2000 + 1))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             finalize(&mut tx, &provenance).await.unwrap();
             tx.commit().await.unwrap();
             lat.push(s.elapsed().as_nanos() as u64);
         }
-        report("txn heartbeat+finalize sqlx (~13 trips)", n, t0.elapsed(), lat, u0, usage()).print();
+        report(
+            "txn heartbeat+finalize sqlx (~13 trips)",
+            n,
+            t0.elapsed(),
+            lat,
+            u0,
+            usage(),
+        )
+        .print();
     }
     // (c) same transaction: BEGIN/stmt/COMMIT via sqlx, finalize inline on
     // the locked raw handle (the narrow production change)
@@ -339,16 +383,32 @@ async fn thread_model() {
         for i in 0..n {
             let s = Instant::now();
             let mut tx = connection.begin().await.unwrap();
-            sqlx::query(HEARTBEAT).bind(i as i64 + n as i64).bind("online").bind(format!("p{}", i % 2000 + 1)).execute(&mut *tx).await.unwrap();
+            sqlx::query(HEARTBEAT)
+                .bind(i as i64 + n as i64)
+                .bind("online")
+                .bind(format!("p{}", i % 2000 + 1))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             {
                 let mut handle = tx.lock_handle().await.unwrap();
-                let conn = unsafe { rusqlite::Connection::from_handle(handle.as_raw_handle().as_ptr()) }.unwrap();
+                let conn =
+                    unsafe { rusqlite::Connection::from_handle(handle.as_raw_handle().as_ptr()) }
+                        .unwrap();
                 finalize_rusqlite(&conn, "cmd").unwrap();
             }
             tx.commit().await.unwrap();
             lat.push(s.elapsed().as_nanos() as u64);
         }
-        report("txn heartbeat sqlx + finalize inline raw", n, t0.elapsed(), lat, u0, usage()).print();
+        report(
+            "txn heartbeat sqlx + finalize inline raw",
+            n,
+            t0.elapsed(),
+            lat,
+            u0,
+            usage(),
+        )
+        .print();
     }
 
     // Hand the raw handle to a dedicated thread (rusqlite) while we hold
@@ -364,12 +424,23 @@ async fn thread_model() {
             let s = Instant::now();
             let id = format!("p{}", i % 2000 + 1);
             on_thread(&jobs, move |c| {
-                c.prepare_cached(POINT_READ).unwrap().query_row([id], |r| r.get::<_, String>(0)).ok()
+                c.prepare_cached(POINT_READ)
+                    .unwrap()
+                    .query_row([id], |r| r.get::<_, String>(0))
+                    .ok()
             })
             .await;
             lat.push(s.elapsed().as_nanos() as u64);
         }
-        report("stmt point-read rusqlite thread", n, t0.elapsed(), lat, u0, usage()).print();
+        report(
+            "stmt point-read rusqlite thread",
+            n,
+            t0.elapsed(),
+            lat,
+            u0,
+            usage(),
+        )
+        .print();
     }
     // (e) heartbeat txn, one job per statement (same trips as sqlx)
     {
@@ -379,17 +450,37 @@ async fn thread_model() {
             let s = Instant::now();
             on_thread(&jobs, |c| c.execute_batch("BEGIN").unwrap()).await;
             let (v, id) = (i as i64 + 2 * n as i64, format!("p{}", i % 2000 + 1));
-            on_thread(&jobs, move |c| c.prepare_cached(HEARTBEAT).unwrap().execute(rusqlite::params![v, "online", id]).unwrap()).await;
+            on_thread(&jobs, move |c| {
+                c.prepare_cached(HEARTBEAT)
+                    .unwrap()
+                    .execute(rusqlite::params![v, "online", id])
+                    .unwrap()
+            })
+            .await;
             // finalize as 11 separate jobs is what sqlx does; emulate by
             // running each statement as its own job.
             for _ in 0..10 {
-                on_thread(&jobs, |c| c.prepare_cached("SELECT 1").unwrap().query_row([], |r| r.get::<_, i64>(0)).unwrap()).await;
+                on_thread(&jobs, |c| {
+                    c.prepare_cached("SELECT 1")
+                        .unwrap()
+                        .query_row([], |r| r.get::<_, i64>(0))
+                        .unwrap()
+                })
+                .await;
             }
             on_thread(&jobs, |c| finalize_rusqlite(c, "cmd").unwrap()).await;
             on_thread(&jobs, |c| c.execute_batch("COMMIT").unwrap()).await;
             lat.push(s.elapsed().as_nanos() as u64);
         }
-        report("txn heartbeat rusqlite thread, job/stmt", n, t0.elapsed(), lat, u0, usage()).print();
+        report(
+            "txn heartbeat rusqlite thread, job/stmt",
+            n,
+            t0.elapsed(),
+            lat,
+            u0,
+            usage(),
+        )
+        .print();
     }
     // (f) heartbeat txn as ONE job on the dedicated thread
     {
@@ -400,14 +491,25 @@ async fn thread_model() {
             let (v, id) = (i as i64 + 3 * n as i64, format!("p{}", i % 2000 + 1));
             on_thread(&jobs, move |c| {
                 c.execute_batch("BEGIN").unwrap();
-                c.prepare_cached(HEARTBEAT).unwrap().execute(rusqlite::params![v, "online", id]).unwrap();
+                c.prepare_cached(HEARTBEAT)
+                    .unwrap()
+                    .execute(rusqlite::params![v, "online", id])
+                    .unwrap();
                 finalize_rusqlite(c, "cmd").unwrap();
                 c.execute_batch("COMMIT").unwrap();
             })
             .await;
             lat.push(s.elapsed().as_nanos() as u64);
         }
-        report("txn heartbeat rusqlite thread, 1 job/txn", n, t0.elapsed(), lat, u0, usage()).print();
+        report(
+            "txn heartbeat rusqlite thread, 1 job/txn",
+            n,
+            t0.elapsed(),
+            lat,
+            u0,
+            usage(),
+        )
+        .print();
     }
     drop(jobs);
     // (g) the whole txn inline on the async thread (lower bound)
@@ -418,7 +520,14 @@ async fn thread_model() {
         for i in 0..n {
             let s = Instant::now();
             conn.execute_batch("BEGIN").unwrap();
-            conn.prepare_cached(HEARTBEAT).unwrap().execute(rusqlite::params![i as i64 + 4 * n as i64, "online", format!("p{}", i % 2000 + 1)]).unwrap();
+            conn.prepare_cached(HEARTBEAT)
+                .unwrap()
+                .execute(rusqlite::params![
+                    i as i64 + 4 * n as i64,
+                    "online",
+                    format!("p{}", i % 2000 + 1)
+                ])
+                .unwrap();
             finalize_rusqlite(&conn, "cmd").unwrap();
             conn.execute_batch("COMMIT").unwrap();
             lat.push(s.elapsed().as_nanos() as u64);
@@ -426,7 +535,15 @@ async fn thread_model() {
                 tokio::task::yield_now().await;
             }
         }
-        report("txn heartbeat inline raw (no handoff)", n, t0.elapsed(), lat, u0, usage()).print();
+        report(
+            "txn heartbeat inline raw (no handoff)",
+            n,
+            t0.elapsed(),
+            lat,
+            u0,
+            usage(),
+        )
+        .print();
     }
     {
         let conn = unsafe { rusqlite::Connection::from_handle(raw as *mut _) }.unwrap();
@@ -437,7 +554,14 @@ async fn thread_model() {
             conn.execute_batch("BEGIN").unwrap();
             begin += s.elapsed().as_nanos() as u64;
             let s = Instant::now();
-            conn.prepare_cached(HEARTBEAT).unwrap().execute(rusqlite::params![i as i64 + 5 * n as i64, "online", format!("p{}", i % 2000 + 1)]).unwrap();
+            conn.prepare_cached(HEARTBEAT)
+                .unwrap()
+                .execute(rusqlite::params![
+                    i as i64 + 5 * n as i64,
+                    "online",
+                    format!("p{}", i % 2000 + 1)
+                ])
+                .unwrap();
             stmt += s.elapsed().as_nanos() as u64;
             finalize_timed(&conn, "cmd", &mut times).unwrap();
             let s = Instant::now();
@@ -459,19 +583,38 @@ async fn thread_model() {
 /// heartbeat UPDATE, 1 of 10 a task update of three statements.
 async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64) {
     let mut tx = begin_transaction(pools, url, false).await.unwrap();
-    tx.set_command_id(&format!("w{writer}-{step}")).await.unwrap();
+    tx.set_command_id(&format!("w{writer}-{step}"))
+        .await
+        .unwrap();
     let now = step as i64;
     if step % 10 == 0 {
         let id = ((writer as i64 * 7919 + step as i64) % TASK_ROWS) + 1;
-        sqlx::query("SELECT status FROM tasks WHERE id = $1").bind(id).fetch_one(&mut **tx.transaction()).await.unwrap();
+        sqlx::query("SELECT status FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **tx.transaction())
+            .await
+            .unwrap();
         sqlx::query("UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3")
-            .bind(if step % 20 == 0 { "doing" } else { "done" }).bind(now).bind(id)
-            .execute(&mut **tx.transaction()).await.unwrap();
+            .bind(if step % 20 == 0 { "doing" } else { "done" })
+            .bind(now)
+            .bind(id)
+            .execute(&mut **tx.transaction())
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO task_events (task_id, kind, at) VALUES ($1, 'status', $2)")
-            .bind(id).bind(now).execute(&mut **tx.transaction()).await.unwrap();
+            .bind(id)
+            .bind(now)
+            .execute(&mut **tx.transaction())
+            .await
+            .unwrap();
     } else {
-        sqlx::query(HEARTBEAT).bind(now).bind("online").bind(format!("p{}", writer as i64 % PRESENCE_ROWS + 1))
-            .execute(&mut **tx.transaction()).await.unwrap();
+        sqlx::query(HEARTBEAT)
+            .bind(now)
+            .bind("online")
+            .bind(format!("p{}", writer as i64 % PRESENCE_ROWS + 1))
+            .execute(&mut **tx.transaction())
+            .await
+            .unwrap();
     }
     // Simulated V8 time with the writer held (the Reducer path keeps its
     // write transaction open from the first ctx.db call until it returns).
@@ -491,9 +634,16 @@ async fn commit() {
         .split(',')
         .map(|w| w.trim().parse().unwrap())
         .collect();
-    let durability = if sync == "barrier" { Durability::Full } else { Durability::Normal };
+    let durability = if sync == "barrier" {
+        Durability::Full
+    } else {
+        Durability::Normal
+    };
     let pools = PoolRegistry::with_durability(
-        PoolLimits { max_total_connections: 256, ..PoolLimits::default() },
+        PoolLimits {
+            max_total_connections: 256,
+            ..PoolLimits::default()
+        },
         durability,
     );
     let url = gonvex_store::database_url(&dir.join(format!("commit-{sync}.db")));
@@ -503,14 +653,21 @@ async fn commit() {
         provision(&mut connection, TASK_ROWS, PRESENCE_ROWS).await;
         if sync == "full" {
             // The writer pool keeps its single connection forever.
-            sqlx::query("PRAGMA synchronous = FULL").execute(&mut *connection).await.unwrap();
+            sqlx::query("PRAGMA synchronous = FULL")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
         }
     }
     // BENCH_RATE: total transactions/s offered (0 = closed loop, as fast as
     // possible). Each writer sleeps writers/rate between its transactions.
     let rate: f64 = env_or("BENCH_RATE", 0.0);
     for &count in &writers {
-        let pause = if rate > 0.0 { Duration::from_secs_f64(count as f64 / rate) } else { Duration::ZERO };
+        let pause = if rate > 0.0 {
+            Duration::from_secs_f64(count as f64 / rate)
+        } else {
+            Duration::ZERO
+        };
         let deadline = Instant::now() + Duration::from_secs(seconds);
         let (u0, t0) = (usage(), Instant::now());
         let mut tasks = Vec::new();
@@ -555,7 +712,9 @@ async fn commit() {
         }
         .print();
     }
-    let wal = std::fs::metadata(gonvex_store::database_path(&url).with_extension("db-wal")).map(|m| m.len()).unwrap_or(0);
+    let wal = std::fs::metadata(gonvex_store::database_path(&url).with_extension("db-wal"))
+        .map(|m| m.len())
+        .unwrap_or(0);
     println!("wal bytes at end: {wal}");
     pools.close().await;
 }
@@ -577,7 +736,12 @@ async fn cache() {
         let writer = pools.pool(url).await.unwrap();
         let mut connection = writer.acquire().await.unwrap();
         // One big tenant (the 39 % one), the rest small.
-        provision(&mut connection, if i == 0 { big } else { 300 }, if i == 0 { PRESENCE_ROWS } else { 50 }).await;
+        provision(
+            &mut connection,
+            if i == 0 { big } else { 300 },
+            if i == 0 { PRESENCE_ROWS } else { 50 },
+        )
+        .await;
     }
     let urls = Arc::new(urls);
     // Touch every tenant's readers (snapshot-style scans), then measure the
@@ -587,7 +751,10 @@ async fn cache() {
         let mut conns = Vec::new();
         for _ in 0..readers {
             let mut c = pool.acquire().await.unwrap();
-            sqlx::query("SELECT * FROM tasks").fetch_all(&mut *c).await.unwrap();
+            sqlx::query("SELECT * FROM tasks")
+                .fetch_all(&mut *c)
+                .await
+                .unwrap();
             conns.push(c);
         }
     }
@@ -635,5 +802,8 @@ async fn cache() {
         status_kib("VmRSS:"), status_kib("RssAnon:"), status_kib("RssFile:"), sqlite_memory_used() / 1024,
         unsafe { libsqlite3_sys::sqlite3_memory_highwater(0) } / 1024
     );
-    println!("cache budget: {} MiB (GONVEX_SQLITE_CACHE_BUDGET_MB)", gonvex_store::sqlite_cache_budget_mib());
+    println!(
+        "cache budget: {} MiB (GONVEX_SQLITE_CACHE_BUDGET_MB)",
+        gonvex_store::sqlite_cache_budget_mib()
+    );
 }

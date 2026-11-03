@@ -401,10 +401,7 @@ impl StorageManager {
             .bind(key).fetch_optional(&mut **lookup.transaction()).await.map_err(|e| e.to_string())?;
         lookup.commit().await.map_err(|e| e.to_string())?;
         if let Some(ticket) = ticket {
-            if ticket
-                .get::<Option<i64>, _>("consumed_at")
-                .is_some()
-            {
+            if ticket.get::<Option<i64>, _>("consumed_at").is_some() {
                 return Err("upload already consumed".into());
             }
             let project: String = ticket.get("project_id");
@@ -920,7 +917,9 @@ fn metadata_from_row(row: &sqlx::sqlite::SqliteRow) -> FileMetadata {
         visibility: row.get("visibility"),
         status: row.get("status"),
         created_at: millis_to_datetime(row.get("created_at")),
-        uploaded_at: row.get::<Option<i64>, _>("uploaded_at").map(millis_to_datetime),
+        uploaded_at: row
+            .get::<Option<i64>, _>("uploaded_at")
+            .map(millis_to_datetime),
     }
 }
 
@@ -1034,7 +1033,6 @@ mod tests {
             None => tempfile::tempdir().unwrap(),
         }
     }
-
 
     #[test]
     fn object_keys_are_tenant_namespaced_and_paths_are_encoded() {

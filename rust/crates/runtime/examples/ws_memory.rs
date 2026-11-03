@@ -376,6 +376,8 @@ mod server {
             database_idle_timeout: Duration::from_secs(60),
             module_host: ModuleHostConfig {
                 enabled: false,
+                in_process: false,
+                max_heap_bytes: 64 << 20,
                 binary: None,
                 endpoint: None,
                 start_timeout: Duration::from_secs(1),
@@ -391,6 +393,7 @@ mod server {
             storage: StorageConfig::default(),
             service_principals: Vec::new(),
             public_functions: Default::default(),
+            presence: Default::default(),
         };
         let runtime = gonvex_runtime::Runtime::new(config);
         runtime.start().await.unwrap();

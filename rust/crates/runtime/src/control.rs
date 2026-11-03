@@ -12,10 +12,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use gonvex_protocol::ServerMessage;
 use gonvex_store::{
     Member, SessionIdentity, TenantSession, TenantTransaction, TransactionAttribution,
 };
-use gonvex_protocol::ServerMessage;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use serde_json::{Map, Value};
@@ -1726,25 +1726,30 @@ impl Runtime {
             // A previously committed tenant command only needs handoff recovery;
             // it must not replay grants or depend on the issuer's later status.
             let authority = async {
-              let inviter_session = inviter_session.map_err(|_| invitation_authority_denial())?;
-              let inviter = sqlx::query(
-                "SELECT status,role,permissions FROM members WHERE id=$1 AND account_id=$2",
-            )
-            .bind(&inviter_session.member.id)
-            .bind(&inviter_account_id)
-            .fetch_optional(&mut **tenant_tx.transaction())
-            .await?.ok_or_else(invitation_authority_denial)?;
-                    validate_invitation_authority(
-                        &inviter.get::<String, _>("status"),
-                        &inviter.get::<String, _>("role"),
-                        &role,
-                    )?;
-              Ok::<_, ControlError>(gonvex_module_runtime::MemberIdentity {
-                id: inviter_session.member.id.clone(), account_id: inviter_account_id.clone(),
-                status: Some(inviter.get("status")), role: Some(inviter.get("role")),
-                permissions: inviter.get::<Json<Value>, _>("permissions").0, display_name: None,
-              })
-            }.await;
+                let inviter_session = inviter_session.map_err(|_| invitation_authority_denial())?;
+                let inviter = sqlx::query(
+                    "SELECT status,role,permissions FROM members WHERE id=$1 AND account_id=$2",
+                )
+                .bind(&inviter_session.member.id)
+                .bind(&inviter_account_id)
+                .fetch_optional(&mut **tenant_tx.transaction())
+                .await?
+                .ok_or_else(invitation_authority_denial)?;
+                validate_invitation_authority(
+                    &inviter.get::<String, _>("status"),
+                    &inviter.get::<String, _>("role"),
+                    &role,
+                )?;
+                Ok::<_, ControlError>(gonvex_module_runtime::MemberIdentity {
+                    id: inviter_session.member.id.clone(),
+                    account_id: inviter_account_id.clone(),
+                    status: Some(inviter.get("status")),
+                    role: Some(inviter.get("role")),
+                    permissions: inviter.get::<Json<Value>, _>("permissions").0,
+                    display_name: None,
+                })
+            }
+            .await;
             let inviter_authority = match authority {
                 Ok(authority) => authority,
                 Err(error) => {
@@ -2380,19 +2385,31 @@ impl Runtime {
                 // a session whose connection is open here is seen now.
                 let live = self.inner.presence.support_live_ids(&connection.project_id);
                 let now = Utc::now();
-                let mut sessions: Vec<(chrono::DateTime<Utc>, Value)> = rows.into_iter().map(|row| {
-                    let id = row.get::<String,_>("id");
-                    let seen = if live.contains(&id) { now } else { row_time(&row, "last_seen_at") };
-                    (seen, serde_json::json!({
-                        "id":id,"tenantId":row.get::<String,_>("tenant_id"),
-                        "accountId":row.get::<String,_>("account_id"),
-                        "release":row.get::<String,_>("release"),
-                        "environment":row.get::<String,_>("environment"),
-                        "lastSeenAt":timestamp(seen),
-                    }))
-                }).collect();
+                let mut sessions: Vec<(chrono::DateTime<Utc>, Value)> = rows
+                    .into_iter()
+                    .map(|row| {
+                        let id = row.get::<String, _>("id");
+                        let seen = if live.contains(&id) {
+                            now
+                        } else {
+                            row_time(&row, "last_seen_at")
+                        };
+                        (
+                            seen,
+                            serde_json::json!({
+                                "id":id,"tenantId":row.get::<String,_>("tenant_id"),
+                                "accountId":row.get::<String,_>("account_id"),
+                                "release":row.get::<String,_>("release"),
+                                "environment":row.get::<String,_>("environment"),
+                                "lastSeenAt":timestamp(seen),
+                            }),
+                        )
+                    })
+                    .collect();
                 sessions.sort_by(|a, b| b.0.cmp(&a.0));
-                Ok(Value::Array(sessions.into_iter().map(|(_, session)| session).collect()))
+                Ok(Value::Array(
+                    sessions.into_iter().map(|(_, session)| session).collect(),
+                ))
             }
             "control.support.listTenants" => unreachable!(),
             "control.support.getSession" => {
@@ -2407,7 +2424,12 @@ impl Runtime {
                 .fetch_optional(&mut **transaction.transaction())
                 .await?
                 .ok_or_else(|| ControlError::InvalidArguments("support session not found".to_owned()))?;
-                let seen = if self.inner.presence.support_live_ids(&connection.project_id).contains(id) {
+                let seen = if self
+                    .inner
+                    .presence
+                    .support_live_ids(&connection.project_id)
+                    .contains(id)
+                {
                     Utc::now()
                 } else {
                     row_time(&row, "last_seen_at")
@@ -3233,7 +3255,12 @@ impl Runtime {
                     })?;
                 // Sessions whose connection is open here are live even though
                 // presence v2 leaves their stored `last_seen_at` untouched.
-                let live: Vec<String> = self.inner.presence.support_live_ids(&connection.project_id).into_iter().collect();
+                let live: Vec<String> = self
+                    .inner
+                    .presence
+                    .support_live_ids(&connection.project_id)
+                    .into_iter()
+                    .collect();
                 let deleted = sqlx::query("DELETE FROM gonvex_support_sessions WHERE project_id=$1 AND last_seen_at < CAST(unixepoch('subsec')*1000 AS INTEGER)-($2*1000) AND id NOT IN (SELECT value FROM json_each($3))")
                     .bind(&connection.project_id).bind(seconds).bind(serde_json::to_string(&live).unwrap_or_else(|_| "[]".to_owned()))
                     .execute(&mut **transaction.transaction()).await?.rows_affected();
@@ -3357,10 +3384,12 @@ async fn member_auth_providers(
         .resolve_tenant(&connection.project_id, &caller.route.tenant_id)
         .await?;
     let mut tenant_tx = control.begin_tenant_transaction(&route, true).await?;
-    let rows = sqlx::query("SELECT id,account_id FROM members WHERE id IN (SELECT value FROM json_each($1))")
-        .bind(Value::from(member_ids.clone()).to_string())
-        .fetch_all(&mut **tenant_tx.transaction())
-        .await?;
+    let rows = sqlx::query(
+        "SELECT id,account_id FROM members WHERE id IN (SELECT value FROM json_each($1))",
+    )
+    .bind(Value::from(member_ids.clone()).to_string())
+    .fetch_all(&mut **tenant_tx.transaction())
+    .await?;
     tenant_tx.commit().await?;
     let account_by_member = rows
         .into_iter()

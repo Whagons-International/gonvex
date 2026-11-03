@@ -103,17 +103,39 @@ fn split_engine_routes_by_bundle_and_resolves_reducer_functions_by_path() {
         engine.prewarm().await.unwrap();
         // Load-time validation evaluated the complete bundle and released it.
         assert_eq!(engine.inner.pools[0].idle_count(), 0);
-        assert_eq!(engine.inner.reducer.as_ref().unwrap().pools[0].idle_count(), 1);
+        assert_eq!(
+            engine.inner.reducer.as_ref().unwrap().pools[0].idle_count(),
+            1
+        );
 
-        assert_eq!(call(&engine, "tasks.get", FunctionKind::Query).await, "reducer:tasks.get");
-        assert_eq!(call(&engine, "tasks.rename", FunctionKind::Reducer).await, "reducer:tasks.rename");
-        assert_eq!(call(&engine, "assistant.ask", FunctionKind::Action).await, "complete:assistant.ask");
-        assert_eq!(engine.inner.pools[0].idle_count(), 1, "the Action isolate started on demand");
+        assert_eq!(
+            call(&engine, "tasks.get", FunctionKind::Query).await,
+            "reducer:tasks.get"
+        );
+        assert_eq!(
+            call(&engine, "tasks.rename", FunctionKind::Reducer).await,
+            "reducer:tasks.rename"
+        );
+        assert_eq!(
+            call(&engine, "assistant.ask", FunctionKind::Action).await,
+            "complete:assistant.ask"
+        );
+        assert_eq!(
+            engine.inner.pools[0].idle_count(),
+            1,
+            "the Action isolate started on demand"
+        );
         assert_eq!(engine.release_idle_on_demand(Duration::ZERO), 1);
         assert_eq!(engine.inner.pools[0].idle_count(), 0);
         // Releasing never touches the warm Query/Reducer isolate.
-        assert_eq!(engine.inner.reducer.as_ref().unwrap().pools[0].idle_count(), 1);
-        assert_eq!(call(&engine, "assistant.ask", FunctionKind::Action).await, "complete:assistant.ask");
+        assert_eq!(
+            engine.inner.reducer.as_ref().unwrap().pools[0].idle_count(),
+            1
+        );
+        assert_eq!(
+            call(&engine, "assistant.ask", FunctionKind::Action).await,
+            "complete:assistant.ask"
+        );
     });
 }
 
@@ -122,8 +144,14 @@ fn unlisted_queries_and_reducers_run_from_the_complete_bundle() {
     run_v8_test(async {
         let engine = engine(vec!["tasks.get"], V8Config::default()).unwrap();
         engine.prewarm().await.unwrap();
-        assert_eq!(call(&engine, "tasks.get", FunctionKind::Query).await, "reducer:tasks.get");
-        assert_eq!(call(&engine, "tasks.rename", FunctionKind::Reducer).await, "complete:tasks.rename");
+        assert_eq!(
+            call(&engine, "tasks.get", FunctionKind::Query).await,
+            "reducer:tasks.get"
+        );
+        assert_eq!(
+            call(&engine, "tasks.rename", FunctionKind::Reducer).await,
+            "complete:tasks.rename"
+        );
     });
 }
 
@@ -143,7 +171,10 @@ fn idle_on_demand_isolates_are_released_by_the_reaper() {
         assert_eq!(engine.inner.pools[0].idle_count(), 1);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while engine.inner.pools[0].idle_count() > 0 {
-            assert!(std::time::Instant::now() < deadline, "idle Action isolate was never released");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "idle Action isolate was never released"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     });
@@ -175,7 +206,8 @@ fn a_complete_bundle_that_fails_to_evaluate_fails_the_split_load() {
                 payload: b"throw new Error('broken complete bundle');".to_vec(),
             },
             Some(ReducerBundle {
-                code: b"const get = { run: async () => 1 }; export { get as \"tasks.get\" };".to_vec(),
+                code: b"const get = { run: async () => 1 }; export { get as \"tasks.get\" };"
+                    .to_vec(),
                 functions: vec!["tasks.get".into()],
             }),
             V8Config::default(),

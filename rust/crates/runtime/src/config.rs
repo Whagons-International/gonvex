@@ -840,8 +840,14 @@ mod tests {
             ("GONVEX_PRESENCE_OFFLINE_GRACE_MS", "0"),
             ("GONVEX_PRESENCE_PING_SECONDS", "40"),
             ("GONVEX_PRESENCE_LIVENESS_SECONDS", "30"),
-            ("GONVEX_PRESENCE_LEGACY_BEAT_PATHS", "presence.beat, other.beat"),
-            ("GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS", "presence.transition"),
+            (
+                "GONVEX_PRESENCE_LEGACY_BEAT_PATHS",
+                "presence.beat, other.beat",
+            ),
+            (
+                "GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS",
+                "presence.transition",
+            ),
         ])
         .unwrap()
         .presence;
@@ -850,7 +856,10 @@ mod tests {
         assert_eq!(custom.offline_grace, Duration::ZERO);
         // Liveness never drops below two Ping intervals.
         assert_eq!(custom.liveness_timeout, Duration::from_secs(80));
-        assert_eq!(custom.legacy_beat_paths, vec!["presence.beat", "other.beat"]);
+        assert_eq!(
+            custom.legacy_beat_paths,
+            vec!["presence.beat", "other.beat"]
+        );
         assert_eq!(custom.legacy_transition_paths, vec!["presence.transition"]);
         assert!(config(&[("GONVEX_PRESENCE_TICK_MS", "0")]).is_err());
     }
@@ -981,7 +990,10 @@ mod tests {
         .expect("config");
 
         assert_eq!(config.addr, "0.0.0.0:9090".parse().unwrap());
-        assert_eq!(config.data_dir(), Some(PathBuf::from("/var/lib/gonvex/data")));
+        assert_eq!(
+            config.data_dir(),
+            Some(PathBuf::from("/var/lib/gonvex/data"))
+        );
         assert_eq!(
             config.control_plane_database_url.as_deref(),
             Some("sqlite:///var/lib/gonvex/data/control.db")
@@ -990,7 +1002,10 @@ mod tests {
             config.default_database_url.as_deref(),
             Some("sqlite:///var/lib/gonvex/data")
         );
-        assert_eq!(config.tenant_database_urls["tenant-a"], "sqlite:///srv/a.db");
+        assert_eq!(
+            config.tenant_database_urls["tenant-a"],
+            "sqlite:///srv/a.db"
+        );
         assert!(config.require_auth);
         assert_eq!(config.database_max_total_connections, 64);
         assert_eq!(

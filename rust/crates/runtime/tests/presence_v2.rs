@@ -48,6 +48,8 @@ fn test_config(database_url: String, presence: PresenceConfig) -> Config {
         database_idle_timeout: Duration::from_secs(60),
         module_host: ModuleHostConfig {
             enabled: false,
+            in_process: false,
+            max_heap_bytes: 64 << 20,
             binary: None,
             endpoint: None,
             start_timeout: Duration::from_secs(1),
@@ -256,7 +258,10 @@ async fn quiet(socket: &mut Socket, window: Duration) {
             Ok(Some(Ok(Message::Text(text)))) => {
                 let frame: Value = serde_json::from_str(&text).unwrap();
                 assert!(
-                    !frame["type"].as_str().unwrap_or("").starts_with("presence."),
+                    !frame["type"]
+                        .as_str()
+                        .unwrap_or("")
+                        .starts_with("presence."),
                     "unexpected presence frame {frame}"
                 );
             }
@@ -309,12 +314,23 @@ async fn presence_v2_transitions_scoping_tabs_and_reconnect() {
     let mut tab2 = fixture.connect(&alice_token, "tenant-a", true).await;
     send(&mut tab1, json!({"type":"presence.set","state":"active"})).await;
     send(&mut tab2, json!({"type":"presence.set","state":"idle"})).await;
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "active".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "active".into())]
+    );
 
     // Carol (tenant B) is invisible to tenant A, and Alice to Carol.
     let mut carol_socket = fixture.connect(&carol_token, "tenant-b", true).await;
-    send(&mut carol_socket, json!({"type":"presence.set","state":"active"})).await;
-    send(&mut carol_socket, json!({"type":"presence.subscribe","id":"b"})).await;
+    send(
+        &mut carol_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
+    send(
+        &mut carol_socket,
+        json!({"type":"presence.subscribe","id":"b"}),
+    )
+    .await;
     let carol_snapshot = next_presence(&mut carol_socket).await;
     assert!(!carol_snapshot.to_string().contains(&alice));
     quiet(&mut bob, TICK * 6).await;
@@ -322,14 +338,20 @@ async fn presence_v2_transitions_scoping_tabs_and_reconnect() {
     // snapshot instead of the first patch.
     if carol_snapshot["members"].as_array().unwrap().is_empty() {
         let carol_patch = next_presence(&mut carol_socket).await;
-        assert_eq!(changes(&carol_patch), vec![(carol.clone(), "active".into())]);
+        assert_eq!(
+            changes(&carol_patch),
+            vec![(carol.clone(), "active".into())]
+        );
     } else {
         assert_eq!(carol_snapshot["members"][0]["memberId"], carol.as_str());
     }
 
     // Both tabs idle → idle. Tab 1 closes → Alice stays idle via tab 2.
     send(&mut tab1, json!({"type":"presence.set","state":"idle"})).await;
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "idle".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "idle".into())]
+    );
     tab1.close(None).await.unwrap();
     quiet(&mut bob, GRACE * 2).await;
 
@@ -346,10 +368,16 @@ async fn presence_v2_transitions_scoping_tabs_and_reconnect() {
     assert_eq!(changes(&offline), vec![(alice.clone(), "offline".into())]);
     // Coming back is immediate, then a real disconnect goes offline after grace.
     send(&mut tab3, json!({"type":"presence.set","state":"active"})).await;
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "active".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "active".into())]
+    );
     let closed_at = std::time::Instant::now();
     drop(tab3);
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "offline".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "offline".into())]
+    );
     assert!(closed_at.elapsed() >= GRACE, "offline only after grace");
 
     // A client without the capability (old SDK) is never in the feed, and a
@@ -357,15 +385,26 @@ async fn presence_v2_transitions_scoping_tabs_and_reconnect() {
     let mut old = fixture.connect(&alice_token, "tenant-a", false).await;
     send(&mut old, json!({"type":"presence.set","state":"active"})).await;
     // presence.set needs no capability; only liveness Pings do. It is accepted.
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "active".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "active".into())]
+    );
     drop(old);
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "offline".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "offline".into())]
+    );
 
-    let (mut anonymous, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", fixture.address))
-        .await
-        .unwrap();
+    let (mut anonymous, _) =
+        tokio_tungstenite::connect_async(format!("ws://{}/ws", fixture.address))
+            .await
+            .unwrap();
     next_json(&mut anonymous).await;
-    send(&mut anonymous, json!({"type":"presence.subscribe","id":"nope"})).await;
+    send(
+        &mut anonymous,
+        json!({"type":"presence.subscribe","id":"nope"}),
+    )
+    .await;
     let error = next_presence(&mut anonymous).await;
     assert_eq!(error["type"], "presence.error");
     assert_eq!(error["id"], "nope");
@@ -391,12 +430,22 @@ async fn unresponsive_presence_connections_are_closed_and_go_offline() {
     // Alice's socket stops reading: tungstenite answers Pings only while the
     // stream is polled, so the server sees no inbound frame.
     let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
-    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    send(
+        &mut alice_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
     let started = std::time::Instant::now();
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "active".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "active".into())]
+    );
     // Bob keeps reading (and so answers Pings); Alice goes offline after
     // liveness timeout + grace, while Bob's own connection survives.
-    assert_eq!(changes(&next_presence(&mut bob).await), vec![(alice.clone(), "offline".into())]);
+    assert_eq!(
+        changes(&next_presence(&mut bob).await),
+        vec![(alice.clone(), "offline".into())]
+    );
     assert!(started.elapsed() >= Duration::from_secs(2));
     // Alice's server side closed the socket with the liveness reason.
     let mut closed = false;
@@ -461,7 +510,11 @@ async fn repeated_support_heartbeats_are_answered_without_writes() {
         }
     }
     assert!(session_ids.iter().all(|id| id == &session_ids[0]));
-    assert_eq!(idempotency_rows().await, 1, "only the first heartbeat writes");
+    assert_eq!(
+        idempotency_rows().await,
+        1,
+        "only the first heartbeat writes"
+    );
     // A changed release is new attribution and is written.
     send(
         &mut socket,
@@ -476,11 +529,12 @@ async fn repeated_support_heartbeats_are_answered_without_writes() {
         }
     }
     assert_eq!(idempotency_rows().await, 2);
-    let release: String = sqlx::query_scalar("SELECT release FROM gonvex_support_sessions WHERE id=$1")
-        .bind(&session_ids[0])
-        .fetch_one(&control)
-        .await
-        .unwrap();
+    let release: String =
+        sqlx::query_scalar("SELECT release FROM gonvex_support_sessions WHERE id=$1")
+            .bind(&session_ids[0])
+            .fetch_one(&control)
+            .await
+            .unwrap();
     assert_eq!(release, "1.2.4");
     // Closing the connection flushes last_seen_at lazily (batched).
     let stored_before: i64 =

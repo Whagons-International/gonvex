@@ -283,7 +283,12 @@ impl PresenceHub {
     }
 
     pub fn is_legacy_transition(&self, path: &str) -> bool {
-        self.config.enabled && self.config.legacy_transition_paths.iter().any(|p| p == path)
+        self.config.enabled
+            && self
+                .config
+                .legacy_transition_paths
+                .iter()
+                .any(|p| p == path)
     }
 
     fn lock(&self) -> MutexGuard<'_, HubState> {
@@ -303,13 +308,16 @@ impl PresenceHub {
     ) {
         let mut hub = self.lock();
         let connection: Arc<str> = connection.into();
-        let moved = hub.connections.get(&connection).is_some_and(|registration| {
-            registration.scope != *scope
-                || registration
-                    .member
-                    .as_deref()
-                    .is_some_and(|current| current != member)
-        });
+        let moved = hub
+            .connections
+            .get(&connection)
+            .is_some_and(|registration| {
+                registration.scope != *scope
+                    || registration
+                        .member
+                        .as_deref()
+                        .is_some_and(|current| current != member)
+            });
         if moved {
             detach(&mut hub, &connection, now, &self.config, false, true);
         }
@@ -360,9 +368,7 @@ impl PresenceHub {
         {
             let hub = self.lock();
             if let Some(registration) = hub.connections.get(connection) {
-                if registration.scope == *scope
-                    && registration.member.as_deref() == Some(member)
-                {
+                if registration.scope == *scope && registration.member.as_deref() == Some(member) {
                     return;
                 }
             }
@@ -550,7 +556,10 @@ impl PresenceHub {
     /// Online Members of a scope (for tests and diagnostics).
     pub fn published(&self, scope: &ScopeKey) -> Vec<PresenceMember> {
         let hub = self.lock();
-        hub.scopes.get(scope).map(published_members).unwrap_or_default()
+        hub.scopes
+            .get(scope)
+            .map(published_members)
+            .unwrap_or_default()
     }
 
     pub fn tracked_members(&self) -> usize {
@@ -774,7 +783,14 @@ mod tests {
         hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0);
         hub.set_state("c2", &scope("a"), "m2", PresenceState::Idle, false, t0);
         let stats = hub.tick(t0, 1_000);
-        assert_eq!(stats, TickStats { scopes: 1, changes: 2, frames: 1 });
+        assert_eq!(
+            stats,
+            TickStats {
+                scopes: 1,
+                changes: 2,
+                frames: 1
+            }
+        );
         let got = frames(&hub, "viewer", &slot);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0]["type"], "presence.patch");
@@ -800,7 +816,14 @@ mod tests {
         let (slot_b, _) = hub.subscribe("viewer-b", &scope("b"), "p", t0);
         let other_project = ScopeKey::new("other", "a");
         let (slot_p, _) = hub.subscribe("viewer-p", &other_project, "p", t0);
-        hub.set_state("c1", &scope("a"), "same-member-id", PresenceState::Active, false, t0);
+        hub.set_state(
+            "c1",
+            &scope("a"),
+            "same-member-id",
+            PresenceState::Active,
+            false,
+            t0,
+        );
         hub.tick(t0, 1);
         assert_eq!(frames(&hub, "viewer-a", &slot_a).len(), 1);
         assert!(frames(&hub, "viewer-b", &slot_b).is_empty());
@@ -819,11 +842,17 @@ mod tests {
         hub.set_state("tab1", &scope("a"), "m1", PresenceState::Active, false, t0);
         hub.set_state("tab2", &scope("a"), "m1", PresenceState::Idle, false, t0);
         hub.tick(t0, 1);
-        assert_eq!(changes(&frames(&hub, "viewer", &slot)[0]), vec![("m1".into(), "active".into())]);
+        assert_eq!(
+            changes(&frames(&hub, "viewer", &slot)[0]),
+            vec![("m1".into(), "active".into())]
+        );
         // One tab hidden: still active because the other is.
         hub.set_state("tab1", &scope("a"), "m1", PresenceState::Idle, false, t0);
         hub.tick(t0, 2);
-        assert_eq!(changes(&frames(&hub, "viewer", &slot)[0]), vec![("m1".into(), "idle".into())]);
+        assert_eq!(
+            changes(&frames(&hub, "viewer", &slot)[0]),
+            vec![("m1".into(), "idle".into())]
+        );
         // Closing one tab keeps the Member online through the other.
         hub.disconnect("tab1", t0);
         hub.tick(t0 + Duration::from_secs(60), 3);
@@ -831,7 +860,10 @@ mod tests {
         // An explicit offline from the last tab skips the grace period.
         hub.set_state("tab2", &scope("a"), "m1", PresenceState::Offline, false, t0);
         hub.tick(t0, 4);
-        assert_eq!(changes(&frames(&hub, "viewer", &slot)[0]), vec![("m1".into(), "offline".into())]);
+        assert_eq!(
+            changes(&frames(&hub, "viewer", &slot)[0]),
+            vec![("m1".into(), "offline".into())]
+        );
         assert_eq!(hub.tracked_members(), 0);
     }
 
@@ -846,10 +878,20 @@ mod tests {
         // Socket drops and the client reconnects on a new connection 2 s later.
         hub.disconnect("c1", t0);
         hub.tick(t0 + Duration::from_secs(1), 2);
-        hub.set_state("c2", &scope("a"), "m1", PresenceState::Active, false, t0 + Duration::from_secs(2));
+        hub.set_state(
+            "c2",
+            &scope("a"),
+            "m1",
+            PresenceState::Active,
+            false,
+            t0 + Duration::from_secs(2),
+        );
         hub.tick(t0 + Duration::from_secs(3), 3);
         hub.tick(t0 + Duration::from_secs(30), 4);
-        assert!(frames(&hub, "viewer", &slot).is_empty(), "no offline/online flicker");
+        assert!(
+            frames(&hub, "viewer", &slot).is_empty(),
+            "no offline/online flicker"
+        );
         // A real disconnect: offline exactly once the grace has elapsed.
         hub.disconnect("c2", t0 + Duration::from_secs(40));
         hub.tick(t0 + Duration::from_secs(49), 5);
@@ -880,7 +922,10 @@ mod tests {
             ])
         );
         hub.tick(t0, 8);
-        assert_eq!(changes(&frames(&hub, "viewer", &slot)[0]), vec![("m3".into(), "active".into())]);
+        assert_eq!(
+            changes(&frames(&hub, "viewer", &slot)[0]),
+            vec![("m3".into(), "active".into())]
+        );
     }
 
     #[test]
@@ -899,9 +944,14 @@ mod tests {
         let merged = frames(&hub, "viewer", &slot);
         assert_eq!(merged.len(), 1);
         assert_eq!(changes(&merged[0]), vec![("m1".into(), "idle".into())]);
-        for (i, state) in [PresenceState::Active, PresenceState::Idle, PresenceState::Active, PresenceState::Idle]
-            .into_iter()
-            .enumerate()
+        for (i, state) in [
+            PresenceState::Active,
+            PresenceState::Idle,
+            PresenceState::Active,
+            PresenceState::Idle,
+        ]
+        .into_iter()
+        .enumerate()
         {
             hub.set_state("c1", &scope("a"), "m1", state, false, t0);
             hub.tick(t0, 10 + i as i64);
@@ -922,7 +972,10 @@ mod tests {
         frames(&hub, "viewer-a", &slot_a);
         hub.set_state("c1", &scope("b"), "m9", PresenceState::Active, false, t0);
         hub.tick(t0 + Duration::from_secs(11), 2);
-        assert_eq!(changes(&frames(&hub, "viewer-a", &slot_a)[0]), vec![("m1".into(), "offline".into())]);
+        assert_eq!(
+            changes(&frames(&hub, "viewer-a", &slot_a)[0]),
+            vec![("m1".into(), "offline".into())]
+        );
         assert_eq!(hub.published(&scope("b"))[0].member_id, "m9");
     }
 
@@ -954,7 +1007,14 @@ mod tests {
         hub.tick(t0, 2);
         assert_eq!(hub.published(&scope("a"))[0].state, PresenceState::Idle);
         // Old clients' `gone` transition removes them immediately.
-        hub.set_state("old", &scope("a"), "m1", parse_state("gone").unwrap(), true, t0);
+        hub.set_state(
+            "old",
+            &scope("a"),
+            "m1",
+            parse_state("gone").unwrap(),
+            true,
+            t0,
+        );
         hub.tick(t0, 3);
         assert!(hub.published(&scope("a")).is_empty());
     }
@@ -962,16 +1022,43 @@ mod tests {
     #[test]
     fn support_sessions_write_once_and_flush_last_seen_on_close() {
         let hub = hub();
-        assert!(!hub.support_is_current("support_c1", "p", "c1", "t", "a", Some("1.0"), Some("prod")));
+        assert!(!hub.support_is_current(
+            "support_c1",
+            "p",
+            "c1",
+            "t",
+            "a",
+            Some("1.0"),
+            Some("prod")
+        ));
         hub.support_register("support_c1", "p", "c1", "t", "a", Some("1.0"), Some("prod"));
-        assert!(hub.support_is_current("support_c1", "p", "c1", "t", "a", Some("1.0"), Some("prod")));
+        assert!(hub.support_is_current(
+            "support_c1",
+            "p",
+            "c1",
+            "t",
+            "a",
+            Some("1.0"),
+            Some("prod")
+        ));
         assert!(hub.support_is_current("support_c1", "p", "c1", "t", "a", None, None));
         // A different release, tenant or account needs a durable write.
-        assert!(!hub.support_is_current("support_c1", "p", "c1", "t", "a", Some("1.1"), Some("prod")));
+        assert!(!hub.support_is_current(
+            "support_c1",
+            "p",
+            "c1",
+            "t",
+            "a",
+            Some("1.1"),
+            Some("prod")
+        ));
         assert!(!hub.support_is_current("support_c1", "p", "c1", "t2", "a", None, None));
         assert!(!hub.support_is_current("support_c1", "p", "c1", "t", "b", None, None));
         assert!(!hub.support_is_current("support_c1", "other", "c1", "t", "a", None, None));
-        assert_eq!(hub.support_live_ids("p"), HashSet::from(["support_c1".to_owned()]));
+        assert_eq!(
+            hub.support_live_ids("p"),
+            HashSet::from(["support_c1".to_owned()])
+        );
         assert!(hub.support_live_ids("other").is_empty());
         hub.disconnect("c1", Instant::now());
         assert!(hub.support_live_ids("p").is_empty());

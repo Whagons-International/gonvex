@@ -1,4 +1,6 @@
 pub mod action_calls;
+#[cfg(test)]
+mod bridge_bench;
 pub mod change_feed;
 pub mod config;
 pub mod control;
@@ -13,8 +15,6 @@ pub mod execution;
 pub mod external_auth;
 pub mod host_calls;
 mod in_process;
-#[cfg(test)]
-mod bridge_bench;
 pub mod live_query;
 pub mod membership_projector;
 mod metrics;
@@ -56,11 +56,11 @@ use axum::routing::{get, post};
 use axum::{body, body::Body, Json, Router};
 use chrono::{SecondsFormat, Utc};
 use futures_util::{Stream, StreamExt};
-use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_protocol::{
     ClientMessage, ExecutionScope, ReducerCallRequest, ReducerErrorClass, ReplicaOpenRequest,
     ServerCapabilities, ServerMessage, PROTOCOL_VERSION,
 };
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_websocket::{self as websocket_transport, WebSocket};
 use serde::Serialize;
 use thiserror::Error;
@@ -134,7 +134,9 @@ pub enum RuntimeStartError {
     ModuleHost(#[from] module_host::ModuleHostError),
     #[error(transparent)]
     Database(#[from] gonvex_store::DatabaseError),
-    #[error("a Control Plane database (GONVEX_DATA_DIR) is required when authentication is enabled")]
+    #[error(
+        "a Control Plane database (GONVEX_DATA_DIR) is required when authentication is enabled"
+    )]
     MissingControlPlane,
     #[error(transparent)]
     Module(#[from] ModuleRegistryError),
@@ -2750,13 +2752,14 @@ async fn websocket(
                     }
                     if let Some(watermark) = terminal_watermark {
                         let frames = if !presence_short
-                            && Box::pin(own_membership_changed(&runtime, tenant_session.as_ref())).await
+                            && Box::pin(own_membership_changed(&runtime, tenant_session.as_ref()))
+                                .await
                         {
-                                discard_tenant_session!();
-                                membership_changed_frames(Some(watermark))
-                            } else {
-                                vec![watermark]
-                            };
+                            discard_tenant_session!();
+                            membership_changed_frames(Some(watermark))
+                        } else {
+                            vec![watermark]
+                        };
                         if send_connection_all(&mut snapshot_delivery, &mut socket, &frames)
                             .await
                             .is_err()
@@ -2862,7 +2865,11 @@ async fn websocket(
                         }
                         if let Some(watermark) = terminal_watermark {
                             let frames = if !presence_short
-                                && Box::pin(own_membership_changed(&runtime, tenant_session.as_ref())).await
+                                && Box::pin(own_membership_changed(
+                                    &runtime,
+                                    tenant_session.as_ref(),
+                                ))
+                                .await
                             {
                                 discard_tenant_session!();
                                 membership_changed_frames(Some(watermark))
@@ -3125,31 +3132,39 @@ async fn websocket(
                         presence::parse_state(&state),
                     ) {
                         presence_hub.set_state(
-                            &connection_id, &scope, &member, state, false,
+                            &connection_id,
+                            &scope,
+                            &member,
+                            state,
+                            false,
                             std::time::Instant::now(),
                         );
                     }
                 }
                 Ok(ClientMessage::PresenceSubscribe { id }) => {
-                    let response = match presence_member_scope(&presence_hub, tenant_session.as_ref()) {
-                        Some((scope, _)) => {
-                            let (slot, snapshot) = presence_hub.subscribe(
-                                &connection_id, &scope, &id, std::time::Instant::now(),
-                            );
-                            presence_slot = Some(slot);
-                            snapshot
-                        }
-                        None => serde_json::to_string(&ServerMessage::PresenceError {
-                            id,
-                            error: if presence_hub.enabled() {
-                                "presence requires an authenticated tenant member session"
-                            } else {
-                                "presence v2 is disabled"
+                    let response =
+                        match presence_member_scope(&presence_hub, tenant_session.as_ref()) {
+                            Some((scope, _)) => {
+                                let (slot, snapshot) = presence_hub.subscribe(
+                                    &connection_id,
+                                    &scope,
+                                    &id,
+                                    std::time::Instant::now(),
+                                );
+                                presence_slot = Some(slot);
+                                snapshot
                             }
-                            .to_owned(),
-                        })
-                        .unwrap_or_default(),
-                    };
+                            None => serde_json::to_string(&ServerMessage::PresenceError {
+                                id,
+                                error: if presence_hub.enabled() {
+                                    "presence requires an authenticated tenant member session"
+                                } else {
+                                    "presence v2 is disabled"
+                                }
+                                .to_owned(),
+                            })
+                            .unwrap_or_default(),
+                        };
                     if socket.send(Message::Text(response.into())).await.is_err() {
                         break;
                     }
@@ -4209,7 +4224,10 @@ async fn call_reducer_with_presence(
 ) -> (ServerMessage, bool) {
     let hub = &runtime.inner.presence;
     if !hub.enabled() {
-        return (call_reducer(runtime, session, control_connection, call).await, false);
+        return (
+            call_reducer(runtime, session, control_connection, call).await,
+            false,
+        );
     }
     let control_scope = call.scope == Some(ExecutionScope::Control);
     let support_heartbeat = control_scope && call.path == SUPPORT_HEARTBEAT;
@@ -4270,16 +4288,15 @@ async fn call_reducer_with_presence(
             );
         }
     }
-    let legacy_transition = (!control_scope
-        && !presence_negotiated
-        && hub.is_legacy_transition(&call.path))
-    .then(|| {
-        call.args
-            .get("state")
-            .and_then(serde_json::Value::as_str)
-            .and_then(presence::parse_state)
-    })
-    .flatten();
+    let legacy_transition =
+        (!control_scope && !presence_negotiated && hub.is_legacy_transition(&call.path))
+            .then(|| {
+                call.args
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(presence::parse_state)
+            })
+            .flatten();
     let response = call_reducer(runtime, session, control_connection, call).await;
     if matches!(response, ServerMessage::ReducerResult { .. }) {
         if let Some((account, tenant, release, environment)) = &support_attribution {
@@ -4680,7 +4697,10 @@ async fn send_connection_all(
 async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
     let mut timer = gonvex_profiler::Timer::start();
     let encoded = serde_json::to_string(message).map_err(|_| ())?;
-    timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
+    timer.lap(
+        gonvex_profiler::Stage::WsEncode,
+        gonvex_profiler::Label::None,
+    );
     socket
         .send(Message::Text(encoded.into()))
         .await
@@ -4712,7 +4732,11 @@ mod tests {
                         key: "id".into(),
                         cursor: cursor.clone(),
                         result: (0..1000)
-                            .map(|id| std::sync::Arc::new(serde_json::json!({"id":id,"body":"x".repeat(1000)})))
+                            .map(|id| {
+                                std::sync::Arc::new(
+                                    serde_json::json!({"id":id,"body":"x".repeat(1000)}),
+                                )
+                            })
                             .collect(),
                         metadata: std::collections::BTreeMap::from([(
                             "pageDigest".into(),
@@ -5316,10 +5340,14 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         // before revoking its tenant.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if runtime.inner.pools.snapshot().await.admission_active > 0 { break; }
+                if runtime.inner.pools.snapshot().await.admission_active > 0 {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&control_fixture).await.unwrap();
         let first = read_socket(&mut socket).await;
         assert_eq!(first["type"], "reducer.result");
