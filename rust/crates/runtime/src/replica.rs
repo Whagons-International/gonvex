@@ -119,6 +119,24 @@ impl ReplicaAggregate {
     }
 }
 
+/// Process-wide bound on concurrent replica snapshot builds
+/// (`GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`, default: available CPUs, min 2).
+fn snapshot_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let default = std::thread::available_parallelism()
+            .map(|cpus| cpus.get())
+            .unwrap_or(2)
+            .max(2);
+        let permits = std::env::var("GONVEX_REPLICA_SNAPSHOT_CONCURRENCY")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default);
+        tokio::sync::Semaphore::new(permits)
+    })
+}
+
 struct Snapshot {
     rows: Vec<Value>,
     by_key: BTreeMap<String, Value>,
@@ -351,6 +369,14 @@ impl Runtime {
         args: &Value,
         after: Option<u64>,
     ) -> Result<Snapshot, ReplicaError> {
+        // Each WebSocket queues up to REPLICA_OPEN_CONCURRENCY preparations,
+        // so a sign-in burst could otherwise build hundreds of full snapshots
+        // at once. Snapshot builds are CPU and memory bound: more of them than
+        // cores only multiplies peak memory, so bound them process-wide.
+        let _snapshot_permit = snapshot_permits()
+            .acquire()
+            .await
+            .expect("snapshot semaphore is never closed");
         let control = self
             .inner
             .control_plane

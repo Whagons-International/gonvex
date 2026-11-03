@@ -88,6 +88,12 @@ fn sqlite_mmap_mib() -> u64 {
     env_u64("GONVEX_SQLITE_MMAP_MIB", 256)
 }
 
+/// Prepared statements cached per connection
+/// (`GONVEX_SQLITE_STATEMENT_CACHE`, default 128).
+fn sqlite_statement_cache() -> usize {
+    env_u64("GONVEX_SQLITE_STATEMENT_CACHE", 128) as usize
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -227,10 +233,16 @@ impl PoolRegistry {
 
     fn options(&self, path: &Path, read_only: bool) -> Result<SqliteConnectOptions, DatabaseError> {
         let url = format!("sqlite://{}", path.display());
-        let options = SqliteConnectOptions::from_str(&url)?
+        let mut options = SqliteConnectOptions::from_str(&url)?
             .create_if_missing(!read_only)
-            .read_only(read_only)
-            .journal_mode(SqliteJournalMode::Wal)
+            .read_only(read_only);
+        // WAL is a persistent property of the file, set once by the writer.
+        // `PRAGMA journal_mode` takes a lock, so issuing it on every reader
+        // open made reader opens wait behind the writer's transactions.
+        if !read_only {
+            options = options.journal_mode(SqliteJournalMode::Wal);
+        }
+        let options = options
             .synchronous(match self.durability {
                 Durability::Full => SqliteSynchronous::Full,
                 Durability::Normal => SqliteSynchronous::Normal,
@@ -246,7 +258,7 @@ impl PoolRegistry {
             .pragma("temp_store", "MEMORY")
             // Module SQL may use `col REGEXP $n` (Rust `regex` syntax).
             .with_regexp()
-            .statement_cache_capacity(512);
+            .statement_cache_capacity(sqlite_statement_cache());
         Ok(options)
     }
 

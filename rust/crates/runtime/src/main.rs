@@ -1,5 +1,8 @@
 use std::process::ExitCode;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use axum::serve::ListenerExt;
 use gonvex_runtime::config::Config;
 use gonvex_runtime::Runtime;

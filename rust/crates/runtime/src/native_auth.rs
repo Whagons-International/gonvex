@@ -243,7 +243,7 @@ async fn authorize(
     .bind(&nonce)
     .bind(&callback_uri)
     .bind(&provider)
-    .bind(Utc::now() + chrono::Duration::minutes(TRANSACTION_MINUTES))
+    .bind((Utc::now() + chrono::Duration::minutes(TRANSACTION_MINUTES)).timestamp_millis())
     .execute(&mut **transaction.transaction())
     .await
     .is_err()
@@ -319,7 +319,7 @@ async fn finish_callback(
     };
     let row = sqlx::query(
         r#"DELETE FROM gonvex_auth_transactions
-           WHERE token_hash=$1 AND expires_at>now()
+           WHERE token_hash=$1 AND expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER)
            RETURNING project_id,redirect_uri,app_state,code_challenge,nonce,
                      google_redirect_uri,provider"#,
     )
@@ -343,13 +343,16 @@ async fn finish_callback(
     if transaction.commit().await.is_err() {
         return redirect_error(&redirect_uri, &app_state, "auth_state_consumption_failed");
     }
-    let mut transaction = match control.begin_control_transaction(false).await {
+    // Read the provider configuration from a snapshot. The provider exchange
+    // below is a network round trip and must not hold the single Control
+    // Plane writer.
+    let mut snapshot = match control.begin_control_transaction(true).await {
         Ok(transaction) => transaction,
         Err(_) => return redirect_error(&redirect_uri, &app_state, "auth_service_unavailable"),
     };
     let configuration = match native_provider_configuration(
         &runtime,
-        &mut transaction,
+        &mut snapshot,
         &project,
         &provider,
         &redirect_uri,
@@ -359,6 +362,7 @@ async fn finish_callback(
         Ok(configuration) => configuration,
         Err(_) => return redirect_error(&redirect_uri, &app_state, "provider_not_configured"),
     };
+    let _ = snapshot.commit().await;
     let code = values.get("code").map(String::as_str).unwrap_or("").trim();
     let id_token = match exchange_provider_code(
         &configuration,
@@ -382,6 +386,10 @@ async fn finish_callback(
     if provider == "microsoft" && !identity.email.is_empty() {
         identity.email_verified = true;
     }
+    let mut transaction = match control.begin_control_transaction(false).await {
+        Ok(transaction) => transaction,
+        Err(_) => return redirect_error(&redirect_uri, &app_state, "auth_service_unavailable"),
+    };
     let account = match resolve_external_account(&mut transaction, &project, &identity).await {
         Ok(account) => account,
         Err(_) => return redirect_error(&redirect_uri, &app_state, "account_creation_failed"),
@@ -397,7 +405,7 @@ async fn finish_callback(
     .bind(&account.id)
     .bind(&redirect_uri)
     .bind(row.get::<String, _>("code_challenge"))
-    .bind(Utc::now() + chrono::Duration::minutes(CODE_MINUTES))
+    .bind((Utc::now() + chrono::Duration::minutes(CODE_MINUTES)).timestamp_millis())
     .execute(&mut **transaction.transaction())
     .await;
     if inserted.is_err() || transaction.commit().await.is_err() {
@@ -534,7 +542,7 @@ async fn exchange_code(
     let row = sqlx::query(
         r#"SELECT project_id,account_id,redirect_uri,code_challenge
            FROM gonvex_auth_codes
-           WHERE code_hash=$1 AND used_at IS NULL AND expires_at>now() FOR UPDATE"#,
+           WHERE code_hash=$1 AND used_at IS NULL AND expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
     )
     .bind(sha256_hex(code.as_bytes()))
     .fetch_optional(&mut **transaction.transaction())
@@ -549,7 +557,7 @@ async fn exchange_code(
             "authorization code does not match this client".to_owned(),
         ));
     }
-    sqlx::query("UPDATE gonvex_auth_codes SET used_at=now() WHERE code_hash=$1")
+    sqlx::query("UPDATE gonvex_auth_codes SET used_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE code_hash=$1")
         .bind(sha256_hex(code.as_bytes()))
         .execute(&mut **transaction.transaction())
         .await?;
@@ -611,9 +619,9 @@ async fn logout(
             .fetch_optional(&mut **transaction.transaction())
             .await
             {
-                let _ = sqlx::query("UPDATE gonvex_auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE project_id=$1 AND account_id=$2")
+                let _ = sqlx::query("UPDATE gonvex_auth_sessions SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE project_id=$1 AND account_id=$2")
                     .bind(&project).bind(&account).execute(&mut **transaction.transaction()).await;
-                let _ = sqlx::query("UPDATE gonvex_auth_refresh_tokens SET revoked_at=COALESCE(revoked_at,now()) WHERE project_id=$1 AND account_id=$2")
+                let _ = sqlx::query("UPDATE gonvex_auth_refresh_tokens SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE project_id=$1 AND account_id=$2")
                     .bind(&project).bind(&account).execute(&mut **transaction.transaction()).await;
             }
         } else {

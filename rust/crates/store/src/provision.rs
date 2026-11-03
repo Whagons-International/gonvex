@@ -15,7 +15,7 @@ use sqlx::{Connection, Row, SqliteConnection};
 use super::data_dir::DataDir;
 use super::feed::{self, CommitNotice, Provenance, SYNC_INFRASTRUCTURE_SQL};
 use super::registry::database_path;
-use super::rows::{quote_identifier, table_columns};
+use super::rows::quote_identifier;
 use super::{ControlPlane, DatabaseError, PoolRegistry, TenantRoute};
 
 /// Keyed lock (see [`PoolRegistry::lock`]) that serializes schema changes on
@@ -1052,8 +1052,29 @@ pub(crate) fn install_change_feed_locked(
             crate::execute_script(&mut *tx, SYNC_INFRASTRUCTURE_SQL).await?;
             record_bootstrap(&mut tx, "infrastructure", SYNC_INFRASTRUCTURE_SQL).await?;
         }
-        for table in application_tables(&mut tx).await? {
-            let columns = table_columns(&mut tx, &table).await?;
+        // One read each for every table's columns, every recorded receipt and
+        // every installed trigger. Checking per table issued roughly
+        // 4 statements x tables x tenants on every boot (51k statements for
+        // 26 Whagons tenants); a warm boot now reads three result sets.
+        let tables = application_tables(&mut tx).await?;
+        let mut columns_by_table = all_table_columns(&mut tx).await?;
+        let receipts: std::collections::HashMap<String, String> =
+            sqlx::query_as::<_, (String, String)>("SELECT name, digest FROM _gonvex_sync_bootstrap")
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect();
+        let triggers: std::collections::HashMap<(String, String), String> =
+            sqlx::query_as::<_, (String, String, Option<String>)>(
+                "SELECT tbl_name, name, sql FROM sqlite_schema WHERE type='trigger'",
+            )
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .filter_map(|(table, name, sql)| sql.map(|sql| ((table, name), sql)))
+            .collect();
+        for table in tables {
+            let columns = columns_by_table.remove(&table).unwrap_or_default();
             let key = columns
                 .iter()
                 .find(|column| column.primary_key)
@@ -1063,9 +1084,9 @@ pub(crate) fn install_change_feed_locked(
                 })?;
             let script = feed::capture_triggers_sql(&table, &key, &columns);
             let receipt = format!("table:{table}");
-            if !bootstrap_matches(&mut tx, &receipt, &script).await?
-                || !installed_triggers_match(&mut tx, &table, &script).await?
-            {
+            let receipt_matches =
+                receipts.get(&receipt).map(String::as_str) == Some(bootstrap_digest(&script).as_str());
+            if !receipt_matches || !triggers_match(&triggers, &table, &script) {
                 crate::execute_script(&mut *tx, &script).await?;
                 record_bootstrap(&mut tx, &receipt, &script).await?;
             }
@@ -1148,33 +1169,49 @@ fn trigger_statements(script: &str) -> Vec<&str> {
     found
 }
 
-/// A matching receipt only proves what this runtime last installed. Another
-/// writer (an older runtime build during a rollback, or a manual edit) can
-/// drop or replace a trigger afterwards, so the installed definitions must
-/// still match the script too.
-async fn installed_triggers_match(
+/// Columns of every ordinary table, in declaration order, from one query.
+async fn all_table_columns(
     connection: &mut SqliteConnection,
+) -> Result<std::collections::HashMap<String, Vec<crate::rows::ColumnInfo>>, DatabaseError> {
+    let rows = sqlx::query(
+        r#"SELECT m.name, p.name, p.type, p."notnull", p.pk
+           FROM sqlite_schema AS m JOIN pragma_table_info(m.name) AS p
+           WHERE m.type = 'table' ORDER BY m.name, p.cid"#,
+    )
+    .fetch_all(connection)
+    .await?;
+    let mut tables: std::collections::HashMap<String, Vec<crate::rows::ColumnInfo>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        tables
+            .entry(row.get(0))
+            .or_default()
+            .push(crate::rows::ColumnInfo {
+                name: row.get(1),
+                declared: row.get::<String, _>(2),
+                not_null: row.get::<i64, _>(3) != 0,
+                primary_key: row.get::<i64, _>(4) != 0,
+            });
+    }
+    Ok(tables)
+}
+
+/// The in-memory form of `installed_triggers_match` for a prefetched
+/// `(table, trigger name) -> sql` map.
+fn triggers_match(
+    installed: &std::collections::HashMap<(String, String), String>,
     table: &str,
     script: &str,
-) -> Result<bool, DatabaseError> {
+) -> bool {
     let expected = trigger_statements(script);
     let names = feed::capture_trigger_names(table);
-    if expected.len() != names.len() {
-        return Ok(false);
-    }
-    for (name, statement) in names.iter().zip(expected) {
-        let installed: Option<String> = sqlx::query_scalar(
-            "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=$1 AND tbl_name=$2",
-        )
-        .bind(name)
-        .bind(table)
-        .fetch_optional(&mut *connection)
-        .await?;
-        if installed.as_deref() != Some(statement) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    expected.len() == names.len()
+        && names.iter().zip(expected).all(|(name, statement)| {
+            installed
+                .get(&(table.to_owned(), name.clone()))
+                .map(String::as_str)
+                == Some(statement)
+        })
 }
 
 fn bootstrap_digest(source: &str) -> String {

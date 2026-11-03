@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -16,20 +16,29 @@ use gonvex_runtime::Runtime;
 use pbkdf2::pbkdf2_hmac;
 use serde_json::Value;
 use sha2::Sha256;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::Row;
+use sqlx::{Row, SqlitePool};
+use tempfile::TempDir;
 use tower::ServiceExt;
 
-fn scoped_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}")
+/// A disposable data directory and a fixture writer on its Control Plane file.
+/// The runtime under test opens the same file through its own registry.
+async fn sqlite_fixture(name: &str) -> (TempDir, String, PoolRegistry, SqlitePool) {
+    let data = tempfile::tempdir().unwrap();
+    let url = gonvex_store::database_url(&data.path().join(format!("{name}.db")));
+    let pools = PoolRegistry::new(PoolLimits::default());
+    let fixture = pools.pool(&url).await.unwrap();
+    (data, url, pools, fixture)
 }
 
+const NOW_MS: &str = "CAST(unixepoch('subsec')*1000 AS INTEGER)";
+
 fn test_config(database_url: String) -> Config {
+    // The default database URL names the data directory holding control.db.
+    let data_dir = gonvex_store::DataDir::parse(&database_url);
     Config {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
         control_plane_database_url: Some(database_url.clone()),
-        default_database_url: Some(database_url),
+        default_database_url: Some(gonvex_store::database_url(data_dir.root())),
         tenant_database_urls: BTreeMap::new(),
         project_database_urls: BTreeMap::new(),
         require_auth: true,
@@ -69,35 +78,9 @@ fn test_config(database_url: String) -> Config {
 
 #[tokio::test]
 async fn tenant_directory_allows_project_developers_without_support_administration() {
-    let Some(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping tenant directory contract test");
-        return;
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let schema = format!("gonvex_tenant_directory_{nonce}");
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base_url)
-        .await
-        .unwrap();
-    sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let database_url = scoped_url(&base_url, &schema);
+    let (data, database_url, fixture_pools, fixture) = sqlite_fixture("control").await;
     let runtime = Runtime::new(test_config(database_url.clone()));
     runtime.start().await.unwrap();
-    let fixture = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .unwrap();
     sqlx::query(
         "INSERT INTO gonvex_runtime_projects(id,name,status,owner_email) VALUES('project','Project','active','owner@example.test'),('other','Other','active','other-owner@example.test')",
     ).execute(&fixture).await.unwrap();
@@ -245,45 +228,15 @@ async fn tenant_directory_allows_project_developers_without_support_administrati
         Err(ControlError::AuthenticationRequired)
     ));
     runtime.shutdown().await;
-    fixture.close().await;
-    sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    fixture_pools.close().await;
+    drop(data);
 }
 
 #[tokio::test]
 async fn refresh_token_reuse_commits_family_revocation() {
-    let Some(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping auth contract test");
-        return;
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let schema = format!("gonvex_auth_contract_{nonce}");
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base_url)
-        .await
-        .unwrap();
-    sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let database_url = scoped_url(&base_url, &schema);
+    let (data, database_url, fixture_pools, fixture) = sqlite_fixture("control").await;
     let runtime = Runtime::new(test_config(database_url.clone()));
     runtime.start().await.unwrap();
-    let fixture = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .unwrap();
     sqlx::query(
         "INSERT INTO gonvex_runtime_projects(id,name,status,auth_mode) VALUES('project','Project','active','gonvex-native')",
     )
@@ -407,20 +360,20 @@ async fn refresh_token_reuse_commits_family_revocation() {
     assert_eq!(identity["account"]["email"], "person@example.test");
 
     let refresh = "gvx_refresh_replayed";
-    sqlx::query(
+    sqlx::query(&format!(
         r#"INSERT INTO gonvex_auth_refresh_tokens
            (token_hash,family_id,project_id,account_id,expires_at,used_at)
-           VALUES($1,'family','project','account',now()+interval '1 day',now()-interval '10 seconds')"#,
-    )
+           VALUES($1,'family','project','account',{NOW_MS}+86400000,{NOW_MS}-10000)"#,
+    ))
     .bind(token_hash(refresh))
     .execute(&fixture)
     .await
     .unwrap();
-    sqlx::query(
+    sqlx::query(&format!(
         r#"INSERT INTO gonvex_auth_sessions
            (token_hash,project_id,account_id,family_id,expires_at)
-           VALUES($1,'project','account','family',now()+interval '1 hour')"#,
-    )
+           VALUES($1,'project','account','family',{NOW_MS}+3600000)"#,
+    ))
     .bind(token_hash("gvx_session_existing"))
     .execute(&fixture)
     .await
@@ -454,43 +407,17 @@ async fn refresh_token_reuse_commits_family_revocation() {
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|row| row.get::<bool, _>("revoked")));
 
-    fixture.close().await;
     runtime.shutdown().await;
-    sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
+    fixture_pools.close().await;
+    drop(data);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn internal_e2e_actor_creation_uses_native_auth_and_tenant_admission() {
-    let Some(base_url) = std::env::var("GONVEX_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping E2E actor contract test");
-        return;
-    };
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let control_schema = format!("gonvex_e2e_control_{nonce}");
-    let tenant_schema = format!("gonvex_e2e_tenant_{nonce}");
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base_url)
-        .await
-        .unwrap();
-    for schema in [&control_schema, &tenant_schema] {
-        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-            .execute(&admin)
-            .await
-            .unwrap();
-    }
-    let control_url = scoped_url(&base_url, &control_schema);
-    let tenant_url = scoped_url(&base_url, &tenant_schema);
+    let _ = tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::new("debug")).with_test_writer().try_init();
+    let data = tempfile::tempdir().unwrap();
+    let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+    let tenant_url = gonvex_store::database_url(&data.path().join("tenant.db"));
     let pools = PoolRegistry::new(PoolLimits::default());
     let control = ControlPlane::connect(&control_url, pools.clone(), BTreeMap::new())
         .await
@@ -505,11 +432,10 @@ async fn internal_e2e_actor_creation_uses_native_auth_and_tenant_admission() {
         .provision_tenant_database(route.clone(), Vec::new())
         .await
         .unwrap();
-    let fixture = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&control_url)
-        .await
-        .unwrap();
+    // One registry owns a database file in production. Release this fixture
+    // registry's tenant connections so only the runtime under test holds them.
+    pools.close_database(&tenant_url).await;
+    let fixture = pools.pool(&control_url).await.unwrap();
     sqlx::query(
         r#"INSERT INTO gonvex_runtime_projects
            (id,name,database_mode,database_url,status,auth_mode)
@@ -660,13 +586,6 @@ async fn internal_e2e_actor_creation_uses_native_auth_and_tenant_admission() {
     );
 
     runtime.shutdown().await;
-    fixture.close().await;
     pools.close().await;
-    for schema in [&tenant_schema, &control_schema] {
-        sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-            .execute(&admin)
-            .await
-            .unwrap();
-    }
-    admin.close().await;
+    drop(data);
 }

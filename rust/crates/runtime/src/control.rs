@@ -20,7 +20,7 @@ use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgRow;
+use sqlx::sqlite::SqliteRow;
 use sqlx::types::Json;
 use sqlx::Row;
 use subtle::ConstantTimeEq;
@@ -353,7 +353,7 @@ impl Runtime {
             .await?;
         sqlx::query(
             r#"UPDATE gonvex_control_idempotency
-               SET state='completed',result=$4,error='',updated_at=now()
+               SET state='completed',result=$4,error='',updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3"#,
         )
         .bind(&connection.project_id)
@@ -495,7 +495,7 @@ impl Runtime {
                 {
                     sqlx::query(
                         r#"UPDATE gonvex_auth_refresh_tokens
-                           SET revoked_at=COALESCE(revoked_at,now())
+                           SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER))
                            WHERE project_id=$1 AND account_id=$2 AND family_id=(
                              SELECT family_id FROM gonvex_auth_refresh_tokens
                              WHERE project_id=$1 AND account_id=$2 AND token_hash=$3 LIMIT 1
@@ -527,7 +527,7 @@ impl Runtime {
                         let message = "refresh token reuse detected; this login was revoked";
                         sqlx::query(
                             r#"UPDATE gonvex_control_idempotency
-                               SET state='failed',error=$4,updated_at=now()
+                               SET state='failed',error=$4,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                                WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3"#,
                         )
                         .bind(&connection.project_id)
@@ -554,7 +554,7 @@ impl Runtime {
         .await?;
         sqlx::query(
             r#"UPDATE gonvex_control_idempotency
-               SET state='completed',result=$4,error='',updated_at=now()
+               SET state='completed',result=$4,error='',updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3"#,
         )
         .bind(&connection.project_id)
@@ -635,8 +635,8 @@ impl Runtime {
         }
         sqlx::query(
             r#"INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash,updated_at)
-               VALUES($1,$2,$3,now()) ON CONFLICT(project_id,account_id) DO UPDATE SET
-                 password_hash=EXCLUDED.password_hash,updated_at=now()"#,
+               VALUES($1,$2,$3,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(project_id,account_id) DO UPDATE SET
+                 password_hash=EXCLUDED.password_hash,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&connection.project_id)
         .bind(&target_account)
@@ -645,7 +645,7 @@ impl Runtime {
         .await?;
         for table in ["gonvex_auth_sessions", "gonvex_auth_refresh_tokens"] {
             let statement = format!(
-                "UPDATE {table} SET revoked_at=COALESCE(revoked_at,now()) WHERE project_id=$1 AND account_id=$2"
+                "UPDATE {table} SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE project_id=$1 AND account_id=$2"
             );
             sqlx::query(&statement)
                 .bind(&connection.project_id)
@@ -710,13 +710,7 @@ impl Runtime {
                 "login provisioning is owned by the configured external identity provider; invite the account instead".to_owned(),
             ));
         }
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!(
-                "provision:{}:{}:{}",
-                connection.project_id, caller.route.tenant_id, email
-            ))
-            .execute(&mut **control_tx.transaction())
-            .await?;
+        require_control_writer(&control_tx, "member login provisioning")?;
         let existing = sqlx::query(
             r#"SELECT account.id,
                       EXISTS(SELECT 1 FROM gonvex_member_login_provisioning provisioning
@@ -743,7 +737,7 @@ impl Runtime {
         } else {
             let account_id = random_id("acct");
             sqlx::query(
-                "INSERT INTO accounts(id,auth_realm_id,email,name,updated_at) VALUES($1,$2,$3,$4,now())",
+                "INSERT INTO accounts(id,auth_realm_id,email,name,updated_at) VALUES($1,$2,$3,$4,CAST(unixepoch('subsec')*1000 AS INTEGER))",
             )
             .bind(&account_id)
             .bind(&connection.project_id)
@@ -754,7 +748,7 @@ impl Runtime {
             sqlx::query(
                 r#"INSERT INTO account_identities
                    (project_id,account_id,provider,issuer,subject,email,verified_email,updated_at)
-                   VALUES($1,$2,'password',$1,$3,$3,TRUE,now())"#,
+                   VALUES($1,$2,'password',$1,$3,$3,TRUE,CAST(unixepoch('subsec')*1000 AS INTEGER))"#,
             )
             .bind(&connection.project_id)
             .bind(&account_id)
@@ -802,10 +796,10 @@ impl Runtime {
         let membership_revision: i64 = sqlx::query_scalar(
             r#"INSERT INTO members
                (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-               VALUES($1,$2,'active',$3,'',$4,$5,now())
+               VALUES($1,$2,'active',$3,'',$4,$5,CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(id) DO UPDATE SET status='active',display_name=EXCLUDED.display_name,
                  role=EXCLUDED.role,permissions=EXCLUDED.permissions,
-                 membership_revision=members.membership_revision+1,updated_at=now()
+                 membership_revision=members.membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                RETURNING membership_revision"#,
         )
         .bind(&member_id)
@@ -836,11 +830,11 @@ impl Runtime {
         sqlx::query(
             r#"INSERT INTO account_tenant_index
                (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-               VALUES($1,$2,$3,'active',$4,now())
+               VALUES($1,$2,$3,'active',$4,CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(account_id,tenant_id) DO UPDATE SET member_id=EXCLUDED.member_id,
-                 status='active',tenant_membership_revision=GREATEST(
+                 status='active',tenant_membership_revision=max(
                    account_tenant_index.tenant_membership_revision,
-                   EXCLUDED.tenant_membership_revision),updated_at=now()"#,
+                   EXCLUDED.tenant_membership_revision),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&account_id)
         .bind(&caller.route.tenant_id)
@@ -898,10 +892,10 @@ impl Runtime {
             let revision: i64 = sqlx::query_scalar(
                 r#"INSERT INTO members
                    (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-                   VALUES($1,$2,'active',$3,$4,'admin','{"developer":true}'::jsonb,now())
+                   VALUES($1,$2,'active',$3,$4,'admin','{"developer":true}',CAST(unixepoch('subsec')*1000 AS INTEGER))
                    ON CONFLICT(id) DO UPDATE SET status='active',display_name=EXCLUDED.display_name,
-                     avatar_url=EXCLUDED.avatar_url,role='admin',permissions='{"developer":true}'::jsonb,
-                     membership_revision=members.membership_revision+1,updated_at=now()
+                     avatar_url=EXCLUDED.avatar_url,role='admin',permissions='{"developer":true}',
+                     membership_revision=members.membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                    RETURNING membership_revision"#,
             )
             .bind(&member_id)
@@ -916,7 +910,7 @@ impl Runtime {
             let revision: i64 = if was_active {
                 sqlx::query_scalar(
                     r#"UPDATE members SET status='revoked',
-                       membership_revision=membership_revision+1,updated_at=now()
+                       membership_revision=membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                        WHERE id=$1 RETURNING membership_revision"#,
                 )
                 .bind(&member_id)
@@ -951,11 +945,11 @@ impl Runtime {
             sqlx::query(
                 r#"INSERT INTO account_tenant_index
                    (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-                   VALUES($1,$2,$3,'active',$4,now())
+                   VALUES($1,$2,$3,'active',$4,CAST(unixepoch('subsec')*1000 AS INTEGER))
                    ON CONFLICT(account_id,tenant_id) DO UPDATE SET member_id=EXCLUDED.member_id,
-                     status='active',tenant_membership_revision=GREATEST(
+                     status='active',tenant_membership_revision=max(
                        account_tenant_index.tenant_membership_revision,
-                       EXCLUDED.tenant_membership_revision),updated_at=now()"#,
+                       EXCLUDED.tenant_membership_revision),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
             )
             .bind(&identity.account.id)
             .bind(tenant_id)
@@ -966,7 +960,7 @@ impl Runtime {
         } else {
             sqlx::query(
                 r#"UPDATE account_tenant_index SET status='revoked',
-                   tenant_membership_revision=GREATEST(tenant_membership_revision,$3),updated_at=now()
+                   tenant_membership_revision=max(tenant_membership_revision,$3),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                    WHERE account_id=$1 AND tenant_id=$2"#,
             )
             .bind(&identity.account.id)
@@ -1042,7 +1036,7 @@ impl Runtime {
         .bind(target_account)
         .bind(tenant_id)
         .bind(reason)
-        .bind(expires)
+        .bind(expires.timestamp_millis())
         .execute(&mut **transaction.transaction())
         .await?;
         let result = serde_json::json!({
@@ -1089,13 +1083,13 @@ impl Runtime {
                 "tenant domain must be a lowercase DNS label".to_owned(),
             ));
         }
-        let base_url = self
+        let data_dir = self
             .inner
             .config
-            .default_database_url
-            .clone()
+            .data_dir()
+            .map(|path| path.display().to_string())
             .ok_or_else(|| {
-                ControlError::InvalidArguments("DATABASE_URL is not configured".to_owned())
+                ControlError::InvalidArguments("GONVEX_DATA_DIR is not configured".to_owned())
             })?;
         let mut reserve_tx = control.begin_control_transaction(false).await?;
         let project = sqlx::query(
@@ -1118,20 +1112,7 @@ impl Runtime {
                 "this project allows tenant creation only through its Control Plane".to_owned(),
             ));
         }
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!(
-                "tenant-create:{}:{}",
-                connection.project_id, idempotency_key
-            ))
-            .execute(&mut **reserve_tx.transaction())
-            .await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!(
-                "tenant-domain:{}:{}",
-                connection.project_id, requested_domain
-            ))
-            .execute(&mut **reserve_tx.transaction())
-            .await?;
+        require_control_writer(&reserve_tx, "tenant creation")?;
         let checkpoint = sqlx::query(
             r#"SELECT tenant_id,database_name,database_alias,name,domain,account_id
                FROM gonvex_tenant_provisioning WHERE project_id=$1 AND idempotency_key=$2"#,
@@ -1210,7 +1191,9 @@ impl Runtime {
         }
         reserve_tx.commit().await?;
 
-        let database_url = control.create_database(&base_url, &database_name).await?;
+        let database_url = control
+            .create_tenant_database(&data_dir, &connection.project_id, &tenant_id)
+            .await?;
         let mut directory_tx = control.begin_control_transaction(false).await?;
         sqlx::query(RUNTIME_TENANT_DIRECTORY_INSERT_SQL)
             .bind(&tenant_id)
@@ -1253,9 +1236,9 @@ impl Runtime {
         let revision: i64 = sqlx::query_scalar(
             r#"INSERT INTO members
                (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-               VALUES($1,$2,'active',$3,$4,'owner','{}'::jsonb,now())
+               VALUES($1,$2,'active',$3,$4,'owner','{}',CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(id) DO UPDATE SET status='active',role='owner',
-                 membership_revision=members.membership_revision+1,updated_at=now()
+                 membership_revision=members.membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                RETURNING membership_revision"#,
         )
         .bind(&member_id)
@@ -1285,10 +1268,10 @@ impl Runtime {
         sqlx::query(
             r#"INSERT INTO account_tenant_index
                (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-               VALUES($1,$2,$3,'active',$4,now()) ON CONFLICT(account_id,tenant_id) DO UPDATE SET
+               VALUES($1,$2,$3,'active',$4,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(account_id,tenant_id) DO UPDATE SET
                  member_id=EXCLUDED.member_id,status='active',
-                 tenant_membership_revision=GREATEST(account_tenant_index.tenant_membership_revision,
-                                                     EXCLUDED.tenant_membership_revision),updated_at=now()"#,
+                 tenant_membership_revision=max(account_tenant_index.tenant_membership_revision,
+                                                     EXCLUDED.tenant_membership_revision),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&identity.account.id)
         .bind(&tenant_id)
@@ -1297,7 +1280,7 @@ impl Runtime {
         .execute(&mut **finish_tx.transaction())
         .await?;
         sqlx::query(
-            "UPDATE gonvex_runtime_tenants SET provisioned=TRUE,updated_at=now() WHERE project_id=$1 AND tenant_id=$2",
+            "UPDATE gonvex_runtime_tenants SET provisioned=TRUE,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND tenant_id=$2",
         )
         .bind(&connection.project_id)
         .bind(&tenant_id)
@@ -1343,13 +1326,7 @@ impl Runtime {
             .await?;
         let subject = control_subject(connection, Authorization::ProjectAdmin);
         let mut reserve_tx = control.begin_control_transaction(false).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!(
-                "demo:{}:{}:{}",
-                connection.project_id, tenant_id, email
-            ))
-            .execute(&mut **reserve_tx.transaction())
-            .await?;
+        require_control_writer(&reserve_tx, "demo account creation")?;
         if let Some(result) = claim_control_saga(
             &mut reserve_tx,
             &connection.project_id,
@@ -1389,8 +1366,8 @@ impl Runtime {
         };
         sqlx::query(
             r#"INSERT INTO accounts(id,auth_realm_id,email,name,disabled_at,updated_at)
-               VALUES($1,$2,$3,$4,NULL,now()) ON CONFLICT(id) DO UPDATE SET
-                 email=EXCLUDED.email,name=EXCLUDED.name,disabled_at=NULL,updated_at=now()"#,
+               VALUES($1,$2,$3,$4,NULL,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(id) DO UPDATE SET
+                 email=EXCLUDED.email,name=EXCLUDED.name,disabled_at=NULL,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&account_id)
         .bind(&connection.project_id)
@@ -1401,10 +1378,10 @@ impl Runtime {
         sqlx::query(
             r#"INSERT INTO account_identities
                (project_id,account_id,provider,issuer,subject,email,verified_email,updated_at)
-               VALUES($1,$2,'password',$1,$3,$3,TRUE,now())
+               VALUES($1,$2,'password',$1,$3,$3,TRUE,CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(project_id,provider,issuer,subject) DO UPDATE SET
                  account_id=EXCLUDED.account_id,email=EXCLUDED.email,
-                 verified_email=TRUE,updated_at=now()"#,
+                 verified_email=TRUE,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&connection.project_id)
         .bind(&account_id)
@@ -1414,7 +1391,7 @@ impl Runtime {
         sqlx::query(
             r#"INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash)
                VALUES($1,$2,$3) ON CONFLICT(project_id,account_id) DO UPDATE SET
-                 password_hash=EXCLUDED.password_hash,updated_at=now()"#,
+                 password_hash=EXCLUDED.password_hash,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&connection.project_id)
         .bind(&account_id)
@@ -1448,9 +1425,9 @@ impl Runtime {
         let membership_revision: i64 = sqlx::query_scalar(
             r#"INSERT INTO members
                (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-               VALUES($1,$2,'active',$3,'','member','{}'::jsonb,now())
+               VALUES($1,$2,'active',$3,'','member','{}',CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(id) DO UPDATE SET status='active',display_name=EXCLUDED.display_name,
-                 membership_revision=members.membership_revision+1,updated_at=now()
+                 membership_revision=members.membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                RETURNING membership_revision"#,
         )
         .bind(&member_id)
@@ -1465,10 +1442,10 @@ impl Runtime {
         sqlx::query(
             r#"INSERT INTO account_tenant_index
                (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-               VALUES($1,$2,$3,'active',$4,now()) ON CONFLICT(account_id,tenant_id) DO UPDATE SET
+               VALUES($1,$2,$3,'active',$4,CAST(unixepoch('subsec')*1000 AS INTEGER)) ON CONFLICT(account_id,tenant_id) DO UPDATE SET
                  member_id=EXCLUDED.member_id,status='active',
-                 tenant_membership_revision=GREATEST(account_tenant_index.tenant_membership_revision,
-                                                     EXCLUDED.tenant_membership_revision),updated_at=now()"#,
+                 tenant_membership_revision=max(account_tenant_index.tenant_membership_revision,
+                                                     EXCLUDED.tenant_membership_revision),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&account_id)
         .bind(tenant_id)
@@ -1532,7 +1509,7 @@ impl Runtime {
             .await?;
         let membership_revision = sqlx::query_scalar::<_, i64>(
             r#"UPDATE members SET status='revoked',
-               membership_revision=membership_revision+1,updated_at=now()
+               membership_revision=membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE account_id=$1 AND status='active' RETURNING membership_revision"#,
         )
         .bind(account_id)
@@ -1549,7 +1526,7 @@ impl Runtime {
             .execute(&mut **finish_tx.transaction())
             .await?;
         sqlx::query(
-            "UPDATE accounts SET disabled_at=now(),updated_at=now() WHERE id=$1 AND auth_realm_id=$2",
+            "UPDATE accounts SET disabled_at=CAST(unixepoch('subsec')*1000 AS INTEGER),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1 AND auth_realm_id=$2",
         )
         .bind(account_id)
         .bind(&connection.project_id)
@@ -1557,7 +1534,7 @@ impl Runtime {
         .await?;
         sqlx::query(
             r#"UPDATE account_tenant_index SET status='revoked',
-               tenant_membership_revision=GREATEST(tenant_membership_revision,$3),updated_at=now()
+               tenant_membership_revision=max(tenant_membership_revision,$3),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE account_id=$1 AND tenant_id=$2"#,
         )
         .bind(account_id)
@@ -1598,7 +1575,7 @@ impl Runtime {
                       revoked_at,accepted_at,accepted_account_id,accepted_idempotency_key,
                       handoff_state
                FROM gonvex_auth_membership_invitations
-               WHERE project_id=$1 AND token_hash=$2 FOR UPDATE"#,
+               WHERE project_id=$1 AND token_hash=$2"#,
         )
         .bind(&connection.project_id)
         .bind(sha256_hex(token.as_bytes()))
@@ -1614,9 +1591,9 @@ impl Runtime {
         let team_ids = row.get::<Json<Value>, _>("team_ids").0;
         let allowed_providers = row.get::<Json<Value>, _>("allowed_auth_providers").0;
         let payload = row.get::<Json<Value>, _>("application_payload").0;
-        let expires_at: DateTime<Utc> = row.get("expires_at");
-        let revoked: Option<DateTime<Utc>> = row.get("revoked_at");
-        let accepted: Option<DateTime<Utc>> = row.get("accepted_at");
+        let expires_at = row_time(&row, "expires_at");
+        let revoked = row_optional_time(&row, "revoked_at");
+        let accepted = row_optional_time(&row, "accepted_at");
         let accepted_account: Option<String> = row.get("accepted_account_id");
         let accepted_key: Option<String> = row.get("accepted_idempotency_key");
         if revoked.is_some() || expires_at <= Utc::now() {
@@ -1685,7 +1662,7 @@ impl Runtime {
         let affected = sqlx::query(
             r#"UPDATE gonvex_auth_membership_invitations
                SET handoff_state='claimed',handoff_command_id=$3,
-                   accepted_account_id=$4,accepted_idempotency_key=$5,updated_at=now()
+                   accepted_account_id=$4,accepted_idempotency_key=$5,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE project_id=$1 AND id=$2 AND accepted_at IS NULL AND revoked_at IS NULL
                  AND (handoff_state='pending' OR
                       (handoff_state='claimed' AND accepted_account_id=$4
@@ -1749,7 +1726,7 @@ impl Runtime {
                 .tenant_session_for_account(&connection.project_id, &tenant_id, &inviter_account_id)
                 .await.map_err(|_| invitation_authority_denial())?;
               let inviter = sqlx::query(
-                "SELECT status,role,permissions FROM members WHERE id=$1 AND account_id=$2 FOR SHARE",
+                "SELECT status,role,permissions FROM members WHERE id=$1 AND account_id=$2",
             )
             .bind(&inviter_session.member.id)
             .bind(&inviter_account_id)
@@ -1784,11 +1761,11 @@ impl Runtime {
             sqlx::query(
                 r#"INSERT INTO members
                    (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-                   VALUES($1,$2,'active',$3,$4,$5,$6,now())
+                   VALUES($1,$2,'active',$3,$4,$5,$6,CAST(unixepoch('subsec')*1000 AS INTEGER))
                    ON CONFLICT(id) DO UPDATE SET account_id=EXCLUDED.account_id,status='active',
                      display_name=EXCLUDED.display_name,avatar_url=EXCLUDED.avatar_url,
                      role=EXCLUDED.role,permissions=EXCLUDED.permissions,
-                     membership_revision=members.membership_revision+1,updated_at=now()"#,
+                     membership_revision=members.membership_revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
             )
             .bind(&member_id)
             .bind(&identity.account.id)
@@ -1919,8 +1896,8 @@ impl Runtime {
         let mut finish_tx = control.begin_control_transaction(false).await?;
         let affected = sqlx::query(
             r#"UPDATE gonvex_auth_membership_invitations
-               SET accepted_at=now(),completed_at=now(),handoff_state='completed',
-                   accepted_account_id=$3,accepted_idempotency_key=$4,updated_at=now()
+               SET accepted_at=CAST(unixepoch('subsec')*1000 AS INTEGER),completed_at=CAST(unixepoch('subsec')*1000 AS INTEGER),handoff_state='completed',
+                   accepted_account_id=$3,accepted_idempotency_key=$4,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE project_id=$1 AND id=$2 AND accepted_at IS NULL AND revoked_at IS NULL
                  AND handoff_state='claimed' AND accepted_account_id=$3
                  AND accepted_idempotency_key=$4"#,
@@ -1940,11 +1917,11 @@ impl Runtime {
         sqlx::query(
             r#"INSERT INTO account_tenant_index
                (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-               VALUES($1,$2,$3,'active',1,now())
+               VALUES($1,$2,$3,'active',1,CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(account_id,tenant_id) DO UPDATE SET member_id=EXCLUDED.member_id,
-                 status='active',tenant_membership_revision=GREATEST(
+                 status='active',tenant_membership_revision=max(
                    account_tenant_index.tenant_membership_revision,
-                   EXCLUDED.tenant_membership_revision),updated_at=now()"#,
+                   EXCLUDED.tenant_membership_revision),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&identity.account.id)
         .bind(&tenant_id)
@@ -2077,12 +2054,12 @@ impl Runtime {
                    WHERE id=$1 AND lower(owner_email)=lower($2) AND owner_email<>''
                    UNION ALL
                    SELECT 1 FROM gonvex_project_members
-                   WHERE project_id=$1 AND lower(email)=lower($2) AND role = ANY($3)
+                   WHERE project_id=$1 AND lower(email)=lower($2) AND role IN (SELECT value FROM json_each($3))
                )"#,
         )
         .bind(&connection.project_id)
         .bind(&identity.account.email)
-        .bind(roles)
+        .bind(Value::from(roles.to_vec()).to_string())
         .fetch_one(&mut **transaction.transaction())
         .await?;
         transaction.commit().await?;
@@ -2228,7 +2205,7 @@ impl Runtime {
                         AND tenant.tenant_id=invitation.tenant_id
                        WHERE invitation.project_id=$1 AND invitation.token_hash=$2
                          AND invitation.revoked_at IS NULL AND invitation.accepted_at IS NULL
-                         AND invitation.expires_at>now()"#,
+                         AND invitation.expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
                 )
                 .bind(&connection.project_id)
                 .bind(sha256_hex(token.as_bytes()))
@@ -2251,7 +2228,7 @@ impl Runtime {
                         "tenantId":tenant_id,"tenantName":row.get::<String,_>("name"),
                         "email":email,"role":row.get::<String,_>("role"),
                         "teamIds":teams,"allowedAuthProviders":providers,
-                        "expiresAt":timestamp(row.get::<DateTime<Utc>,_>("expires_at")),
+                        "expiresAt":timestamp(row_time(&row, "expires_at")),
                     }))
                 }
             }
@@ -2274,12 +2251,12 @@ impl Runtime {
                     "permissions":row.get::<Json<Value>,_>("permissions").0,
                     "teamIds":row.get::<Json<Value>,_>("team_ids").0,
                     "allowedAuthProviders":row.get::<Json<Value>,_>("allowed_auth_providers").0,
-                    "expiresAt":timestamp(row.get::<DateTime<Utc>,_>("expires_at")),
-                    "revoked":row.get::<Option<DateTime<Utc>>,_>("revoked_at").is_some(),
-                    "accepted":row.get::<Option<DateTime<Utc>>,_>("accepted_at").is_some(),
+                    "expiresAt":timestamp(row_time(&row, "expires_at")),
+                    "revoked":row_optional_time(&row, "revoked_at").is_some(),
+                    "accepted":row_optional_time(&row, "accepted_at").is_some(),
                     "state":row.get::<String,_>("handoff_state"),
-                    "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
-                    "updatedAt":timestamp(row.get::<DateTime<Utc>,_>("updated_at")),
+                    "createdAt":timestamp(row_time(&row, "created_at")),
+                    "updatedAt":timestamp(row_time(&row, "updated_at")),
                 })).collect()))
             }
             "control.project.developers.list" => {
@@ -2354,7 +2331,7 @@ impl Runtime {
                     "accountId":row.get::<String,_>("account_id"),
                     "release":row.get::<String,_>("release"),
                     "environment":row.get::<String,_>("environment"),
-                    "lastSeenAt":timestamp(row.get::<DateTime<Utc>,_>("last_seen_at")),
+                    "lastSeenAt":timestamp(row_time(&row, "last_seen_at")),
                 })).collect()))
             }
             "control.support.listTenants" => {
@@ -2393,7 +2370,7 @@ impl Runtime {
                             "domain":row.get::<String,_>("domain"),"status":row.get::<String,_>("status"),
                             "timezone":row.get::<String,_>("timezone"),
                             "seatLimit":row.get::<Option<i32>,_>("seat_limit"),
-                            "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
+                            "createdAt":timestamp(row_time(&row, "created_at")),
                             "userCount":count.ok(),"activeSessions":live,
                         })
                     }
@@ -2417,8 +2394,8 @@ impl Runtime {
                     "accountId":row.get::<String,_>("account_id"),
                     "connectionId":row.get::<String,_>("connection_id"),
                     "release":row.get::<String,_>("release"),"environment":row.get::<String,_>("environment"),
-                    "lastSeenAt":timestamp(row.get::<DateTime<Utc>,_>("last_seen_at")),
-                    "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
+                    "lastSeenAt":timestamp(row_time(&row, "last_seen_at")),
+                    "createdAt":timestamp(row_time(&row, "created_at")),
                 }))
             }
             "control.support.getTenant" => {
@@ -2439,8 +2416,8 @@ impl Runtime {
                     "timezone":row.get::<String,_>("timezone"),"description":row.get::<String,_>("description"),
                     "profile":row.get::<Json<Value>,_>("profile").0,
                     "seatLimit":row.get::<Option<i32>,_>("seat_limit"),
-                    "createdAt":timestamp(row.get::<DateTime<Utc>,_>("created_at")),
-                    "updatedAt":timestamp(row.get::<DateTime<Utc>,_>("updated_at")),
+                    "createdAt":timestamp(row_time(&row, "created_at")),
+                    "updatedAt":timestamp(row_time(&row, "updated_at")),
                 }))
             }
             "control.support.listErrors" => {
@@ -2542,7 +2519,7 @@ impl Runtime {
                 sqlx::query(
                     r#"INSERT INTO gonvex_account_passwords(project_id,account_id,password_hash)
                        VALUES($1,$2,$3) ON CONFLICT(project_id,account_id) DO UPDATE SET
-                         password_hash=EXCLUDED.password_hash,updated_at=now()"#,
+                         password_hash=EXCLUDED.password_hash,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
                 )
                 .bind(&connection.project_id)
                 .bind(account_id)
@@ -2557,14 +2534,14 @@ impl Runtime {
                 let all = object.get("all").and_then(Value::as_bool).unwrap_or(false);
                 if all {
                     sqlx::query(
-                        "UPDATE gonvex_auth_sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE project_id=$1 AND account_id=$2",
+                        "UPDATE gonvex_auth_sessions SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE project_id=$1 AND account_id=$2",
                     )
                     .bind(&connection.project_id)
                     .bind(account_id)
                     .execute(&mut **transaction.transaction())
                     .await?;
                     sqlx::query(
-                        "UPDATE gonvex_auth_refresh_tokens SET revoked_at=COALESCE(revoked_at,now()) WHERE project_id=$1 AND account_id=$2",
+                        "UPDATE gonvex_auth_refresh_tokens SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE project_id=$1 AND account_id=$2",
                     )
                     .bind(&connection.project_id)
                     .bind(account_id)
@@ -2582,7 +2559,7 @@ impl Runtime {
                     if let Some(family) = family {
                         for table in ["gonvex_auth_sessions", "gonvex_auth_refresh_tokens"] {
                             let statement = format!(
-                                "UPDATE {table} SET revoked_at=COALESCE(revoked_at,now()) WHERE family_id=$1"
+                                "UPDATE {table} SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE family_id=$1"
                             );
                             sqlx::query(&statement)
                                 .bind(&family)
@@ -2762,7 +2739,7 @@ impl Runtime {
                          firebase_project_id=EXCLUDED.firebase_project_id,
                          firebase_tenant_id=EXCLUDED.firebase_tenant_id,
                          admin_credentials_encrypted=COALESCE(EXCLUDED.admin_credentials_encrypted,gonvex_auth_providers.admin_credentials_encrypted),
-                         updated_at=now()"#,
+                         updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
                 )
                 .bind(&connection.project_id)
                 .bind(provider)
@@ -2780,7 +2757,7 @@ impl Runtime {
                 .execute(&mut **transaction.transaction())
                 .await?;
                 sqlx::query(
-                    "UPDATE gonvex_runtime_projects SET auth_mode=$2,updated_at=now() WHERE id=$1",
+                    "UPDATE gonvex_runtime_projects SET auth_mode=$2,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1",
                 )
                 .bind(&connection.project_id)
                 .bind(auth_mode)
@@ -2800,7 +2777,7 @@ impl Runtime {
                     .trim();
                 let affected = sqlx::query(
                     r#"UPDATE gonvex_runtime_tenants
-                       SET name=$3,domain=$4,description=$5,updated_at=now()
+                       SET name=$3,domain=$4,description=$5,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                        WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL"#,
                 )
                 .bind(&connection.project_id)
@@ -2823,7 +2800,7 @@ impl Runtime {
                 }
                 let tenant = tenant(connection)?;
                 let affected = sqlx::query(
-                    "UPDATE gonvex_runtime_tenants SET timezone=$3,updated_at=now() WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL",
+                    "UPDATE gonvex_runtime_tenants SET timezone=$3,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL",
                 )
                 .bind(&connection.project_id)
                 .bind(&tenant.route.tenant_id)
@@ -2837,7 +2814,7 @@ impl Runtime {
                 empty_args(args)?;
                 let tenant = tenant(connection)?;
                 let affected = sqlx::query(
-                    "UPDATE gonvex_runtime_tenants SET status='deleted',deleted_at=COALESCE(deleted_at,now()),updated_at=now() WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL",
+                    "UPDATE gonvex_runtime_tenants SET status='deleted',deleted_at=COALESCE(deleted_at,CAST(unixepoch('subsec')*1000 AS INTEGER)),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL",
                 )
                 .bind(&connection.project_id)
                 .bind(&tenant.route.tenant_id)
@@ -2881,7 +2858,7 @@ impl Runtime {
                     ));
                 }
                 let affected = sqlx::query(
-                    "UPDATE gonvex_runtime_tenants SET seat_limit=$3,updated_at=now() WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL",
+                    "UPDATE gonvex_runtime_tenants SET seat_limit=$3,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND tenant_id=$2 AND deleted_at IS NULL",
                 )
                 .bind(&connection.project_id)
                 .bind(tenant_id)
@@ -2932,8 +2909,8 @@ impl Runtime {
                         application_payload,invited_by,expires_at,id,token_hash,revoked_at,accepted_at,
                         accepted_account_id,accepted_idempotency_key,handoff_state,handoff_command_id,
                         completed_at,updated_at)
-                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()+interval '7 days',$10,$11,
-                              NULL,NULL,NULL,NULL,'pending','',NULL,now())
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,CAST(unixepoch('subsec')*1000 AS INTEGER)+604800000,$10,$11,
+                              NULL,NULL,NULL,NULL,'pending','',NULL,CAST(unixepoch('subsec')*1000 AS INTEGER))
                        ON CONFLICT(project_id,tenant_id,email) DO UPDATE SET
                          role=EXCLUDED.role,permissions=EXCLUDED.permissions,team_ids=EXCLUDED.team_ids,
                          allowed_auth_providers=EXCLUDED.allowed_auth_providers,
@@ -2941,7 +2918,7 @@ impl Runtime {
                          expires_at=EXCLUDED.expires_at,id=EXCLUDED.id,token_hash=EXCLUDED.token_hash,
                          revoked_at=NULL,accepted_at=NULL,accepted_account_id=NULL,
                          accepted_idempotency_key=NULL,handoff_state='pending',handoff_command_id='',
-                         completed_at=NULL,updated_at=now()"#,
+                         completed_at=NULL,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
                 )
                 .bind(&connection.project_id)
                 .bind(&tenant.route.tenant_id)
@@ -2994,7 +2971,7 @@ impl Runtime {
                 let affected = sqlx::query(
                     r#"UPDATE gonvex_auth_membership_invitations
                        SET role=$4,permissions=$5,team_ids=$6,allowed_auth_providers=$7,
-                           application_payload=$8,invited_by=$9,updated_at=now()
+                           application_payload=$8,invited_by=$9,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                        WHERE project_id=$1 AND tenant_id=$2 AND id=$3
                          AND accepted_at IS NULL AND revoked_at IS NULL"#,
                 )
@@ -3027,7 +3004,7 @@ impl Runtime {
                     ));
                 }
                 let affected = sqlx::query(
-                    "UPDATE gonvex_auth_membership_invitations SET revoked_at=now(),updated_at=now() WHERE project_id=$1 AND tenant_id=$2 AND (id=$3 OR lower(email)=lower($4)) AND accepted_at IS NULL",
+                    "UPDATE gonvex_auth_membership_invitations SET revoked_at=CAST(unixepoch('subsec')*1000 AS INTEGER),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND tenant_id=$2 AND (id=$3 OR lower(email)=lower($4)) AND accepted_at IS NULL",
                 )
                 .bind(&connection.project_id)
                 .bind(&tenant.route.tenant_id)
@@ -3053,7 +3030,7 @@ impl Runtime {
                 let id = random_id("agent");
                 let token = secure_token("agent_claim");
                 sqlx::query(
-                    "INSERT INTO gonvex_agent_claim_tokens(id,project_id,token_hash,permissions,expires_at,created_by) VALUES($1,$2,$3,$4,now()+($5 * interval '1 second'),$6)",
+                    "INSERT INTO gonvex_agent_claim_tokens(id,project_id,token_hash,permissions,expires_at,created_by) VALUES($1,$2,$3,$4,CAST(unixepoch('subsec')*1000 AS INTEGER)+($5*1000),$6)",
                 )
                 .bind(&id).bind(&connection.project_id).bind(sha256_hex(token.as_bytes()))
                 .bind(Json(Value::Array(permissions.into_iter().map(Value::String).collect())))
@@ -3065,9 +3042,9 @@ impl Runtime {
                 let object = exact_object(args, &["token"])?;
                 let token = required_string(object, "token")?;
                 let row = sqlx::query(
-                    r#"UPDATE gonvex_agent_claim_tokens SET claimed_at=now(),claimed_account_id=$3
+                    r#"UPDATE gonvex_agent_claim_tokens SET claimed_at=CAST(unixepoch('subsec')*1000 AS INTEGER),claimed_account_id=$3
                        WHERE project_id=$1 AND token_hash=$2 AND claimed_at IS NULL
-                         AND revoked_at IS NULL AND expires_at>now() RETURNING id,permissions"#,
+                         AND revoked_at IS NULL AND expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER) RETURNING id,permissions"#,
                 )
                 .bind(&connection.project_id)
                 .bind(sha256_hex(token.as_bytes()))
@@ -3085,7 +3062,7 @@ impl Runtime {
             }
             "control.agentAuth.revoke" => {
                 let object = exact_object(args, &["id"])?;
-                let affected = sqlx::query("UPDATE gonvex_agent_claim_tokens SET revoked_at=now() WHERE project_id=$1 AND id=$2 AND revoked_at IS NULL")
+                let affected = sqlx::query("UPDATE gonvex_agent_claim_tokens SET revoked_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND id=$2 AND revoked_at IS NULL")
                     .bind(&connection.project_id).bind(required_string(object,"id")?)
                     .execute(&mut **transaction.transaction()).await?.rows_affected();
                 affected_result(affected)
@@ -3122,13 +3099,13 @@ impl Runtime {
                 let token = secure_token("imp");
                 let expires = Utc::now() + chrono::Duration::minutes(30);
                 sqlx::query("INSERT INTO gonvex_impersonation_grants(id,project_id,token_hash,actor_account_id,target_account_id,tenant_id,reason,expires_at) VALUES($1,$2,$3,$4,$4,$5,'developer mode',$6)")
-                    .bind(&id).bind(&connection.project_id).bind(sha256_hex(token.as_bytes())).bind(account_id).bind(tenant_id).bind(expires)
+                    .bind(&id).bind(&connection.project_id).bind(sha256_hex(token.as_bytes())).bind(account_id).bind(tenant_id).bind(expires.timestamp_millis())
                     .execute(&mut **transaction.transaction()).await?;
                 Ok(serde_json::json!({"id":id,"token":token,"expiresAt":timestamp(expires)}))
             }
             "control.developer.exit" => {
                 let object = exact_object(args, &["grantId"])?;
-                let affected = sqlx::query("UPDATE gonvex_impersonation_grants SET revoked_at=now() WHERE project_id=$1 AND id=$2 AND actor_account_id=$3 AND revoked_at IS NULL")
+                let affected = sqlx::query("UPDATE gonvex_impersonation_grants SET revoked_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE project_id=$1 AND id=$2 AND actor_account_id=$3 AND revoked_at IS NULL")
                     .bind(&connection.project_id).bind(required_string(object,"grantId")?).bind(account_id)
                     .execute(&mut **transaction.transaction()).await?.rows_affected();
                 affected_result(affected)
@@ -3180,10 +3157,10 @@ impl Runtime {
                     .unwrap_or("");
                 sqlx::query(r#"INSERT INTO gonvex_support_sessions
                     (id,project_id,tenant_id,account_id,connection_id,release,environment,last_seen_at)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,now())
+                    VALUES($1,$2,$3,$4,$5,$6,$7,CAST(unixepoch('subsec')*1000 AS INTEGER))
                     ON CONFLICT(id) DO UPDATE SET tenant_id=EXCLUDED.tenant_id,
                       account_id=EXCLUDED.account_id,connection_id=EXCLUDED.connection_id,
-                      release=EXCLUDED.release,environment=EXCLUDED.environment,last_seen_at=now()"#)
+                      release=EXCLUDED.release,environment=EXCLUDED.environment,last_seen_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#)
                     .bind(&session_id).bind(&connection.project_id).bind(tenant_id).bind(account_id)
                     .bind(&connection.connection_id).bind(release).bind(environment)
                     .execute(&mut **transaction.transaction()).await?;
@@ -3212,9 +3189,10 @@ impl Runtime {
             }
             "control.support.ackCommand" => {
                 let object = exact_object(args, &["id"])?;
-                let affected = sqlx::query(r#"UPDATE gonvex_support_commands command SET acknowledged_at=now()
-                    FROM gonvex_support_sessions session WHERE command.id=$1 AND command.project_id=$2
-                    AND command.session_id=session.id AND session.account_id=$3 AND command.acknowledged_at IS NULL"#)
+                let affected = sqlx::query(r#"UPDATE gonvex_support_commands SET acknowledged_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
+                    WHERE id=$1 AND project_id=$2 AND acknowledged_at IS NULL
+                      AND EXISTS(SELECT 1 FROM gonvex_support_sessions session
+                                 WHERE session.id=gonvex_support_commands.session_id AND session.account_id=$3)"#)
                     .bind(required_string(object,"id")?).bind(&connection.project_id).bind(account_id)
                     .execute(&mut **transaction.transaction()).await?.rows_affected();
                 affected_result(affected)
@@ -3230,7 +3208,7 @@ impl Runtime {
                             "olderThanSeconds must be between 60 and 31536000".to_owned(),
                         )
                     })?;
-                let deleted = sqlx::query("DELETE FROM gonvex_support_sessions WHERE project_id=$1 AND last_seen_at < now()-($2 * interval '1 second')")
+                let deleted = sqlx::query("DELETE FROM gonvex_support_sessions WHERE project_id=$1 AND last_seen_at < CAST(unixepoch('subsec')*1000 AS INTEGER)-($2*1000)")
                     .bind(&connection.project_id).bind(seconds).execute(&mut **transaction.transaction()).await?.rows_affected();
                 Ok(serde_json::json!({"deleted":deleted}))
             }
@@ -3244,7 +3222,7 @@ impl Runtime {
                     ));
                 }
                 let affected = sqlx::query(
-                    r#"UPDATE gonvex_account_passwords SET password_hash=$3,updated_at=now()
+                    r#"UPDATE gonvex_account_passwords SET password_hash=$3,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                        WHERE project_id=$1 AND account_id=$2 AND EXISTS(
                          SELECT 1 FROM gonvex_demo_accounts
                          WHERE project_id=$1 AND account_id=$2)"#,
@@ -3352,8 +3330,8 @@ async fn member_auth_providers(
         .resolve_tenant(&connection.project_id, &caller.route.tenant_id)
         .await?;
     let mut tenant_tx = control.begin_tenant_transaction(&route, true).await?;
-    let rows = sqlx::query("SELECT id,account_id FROM members WHERE id = ANY($1)")
-        .bind(&member_ids)
+    let rows = sqlx::query("SELECT id,account_id FROM members WHERE id IN (SELECT value FROM json_each($1))")
+        .bind(Value::from(member_ids.clone()).to_string())
         .fetch_all(&mut **tenant_tx.transaction())
         .await?;
     tenant_tx.commit().await?;
@@ -3370,11 +3348,11 @@ async fn member_auth_providers(
     let mut control_tx = control.begin_control_transaction(true).await?;
     let identities = sqlx::query(
         r#"SELECT account_id,provider,sign_in_provider FROM account_identities
-           WHERE project_id=$1 AND account_id = ANY($2)
+           WHERE project_id=$1 AND account_id IN (SELECT value FROM json_each($2))
            ORDER BY account_id,provider"#,
     )
     .bind(&connection.project_id)
-    .bind(&account_ids)
+    .bind(Value::from(account_ids).to_string())
     .fetch_all(&mut **control_tx.transaction())
     .await?;
     control_tx.commit().await?;
@@ -3427,7 +3405,7 @@ async fn claim_control_idempotency(
         ControlKind::Action => "action",
         ControlKind::Query => "query",
     };
-    lock_control_idempotency(transaction, project, subject, key).await?;
+    require_control_writer(transaction, "Control Plane idempotency claim")?;
     let inserted = sqlx::query(
         r#"INSERT INTO gonvex_control_idempotency
            (project_id,subject_id,idempotency_key,kind,path)
@@ -3446,7 +3424,7 @@ async fn claim_control_idempotency(
     }
     let row = sqlx::query(
         r#"SELECT state,kind,path,result,error FROM gonvex_control_idempotency
-           WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3 FOR UPDATE"#,
+           WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3"#,
     )
     .bind(project)
     .bind(subject)
@@ -3493,7 +3471,7 @@ async fn claim_control_saga(
         ControlKind::Action => "action",
         ControlKind::Query => "query",
     };
-    lock_control_idempotency(transaction, project, subject, key).await?;
+    require_control_writer(transaction, "Control Plane idempotency claim")?;
     sqlx::query(
         r#"INSERT INTO gonvex_control_idempotency
            (project_id,subject_id,idempotency_key,kind,path)
@@ -3508,7 +3486,7 @@ async fn claim_control_saga(
     .await?;
     let row = sqlx::query(
         r#"SELECT state,kind,path,result,error FROM gonvex_control_idempotency
-           WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3 FOR UPDATE"#,
+           WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3"#,
     )
     .bind(project)
     .bind(subject)
@@ -3537,18 +3515,22 @@ async fn claim_control_saga(
         .or(Some(Value::Null)))
 }
 
-async fn lock_control_idempotency(
-    transaction: &mut TenantTransaction,
-    project: &str,
-    subject: &str,
-    key: &str,
+/// SQLite gives every database one writer connection. A Control Plane write
+/// transaction therefore excludes every other writer until it commits, which
+/// is what the Postgres transaction advisory locks used to provide. Claims and
+/// external identity resolution must never run on a read-only snapshot.
+fn require_control_writer(
+    transaction: &TenantTransaction,
+    operation: &'static str,
 ) -> Result<(), ControlError> {
-    let lock_key = advisory_lock_key("control-idempotency", &[project, subject, key]);
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(lock_key)
-        .execute(&mut **transaction.transaction())
-        .await?;
-    Ok(())
+    if transaction.read_only() {
+        Err(ControlError::DatabaseInvariant {
+            operation,
+            detail: "requires the Control Plane writer transaction".to_owned(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 async fn complete_control_idempotency(
@@ -3560,7 +3542,7 @@ async fn complete_control_idempotency(
 ) -> Result<(), ControlError> {
     sqlx::query(
         r#"UPDATE gonvex_control_idempotency
-           SET state='completed',result=$4,error='',updated_at=now()
+           SET state='completed',result=$4,error='',updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
            WHERE project_id=$1 AND subject_id=$2 AND idempotency_key=$3"#,
     )
     .bind(project)
@@ -3644,28 +3626,9 @@ pub(crate) async fn resolve_external_account(
     project: &str,
     identity: &VerifiedExternalIdentity,
 ) -> Result<AuthAccount, ControlError> {
-    let lock_key = advisory_lock_key(
-        "external-identity",
-        &[
-            project,
-            &identity.provider,
-            &identity.issuer,
-            &identity.subject,
-        ],
-    );
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(lock_key)
-        .execute(&mut **transaction.transaction())
-        .await?;
-    if identity.email_verified && !identity.email.is_empty() {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-            .bind(advisory_lock_key(
-                "verified-email",
-                &[project, &identity.email.to_lowercase()],
-            ))
-            .execute(&mut **transaction.transaction())
-            .await?;
-    }
+    // The writer transaction serializes concurrent first logins for one
+    // identity or verified email (formerly two advisory locks).
+    require_control_writer(transaction, "external identity resolution")?;
     if let Some(account_id) = sqlx::query_scalar::<_, String>(
         r#"SELECT account_id FROM account_identities
            WHERE project_id=$1 AND provider=$2 AND issuer=$3 AND subject=$4"#,
@@ -3679,7 +3642,7 @@ pub(crate) async fn resolve_external_account(
     {
         sqlx::query(
             r#"UPDATE account_identities
-               SET email=$5,verified_email=$6,sign_in_provider=$7,updated_at=now()
+               SET email=$5,verified_email=$6,sign_in_provider=$7,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                WHERE project_id=$1 AND provider=$2 AND issuer=$3 AND subject=$4"#,
         )
         .bind(project)
@@ -3692,7 +3655,7 @@ pub(crate) async fn resolve_external_account(
         .execute(&mut **transaction.transaction())
         .await?;
         sqlx::query(
-            "UPDATE accounts SET name=COALESCE(NULLIF($2,''),name),avatar_url=COALESCE(NULLIF($3,''),avatar_url),updated_at=now() WHERE id=$1",
+            "UPDATE accounts SET name=COALESCE(NULLIF($2,''),name),avatar_url=COALESCE(NULLIF($3,''),avatar_url),updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE id=$1",
         )
         .bind(&account_id)
         .bind(&identity.name)
@@ -3729,7 +3692,7 @@ pub(crate) async fn resolve_external_account(
             }
             let account_id = random_id("acct");
             sqlx::query(
-                "INSERT INTO accounts(id,auth_realm_id,email,name,avatar_url,updated_at) VALUES($1,$2,$3,$4,$5,now())",
+                "INSERT INTO accounts(id,auth_realm_id,email,name,avatar_url,updated_at) VALUES($1,$2,$3,$4,$5,CAST(unixepoch('subsec')*1000 AS INTEGER))",
             )
             .bind(&account_id)
             .bind(project)
@@ -3744,7 +3707,7 @@ pub(crate) async fn resolve_external_account(
         require_external_signup(transaction, project, identity).await?;
         let account_id = random_id("acct");
         sqlx::query(
-            "INSERT INTO accounts(id,auth_realm_id,email,name,avatar_url,updated_at) VALUES($1,$2,$3,$4,$5,now())",
+            "INSERT INTO accounts(id,auth_realm_id,email,name,avatar_url,updated_at) VALUES($1,$2,$3,$4,$5,CAST(unixepoch('subsec')*1000 AS INTEGER))",
         )
         .bind(&account_id)
         .bind(project)
@@ -3763,7 +3726,7 @@ pub(crate) async fn resolve_external_account(
     let inserted = sqlx::query(
         r#"INSERT INTO account_identities
            (project_id,account_id,provider,issuer,subject,email,verified_email,sign_in_provider,updated_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,now())
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,CAST(unixepoch('subsec')*1000 AS INTEGER))
            ON CONFLICT(project_id,provider,issuer,subject) DO NOTHING"#,
     )
     .bind(project)
@@ -3817,10 +3780,10 @@ pub(crate) async fn load_auth_account(
                   COALESCE(identity.verified_email,FALSE) AS email_verified,
                   COALESCE(identity.provider,'') AS provider
            FROM accounts account
-           LEFT JOIN LATERAL (
-             SELECT verified_email,provider FROM account_identities
+           LEFT JOIN account_identities identity ON identity.rowid=(
+             SELECT rowid FROM account_identities
              WHERE account_id=account.id ORDER BY updated_at DESC LIMIT 1
-           ) identity ON TRUE
+           )
            WHERE account.id=$1 AND account.auth_realm_id=$2 AND account.disabled_at IS NULL"#,
     )
     .bind(account_id)
@@ -3855,7 +3818,7 @@ pub(crate) async fn issue_session(
     .bind(project)
     .bind(account_id)
     .bind(family_id)
-    .bind(access_expires_at)
+    .bind(access_expires_at.timestamp_millis())
     .execute(&mut **transaction.transaction())
     .await?;
     sqlx::query(
@@ -3865,7 +3828,7 @@ pub(crate) async fn issue_session(
     .bind(family_id)
     .bind(project)
     .bind(account_id)
-    .bind(refresh_expires_at)
+    .bind(refresh_expires_at.timestamp_millis())
     .execute(&mut **transaction.transaction())
     .await?;
     Ok(SessionGrant {
@@ -3900,7 +3863,7 @@ async fn require_external_signup(
         r#"SELECT EXISTS(
              SELECT 1 FROM gonvex_auth_membership_invitations
              WHERE project_id=$1 AND lower(email)=lower($2)
-               AND revoked_at IS NULL AND accepted_at IS NULL AND expires_at>now()
+               AND revoked_at IS NULL AND accepted_at IS NULL AND expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER)
            )"#,
     )
     .bind(project)
@@ -3923,7 +3886,7 @@ pub(crate) async fn refresh_session(
 ) -> Result<RefreshSessionResult, ControlError> {
     let row = sqlx::query(
         r#"SELECT project_id,account_id,family_id,expires_at,used_at,revoked_at
-           FROM gonvex_auth_refresh_tokens WHERE token_hash=$1 FOR UPDATE"#,
+           FROM gonvex_auth_refresh_tokens WHERE token_hash=$1"#,
     )
     .bind(sha256_hex(refresh_token.as_bytes()))
     .fetch_optional(&mut **transaction.transaction())
@@ -3932,9 +3895,9 @@ pub(crate) async fn refresh_session(
     let stored_project: String = row.get("project_id");
     let account_id: String = row.get("account_id");
     let family_id: String = row.get("family_id");
-    let expires_at: DateTime<Utc> = row.get("expires_at");
-    let used_at: Option<DateTime<Utc>> = row.get("used_at");
-    let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
+    let expires_at = row_time(&row, "expires_at");
+    let used_at = row_optional_time(&row, "used_at");
+    let revoked_at = row_optional_time(&row, "revoked_at");
     if stored_project != project || revoked_at.is_some() || expires_at <= Utc::now() {
         return Err(ControlError::InvalidArguments(
             "invalid or expired refresh token".to_owned(),
@@ -3950,7 +3913,7 @@ pub(crate) async fn refresh_session(
         ));
     }
     sqlx::query(
-        "UPDATE gonvex_auth_refresh_tokens SET used_at=now() WHERE token_hash=$1 AND used_at IS NULL",
+        "UPDATE gonvex_auth_refresh_tokens SET used_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE token_hash=$1 AND used_at IS NULL",
     )
     .bind(sha256_hex(refresh_token.as_bytes()))
     .execute(&mut **transaction.transaction())
@@ -3970,7 +3933,7 @@ pub(crate) async fn revoke_family(
 ) -> Result<(), ControlError> {
     for table in ["gonvex_auth_sessions", "gonvex_auth_refresh_tokens"] {
         let statement =
-            format!("UPDATE {table} SET revoked_at=COALESCE(revoked_at,now()) WHERE family_id=$1");
+            format!("UPDATE {table} SET revoked_at=COALESCE(revoked_at,CAST(unixepoch('subsec')*1000 AS INTEGER)) WHERE family_id=$1");
         sqlx::query(&statement)
             .bind(family_id)
             .execute(&mut **transaction.transaction())
@@ -4126,7 +4089,7 @@ async fn upsert_setting(
         r#"INSERT INTO gonvex_control_settings(project_id,kind,scope_id,value,updated_by)
            VALUES($1,$2,$3,$4,$5)
            ON CONFLICT(project_id,kind,scope_id) DO UPDATE SET
-             value=EXCLUDED.value,updated_by=EXCLUDED.updated_by,updated_at=now()"#,
+             value=EXCLUDED.value,updated_by=EXCLUDED.updated_by,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
     )
     .bind(project)
     .bind(kind)
@@ -4767,7 +4730,7 @@ async fn release_invitation_claim(
     sqlx::query(
         r#"UPDATE gonvex_auth_membership_invitations
         SET handoff_state='pending',handoff_command_id='',accepted_account_id=NULL,
-            accepted_idempotency_key=NULL,updated_at=now()
+            accepted_idempotency_key=NULL,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
         WHERE project_id=$1 AND id=$2 AND accepted_at IS NULL
           AND handoff_state='claimed' AND accepted_account_id=$3 AND accepted_idempotency_key=$4"#,
     )
@@ -4787,7 +4750,7 @@ fn invalid_invitation() -> ControlError {
     )
 }
 
-fn error_group_json(row: PgRow) -> Value {
+fn error_group_json(row: SqliteRow) -> Value {
     serde_json::json!({
         "fingerprint":row.get::<String,_>("fingerprint"),
         "project":row.get::<String,_>("project_id"),
@@ -4797,8 +4760,8 @@ fn error_group_json(row: PgRow) -> Value {
         "status":row.get::<String,_>("status"),
         "priority":row.get::<String,_>("priority"),
         "assignee":row.get::<String,_>("assignee"),
-        "firstSeen":timestamp(row.get::<DateTime<Utc>,_>("first_seen")),
-        "lastSeen":timestamp(row.get::<DateTime<Utc>,_>("last_seen")),
+        "firstSeen":timestamp(row_time(&row, "first_seen")),
+        "lastSeen":timestamp(row_time(&row, "last_seen")),
         "count":row.get::<i64,_>("event_count"),
         "tenants":row.get::<Json<Value>,_>("tenants").0,
         "releases":row.get::<Json<Value>,_>("releases").0,
@@ -4814,18 +4777,17 @@ fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339()
 }
 
-fn advisory_lock_key(namespace: &str, components: &[&str]) -> String {
-    let mut material = Vec::new();
-    append_lock_component(&mut material, namespace);
-    for component in components {
-        append_lock_component(&mut material, component);
-    }
-    format!("gonvex-lock-v1:{}", sha256_hex(&material))
+/// Control Plane timestamps are INTEGER Unix milliseconds.
+pub(crate) fn from_unix_ms(value: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(value).unwrap_or_default()
 }
 
-fn append_lock_component(material: &mut Vec<u8>, component: &str) {
-    material.extend_from_slice(&(component.len() as u64).to_be_bytes());
-    material.extend_from_slice(component.as_bytes());
+fn row_time(row: &SqliteRow, column: &str) -> DateTime<Utc> {
+    from_unix_ms(row.get::<i64, _>(column))
+}
+
+fn row_optional_time(row: &SqliteRow, column: &str) -> Option<DateTime<Utc>> {
+    row.get::<Option<i64>, _>(column).map(from_unix_ms)
 }
 
 const RUNTIME_TENANT_DIRECTORY_INSERT_SQL: &str = r#"INSERT INTO gonvex_runtime_tenants
@@ -4833,7 +4795,7 @@ const RUNTIME_TENANT_DIRECTORY_INSERT_SQL: &str = r#"INSERT INTO gonvex_runtime_
         database_url,domain,status,description,provisioned,runtime_created)
        VALUES($1,$2,$1,$3,$4,$5,$6,$7,'active','Account-created tenant database.',FALSE,TRUE)
        ON CONFLICT(project_id,tenant_id) DO UPDATE SET name=EXCLUDED.name,
-         domain=EXCLUDED.domain,database_url=EXCLUDED.database_url,updated_at=now()"#;
+         domain=EXCLUDED.domain,database_url=EXCLUDED.database_url,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#;
 
 fn sha256_hex(value: &[u8]) -> String {
     Sha256::digest(value)
@@ -4880,45 +4842,6 @@ mod tests {
             .contains("database_url,domain,status,description,provisioned,runtime_created"));
         assert!(RUNTIME_TENANT_DIRECTORY_INSERT_SQL
             .contains("$6,$7,'active','Account-created tenant database.',FALSE,TRUE"));
-    }
-
-    #[test]
-    fn external_identity_lock_keys_are_safe_deterministic_and_field_delimited() {
-        let first = advisory_lock_key(
-            "external-identity",
-            &["project", "firebase", "issuer", "subject"],
-        );
-        let same = advisory_lock_key(
-            "external-identity",
-            &["project", "firebase", "issuer", "subject"],
-        );
-        let different_project = advisory_lock_key(
-            "external-identity",
-            &["other-project", "firebase", "issuer", "subject"],
-        );
-        let different_provider = advisory_lock_key(
-            "external-identity",
-            &["project", "external-oidc", "issuer", "subject"],
-        );
-        let different_subject = advisory_lock_key(
-            "external-identity",
-            &["project", "firebase", "issuer", "other-subject"],
-        );
-        let ambiguous_without_lengths = advisory_lock_key("external-identity", &["ab", "c"])
-            != advisory_lock_key("external-identity", &["a", "bc"]);
-
-        assert_eq!(first, same);
-        assert!(different_project != first);
-        assert!(different_provider != first);
-        assert!(different_subject != first);
-        assert!(ambiguous_without_lengths);
-        assert!(first.is_ascii());
-        assert!(!first.contains('\0'));
-        assert!(first
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric()
-                || character == '-'
-                || character == ':'));
     }
 
     #[test]
