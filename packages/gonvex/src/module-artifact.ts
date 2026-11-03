@@ -12,6 +12,7 @@ import { builtinModules } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { rolldown, type OutputChunk, type RolldownPlugin } from "rolldown";
+import { parseAst } from "rolldown/parseAst";
 import { projectLocalSchema } from "./local-bindings.js";
 
 import type {
@@ -29,6 +30,7 @@ import type {
   ModuleFunction,
   ModuleJavaScript,
   ModuleLanguage,
+  ModuleReducerBundle,
   ModuleSchema,
   ReplicaCollectionDefinition,
   VisibilityExpression,
@@ -99,6 +101,8 @@ export type ModuleArtifactOptions = {
   entrypoint?: string;
   /** gonvex.json `module.bundle`, project-relative output under gonvex/_build. */
   bundle?: string;
+  /** gonvex.json `module.split`: also emit the Query/Reducer-only bundle. */
+  split?: boolean;
 };
 
 /**
@@ -213,6 +217,9 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   }
   const sortedFiles = sortedRecord(files);
   const sortedFunctions = sortedRecord(functions);
+  const reducerBundle = options.split
+    ? await bundleReducerJavaScript(options, javascript, sortedFunctions)
+    : undefined;
   const sortedVisibility = sortedRecord(visibilityPlans);
   const sortedCrons = crons.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
   if (invitationAcceptanceReducer) {
@@ -229,6 +236,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       visibility: sortedVisibility,
       crons: sortedCrons,
       javascript,
+      reducerBundle,
       invitationAcceptanceReducer,
     }),
     entrypoint: entrypoint.projectPath,
@@ -236,6 +244,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     visibility: sortedVisibility,
     files: sortedFiles,
     javascript,
+    ...(reducerBundle ? { reducerBundle } : {}),
     ...(sortedCrons.length > 0 ? { crons: sortedCrons } : {}),
     ...(invitationAcceptanceReducer ? { invitationAcceptanceReducer } : {}),
   };
@@ -589,6 +598,7 @@ function artifactHash(input: {
   visibility: Record<string, VisibilityPlan>;
   crons: ModuleCron[];
   javascript: ModuleJavaScript;
+  reducerBundle?: ModuleReducerBundle;
   invitationAcceptanceReducer?: string;
 }) {
   const contract = {
@@ -601,6 +611,14 @@ function artifactHash(input: {
     crons: input.crons,
     javascript: { path: input.javascript.path, hash: input.javascript.hash },
     invitationAcceptanceReducer: input.invitationAcceptanceReducer ?? "",
+    // Present only for split artifacts, so unsplit artifact hashes are unchanged.
+    ...(input.reducerBundle ? {
+      reducerBundle: {
+        path: input.reducerBundle.path,
+        hash: input.reducerBundle.hash,
+        functions: input.reducerBundle.functions,
+      },
+    } : {}),
   };
   return createHash("sha256").update(canonicalJson(contract)).digest("hex");
 }
@@ -616,6 +634,84 @@ function canonicalJson(value: unknown): string {
 }
 
 async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint: string): Promise<ModuleJavaScript> {
+  const outputPath = moduleBundleOutputPath(options);
+  return writeBundle(options, entrypoint, outputPath, [], entrypoint, options.split === true);
+}
+
+/**
+ * Rewrites every character above U+00FF as a `\uXXXX` escape so V8 can store
+ * the bundle source as a one-byte string. One such character anywhere makes
+ * V8 keep the whole multi-megabyte source as UTF-16 in every isolate heap.
+ *
+ * Escapes are equivalent in string and template literals (cooked values),
+ * regular expressions, identifiers and comments. A tagged template exposes
+ * its raw text, so tagged quasis are left alone (the bundle then stays
+ * two-byte). The result is re-parsed and every string literal and template
+ * cooked value is compared with the original; any difference keeps the
+ * original source. Only `Function.prototype.toString` text can differ.
+ */
+export function latin1JavaScript(code: string): { code: string; latin1: boolean } {
+  if (!/[^\u0000-\u00ff]/.test(code)) return { code, latin1: true };
+  let original: ReturnType<typeof parseAst>;
+  try {
+    original = parseAst(code);
+  } catch {
+    return { code, latin1: false };
+  }
+  const tagged: Array<[number, number]> = [];
+  visitAst(original, (node) => {
+    if (node.type === "TaggedTemplateExpression") {
+      const quasi = node.quasi as { start: number; end: number };
+      tagged.push([quasi.start, quasi.end]);
+    }
+  });
+  tagged.sort((left, right) => left[0] - right[0]);
+  let output = "";
+  let last = 0;
+  let next = 0;
+  const pattern = /[^\u0000-\u00ff]/g;
+  for (let match = pattern.exec(code); match; match = pattern.exec(code)) {
+    const at = match.index;
+    while (next < tagged.length && tagged[next]![1] <= at) next += 1;
+    if (next < tagged.length && tagged[next]![0] <= at) continue;
+    output += code.slice(last, at) + `\\u${code.charCodeAt(at).toString(16).padStart(4, "0")}`;
+    last = at + 1;
+  }
+  output += code.slice(last);
+  try {
+    if (JSON.stringify(literalValues(parseAst(output))) !== JSON.stringify(literalValues(original))) {
+      return { code, latin1: false };
+    }
+  } catch {
+    return { code, latin1: false };
+  }
+  return { code: output, latin1: !/[^\u0000-\u00ff]/.test(output) };
+}
+
+function literalValues(ast: ReturnType<typeof parseAst>): unknown[] {
+  const values: unknown[] = [];
+  visitAst(ast, (node) => {
+    if (node.type === "Literal" && typeof node.value === "string") values.push(node.value);
+    if (node.type === "TemplateElement") values.push((node.value as { cooked?: string | null }).cooked ?? null);
+  });
+  return values;
+}
+
+function visitAst(node: unknown, visit: (node: Record<string, unknown> & { type: string }) => void): void {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const child of node) visitAst(child, visit);
+    return;
+  }
+  const record = node as Record<string, unknown>;
+  if (typeof record.type === "string") visit(record as Record<string, unknown> & { type: string });
+  for (const key in record) {
+    const child = record[key];
+    if (child && typeof child === "object") visitAst(child, visit);
+  }
+}
+
+function moduleBundleOutputPath(options: ModuleArtifactOptions): string {
   const buildDir = resolve(options.backendDir, "_build");
   const declaredOutput = options.bundle?.trim();
   if (declaredOutput && isAbsolute(declaredOutput)) {
@@ -623,12 +719,67 @@ async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint
   }
   const outputPath = declaredOutput ? resolve(options.root, declaredOutput) : resolve(options.backendDir, defaultBundlePath);
   assertInside(buildDir, outputPath, "gonvex.json module.bundle must resolve under gonvex/_build");
+  return outputPath;
+}
 
+const reducerEntryId = "\0gonvex-reducer-entry";
+
+/**
+ * Builds the Query/Reducer-only bundle. Its entry imports each Query and
+ * Reducer export straight from its defining file and re-exports it under the
+ * function path, so Action-only exports (and whatever only they import) are
+ * tree-shaken away. A function the entry cannot address statically (no export
+ * binding, the SDK's synthesized `__local` replica Queries) stays out of the
+ * list and keeps running from the complete bundle.
+ */
+async function bundleReducerJavaScript(
+  options: ModuleArtifactOptions,
+  complete: ModuleJavaScript,
+  functions: Record<string, ModuleFunction>,
+): Promise<ModuleReducerBundle> {
+  const served: Array<[string, ModuleFunction]> = Object.entries(functions)
+    .filter(([, entry]) => (entry.kind === "query" || entry.kind === "reducer")
+      && !!entry.export && entry.handler !== "__local" && !!entry.file)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const lines: string[] = [];
+  const exports: string[] = [];
+  served.forEach(([path, entry], index) => {
+    const source = resolve(options.root, entry.file);
+    assertInside(resolve(options.root), source, `function ${path} file must be inside the project`);
+    lines.push(`import { ${entry.export} as __gonvex_${index} } from ${JSON.stringify(source)};`);
+    exports.push(`  __gonvex_${index} as ${JSON.stringify(path)},`);
+  });
+  const entrySource = `${lines.join("\n")}\nexport {\n${exports.join("\n")}\n};\n`;
+  const completePath = resolve(options.root, complete.path);
+  const outputPath = completePath.replace(/(\.[cm]?js)?$/, ".reducers.js");
+  const javascript = await writeBundle(options, reducerEntryId, outputPath, [{
+    name: "gonvex-reducer-entry",
+    resolveId: (id) => (id === reducerEntryId ? reducerEntryId : null),
+    load: (id) => (id === reducerEntryId ? entrySource : null),
+  }], "reducer bundle", true, {
+    // An unused `action({...})` definition is dead in this bundle. Treating
+    // the SDK declaration as pure lets its handler (and what only it
+    // imports) drop out; the complete bundle still evaluates and validates
+    // every Action when the artifact loads.
+    manualPureFunctions: ["action"],
+  });
+  return { ...javascript, functions: served.map(([path]) => path) };
+}
+
+async function writeBundle(
+  options: ModuleArtifactOptions,
+  input: string,
+  outputPath: string,
+  plugins: RolldownPlugin[],
+  label: string,
+  oneByteSource = false,
+  treeshake: { manualPureFunctions?: string[] } = {},
+): Promise<ModuleJavaScript> {
   await mkdir(dirname(outputPath), { recursive: true });
   let bundle: Awaited<ReturnType<typeof rolldown>>;
   try {
     bundle = await rolldown({
-      input: entrypoint,
+      input,
       cwd: options.root,
       platform: "neutral",
       tsconfig: false,
@@ -639,10 +790,11 @@ async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint
         conditionNames: ["browser", "import", "default"],
         mainFields: ["browser", "module", "main"],
       },
-      plugins: [rejectNodeBuiltinsPlugin()],
+      plugins: [...plugins, rejectNodeBuiltinsPlugin()],
+      ...(treeshake.manualPureFunctions ? { treeshake: { manualPureFunctions: treeshake.manualPureFunctions } } : {}),
     });
   } catch (error) {
-    throw moduleBundleError(entrypoint, error);
+    throw moduleBundleError(label, error);
   }
 
   try {
@@ -664,15 +816,16 @@ async function bundleModuleJavaScript(options: ModuleArtifactOptions, entrypoint
     }
     if (!chunk.code.trim()) throw new Error("module bundle is empty");
 
-    await writeFile(outputPath, chunk.code, "utf8");
-    const code = Buffer.from(chunk.code, "utf8");
+    const source = oneByteSource ? latin1JavaScript(chunk.code).code : chunk.code;
+    await writeFile(outputPath, source, "utf8");
+    const code = Buffer.from(source, "utf8");
     return {
       path: projectPath(options.root, outputPath),
       hash: createHash("sha256").update(code).digest("hex"),
       code: code.toString("base64"),
     };
   } catch (error) {
-    throw moduleBundleError(entrypoint, error);
+    throw moduleBundleError(label, error);
   } finally {
     await bundle.close();
   }

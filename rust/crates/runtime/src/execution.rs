@@ -244,6 +244,10 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<Value, ExecutionError> {
+        let _profile = gonvex_profiler::ScopeTimer::new(
+            gonvex_profiler::Stage::FnTotal,
+            gonvex_profiler::Label::Query,
+        );
         let module = match access.module {
             Some(module) => module,
             None => self
@@ -409,6 +413,11 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
+        let profile_label = gonvex_profiler::Label::classify("reducer", path);
+        let _profile =
+            gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
+        let mut profile_timer = gonvex_profiler::Timer::start();
+        let profile_started = profile_timer;
         let committed_revisions = access.committed_revisions.clone();
         let module = match access.module {
             Some(module) => module,
@@ -493,6 +502,7 @@ impl Runtime {
             }),
         };
         let mut handler = DatabaseHostCalls::lazy_reducer(pending)
+            .with_profile_label(profile_label)
             .with_intent(&session.route.tenant_id, command_id)
             .with_schema(&module.schema)
             .with_schedulable_functions(
@@ -536,6 +546,7 @@ impl Runtime {
             });
         }
         invocation.context.intent_entropy = access.intent_entropy;
+        let profile_prepare = profile_timer.lap(gonvex_profiler::Stage::FnPrepare, profile_label);
         let result = self
             .inner
             .module_host
@@ -566,25 +577,50 @@ impl Runtime {
                     }
                     stored?;
                 }
-                let committed_revision =
-                    handler.finish_with_revision(true).await.map_err(|error| {
-                        // A commit lost to the connection is retried under the same
-                        // idempotency key: if it did commit, the retry replays it.
-                        if fault.observed() {
-                            ExecutionError::Transient(Box::new(ExecutionError::HostCall(error)))
-                        } else {
-                            ExecutionError::HostCall(error)
-                        }
-                    })?;
+                profile_timer.skip();
+                let (invoke_times, writer_wait, sql) = handler.profile_times();
+                let finished = handler.finish_with_revision(true).await;
+                let profile_finish =
+                    profile_timer.lap(gonvex_profiler::Stage::FnFinish, profile_label);
+                let profile_total = profile_started.elapsed_ns();
+                if gonvex_profiler::is_slow(profile_total) {
+                    gonvex_profiler::record_slow_trace(
+                        profile_label,
+                        &[
+                            profile_total,
+                            profile_prepare,
+                            invoke_times.connect,
+                            invoke_times.first_frame,
+                            invoke_times.js,
+                            invoke_times.host_calls,
+                            writer_wait,
+                            sql,
+                            profile_finish,
+                            invoke_times.host_call_count,
+                        ],
+                    );
+                }
+                let committed_revision = finished.map_err(|error| {
+                    // A commit lost to the connection is retried under the same
+                    // idempotency key: if it did commit, the retry replays it.
+                    if fault.observed() {
+                        ExecutionError::Transient(Box::new(ExecutionError::HostCall(error)))
+                    } else {
+                        ExecutionError::HostCall(error)
+                    }
+                })?;
                 self.inner.membership_projector.wake();
                 if let Some(tracker) = committed_revisions {
                     tracker.observe(committed_revision);
                 }
                 let runtime = self.clone();
                 let session = session.clone();
-                tokio::spawn(async move {
-                    runtime.drain_action_outbox(session).await;
-                });
+                tokio::spawn(gonvex_profiler::instrument(
+                    gonvex_profiler::TaskKind::Outbox,
+                    async move {
+                        runtime.drain_action_outbox(session).await;
+                    },
+                ));
                 Ok(ReducerExecution {
                     value,
                     committed_revision,
@@ -660,6 +696,10 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ActionExecution, ExecutionError> {
+        let _profile = gonvex_profiler::ScopeTimer::new(
+            gonvex_profiler::Stage::FnTotal,
+            gonvex_profiler::Label::Action,
+        );
         let committed_revisions = access.committed_revisions.clone().unwrap_or_default();
         let module = match access.module {
             Some(module) => module,

@@ -1,9 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore as useReactSyncExternalStore, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { usePaintExternalStore as useSyncExternalStore } from "./paint-external-store.js";
-import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow } from "@gonvex/client";
+import { GonvexClient, GonvexClientError, control, entityStatusFromIntents, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type ControlImpersonation, type ControlInvitationAcceptance, type ControlInvitationListItem, type ControlTenant, type ControlToken, type FunctionReference, type GonvexExternalAuthAdapter, type LiveQueryResult, type ReplicaCollectionSubscriptionState, type ReplicaRow, type PresenceFeedSnapshot } from "@gonvex/client";
 import type { JsonValue } from "@gonvex/protocol";
 
-export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult } from "@gonvex/client";
+export { GonvexClientError, type ConnectionState, type EntityIntentStatus, type LocalExecutionFallbackEvent, type OutboxIntent, type ResetLocalReplicaOptions, type ResetLocalReplicaResult, type PresenceFeedSnapshot } from "@gonvex/client";
 export { createFirebaseAuthAdapter, type GonvexExternalAuthAdapter, type GonvexExternalIdentityHint, type GonvexFirebaseAuthAdapterOptions } from "@gonvex/client";
 
 const GonvexContext = createContext<GonvexClient | null>(null);
@@ -2002,6 +2002,25 @@ export function useLiveQueryState<T extends ReplicaRow = ReplicaRow>(
 }
 
 /** Execute a read-only Query once. Queries never subscribe or rerun. */
+const NO_PRESENCE: PresenceFeedSnapshot = { supported: false, ready: false, members: new Map() };
+
+/**
+ * Presence v2 feed for the connected tenant: online Members keyed by Member
+ * id (`active` or `idle`; absent means offline). `supported` is false on a
+ * runtime without presence v2, so callers can fall back to their old path.
+ * Pass `"skip"` to stay unsubscribed.
+ */
+export function usePresence(mode?: "skip"): PresenceFeedSnapshot {
+  const client = useGonvexClient();
+  const skip = mode === "skip";
+  const subscribe = useCallback(
+    (listener: () => void) => (skip ? () => undefined : client.subscribePresence(listener)),
+    [client, skip],
+  );
+  const getSnapshot = useCallback(() => (skip ? NO_PRESENCE : client.presenceSnapshot()), [client, skip]);
+  return useReactSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
 export function useQuery<T extends JsonValue = JsonValue>(ref: FunctionReference, args: JsonValue | "skip" = {}): T | undefined {
   const client = useGonvexClient();
   const sessionScopeGeneration = useSessionScopeGeneration(client);

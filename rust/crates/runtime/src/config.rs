@@ -52,6 +52,8 @@ pub struct Config {
     /// Parsed from `GONVEX_SERVICE_PRINCIPALS`; empty disables the feature.
     pub service_principals: Vec<ServicePrincipalConfig>,
     pub public_functions: crate::public_functions::PublicLimits,
+    /// Presence v2 (`GONVEX_PRESENCE_*`); see `presence.rs`.
+    pub presence: crate::presence::PresenceConfig,
 }
 
 /// One trusted backend service credential. Only the SHA-256 digest of the
@@ -148,6 +150,11 @@ impl Default for SandboxConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleHostConfig {
     pub enabled: bool,
+    /// Run the V8 isolates inside the runtime process. Host calls are then
+    /// direct function calls instead of JSON frames on a socket; `binary` and
+    /// `endpoint` are ignored. `GONVEX_MODULE_HOST_IN_PROCESS=false` keeps the
+    /// separate module-host process.
+    pub in_process: bool,
     pub binary: Option<PathBuf>,
     pub endpoint: Option<String>,
     pub start_timeout: Duration,
@@ -157,6 +164,10 @@ pub struct ModuleHostConfig {
     pub isolate_pool_size: usize,
     pub execution_timeout: Duration,
     pub action_execution_timeout: Duration,
+    /// V8 heap ceiling per isolate (in-process mode; the separate host takes
+    /// its own `--max-heap-mb`). Crossing it terminates the call and retires
+    /// the isolate.
+    pub max_heap_bytes: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -280,6 +291,16 @@ impl Config {
                     lookup("GONVEX_MODULE_HOST_ENABLED"),
                     true,
                 )?,
+                in_process: boolean(
+                    "GONVEX_MODULE_HOST_IN_PROCESS",
+                    lookup("GONVEX_MODULE_HOST_IN_PROCESS"),
+                    true,
+                )?,
+                max_heap_bytes: integer(
+                    "GONVEX_MODULE_HOST_MAX_HEAP_MB",
+                    lookup("GONVEX_MODULE_HOST_MAX_HEAP_MB"),
+                    64,
+                )? << 20,
                 binary: non_empty(lookup("GONVEX_MODULE_HOST_BINARY")).map(PathBuf::from),
                 endpoint: non_empty(lookup("GONVEX_MODULE_HOST_ENDPOINT")),
                 start_timeout: duration_ms(
@@ -433,6 +454,7 @@ impl Config {
                 )?,
                 public_base_url: non_empty(lookup("GONVEX_PUBLIC_URL")).unwrap_or_default(),
             },
+            presence: presence_config(&mut lookup)?,
             public_functions: crate::public_functions::PublicLimits {
                 pending_per_ip: integer(
                     "GONVEX_PENDING_CONNECTIONS_PER_IP",
@@ -566,6 +588,64 @@ fn duration_ms(
     default: usize,
 ) -> Result<Duration, ConfigError> {
     integer(name, value, default).map(|value| Duration::from_millis(value as u64))
+}
+
+fn path_list(value: Option<String>) -> Vec<String> {
+    non_empty(value)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn presence_config(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<crate::presence::PresenceConfig, ConfigError> {
+    let defaults = crate::presence::PresenceConfig::default();
+    let ping_interval = Duration::from_secs(integer(
+        "GONVEX_PRESENCE_PING_SECONDS",
+        lookup("GONVEX_PRESENCE_PING_SECONDS"),
+        defaults.ping_interval.as_secs() as usize,
+    )? as u64);
+    let liveness_timeout = Duration::from_secs(integer(
+        "GONVEX_PRESENCE_LIVENESS_SECONDS",
+        lookup("GONVEX_PRESENCE_LIVENESS_SECONDS"),
+        defaults.liveness_timeout.as_secs() as usize,
+    )? as u64)
+    // At least two missed Pings before a connection is declared dead.
+    .max(ping_interval * 2);
+    Ok(crate::presence::PresenceConfig {
+        enabled: boolean(
+            "GONVEX_PRESENCE_V2",
+            lookup("GONVEX_PRESENCE_V2"),
+            defaults.enabled,
+        )?,
+        tick: duration_ms(
+            "GONVEX_PRESENCE_TICK_MS",
+            lookup("GONVEX_PRESENCE_TICK_MS"),
+            defaults.tick.as_millis() as usize,
+        )?,
+        offline_grace: Duration::from_millis(integer_allow_zero(
+            "GONVEX_PRESENCE_OFFLINE_GRACE_MS",
+            lookup("GONVEX_PRESENCE_OFFLINE_GRACE_MS"),
+            defaults.offline_grace.as_millis() as usize,
+        )? as u64),
+        ping_interval,
+        liveness_timeout,
+        legacy_beat_paths: path_list(lookup("GONVEX_PRESENCE_LEGACY_BEAT_PATHS")),
+        legacy_transition_paths: path_list(lookup("GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS")),
+        max_pending_batches: defaults.max_pending_batches,
+        support_refresh: Duration::from_secs(integer(
+            "GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS",
+            lookup("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS"),
+            defaults.support_refresh.as_secs() as usize,
+        )? as u64),
+    })
 }
 
 fn integer_allow_zero(
@@ -750,6 +830,51 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_owned()))
         })
+    }
+
+    #[test]
+    fn presence_v2_config() {
+        let defaults = config(&[]).unwrap().presence;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.tick, Duration::from_millis(1_000));
+        assert_eq!(defaults.offline_grace, Duration::from_secs(10));
+        assert!(defaults.legacy_beat_paths.is_empty());
+        assert_eq!(defaults.support_refresh, Duration::from_secs(300));
+        assert_eq!(
+            config(&[("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS", "60")])
+                .unwrap()
+                .presence
+                .support_refresh,
+            Duration::from_secs(60)
+        );
+        let custom = config(&[
+            ("GONVEX_PRESENCE_V2", "off"),
+            ("GONVEX_PRESENCE_TICK_MS", "250"),
+            ("GONVEX_PRESENCE_OFFLINE_GRACE_MS", "0"),
+            ("GONVEX_PRESENCE_PING_SECONDS", "40"),
+            ("GONVEX_PRESENCE_LIVENESS_SECONDS", "30"),
+            (
+                "GONVEX_PRESENCE_LEGACY_BEAT_PATHS",
+                "presence.beat, other.beat",
+            ),
+            (
+                "GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS",
+                "presence.transition",
+            ),
+        ])
+        .unwrap()
+        .presence;
+        assert!(!custom.enabled);
+        assert_eq!(custom.tick, Duration::from_millis(250));
+        assert_eq!(custom.offline_grace, Duration::ZERO);
+        // Liveness never drops below two Ping intervals.
+        assert_eq!(custom.liveness_timeout, Duration::from_secs(80));
+        assert_eq!(
+            custom.legacy_beat_paths,
+            vec!["presence.beat", "other.beat"]
+        );
+        assert_eq!(custom.legacy_transition_paths, vec!["presence.transition"]);
+        assert!(config(&[("GONVEX_PRESENCE_TICK_MS", "0")]).is_err());
     }
 
     #[test]

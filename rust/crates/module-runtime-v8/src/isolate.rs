@@ -46,6 +46,9 @@ const WEB_STREAMS: &str = include_str!("vendor/web_streams_ponyfill.js");
 pub(crate) struct ModuleSource {
     specifier: ModuleSpecifier,
     code: String,
+    /// A split reducer bundle exports every function under its exact path,
+    /// so it is resolved by path alone and no other candidate can shadow it.
+    resolve_by_path: bool,
     #[cfg(test)]
     pub(crate) probe: Arc<WorkerTestProbe>,
 }
@@ -76,9 +79,23 @@ impl ModuleSource {
         Ok(Self {
             specifier,
             code,
+            resolve_by_path: false,
             #[cfg(test)]
             probe: Arc::default(),
         })
+    }
+}
+
+impl ModuleSource {
+    /// The Query/Reducer-only bundle of a split artifact. Its specifier is
+    /// distinct from the complete bundle's so stack traces name the bundle.
+    pub(crate) fn reducer_bundle(module_id: &str, code: String) -> Result<Self, ModuleError> {
+        let mut source = Self::new(module_id, code)?;
+        source.specifier = source.specifier.join("reducers.js").map_err(|err| {
+            ModuleError::InvalidArtifact(format!("reducer bundle specifier: {err}"))
+        })?;
+        source.resolve_by_path = true;
+        Ok(source)
     }
 }
 
@@ -207,6 +224,29 @@ impl Drop for WorkerExit {
     }
 }
 
+/// Returns freed native heap to the operating system. V8 parses and compiles
+/// a module bundle with malloc-backed zones on the isolate's own thread; glibc
+/// keeps those freed pages in that thread's arena, so without a trim every
+/// isolate start or stop leaves tens of megabytes resident.
+pub fn trim_native_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let enabled = *ENABLED.get_or_init(|| {
+            std::env::var("GONVEX_MODULE_MALLOC_TRIM")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true)
+        });
+        if enabled {
+            // SAFETY: malloc_trim has no preconditions; it only releases
+            // free memory held by the allocator.
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        }
+    }
+}
+
 impl IsolateWorker {
     /// Starts the thread and its isolate. The returned receiver resolves once
     /// the bundle has loaded and evaluated, so a broken artifact surfaces as a
@@ -284,6 +324,8 @@ fn worker_main(
         &runtime,
         worker_loop(source, config, ready, calls, &control),
     );
+    drop(runtime);
+    trim_native_heap();
 }
 
 async fn worker_loop(
@@ -298,6 +340,8 @@ async fn worker_loop(
         _ = control.canceled() => Err(ModuleError::Execution("module isolate startup was canceled".into())),
         result = ModuleIsolate::create(&source, config, control) => result,
     };
+    // Parsing and top-level evaluation are done; release their scratch memory.
+    trim_native_heap();
     let mut isolate = match initialized {
         Ok(isolate) => {
             if ready.send(Ok(())).is_err() {
@@ -310,6 +354,7 @@ async fn worker_loop(
             return;
         }
     };
+    let mut served: u64 = 0;
     loop {
         let call = tokio::select! {
             biased;
@@ -322,6 +367,14 @@ async fn worker_loop(
             reply = isolate.run(call.spec) => reply,
         };
         let healthy = reply.healthy;
+        served += 1;
+        if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
+            log_heap_statistics(
+                &mut isolate.runtime,
+                &source.specifier,
+                &format!("after-{served}-calls"),
+            );
+        }
         let _ = call.reply.send(reply);
         if !healthy {
             break;
@@ -534,6 +587,57 @@ extension!(
     ]
 );
 
+fn heap_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GONVEX_V8_HEAP_STATS")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Diagnostic only (`GONVEX_V8_HEAP_STATS=1`): one stderr line of V8 heap
+/// statistics, so memory studies can attribute RSS to isolate heaps.
+fn log_heap_statistics(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, moment: &str) {
+    let mut stats = v8::HeapStatistics::default();
+    runtime.v8_isolate().get_heap_statistics(&mut stats);
+    eprintln!(
+        "[gonvex-module-host] v8-heap {{\"moment\":\"{moment}\",\"module\":\"{specifier}\",\"total\":{},\"executable\":{},\"physical\":{},\"used\":{},\"malloced\":{},\"external\":{},\"limit\":{},\"contexts\":{}}}",
+        stats.total_heap_size(),
+        stats.total_heap_size_executable(),
+        stats.total_physical_size(),
+        stats.used_heap_size(),
+        stats.malloced_memory(),
+        stats.external_memory(),
+        stats.heap_size_limit(),
+        stats.number_of_native_contexts(),
+    );
+}
+
+/// Diagnostic only (`GONVEX_V8_HEAP_SNAPSHOT_DIR`): writes a `.heapsnapshot`
+/// of the freshly initialized isolate for offline attribution.
+fn write_heap_snapshot(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, directory: &str) {
+    use std::io::Write as _;
+    let name = specifier.path().trim_matches('/').replace('/', "-");
+    let path = std::path::Path::new(directory).join(format!(
+        "{name}-{}-{:?}.heapsnapshot",
+        std::process::id(),
+        thread::current().id()
+    ));
+    let Ok(file) = std::fs::File::create(&path) else {
+        eprintln!(
+            "[gonvex-module-host] cannot write heap snapshot {}",
+            path.display()
+        );
+        return;
+    };
+    let mut file = std::io::BufWriter::new(file);
+    runtime
+        .v8_isolate()
+        .take_heap_snapshot(|chunk| file.write_all(chunk).is_ok());
+    let _ = file.flush();
+}
+
 /// Field order is drop order: the watchdog stops before the V8 handles and the
 /// runtime go away, so it can never terminate an isolate that is being torn
 /// down.
@@ -545,6 +649,7 @@ struct ModuleIsolate {
     terminated: Arc<AtomicBool>,
     heap_exhausted: Arc<AtomicBool>,
     config: V8Config,
+    resolve_by_path: bool,
 }
 
 impl ModuleIsolate {
@@ -617,6 +722,12 @@ impl ModuleIsolate {
             )));
         }
         let (dispatch, namespace) = initialized.expect("initialization timeout checked")?;
+        if heap_stats_enabled() {
+            log_heap_statistics(&mut runtime, &source.specifier, "initialized");
+        }
+        if let Ok(directory) = std::env::var("GONVEX_V8_HEAP_SNAPSHOT_DIR") {
+            write_heap_snapshot(&mut runtime, &source.specifier, &directory);
+        }
         Ok(Self {
             watchdog,
             dispatch,
@@ -625,6 +736,7 @@ impl ModuleIsolate {
             terminated,
             heap_exhausted,
             config,
+            resolve_by_path: source.resolve_by_path,
         })
     }
 
@@ -940,7 +1052,11 @@ impl ModuleIsolate {
         &mut self,
         contract: &FunctionContract,
     ) -> Result<v8::Global<v8::Value>, ModuleError> {
-        let candidates = handler_candidates(contract);
+        let candidates = if self.resolve_by_path {
+            vec![contract.path.clone()]
+        } else {
+            handler_candidates(contract)
+        };
         let exports = &self.namespace;
         let scope = &mut self.runtime.handle_scope();
         // A namespace lookup can throw on a cyclic import, so it runs under a

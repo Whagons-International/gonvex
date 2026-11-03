@@ -125,6 +125,14 @@ pub struct DatabaseHostCalls {
     /// statement; like PostgreSQL, the invocation treats the transaction as
     /// aborted until `ROLLBACK TO` a savepoint, and never commits it.
     aborted: bool,
+    /// Function class for profiler histograms.
+    profile_label: gonvex_profiler::Label,
+    /// ns spent opening the lazy write transaction (writer wait).
+    writer_wait_ns: u64,
+    /// ns in database host calls excluding the writer wait, and the module
+    /// host invocation timing (profiler slow traces).
+    sql_ns: u64,
+    invoke_times: crate::module_host::InvokeTimes,
 }
 
 impl DatabaseHostCalls {
@@ -146,6 +154,10 @@ impl DatabaseHostCalls {
             deferred_ordinals: BTreeMap::new(),
             fault: Arc::default(),
             aborted: false,
+            profile_label: gonvex_profiler::Label::None,
+            writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         }
     }
 
@@ -168,6 +180,10 @@ impl DatabaseHostCalls {
             deferred_ordinals: BTreeMap::new(),
             fault: Arc::default(),
             aborted: false,
+            profile_label: gonvex_profiler::Label::None,
+            writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         };
         handler.transaction = None;
         handler
@@ -185,6 +201,7 @@ impl DatabaseHostCalls {
         }
         if self.transaction.is_none() {
             if let Some(pending) = self.pending.take() {
+                let mut timer = gonvex_profiler::Timer::start();
                 let fault = self.fault.clone();
                 let mut transaction = pending
                     .control
@@ -222,10 +239,27 @@ impl DatabaseHostCalls {
                         return Err(RECEIPT_REPLAY.to_owned());
                     }
                 }
+                self.writer_wait_ns +=
+                    timer.lap(gonvex_profiler::Stage::WriterWait, self.profile_label);
+                transaction.set_profile_label(self.profile_label);
                 self.transaction = Some(transaction);
             }
         }
         self.transaction()
+    }
+
+    /// Profiler slow-trace inputs: module-host timing, writer wait, SQL time.
+    pub(crate) fn profile_times(&self) -> (crate::module_host::InvokeTimes, u64, u64) {
+        (self.invoke_times, self.writer_wait_ns, self.sql_ns)
+    }
+
+    /// Labels this handler's profiler stages with a function class.
+    pub fn with_profile_label(mut self, label: gonvex_profiler::Label) -> Self {
+        self.profile_label = label;
+        if let Some(transaction) = self.transaction.as_mut() {
+            transaction.set_profile_label(label);
+        }
+        self
     }
 
     pub fn with_storage(
@@ -375,6 +409,47 @@ impl DatabaseHostCalls {
 #[async_trait]
 impl HostCallHandler for DatabaseHostCalls {
     async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
+        if !gonvex_profiler::enabled() {
+            return self.handle_call(call).await;
+        }
+        let database = matches!(
+            call,
+            HostCallFrame::DbQuery { .. }
+                | HostCallFrame::DbInsert { .. }
+                | HostCallFrame::DbUpdate { .. }
+                | HostCallFrame::DbDelete { .. }
+                | HostCallFrame::DbDeleteMany { .. }
+        );
+        let started = gonvex_profiler::now_ns();
+        let writer_wait_before = self.writer_wait_ns;
+        let result = self.handle_call(call).await;
+        // The first database call also opens the write transaction; that wait
+        // is its own stage (db.writer_wait), so SQL time excludes it.
+        let elapsed = gonvex_profiler::now_ns()
+            .saturating_sub(started)
+            .saturating_sub(self.writer_wait_ns - writer_wait_before);
+        if database {
+            self.sql_ns += elapsed;
+        }
+        gonvex_profiler::record(
+            if database {
+                gonvex_profiler::Stage::Sql
+            } else {
+                gonvex_profiler::Stage::HostOther
+            },
+            self.profile_label,
+            elapsed,
+        );
+        result
+    }
+
+    fn invoke_profiled(&mut self, times: crate::module_host::InvokeTimes) {
+        self.invoke_times = times;
+    }
+}
+
+impl DatabaseHostCalls {
+    async fn handle_call(&mut self, call: HostCallFrame) -> Result<Value, String> {
         match call {
             HostCallFrame::Storage { operation, payload } if operation == "getMetadata" => {
                 let (runtime, session) = self
@@ -1147,6 +1222,10 @@ mod tests {
             deferred_ordinals: BTreeMap::new(),
             fault: Default::default(),
             aborted: false,
+            profile_label: gonvex_profiler::Label::None,
+            writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         };
         let mut calls = calls;
         assert_eq!(
@@ -1183,6 +1262,10 @@ mod tests {
             deferred_ordinals: BTreeMap::new(),
             fault: Default::default(),
             aborted: false,
+            profile_label: gonvex_profiler::Label::None,
+            writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());
