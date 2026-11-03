@@ -1192,17 +1192,27 @@ impl ControlPlane {
                SET status = 'pending', locked_at = NULL,
                    available_at = "#,
             now_ms!(),
-            r#" + $2 * 1000,
+            r#" + $2,
                    last_error = $3
                WHERE id = $1"#
         ))
         .bind(action_id)
-        .bind(attempts.clamp(1, 10))
+        .bind(retry_delay_ms(attempts))
         .bind(error)
         .execute(&pool)
         .await?;
         Ok(())
     }
+}
+
+/// Exponential backoff for a failed Action: 1 s after the first failure,
+/// doubling, capped at 15 minutes. A linear 1–10 s backoff retried a
+/// permanently failing Action every 10 s forever, and each retry is two
+/// writes on the tenant's single writer.
+pub fn retry_delay_ms(attempts: i32) -> i64 {
+    const CAP_MS: i64 = 15 * 60 * 1000;
+    let exponent = attempts.clamp(1, 30) - 1;
+    1000i64.checked_shl(exponent as u32).unwrap_or(CAP_MS).min(CAP_MS)
 }
 
 /// Host-owned attribution installed on one Reducer transaction before commit.
@@ -1668,6 +1678,16 @@ mod tests {
             Some(serde_json::json!({"kind":"api_key"}))
         )
         .is_err());
+    }
+
+    #[test]
+    fn action_retries_back_off_exponentially_to_a_cap() {
+        assert_eq!(retry_delay_ms(1), 1_000);
+        assert_eq!(retry_delay_ms(2), 2_000);
+        assert_eq!(retry_delay_ms(5), 16_000);
+        assert_eq!(retry_delay_ms(11), 900_000);
+        assert_eq!(retry_delay_ms(40), 900_000);
+        assert_eq!(retry_delay_ms(0), 1_000);
     }
 
     #[test]

@@ -919,10 +919,8 @@ impl Runtime {
                                 &error,
                             )
                             .await;
-                        tokio::time::sleep(std::time::Duration::from_secs(
-                            claimed.attempts.clamp(1, 10) as u64,
-                        ))
-                        .await;
+                        // No inline sleep: the claim skips Actions that are not
+                        // due, so one failing Action no longer delays the rest.
                     }
                 }
                 continue;
@@ -1009,10 +1007,8 @@ impl Runtime {
                             &error,
                         )
                         .await;
-                    tokio::time::sleep(std::time::Duration::from_secs(
-                        claimed.attempts.clamp(1, 10) as u64,
-                    ))
-                    .await;
+                    // No inline sleep: the claim skips Actions that are not
+                    // due, so one failing Action no longer delays the rest.
                 }
             }
         }
