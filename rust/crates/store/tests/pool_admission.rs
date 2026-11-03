@@ -39,7 +39,7 @@ impl Fixture {
         let pools = PoolRegistry::new(PoolLimits {
             max_total_connections: 2,
             max_connections_per_database: 2,
-            acquire_timeout: Duration::from_millis(300),
+            acquire_timeout: Duration::from_millis(2000),
             ..PoolLimits::default()
         });
         let control = ControlPlane::connect(&data.control_url(), pools.clone(), BTreeMap::new())

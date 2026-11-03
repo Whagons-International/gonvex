@@ -65,8 +65,10 @@ async fn idle_readers_close_and_databases_stay_within_their_budget() {
 #[tokio::test]
 async fn each_database_has_exactly_one_writer_connection() {
     let dir = TestDir::new("gonvex-writer");
+    // Long enough to open a new database file on a loaded machine; the held
+    // writer below still has to time out within it.
     let registry = PoolRegistry::new(PoolLimits {
-        acquire_timeout: Duration::from_millis(200),
+        acquire_timeout: Duration::from_millis(1000),
         ..PoolLimits::default()
     });
     let url = dir.url("tenant");

@@ -28,6 +28,7 @@ macro_rules! now_ms {
 
 pub mod capture;
 mod data_dir;
+mod sync_barrier;
 pub mod feed;
 mod registry;
 pub mod rows;
@@ -1407,6 +1408,11 @@ impl TenantTransaction {
             }
         };
         self.transaction.commit().await?;
+        // Acknowledge and publish only once the commit is on disk; one WAL
+        // sync covers every commit that finished before it started.
+        if let Some((pools, database_url)) = &self.publisher {
+            pools.durable(database_url).await?;
+        }
         let revision = notice.as_ref().map(|notice| notice.revision);
         if let (Some(notice), Some((pools, database_url))) = (notice, self.publisher.take()) {
             pools

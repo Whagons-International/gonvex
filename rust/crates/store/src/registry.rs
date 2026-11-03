@@ -174,6 +174,8 @@ pub(crate) struct Database {
     pub(crate) reader: SqlitePool,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
+    sync: Arc<crate::sync_barrier::SyncBarrier>,
 }
 
 #[derive(Clone)]
@@ -246,10 +248,10 @@ impl PoolRegistry {
             options = options.journal_mode(SqliteJournalMode::Wal);
         }
         let options = options
-            .synchronous(match self.durability {
-                Durability::Full => SqliteSynchronous::Full,
-                Durability::Normal => SqliteSynchronous::Normal,
-            })
+            // COMMIT never syncs while holding the single writer; Full
+            // durability is provided by waiting on the database's batched
+            // WAL sync before a commit is acknowledged (`durable`).
+            .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5))
             // Private page cache per connection. Many tenants times several
@@ -317,6 +319,7 @@ impl PoolRegistry {
             reader,
             notify,
             locks: Arc::default(),
+            sync: crate::sync_barrier::SyncBarrier::new(&path),
         };
         Ok(database)
     }
@@ -328,6 +331,15 @@ impl PoolRegistry {
             .values()
             .filter_map(|cell| cell.get().cloned())
             .collect()
+    }
+
+    /// Waits until everything committed on `database_url` so far is on disk
+    /// (no-op with `Durability::Normal`).
+    pub async fn durable(&self, database_url: &str) -> Result<(), DatabaseError> {
+        if self.durability == Durability::Normal {
+            return Ok(());
+        }
+        self.database(database_url).await?.sync.wait().await
     }
 
     /// The writer pool (one connection). Every write must use it.
