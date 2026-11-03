@@ -98,9 +98,12 @@ impl ChangeFeedHub {
         let route = route.clone();
         let pools = self.pools.clone();
         let shutdown = self.shutdown.subscribe();
-        tokio::spawn(async move {
-            run_feed(route, pools, sender, shutdown, initial_revision).await;
-        });
+        tokio::spawn(gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::Feed,
+            async move {
+                run_feed(route, pools, sender, shutdown, initial_revision).await;
+            },
+        ));
         receiver
     }
 
@@ -202,10 +205,27 @@ async fn run_feed(
                 }
                 _ = tokio::time::sleep(Duration::from_secs(5)) => ("repair", None),
             };
+            if let Some(lag) = notified_revision.and_then(|revision| {
+                gonvex_profiler::since_stamp(gonvex_profiler::stamp_key(
+                    route.database_url.trim(),
+                    revision,
+                ))
+            }) {
+                gonvex_profiler::record(
+                    gonvex_profiler::Stage::FeedNotifyLag,
+                    gonvex_profiler::Label::None,
+                    lag,
+                );
+            }
             let delivery_started = std::time::Instant::now();
             let delivery_after = last_revision;
             match deliver_committed(&pools, &route, last_revision, &sender).await {
                 Ok(revision) => {
+                    gonvex_profiler::record_duration(
+                        gonvex_profiler::Stage::FeedRead,
+                        gonvex_profiler::Label::None,
+                        delivery_started.elapsed(),
+                    );
                     last_revision = revision;
                     tracing::debug!(
                         project = %route.project_id,
@@ -311,6 +331,7 @@ async fn deliver_committed(
     let mut batch = Vec::new();
     for change in changes {
         if current_revision != 0 && change.revision != current_revision {
+            stamp_broadcast(&clock.epoch, current_revision);
             let _ = sender.send(FeedEvent::Transaction {
                 database_epoch: clock.epoch.clone(),
                 revision: current_revision,
@@ -321,6 +342,7 @@ async fn deliver_committed(
         batch.push(change);
     }
     if !batch.is_empty() {
+        stamp_broadcast(&clock.epoch, current_revision);
         let _ = sender.send(FeedEvent::Transaction {
             database_epoch: clock.epoch,
             revision: current_revision,
@@ -328,6 +350,17 @@ async fn deliver_committed(
         });
     }
     Ok(clock.revision)
+}
+
+/// Marks when a transaction was broadcast so each connection can measure its
+/// own queue wait and delivery time ([`broadcast_key`]).
+fn stamp_broadcast(epoch: &str, revision: u64) {
+    gonvex_profiler::stamp(broadcast_key(epoch, revision));
+}
+
+/// Profiler stamp key of a broadcast feed transaction.
+pub(crate) fn broadcast_key(epoch: &str, revision: u64) -> u64 {
+    gonvex_profiler::stamp_key(epoch, revision)
 }
 
 pub async fn read_clock(

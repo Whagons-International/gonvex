@@ -139,7 +139,8 @@ pub struct Compressed {
     alternative: Arc<Mutex<Option<Vec<u8>>>>,
     precompressed: Arc<Mutex<Option<BytesMut>>>,
     sender: ratchet_core::Sender<IoStream, Encode>,
-    receiver: mpsc::Receiver<Result<ws::Message, axum::Error>>,
+    /// Inbound messages with the profiler time they were read off the socket.
+    receiver: mpsc::Receiver<(u64, Result<ws::Message, axum::Error>)>,
     reader: JoinHandle<()>,
 }
 
@@ -163,7 +164,7 @@ impl Stream for WebSocket {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut self.get_mut().transport {
             Transport::Plain(socket) => Pin::new(socket.as_mut()).poll_next(cx),
-            Transport::Compressed(socket) => socket.receiver.poll_recv(cx),
+            Transport::Compressed(socket) => socket.receiver.poll_recv(cx).map(|item| item.map(inbound)),
         }
     }
 }
@@ -244,7 +245,7 @@ impl WebSocket {
         let (tx, rx) = mpsc::channel(1);
         // Ratchet reads are not cancellation safe. Keep them in an owned task;
         // the runtime can cancel channel receives without losing a partial frame.
-        let reader = tokio::spawn(async move {
+        let reader = tokio::spawn(gonvex_profiler::instrument(gonvex_profiler::TaskKind::WsReader, async move {
             let mut payload = BytesMut::new();
             loop {
                 let result = match receiver.read(&mut payload).await {
@@ -276,11 +277,12 @@ impl WebSocket {
                     Err(error) => Err(axum::Error::new(error)),
                 };
                 let done = result.is_err() || matches!(result, Ok(ws::Message::Close(_)));
-                if tx.send(result).await.is_err() || done {
+                let read_at = if gonvex_profiler::enabled() { gonvex_profiler::now_ns() } else { 0 };
+                if tx.send((read_at, result)).await.is_err() || done {
                     break;
                 }
             }
-        });
+        }));
         Self {
             transport: Transport::Compressed(Box::new(Compressed {
                 threshold,
@@ -306,7 +308,7 @@ impl WebSocket {
     pub async fn next(&mut self) -> Option<Result<ws::Message, axum::Error>> {
         match &mut self.transport {
             Transport::Plain(socket) => socket.recv().await,
-            Transport::Compressed(socket) => socket.receiver.recv().await,
+            Transport::Compressed(socket) => socket.receiver.recv().await.map(inbound),
         }
     }
 
@@ -315,6 +317,8 @@ impl WebSocket {
     /// it does not recompress the winner. Plain connections compare raw bytes.
     pub async fn send_best_text(&mut self, full: &str, patch: &str) -> Result<(), axum::Error> {
         self.flush_batch().await?;
+        let _sending = gonvex_profiler::gauge(gonvex_profiler::GaugeId::WsSending).guard();
+        let _write = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::WsWrite, gonvex_profiler::Label::None);
         match &mut self.transport {
             Transport::Plain(socket) => {
                 socket
@@ -341,6 +345,8 @@ impl WebSocket {
 
     pub async fn send(&mut self, message: ws::Message) -> Result<(), axum::Error> {
         self.flush_batch().await?;
+        let _sending = gonvex_profiler::gauge(gonvex_profiler::GaugeId::WsSending).guard();
+        let _write = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::WsWrite, gonvex_profiler::Label::None);
         let socket = match &mut self.transport {
             Transport::Plain(socket) => return socket.send(message).await,
             Transport::Compressed(socket) => socket,
@@ -365,6 +371,21 @@ impl WebSocket {
         };
         result.map_err(axum::Error::new)
     }
+}
+
+/// Records how long an inbound message waited between the socket reader and
+/// the connection task.
+fn inbound(
+    (read_at, message): (u64, Result<ws::Message, axum::Error>),
+) -> Result<ws::Message, axum::Error> {
+    if read_at != 0 {
+        gonvex_profiler::record(
+            gonvex_profiler::Stage::WsInboundWait,
+            gonvex_profiler::Label::None,
+            gonvex_profiler::now_ns().saturating_sub(read_at),
+        );
+    }
+    message
 }
 
 #[derive(Debug)]
@@ -474,6 +495,10 @@ fn compress_text(payload: &[u8], window_bits: u8, threshold: usize) -> io::Resul
     if payload.len() < threshold {
         return Ok(None);
     }
+    let _compress = gonvex_profiler::ScopeTimer::new(
+        gonvex_profiler::Stage::WsCompress,
+        gonvex_profiler::Label::None,
+    );
     // No context takeover, including when comparing alternatives. The
     // thread's compressor is reset, not rebuilt, for every message.
     let mut encoded = Vec::new();

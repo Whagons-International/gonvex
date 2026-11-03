@@ -122,6 +122,14 @@ pub struct DatabaseHostCalls {
     fault: Arc<TransientFault>,
     /// Module SQL state, shared with the isolate thread (`SqlInline`).
     sql: Arc<Mutex<SqlCalls>>,
+    /// Function class for profiler histograms.
+    profile_label: gonvex_profiler::Label,
+    /// ns spent opening the lazy write transaction (writer wait).
+    writer_wait_ns: u64,
+    /// ns in database host calls excluding the writer wait, and the module
+    /// host invocation timing (profiler slow traces).
+    sql_ns: u64,
+    invoke_times: crate::module_host::InvokeTimes,
 }
 
 /// The part of a database handler that runs module SQL. It lives behind a
@@ -142,6 +150,9 @@ pub(crate) struct SqlCalls {
     session: Option<DirectSession>,
     /// Calls answered on the isolate thread (diagnostics and tests).
     inline_calls: u64,
+    /// ns spent in SQL answered on the isolate thread (profiler only).
+    inline_sql_ns: u64,
+    profile_label: gonvex_profiler::Label,
 }
 
 const CLOSED: &str = "the invocation transaction is closed";
@@ -173,8 +184,14 @@ impl DatabaseHostCalls {
                 aborted: None,
                 session: None,
                 inline_calls: 0,
+                inline_sql_ns: 0,
+                profile_label: gonvex_profiler::Label::None,
             })),
             fault,
+            profile_label: gonvex_profiler::Label::None,
+            writer_wait_ns: 0,
+            sql_ns: 0,
+            invoke_times: Default::default(),
         }
     }
 
@@ -212,6 +229,7 @@ impl DatabaseHostCalls {
         }
         if self.transaction.is_none() {
             if let Some(pending) = self.pending.take() {
+                let mut timer = gonvex_profiler::Timer::start();
                 let fault = self.fault.clone();
                 let mut transaction = pending
                     .control
@@ -249,6 +267,9 @@ impl DatabaseHostCalls {
                         return Err(RECEIPT_REPLAY.to_owned());
                     }
                 }
+                self.writer_wait_ns +=
+                    timer.lap(gonvex_profiler::Stage::WriterWait, self.profile_label);
+                transaction.set_profile_label(self.profile_label);
                 self.transaction = Some(transaction);
             }
         }
@@ -271,6 +292,21 @@ impl DatabaseHostCalls {
             .map_err(|error| fault.database(error))?;
         self.sql().session = Some(session);
         Ok(())
+    }
+
+    /// Profiler slow-trace inputs: module-host timing, writer wait, SQL time.
+    pub(crate) fn profile_times(&self) -> (crate::module_host::InvokeTimes, u64, u64) {
+        (self.invoke_times, self.writer_wait_ns, self.sql_ns + self.sql().inline_sql_ns)
+    }
+
+    /// Labels this handler's profiler stages with a function class.
+    pub fn with_profile_label(mut self, label: gonvex_profiler::Label) -> Self {
+        self.profile_label = label;
+        self.sql().profile_label = label;
+        if let Some(transaction) = self.transaction.as_mut() {
+            transaction.set_profile_label(label);
+        }
+        self
     }
 
     pub fn with_storage(
@@ -490,19 +526,31 @@ fn is_db_call(call: &HostCallFrame) -> bool {
 #[async_trait]
 impl HostCallHandler for DatabaseHostCalls {
     async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
-        if is_db_call(&call) {
-            let bytes = self.db_bytes(call).await?;
-            return decode_response(&bytes);
+        if !gonvex_profiler::enabled() {
+            return self.handle_call(call).await;
         }
-        self.handle_other(call).await
+        let database = is_db_call(&call);
+        let started = gonvex_profiler::now_ns();
+        let writer_wait_before = self.writer_wait_ns;
+        let result = self.handle_call(call).await;
+        self.record_call(database, started, writer_wait_before);
+        result
     }
 
     async fn handle_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
-        if is_db_call(&call) {
-            return self.db_bytes(call).await;
+        if !gonvex_profiler::enabled() {
+            return self.handle_call_bytes(call).await;
         }
-        let value = self.handle_other(call).await?;
-        serde_json::to_vec(&value).map_err(|error| format!("host response could not be re-encoded: {error}"))
+        let database = is_db_call(&call);
+        let started = gonvex_profiler::now_ns();
+        let writer_wait_before = self.writer_wait_ns;
+        let result = self.handle_call_bytes(call).await;
+        self.record_call(database, started, writer_wait_before);
+        result
+    }
+
+    fn invoke_profiled(&mut self, times: crate::module_host::InvokeTimes) {
+        self.invoke_times = times;
     }
 
     fn inline_host(&self) -> Option<Arc<dyn InlineHost>> {
@@ -546,7 +594,13 @@ impl InlineHost for SqlInline {
         };
         sql.inline_calls += 1;
         let writes = !matches!(frame, HostCallFrame::DbQuery { .. });
+        let started = gonvex_profiler::enabled().then(gonvex_profiler::now_ns);
         let result = if writes { sql.require_write() } else { Ok(()) }.and_then(|()| sql.call(frame));
+        if let Some(started) = started {
+            let elapsed = gonvex_profiler::now_ns().saturating_sub(started);
+            sql.inline_sql_ns += elapsed;
+            gonvex_profiler::record(gonvex_profiler::Stage::Sql, sql.profile_label, elapsed);
+        }
         Ok(match result {
             Ok(value) => Ok(HostResponse { value }),
             // Same text as the async transport (`in_process::DirectHost`).
@@ -561,6 +615,43 @@ impl InlineHost for SqlInline {
 }
 
 impl DatabaseHostCalls {
+    async fn handle_call(&mut self, call: HostCallFrame) -> Result<Value, String> {
+        if is_db_call(&call) {
+            let bytes = self.db_bytes(call).await?;
+            return decode_response(&bytes);
+        }
+        self.handle_other(call).await
+    }
+
+    async fn handle_call_bytes(&mut self, call: HostCallFrame) -> Result<Vec<u8>, String> {
+        if is_db_call(&call) {
+            return self.db_bytes(call).await;
+        }
+        let value = self.handle_other(call).await?;
+        serde_json::to_vec(&value).map_err(|error| format!("host response could not be re-encoded: {error}"))
+    }
+
+    /// Records one host call's stage. The first database call also opens the
+    /// write transaction; that wait is its own stage (db.writer_wait), so SQL
+    /// time excludes it.
+    fn record_call(&mut self, database: bool, started: u64, writer_wait_before: u64) {
+        let elapsed = gonvex_profiler::now_ns()
+            .saturating_sub(started)
+            .saturating_sub(self.writer_wait_ns - writer_wait_before);
+        if database {
+            self.sql_ns += elapsed;
+        }
+        gonvex_profiler::record(
+            if database {
+                gonvex_profiler::Stage::Sql
+            } else {
+                gonvex_profiler::Stage::HostOther
+            },
+            self.profile_label,
+            elapsed,
+        );
+    }
+
     async fn handle_other(&mut self, call: HostCallFrame) -> Result<Value, String> {
         match call {
             HostCallFrame::Storage { operation, payload } if operation == "getMetadata" => {

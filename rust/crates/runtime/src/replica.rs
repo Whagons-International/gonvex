@@ -250,6 +250,11 @@ fn shared_definition(
     shared
 }
 
+/// Free snapshot permits right now (profiler gauge).
+pub(crate) fn snapshot_permits_available() -> usize {
+    snapshot_permits().available_permits()
+}
+
 /// Process-wide bound on concurrent replica snapshot builds
 /// (`GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`, default: available CPUs, min 2).
 fn snapshot_permits() -> &'static tokio::sync::Semaphore {
@@ -282,6 +287,8 @@ struct CollectionRead {
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
     _permit: tokio::sync::SemaphorePermit<'static>,
+    /// Snapshot-active gauge, held as long as the permit.
+    _active: gonvex_profiler::GaugeGuard,
 }
 
 // Small and normal application collections can carry their integrity map with
@@ -651,13 +658,21 @@ impl Runtime {
         plan: &VisibilityPlan,
     ) -> Result<CollectionRead, ReplicaError> {
         // Each WebSocket queues up to REPLICA_OPEN_CONCURRENCY preparations,
-        // so a sign-in burst could otherwise scan hundreds of collections at
-        // once. Scans are CPU bound: more of them than cores only multiplies
-        // peak memory, so bound them process-wide.
-        let permit = snapshot_permits()
-            .acquire()
-            .await
-            .expect("snapshot semaphore is never closed");
+        // so a sign-in burst could otherwise build hundreds of full snapshots
+        // at once. Snapshot builds are CPU and memory bound: more of them than
+        // cores only multiplies peak memory, so bound them process-wide.
+        use gonvex_profiler::{gauge, GaugeId, Label, ScopeTimer, Stage, Timer};
+        let _build = ScopeTimer::new(Stage::SnapshotBuild, Label::None);
+        let mut timer = Timer::start();
+        let permit = {
+            let _waiting = gauge(GaugeId::SnapshotWaiting).guard();
+            snapshot_permits()
+                .acquire()
+                .await
+                .expect("snapshot semaphore is never closed")
+        };
+        let active = gauge(GaugeId::SnapshotActive).guard();
+        timer.lap(Stage::SnapshotPermitWait, Label::None);
         let control = self
             .inner
             .control_plane
@@ -693,10 +708,12 @@ impl Runtime {
             }
             None => visibility::PreparedParentAcl::default(),
         };
+        timer.lap(Stage::SnapshotAcl, Label::None);
         let mut transaction = control
             .begin_tenant_transaction(&session.route, true)
             .await?;
         let clock = clock_in_transaction(&mut transaction).await?;
+        timer.lap(Stage::SnapshotBegin, Label::None);
         self.inner.visibility_metrics.record_collection_snapshot();
         self.inner
             .visibility_metrics
@@ -717,11 +734,13 @@ impl Runtime {
         } else {
             visibility::resolve(&mut transaction, session, plan, clock.revision).await?
         };
+        timer.lap(Stage::SnapshotVisibility, Label::None);
         Ok(CollectionRead {
             transaction,
             clock,
             resolved,
             _permit: permit,
+            _active: active,
         })
     }
 

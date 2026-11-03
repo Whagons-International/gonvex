@@ -42,8 +42,8 @@ pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
     database_path, database_url, AdmissionPermit, DatabaseListener, Durability, KeyedLock,
-    Notification, PoolLimits, PoolRegistry, PoolRegistrySnapshot, sqlite_cache_budget_mib,
-    sqlite_memory_used,
+    Notification, PoolLimits, PoolRegistry, PoolRegistrySnapshot, WriterQueue, WriterStats,
+    sqlite_cache_budget_mib, sqlite_memory_used,
 };
 
 mod provision;
@@ -1255,6 +1255,9 @@ pub struct TenantTransaction {
     committed: Option<CommitNotice>,
     /// Shared with direct sessions, which mark failures from other threads.
     failed: Arc<std::sync::Mutex<Option<String>>>,
+    /// Function class for the commit-stage histograms.
+    profile_label: gonvex_profiler::Label,
+    _writer_held: Option<gonvex_profiler::GaugeGuard>,
 }
 
 /// The connection locked out of sqlx's worker for direct statements. The
@@ -1290,14 +1293,28 @@ pub async fn begin_transaction(
     database_url: &str,
     read_only: bool,
 ) -> Result<TenantTransaction, DatabaseError> {
+    use gonvex_profiler::{Label, Stage, Timer};
     let admission = pools.admit(database_url).await?;
     let database = pools.database(database_url).await?;
-    let (pool, statements) = if read_only {
-        (database.reader, None)
+    let (transaction, statements, writer_held) = if read_only {
+        let mut timer = Timer::start();
+        let transaction = database.reader.begin().await?;
+        timer.lap(Stage::ReaderBegin, Label::None);
+        (transaction, None, None)
     } else {
-        (database.writer, Some(database.statements))
+        let stats = database.writer_stats.clone();
+        let waiting = stats.enter();
+        let mut timer = Timer::start();
+        let transaction = database.writer.begin().await?;
+        let waited = timer.lap(Stage::WriterAcquire, Label::None);
+        drop(waiting);
+        stats.acquired(waited);
+        (
+            transaction,
+            Some(database.statements),
+            Some(gonvex_profiler::gauge(gonvex_profiler::GaugeId::WriterHeld).guard()),
+        )
     };
-    let transaction = pool.begin().await?;
     Ok(TenantTransaction {
         direct: None,
         statements,
@@ -1308,6 +1325,8 @@ pub async fn begin_transaction(
         publisher: (!read_only).then(|| (pools.clone(), Arc::from(database_url.trim()))),
         committed: None,
         failed: Arc::default(),
+        profile_label: Label::None,
+        _writer_held: writer_held,
     })
 }
 
@@ -1373,6 +1392,11 @@ impl TenantTransaction {
     ) -> Result<R, DatabaseError> {
         let session = self.direct().await?;
         Ok(session.run(work).ok_or_else(released)??)
+    }
+
+    /// Labels this transaction's commit-stage histograms with a function class.
+    pub fn set_profile_label(&mut self, label: gonvex_profiler::Label) {
+        self.profile_label = label;
     }
 
     pub async fn set_command_id(&mut self, command_id: &str) -> Result<(), DatabaseError> {
@@ -1569,6 +1593,9 @@ impl TenantTransaction {
             self.transaction.rollback().await?;
             return Err(DatabaseError::TransactionAborted(reason));
         }
+        use gonvex_profiler::{Stage, Timer};
+        let label = self.profile_label;
+        let mut timer = Timer::start();
         let notice = if self.read_only {
             None
         } else {
@@ -1581,18 +1608,24 @@ impl TenantTransaction {
                 }
             }
         };
+        timer.lap(Stage::CommitFinalize, label);
         self.release_direct();
         self.transaction.commit().await?;
+        timer.lap(Stage::CommitSql, label);
         // Acknowledge and publish only once the commit is on disk; one WAL
         // sync covers every commit that finished before it started.
         if let Some((pools, database_url)) = &self.publisher {
             pools.durable(database_url).await?;
+            timer.lap(Stage::CommitFsync, label);
         }
         let revision = notice.as_ref().map(|notice| notice.revision);
         if let (Some(notice), Some((pools, database_url))) = (notice, self.publisher.take()) {
             pools
                 .notify(&database_url, feed::CHANGE_FEED_CHANNEL, &notice.payload())
                 .await?;
+            // The change-feed reader measures notify -> wake-up from this stamp.
+            gonvex_profiler::stamp(gonvex_profiler::stamp_key(&database_url, notice.revision));
+            timer.lap(Stage::CommitPublish, label);
             self.committed = Some(notice);
         }
         Ok(revision)
