@@ -390,6 +390,8 @@ async fn run() {
         let mut samples = Vec::new();
         let mut messages = 0;
         let mut bytes = 0;
+        let mut receivers = 0;
+        let mut readies = 0;
         for i in 0..iterations(30) + 3 {
             let event = if presence {
                 fixture.beat_presence(BIG, i % members).await.unwrap()
@@ -416,6 +418,12 @@ async fn run() {
             .await;
             messages = result.iter().map(Vec::len).sum::<usize>();
             bytes = result.iter().map(|m| wire_bytes(m)).sum::<usize>();
+            receivers = result.iter().filter(|m| !m.is_empty()).count();
+            readies = result
+                .iter()
+                .flatten()
+                .filter(|m| matches!(m, ServerMessage::ReplicaReady { .. }))
+                .count();
             drop(result);
             if i >= 3 {
                 samples.push(sample);
@@ -425,7 +433,18 @@ async fn run() {
             &name,
             &samples,
             members as f64,
-            json!({"unit": "subscriber connection", "messages": messages, "wire_bytes": bytes}),
+            json!({
+                "unit": "subscriber connection",
+                "messages": messages,
+                "replica_ready_messages": readies,
+                "connections_with_messages": receivers,
+                "wire_bytes": bytes,
+                "wire_bytes_per_member": bytes / members,
+                // Linear in members: every member of the tenant receives the
+                // same kind of frames for a change.
+                "projected_1950_members_wire_bytes": bytes * 1950 / members,
+                "projected_1950_members_messages": messages * 1950 / members,
+            }),
         );
     }
     drop(connections);

@@ -63,6 +63,31 @@ from the after-image; an entity delete is sent only when no collection of the
 connection holds it (the SDK removes a deleted entity from every window of
 that entity).
 
+## Unchanged subscriptions send nothing
+
+A subscription whose client rows did not change in a revision (most members
+cannot see a given task) sends no frame for it: no `replica.ready`, no delta.
+Its cursor stays where the client last saw a change, or advances with the
+connection's `replica.watermark` (sent once per revision, and once per batch
+in perf/delivery's `replica.batch`), which the SDK applies to settled windows.
+Clients without the watermark capability keep the older cursor; a resume from
+it replays the change log since that cursor and verifies the client's digest
+against SQL, so an older cursor is always safe (`tests/replica_state.rs`:
+"an unaffected subscription receives nothing, then resumes"). A changed
+subscription still sends its delta followed by `replica.ready`.
+
+One task update to the 78 fixture members (`apply_feed/task_update`):
+
+| | before | after |
+| --- | --- | --- |
+| messages | 284 (209 of them readies to members whose rows did not change) | 75 (25 receivers × transaction, delta, ready) |
+| connections receiving frames | 78 | 25 |
+| JSON bytes (uncompressed) | 211,321 (2,709 per member) | 153,475 (1,967 per member) |
+| projected to 1,950 members | 7,100 messages, 5.28 MB | 1,875 messages, 3.84 MB |
+
+The remaining bytes are the task row itself (encoded per receiver here; once
+per visibility class in perf/delivery).
+
 ## What cannot be decided from images: reconcile with the client's hashes
 
 The runtime sends `replica.needHashes` for that collection and drops the
@@ -157,7 +182,7 @@ the quietest run of each side, memory and allocation counts are stable.
 | projection to a 1,950-member tenant (marginal × 1,950, Admin) | 4.92 GB | 249 MB |
 | snapshot open, 9,000 tasks (Admin): time / peak heap | 158 ms / 73.6 MB | 141 ms / 73.3 MB |
 | snapshot open, 3,411 tasks (TeamAllSpots) | 70 ms / 27.9 MB | 55 ms / 27.8 MB |
-| feed apply, one task update to 78 members × 10 collections | 124.5 ms (1.60 ms/subscriber), 82 k allocs | 6.1 ms (78 µs/subscriber), 85 k allocs |
+| feed apply, one task update to 78 members × 10 collections | 124.5 ms (1.60 ms/subscriber), 82 k allocs, 284 messages / 211 KB | 6.1 ms (78 µs/subscriber), 75 k allocs, 75 messages / 153 KB |
 | feed apply, one presence beat | 6.6 ms | 3.2 ms |
 | resume TeamAllSpots tasks, 0 changes: time / peak heap | 159 ms / 29.0 MB | 167 ms / 0.79 MB |
 | resume, 10 changes | 222 ms / 29.2 MB | 185 ms / 0.81 MB |

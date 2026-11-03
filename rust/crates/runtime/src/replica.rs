@@ -779,17 +779,25 @@ impl Runtime {
             for (key, touch) in delta.touches {
                 touches.entry(key).or_default().merge(&subscription.id, touch);
             }
-            if !delta.upserts.is_empty() || !delta.deleted.is_empty() {
-                messages.push(replica_delta(
-                    &subscription.id,
-                    &subscription.path,
-                    subscription.cursor.clone(),
-                    delta.upserts.into_values().collect(),
-                    delta.deleted.into_iter().collect(),
-                    subscription.digest.digest(),
-                    subscription.window.truncated,
-                ));
+            if delta.upserts.is_empty() && delta.deleted.is_empty() {
+                // The client's rows and digest are unchanged: send nothing.
+                // Its cursor stays where it is (or advances with the
+                // connection watermark); a resume from that cursor replays
+                // the log and verifies the digest against SQL, so an older
+                // cursor is always safe. Most members cannot see a given
+                // task, so a per-revision ready to each of them was the
+                // largest per-connection delivery cost.
+                continue;
             }
+            messages.push(replica_delta(
+                &subscription.id,
+                &subscription.path,
+                subscription.cursor.clone(),
+                delta.upserts.into_values().collect(),
+                delta.deleted.into_iter().collect(),
+                subscription.digest.digest(),
+                subscription.window.truncated,
+            ));
             messages.push(replica_ready(
                 &subscription.id,
                 &subscription.path,
