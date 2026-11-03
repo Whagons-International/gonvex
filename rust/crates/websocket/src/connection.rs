@@ -619,20 +619,26 @@ impl SocketWatch {
         self.0.stalled.load(Relaxed)
     }
 
-    /// Latest evidence that the peer is alive and keeping up: an inbound
-    /// frame, a blocked write resuming (the peer consumed data), or now while
-    /// the reader is waiting for the application (the silence is ours). A
-    /// client draining a large send is therefore alive even if its replies
-    /// queue behind that data; a client that stopped reading is not.
+    /// Latest evidence that the peer is alive, for an inbound-silence
+    /// (liveness) timeout. Counts an inbound frame and a blocked write
+    /// resuming (the peer consumed data), and is "now" while the server
+    /// itself is the reason for the silence:
+    /// - the reader holds a message the application has not taken, or
+    /// - frames are still queued for the peer, so its replies (Pongs) may be
+    ///   waiting behind that data. Whether such a peer is draining or stuck
+    ///   is the send-stall timeout's decision, not the liveness timeout's.
+    ///
+    /// A client that stopped reading while nothing is queued for it gets no
+    /// credit, so it still fails liveness.
     pub fn last_activity(&self) -> Option<Instant> {
-        if self.0.reader_waiting.load(Relaxed) {
+        let pending = self.0.queue.lock().unwrap().frames > 0;
+        if pending || self.0.reader_waiting.load(Relaxed) {
             return Some(Instant::now());
         }
         let inbound = self.0.inbound_at.load(Relaxed);
         let drained = self.0.drained_at.load(Relaxed);
         self.0.instant(inbound.max(drained))
     }
-
 }
 
 impl Stream for WebSocket {
