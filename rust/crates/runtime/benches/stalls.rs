@@ -317,6 +317,9 @@ async fn run() {
         // (c) N concurrent opens of the 9k-task collection across all
         // members, every subscription retained (as reconnecting sockets do).
         let bursts = std::env::var("STALL_BURSTS").unwrap_or("200".into());
+        // STALL_BURST_RETAIN=0: drop each subscription when its open completes,
+        // so the peak is the transient build memory (not the retained rows).
+        let retain = std::env::var("STALL_BURST_RETAIN").map_or(true, |value| value != "0");
         for burst in bursts.split(',').filter_map(|value| value.trim().parse::<usize>().ok()) {
             let _ = SnapshotAdmission::global().take_peak_reserved_bytes();
             let base = reset_peak();
@@ -343,7 +346,11 @@ async fn run() {
                 let (opened, latency) = handle.await.unwrap();
                 rows += opened.rows;
                 latencies.push(latency);
-                held.push(opened.subscription);
+                if retain {
+                    held.push(opened.subscription);
+                } else {
+                    gonvex_runtime::offload::retire(opened.subscription);
+                }
             }
             let elapsed = started.elapsed();
             let peak = peak_live_bytes() - base;
@@ -368,7 +375,8 @@ async fn run() {
                 "snapshotBudgetBytes".into(),
                 json!(SnapshotAdmission::global().budget_bytes()),
             );
-            stop_probes(probes, &format!("stall/burst_{burst}_opens"), extra).await;
+            let suffix = if retain { "" } else { "_dropped" };
+            stop_probes(probes, &format!("stall/burst_{burst}_opens{suffix}"), extra).await;
             drop(held);
         }
     }

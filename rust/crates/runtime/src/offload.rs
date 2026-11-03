@@ -16,14 +16,18 @@
 //!   `threads` (fixed OS threads, one job at a time each). The alternatives
 //!   exist for the comparison in docs/performance/offload.md.
 //! - `GONVEX_OFFLOAD_THREADS`: pool threads (default: available CPUs, 1..=4).
-//! - `GONVEX_OFFLOAD_NICE`: nice increment of pool threads (default 10, 0 off).
+//! - `GONVEX_OFFLOAD_NICE`: nice increment of pool threads (default 0: off).
+//!   Measured: nice 10 cut pool throughput 2-20x on a shared host (hierarchical
+//!   CFS weighs a cgroup by the nice weight of its runnable threads), while the
+//!   network thread was already isolated at nice 0 (docs/performance/offload.md).
 //! - `GONVEX_OFFLOAD_MIN_US`: feed applications whose recent maximum for the
 //!   same set of tables is below this run inline (default 250 us): a pool round
 //!   trip costs ~6-12 us plus a session clone, more than a small presence delta.
 //! - `GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`: concurrent snapshot builds
 //!   (default: available CPUs, min 2).
-//! - `GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES`: estimated decoded snapshot JSON
-//!   bytes in flight across all builds (default 32 MiB; heap is ~3-4x that).
+//! - `GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES`: estimated decoded snapshot heap
+//!   in flight across all builds (default 128 MiB). Estimated as 12x the rows'
+//!   JSON size: a 9,000-task Admin snapshot (~6 MB of JSON) peaks at ~76 MB.
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -114,7 +118,7 @@ pub fn offload() -> &'static Offload {
         let threads = env_usize("GONVEX_OFFLOAD_THREADS")
             .filter(|threads| *threads > 0)
             .unwrap_or_else(|| cpus().clamp(1, 4));
-        let nice = env_usize("GONVEX_OFFLOAD_NICE").unwrap_or(10) as i32;
+        let nice = env_usize("GONVEX_OFFLOAD_NICE").unwrap_or(0) as i32;
         let inline_below =
             Duration::from_micros(env_usize("GONVEX_OFFLOAD_MIN_US").unwrap_or(250) as u64);
         Offload::new(strategy, threads, nice, inline_below)
@@ -521,7 +525,7 @@ pub(crate) async fn encode_snapshot_json(
 // Snapshot admission: a count bound plus an estimated byte budget.
 
 /// Bounds concurrent replica snapshot builds by count and by the estimated
-/// decoded JSON bytes they hold before interning (the transient part of a
+/// decoded heap they hold before interning (the transient part of a
 /// snapshot build; the interned rows are retained by subscriptions anyway).
 /// Each build reserves its estimate, the last observed size of the same
 /// collection for the same member, else the largest observed size of the
@@ -542,7 +546,10 @@ struct Estimates {
     by_table: HashMap<Box<str>, usize>,
 }
 
-const UNKNOWN_SNAPSHOT_BYTES: usize = 1 << 20;
+const UNKNOWN_SNAPSHOT_BYTES: usize = 8 << 20;
+/// Decoded heap per byte of row JSON (`serde_json::Value` maps with string
+/// keys), measured on the Whagons task rows of the perf fixture.
+const HEAP_PER_JSON_BYTE: usize = 12;
 const ESTIMATE_ENTRIES: usize = 65_536;
 
 pub struct SnapshotPermit {
@@ -576,7 +583,7 @@ impl SnapshotAdmission {
                 .unwrap_or_else(|| cpus().max(2));
             let budget = env_usize("GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES")
                 .filter(|value| *value > 0)
-                .unwrap_or(32 << 20);
+                .unwrap_or(128 << 20);
             Self::new(count, budget)
         })
     }
@@ -654,7 +661,8 @@ impl Drop for SnapshotPermit {
     }
 }
 
-/// JSON bytes of `rows`, extrapolated from up to 64 sampled rows.
+/// Estimated decoded heap of `rows`: their JSON size (extrapolated from up
+/// to 64 sampled rows) times [`HEAP_PER_JSON_BYTE`].
 fn estimate_rows_bytes(rows: &[Value]) -> usize {
     if rows.is_empty() {
         return 0;
@@ -666,7 +674,7 @@ fn estimate_rows_bytes(rows: &[Value]) -> usize {
         .fold((0usize, 0usize), |(count, bytes), row| {
             (count + 1, bytes + crate::replica::json_byte_len(row))
         });
-    bytes * rows.len() / count
+    bytes * rows.len() / count * HEAP_PER_JSON_BYTE
 }
 
 #[cfg(test)]
@@ -683,8 +691,8 @@ mod tests {
         // 64 KiB budget, generous count: bytes are the binding bound.
         let admission = leak(SnapshotAdmission::new(64, 64 * 1024));
         // Teach sizes: 40 KiB for "big" keys, 4 KiB for the others.
-        let big = vec![Value::String("x".repeat(40 * 1024 - 2))];
-        let small = vec![Value::String("x".repeat(4 * 1024 - 2))];
+        let big = vec![Value::String("x".repeat(40 * 1024 / HEAP_PER_JSON_BYTE - 2))];
+        let small = vec![Value::String("x".repeat(4 * 1024 / HEAP_PER_JSON_BYTE - 2))];
         for n in 0..10 {
             let key = format!("member-{n}");
             let permit = admission.admit(key, "tasks").await;
@@ -741,7 +749,8 @@ mod tests {
         assert_eq!(admission.estimate("a", "tasks"), UNKNOWN_SNAPSHOT_BYTES);
         let rows: Vec<Value> = (0..1000).map(|n| serde_json::json!({ "n": n })).collect();
         admission.admit("a".into(), "tasks").await.observe(&rows);
-        let exact: usize = rows.iter().map(crate::replica::json_byte_len).sum();
+        let exact: usize = rows.iter().map(crate::replica::json_byte_len).sum::<usize>()
+            * HEAP_PER_JSON_BYTE;
         let estimate = admission.estimate("b", "tasks");
         assert!(estimate.abs_diff(exact) * 10 < exact, "{estimate} vs {exact}");
         assert_eq!(admission.estimate("a", "tasks"), estimate);
