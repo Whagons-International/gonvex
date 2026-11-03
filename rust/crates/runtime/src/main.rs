@@ -1,5 +1,8 @@
 use std::process::ExitCode;
 
+// `system-alloc` keeps the system allocator so heap profilers that hook
+// malloc (heaptrack) see every allocation. Production uses mimalloc.
+#[cfg(not(feature = "system-alloc"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

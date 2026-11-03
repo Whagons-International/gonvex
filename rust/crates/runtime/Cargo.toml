@@ -8,6 +8,8 @@ license.workspace = true
 [features]
 default = []
 test-firebase-auth-emulator = []
+# Heap profiling builds: use the system allocator instead of mimalloc.
+system-alloc = []
 duckdb = ["dep:duckdb", "dep:calamine"]
 
 [dependencies]

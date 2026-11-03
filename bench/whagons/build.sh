@@ -15,12 +15,12 @@ docker run --rm \
   -v "$repo:/src:ro" -v "$bin:/out" \
   -v gvsq-cargo-registry:/usr/local/cargo/registry \
   -v gvsq-cargo-target:/target \
-  -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS="${LOAD_BUILD_JOBS:-6}" \
+  -e CARGO_TARGET_DIR=/target -e CARGO_BUILD_JOBS="${LOAD_BUILD_JOBS:-6}" -e LOAD_FEATURES="${LOAD_FEATURES:-}" \
   -w /src/rust rust:1.94-bookworm bash -euc '
     cargo build --locked --profile local-load \
       --config "profile.local-load.inherits=\"release\"" \
       --config "profile.local-load.debug-assertions=true" \
-      --features gonvex-runtime/test-firebase-auth-emulator \
+      --features "gonvex-runtime/test-firebase-auth-emulator ${LOAD_FEATURES:-}" \
       -p gonvex-runtime -p gonvex-module-host -p gonvex-sandbox-worker
     for binary in gonvex-runtime gonvex-module-host gonvex-sandbox-worker; do
       install -m 755 "/target/local-load/$binary" "/out/$binary.new"

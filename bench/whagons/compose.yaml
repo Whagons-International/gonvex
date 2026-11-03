@@ -41,7 +41,10 @@ services:
       timeout: 2s
       retries: 120
   runtime:
-    image: debian:bookworm-slim
+    # Profiling: LOAD_RUNTIME_IMAGE=gvsq-heaptrack (debian + heaptrack) and
+    # LOAD_RUNTIME_COMMAND="heaptrack -o /state/heap /binhost/gonvex-runtime"
+    # with a LOAD_FEATURES=gonvex-runtime/system-alloc build.
+    image: ${LOAD_RUNTIME_IMAGE:-debian:bookworm-slim}
     container_name: gvsq-runtime
     network_mode: service:namespace
     user: '${LOAD_UID:-0}:${LOAD_GID:-0}'
@@ -49,7 +52,7 @@ services:
     mem_limit: ${LOAD_RUNTIME_MEMORY:-4g}
     memswap_limit: ${LOAD_RUNTIME_MEMORY:-4g}
     working_dir: /state
-    command: [/binhost/gonvex-runtime]
+    command: ${LOAD_RUNTIME_COMMAND:-/binhost/gonvex-runtime}
     volumes:
       # Linux binaries from build.sh (built in rust:bookworm, same glibc).
       - ${LOAD_BIN_DIR:?set LOAD_BIN_DIR}:/binhost:ro
