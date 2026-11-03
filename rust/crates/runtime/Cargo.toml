@@ -90,6 +90,11 @@ harness = false
 required-features = ["perf-fixture"]
 
 [[bench]]
+name = "delivery_v3"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
 name = "stalls"
 harness = false
 required-features = ["perf-fixture"]
