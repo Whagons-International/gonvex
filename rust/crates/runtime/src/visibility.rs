@@ -51,6 +51,10 @@ pub(crate) struct PlanCaches {
     /// subscription per change, and re-walking the predicate each time was
     /// 4.9% of runtime CPU at 200 Whagons users.
     inherits_any: std::sync::OnceLock<Vec<VisibilityExpression>>,
+    /// Tables any non-derived set reads (base or join), for every role:
+    /// `principal_change_concerns` returns early for any other table, which
+    /// is nearly every data write.
+    principal_tables: std::sync::OnceLock<BTreeSet<String>>,
     /// The compiled program (`visibility_class`), built on first use.
     pub(crate) compiled: std::sync::OnceLock<Arc<crate::visibility_class::CompiledPlan>>,
 }
@@ -1053,7 +1057,26 @@ impl VisibilityPlan {
                 return true;
             }
         }
-        let active = active_sets(self, &resolved.role);
+        let reads_table = self
+            .active_sets_cache
+            .0
+            .principal_tables
+            .get_or_init(|| {
+                self.sets
+                    .values()
+                    .filter(|set| set.kind != "derived")
+                    .flat_map(|set| {
+                        std::iter::once(set.table.clone())
+                            .chain(set.joins.iter().map(|join| join.table.clone()))
+                    })
+                    .collect()
+            })
+            .contains(table);
+        let active = if reads_table {
+            active_sets(self, &resolved.role)
+        } else {
+            Arc::default()
+        };
         for name in active.iter() {
             let set = &self.sets[name];
             // Derived inputs are data rows, routed through their source tokens

@@ -186,6 +186,17 @@ pub struct CompiledPlan {
     member_atoms: Vec<MemberAtom>,
     unsupported: Option<String>,
     scopes: Mutex<FxMap<String, Arc<ClassScope>>>,
+    /// Per bit pattern: which class sets can still change a row decision.
+    relevant: Mutex<FxMap<Box<[bool]>, Residual>>,
+}
+
+/// What a class's bits leave of the program: the residual shape (fixed
+/// subtrees and their values) and the class sets it still consults. Members
+/// with equal residuals decide every row identically whatever their bits.
+#[derive(Clone)]
+struct Residual {
+    shape: Arc<[u32]>,
+    sets: Arc<[bool]>,
 }
 
 impl std::fmt::Debug for CompiledPlan {
@@ -451,6 +462,7 @@ pub fn compile(plan: &VisibilityPlan) -> CompiledPlan {
         member_atoms,
         unsupported: compiler.unsupported,
         scopes: Mutex::new(FxMap::default()),
+        relevant: Mutex::new(FxMap::default()),
     }
 }
 
@@ -846,7 +858,8 @@ fn contains(set: &[u32], token: u32) -> bool {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ClassKey {
-    bits: Box<[bool]>,
+    /// The residual shape of the class bits (see `Residual`), not the bits.
+    shape: Arc<[u32]>,
     sets: Box<[TokenSet]>,
     /// Per inherits spec: (parent index identity, parent class id).
     parents: Box<[Option<(usize, u64)>]>,
@@ -1014,6 +1027,8 @@ fn bind(
             BitAtom::NonEmpty(set) => resolved.sets.get(set).is_some_and(|set| !set.is_empty()),
         })
         .collect::<Box<[bool]>>();
+    let residual = plan.residual(&bits);
+    let relevant = residual.sets.clone();
     let (sets, member_sets) = {
         let mut grew = false;
         let mut interner = scope.interner.write().unwrap_or_else(|e| e.into_inner());
@@ -1040,7 +1055,13 @@ fn bind(
             }
             built.into_boxed_slice()
         };
-        let sets = tokens(&plan.class_sets);
+        let mut sets = tokens(&plan.class_sets);
+        let empty: TokenSet = Arc::from(Vec::new());
+        for (set, keep) in sets.iter_mut().zip(relevant.iter()) {
+            if !keep {
+                *set = empty.clone();
+            }
+        }
         let member_sets = tokens(&plan.member_sets);
         drop(interner);
         if grew {
@@ -1049,7 +1070,7 @@ fn bind(
         (sets, member_sets)
     };
     let key = ClassKey {
-        bits,
+        shape: residual.shape.clone(),
         sets,
         parents: parent_classes
             .iter()
@@ -1069,11 +1090,14 @@ fn bind(
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(plan.fingerprint);
-        for bit in key.bits.iter() {
-            hasher.update([*bit as u8]);
+        for word in key.shape.iter() {
+            hasher.update(word.to_le_bytes());
         }
-        for name in &plan.class_sets {
+        for (name, keep) in plan.class_sets.iter().zip(relevant.iter()) {
             hasher.update([0xfe]);
+            if !keep {
+                continue;
+            }
             for token in resolved.sets.get(name).into_iter().flatten() {
                 hasher.update(token.as_bytes());
                 hasher.update([0]);
@@ -1087,7 +1111,7 @@ fn bind(
         }
         u64::from_le_bytes(hasher.finalize()[..8].try_into().unwrap())
     };
-    let class = scope.class_for(plan, key, parent_classes, stable_id);
+    let class = scope.class_for(plan, key, bits, parent_classes, stable_id);
     let contexts = plan
         .contexts
         .iter()
@@ -1120,6 +1144,88 @@ enum Tri {
 }
 
 impl CompiledPlan {
+    /// Row-independent value of a node given the class bits, if any.
+    fn fixed(&self, node: u32, bits: &[bool]) -> Option<bool> {
+        match &self.nodes[node as usize] {
+            Node::Const(value) => Some(*value),
+            Node::Bit(index) => Some(bits[*index as usize]),
+            Node::And(start, length) => {
+                let mut all = true;
+                for child in self.children(*start, *length) {
+                    match self.fixed(*child, bits) {
+                        Some(false) => return Some(false),
+                        Some(true) => {}
+                        None => all = false,
+                    }
+                }
+                all.then_some(true)
+            }
+            Node::Or(start, length) => {
+                let mut none = true;
+                for child in self.children(*start, *length) {
+                    match self.fixed(*child, bits) {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => none = false,
+                    }
+                }
+                none.then_some(false)
+            }
+            Node::Not(child) => self.fixed(*child, bits).map(|value| !value),
+            _ => None,
+        }
+    }
+
+    /// The residual program for these bits: class sets an evaluation can
+    /// consult in a subtree whose value is not already fixed, and the shape
+    /// of fixed subtrees. Other sets and bits never change a decision, so
+    /// they stay out of the class key (an admin with tasks.viewAll shares a
+    /// class whatever its teams and flags are).
+    fn residual(&self, bits: &[bool]) -> Residual {
+        let mut cache = self.relevant.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(found) = cache.get(bits) {
+            return found.clone();
+        }
+        fn mark(
+            plan: &CompiledPlan,
+            node: u32,
+            bits: &[bool],
+            sets: &mut [bool],
+            shape: &mut Vec<u32>,
+        ) {
+            if let Some(value) = plan.fixed(node, bits) {
+                shape.push(node << 2 | 2 | value as u32);
+                return;
+            }
+            shape.push(node << 2);
+            match &plan.nodes[node as usize] {
+                Node::InClass { set, .. } => sets[*set as usize] = true,
+                Node::And(start, length) | Node::Or(start, length) => {
+                    for child in plan.children(*start, *length) {
+                        mark(plan, *child, bits, sets, shape);
+                    }
+                }
+                Node::Not(child) => mark(plan, *child, bits, sets, shape),
+                Node::Inherits(spec) => {
+                    let spec = &plan.inherits[*spec as usize];
+                    for root in spec.override_root.into_iter().chain(spec.on_missing) {
+                        mark(plan, root, bits, sets, shape);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut sets = vec![false; self.class_sets.len()];
+        let mut shape = Vec::new();
+        mark(self, self.root, bits, &mut sets, &mut shape);
+        let residual = Residual {
+            shape: shape.into(),
+            sets: sets.into(),
+        };
+        cache.insert(bits.into(), residual.clone());
+        residual
+    }
+
     fn children(&self, start: u32, length: u32) -> &[u32] {
         &self.kids[start as usize..(start + length) as usize]
     }
@@ -1572,6 +1678,7 @@ impl ClassScope {
         self: &Arc<Self>,
         plan: &Arc<CompiledPlan>,
         key: ClassKey,
+        bits: Box<[bool]>,
         parents: Vec<Option<ParentClass>>,
         stable_id: u64,
     ) -> Arc<VisibilityClass> {
@@ -1579,14 +1686,15 @@ impl ClassScope {
         if let Some(existing) = classes.get(&key).and_then(Weak::upgrade) {
             return existing;
         }
-        let gated = plan.tri(plan.root, &key.bits) == Tri::False;
+        // Any member's bits with this residual decide identically.
+        let gated = plan.tri(plan.root, &bits) == Tri::False;
         let class = Arc::new(VisibilityClass {
             // Process-unique: memo keys mix classes of different scopes.
             id: NEXT_CLASS.fetch_add(1, Ordering::Relaxed),
             stable_id,
             plan: plan.clone(),
             scope: self.clone(),
-            bits: key.bits.clone(),
+            bits,
             sets: key.sets.clone(),
             parents: parents.into_boxed_slice(),
             gated,

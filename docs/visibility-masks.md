@@ -1,6 +1,8 @@
 # Visibility masks: permission checks without fan-out
 
-Status: design, 2026-10-29. Implementation and behavior parity remain required.
+Status: design 2026-10-29; masks merged (#249, #255, #273); compiled visibility
+classes and permission bits implemented 2026-11-03 (see "Compiled visibility
+classes" and "Permission bits" at the end).
 
 ## Problem
 

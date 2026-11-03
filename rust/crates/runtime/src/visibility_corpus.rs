@@ -236,6 +236,9 @@ pub(crate) fn corpus() -> Corpus {
         principal("alice", "member", json!({}), &["w1", "w2"], &["s1"], false, &["p1"], &["t-w2-s2-bob-web-0"]),
         principal("alice", "member", json!({}), &["w1"], &["s1"], false, &["p1"], &["t-w2-s2-bob-web-0", "t-w3-null-null-web-1"]),
         principal("alice", "member", json!({}), &["w1"], &[], false, &["p1"], &[]),
+        // Another system admin with other teams: team sets cannot change an
+        // admin's decision, so both admins share one class.
+        principal("ivan", "system_admin", json!({}), &["w2"], &["s2"], true, &[], &[]),
     ];
 
     let mut task_rows = Vec::new();
@@ -583,7 +586,12 @@ fn identical_principals_share_a_class_and_principal_changes_move_members() {
     assert_eq!(alice.scope().stats().classes, 2, "dead classes leave the registry");
     // The admin class is ungated (sees rows without tokens); team classes are gated.
     assert!(alice.class().gated());
-    assert!(!bind(3).class().gated());
+    let dave = bind(3);
+    assert!(!dave.class().gated());
+    let ivan = bind(11);
+    assert!(Arc::ptr_eq(dave.class(), ivan.class()), "admins share a class");
+    assert_eq!(dave.class().stable_id(), ivan.class().stable_id());
+    assert_ne!(alice.class().stable_id(), dave.class().stable_id());
 }
 
 #[test]
