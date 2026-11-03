@@ -128,6 +128,10 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
                 events.push(event);
             }
             let mut expected: Vec<Vec<Value>> = vec![Vec::new(); members];
+            // What each client receives: expanded batch items, plus frames
+            // sent outside a batch (which flush the pending batch first).
+            let mut received: Vec<Vec<Value>> = vec![Vec::new(); members];
+            let mut unbatched = 0usize;
             for event in &events {
                 for (index, connection) in connections.iter_mut().enumerate() {
                     let messages = fixture
@@ -139,7 +143,7 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
                         )
                         .await
                         .unwrap();
-                    let (batcher, batch, _) = &mut batchers[index];
+                    let (batcher, batch, bindings) = &mut batchers[index];
                     for message in messages {
                         let mut legacy = message.clone();
                         // The old path: per-connection frames, compact (no
@@ -161,7 +165,17 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
                                 message,
                             )
                             .unwrap();
-                        assert!(rest.is_none());
+                        if let Some(mut other) = rest {
+                            // Sent the usual way (e.g. replica.needHashes):
+                            // the pending batch goes first.
+                            unbatched += 1;
+                            if let Some(frame) = batcher.take_frame(batch, None) {
+                                let value: Value = serde_json::from_slice(&frame.bytes).unwrap();
+                                received[index].extend(expand(&value, bindings).0);
+                            }
+                            let text = perf_legacy_encode(&mut other, native, None).unwrap();
+                            received[index].push(serde_json::from_str(&text).unwrap());
+                        }
                     }
                     batcher.watermark(
                         batch,
@@ -173,6 +187,7 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
             }
             let last = revision(events.last().unwrap());
             for (index, (batcher, batch, bindings)) in batchers.iter_mut().enumerate() {
+                let mut items = std::mem::take(&mut received[index]);
                 let compressed = (round + index) % 2 == 0;
                 let deflate = compressed.then_some((12, 0));
                 let frame = batcher.take_frame(batch, deflate).unwrap();
@@ -184,13 +199,17 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
                 };
                 let batch: Value = serde_json::from_slice(&text).unwrap();
                 assert_eq!(batch["tenant"], json!(tenant_id));
-                let (items, watermark) = expand(&batch, bindings);
+                let (tail, watermark) = expand(&batch, bindings);
+                items.extend(tail);
                 assert_eq!(watermark, Some(last));
                 assert_eq!(
                     items, expected[index],
                     "member {index} round {round} native={native}: batch differs from its own frames"
                 );
                 shared_items += items.len() as u64;
+            }
+            if unbatched > 0 {
+                eprintln!("round {round}: {unbatched} frames sent outside a batch");
             }
         }
         let stats = hub.tenant(&tenant_id).stats();

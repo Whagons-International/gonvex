@@ -211,6 +211,13 @@ Raw numbers: `BENCH_JSON` lines of the `delivery` bench.
 - More allocations in v2 (envelope, stream bindings, ready items, digest tails
   are small per-connection allocations) but 16x fewer bytes allocated.
 
+Re-run after merging `perf/replica-state` (232ee8d, no per-subscription row
+mirror): same frames and item sharing; json v2 677 us vs legacy 1,167 us
+(legacy_reuse 621 us), native v2 828 us vs legacy 1,401 us (legacy_reuse
+804 us), 17.7 / 19.4 frames per change, wire 58 / 66 KB vs 113 / 114 KB.
+Socket replay: 0.37 vs 0.75 of one core, 10,944 vs 200,431 frames/s. The
+machine was busier in this run; medians move 10-40% between runs.
+
 ### Compressor reuse (all clients)
 
 | Bench | Before (09f1784) | After | Note |
@@ -289,8 +296,16 @@ in-memory path.
   With encode-once that happens once per distinct item instead of once per
   connection; keeping raw `json_object` bytes through the change feed is left
   for when workstream 5 makes the feed path produce per-class deltas.
-- Per-connection `apply_feed_event` (1.69 ms per subscriber in the fixture) is
-  unchanged: that is workstream 5.
+- `apply_feed_event` still runs per connection. Workstream 5 made it cheap
+  (78 us per subscriber) and pure (`replica::decide_row` gives every
+  subscription of one collection and visibility class the same answer); the
+  next step is to decide once per (class, collection) per event and push the
+  same shared item to every connection of the class (the memo equality check
+  then becomes a lookup). Not done here: it needs workstream 7's stable class
+  ids in the connection loop.
+- `replica.ready` items and delta digests stay per connection (aggregate
+  digests are always on after workstream 5); they are the largest per-socket
+  bytes left.
 - Live-query, control and presence frames are not batched (they flush the
   batch). Presence transitions can be added as items when the presence agent's
   per-connection pending slot lands.
