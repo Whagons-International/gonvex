@@ -206,6 +206,8 @@ export type ServerCapabilities = {
   reducerReceiptLookup?: 1;
   /** Server closes each successful Control write after refreshing this connection's Control subscriptions. */
   controlWatermark?: 1;
+  /** Server sends replica feed frames in `replica.batch` messages (delivery v2) when the client also advertises version 1. */
+  replicaBatchFrames?: 1;
 };
 
 /** Reserved tenant Query for reconciling an already accepted durable intent. */
@@ -280,6 +282,8 @@ export type ClientCapabilities = {
 	queryFanout?: 1;
 	/** Client accepts several independent query updates in one WebSocket frame. */
 	queryResultBatch?: 1;
+  /** Client accepts `replica.batch` messages: stream-addressed shared items, one message per tick. */
+  replicaBatchFrames?: 1;
 };
 
 export type KeyedCollectionPatch = {
@@ -535,6 +539,22 @@ export type ServerMessage =
   | ({ type: "replica.ready" } & ReplicaReady)
   | { type: "replica.readyMany"; ready: ReplicaReady[] }
   | { type: "replica.watermark"; revision: number }
+  /**
+   * Delivery v2 (`replicaBatchFrames`). `items` run in order: `replica.stream`
+   * binds a subscription id to a stream token on this socket; `replica.delta`
+   * and `replica.ready` items carry a stream token in `id` and apply to every
+   * subscription bound to it; `replica.transaction` items are unchanged. The
+   * optional `watermark` applies after every item. `tenant`/`class`/`from`
+   * describe the sender's stream (informational for clients).
+   */
+  | {
+    type: "replica.batch";
+    tenant: string;
+    class: string;
+    from: number;
+    items: ReplicaBatchItem[];
+    watermark?: number;
+  }
   | { type: "replica.needHashes"; id: string; path?: string }
   // Client-local status frame emitted when a formerly authoritative materialized
   // collection must be reconciled before it can be trusted again.
@@ -583,3 +603,45 @@ export type ReplicaRowPatchFrame = {
   }>;
   evicted: number[];
 };
+
+/** A delivery v2 binding: `id` is the client's subscription, `stream` the token later items use. */
+export type ReplicaStreamBinding = { type: "replica.stream"; id: string; stream: string };
+
+/** Items of a `replica.batch` message. */
+export type ReplicaBatchItem =
+  | ReplicaStreamBinding
+  | Extract<ServerMessage, { type: "replica.delta" | "replica.ready" | "replica.transaction" }>;
+
+/**
+ * Expands a `replica.batch` message into the per-subscription frames the
+ * pre-batch protocol sent, in order. `bindings` maps stream token to the
+ * subscription ids of this socket and is updated by `replica.stream` items.
+ */
+export function expandReplicaBatch(
+  batch: Extract<ServerMessage, { type: "replica.batch" }>,
+  bindings: Map<string, string[]>,
+): ServerMessage[] {
+  const messages: ServerMessage[] = [];
+  for (const item of batch.items) {
+    if (item.type === "replica.stream") {
+      for (const [stream, ids] of bindings) {
+        const index = ids.indexOf(item.id);
+        if (index >= 0 && stream !== item.stream) {
+          ids.splice(index, 1);
+          if (ids.length === 0) bindings.delete(stream);
+        }
+      }
+      const ids = bindings.get(item.stream);
+      if (!ids) bindings.set(item.stream, [item.id]);
+      else if (!ids.includes(item.id)) ids.push(item.id);
+      continue;
+    }
+    if (item.type === "replica.delta" || item.type === "replica.ready") {
+      for (const id of bindings.get(item.id) ?? []) messages.push({ ...item, id } as ServerMessage);
+      continue;
+    }
+    messages.push(item as ServerMessage);
+  }
+  if (typeof batch.watermark === "number") messages.push({ type: "replica.watermark", revision: batch.watermark });
+  return messages;
+}
