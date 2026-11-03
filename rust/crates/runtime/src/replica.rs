@@ -252,25 +252,7 @@ fn shared_definition(
 
 /// Free snapshot permits right now (profiler gauge).
 pub(crate) fn snapshot_permits_available() -> usize {
-    snapshot_permits().available_permits()
-}
-
-/// Process-wide bound on concurrent replica snapshot builds
-/// (`GONVEX_REPLICA_SNAPSHOT_CONCURRENCY`, default: available CPUs, min 2).
-fn snapshot_permits() -> &'static tokio::sync::Semaphore {
-    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    PERMITS.get_or_init(|| {
-        let default = std::thread::available_parallelism()
-            .map(|cpus| cpus.get())
-            .unwrap_or(2)
-            .max(2);
-        let permits = std::env::var("GONVEX_REPLICA_SNAPSHOT_CONCURRENCY")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(default);
-        tokio::sync::Semaphore::new(permits)
-    })
+    crate::offload::SnapshotAdmission::global().available_permits()
 }
 
 /// One row of a collection scan: its key, decoded projection and canonical
@@ -286,7 +268,7 @@ struct CollectionRead {
     transaction: TenantTransaction,
     clock: ReplicaClock,
     resolved: ResolvedVisibility,
-    _permit: tokio::sync::SemaphorePermit<'static>,
+    permit: crate::offload::SnapshotPermit,
     /// Snapshot-active gauge, held as long as the permit.
     _active: gonvex_profiler::GaugeGuard,
 }
@@ -315,7 +297,7 @@ impl Runtime {
         args: &Value,
     ) -> Result<Value, ReplicaError> {
         let mut read = self
-            .begin_collection_read(session, definition, visibility)
+            .begin_collection_read(session, definition, visibility, args)
             .await?;
         let mut rows = Vec::new();
         scan_window(
@@ -407,7 +389,7 @@ impl Runtime {
             subscription: None,
         };
         let mut read = self
-            .begin_collection_read(session, &definition, &visibility)
+            .begin_collection_read(session, &definition, &visibility, &request.args)
             .await?;
         let cursor = cursor_for(&read.clock, &definition, &directive.visibility_scope);
         let resumable = cursor_resumable(
@@ -443,6 +425,7 @@ impl Runtime {
                 },
             )
             .await?;
+            read.permit.observe_json_bytes(window.bytes.max(0) as usize);
             read.transaction.commit().await?;
             messages.push(replica_snapshot_message(
                 &request,
@@ -494,6 +477,7 @@ impl Runtime {
                         },
                     )
                     .await?;
+                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
                     read.transaction.commit().await?;
                     let mut prior = digest.clone();
                     let mut upserts = BTreeMap::new();
@@ -573,6 +557,7 @@ impl Runtime {
                         },
                     )
                     .await?;
+                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
                     read.transaction.commit().await?;
                     if request.digest.as_deref() != Some(hashes_digest(&hashes).as_str()) {
                         return Ok(need_hashes(&request));
@@ -599,6 +584,7 @@ impl Runtime {
                         },
                     )
                     .await?;
+                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
                     read.transaction.commit().await?;
                     let deleted = request
                         .keys
@@ -656,6 +642,7 @@ impl Runtime {
         session: &TenantSession,
         definition: &ReplicaCollectionDefinition,
         plan: &VisibilityPlan,
+        args: &Value,
     ) -> Result<CollectionRead, ReplicaError> {
         // Each WebSocket queues up to REPLICA_OPEN_CONCURRENCY preparations,
         // so a sign-in burst could otherwise build hundreds of full snapshots
@@ -664,12 +651,19 @@ impl Runtime {
         use gonvex_profiler::{gauge, GaugeId, Label, ScopeTimer, Stage, Timer};
         let _build = ScopeTimer::new(Stage::SnapshotBuild, Label::None);
         let mut timer = Timer::start();
+        // Bounded by count and by an estimated byte budget
+        // (`crate::offload::SnapshotAdmission`).
         let permit = {
             let _waiting = gauge(GaugeId::SnapshotWaiting).guard();
-            snapshot_permits()
-                .acquire()
+            crate::offload::SnapshotAdmission::global()
+                .admit(
+                    format!(
+                        "{}\u{0}{}\u{0}{}\u{0}{}",
+                        session.route.database_url, definition.table, session.member.id, args
+                    ),
+                    &definition.table,
+                )
                 .await
-                .expect("snapshot semaphore is never closed")
         };
         let active = gauge(GaugeId::SnapshotActive).guard();
         timer.lap(Stage::SnapshotPermitWait, Label::None);
@@ -739,7 +733,7 @@ impl Runtime {
             transaction,
             clock,
             resolved,
-            _permit: permit,
+            permit,
             _active: active,
         })
     }
@@ -2070,6 +2064,11 @@ impl SnapshotPages {
         pages
     }
 
+    /// Rows not yet paged.
+    pub(crate) fn remaining_rows(&self) -> usize {
+        self.rows.len()
+    }
+
     pub(crate) fn identity(&self) -> (&str, &str) {
         (&self.id, &self.snapshot_id)
     }
@@ -2130,7 +2129,7 @@ impl SnapshotPages {
     }
 }
 
-fn json_byte_len(value: &Value) -> usize {
+pub(crate) fn json_byte_len(value: &Value) -> usize {
     match value {
         Value::Null => 4,
         Value::Bool(true) => 4,

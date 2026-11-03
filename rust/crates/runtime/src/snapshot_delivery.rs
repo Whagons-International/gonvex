@@ -59,6 +59,12 @@ impl SnapshotDelivery {
     pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
+    /// Whether the next `pump` may encode many rows (worth the offload pool).
+    pub(crate) fn has_bulk_pending(&self) -> bool {
+        self.pending
+            .values()
+            .any(|pending| !pending.last_sent && pending.pages.remaining_rows() >= 64)
+    }
     pub(crate) fn remove(&mut self, id: &str) {
         if let Some(pending) = self.pending.remove(id) {
             // Cancellation prevents future frames; it cannot revoke bytes
