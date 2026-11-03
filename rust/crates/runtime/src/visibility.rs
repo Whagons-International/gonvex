@@ -40,16 +40,23 @@ pub struct VisibilityPlan {
 /// asked for it per subscription per change, walking the whole predicate
 /// each time (the largest CPU cost at 200 Whagons users).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ActiveSetsCache(Arc<PlanCaches>);
+pub(crate) struct ActiveSetsCache(pub(crate) Arc<PlanCaches>);
 
 #[derive(Debug, Default)]
 pub(crate) struct PlanCaches {
-    sets: std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>,
+    sets: std::sync::Mutex<BTreeMap<String, Arc<BTreeSet<String>>>>,
     /// `inherited_columns`, fixed per plan; read per subscription per change.
     inherited: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
-    /// Whether the plan has any `inheritsAny`; most plans have none, and
-    /// change routing asks per subscription per change.
-    has_inherits_any: std::sync::OnceLock<bool>,
+    /// The plan's `inheritsAny` expressions; change routing asks per
+    /// subscription per change, and re-walking the predicate each time was
+    /// 4.9% of runtime CPU at 200 Whagons users.
+    inherits_any: std::sync::OnceLock<Vec<VisibilityExpression>>,
+    /// Tables any non-derived set reads (base or join), for every role:
+    /// `principal_change_concerns` returns early for any other table, which
+    /// is nearly every data write.
+    principal_tables: std::sync::OnceLock<BTreeSet<String>>,
+    /// The compiled program (`visibility_class`), built on first use.
+    pub(crate) compiled: std::sync::OnceLock<Arc<crate::visibility_class::CompiledPlan>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -790,17 +797,12 @@ pub fn via_index_name(via: &VisibilityVia, column: &str) -> String {
     format!("via\u{0}{}\u{0}{}", via.table, column)
 }
 
-/// Every `inheritsAny` expression of a plan.
-pub fn inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
-    let has_any = plan
-        .active_sets_cache
+/// Every `inheritsAny` expression of a plan (cached on the plan).
+pub fn inherits_any(plan: &VisibilityPlan) -> &[VisibilityExpression] {
+    plan.active_sets_cache
         .0
-        .has_inherits_any
-        .get_or_init(|| !collect_inherits_any(plan).is_empty());
-    if !*has_any {
-        return Vec::new();
-    }
-    collect_inherits_any(plan)
+        .inherits_any
+        .get_or_init(|| collect_inherits_any(plan).into_iter().cloned().collect())
 }
 
 fn collect_inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
@@ -1013,7 +1015,7 @@ impl VisibilityPlan {
         resolved: &ResolvedVisibility,
     ) -> VisibilityDependencies {
         let sets = active_sets(self, &resolved.role);
-        self.dependency_columns_for_sets(Some(&sets))
+        self.dependency_columns_for_sets(Some(sets.as_ref()))
     }
 
     /// Conservative row routing for legacy declarations. A changed occurrence
@@ -1040,8 +1042,8 @@ impl VisibilityPlan {
             }
         }
         let active = active_sets(self, &resolved.role);
-        for name in active {
-            let set = &self.sets[&name];
+        for name in active.iter() {
+            let set = &self.sets[name];
             let base = if set.alias.is_empty() {
                 set.table.as_str()
             } else {
@@ -1125,8 +1127,27 @@ impl VisibilityPlan {
                 return true;
             }
         }
-        let active = active_sets(self, &resolved.role);
-        for name in &active {
+        let reads_table = self
+            .active_sets_cache
+            .0
+            .principal_tables
+            .get_or_init(|| {
+                self.sets
+                    .values()
+                    .filter(|set| set.kind != "derived")
+                    .flat_map(|set| {
+                        std::iter::once(set.table.clone())
+                            .chain(set.joins.iter().map(|join| join.table.clone()))
+                    })
+                    .collect()
+            })
+            .contains(table);
+        let active = if reads_table {
+            active_sets(self, &resolved.role)
+        } else {
+            Arc::default()
+        };
+        for name in active.iter() {
             let set = &self.sets[name];
             // Derived inputs are data rows, routed through their source tokens
             // by derived_change_concerns. They never reload every principal.
@@ -1254,12 +1275,11 @@ impl VisibilityPlan {
     }
 
     /// Child columns that reference each directly inherited parent table.
-    pub fn inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+    pub fn inherited_columns(&self) -> &BTreeMap<String, BTreeSet<String>> {
         self.active_sets_cache
             .0
             .inherited
             .get_or_init(|| self.compute_inherited_columns())
-            .clone()
     }
 
     fn compute_inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
@@ -1480,12 +1500,12 @@ fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool
 
 /// Sets a predicate references for this role, plus every set a `derived`
 /// set maps from, transitively.
-fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
+fn active_sets(plan: &VisibilityPlan, role: &str) -> Arc<BTreeSet<String>> {
     let cache = &plan.active_sets_cache.0.sets;
     if let Some(sets) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(role) {
         return sets.clone();
     }
-    let active = compute_active_sets(plan, role);
+    let active = Arc::new(compute_active_sets(plan, role));
     cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1632,7 +1652,7 @@ async fn resolve_member(
     let mut sets = BTreeMap::new();
     let mut active = BTreeSet::new();
     if materialize || plan.version == Some(2) {
-        active.extend(active_sets(plan, &role));
+        active.extend(active_sets(plan, &role).iter().cloned());
     }
     for (name, set) in &plan.sets {
         if !active.contains(name) || set.kind == "derived" {
@@ -1708,7 +1728,11 @@ pub fn resolve_with_parents<'a>(
                 table,
                 InheritedParent {
                     plan: shared_plan(parent),
-                    resolved: Arc::new(parent_resolved),
+                    resolved: shared_parent_resolution(
+                        &session.route.database_url,
+                        &parent.table,
+                        parent_resolved,
+                    ),
                     index,
                 },
             );
@@ -1720,19 +1744,91 @@ pub fn resolve_with_parents<'a>(
                 resolved.indexes.insert(via_index_name(via, column), index);
             }
         }
-        for name in active_sets(plan, &resolved.role) {
-            let set = &plan.sets[&name];
+        for name in active_sets(plan, &resolved.role).iter() {
+            let set = &plan.sets[name];
             if set.kind != "derived" {
                 continue;
             }
             let index = acl.get(&set.table, &set.key)?;
-            resolved.indexes.insert(name, index);
+            resolved.indexes.insert(name.clone(), index);
         }
         for _ in 0..snapshot::resolve_derived(transaction, plan, &mut resolved).await? {
             metrics.record_visibility_sql_statement();
         }
         Ok(resolved)
     })
+}
+
+/// One `Arc` per identical parent resolution of a member: every collection
+/// inheriting from the same parent (Whagons' taskUsers, taskTags, notes...
+/// all inherit `tasks`) held its own deep copy of the member's tasks
+/// principal (~45 KB each). In-memory grant patches use `Arc::make_mut`, so a
+/// shared resolution is copied on write and never changes under another
+/// subscription.
+fn shared_parent_resolution(
+    database: &str,
+    table: &str,
+    resolved: ResolvedVisibility,
+) -> Arc<ResolvedVisibility> {
+    type Key = (String, String, String, u64);
+    static SHARED: std::sync::OnceLock<std::sync::Mutex<(BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>, usize)>> =
+        std::sync::OnceLock::new();
+    fn same(left: &ResolvedVisibility, right: &ResolvedVisibility) -> bool {
+        left.ephemeral_member == right.ephemeral_member
+            && left.revision == right.revision
+            && left.role == right.role
+            && left.direct == right.direct
+            && left.permissions == right.permissions
+            && left.sets == right.sets
+            && left.fingerprint == right.fingerprint
+            && left.indexes.len() == right.indexes.len()
+            && left
+                .indexes
+                .iter()
+                .zip(&right.indexes)
+                .all(|((a, x), (b, y))| a == b && Arc::ptr_eq(x, y))
+            && left.inherited.len() == right.inherited.len()
+            && left.inherited.iter().zip(&right.inherited).all(|((a, x), (b, y))| {
+                a == b
+                    && Arc::ptr_eq(&x.plan, &y.plan)
+                    && Arc::ptr_eq(&x.resolved, &y.resolved)
+                    && Arc::ptr_eq(&x.index, &y.index)
+            })
+    }
+    let key = (
+        database.to_owned(),
+        table.to_owned(),
+        resolved
+            .direct
+            .get("member.id")
+            .cloned()
+            .unwrap_or_default(),
+        resolved.revision,
+    );
+    let mut shared = SHARED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (map, swept_at) = &mut *shared;
+    let entries = map.entry(key).or_default();
+    entries.retain(|entry| entry.strong_count() > 0);
+    if let Some(existing) = entries
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .find(|existing| same(existing, &resolved))
+    {
+        return existing;
+    }
+    let created = Arc::new(resolved);
+    entries.push(Arc::downgrade(&created));
+    if map.len() > (*swept_at).max(1024) * 2 {
+        map.retain(|_, entries| {
+            entries.retain(|entry| entry.strong_count() > 0);
+            !entries.is_empty()
+        });
+        *swept_at = map.len();
+    }
+    created
 }
 
 /// Recompute every derived set of a version 2 plan in memory from its source
@@ -1886,7 +1982,7 @@ pub fn ancestor_row_change_concerns(
             };
             admitted(old) != admitted(new)
         });
-        let association = inherits_any(&parent.plan).into_iter().any(|expression| {
+        let association = inherits_any(&parent.plan).iter().any(|expression| {
             let (Some(via), Some(ancestor)) =
                 (&expression.via, state.inherited.get(&expression.table))
             else {
@@ -2743,6 +2839,11 @@ fn context_key(value: &str) -> Result<(), VisibilityError> {
             "unsupported context {value:?}"
         )))
     }
+}
+
+/// Whether `value` is a plain SQL identifier the runtime may quote.
+pub(crate) fn identifier_ok(value: &str) -> Result<(), VisibilityError> {
+    identifier(value).map(|_| ())
 }
 
 fn identifier(value: &str) -> Result<&str, VisibilityError> {

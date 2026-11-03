@@ -544,6 +544,11 @@ pub enum HostCallFrame {
         operation: String,
         payload: serde_json::Value,
     },
+    PermissionsHas {
+        permission: String,
+        #[serde(default)]
+        scope: String,
+    },
 }
 
 impl HostCallFrame {
@@ -646,6 +651,9 @@ impl HostCallFrame {
                 operation,
                 payload: decode(payload, "payload")?,
             },
+            HostCall::PermissionsHas { permission, scope } => {
+                Self::PermissionsHas { permission, scope }
+            }
         })
     }
 }

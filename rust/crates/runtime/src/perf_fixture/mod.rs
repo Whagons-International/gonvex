@@ -407,16 +407,26 @@ impl Fixture {
     /// Opens a member's full [`WHAGONS_SUBSCRIPTIONS`] set, one after another
     /// (the websocket queue runs up to 8 concurrently).
     pub async fn connect(&self, tenant: usize, member: usize) -> FixtureResult<MemberConnection> {
+        self.connect_paths(tenant, member, &WHAGONS_SUBSCRIPTIONS).await
+    }
+
+    /// [`Fixture::connect`] opening only `paths`.
+    pub async fn connect_paths(
+        &self,
+        tenant: usize,
+        member: usize,
+        paths: &[&str],
+    ) -> FixtureResult<MemberConnection> {
         let session = self.session(tenant, member);
         let mut subscriptions = BTreeMap::new();
         let mut rows = BTreeMap::new();
-        for path in WHAGONS_SUBSCRIPTIONS {
+        for path in paths {
             let opened = self.open_replica(&session, path, path).await?;
             let subscription = opened
                 .subscription
                 .ok_or_else(|| format!("{path} did not stay subscribed"))?;
-            rows.insert(path.to_owned(), subscription_rows(&subscription));
-            subscriptions.insert(path.to_owned(), subscription);
+            rows.insert(path.to_string(), subscription_rows(&subscription));
+            subscriptions.insert(path.to_string(), subscription);
         }
         Ok(MemberConnection {
             tenant,
@@ -573,6 +583,10 @@ impl Fixture {
             principal_rebuilds: after.principal_rebuilds - before.principal_rebuilds,
             consistency_rebuilds: after.consistency_rebuilds - before.consistency_rebuilds,
             in_memory_row_checks: after.in_memory_row_checks - before.in_memory_row_checks,
+            compiled_row_checks: after.compiled_row_checks - before.compiled_row_checks,
+            class_evaluations: after.class_evaluations - before.class_evaluations,
+            member_evaluations: after.member_evaluations - before.member_evaluations,
+            fallback_row_checks: after.fallback_row_checks - before.fallback_row_checks,
         };
         Ok(delivery)
     }
@@ -689,6 +703,98 @@ impl Fixture {
             }
         }
         admitted
+    }
+
+    /// `evaluate_visibility` through the compiled class programs
+    /// (`visibility_class`): change rows decoded once, one default evaluation
+    /// per visibility class, members evaluated alone only when a member atom
+    /// (grant, context) hits the row. Returns admitted count and the stats.
+    pub fn evaluate_visibility_compiled(
+        connections: &mut [MemberConnection],
+        subscription: &str,
+        change: &LogChange,
+    ) -> (usize, crate::visibility_class::EvalStats) {
+        use crate::visibility_class::MemberHandle;
+        let mut memo = crate::visibility_class::EvalMemo::default();
+        let mut admitted = 0;
+        for connection in connections {
+            let database = connection.session.route.database_url.clone();
+            let Some(subscription) = connection.subscriptions.get_mut(subscription) else {
+                continue;
+            };
+            let concerns = subscription.visibility.principal_change_concerns(
+                &subscription.resolved,
+                &change.table,
+                &change.operation,
+                &change.changed_columns,
+                &change.old_value,
+                &change.new_value,
+            );
+            std::hint::black_box(concerns);
+            let handle =
+                subscription
+                    .mask
+                    .get(&subscription.visibility, &subscription.resolved, &database);
+            let visible = match &handle {
+                MemberHandle::Compiled(member) => member.visible_memo(&mut memo, &change.new_value),
+                MemberHandle::Fallback => {
+                    memo.stats.fallback_checks += 1;
+                    crate::visibility::row_matches(
+                        &subscription.visibility,
+                        &subscription.resolved,
+                        &change.new_value,
+                    )
+                }
+            };
+            admitted += visible as usize;
+        }
+        (admitted, memo.stats)
+    }
+
+    /// Compiled bindings of every connection's `subscription` (warms the
+    /// subscription caches), for class statistics and candidate routing.
+    pub fn visibility_handles(
+        connections: &mut [MemberConnection],
+        subscription: &str,
+    ) -> Vec<Option<std::sync::Arc<crate::visibility_class::MemberVisibility>>> {
+        connections
+            .iter_mut()
+            .map(|connection| {
+                let database = connection.session.route.database_url.clone();
+                let subscription = connection.subscriptions.get_mut(subscription)?;
+                match subscription.mask.get(
+                    &subscription.visibility,
+                    &subscription.resolved,
+                    &database,
+                ) {
+                    crate::visibility_class::MemberHandle::Compiled(member) => Some(member),
+                    crate::visibility_class::MemberHandle::Fallback => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Approximate heap bytes of one connection's `ResolvedVisibility` for
+    /// `subscription` (BTreeSet<String> token sets), for memory comparison.
+    pub fn resolved_heap_bytes(connection: &MemberConnection, subscription: &str) -> usize {
+        let Some(subscription) = connection.subscriptions.get(subscription) else {
+            return 0;
+        };
+        fn sets(resolved: &crate::visibility::ResolvedVisibility) -> usize {
+            resolved
+                .sets
+                .iter()
+                .map(|(name, tokens)| {
+                    name.len() + 48 + tokens.iter().map(|token| token.len() + 40).sum::<usize>()
+                })
+                .sum::<usize>()
+                + resolved
+                    .inherited
+                    .values()
+                    .map(|parent| sets(&parent.resolved))
+                    .sum::<usize>()
+        }
+        sets(&subscription.resolved)
     }
 
     /// Orderly shutdown (runtime first, then the fake host and run files).

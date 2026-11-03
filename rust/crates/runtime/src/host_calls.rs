@@ -482,6 +482,9 @@ impl HostCallHandler for DatabaseHostCalls {
                 self.enqueue_scheduled(&function, args, run_at, coalesce)
                     .await
             }
+            HostCallFrame::PermissionsHas { permission, scope } => {
+                self.permissions_has(&permission, &scope).await
+            }
             _ => Err(match self.capability {
                 DatabaseCapability::Query => {
                     "a Query may only use its read-only database capability".to_owned()
@@ -496,6 +499,34 @@ impl HostCallHandler for DatabaseHostCalls {
 }
 
 impl DatabaseHostCalls {
+    /// `ctx.permissions.has`: a bit test on the tenant's committed
+    /// permission bits. When this invocation already holds its transaction,
+    /// first wait until the bits cover every revision that transaction sees,
+    /// so a check never answers from a state older than the Reducer's reads.
+    async fn permissions_has(&mut self, permission: &str, scope: &str) -> Result<Value, String> {
+        let (runtime, session) = self.storage_context.clone().ok_or_else(|| {
+            "ctx.permissions is available to Reducers with a tenant session".to_owned()
+        })?;
+        let index = runtime.permission_index(&session).await?;
+        if let Some(transaction) = self.transaction.as_mut() {
+            let revision: i64 =
+                sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1")
+                    .fetch_one(&mut **transaction.transaction())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            if !crate::permission_bits::PermissionIndex::wait_for(&index, revision.max(0) as u64)
+                .await
+            {
+                return Err("permission bits are rebuilding; retry".to_owned());
+            }
+        }
+        let held = index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .has(&session.member.id, permission, scope);
+        Ok(Value::Bool(held))
+    }
+
     async fn enqueue_scheduled(
         &mut self,
         function: &str,

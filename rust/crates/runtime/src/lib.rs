@@ -1,4 +1,6 @@
+// Deep clones on hot paths are bugs here (workstream 7, Gabriel 2026-11-03).
 #![warn(clippy::redundant_clone)]
+
 pub mod action_calls;
 pub mod change_feed;
 pub mod config;
@@ -41,6 +43,10 @@ mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
+pub mod permission_bits;
+pub mod visibility_class;
+#[cfg(test)]
+mod visibility_corpus;
 pub mod visibility_index;
 mod visibility_mask;
 pub mod visibility_metrics;
@@ -97,6 +103,7 @@ struct RuntimeInner {
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
     delivery: delivery::DeliveryHub,
+    permissions: permission_bits::PermissionRegistry,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -261,6 +268,7 @@ impl Runtime {
                 visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 parent_acl: visibility::ParentAclRegistry::default(),
                 delivery: delivery::DeliveryHub::default(),
+                permissions: permission_bits::PermissionRegistry::default(),
             }),
         }
     }

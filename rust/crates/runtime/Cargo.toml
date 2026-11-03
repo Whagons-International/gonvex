@@ -72,6 +72,11 @@ harness = false
 required-features = ["perf-fixture"]
 
 [[bench]]
+name = "visibility_classes"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
 name = "replica_state"
 harness = false
 required-features = ["perf-fixture"]

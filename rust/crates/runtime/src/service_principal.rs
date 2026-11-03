@@ -1094,6 +1094,7 @@ mod tests {
                 replica_epochs: Default::default(),
                 schema: json!({"tables": {"apiKeys": {}}}),
                 visibility: Default::default(),
+                permission_grants: None,
                 invitation_acceptance_reducer: String::new(),
                 migrations: Vec::new(),
                 crons: Vec::new(),

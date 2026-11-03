@@ -386,6 +386,12 @@ pub enum HostCall {
         operation: String,
         payload: Vec<u8>,
     },
+    /// Does the invoking member hold `permission` in `scope` (`""` is
+    /// tenant-wide)? Answered from the host's in-memory permission bits.
+    PermissionsHas {
+        permission: String,
+        scope: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -406,7 +412,7 @@ impl HostCall {
     /// denial message a module sees.
     pub fn capability(&self) -> &'static str {
         match self {
-            Self::DbQuery { .. } => "db_read",
+            Self::DbQuery { .. } | Self::PermissionsHas { .. } => "db_read",
             Self::DbInsert { .. }
             | Self::DbUpdate { .. }
             | Self::DbDelete { .. }

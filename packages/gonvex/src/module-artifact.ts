@@ -30,6 +30,7 @@ import type {
   ModuleJavaScript,
   ModuleLanguage,
   ModuleSchema,
+  PermissionGrantSource,
   ReplicaCollectionDefinition,
   VisibilityExpression,
   VisibilityPlan,
@@ -81,6 +82,7 @@ const visibilityDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-
 const visibilityRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*visibility\s*\(/gi;
 const cronDefinitionPattern = /export\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=;]+)?=\s*(cron|tenantCron)\s*\(/gi;
 const cronRegistrationPattern = /\b(?:app|server|gonvex)\s*\.\s*(cron|tenantCron)\s*\(/gi;
+const permissionGrantsPattern = /\bpermissionGrants\s*\(/g;
 const invitationAcceptancePattern = /\binvitationAcceptance\s*\(\s*(["'`])([^"'`]+)\1\s*\)/g;
 const identifierPattern = /[A-Za-z_$][A-Za-z0-9_$]*/y;
 const keywordPattern = /(?:true|false|null|undefined)\b/y;
@@ -127,6 +129,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   const visibilityPlans: Record<string, VisibilityPlan> = {};
   const crons: ModuleCron[] = [];
   let invitationAcceptanceReducer = "";
+  let grantSource: PermissionGrantSource | undefined;
   for (const file of sources) {
     const contents = await readFile(file);
     files[projectPath(options.root, file)] = contents.toString("base64");
@@ -142,6 +145,10 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       visibilityPlans[plan.table] = plan;
     }
     crons.push(...parseCronDefinitions(contents.toString("utf8")));
+    for (const declared of parsePermissionGrants(contents.toString("utf8"))) {
+      if (grantSource && canonicalJson(grantSource) !== canonicalJson(declared)) throw new Error("module declares more than one permissionGrants projection");
+      grantSource = declared;
+    }
     invitationAcceptancePattern.lastIndex = 0;
     for (const match of contents.toString("utf8").matchAll(invitationAcceptancePattern)) {
       if (invitationAcceptanceReducer && invitationAcceptanceReducer !== match[2]) throw new Error("module declares more than one invitation acceptance Reducer");
@@ -230,6 +237,7 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
       crons: sortedCrons,
       javascript,
       invitationAcceptanceReducer,
+      permissionGrants: grantSource,
     }),
     entrypoint: entrypoint.projectPath,
     functions: sortedFunctions,
@@ -238,7 +246,46 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
     javascript,
     ...(sortedCrons.length > 0 ? { crons: sortedCrons } : {}),
     ...(invitationAcceptanceReducer ? { invitationAcceptanceReducer } : {}),
+    ...(grantSource ? { permissionGrants: grantSource } : {}),
   };
+}
+
+const sqlIdentifier = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
+
+function parsePermissionGrants(source: string): PermissionGrantSource[] {
+  const found: PermissionGrantSource[] = [];
+  permissionGrantsPattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = permissionGrantsPattern.exec(source)) !== null) {
+    const openParen = match.index + match[0].length - 1;
+    // The SDK's own definition `function permissionGrants(source: ...)` is not a declaration.
+    if (/function\s*$/.test(source.slice(Math.max(0, match.index - 16), match.index))) continue;
+    const call = readCallArguments(source, openParen);
+    permissionGrantsPattern.lastIndex = Math.max(call.end, openParen + 1);
+    const value = call.args[0]?.value;
+    const table = stringMember(value, "table");
+    const member = stringMember(value, "member");
+    const permission = stringMember(value, "permission");
+    const scope = stringMember(value, "scope");
+    if (!isJsonObject(value) || !table || !member || !permission || !scope) {
+      throw new Error("permissionGrants must use literal table, member, permission and scope");
+    }
+    const whereNull = readMember(value, "whereNull");
+    if (whereNull !== undefined && (!Array.isArray(whereNull) || whereNull.some(column => typeof column !== "string"))) {
+      throw new Error("permissionGrants whereNull must be a literal array of column names");
+    }
+    const key = stringMember(value, "key");
+    const declared: PermissionGrantSource = {
+      table, member, permission, scope,
+      ...(whereNull && (whereNull as string[]).length ? { whereNull: whereNull as string[] } : {}),
+      ...(key ? { key } : {}),
+    };
+    for (const name of [table, member, permission, scope, ...(declared.whereNull ?? []), ...(key ? [key] : [])]) {
+      if (!sqlIdentifier.test(name)) throw new Error(`permissionGrants: invalid SQL identifier ${JSON.stringify(name)}`);
+    }
+    found.push(declared);
+  }
+  return found;
 }
 
 function parseCronDefinitions(source: string): ModuleCron[] {
@@ -590,6 +637,7 @@ function artifactHash(input: {
   crons: ModuleCron[];
   javascript: ModuleJavaScript;
   invitationAcceptanceReducer?: string;
+  permissionGrants?: PermissionGrantSource;
 }) {
   const contract = {
     generation: moduleArtifactGeneration,
@@ -601,6 +649,8 @@ function artifactHash(input: {
     crons: input.crons,
     javascript: { path: input.javascript.path, hash: input.javascript.hash },
     invitationAcceptanceReducer: input.invitationAcceptanceReducer ?? "",
+    // Only modules that declare it hash it: earlier artifact hashes are unchanged.
+    ...(input.permissionGrants ? { permissionGrants: input.permissionGrants } : {}),
   };
   return createHash("sha256").update(canonicalJson(contract)).digest("hex");
 }

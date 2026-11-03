@@ -87,6 +87,9 @@ pub struct ReplicaSubscription {
     pub resolved: ResolvedVisibility,
     pub(crate) digest: ReplicaAggregate,
     pub(crate) window: ReplicaWindow,
+    /// Compiled visibility binding of `resolved` (`visibility_class`),
+    /// cleared whenever an event changes `resolved` in memory.
+    pub(crate) mask: crate::visibility_class::HandleCache,
 }
 
 /// Counters of the rows a client holds, and for a truncated ordered window
@@ -634,6 +637,7 @@ impl Runtime {
                 resolved: read.resolved,
                 digest,
                 window,
+                mask: Default::default(),
             }),
         })
     }
@@ -748,6 +752,9 @@ impl Runtime {
         let mut messages = Vec::new();
         let mut touches = BTreeMap::<(String, String), EntityTouch>::new();
         let mut resynced = BTreeSet::new();
+        // Change rows decoded once and class defaults evaluated once per
+        // visibility class for the whole event (`changes` outlives it).
+        let mut memo = crate::visibility_class::EvalMemo::default();
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
@@ -779,7 +786,13 @@ impl Runtime {
                 }
                 Step::Apply(context) => context,
             };
-            let Some(delta) = apply_rows(subscription, &context, &collapsed)? else {
+            let Some(delta) = apply_rows_with(
+                subscription,
+                &context,
+                &collapsed,
+                Some((&mut memo, session.route.database_url.as_str())),
+            )?
+            else {
                 self.resync(subscription, Resync::Window, &mut messages, &mut resynced);
                 continue;
             };
@@ -847,6 +860,7 @@ impl Runtime {
                 },
             );
         }
+        self.inner.visibility_metrics.record_eval_stats(&memo.stats);
         Ok(messages)
     }
 
@@ -981,11 +995,36 @@ pub(crate) struct SubscriptionDelta {
 /// Applies the event's source rows (and rows a visibility change affected)
 /// to one subscription's digest and window. None when the change cannot be
 /// represented without the client's membership (the caller reconciles).
+#[cfg(test)]
 fn apply_rows(
     subscription: &mut ReplicaSubscription,
     context: &ApplyContext,
     collapsed: &CollapsedChanges<'_>,
 ) -> Result<Option<SubscriptionDelta>, ReplicaError> {
+    apply_rows_with(subscription, context, collapsed, None)
+}
+
+/// `compiled`: the event's memo and the tenant database (class scope). With
+/// it, rows are decided by the subscription's compiled visibility class.
+fn apply_rows_with(
+    subscription: &mut ReplicaSubscription,
+    context: &ApplyContext,
+    collapsed: &CollapsedChanges<'_>,
+    mut compiled: Option<(&mut crate::visibility_class::EvalMemo, &str)>,
+) -> Result<Option<SubscriptionDelta>, ReplicaError> {
+    if context.before.is_some() {
+        // The event changed this principal in memory: rebind.
+        subscription.mask.clear();
+    }
+    let handle = compiled.as_ref().map(|(_, scope)| {
+        subscription
+            .mask
+            .get(&subscription.visibility, &subscription.resolved, scope)
+    });
+    let mut compiled = match (compiled.as_mut(), handle.as_ref()) {
+        (Some((memo, _)), Some(handle)) => Some(Compiled { memo, handle }),
+        _ => None,
+    };
     let mut delta = SubscriptionDelta::default();
     let table = subscription.definition.table.clone();
     for ((_, id), change) in collapsed
@@ -1005,12 +1044,24 @@ fn apply_rows(
             change.new,
             changed_columns,
             &mut delta,
+            compiled.as_mut(),
+            true,
         )? {
             return Ok(None);
         }
     }
     for (id, row) in &context.affected {
-        if !row_step(subscription, context, id, row, row, Vec::new(), &mut delta)? {
+        if !row_step(
+            subscription,
+            context,
+            id,
+            row,
+            row,
+            Vec::new(),
+            &mut delta,
+            compiled.as_mut(),
+            false,
+        )? {
             return Ok(None);
         }
     }
@@ -1064,11 +1115,48 @@ pub fn decide_row(
     old: &Value,
     new: &Value,
 ) -> Result<RowDecision, ReplicaError> {
+    decide_row_with(
+        definition,
+        args,
+        plan,
+        before,
+        after,
+        overlay,
+        window,
+        old,
+        new,
+        &mut |_, _| None,
+    )
+}
+
+/// `decide_row` with a compiled visibility check: `compiled(row, is_old)`
+/// answers the row's visibility (collection filters are applied here), or
+/// None to use the interpreted evaluator.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decide_row_with(
+    definition: &ReplicaCollectionDefinition,
+    args: &Value,
+    plan: &VisibilityPlan,
+    before: &ResolvedVisibility,
+    after: &ResolvedVisibility,
+    overlay: &Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
+    window: &ReplicaWindow,
+    old: &Value,
+    new: &Value,
+    compiled: &mut dyn FnMut(&Value, bool) -> Option<bool>,
+) -> Result<RowDecision, ReplicaError> {
     let old_visible = !old.is_null()
-        && visibility::with_parent_overlay(overlay, || {
-            row_in_collection(old, args, definition, plan, before)
-        });
-    let new_visible = !new.is_null() && row_in_collection(new, args, definition, plan, after);
+        && collection_filters_admit(old, args, definition)
+        && match compiled(old, true) {
+            Some(visible) => visible,
+            None => visibility::with_parent_overlay(overlay, || visible(plan, before, old)),
+        };
+    let new_visible = !new.is_null()
+        && collection_filters_admit(new, args, definition)
+        && match compiled(new, false) {
+            Some(visible) => visible,
+            None => visible(plan, after, new),
+        };
     if !old_visible && !new_visible {
         return Ok(RowDecision::Outside);
     }
@@ -1133,6 +1221,13 @@ pub fn decide_row(
 
 /// One row's transition for one subscription. Returns false when the window
 /// cannot be maintained from the images alone.
+/// A subscription's compiled binding and the event's memo.
+struct Compiled<'a> {
+    memo: &'a mut crate::visibility_class::EvalMemo,
+    handle: &'a crate::visibility_class::MemberHandle,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn row_step(
     subscription: &mut ReplicaSubscription,
     context: &ApplyContext,
@@ -1141,8 +1236,32 @@ fn row_step(
     new: &Value,
     changed_columns: Vec<String>,
     delta: &mut SubscriptionDelta,
+    compiled: Option<&mut Compiled<'_>>,
+    memoize: bool,
 ) -> Result<bool, ReplicaError> {
-    let decision = decide_row(
+    // The binding is of the principal after the event; the old image is
+    // decided by it only when the principal and the parents did not move.
+    let same_principal = context.before.is_none() && context.overlay.is_none();
+    let mut compiled = compiled;
+    let mut check = |row: &Value, is_old: bool| -> Option<bool> {
+        use crate::visibility_class::{MemberHandle, RowView};
+        let compiled = compiled.as_deref_mut()?;
+        if is_old && !same_principal {
+            return None;
+        }
+        match compiled.handle {
+            MemberHandle::Compiled(member) if memoize => Some(member.visible_memo(compiled.memo, row)),
+            MemberHandle::Compiled(member) => {
+                compiled.memo.stats.compiled_checks += 1;
+                Some(member.visible(RowView::Value(row)))
+            }
+            MemberHandle::Fallback => {
+                compiled.memo.stats.fallback_checks += 1;
+                None
+            }
+        }
+    };
+    let decision = decide_row_with(
         &subscription.definition,
         &subscription.args,
         &subscription.visibility,
@@ -1152,6 +1271,7 @@ fn row_step(
         &subscription.window,
         old,
         new,
+        &mut check,
     )?;
     let (changed, old, new) = match decision {
         RowDecision::Outside => return Ok(true),
@@ -1554,6 +1674,15 @@ fn row_in_collection(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
 ) -> bool {
+    collection_filters_admit(row, args, definition) && visible(plan, resolved, row)
+}
+
+/// The collection's own filters (exclusions and argument equalities).
+fn collection_filters_admit(
+    row: &Value,
+    args: &Value,
+    definition: &ReplicaCollectionDefinition,
+) -> bool {
     let (Some(object), Some(args)) = (row.as_object(), args.as_object()) else {
         return false;
     };
@@ -1571,7 +1700,7 @@ fn row_in_collection(
     {
         return false;
     }
-    visible(plan, resolved, row)
+    true
 }
 
 /// The one call into the in-memory visibility evaluator (workstream 7 swaps
@@ -2859,6 +2988,7 @@ mod tests {
             resolved,
             digest,
             window,
+            mask: Default::default(),
         }
     }
 
