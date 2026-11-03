@@ -4,7 +4,7 @@
 # is reset with the runtime stopped, then the runtime is started fresh.
 set -euo pipefail
 bench=$(cd "$(dirname "$0")" && pwd)
-lab=$(realpath -m "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
+lab=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 case "$lab" in /|"$repo"|"$repo"/*) echo 'LOAD_LAB_ROOT must be a directory outside the checkout' >&2; exit 2;; esac
 label=${LOAD_LABEL:?set a unique LOAD_LABEL}

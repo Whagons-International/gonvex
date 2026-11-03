@@ -6,7 +6,7 @@
 # them with `docker volume rm` when the lab is no longer needed.
 set -euo pipefail
 repo=${LOAD_GONVEX_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}
-lab=$(realpath -m "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$LOAD_LAB_ROOT")
+lab=$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
 case "$lab" in /|"$repo"|"$repo"/*) echo 'LOAD_LAB_ROOT must be a directory outside the checkout' >&2; exit 2;; esac
 bin=${LOAD_BIN_DIR:?set LOAD_BIN_DIR}
 mkdir -p "$lab" "$bin"
