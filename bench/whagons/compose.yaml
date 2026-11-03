@@ -71,6 +71,7 @@ services:
       GONVEX_SANDBOX_WORKER_BINARY: /binhost/gonvex-sandbox-worker
       GONVEX_DB_MAX_OPEN_CONNS: ${LOAD_READERS:-4}
       GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE: ${LOAD_ISOLATES:-4}
+      GONVEX_REPLICA_SNAPSHOT_CONCURRENCY: ${LOAD_SNAPSHOTS:-4}
       GONVEX_MODULE_HOST_MAX_CONCURRENT_CALLS: ${LOAD_MODULE_CONCURRENCY:-32}
       GONVEX_DB_MAX_TOTAL_CONNS: ${LOAD_SHARED:-64}
       RUST_LOG: warn
@@ -87,8 +88,8 @@ services:
     depends_on:
       auth: {condition: service_healthy}
       runtime: {condition: service_healthy}
-    cpus: 2
-    mem_limit: 2g
+    cpus: ${LOAD_GENERATOR_CPUS:-2}
+    mem_limit: ${LOAD_GENERATOR_MEMORY:-2g}
     user: '${LOAD_UID:-1000}:${LOAD_GID:-1000}'
     volumes:
       - ${WHAGONS_CHECKOUT:?set WHAGONS_CHECKOUT}:${WHAGONS_CHECKOUT}:ro
@@ -109,7 +110,8 @@ services:
       LOAD_RAMP_SECONDS: ${LOAD_RAMP_SECONDS:-60}
       LOAD_ALL_TENANTS_ACTIVE: ${LOAD_ALL_TENANTS_ACTIVE:-false}
       LOAD_RESULT: /state/${LOAD_LABEL:-step}.json
-    entrypoint: [/bin/sh, -c, 'exec "$$LOAD_DEPS_ROOT/.bin/tsx" /harness/run.ts "$$@"', load-runner]
+      LOAD_SHARDS: ${LOAD_SHARDS:-1}
+    entrypoint: [/bin/sh, /harness/shards.sh]
 networks:
   isolated:
     internal: true

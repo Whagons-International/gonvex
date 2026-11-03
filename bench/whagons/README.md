@@ -83,8 +83,11 @@ literal loopback addresses *inside the isolated network namespace*.
 6. Run `monitor.py OUTPUT_DIRECTORY` alongside each step. It stops the generator
    if host memory full PSI avg10 exceeds the workstation's existing 5% gate.
 
-Run every build and load through `coach-resources`, using a build directory on
-`/mnt/data`. Run `build-headroom` before **each** step and retry refused gates.
+Keep the lab directory (`LOAD_LAB_ROOT`) outside the checkout. Set
+`LOAD_HEADROOM_CHECK` to a command that takes the lab path and fails when the
+host lacks disk or memory headroom; the scripts wait until it passes before each
+step. Large cases need `LOAD_SHARDS` (one Node event loop drives about 100
+users) and a matching `LOAD_GENERATOR_CPUS`/`LOAD_GENERATOR_MEMORY`.
 Stop only this experiment's containers after the final step. No production or
 shared QA stack is a valid target.
 
@@ -127,7 +130,7 @@ namespace. No credentials or settings from an existing deployment are needed.
 Set these paths before invoking Compose:
 
 ```sh
-export LOAD_LAB_ROOT=/mnt/data/work/gonvex-load-lab
+export LOAD_LAB_ROOT=$HOME/work/gonvex-load-lab
 export LOAD_BIN_DIR=$LOAD_LAB_ROOT/candidate-bin
 export LOAD_NPM_CACHE=$HOME/.npm
 export WHAGONS_CHECKOUT=/absolute/path/to/pinned/whagons-staging

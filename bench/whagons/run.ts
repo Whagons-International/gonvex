@@ -120,14 +120,20 @@ async function main() {
  }
  const target=Number(process.env.LOAD_USERS||26),seconds=Number(process.env.LOAD_SECONDS||180),ramp=Number(process.env.LOAD_RAMP_SECONDS||60);
  if(!Number.isSafeInteger(target)||target<1||!Number.isFinite(seconds)||seconds<1) throw Error('Invalid load bounds');
+ // One Node event loop saturates near 120 users, so large cases run several
+ // shards. Shard k drives users i with i % shards === k; tenant choice, ramp
+ // timing and task ordinals stay global, so the mix matches an unsharded run.
+ const shards=Number(process.env.LOAD_SHARDS||1),shard=Number(process.env.LOAD_SHARD||0);
+ if(!Number.isSafeInteger(shards)||shards<1||!Number.isSafeInteger(shard)||shard<0||shard>=shards) throw Error('Invalid shard');
+ const mine=(i:number)=>i%shards===shard;const myTarget=Array.from({length:target},(_,i)=>i).filter(mine).length;
  const measurements:any={save:[],heartbeat:[],reducer:[],query:[],delivery:[],taskDelivery:[],login:[]},errors:Record<string,number>={};
  const error=(e:any)=>{const key=String(e?.message||e).slice(0,240);errors[key]=(errors[key]||0)+1;};
  const timed=async(kind:string,fn:()=>Promise<any>)=>{const t=performance.now();try{const v=await fn();measurements[kind].push(performance.now()-t);return v;}catch(e){error(e);return undefined;}};
  const perPath:Record<string,{durations:number[],errors:number}>={};
  recordReducer=(path,ms,failed)=>{const p=perPath[path]??={durations:[],errors:0};if(failed)p.errors++;else{p.durations.push(ms);measurements.reducer.push(ms);}};
  const users:any[]=[];const snapshots:any[]=[];const pending=new Map<string,number>();const pendingTasks=new Map<string,number>();
- const started=Date.now();let stopping=false;let aborted=false;let deadline=Infinity;let remaining=target;
- process.on('SIGTERM',()=>{aborted=true;stopping=true;deadline=Date.now();writeFileSync((process.env.LOAD_RESULT||state+'.result')+'.partial.json',JSON.stringify({aborted:true,profileHash,targetUsers:target,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}]))}));});
+ const started=Date.now();let stopping=false;let aborted=false;let deadline=Infinity;let remaining=myTarget;
+ process.on('SIGTERM',()=>{aborted=true;stopping=true;deadline=Date.now();writeFileSync((process.env.LOAD_RESULT||state+'.result')+'.partial.json',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}]))}));});
  const ready=()=>{if(--remaining===0)deadline=Date.now()+seconds*1000;};
  // Preserve the seven observed tenant weights. An optional stress profile
  // activates the other nineteen tenants too; it is not the observed mix.
@@ -139,9 +145,10 @@ async function main() {
   for(let k=0;k<fixtures.length;k++) {for(let j=0;j<(k<3?80:4);j++){const email=`load-filler-${k}-${j}@example.invalid`;const b=await login(email);b.c.close();await post('/dev/internal/e2e/members',{projectId,tenantId:fixtures[k].tenant,email});}}
   console.log(JSON.stringify({preparedUsers:target}));return;
  }
- const metricTimer=setInterval(()=>{void fetch(url+'/dev/metrics?project='+encodeURIComponent(projectId),{headers:{authorization:'Bearer '+admin}}).then(r=>r.json()).then(x=>appendFile(state+'.metrics.jsonl',JSON.stringify({at:Date.now(),metrics:x})+'\n')).catch(error);},10000);
+ const metricTimer=shard!==0?undefined:setInterval(()=>{void fetch(url+'/dev/metrics?project='+encodeURIComponent(projectId),{headers:{authorization:'Bearer '+admin}}).then(r=>r.json()).then(x=>appendFile(state+'.metrics.jsonl',JSON.stringify({at:Date.now(),metrics:x})+'\n')).catch(error);},10000);
  const tenantCounts=new Map<string,number>();const ordinals=Array.from({length:target},(_,i)=>{const f=chooseTenant(i);const n=tenantCounts.get(f.tenant)||0;tenantCounts.set(f.tenant,n+1);return n;});
  const jobs=Array.from({length:target},(_,i)=>(async()=>{
+  if(!mine(i))return;
   let seed=(i+1)*2654435761;const random=()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return (seed>>>0)/4294967296;};
   const think=()=>{const knots=[[0,0],[.25,5.163],[.5,12.732],[.75,44.774],[.95,735.971],[1,1800]];const u=random();const hi=knots.findIndex(k=>k[0]>=u);const a=knots[Math.max(0,hi-1)],b=knots[Math.max(1,hi)];return (a[1]+(b[1]-a[1])*(u-a[0])/(b[0]-a[0]))*1.1*1000;};
   await pause(i*ramp*1000/target);if(stopping)return;
@@ -204,9 +211,9 @@ async function main() {
  })().catch(e=>{error(e);ready();}));
  await Promise.all(jobs);clearInterval(metricTimer);stopping=true;for(const c of users)c.close();
  if(!measurements.delivery.length) error(new Error('No update delivery samples'));
- const result={sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'observed-seven',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,snapshots,targetUsers:target,connectedUsers:users.length,rampSeconds:ramp,steadySeconds:seconds,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
+ const result={sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'observed-seven',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,snapshots,targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{raw:measurements,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const q:any=result.latencyMs;
- (result as any).clientSloPassed=!aborted&&users.length===target&&Object.keys(errors).length===0&&q.save.samples>0&&q.taskDelivery.samples>0&&q.save.p95<1000&&q.reducer.p95<1000&&q.taskDelivery.p95<1000;
+ (result as any).clientSloPassed=!aborted&&users.length===myTarget&&Object.keys(errors).length===0&&q.save.samples>0&&q.taskDelivery.samples>0&&q.save.p95<1000&&q.reducer.p95<1000&&q.taskDelivery.p95<1000;
  console.log(JSON.stringify(result));await writeFile(process.env.LOAD_RESULT||state+'.result',JSON.stringify(result,null,2));
 }
 main().catch(e=>{console.error(e);process.exit(1);});

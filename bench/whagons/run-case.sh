@@ -1,16 +1,17 @@
 #!/bin/bash
 # One measured load case on the SQLite lab. Artifacts and build caches belong
-# on /mnt/data. The runtime owns its SQLite files while running, so task state
+# outside the checkout. The runtime owns its SQLite files while running, so task state
 # is reset with the runtime stopped, then the runtime is started fresh.
 set -euo pipefail
 bench=$(cd "$(dirname "$0")" && pwd)
 lab=$(realpath -m "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
-case "$lab" in /mnt/data/*|/home/gabriel/work/*) ;; *) echo 'LOAD_LAB_ROOT must be under /home/gabriel/work' >&2;exit 2;; esac
+repo=$(cd "$(dirname "$0")/../.." && pwd)
+case "$lab" in /|"$repo"|"$repo"/*) echo 'LOAD_LAB_ROOT must be a directory outside the checkout' >&2; exit 2;; esac
 label=${LOAD_LABEL:?set a unique LOAD_LABEL}
 [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
 mkdir -p "$lab/$label"
 [ ! -e "$lab/$label-summary.json" ] || { echo 'Refusing to overwrite a measured case' >&2;exit 2; }
-headroom() { until /home/gabriel/.local/bin/build-headroom "$lab"; do sleep 30;done; }
+headroom() { until ${LOAD_HEADROOM_CHECK:-true} "$lab"; do sleep 30;done; }
 compose=(docker compose -f "$bench/compose.yaml")
 export LOAD_LAB_ROOT="$lab"
 headroom

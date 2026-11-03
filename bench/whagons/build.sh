@@ -2,9 +2,9 @@
 set -euo pipefail
 repo=${LOAD_GONVEX_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}
 lab=$(realpath -m "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
-case "$lab" in /mnt/data/*|/home/gabriel/work/*) ;; *) echo 'Load artifacts must live on /home/gabriel/work (or legacy /mnt/data)' >&2; exit 2;; esac
+case "$lab" in /|"$repo"|"$repo"/*) echo 'LOAD_LAB_ROOT must be a directory outside the checkout' >&2; exit 2;; esac
 mkdir -p "$lab" "${LOAD_BIN_DIR:?set a revision-specific LOAD_BIN_DIR}"
-until /home/gabriel/.local/bin/build-headroom "$lab"; do sleep 30; done
+until ${LOAD_HEADROOM_CHECK:-true} "$lab"; do sleep 30; done
 revision=$(git -C "$repo" rev-parse HEAD)
 # Separate targets prevent Cargo fresh-artifact root links selecting another checkout.
 export CARGO_TARGET_DIR="${LOAD_CARGO_TARGET_DIR:-$lab/target-$revision}" CARGO_BUILD_JOBS=${LOAD_BUILD_JOBS:-2}

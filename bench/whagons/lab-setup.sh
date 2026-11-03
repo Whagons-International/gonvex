@@ -5,10 +5,11 @@
 set -euo pipefail
 bench=$(cd "$(dirname "$0")" && pwd)
 lab=$(realpath -m "${LOAD_LAB_ROOT:?set LOAD_LAB_ROOT}")
-case "$lab" in /mnt/data/*|/home/gabriel/work/*) ;; *) echo 'LOAD_LAB_ROOT must be under /home/gabriel/work' >&2; exit 2;; esac
+repo=$(cd "$(dirname "$0")/../.." && pwd)
+case "$lab" in /|"$repo"|"$repo"/*) echo 'LOAD_LAB_ROOT must be a directory outside the checkout' >&2; exit 2;; esac
 users=${1:-100}
 compose=(docker compose -f "$bench/compose.yaml")
-headroom() { until /home/gabriel/.local/bin/build-headroom "$lab"; do sleep 30; done; }
+headroom() { until ${LOAD_HEADROOM_CHECK:-true} "$lab"; do sleep 30; done; }
 "${compose[@]}" --profile load down --remove-orphans >/dev/null 2>&1 || true
 rm -rf "$lab/runtime" "$lab/auth-export" "$lab/fixture.json" "$lab/fixture.json.metrics.jsonl"
 mkdir -p "$lab/runtime"
