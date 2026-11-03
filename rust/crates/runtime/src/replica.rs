@@ -1223,28 +1223,36 @@ fn source_update_requires_snapshot<'a>(
         return Ok(false);
     }
 
-    let mut projected = rows.clone();
+    // Only the changed rows differ from `rows`: overlay them instead of
+    // copying the whole collection per change per subscription.
+    let mut overlay: BTreeMap<&str, Option<Value>> = BTreeMap::new();
     for change in changes {
-        let old_visible = row_in_collection(&change.old_value, args, definition, plan, resolved);
         let new_visible = row_in_collection(&change.new_value, args, definition, plan, resolved);
-        if new_visible {
-            projected.insert(
-                change.row_id.as_str().into(),
-                ReplicaEntry::detached(&change.row_id, project_row(&change.new_value, definition)?),
-            );
-        } else if old_visible || projected.contains_key(change.row_id.as_str()) {
-            projected.remove(change.row_id.as_str());
-        }
+        let projection = if new_visible {
+            Some(project_row(&change.new_value, definition)?)
+        } else {
+            None
+        };
+        overlay.insert(change.row_id.as_str(), projection);
     }
-
-    if definition.max_rows > 0 && projected.len() > definition.max_rows {
+    let count = overlay.iter().fold(rows.len() as i64, |count, (id, row)| {
+        match (rows.contains_key(*id), row.is_some()) {
+            (false, true) => count + 1,
+            (true, false) => count - 1,
+            _ => count,
+        }
+    });
+    if definition.max_rows > 0 && count > definition.max_rows as i64 {
         return Ok(true);
     }
     if definition.max_bytes > 0 {
-        let bytes = projected
-            .values()
-            .map(|row| serde_json::to_vec(row).unwrap_or_default().len() as i64)
-            .sum::<i64>();
+        let size = |row: &Value| serde_json::to_vec(row).unwrap_or_default().len() as i64;
+        let bytes = rows
+            .iter()
+            .filter(|(id, _)| !overlay.contains_key(id.as_ref()))
+            .map(|(_, row)| size(&row.row))
+            .sum::<i64>()
+            + overlay.values().flatten().map(size).sum::<i64>();
         if bytes > definition.max_bytes {
             return Ok(true);
         }

@@ -47,6 +47,9 @@ pub(crate) struct PlanCaches {
     sets: std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>,
     /// `inherited_columns`, fixed per plan; read per subscription per change.
     inherited: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
+    /// Whether the plan has any `inheritsAny`; most plans have none, and
+    /// change routing asks per subscription per change.
+    has_inherits_any: std::sync::OnceLock<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -719,6 +722,18 @@ pub fn via_index_name(via: &VisibilityVia, column: &str) -> String {
 
 /// Every `inheritsAny` expression of a plan.
 pub fn inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
+    let has_any = plan
+        .active_sets_cache
+        .0
+        .has_inherits_any
+        .get_or_init(|| !collect_inherits_any(plan).is_empty());
+    if !*has_any {
+        return Vec::new();
+    }
+    collect_inherits_any(plan)
+}
+
+fn collect_inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
     fn visit<'a>(expression: &'a VisibilityExpression, output: &mut Vec<&'a VisibilityExpression>) {
         if expression.operator == "inheritsAny" {
             output.push(expression);
