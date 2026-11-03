@@ -16,13 +16,15 @@ const (
 	maxTotalSafetyCeiling = 128
 )
 
-// budgetedIdleTTL keeps one connection warm per active database for 15s
-// instead of 1s, so gaps between requests stop opening new PostgreSQL
-// sessions. More than one idle connection per pool held shared budget slots
-// while other queries queued for the budget (2026-11-02), so idle stays at 1.
+// budgetedIdleTTL and budgetedMaxIdle keep a few connections warm per active
+// database. Opening a task fans out ~20 parallel queries; with one warm
+// connection the rest were opened fresh (~70ms each in production) and queued
+// behind the pool, ~982k pool waits a day (2026-11-03). Idle connections still
+// hold shared budget slots, so the TTL stays short enough for dormant tenants
+// to give them back between maintenance ticks.
 const (
-	budgetedIdleTTL = 15 * time.Second
-	budgetedMaxIdle = 1
+	budgetedIdleTTL = 30 * time.Second
+	budgetedMaxIdle = 3
 )
 
 var runtimeBudget = &connectionBudget{limit: func() int {
