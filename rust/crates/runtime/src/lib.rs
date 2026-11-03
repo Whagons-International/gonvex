@@ -20,6 +20,7 @@ pub mod modules;
 mod native_auth;
 mod operations;
 mod operator_data;
+pub mod profiling;
 pub mod public_functions;
 pub mod replica;
 mod replica_cursor;
@@ -256,6 +257,7 @@ impl Runtime {
     }
 
     pub async fn start(&self) -> Result<(), RuntimeStartError> {
+        profiling::start();
         if self.inner.config.sandbox.enabled {
             let binary = self
                 .inner
@@ -1406,13 +1408,16 @@ async fn websocket_upgrade(
         max_message,
         max_frame,
         move |socket| {
-            websocket(
-                socket,
-                runtime,
-                ip,
-                public_transport,
-                public_connection,
-                pending,
+            gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::WsConnection,
+                websocket(
+                    socket,
+                    runtime,
+                    ip,
+                    public_transport,
+                    public_connection,
+                    pending,
+                ),
             )
         },
     )
@@ -1639,10 +1644,17 @@ async fn websocket(
                     }
                     ScheduledTransport::Feed(event) => match event {
                     Ok(event) => {
-                        let feed_revision = match &event {
-                            change_feed::FeedEvent::Transaction { revision, .. } => Some(*revision),
-                            change_feed::FeedEvent::Reset { .. } => None,
+                        let (feed_revision, feed_key) = match &event {
+                            change_feed::FeedEvent::Transaction { revision, database_epoch, .. } => (
+                                Some(*revision),
+                                Some(change_feed::broadcast_key(database_epoch, *revision)),
+                            ),
+                            change_feed::FeedEvent::Reset { .. } => (None, None),
                         };
+                        if let Some(wait) = feed_key.and_then(gonvex_profiler::since_stamp) {
+                            gonvex_profiler::record(gonvex_profiler::Stage::DeliveryQueueWait, gonvex_profiler::Label::None, wait);
+                        }
+                        let mut delivery_timer = gonvex_profiler::Timer::start();
                         let feed_apply_started = std::time::Instant::now();
                         tracing::debug!(
                             target: "gonvex_runtime::ws_trace",
@@ -1667,11 +1679,19 @@ async fn websocket(
                             {
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
-                            match runtime.apply_feed_event(session, &mut replicas, event).await {
+                            let applied = runtime.apply_feed_event(session, &mut replicas, event).await;
+                            delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
+                            match applied {
                                 Ok(messages) => {
+                                    gonvex_profiler::record(gonvex_profiler::Stage::DeliveryFrames, gonvex_profiler::Label::None, messages.len() as u64);
+                                    let mut backlog = gonvex_profiler::Backlog::new(messages.len());
                                     for mut message in messages {
+                                        backlog.sent();
                                         if replica_field_patches_enabled && !replica_native_rows_enabled {
-                                            match row_patches.prepare(&message) {
+                                            let mut encode_timer = gonvex_profiler::Timer::start();
+                                            let prepared = row_patches.prepare(&message);
+                                            encode_timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
+                                            match prepared {
                                                 Ok(Some((full, patch))) => {
                                                     let result = if let Some(patch) = patch {
                                                         socket.send_best_text(&full, &patch).await
@@ -1686,7 +1706,10 @@ async fn websocket(
                                             }
                                         }
                                         if replica_no_old_values_enabled && !replica_native_rows_enabled {
-                                            match gonvex_protocol::encode_compact_replica_transaction(&mut message, socket.compression_threshold()) {
+                                            let mut encode_timer = gonvex_profiler::Timer::start();
+                                            let compact = gonvex_protocol::encode_compact_replica_transaction(&mut message, socket.compression_threshold());
+                                            encode_timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
+                                            match compact {
                                                 Ok(Some(encoded)) => {
                                                     if socket.send(Message::Text(encoded.into())).await.is_err() { return; }
                                                     continue;
@@ -1736,6 +1759,10 @@ async fn websocket(
                                     legacy_snapshot_delivery.clear();
                                 }
                             }
+                        }
+                        delivery_timer.lap(gonvex_profiler::Stage::DeliverySend, gonvex_profiler::Label::None);
+                        if let Some(total) = feed_key.and_then(gonvex_profiler::since_stamp) {
+                            gonvex_profiler::record(gonvex_profiler::Stage::DeliveryTotal, gonvex_profiler::Label::None, total);
                         }
                         tracing::debug!(
                             target: "gonvex_runtime::ws_trace",
@@ -4232,6 +4259,10 @@ async fn send_replica_open(
     native: bool,
     delivery: &mut snapshot_delivery::SnapshotDelivery,
 ) -> Result<(), ()> {
+    let _profile = gonvex_profiler::ScopeTimer::new(
+        gonvex_profiler::Stage::SnapshotSend,
+        gonvex_profiler::Label::None,
+    );
     if native && matches!(message, ServerMessage::ReplicaSnapshot { .. }) {
         let id = if let ServerMessage::ReplicaSnapshot { id, .. } = &message {
             id.clone()
@@ -4323,7 +4354,9 @@ async fn send_connection_all(
 }
 
 async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
+    let mut timer = gonvex_profiler::Timer::start();
     let encoded = serde_json::to_string(message).map_err(|_| ())?;
+    timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
     socket
         .send(Message::Text(encoded.into()))
         .await
