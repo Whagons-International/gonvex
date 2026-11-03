@@ -257,10 +257,12 @@ impl Config {
             )?,
             // Read-only connections per database file; writes always use the
             // file's single writer connection.
+            // Each SQLite connection holds its own parsed schema (~4 MB for
+            // the Whagons tenant schema), so idle readers are not free.
             database_max_connections: integer(
                 "GONVEX_DB_MAX_OPEN_CONNS",
                 lookup("GONVEX_DB_MAX_OPEN_CONNS"),
-                4,
+                default_readers_per_database(),
             )? as u32,
             database_max_idle_connections: integer_allow_zero(
                 "GONVEX_DB_MAX_IDLE_CONNS",
@@ -270,7 +272,7 @@ impl Config {
             database_idle_timeout: duration_ms(
                 "GONVEX_DB_IDLE_TIMEOUT_MS",
                 lookup("GONVEX_DB_IDLE_TIMEOUT_MS"),
-                60_000,
+                15_000,
             )?,
             module_host: ModuleHostConfig {
                 enabled: boolean(
@@ -527,6 +529,15 @@ fn boolean(name: &'static str, value: Option<String>, default: bool) -> Result<b
 /// One V8 isolate per available CPU (cgroup quota aware), at most 4. Each
 /// isolate holds the whole application bundle (~290 MB for Whagons), and
 /// isolates beyond the CPU count add memory without adding throughput.
+/// Readers per database file: one per CPU, at least 2 (a long snapshot read
+/// must not block other reads) and at most 4.
+fn default_readers_per_database() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(2)
+        .clamp(2, 4)
+}
+
 fn default_isolate_pool_size() -> usize {
     std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
@@ -745,7 +756,7 @@ mod tests {
     fn database_idle_timeout_is_configurable() {
         assert_eq!(
             config(&[]).unwrap().database_idle_timeout,
-            Duration::from_secs(60)
+            Duration::from_secs(15)
         );
         assert_eq!(
             config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1500")])

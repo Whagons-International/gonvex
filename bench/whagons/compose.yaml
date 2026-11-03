@@ -31,7 +31,8 @@ services:
     entrypoint: [/bin/sh, -c]
     command:
       - >-
-        if [ -d /state/auth-export ]; then set -- --import /state/auth-export; else set --; fi;
+        if [ -d /state/auth-golden ]; then set -- --import /state/auth-golden;
+        elif [ -d /state/auth-export ]; then set -- --import /state/auth-export; else set --; fi;
         exec npx --offline --yes firebase-tools@15.11.0 emulators:start --only auth
         --project demo-whagons-e2e --config /firebase.json
         --export-on-exit /state/auth-export "$$@"
@@ -71,8 +72,8 @@ services:
       GONVEX_MODULE_HOST_ENABLED: 'true'
       GONVEX_MODULE_HOST_BINARY: /binhost/gonvex-module-host
       GONVEX_SANDBOX_WORKER_BINARY: /binhost/gonvex-sandbox-worker
-      GONVEX_DB_MAX_OPEN_CONNS: ${LOAD_READERS:-4}
-      GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE: ${LOAD_ISOLATES:-4}
+      GONVEX_DB_MAX_OPEN_CONNS: ${LOAD_READERS:-}
+      GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE: ${LOAD_ISOLATES:-}
       GONVEX_REPLICA_SNAPSHOT_CONCURRENCY: ${LOAD_SNAPSHOTS:-4}
       GONVEX_MODULE_HOST_MAX_CONCURRENT_CALLS: ${LOAD_MODULE_CONCURRENCY:-32}
       GONVEX_DB_MAX_TOTAL_CONNS: ${LOAD_SHARED:-64}

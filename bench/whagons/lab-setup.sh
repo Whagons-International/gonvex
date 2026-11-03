@@ -12,7 +12,7 @@ compose=(docker compose -f "$bench/compose.yaml")
 headroom() { until ${LOAD_HEADROOM_CHECK:-true} "$lab"; do sleep 30; done; }
 "${compose[@]}" --profile load down --remove-orphans >/dev/null 2>&1 || true
 docker volume rm gvsq-state >/dev/null 2>&1 || true
-rm -rf "$lab/auth-export" "$lab/fixture.json" "$lab/fixture.json.metrics.jsonl"
+rm -rf "$lab/auth-export" "$lab/auth-golden" "$lab/fixture.json" "$lab/fixture.json.metrics.jsonl"
 headroom
 "${compose[@]}" up -d --wait --wait-timeout 240
 "${compose[@]}" run --name gvsq-generator --rm --no-deps generator setup > "$lab/setup.log" 2>&1
@@ -25,3 +25,9 @@ headroom
 "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 runtime >/dev/null
 "${compose[@]}" run --name gvsq-generator --rm --no-deps generator verify > "$lab/verify.log" 2>&1
 grep -c '"ok":true' "$lab/verify.log"
+# Freeze the emulator's accounts: a clean stop exports them, and every later
+# start imports this copy, so an abrupt teardown cannot leave the auth state
+# out of step with the tenant members.
+"${compose[@]}" stop -t 30 auth >/dev/null
+cp -a "$lab/auth-export" "$lab/auth-golden"
+"${compose[@]}" up -d --no-deps --wait --wait-timeout 180 auth >/dev/null
