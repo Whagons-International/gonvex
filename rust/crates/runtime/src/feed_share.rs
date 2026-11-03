@@ -148,7 +148,9 @@ impl EventShares {
         }
         let mut recent = self.recent.lock().unwrap();
         if let Some(share) = recent.iter().find(|share| {
-            share.revision == revision && share.epoch == epoch && Arc::ptr_eq(&share.changes, changes)
+            share.revision == revision
+                && share.epoch == epoch
+                && Arc::ptr_eq(&share.changes, changes)
         }) {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(Arc::clone(share));

@@ -65,10 +65,16 @@ async fn class_shared_decisions_equal_each_connections_own_decisions() {
                     .await
                     .unwrap(),
             ),
-            4 => ("presence", fixture.beat_presence(0, round % members).await.unwrap()),
+            4 => (
+                "presence",
+                fixture.beat_presence(0, round % members).await.unwrap(),
+            ),
             _ => (
                 "spot cleared",
-                fixture.update_task(0, task, json!({"spotId": null})).await.unwrap(),
+                fixture
+                    .update_task(0, task, json!({"spotId": null}))
+                    .await
+                    .unwrap(),
             ),
         };
         events.push((format!("{name} {round}"), event));
@@ -116,7 +122,10 @@ async fn class_shared_decisions_equal_each_connections_own_decisions() {
         ),
     ];
     for (name, statement, binds) in statements {
-        events.push((name.to_owned(), fixture.commit(0, &statement, binds).await.unwrap()));
+        events.push((
+            name.to_owned(),
+            fixture.commit(0, &statement, binds).await.unwrap(),
+        ));
     }
     let before = feed_share::shared_decisions();
     let mut frames = 0usize;
@@ -125,25 +134,48 @@ async fn class_shared_decisions_equal_each_connections_own_decisions() {
             feed_share::set_sharing(Some(true));
             let with = fixture
                 .runtime
-                .apply_feed_event(&shared[member].session.clone(), &mut shared[member].subscriptions, event.clone())
+                .apply_feed_event(
+                    &shared[member].session.clone(),
+                    &mut shared[member].subscriptions,
+                    event.clone(),
+                )
                 .await
                 .unwrap();
             feed_share::set_sharing(Some(false));
             let without = fixture
                 .runtime
-                .apply_feed_event(&alone[member].session.clone(), &mut alone[member].subscriptions, event.clone())
+                .apply_feed_event(
+                    &alone[member].session.clone(),
+                    &mut alone[member].subscriptions,
+                    event.clone(),
+                )
                 .await
                 .unwrap();
-            let with: Vec<Value> = with.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
-            let without: Vec<Value> =
-                without.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
-            assert_eq!(with, without, "member {member} ({:?}), event {name}", tenant_members[member].kind);
+            let with: Vec<Value> = with
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap())
+                .collect();
+            let without: Vec<Value> = without
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap())
+                .collect();
+            assert_eq!(
+                with, without,
+                "member {member} ({:?}), event {name}",
+                tenant_members[member].kind
+            );
             frames += with.len();
         }
     }
     feed_share::set_sharing(None);
     let reused = feed_share::shared_decisions() - before;
-    eprintln!("{} events, {frames} frames, {reused} shared decisions", events.len());
+    eprintln!(
+        "{} events, {frames} frames, {reused} shared decisions",
+        events.len()
+    );
     assert!(frames > 0);
-    assert!(reused > 0, "no decision was shared: the oracle exercised nothing");
+    assert!(
+        reused > 0,
+        "no decision was shared: the oracle exercised nothing"
+    );
 }

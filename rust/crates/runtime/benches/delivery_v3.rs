@@ -102,7 +102,11 @@ async fn feed_one(
 ) -> bool {
     let messages = fixture
         .runtime
-        .apply_feed_event(&connection.session, &mut connection.subscriptions, event.clone())
+        .apply_feed_event(
+            &connection.session,
+            &mut connection.subscriptions,
+            event.clone(),
+        )
         .await
         .unwrap();
     let received = !messages.is_empty();
@@ -163,14 +167,19 @@ async fn run() {
                 edit += 1;
                 let task = spotless[edit % spotless.len()];
                 let event = fixture
-                    .update_task(BIG, task, json!({"description": format!("v3 edit {edit} {}", "x".repeat(380))}))
+                    .update_task(
+                        BIG,
+                        task,
+                        json!({"description": format!("v3 edit {edit} {}", "x".repeat(380))}),
+                    )
                     .await
                     .unwrap();
                 let mut wire = Wire::default();
                 let before = AllocSnapshot::now();
                 let started = Instant::now();
                 for (connection, conn) in connections.iter_mut().zip(v.iter_mut()) {
-                    if feed_one(&fixture, &hub, &tenant_id, native, connection, conn, &event).await {
+                    if feed_one(&fixture, &hub, &tenant_id, native, connection, conn, &event).await
+                    {
                         wire.receivers += 1;
                     }
                     if conn.batcher.has_items() {
@@ -206,17 +215,32 @@ async fn run() {
             let mut extra = BTreeMap::new();
             extra.insert("medianNs".into(), json!(samples[samples.len() / 2]));
             extra.insert("p90Ns".into(), json!(samples[samples.len() * 9 / 10]));
-            extra.insert("nsPerSubscriber".into(), json!(samples[samples.len() / 2] / members as f64));
-            extra.insert("allocationsPerChange".into(), json!(allocs.allocations as f64 / n));
-            extra.insert("bytesAllocatedPerChange".into(), json!(allocs.allocated_bytes as f64 / n));
+            extra.insert(
+                "nsPerSubscriber".into(),
+                json!(samples[samples.len() / 2] / members as f64),
+            );
+            extra.insert(
+                "allocationsPerChange".into(),
+                json!(allocs.allocations as f64 / n),
+            );
+            extra.insert(
+                "bytesAllocatedPerChange".into(),
+                json!(allocs.allocated_bytes as f64 / n),
+            );
             extra.insert("framesPerChange".into(), json!(sum.frames as f64 / n));
             extra.insert("receiversPerChange".into(), json!(sum.receivers as f64 / n));
             extra.insert("jsonBytesPerChange".into(), json!(sum.raw_bytes as f64 / n));
-            extra.insert("wireBytesPerChange".into(), json!(sum.wire_bytes as f64 / n));
-            extra.insert("memo".into(), json!({
-                "hits": stats.hits, "encodes": stats.encodes,
-                "privateEncodes": stats.private_encodes, "encodedBytes": stats.encoded_bytes,
-            }));
+            extra.insert(
+                "wireBytesPerChange".into(),
+                json!(sum.wire_bytes as f64 / n),
+            );
+            extra.insert(
+                "memo".into(),
+                json!({
+                    "hits": stats.hits, "encodes": stats.encodes,
+                    "privateEncodes": stats.private_encodes, "encodedBytes": stats.encoded_bytes,
+                }),
+            );
             eprintln!("{name}: {extra:?}");
             report.record(&name, extra);
         }
@@ -257,7 +281,10 @@ async fn run() {
         extra.insert("seconds".into(), json!(elapsed.as_secs_f64()));
         extra.insert("peakHeapBytes".into(), json!(peak));
         extra.insert("retainedBytesAfterOpen".into(), json!(live));
-        extra.insert("retainedBytesPerConnection".into(), json!(live / burst.max(1) as i64));
+        extra.insert(
+            "retainedBytesPerConnection".into(),
+            json!(live / burst.max(1) as i64),
+        );
         extra.insert(
             "note".into(),
             json!("fixture.connect (open_replica per collection, snapshot messages built and dropped); concurrent on 1 tokio worker"),
@@ -294,7 +321,11 @@ async fn run() {
             let task = (k * 7919) % tasks;
             events.push(
                 fixture
-                    .update_task(0, task, json!({"description": format!("driver {k} {}", "y".repeat(380))}))
+                    .update_task(
+                        0,
+                        task,
+                        json!({"description": format!("driver {k} {}", "y".repeat(380))}),
+                    )
                     .await
                     .unwrap(),
             );
@@ -354,12 +385,30 @@ async fn run() {
         extra.insert("members".into(), json!(large_members));
         extra.insert("writes".into(), json!(writes));
         extra.insert("framesPerSecond".into(), json!(frames as f64 / simulated));
-        extra.insert("receiversPerWrite".into(), json!(receivers as f64 / writes as f64));
-        extra.insert("wireBytesPerSecond".into(), json!(wire_bytes as f64 / simulated));
-        extra.insert("cpuShareOfOneCore".into(), json!(busy.as_secs_f64() / simulated));
-        extra.insert("busyMsPerWrite".into(), json!(busy.as_secs_f64() * 1e3 / writes as f64));
-        extra.insert("allocationsPerWrite".into(), json!(allocs.allocations as f64 / writes as f64));
-        extra.insert("bytesAllocatedPerWrite".into(), json!(allocs.allocated_bytes as f64 / writes as f64));
+        extra.insert(
+            "receiversPerWrite".into(),
+            json!(receivers as f64 / writes as f64),
+        );
+        extra.insert(
+            "wireBytesPerSecond".into(),
+            json!(wire_bytes as f64 / simulated),
+        );
+        extra.insert(
+            "cpuShareOfOneCore".into(),
+            json!(busy.as_secs_f64() / simulated),
+        );
+        extra.insert(
+            "busyMsPerWrite".into(),
+            json!(busy.as_secs_f64() * 1e3 / writes as f64),
+        );
+        extra.insert(
+            "allocationsPerWrite".into(),
+            json!(allocs.allocations as f64 / writes as f64),
+        );
+        extra.insert(
+            "bytesAllocatedPerWrite".into(),
+            json!(allocs.allocated_bytes as f64 / writes as f64),
+        );
         extra.insert(
             "note".into(),
             json!("apply_feed_event + batch push + flush through one compressed loopback socket for every member, in sequence on 1 tokio worker"),

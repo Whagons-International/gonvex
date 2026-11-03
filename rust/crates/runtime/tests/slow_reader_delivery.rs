@@ -41,7 +41,10 @@ fn limits() -> OutboundLimits {
 /// reads everything and returns the WebSocket frames (opcode byte, payload).
 async fn slow_socket(
     release: Arc<AtomicBool>,
-) -> (gonvex_websocket::WebSocket, std::thread::JoinHandle<Vec<(u8, Vec<u8>)>>) {
+) -> (
+    gonvex_websocket::WebSocket,
+    std::thread::JoinHandle<Vec<(u8, Vec<u8>)>>,
+) {
     use std::io::Write;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -74,7 +77,8 @@ async fn slow_socket(
     );
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = std::thread::spawn(move || {
-        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        let socket =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
         socket.set_recv_buffer_size(4096).unwrap();
         socket.connect(&address.into()).unwrap();
         let mut stream: std::net::TcpStream = socket.into();
@@ -194,7 +198,8 @@ async fn a_slow_reader_gets_fewer_newer_batches_and_never_exceeds_the_cap() {
                 // Incompressible, so the kernel buffers cannot absorb it all.
                 let noise: String = (0..24 << 10)
                     .map(|i| {
-                        let x = (written as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                        let x = (written as u64)
+                            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
                             .wrapping_add((i as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9));
                         char::from(b'a' + ((x ^ (x >> 29)) % 26) as u8)
                     })
@@ -219,12 +224,20 @@ async fn a_slow_reader_gets_fewer_newer_batches_and_never_exceeds_the_cap() {
         }
         // One tick: everything waiting, merged when the socket fell behind.
         let mut taken = 0;
-        while let Some(event) = pending.take().map(Result::unwrap).or_else(|| {
-            feed.as_mut().and_then(|rx| rx.try_recv().ok())
-        }) {
+        while let Some(event) = pending
+            .take()
+            .map(Result::unwrap)
+            .or_else(|| feed.as_mut().and_then(|rx| rx.try_recv().ok()))
+        {
             let event = if catching_up {
                 let before = revision(&event);
-                let merged = merge_waiting_feed(event, &mut feed, &mut pending, &connection.subscriptions, true);
+                let merged = merge_waiting_feed(
+                    event,
+                    &mut feed,
+                    &mut pending,
+                    &connection.subscriptions,
+                    true,
+                );
                 if revision(&merged) != before {
                     merged_events += 1;
                 }
@@ -235,16 +248,32 @@ async fn a_slow_reader_gets_fewer_newer_batches_and_never_exceeds_the_cap() {
             applied_events += 1;
             let messages = fixture
                 .runtime
-                .apply_feed_event(&connection.session.clone(), &mut connection.subscriptions, event.clone())
+                .apply_feed_event(
+                    &connection.session.clone(),
+                    &mut connection.subscriptions,
+                    event.clone(),
+                )
                 .await
                 .unwrap();
             for message in messages {
                 assert!(batcher
-                    .push(socket.batch_mut(), &hub, &tenant_id, false, &connection.subscriptions, message)
+                    .push(
+                        socket.batch_mut(),
+                        &hub,
+                        &tenant_id,
+                        false,
+                        &connection.subscriptions,
+                        message
+                    )
                     .unwrap()
                     .is_none());
             }
-            batcher.watermark(socket.batch_mut(), &tenant_id, &connection.subscriptions, revision(&event));
+            batcher.watermark(
+                socket.batch_mut(),
+                &tenant_id,
+                &connection.subscriptions,
+                revision(&event),
+            );
             taken += 1;
             if taken >= 3 && !catching_up {
                 break;
@@ -278,14 +307,21 @@ async fn a_slow_reader_gets_fewer_newer_batches_and_never_exceeds_the_cap() {
         if opcode & 0x0f != 1 {
             continue;
         }
-        let text = if opcode & 0x40 != 0 { inflate(payload) } else { payload.clone() };
+        let text = if opcode & 0x40 != 0 {
+            inflate(payload)
+        } else {
+            payload.clone()
+        };
         let batch: Value = serde_json::from_slice(&text).unwrap();
         assert_eq!(batch["type"], "replica.batch");
         received += 1;
         for item in batch["items"].as_array().unwrap() {
             match item["type"].as_str().unwrap() {
                 "replica.stream" => {
-                    bindings.insert(item["stream"].as_str().unwrap().into(), item["id"].as_str().unwrap().into());
+                    bindings.insert(
+                        item["stream"].as_str().unwrap().into(),
+                        item["id"].as_str().unwrap().into(),
+                    );
                 }
                 "replica.delta" => {
                     for row in item["upserts"].as_array().into_iter().flatten() {
@@ -306,9 +342,19 @@ async fn a_slow_reader_gets_fewer_newer_batches_and_never_exceeds_the_cap() {
     assert_eq!(received, batches);
     // Fewer: the slow client got far fewer batches and row versions than writes.
     assert!(merged_events > 0, "nothing was coalesced");
-    assert!(batches < WRITES / 2, "{batches} batches for {WRITES} writes");
-    assert!(descriptions.len() < WRITES / 2, "{} versions", descriptions.len());
+    assert!(
+        batches < WRITES / 2,
+        "{batches} batches for {WRITES} writes"
+    );
+    assert!(
+        descriptions.len() < WRITES / 2,
+        "{} versions",
+        descriptions.len()
+    );
     // Newer: it ends at the last write, nothing missing at the end.
     assert_eq!(watermark, last_revision);
-    assert!(descriptions.last().unwrap().starts_with(&format!("slow {WRITES} ")));
+    assert!(descriptions
+        .last()
+        .unwrap()
+        .starts_with(&format!("slow {WRITES} ")));
 }

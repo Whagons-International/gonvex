@@ -479,9 +479,13 @@ impl WebSocket {
     pub fn from_axum(socket: ws::WebSocket, limits: OutboundLimits) -> Self {
         let shared = Shared::new(limits);
         let (sink, stream) = socket.split();
-        Self::start(shared, None, None, Writer::Sink(Box::pin(sink)), |shared, tx| {
-            tokio::spawn(read_stream(shared, stream, tx))
-        })
+        Self::start(
+            shared,
+            None,
+            None,
+            Writer::Sink(Box::pin(sink)),
+            |shared, tx| tokio::spawn(read_stream(shared, stream, tx)),
+        )
     }
 
     pub fn is_compressed(&self) -> bool {
