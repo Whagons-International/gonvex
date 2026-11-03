@@ -123,7 +123,10 @@ impl std::fmt::Debug for SharedText {
 
 impl SharedText {
     /// `text` is UTF-8 (a `String`), so plain transports never re-validate it.
-    pub fn new(text: String) -> Self {
+    pub fn new(mut text: String) -> Self {
+        // Encoded once, possibly held for a while (memo, pending batches):
+        // drop the encoder's growth slack so `heap_bytes` is what it holds.
+        text.shrink_to_fit();
         Self {
             text: Bytes::from(text),
             deflated: Default::default(),
@@ -176,6 +179,7 @@ impl SharedText {
                     out.extend_from_slice(&[0, 0, 0, 255, 255]);
                 }
             }
+            out.shrink_to_fit();
             Bytes::from(out)
         })
     }

@@ -1763,7 +1763,7 @@ async fn websocket(
             _ = tokio::task::yield_now(), if !legacy_snapshot_delivery.is_empty() => {
                 for page in legacy_snapshot_delivery.next() {
                     let Ok(page) = offload::encode_snapshot_json(page).await else { return; };
-                    if socket.send(Message::Text(page.into())).await.is_err() {return;}
+                    if socket.send(gonvex_websocket::text_message(page)).await.is_err() {return;}
                 }
                 continue;
             }
@@ -4878,7 +4878,7 @@ async fn send_replica_open(
         let mut pages = offload::PageEncoder::new(replica::SnapshotPages::new(message));
         while let Some(page) = pages.next().await {
             let page = page.map_err(|_| ())?;
-            socket.send(Message::Text(page.into())).await.map_err(|_| ())?;
+            socket.send(gonvex_websocket::text_message(page)).await.map_err(|_| ())?;
         }
         Ok(())
     } else {
@@ -4886,7 +4886,7 @@ async fn send_replica_open(
         if matches!(message, ServerMessage::ReplicaSnapshot { .. }) && !delivery.native() {
             let encoded = offload::encode_snapshot_json(message).await.map_err(|_| ())?;
             return socket
-                .send(Message::Text(encoded.into()))
+                .send(gonvex_websocket::text_message(encoded))
                 .await
                 .map_err(|_| ());
         }

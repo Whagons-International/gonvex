@@ -115,3 +115,11 @@ required-features = ["perf-fixture"]
 name = "replica_state"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "slow_reader_delivery"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "class_sharing_oracle"
+required-features = ["perf-fixture"]
+
