@@ -57,7 +57,7 @@ async function main() {
  // Row encoding. Default: legacy JSON rows, as the Whagons app's SDK
  // negotiates without a native staging adapter. LOAD_NATIVE_ROWS=true makes
  // thin clients and SDK users (with in-memory staging, no fsync) use native rows.
- const nativeRequested=process.env.LOAD_NATIVE_ROWS==='true';
+ const nativeRequested=process.env.LOAD_NATIVE_ROWS==='true';const presenceV2=process.env.LOAD_PRESENCE_V2==='1';
  const sdkStaging=nativeRequested?memorySnapshotStaging():undefined;
  // Open-loop schedule (default for thin runs): foreground actions and
  // heartbeats fire at planned times whether or not earlier ones finished, and
@@ -67,7 +67,7 @@ async function main() {
  const maxInFlightPerUser=Number(process.env.LOAD_MAX_INFLIGHT_PER_USER||16);
  const plannedStart=new AsyncLocalStorage<{at:number,used:boolean}>();
  const scheduleStats={kind:openLoop?'open':'closed',fired:0,overflow:0,skippedDuringReconnect:0,lateMs:[] as number[]};
- const client=(kind:string=clientKind)=>{if(kind==='thin'){const c=new ThinClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,nativeRows:nativeRequested,ackDelayMs:Number(process.env.LOAD_THIN_ACK_DELAY_MS||0)});c.connect();return c;}const staging=sdkStaging?.client();const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false},...(staging?{nativeSnapshotStaging:staging.staging}:{})});c.connect();return c;};
+ const client=(kind:string=clientKind)=>{if(kind==='thin'){const c=new ThinClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,nativeRows:nativeRequested,ackDelayMs:Number(process.env.LOAD_THIN_ACK_DELAY_MS||0),presenceV2});c.connect();return c;}const staging=sdkStaging?.client();const c=new GonvexClient(url.replace('http:','ws:')+'/ws',{project:projectId,clientContract:localRuntime.clientContract,outbox:{enabled:false},...(staging?{nativeSnapshotStaging:staging.staging}:{})});c.connect();return c;};
  let recordReducer:((path:string,ms:number,failed:boolean)=>void)|undefined;
  const reducer=async(c:any,ref:any,args:any)=>{const at=performance.now();try{const value=await c.reducer({...ref,localExecution:undefined},args,{offline:'reject'});recordReducer?.(ref.path,performance.now()-at,false);return value;}catch(e){recordReducer?.(ref.path,performance.now()-at,true);throw e;}};
  const identity=async(email:string)=>{
@@ -76,6 +76,9 @@ async function main() {
   if(!r.ok) r=await fetch(auth+'/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=local',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   const b:any=await r.json();if(!r.ok) throw Error('Emulator identity failed');return b.idToken;
  };
+ // LOAD_PRESENCE_V2=1: behave like the presence-v2 app (Whagons perf/presence-v2): when the
+ // runtime grants presence v2, no presence/support heartbeat Reducers; transitions are
+ // presence.set and delivery is timed from the presence feed (presence.patch).
  const login=async(email:string,tenant?:string,kind:string=clientKind)=>{
   const c=client(kind);
   try {
@@ -174,7 +177,7 @@ async function main() {
  const perPath:Record<string,{durations:number[],errors:number}>={};
  recordReducer=(path,ms,failed)=>{const p=perPath[path]??={durations:[],errors:0};if(failed)p.errors++;else{p.durations.push(ms);sample('reducer',ms);}};
  const periodicTimers:ReturnType<typeof setInterval>[]=[];
- const users:any[]=[];const snapshots:any[]=[];const pending=new Map<string,number>();const pendingTasks=new Map<string,{at:number,matches:(row:any,at:number)=>boolean}>();
+ const presenceStates=new Map<string,string>();const users:any[]=[];const snapshots:any[]=[];const pending=new Map<string,number>();const pendingTasks=new Map<string,{at:number,matches:(row:any,at:number)=>boolean}>();
  const started=Date.now();let stopping=false;let aborted=false;let deadline=Infinity;let remaining=myTarget;
  process.on('SIGTERM',()=>{const plateauEnd=deadline;aborted=true;stopping=true;deadline=Date.now();const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';writeFileSync(partial+'.tmp',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),steadyStartMs:plateauEnd-seconds*1000,rawSamples:samples,rawPaths:perPath}));renameSync(partial+'.tmp',partial);});
  const ready=()=>{if(--remaining===0)deadline=Date.now()+seconds*1000;};
@@ -258,11 +261,15 @@ async function main() {
   const connect=async(kind:string)=>{
    const session=await timed(kind,()=>login(email,f.tenant,userKind(i,target)));if(!session)return false;
    c=session.c;member=session.grant.tenants.find((t:any)=>t.id===f.tenant)?.memberId;
-   const watch=c.watchReplica(api.presence.list,{});presenceReadyAt=Infinity;
+   presenceReadyAt=Infinity;
+   if(presenceV2&&c.presenceSupported?.()){stopPresence=c.subscribePresence(()=>{try{const snap=c.presenceSnapshot();if(!snap.ready)return;if(presenceReadyAt===Infinity)presenceReadyAt=Date.now();
+    for(const [id,m] of snap.members as Map<string,any>){const ts=pending.get(id);if(ts&&ts>=presenceReadyAt&&m.state===presenceStates.get(id)&&seen.get(id)!==ts){seen.set(id,ts);sample('delivery',Date.now()-ts,ts);}}
+   }catch(e){error(e);}});}else{
+   const watch=c.watchReplica(api.presence.list,{});
    stopPresence=watch.onUpdate(()=>{try{
     if(presenceReadyAt===Infinity){if(!watch.status().isUpToDate)return;presenceReadyAt=Date.now();}
     for(const row of watch.localReplicaResult()||[]){const ts=pending.get(row.userId);if(ts&&ts>=presenceReadyAt&&row.lastSeenAt>=ts&&seen.get(row.userId)!==row.lastSeenAt){seen.set(row.userId,row.lastSeenAt);sample('delivery',Date.now()-ts,ts);}}
-   }catch(e){error(e);}});
+   }catch(e){error(e);}});}
    extras=watchAll(c,[api.workspaces.list,api.statuses.statuses,api.tags.tags,api.members.listMembers,api.members.listMemberTeams,api.taskResources.taskUsers,api.taskResources.taskTags,api.workspacePreferences.workspacePreferences].map(ref=>[ref,{}] as [any,any]));
    const w=c.watchReplica(api.tasks.recentWorkspaceTasks,{});const q0=performance.now();let first=true;
    stopTasks=w.onUpdate(()=>{try{
@@ -281,10 +288,11 @@ async function main() {
   const periodicPending=new Set<Promise<unknown>>();
   const launch=(fn:()=>Promise<unknown>)=>{const p=fn();periodicPending.add(p);void p.finally(()=>periodicPending.delete(p));};
   let beatInFlight=false,supportInFlight=false,transitionInFlight=false,idle=false,reconnecting=false;
-  const sendBeat=async()=>{if(stopping||reconnecting||Date.now()>=deadline||(beatInFlight&&!openLoop))return;beatInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.beat,{}));}finally{beatInFlight=false;}};
-  const sendSupport=async()=>{if(stopping||reconnecting||Date.now()>=deadline||(supportInFlight&&!openLoop))return;supportInFlight=true;try{await timed('heartbeat',()=>reducer(c,control.support.heartbeat,{release:'synthetic-local',environment:'test'}));}finally{supportInFlight=false;}};
+  const v2=()=>presenceV2&&c?.presenceSupported?.();
+  const sendBeat=async()=>{if(v2())return;if(stopping||reconnecting||Date.now()>=deadline||(beatInFlight&&!openLoop))return;beatInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.beat,{}));}finally{beatInFlight=false;}};
+  const sendSupport=async()=>{if(v2())return;if(stopping||reconnecting||Date.now()>=deadline||(supportInFlight&&!openLoop))return;supportInFlight=true;try{await timed('heartbeat',()=>reducer(c,control.support.heartbeat,{release:'synthetic-local',environment:'test'}));}finally{supportInFlight=false;}};
   let transitionAt=Date.now()-Math.log(Math.max(transitionRandom(),.000001))*101000;
-  const sendTransition=async(state:string)=>{if(stopping||reconnecting||Date.now()>=deadline||(transitionInFlight&&!openLoop))return;transitionInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.transition,{state}));}finally{transitionInFlight=false;if(!openLoop)transitionAt=Date.now()-Math.log(Math.max(transitionRandom(),.000001))*101000;}};
+  const sendTransition=async(state:string)=>{if(v2()){if(stopping||reconnecting||Date.now()>=deadline)return;pending.set(member,Date.now());presenceStates.set(member,state);c.setPresence(state);if(!openLoop)transitionAt=Date.now()-Math.log(Math.max(transitionRandom(),.000001))*101000;return;}if(stopping||reconnecting||Date.now()>=deadline||(transitionInFlight&&!openLoop))return;transitionInFlight=true;pending.set(member,Date.now());try{await timed('heartbeat',()=>reducer(c,api.presence.transition,{state}));}finally{transitionInFlight=false;if(!openLoop)transitionAt=Date.now()-Math.log(Math.max(transitionRandom(),.000001))*101000;}};
   // Match the independent app providers: fixed 30-second ticks, skip an
   // overlapping heartbeat, and continue them while foreground saves await.
   // Open loop: a timer's call starts its clock at the planned tick, and the

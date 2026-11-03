@@ -79,7 +79,7 @@ scp -q "$lab/fixture.json" "$remote:$rroot/fixture.json"
 rresult="$rroot/results/$label.json"
 fwd=""
 for v in LOAD_CLIENT LOAD_SDK_USERS LOAD_ORACLE_CLIENT LOAD_OPEN_LOOP LOAD_NATIVE_ROWS LOAD_THIN_ACK_DELAY_MS LOAD_USERS LOAD_SECONDS \
- LOAD_RAMP_SECONDS LOAD_SHARDS LOAD_ALL_TENANTS_ACTIVE LOAD_SCRIPT LOAD_SCENARIO LOAD_RATE LOAD_DWELL_MS LOAD_PREPARED_USERS LOAD_MAX_INFLIGHT LOAD_PATH_MOUNTS; do
+ LOAD_RAMP_SECONDS LOAD_SHARDS LOAD_ALL_TENANTS_ACTIVE LOAD_SCRIPT LOAD_SCENARIO LOAD_RATE LOAD_DWELL_MS LOAD_PREPARED_USERS LOAD_MAX_INFLIGHT LOAD_PATH_MOUNTS LOAD_PRESENCE_V2 LOAD_TEARDOWN_MS; do
  [ -z "${!v:-}" ] || fwd="$fwd $v=$(printf %q "${!v}")"
 done
 # On-CPU then off-CPU flamegraphs of the runtime, 30 s each, starting
@@ -102,7 +102,7 @@ if [ "${LOAD_PERF:-1}" != 0 ] && command -v perf >/dev/null; then
    fi ) & perfjob=$!
 fi
 status=0
-ssh "$remote" "cd $rroot && env WHAGONS_CHECKOUT=$rroot/app LOAD_STATE=$rroot/fixture.json LOAD_ADMIN_KEY=local-load-admin \
+ssh "$remote" "cd $rroot && env WHAGONS_CHECKOUT=$rroot/${LOAD_REMOTE_APP:-app} LOAD_STATE=$rroot/fixture.json LOAD_ADMIN_KEY=local-load-admin \
  LOAD_URL=http://127.0.0.1:$rport LOAD_AUTH_URL=http://127.0.0.1:$aport LOAD_RESULT=$rresult \
  LOAD_NODE_BIN=$rroot/tools/node-v26.13.0-darwin-arm64/bin/node LOAD_HARNESS_ROOT=$rh LOAD_RTT_HOST=${LOAD_RTT_HOST:-100.85.148.8} \
  PATH=$rroot/tools/node-v26.13.0-darwin-arm64/bin:/usr/bin:/bin:/usr/sbin:/sbin $fwd sh $rh/remote-shards.sh" > "$out/generator.log" 2>&1 || status=$?
