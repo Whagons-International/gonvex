@@ -399,51 +399,41 @@ async fn unmaintained_index_behind_the_event_is_not_ready() {
     assert!(!ready_at(&index, 6, "any").await);
 }
 
-/// Real PostgreSQL, real change feed: no connection consumes the feed, yet the
-/// index advances; and a snapshot holding the database's only admission slot
+/// Real SQLite, real change feed: no connection consumes the feed, yet the
+/// index advances; and a snapshot holding the runtime's only admission slot
 /// resolves inherited parents without asking for a second one.
 #[tokio::test]
 async fn real_feed_maintains_index_without_consumers_and_without_nested_admission() {
-    use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
-    use sqlx::postgres::PgPoolOptions;
-    let Ok(base) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL unset; skipping parent ACL feed test");
-        return;
-    };
-    let schema = format!("parent_acl_{}", uuid::Uuid::new_v4().simple());
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let separator = if base.contains('?') { '&' } else { '?' };
-    let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+    use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
+    async fn script(pools: &PoolRegistry, url: &str, sql: &str) {
+        let mut transaction = gonvex_store::begin_transaction(pools, url, false)
+            .await
+            .unwrap();
+        gonvex_store::execute_script(&mut **transaction.transaction(), sql)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+    }
+    let directory = tempfile::tempdir().unwrap();
+    // One file holds the Control Plane and the tenant tables.
+    let url = gonvex_store::database_url(&directory.path().join("acl.db"));
     let pools = PoolRegistry::new(PoolLimits {
-        max_connections_per_database: 1,
+        max_total_connections: 1,
         acquire_timeout: Duration::from_secs(2),
         ..PoolLimits::default()
     });
     let control = ControlPlane::connect(&url, pools.clone(), BTreeMap::new())
         .await
         .unwrap();
-    let db = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .unwrap();
-    sqlx::raw_sql(
-        r#"CREATE TABLE tasks(id text PRIMARY KEY, "workspaceId" text, title text);
-           CREATE TABLE "taskNotes"(id text PRIMARY KEY, "taskId" text);
-           CREATE TABLE "memberTeams"(id text PRIMARY KEY, "memberId" text, "teamId" text);
+    script(
+        &pools,
+        &url,
+        r#"CREATE TABLE tasks(id TEXT PRIMARY KEY, "workspaceId" TEXT, title TEXT);
+           CREATE TABLE "taskNotes"(id TEXT PRIMARY KEY, "taskId" TEXT);
+           CREATE TABLE "memberTeams"(id TEXT PRIMARY KEY, "memberId" TEXT, "teamId" TEXT);
            INSERT INTO tasks VALUES('t1','private','Task');"#,
     )
-    .execute(&db)
-    .await
-    .unwrap();
+    .await;
     let route = TenantRoute {
         project_id: "acl".into(),
         tenant_id: "tenant".into(),
@@ -454,13 +444,13 @@ async fn real_feed_maintains_index_without_consumers_and_without_nested_admissio
         .provision_tenant_database(route.clone(), Vec::new())
         .await
         .unwrap();
-    sqlx::raw_sql(
+    script(
+        &pools,
+        &url,
         r#"INSERT INTO members(id,account_id,status,display_name) VALUES('alice','alice','active','Alice');
            INSERT INTO "memberTeams" VALUES('mt','alice','team');"#,
     )
-    .execute(&db)
-    .await
-    .unwrap();
+    .await;
     let mut plans = BTreeMap::new();
     for plan in [
         json!({"version":2,"table":"tasks","key":"id","permissionTables":["memberTeams"],"sets":{
@@ -490,10 +480,12 @@ async fn real_feed_maintains_index_without_consumers_and_without_nested_admissio
     assert_eq!(workspace(&index, "t1").as_deref(), Some("private"));
 
     // No consumer of any kind reads the feed from here on.
-    sqlx::query("UPDATE tasks SET \"workspaceId\"='team' WHERE id='t1'")
-        .execute(&db)
-        .await
-        .unwrap();
+    script(
+        &pools,
+        &url,
+        "UPDATE tasks SET \"workspaceId\"='team' WHERE id='t1'",
+    )
+    .await;
     let clock = crate::change_feed::read_clock(&pools, &route)
         .await
         .unwrap();
@@ -554,11 +546,5 @@ async fn real_feed_maintains_index_without_consumers_and_without_nested_admissio
     transaction.commit().await.unwrap();
 
     feeds.shutdown();
-    db.close().await;
     pools.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
 }
