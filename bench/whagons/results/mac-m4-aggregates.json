@@ -1,0 +1,2243 @@
+[
+  {
+    "phase": "pre279-n1",
+    "users": 1,
+    "target": 1,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 4,
+        "p50": 41.63904199999888,
+        "p95": 396.18520799999897,
+        "p99": 396.18520799999897
+      },
+      "heartbeat": {
+        "samples": 13,
+        "p50": 18.77637500000128,
+        "p95": 720.9534170000001,
+        "p99": 720.9534170000001
+      },
+      "reducer": {
+        "samples": 17,
+        "p50": 19.848291000002064,
+        "p95": 720.9354589999999,
+        "p99": 720.9354589999999
+      },
+      "query": {
+        "samples": 1,
+        "p50": 719.8022920000001,
+        "p95": 719.8022920000001,
+        "p99": 719.8022920000001
+      },
+      "delivery": {
+        "samples": 7,
+        "p50": 14,
+        "p95": 26,
+        "p99": 26
+      },
+      "taskDelivery": {
+        "samples": 2,
+        "p50": 326,
+        "p95": 389,
+        "p99": 389
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 4,
+        "p50": 41.63904199999888,
+        "p95": 396.18520799999897,
+        "p99": 396.18520799999897
+      },
+      "heartbeat": {
+        "samples": 14,
+        "p50": 18.586707999998907,
+        "p95": 720.9534170000001,
+        "p99": 720.9534170000001
+      },
+      "reducer": {
+        "samples": 18,
+        "p50": 19.68095799999719,
+        "p95": 720.9354589999999,
+        "p99": 720.9354589999999
+      },
+      "query": {
+        "samples": 2,
+        "p50": 0.8712090000000217,
+        "p95": 719.8022920000001,
+        "p99": 719.8022920000001
+      },
+      "delivery": {
+        "samples": 7,
+        "p50": 14,
+        "p95": 26,
+        "p99": 26
+      },
+      "taskDelivery": {
+        "samples": 2,
+        "p50": 326,
+        "p95": 389,
+        "p99": 389
+      },
+      "login": {
+        "samples": 1,
+        "p50": 69.408459,
+        "p95": 69.408459,
+        "p99": 69.408459
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": true,
+    "memoryStopped": false,
+    "maxConnections": 57,
+    "meanConnections": 16.377777777777776,
+    "newConnectionsPerSecond": 8.055718128612657,
+    "pg": {
+      "userCores": 0.03870501161706617,
+      "systemCores": 0.04050940304636784,
+      "peakMemoryBytes": 2452410368
+    },
+    "runtime": {
+      "userCores": 0.030906175195654643,
+      "systemCores": 0.014374339656809391,
+      "peakMemoryBytes": 1947926528
+    },
+    "generator": {
+      "userCores": 0.006076376630940783,
+      "systemCores": 0.00201450968499328,
+      "peakMemoryBytes": 243281920
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.0824264705882353,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 1,
+    "maxAuthenticatedAccounts": 1,
+    "admissionMeanMsBetweenSamples": 6.1583318515225605,
+    "admissionMaxMsSinceRuntimeStart": 412.097,
+    "newApplicationConnectionsPerSecond": 7.100667484323038,
+    "newHealthConnectionsPerSecond": 0.956074125841921,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0
+  },
+  {
+    "phase": "pre279-n2",
+    "users": 2,
+    "target": 2,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 13,
+        "p50": 28.631082999985665,
+        "p95": 386.4042089999966,
+        "p99": 386.4042089999966
+      },
+      "heartbeat": {
+        "samples": 26,
+        "p50": 20.124875000008615,
+        "p95": 35.537624999997206,
+        "p99": 262.73974999999996
+      },
+      "reducer": {
+        "samples": 39,
+        "p50": 23.129750000000058,
+        "p95": 314.62508300000627,
+        "p99": 386.28229199999987
+      },
+      "query": {
+        "samples": 1,
+        "p50": 260.91037499999993,
+        "p95": 260.91037499999993,
+        "p99": 260.91037499999993
+      },
+      "delivery": {
+        "samples": 14,
+        "p50": 17,
+        "p95": 32,
+        "p99": 32
+      },
+      "taskDelivery": {
+        "samples": 3,
+        "p50": 294,
+        "p95": 379,
+        "p99": 379
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 13,
+        "p50": 28.631082999985665,
+        "p95": 386.4042089999966,
+        "p99": 386.4042089999966
+      },
+      "heartbeat": {
+        "samples": 28,
+        "p50": 20.124875000008615,
+        "p95": 262.73974999999996,
+        "p99": 760.338375
+      },
+      "reducer": {
+        "samples": 41,
+        "p50": 23.129750000000058,
+        "p95": 314.62508300000627,
+        "p99": 760.313709
+      },
+      "query": {
+        "samples": 4,
+        "p50": 2.806709000000012,
+        "p95": 758.6936669999999,
+        "p99": 758.6936669999999
+      },
+      "delivery": {
+        "samples": 14,
+        "p50": 17,
+        "p95": 32,
+        "p99": 32
+      },
+      "taskDelivery": {
+        "samples": 3,
+        "p50": 294,
+        "p95": 379,
+        "p99": 379
+      },
+      "login": {
+        "samples": 2,
+        "p50": 80.16829200000001,
+        "p95": 100.84970800000002,
+        "p99": 100.84970800000002
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": true,
+    "memoryStopped": false,
+    "maxConnections": 58,
+    "meanConnections": 16.244444444444444,
+    "newConnectionsPerSecond": 6.893838573116198,
+    "pg": {
+      "userCores": 0.03522391130227473,
+      "systemCores": 0.03461271662169192,
+      "peakMemoryBytes": 2432749568
+    },
+    "runtime": {
+      "userCores": 0.033037768957304564,
+      "systemCores": 0.013036488635671781,
+      "peakMemoryBytes": 1969537024
+    },
+    "generator": {
+      "userCores": 0.005944502033256607,
+      "systemCores": 0.0021472744341490524,
+      "peakMemoryBytes": 252420096
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.00992753623188406,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 2,
+    "maxAuthenticatedAccounts": 2,
+    "admissionMeanMsBetweenSamples": 2.729372145187602,
+    "admissionMaxMsSinceRuntimeStart": 371.75,
+    "newApplicationConnectionsPerSecond": 5.947400201934502,
+    "newHealthConnectionsPerSecond": 0.9567313589189086,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0
+  },
+  {
+    "phase": "pre279-n5-valid",
+    "users": 5,
+    "target": 5,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 16,
+        "p50": 29.924999999999272,
+        "p95": 445.6334999999963,
+        "p99": 445.6334999999963
+      },
+      "heartbeat": {
+        "samples": 65,
+        "p50": 22.987374999996973,
+        "p95": 4101.358294000005,
+        "p99": 4107.711336
+      },
+      "reducer": {
+        "samples": 81,
+        "p50": 24.06037500000093,
+        "p95": 4096.0247519999975,
+        "p99": 4107.708042999999
+      },
+      "query": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "delivery": {
+        "samples": 53,
+        "p50": 22,
+        "p95": 4090,
+        "p99": 4102
+      },
+      "taskDelivery": {
+        "samples": 6,
+        "p50": 314,
+        "p95": 441,
+        "p99": 441
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 16,
+        "p50": 29.924999999999272,
+        "p95": 445.6334999999963,
+        "p99": 445.6334999999963
+      },
+      "heartbeat": {
+        "samples": 75,
+        "p50": 24.062457999999992,
+        "p95": 4101.358294000005,
+        "p99": 4107.711336
+      },
+      "reducer": {
+        "samples": 91,
+        "p50": 24.26808299999999,
+        "p95": 4096.0247519999975,
+        "p99": 4107.708042999999
+      },
+      "query": {
+        "samples": 10,
+        "p50": 2.73112500000002,
+        "p95": 1480.018584,
+        "p99": 1480.018584
+      },
+      "delivery": {
+        "samples": 53,
+        "p50": 22,
+        "p95": 4090,
+        "p99": 4102
+      },
+      "taskDelivery": {
+        "samples": 6,
+        "p50": 314,
+        "p95": 441,
+        "p99": 441
+      },
+      "login": {
+        "samples": 5,
+        "p50": 84.38741700000003,
+        "p95": 91.730167,
+        "p99": 91.730167
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 60,
+    "meanConnections": 22.42222222222222,
+    "newConnectionsPerSecond": 7.876699772957202,
+    "pg": {
+      "userCores": 0.04267913313696961,
+      "systemCores": 0.04540989686700432,
+      "peakMemoryBytes": 2466340864
+    },
+    "runtime": {
+      "userCores": 0.0411911190318572,
+      "systemCores": 0.0180823504854305,
+      "peakMemoryBytes": 2132140032
+    },
+    "generator": {
+      "userCores": 0.0123213051828484,
+      "systemCores": 0.0031309262188717844,
+      "peakMemoryBytes": 291397632
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.014558823529411765,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 5,
+    "maxAuthenticatedAccounts": 5,
+    "admissionMeanMsBetweenSamples": 71.95480217243721,
+    "admissionMaxMsSinceRuntimeStart": 10034.264,
+    "newApplicationConnectionsPerSecond": 6.913495414754629,
+    "newHealthConnectionsPerSecond": 0.9597427048731204,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 16,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "pre279-n10",
+    "users": 10,
+    "target": 10,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 28.71191700000054,
+        "p95": 454.45616699999664,
+        "p99": 771.2500419999997
+      },
+      "heartbeat": {
+        "samples": 129,
+        "p50": 23.72270800000115,
+        "p95": 3829.605085999996,
+        "p99": 3899.4391690000048
+      },
+      "reducer": {
+        "samples": 153,
+        "p50": 24.771292000001267,
+        "p95": 3823.801044000007,
+        "p99": 3899.425126999995
+      },
+      "query": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "delivery": {
+        "samples": 147,
+        "p50": 21,
+        "p95": 3809,
+        "p99": 3871
+      },
+      "taskDelivery": {
+        "samples": 16,
+        "p50": 169,
+        "p95": 750,
+        "p99": 750
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 28.71191700000054,
+        "p95": 454.45616699999664,
+        "p99": 771.2500419999997
+      },
+      "heartbeat": {
+        "samples": 147,
+        "p50": 24.778125000000728,
+        "p95": 3823.8051269999996,
+        "p99": 3899.4391690000048
+      },
+      "reducer": {
+        "samples": 171,
+        "p50": 25.047500000000582,
+        "p95": 3823.0516269999935,
+        "p99": 3899.425126999995
+      },
+      "query": {
+        "samples": 20,
+        "p50": 90.00770899999998,
+        "p95": 2487.444876,
+        "p99": 2541.6472510000003
+      },
+      "delivery": {
+        "samples": 147,
+        "p50": 21,
+        "p95": 3809,
+        "p99": 3871
+      },
+      "taskDelivery": {
+        "samples": 16,
+        "p50": 169,
+        "p95": 750,
+        "p99": 750
+      },
+      "login": {
+        "samples": 10,
+        "p50": 417.216,
+        "p95": 468.42862500000007,
+        "p99": 468.42862500000007
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 25.35,
+    "newConnectionsPerSecond": 8.122307335015549,
+    "pg": {
+      "userCores": 0.042448554038851255,
+      "systemCores": 0.04370830429149853,
+      "peakMemoryBytes": 2586472448
+    },
+    "runtime": {
+      "userCores": 0.04894674577390137,
+      "systemCores": 0.019138090105854978,
+      "peakMemoryBytes": 2558889984
+    },
+    "generator": {
+      "userCores": 0.025299658613301673,
+      "systemCores": 0.005079110475658024,
+      "peakMemoryBytes": 317919232
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.01,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 10,
+    "maxAuthenticatedAccounts": 10,
+    "admissionMeanMsBetweenSamples": 101.27062515356265,
+    "admissionMaxMsSinceRuntimeStart": 10032.512,
+    "newApplicationConnectionsPerSecond": 6.909449313613145,
+    "newHealthConnectionsPerSecond": 0.9615091277843535,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 19
+  },
+  {
+    "phase": "defaults279-n10",
+    "users": 10,
+    "target": 10,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 14.623833999998169,
+        "p95": 366.99662499999977,
+        "p99": 467.60658399999375
+      },
+      "heartbeat": {
+        "samples": 123,
+        "p50": 29.07699999999022,
+        "p95": 68.74145800000406,
+        "p99": 91.39491700000508
+      },
+      "reducer": {
+        "samples": 147,
+        "p50": 27.6422079999993,
+        "p95": 83.59199999999691,
+        "p99": 366.7525000000023
+      },
+      "query": {
+        "samples": 1,
+        "p50": 254.341833,
+        "p95": 254.341833,
+        "p99": 254.341833
+      },
+      "delivery": {
+        "samples": 139,
+        "p50": 25,
+        "p95": 62,
+        "p99": 79
+      },
+      "taskDelivery": {
+        "samples": 16,
+        "p50": 135,
+        "p95": 480,
+        "p99": 480
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 14.623833999998169,
+        "p95": 366.99662499999977,
+        "p99": 467.60658399999375
+      },
+      "heartbeat": {
+        "samples": 141,
+        "p50": 29.07699999999022,
+        "p95": 254.738625,
+        "p99": 2284.339168
+      },
+      "reducer": {
+        "samples": 165,
+        "p50": 27.6422079999993,
+        "p95": 366.7525000000023,
+        "p99": 2284.3250009999997
+      },
+      "query": {
+        "samples": 20,
+        "p50": 61.53483299999999,
+        "p95": 2281.993626,
+        "p99": 2368.473959
+      },
+      "delivery": {
+        "samples": 139,
+        "p50": 25,
+        "p95": 62,
+        "p99": 79
+      },
+      "taskDelivery": {
+        "samples": 16,
+        "p50": 135,
+        "p95": 480,
+        "p99": 480
+      },
+      "login": {
+        "samples": 10,
+        "p50": 140.687208,
+        "p95": 162.60333300000002,
+        "p99": 162.60333300000002
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": true,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9553625241540509,
+    "pg": {
+      "userCores": 0.03305501855701139,
+      "systemCores": 0.01838073808542974,
+      "peakMemoryBytes": 2795249664
+    },
+    "runtime": {
+      "userCores": 0.040966967307006635,
+      "systemCores": 0.015588822967637115,
+      "peakMemoryBytes": 2457927680
+    },
+    "generator": {
+      "userCores": 0.021797369531438134,
+      "systemCores": 0.005167919701499309,
+      "peakMemoryBytes": 322023424
+    },
+    "hostMemoryFullPsiMax": 0.18,
+    "hostIoFullPsiMean": 0.009044117647058824,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 10,
+    "maxAuthenticatedAccounts": 10,
+    "admissionMeanMsBetweenSamples": 1.4597514143471373,
+    "admissionMaxMsSinceRuntimeStart": 455.003,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.959283009437489,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "defaults279-n12",
+    "users": 12,
+    "target": 12,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 29.168292000000292,
+        "p95": 696.6022509999893,
+        "p99": 809.2204169999968
+      },
+      "heartbeat": {
+        "samples": 145,
+        "p50": 53.530416999998124,
+        "p95": 184.42725000000792,
+        "p99": 341.3243749999965
+      },
+      "reducer": {
+        "samples": 169,
+        "p50": 50.91558400000213,
+        "p95": 216.89933299999393,
+        "p99": 696.4147499999963
+      },
+      "query": {
+        "samples": 1,
+        "p50": 414.9855,
+        "p95": 414.9855,
+        "p99": 414.9855
+      },
+      "delivery": {
+        "samples": 207,
+        "p50": 50,
+        "p95": 256,
+        "p99": 323
+      },
+      "taskDelivery": {
+        "samples": 19,
+        "p50": 302,
+        "p95": 908,
+        "p99": 908
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 29.168292000000292,
+        "p95": 696.6022509999893,
+        "p99": 809.2204169999968
+      },
+      "heartbeat": {
+        "samples": 168,
+        "p50": 53.530416999998124,
+        "p95": 520.816834,
+        "p99": 4197.140669
+      },
+      "reducer": {
+        "samples": 192,
+        "p50": 50.91558400000213,
+        "p95": 696.4147499999963,
+        "p99": 4197.1353770000005
+      },
+      "query": {
+        "samples": 24,
+        "p50": 74.11958300000003,
+        "p95": 4195.140169,
+        "p99": 4279.341377
+      },
+      "delivery": {
+        "samples": 207,
+        "p50": 50,
+        "p95": 256,
+        "p99": 323
+      },
+      "taskDelivery": {
+        "samples": 19,
+        "p50": 302,
+        "p95": 908,
+        "p99": 908
+      },
+      "login": {
+        "samples": 12,
+        "p50": 202.735541,
+        "p95": 228.858791,
+        "p99": 228.858791
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": true,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9554105376452118,
+    "pg": {
+      "userCores": 0.05941913392542502,
+      "systemCores": 0.0303805777234558,
+      "peakMemoryBytes": 2643398656
+    },
+    "runtime": {
+      "userCores": 0.09328719729610235,
+      "systemCores": 0.030881266216754844,
+      "peakMemoryBytes": 2816794624
+    },
+    "generator": {
+      "userCores": 0.039543430052063074,
+      "systemCores": 0.008453559482720469,
+      "peakMemoryBytes": 348114944
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.03888888888888889,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 12,
+    "maxAuthenticatedAccounts": 12,
+    "admissionMeanMsBetweenSamples": 2.022593998953306,
+    "admissionMaxMsSinceRuntimeStart": 365.847,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9511772105227317,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "defaults279-n16",
+    "users": 16,
+    "target": 16,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 31,
+        "p50": 42.45579199999338,
+        "p95": 691.2842090000049,
+        "p99": 873.8796250000014
+      },
+      "heartbeat": {
+        "samples": 194,
+        "p50": 63.95470800000112,
+        "p95": 4438.249502000006,
+        "p99": 4490.807169
+      },
+      "reducer": {
+        "samples": 225,
+        "p50": 62.38462499999878,
+        "p95": 4431.4648769999985,
+        "p99": 4486.950668999998
+      },
+      "query": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "delivery": {
+        "samples": 382,
+        "p50": 55,
+        "p95": 4455,
+        "p99": 4500
+      },
+      "taskDelivery": {
+        "samples": 37,
+        "p50": 395,
+        "p95": 890,
+        "p99": 961
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 31,
+        "p50": 42.45579199999338,
+        "p95": 691.2842090000049,
+        "p99": 873.8796250000014
+      },
+      "heartbeat": {
+        "samples": 225,
+        "p50": 63.95470800000112,
+        "p95": 4440.450919000003,
+        "p99": 4518.006418999998
+      },
+      "reducer": {
+        "samples": 256,
+        "p50": 61.617499999993015,
+        "p95": 4438.231918999998,
+        "p99": 4517.997752000003
+      },
+      "query": {
+        "samples": 32,
+        "p50": 78.22816599999999,
+        "p95": 4524.076336,
+        "p99": 4628.054669
+      },
+      "delivery": {
+        "samples": 383,
+        "p50": 55,
+        "p95": 4455,
+        "p99": 4500
+      },
+      "taskDelivery": {
+        "samples": 37,
+        "p50": 395,
+        "p95": 890,
+        "p99": 961
+      },
+      "login": {
+        "samples": 16,
+        "p50": 205.09829100000002,
+        "p95": 234.22320800000006,
+        "p99": 234.22320800000006
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9497319610592913,
+    "pg": {
+      "userCores": 0.06436660239178921,
+      "systemCores": 0.03046804316201462,
+      "peakMemoryBytes": 2727149568
+    },
+    "runtime": {
+      "userCores": 0.13673728606386643,
+      "systemCores": 0.035679642946621744,
+      "peakMemoryBytes": 3015573504
+    },
+    "generator": {
+      "userCores": 0.04862439044984951,
+      "systemCores": 0.009681249407152951,
+      "peakMemoryBytes": 418811904
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.009926470588235295,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 16,
+    "maxAuthenticatedAccounts": 16,
+    "admissionMeanMsBetweenSamples": 57.46108994413408,
+    "admissionMaxMsSinceRuntimeStart": 10108.003,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9496640305865922,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 16,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "defaults279-n20",
+    "users": 20,
+    "target": 20,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 48,
+        "p50": 44.63604199999827,
+        "p95": 4653.980502000006,
+        "p99": 8530.992879000012
+      },
+      "heartbeat": {
+        "samples": 244,
+        "p50": 105.30883299998823,
+        "p95": 14325.254840000009,
+        "p99": 14608.936172999995
+      },
+      "reducer": {
+        "samples": 292,
+        "p50": 98.56650000000081,
+        "p95": 14311.368923999995,
+        "p99": 14608.917632000004
+      },
+      "query": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "delivery": {
+        "samples": 566,
+        "p50": 75,
+        "p95": 14294,
+        "p99": 14585
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 333,
+        "p95": 4774,
+        "p99": 4897
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 48,
+        "p50": 44.63604199999827,
+        "p95": 4653.980502000006,
+        "p99": 8530.992879000012
+      },
+      "heartbeat": {
+        "samples": 284,
+        "p50": 105.30883299998823,
+        "p95": 14311.381131000002,
+        "p99": 14608.936172999995
+      },
+      "reducer": {
+        "samples": 332,
+        "p50": 98.56650000000081,
+        "p95": 14294.998923,
+        "p99": 14563.642215
+      },
+      "query": {
+        "samples": 40,
+        "p50": 86.37533300000001,
+        "p95": 5156.391502,
+        "p99": 5327.621169
+      },
+      "delivery": {
+        "samples": 578,
+        "p50": 78,
+        "p95": 14294,
+        "p99": 14585
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 333,
+        "p95": 4774,
+        "p99": 4897
+      },
+      "login": {
+        "samples": 20,
+        "p50": 209.84149999999994,
+        "p95": 226.43258400000002,
+        "p99": 229.66345899999993
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9496910548856515,
+    "pg": {
+      "userCores": 0.07314856639962446,
+      "systemCores": 0.03320801300961776,
+      "peakMemoryBytes": 2735587328
+    },
+    "runtime": {
+      "userCores": 0.17223928600002594,
+      "systemCores": 0.03952762700623117,
+      "peakMemoryBytes": 3295297536
+    },
+    "generator": {
+      "userCores": 0.0686860918905724,
+      "systemCores": 0.010573242400752938,
+      "peakMemoryBytes": 421048320
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.00917910447761194,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 20,
+    "maxAuthenticatedAccounts": 20,
+    "admissionMeanMsBetweenSamples": 153.06925573439517,
+    "admissionMaxMsSinceRuntimeStart": 10243.534,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9509277328886554,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 36,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "defaults279-n26",
+    "users": 26,
+    "target": 26,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 62,
+        "p50": 28.900917000006302,
+        "p95": 604.9281249999985,
+        "p99": 1910.215458999999
+      },
+      "heartbeat": {
+        "samples": 336,
+        "p50": 53.101708999995026,
+        "p95": 176.55679099998088,
+        "p99": 219.6278749999983
+      },
+      "reducer": {
+        "samples": 398,
+        "p50": 51.73112499999843,
+        "p95": 210.26049999999668,
+        "p99": 808.8747500000027
+      },
+      "query": {
+        "samples": 1,
+        "p50": 1597.7610009999999,
+        "p95": 1597.7610009999999,
+        "p99": 1597.7610009999999
+      },
+      "delivery": {
+        "samples": 928,
+        "p50": 52,
+        "p95": 170,
+        "p99": 208
+      },
+      "taskDelivery": {
+        "samples": 98,
+        "p50": 339,
+        "p95": 1804,
+        "p99": 1963
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 62,
+        "p50": 28.900917000006302,
+        "p95": 604.9281249999985,
+        "p99": 1910.215458999999
+      },
+      "heartbeat": {
+        "samples": 386,
+        "p50": 53.579916999995476,
+        "p95": 399.138375,
+        "p99": 5551.80646
+      },
+      "reducer": {
+        "samples": 448,
+        "p50": 52.1886250000025,
+        "p95": 404.88633400000003,
+        "p99": 5293.347377
+      },
+      "query": {
+        "samples": 52,
+        "p50": 75.63704199999995,
+        "p95": 5558.074918,
+        "p99": 5851.797002
+      },
+      "delivery": {
+        "samples": 943,
+        "p50": 53,
+        "p95": 176,
+        "p99": 1429
+      },
+      "taskDelivery": {
+        "samples": 98,
+        "p50": 339,
+        "p95": 1804,
+        "p99": 1963
+      },
+      "login": {
+        "samples": 26,
+        "p50": 198.03616699999998,
+        "p95": 206.18345800000003,
+        "p99": 206.27141700000004
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 63,
+    "meanConnections": 63.0,
+    "newConnectionsPerSecond": 0.9553216457644431,
+    "pg": {
+      "userCores": 0.06712528694669134,
+      "systemCores": 0.029289007684265084,
+      "peakMemoryBytes": 2928603136
+    },
+    "runtime": {
+      "userCores": 0.2047550616160229,
+      "systemCores": 0.04498588340254591,
+      "peakMemoryBytes": 3639373824
+    },
+    "generator": {
+      "userCores": 0.10219055861207134,
+      "systemCores": 0.018515596822772436,
+      "peakMemoryBytes": 503934976
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.009117647058823529,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 26,
+    "maxAuthenticatedAccounts": 26,
+    "admissionMeanMsBetweenSamples": 7.470687961297526,
+    "admissionMaxMsSinceRuntimeStart": 1006.714,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9522536118463163,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "shared4-n10-resumed",
+    "users": 10,
+    "target": 10,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 28.234040999999706,
+        "p95": 464.2860419999997,
+        "p99": 602.5349169999972
+      },
+      "heartbeat": {
+        "samples": 130,
+        "p50": 50.83641699999862,
+        "p95": 121.84379199999967,
+        "p99": 166.64191599999685
+      },
+      "reducer": {
+        "samples": 154,
+        "p50": 49.459708999987924,
+        "p95": 131.4054580000011,
+        "p99": 464.09395800000493
+      },
+      "query": {
+        "samples": 1,
+        "p50": 363.60137499999996,
+        "p95": 363.60137499999996,
+        "p99": 363.60137499999996
+      },
+      "delivery": {
+        "samples": 150,
+        "p50": 42,
+        "p95": 122,
+        "p99": 152
+      },
+      "taskDelivery": {
+        "samples": 16,
+        "p50": 283,
+        "p95": 636,
+        "p99": 636
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 24,
+        "p50": 28.234040999999706,
+        "p95": 464.2860419999997,
+        "p99": 602.5349169999972
+      },
+      "heartbeat": {
+        "samples": 148,
+        "p50": 50.83641699999862,
+        "p95": 371.271792,
+        "p99": 2591.1039170000004
+      },
+      "reducer": {
+        "samples": 172,
+        "p50": 49.459708999987924,
+        "p95": 464.09395800000493,
+        "p99": 2591.096626
+      },
+      "query": {
+        "samples": 20,
+        "p50": 25.63583399999999,
+        "p95": 2584.861376,
+        "p99": 2682.604168
+      },
+      "delivery": {
+        "samples": 150,
+        "p50": 42,
+        "p95": 122,
+        "p99": 152
+      },
+      "taskDelivery": {
+        "samples": 16,
+        "p50": 283,
+        "p95": 636,
+        "p99": 636
+      },
+      "login": {
+        "samples": 10,
+        "p50": 145.90466700000002,
+        "p95": 166.358584,
+        "p99": 166.358584
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": true,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9553067288789224,
+    "pg": {
+      "userCores": 0.04324571265524676,
+      "systemCores": 0.026091188461086327,
+      "peakMemoryBytes": 2736558080
+    },
+    "runtime": {
+      "userCores": 0.0721332284500978,
+      "systemCores": 0.025672361765326508,
+      "peakMemoryBytes": 2497085440
+    },
+    "generator": {
+      "userCores": 0.02730542439262707,
+      "systemCores": 0.005668812594638842,
+      "peakMemoryBytes": 341061632
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.0,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 10,
+    "maxAuthenticatedAccounts": 10,
+    "admissionMeanMsBetweenSamples": 3.686121840280367,
+    "admissionMaxMsSinceRuntimeStart": 471.255,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9553961951219733,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "shared4-n16",
+    "users": 16,
+    "target": 16,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 31,
+        "p50": 40.01070899999468,
+        "p95": 915.158334000007,
+        "p99": 1013.1792920000007
+      },
+      "heartbeat": {
+        "samples": 221,
+        "p50": 61.258417000004556,
+        "p95": 142.70970800000214,
+        "p99": 199.4961670000048
+      },
+      "reducer": {
+        "samples": 252,
+        "p50": 59.08566700000665,
+        "p95": 179.25379200000316,
+        "p99": 503.60916599999837
+      },
+      "query": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "delivery": {
+        "samples": 430,
+        "p50": 61,
+        "p95": 159,
+        "p99": 216
+      },
+      "taskDelivery": {
+        "samples": 37,
+        "p50": 339,
+        "p95": 1087,
+        "p99": 1105
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 31,
+        "p50": 40.01070899999468,
+        "p95": 915.158334000007,
+        "p99": 1013.1792920000007
+      },
+      "heartbeat": {
+        "samples": 253,
+        "p50": 62.68687499999942,
+        "p95": 398.8075839999999,
+        "p99": 4033.292627
+      },
+      "reducer": {
+        "samples": 284,
+        "p50": 61.543792000000394,
+        "p95": 477.78025,
+        "p99": 4033.285461
+      },
+      "query": {
+        "samples": 32,
+        "p50": 76.72645799999998,
+        "p95": 4130.918794,
+        "p99": 4215.52721
+      },
+      "delivery": {
+        "samples": 430,
+        "p50": 61,
+        "p95": 159,
+        "p99": 216
+      },
+      "taskDelivery": {
+        "samples": 37,
+        "p50": 339,
+        "p95": 1087,
+        "p99": 1105
+      },
+      "login": {
+        "samples": 16,
+        "p50": 205.05624999999998,
+        "p95": 225.55424999999997,
+        "p99": 225.55424999999997
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9552711223684878,
+    "pg": {
+      "userCores": 0.061622464448399444,
+      "systemCores": 0.03100320686238174,
+      "peakMemoryBytes": 2647011328
+    },
+    "runtime": {
+      "userCores": 0.1308119832599023,
+      "systemCores": 0.03557034682365934,
+      "peakMemoryBytes": 3032875008
+    },
+    "generator": {
+      "userCores": 0.05056117942917987,
+      "systemCores": 0.008669761138020189,
+      "peakMemoryBytes": 391467008
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.009044117647058824,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 18,
+    "minSteadyAuthenticatedAccounts": 16,
+    "maxAuthenticatedAccounts": 16,
+    "admissionMeanMsBetweenSamples": 2.8247448031017894,
+    "admissionMaxMsSinceRuntimeStart": 423.411,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9574378475478623,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "shared4-n16-repeat",
+    "users": 16,
+    "target": 16,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 31,
+        "p50": 39.33062500000233,
+        "p95": 704.6420419999995,
+        "p99": 1051.4415429999935
+      },
+      "heartbeat": {
+        "samples": 195,
+        "p50": 55.4920409999977,
+        "p95": 172.41758299999856,
+        "p99": 220.86645800000406
+      },
+      "reducer": {
+        "samples": 226,
+        "p50": 52.6493749999936,
+        "p95": 191.82029200000397,
+        "p99": 704.537166999995
+      },
+      "query": {
+        "samples": 1,
+        "p50": 2974.5621260000003,
+        "p95": 2974.5621260000003,
+        "p99": 2974.5621260000003
+      },
+      "delivery": {
+        "samples": 379,
+        "p50": 50,
+        "p95": 172,
+        "p99": 204
+      },
+      "taskDelivery": {
+        "samples": 37,
+        "p50": 305,
+        "p95": 1022,
+        "p99": 1079
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 31,
+        "p50": 39.33062500000233,
+        "p95": 704.6420419999995,
+        "p99": 1051.4415429999935
+      },
+      "heartbeat": {
+        "samples": 225,
+        "p50": 55.4920409999977,
+        "p95": 412.36458300000004,
+        "p99": 4162.6796269999995
+      },
+      "reducer": {
+        "samples": 256,
+        "p50": 52.6493749999936,
+        "p95": 704.537166999995,
+        "p99": 4162.670586
+      },
+      "query": {
+        "samples": 32,
+        "p50": 64.85704099999998,
+        "p95": 4291.41471,
+        "p99": 4432.787252
+      },
+      "delivery": {
+        "samples": 379,
+        "p50": 50,
+        "p95": 172,
+        "p99": 204
+      },
+      "taskDelivery": {
+        "samples": 37,
+        "p50": 305,
+        "p95": 1022,
+        "p99": 1079
+      },
+      "login": {
+        "samples": 16,
+        "p50": 166.30116699999996,
+        "p95": 187.13875000000002,
+        "p99": 187.13875000000002
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9551614110231983,
+    "pg": {
+      "userCores": 0.060614820938265826,
+      "systemCores": 0.0308378117420926,
+      "peakMemoryBytes": 2607513600
+    },
+    "runtime": {
+      "userCores": 0.11934801947178914,
+      "systemCores": 0.03474502373292643,
+      "peakMemoryBytes": 3043184640
+    },
+    "generator": {
+      "userCores": 0.0481871664989317,
+      "systemCores": 0.008138662770495889,
+      "peakMemoryBytes": 409714688
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.01,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 16,
+    "maxAuthenticatedAccounts": 16,
+    "admissionMeanMsBetweenSamples": 2.6651565288698085,
+    "admissionMaxMsSinceRuntimeStart": 497.18,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9589213574823072,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "shared4-n20",
+    "users": 20,
+    "target": 20,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 32.624041999995825,
+        "p95": 668.1004169999942,
+        "p99": 863.4110010000004
+      },
+      "heartbeat": {
+        "samples": 269,
+        "p50": 47.46304099999543,
+        "p95": 131.07820799999172,
+        "p99": 167.12683300001663
+      },
+      "reducer": {
+        "samples": 319,
+        "p50": 44.84245799999917,
+        "p95": 167.12370799999917,
+        "p99": 656.3379170000001
+      },
+      "query": {
+        "samples": 2,
+        "p50": 471.8432090000001,
+        "p95": 646.771875,
+        "p99": 646.771875
+      },
+      "delivery": {
+        "samples": 608,
+        "p50": 36,
+        "p95": 106,
+        "p99": 160
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 257,
+        "p95": 921,
+        "p99": 1015
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 32.624041999995825,
+        "p95": 668.1004169999942,
+        "p99": 863.4110010000004
+      },
+      "heartbeat": {
+        "samples": 305,
+        "p50": 50.30449999999837,
+        "p95": 475.5040839999999,
+        "p99": 4676.885669
+      },
+      "reducer": {
+        "samples": 355,
+        "p50": 48.800792000009096,
+        "p95": 616.455375,
+        "p99": 4676.854461
+      },
+      "query": {
+        "samples": 40,
+        "p50": 147.608292,
+        "p95": 4744.398044,
+        "p99": 4844.3457530000005
+      },
+      "delivery": {
+        "samples": 611,
+        "p50": 36,
+        "p95": 109,
+        "p99": 243
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 257,
+        "p95": 921,
+        "p99": 1015
+      },
+      "login": {
+        "samples": 20,
+        "p50": 260.65495799999997,
+        "p95": 271.41366700000003,
+        "p99": 272.28525
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": true,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9552813685742999,
+    "pg": {
+      "userCores": 0.06708099582057835,
+      "systemCores": 0.03301787284341925,
+      "peakMemoryBytes": 2657333248
+    },
+    "runtime": {
+      "userCores": 0.14937673272256244,
+      "systemCores": 0.04100452204921074,
+      "peakMemoryBytes": 3305865216
+    },
+    "generator": {
+      "userCores": 0.057668126915900314,
+      "systemCores": 0.010150090150486362,
+      "peakMemoryBytes": 438075392
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.010073529411764705,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 20,
+    "maxAuthenticatedAccounts": 20,
+    "admissionMeanMsBetweenSamples": 2.398859581589958,
+    "admissionMaxMsSinceRuntimeStart": 639.247,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9502578838667313,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "shared4-n20-repeat",
+    "users": 20,
+    "target": 20,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 34.122082999994745,
+        "p95": 730.934957999998,
+        "p99": 956.4238330000007
+      },
+      "heartbeat": {
+        "samples": 270,
+        "p50": 24.377290999997058,
+        "p95": 105.28737499999988,
+        "p99": 142.02987500000017
+      },
+      "reducer": {
+        "samples": 320,
+        "p50": 25.443959000025643,
+        "p95": 140.59633299999405,
+        "p99": 726.4590420000022
+      },
+      "query": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "delivery": {
+        "samples": 618,
+        "p50": 23,
+        "p95": 97,
+        "p99": 1011
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 307,
+        "p95": 1175,
+        "p99": 1279
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 34.122082999994745,
+        "p95": 730.934957999998,
+        "p99": 956.4238330000007
+      },
+      "heartbeat": {
+        "samples": 309,
+        "p50": 31.159791000012774,
+        "p95": 692.9708330000001,
+        "p99": 5635.080336
+      },
+      "reducer": {
+        "samples": 359,
+        "p50": 31.15937500000291,
+        "p95": 726.4590420000022,
+        "p99": 5635.076252
+      },
+      "query": {
+        "samples": 40,
+        "p50": 201.30558400000007,
+        "p95": 5655.200294,
+        "p99": 5909.861043999999
+      },
+      "delivery": {
+        "samples": 628,
+        "p50": 24,
+        "p95": 111,
+        "p99": 3899
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 307,
+        "p95": 1175,
+        "p99": 1279
+      },
+      "login": {
+        "samples": 20,
+        "p50": 269.679416,
+        "p95": 279.46266699999995,
+        "p99": 280.13808299999994
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 62,
+    "meanConnections": 62.0,
+    "newConnectionsPerSecond": 0.9497581991047054,
+    "pg": {
+      "userCores": 0.07471224037204965,
+      "systemCores": 0.03568767267485553,
+      "peakMemoryBytes": 2636152832
+    },
+    "runtime": {
+      "userCores": 0.17518021785957935,
+      "systemCores": 0.04884469674273904,
+      "peakMemoryBytes": 3284934656
+    },
+    "generator": {
+      "userCores": 0.06284574840167251,
+      "systemCores": 0.010744203813513691,
+      "peakMemoryBytes": 461037568
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.009333333333333334,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 20,
+    "maxAuthenticatedAccounts": 20,
+    "admissionMeanMsBetweenSamples": 2.357223840747575,
+    "admissionMaxMsSinceRuntimeStart": 681.383,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9508783506530775,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "shared4-n26-resumed",
+    "users": 26,
+    "target": 26,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 62,
+        "p50": 45.78920800000196,
+        "p95": 935.0094590000008,
+        "p99": 1424.4452509999974
+      },
+      "heartbeat": {
+        "samples": 364,
+        "p50": 97.78925000000163,
+        "p95": 362.9217499999795,
+        "p99": 690.243541999982
+      },
+      "reducer": {
+        "samples": 426,
+        "p50": 89.71654200000921,
+        "p95": 421.0849589999998,
+        "p99": 934.9891260000004
+      },
+      "query": {
+        "samples": 1,
+        "p50": 833.693501,
+        "p95": 833.693501,
+        "p99": 833.693501
+      },
+      "delivery": {
+        "samples": 995,
+        "p50": 89,
+        "p95": 406,
+        "p99": 694
+      },
+      "taskDelivery": {
+        "samples": 98,
+        "p50": 562,
+        "p95": 1632,
+        "p99": 1888
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 62,
+        "p50": 45.78920800000196,
+        "p95": 935.0094590000008,
+        "p99": 1424.4452509999974
+      },
+      "heartbeat": {
+        "samples": 414,
+        "p50": 105.80608300000313,
+        "p95": 859.3432080000001,
+        "p99": 5833.019919
+      },
+      "reducer": {
+        "samples": 476,
+        "p50": 101.04491599999892,
+        "p95": 885.6971249999999,
+        "p99": 5833.013127
+      },
+      "query": {
+        "samples": 52,
+        "p50": 189.157375,
+        "p95": 5930.6862519999995,
+        "p99": 6133.435878
+      },
+      "delivery": {
+        "samples": 1001,
+        "p50": 89,
+        "p95": 428,
+        "p99": 752
+      },
+      "taskDelivery": {
+        "samples": 98,
+        "p50": 562,
+        "p95": 1632,
+        "p99": 1888
+      },
+      "login": {
+        "samples": 26,
+        "p50": 244.09191600000003,
+        "p95": 254.97762500000005,
+        "p99": 265.287666
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 63,
+    "meanConnections": 63.0,
+    "newConnectionsPerSecond": 0.9553022245513968,
+    "pg": {
+      "userCores": 0.08173204730925969,
+      "systemCores": 0.03486111558258475,
+      "peakMemoryBytes": 2807152640
+    },
+    "runtime": {
+      "userCores": 0.25712245628119995,
+      "systemCores": 0.05135722425014244,
+      "peakMemoryBytes": 3524329472
+    },
+    "generator": {
+      "userCores": 0.08893921536916369,
+      "systemCores": 0.011483807337591507,
+      "peakMemoryBytes": 508018688
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.009926470588235295,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 26,
+    "maxAuthenticatedAccounts": 26,
+    "admissionMeanMsBetweenSamples": 7.136653535663192,
+    "admissionMaxMsSinceRuntimeStart": 1448.049,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9545932747996844,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 0,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "open1-idle1-n20",
+    "users": 20,
+    "target": 20,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 36.17012500000419,
+        "p95": 820.7350000000006,
+        "p99": 2194.830418000005
+      },
+      "heartbeat": {
+        "samples": 245,
+        "p50": 118.99816700001247,
+        "p95": 4130.1838350000035,
+        "p99": 4269.186752000001
+      },
+      "reducer": {
+        "samples": 295,
+        "p50": 113.01324999999997,
+        "p95": 4040.21471,
+        "p99": 4269.179835000003
+      },
+      "query": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "delivery": {
+        "samples": 571,
+        "p50": 96,
+        "p95": 4189,
+        "p99": 4265
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 359,
+        "p95": 2150,
+        "p99": 2297
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 36.17012500000419,
+        "p95": 820.7350000000006,
+        "p99": 2194.830418000005
+      },
+      "heartbeat": {
+        "samples": 285,
+        "p50": 118.99816700001247,
+        "p95": 4197.567167999994,
+        "p99": 5008.232501
+      },
+      "reducer": {
+        "samples": 335,
+        "p50": 113.01324999999997,
+        "p95": 4195.243751000002,
+        "p99": 4912.45796
+      },
+      "query": {
+        "samples": 40,
+        "p50": 41.204667000000086,
+        "p95": 4909.0500839999995,
+        "p99": 5089.805126
+      },
+      "delivery": {
+        "samples": 571,
+        "p50": 96,
+        "p95": 4189,
+        "p99": 4265
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 359,
+        "p95": 2150,
+        "p99": 2297
+      },
+      "login": {
+        "samples": 20,
+        "p50": 245.10287500000004,
+        "p95": 273.73587599999996,
+        "p99": 275.6030420000001
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 35,
+    "meanConnections": 35.0,
+    "newConnectionsPerSecond": 0.9497192378536635,
+    "pg": {
+      "userCores": 0.05658437702128224,
+      "systemCores": 0.029811061039163037,
+      "peakMemoryBytes": 2573549568
+    },
+    "runtime": {
+      "userCores": 0.15129351925782827,
+      "systemCores": 0.04002495356006121,
+      "peakMemoryBytes": 3284226048
+    },
+    "generator": {
+      "userCores": 0.061891796935580334,
+      "systemCores": 0.01055545806766563,
+      "peakMemoryBytes": 429649920
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.008666666666666666,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 17,
+    "minSteadyAuthenticatedAccounts": 20,
+    "maxAuthenticatedAccounts": 20,
+    "admissionMeanMsBetweenSamples": 182.01433965105412,
+    "admissionMaxMsSinceRuntimeStart": 10343.074,
+    "newApplicationConnectionsPerSecond": 0.0,
+    "newHealthConnectionsPerSecond": 0.9521693414634851,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 39,
+    "invalidBuildOverlap": false
+  },
+  {
+    "phase": "open2-idle1-n20",
+    "users": 20,
+    "target": 20,
+    "errors": 0,
+    "latencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 38.57929100000183,
+        "p95": 509.6752090000009,
+        "p99": 861.9456670000072
+      },
+      "heartbeat": {
+        "samples": 267,
+        "p50": 106.57579200000328,
+        "p95": 4506.424334999996,
+        "p99": 4568.178918999998
+      },
+      "reducer": {
+        "samples": 317,
+        "p50": 102.69949999998789,
+        "p95": 4503.438169000001,
+        "p99": 4533.617294000003
+      },
+      "query": {
+        "samples": 1,
+        "p50": 5422.588336,
+        "p95": 5422.588336,
+        "p99": 5422.588336
+      },
+      "delivery": {
+        "samples": 605,
+        "p50": 82,
+        "p95": 4459,
+        "p99": 4529
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 354,
+        "p95": 1041,
+        "p99": 1185
+      },
+      "login": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "wholePhaseLatencyMs": {
+      "save": {
+        "samples": 50,
+        "p50": 38.57929100000183,
+        "p95": 509.6752090000009,
+        "p99": 861.9456670000072
+      },
+      "heartbeat": {
+        "samples": 305,
+        "p50": 111.17362500000002,
+        "p95": 4510.441669,
+        "p99": 5339.164169
+      },
+      "reducer": {
+        "samples": 355,
+        "p50": 106.8260420000006,
+        "p95": 4509.510710000002,
+        "p99": 5339.135419
+      },
+      "query": {
+        "samples": 40,
+        "p50": 99.02487500000007,
+        "p95": 5362.078086,
+        "p99": 5549.430128
+      },
+      "delivery": {
+        "samples": 605,
+        "p50": 82,
+        "p95": 4459,
+        "p99": 4529
+      },
+      "taskDelivery": {
+        "samples": 62,
+        "p50": 354,
+        "p95": 1041,
+        "p99": 1185
+      },
+      "login": {
+        "samples": 20,
+        "p50": 417.87737500000003,
+        "p95": 436.5379999999999,
+        "p99": 440.17204200000003
+      }
+    },
+    "latencyScope": "steady plateau; operations started with all users connected",
+    "capacityPassed": false,
+    "memoryStopped": false,
+    "maxConnections": 39,
+    "meanConnections": 35.28888888888889,
+    "newConnectionsPerSecond": 53.59800850046314,
+    "pg": {
+      "userCores": 0.11200246180247801,
+      "systemCores": 0.1429199051226551,
+      "peakMemoryBytes": 2334703616
+    },
+    "runtime": {
+      "userCores": 0.13802118820804754,
+      "systemCores": 0.03860557440570777,
+      "peakMemoryBytes": 3331809280
+    },
+    "generator": {
+      "userCores": 0.05627185854997393,
+      "systemCores": 0.008656856329278081,
+      "peakMemoryBytes": 447410176
+    },
+    "hostMemoryFullPsiMax": 0.0,
+    "hostIoFullPsiMean": 0.007226277372262773,
+    "oomKills": {
+      "pg": 0,
+      "runtime": 0,
+      "generator": 0
+    },
+    "steadyAccountSamples": 18,
+    "minSteadyAuthenticatedAccounts": 20,
+    "maxAuthenticatedAccounts": 20,
+    "admissionMeanMsBetweenSamples": 47.517439835270906,
+    "admissionMaxMsSinceRuntimeStart": 10048.126,
+    "newApplicationConnectionsPerSecond": 51.89589511301029,
+    "newHealthConnectionsPerSecond": 0.9584402272734377,
+    "connectionRejections": 0,
+    "runtimeErrorLogLines": 15,
+    "invalidBuildOverlap": false
+  }
+]

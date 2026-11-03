@@ -1,0 +1,61 @@
+{
+  "machine": "Apple M4, 10 CPU cores, 24 GB RAM, ARM64",
+  "dockerMemoryGiB": 14,
+  "pre279": "abb078dbcd9650b1c0777aee4bf4fd0184fdd68c",
+  "with279": "360fab553aa0fce2486227fbe42a316c72c0a858",
+  "instrumentation": "identical admission timing counters, idle-timeout env setting; ARM syscall compile guard",
+  "sdk": "0.5.2-staging.31",
+  "sdkPatch": "acdbdb91641e680808142cdd53c0918d29648148eccc411514db18ece5026f98",
+  "workload": "observed-seven weighted active tenants; 26 synthetic tenant databases and scheduled jobs",
+  "caps": {
+    "postgresCpu": 4,
+    "postgresGiB": 4,
+    "runtimeCpu": 4,
+    "runtimeGiB": 4,
+    "generatorCpu": 2,
+    "generatorGiB": 2
+  },
+  "images": {
+    "279": {
+      "Id": "sha256:1b72a867fc3196bb8989359c2f62578afd24110bec815c85283070b2bd489b54",
+      "Architecture": "arm64",
+      "Os": "linux"
+    },
+    "pre279": {
+      "Id": "sha256:cebd9458d52118b8f22547905b1a0e56f86d7ad96e612804c5a88d7440834979",
+      "Architecture": "arm64",
+      "Os": "linux"
+    }
+  },
+  "appStaging": "e38e788426cca137b816d0dcb127a46e4cbced5d",
+  "sourceManifests": {
+    "candidate": {
+      "sha256": "37653638401c44d701f92d985d7a96eac4d74f3c7bfc2abc934319b54ec70409",
+      "files": 144,
+      "path": "candidate-source.sha256"
+    },
+    "baseline": {
+      "sha256": "8e3477388367ac17a4508921c8e117ef884865e28c3e138007a4c62011793682",
+      "files": 144,
+      "path": "baseline-source.sha256"
+    },
+    "app": {
+      "sha256": "4ff11ecdd416da9747cab6c27cf324a814a4a034af447d186eb98f11cf09838e",
+      "files": 5990,
+      "path": "app-source.sha256"
+    }
+  },
+  "provenanceCorrection": "Image 279 corrected after final rebuild; measured image unchanged during resume. PR base later advanced to merged #279, not measured.",
+  "harnessCheckpoint": "f7bda30f6b047386c55e66368c2e77a70133ab1a",
+  "prBaseAfterMerge": "88d94c0699da0d9690ccfa74651149e3c4fe02e2",
+  "appManifestSha256": "f942d9b85a1e2145369d0212e4734e68748130ee8cf234bef8d67f364e71bb5e",
+  "candidateSourceVerification": {
+    "reference": "360fab553aa0fce2486227fbe42a316c72c0a858",
+    "filesCompared": 144,
+    "differences": [
+      "rust/crates/runtime/tests/operator_contract.rs: archive lacks newly merged dashboard security test; no runtime build source differs"
+    ],
+    "exactArchiveManifestSha256": "37653638401c44d701f92d985d7a96eac4d74f3c7bfc2abc934319b54ec70409"
+  },
+  "baselineSourceVerification": "All 144 files match Linux gvmac-pre279 archive; manifest includes identical measurement/config/ARM changes."
+}

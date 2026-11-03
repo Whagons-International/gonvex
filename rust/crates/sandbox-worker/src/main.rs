@@ -787,7 +787,9 @@ fn install_network_seccomp() -> Result<(), String> {
             libc::SYS_umount2,
             libc::SYS_unshare,
             libc::SYS_setns,
+            #[cfg(target_arch = "x86_64")]
             libc::SYS_fork,
+            #[cfg(target_arch = "x86_64")]
             libc::SYS_vfork,
             libc::SYS_io_uring_setup,
             libc::SYS_io_uring_enter,
