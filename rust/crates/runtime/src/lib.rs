@@ -23,6 +23,7 @@ pub mod modules;
 mod native_auth;
 mod operations;
 mod operator_data;
+pub mod presence;
 pub mod profiling;
 pub mod public_functions;
 pub mod replica;
@@ -91,6 +92,7 @@ struct RuntimeInner {
     live_query_cache: live_query::SharedLiveQueryCache,
     membership_projector: membership_projector::MembershipProjector,
     metrics: metrics::RuntimeMetrics,
+    presence: presence::PresenceHub,
     public_limiter: Arc<public_functions::PublicLimiter>,
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
@@ -235,8 +237,10 @@ impl Runtime {
         let metrics = metrics::RuntimeMetrics::with_changes(runtime_events.clone());
         let sandboxes = sandbox::SandboxManager::new(config.sandbox.clone());
         let storage = storage::StorageManager::new(config.storage.clone());
+        let presence = presence::PresenceHub::new(config.presence.clone());
         Self {
             inner: Arc::new(RuntimeInner {
+                presence,
                 config,
                 module_host,
                 pools,
@@ -259,8 +263,64 @@ impl Runtime {
         }
     }
 
+    /// Presence v2 tick (coalesced transition publishing) and the batched
+    /// support-session `last_seen_at` flusher. Both stop with the runtime.
+    fn start_presence_tasks(&self) {
+        if !self.inner.presence.enabled() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        let tick = self.inner.presence.config().tick;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else { return };
+                inner
+                    .presence
+                    .tick(std::time::Instant::now(), presence::now_ms());
+            }
+        });
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else { return };
+                let pending = inner.presence.take_last_seen_flush();
+                if pending.is_empty() {
+                    continue;
+                }
+                let Some(control) = inner.control_plane.read().await.clone() else {
+                    continue;
+                };
+                let result = async {
+                    let mut transaction = control.begin_control_transaction(false).await?;
+                    for seen in &pending {
+                        sqlx::query(
+                            "UPDATE gonvex_support_sessions SET last_seen_at=MAX(last_seen_at,$3) WHERE project_id=$1 AND id=$2",
+                        )
+                        .bind(&seen.project_id)
+                        .bind(&seen.session_id)
+                        .bind(seen.last_seen_ms)
+                        .execute(&mut **transaction.transaction())
+                        .await?;
+                    }
+                    transaction.commit().await
+                }
+                .await;
+                if let Err(error) = result {
+                    tracing::debug!(%error, sessions = pending.len(), "support last-seen flush failed");
+                }
+            }
+        });
+    }
+
     pub async fn start(&self) -> Result<(), RuntimeStartError> {
         profiling::start();
+        self.start_presence_tasks();
         if self.inner.config.sandbox.enabled {
             let binary = self
                 .inner
@@ -1457,6 +1517,16 @@ async fn websocket(
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
     let _connection_presence = runtime.inner.metrics.register(&connection_id);
+    // Presence v2: the socket is the liveness signal; dropping the guard (any
+    // exit from this task) removes the connection's presence after grace.
+    let presence_hub = runtime.inner.presence.clone();
+    let _presence_guard = presence::ConnectionGuard::new(presence_hub.clone(), &connection_id);
+    let mut presence_slot: Option<Arc<presence::PresenceSlot>> = None;
+    let mut presence_negotiated = false;
+    let mut last_inbound = tokio::time::Instant::now();
+    let mut presence_ping = tokio::time::interval(presence_hub.config().ping_interval);
+    presence_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    presence_ping.tick().await;
     let mut control_connection = control::ControlConnection {
         connection_id: connection_id.clone(),
         ..control::ControlConnection::default()
@@ -1501,6 +1571,7 @@ async fn websocket(
             replica_watermark: Some(1),
             reducer_receipt_lookup: Some(1),
             control_watermark: Some(1),
+            presence: presence_hub.enabled().then_some(1),
         }),
     };
     if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
@@ -1527,6 +1598,8 @@ async fn websocket(
             feed_scheduler.reset();
             sent_replica_revision = 0;
             sent_zero_bootstrap_watermark = false;
+            presence_hub.reset(&connection_id, std::time::Instant::now());
+            presence_slot = None;
             runtime.inner.metrics.authenticated(
                 &connection_id,
                 &control::ControlConnection {
@@ -1551,6 +1624,7 @@ async fn websocket(
             bytes > replica_open_queue::MAX_BYTES || replica_opens.has_capacity(&request.id, bytes)
         });
         let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
+        let presence_wait = presence_slot.clone();
         let message = tokio::select! {
             _ = std::future::ready(()), if admit_replica => {
                 let request = pending_replica_opens.pop_front().unwrap();
@@ -1614,6 +1688,8 @@ async fn websocket(
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
                     };
+                    presence_hub.reset(&connection_id, std::time::Instant::now());
+                    presence_slot = None;
                     runtime.inner.metrics.authenticated(
                         &connection_id,
                         &control_connection,
@@ -1643,6 +1719,7 @@ async fn websocket(
                 match transport {
                     ScheduledTransport::Socket(message) => {
                         let Some(message) = message else { break; };
+                        last_inbound = tokio::time::Instant::now();
                         message
                     }
                     ScheduledTransport::Feed(event) => match event {
@@ -1803,6 +1880,29 @@ async fn websocket(
                     }
                     },
                 }
+            }
+            _ = async {
+                match presence_wait.as_ref() {
+                    Some(slot) => slot.notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(slot) = presence_slot.as_ref() {
+                    if let Some(frame) = presence_hub.drain(&connection_id, slot) {
+                        if socket.send(Message::Text(frame.into())).await.is_err() { return; }
+                    }
+                }
+                continue;
+            }
+            _ = presence_ping.tick(), if presence_negotiated => {
+                if last_inbound.elapsed() >= presence_hub.config().liveness_timeout {
+                    let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 4000, reason: "presence liveness timeout".into(),
+                    }))).await;
+                    break;
+                }
+                if socket.send(Message::Ping(Default::default())).await.is_err() { break; }
+                continue;
             }
             event = runtime_events.recv() => {
                 match event {
@@ -2082,6 +2182,9 @@ async fn websocket(
                     let Ok((response, grant)) = service_auth else {
                         break;
                     };
+                    presence_hub.reset(&connection_id, std::time::Instant::now());
+                    presence_slot = None;
+                    presence_negotiated = false;
                     replicas.clear();
                     replica_opens.clear();
                     pending_replica_opens.clear();
@@ -2151,6 +2254,13 @@ async fn websocket(
                     let Ok((mut response, authenticated_control)) = auth_result else {
                         break;
                     };
+                    // A new session scope: the client re-announces its state
+                    // and re-subscribes after `auth.result`. Grace hides the
+                    // gap for a same-tenant token refresh.
+                    presence_hub.reset(&connection_id, std::time::Instant::now());
+                    presence_slot = None;
+                    presence_negotiated = presence_hub.enabled()
+                        && capabilities.as_ref().and_then(|c| c.presence) == Some(1);
                     if let Some(session) = authenticated_control
                         .tenant
                         .as_ref()
@@ -2588,9 +2698,11 @@ async fn websocket(
                         .metrics
                         .activity(&connection_id, "Reducer", Some(&call.path));
                     let control_write = call.scope == Some(ExecutionScope::Control);
-                    let response =
-                        call_reducer(&runtime, tenant_session.as_ref(), &control_connection, call)
-                            .await;
+                    let (response, presence_short) = call_reducer_with_presence(
+                        &runtime, tenant_session.as_ref(), &control_connection, call,
+                        sent_replica_revision, presence_negotiated,
+                    )
+                    .await;
                     let terminal_watermark = call_watermark_after_sent_replica_work(
                         &response,
                         !control_write && tenant_session.is_some(),
@@ -2603,7 +2715,7 @@ async fn websocket(
                     );
                     let control_succeeded =
                         control_write && matches!(response, ServerMessage::ReducerResult { .. });
-                    let control_updates = if control_succeeded {
+                    let control_updates = if control_succeeded && !presence_short {
                         runtime
                             .refresh_control_queries(
                                 &control_connection,
@@ -2625,8 +2737,9 @@ async fn websocket(
                         }
                     }
                     if let Some(watermark) = terminal_watermark {
-                        let frames =
-                            if own_membership_changed(&runtime, tenant_session.as_ref()).await {
+                        let frames = if !presence_short
+                            && own_membership_changed(&runtime, tenant_session.as_ref()).await
+                        {
                                 discard_tenant_session!();
                                 membership_changed_frames(Some(watermark))
                             } else {
@@ -2639,7 +2752,7 @@ async fn websocket(
                             break;
                         }
                     }
-                    if control_succeeded {
+                    if control_succeeded && !presence_short {
                         runtime.notify_control_changed(&control_connection.project_id);
                     }
                     tracing::debug!(
@@ -2694,11 +2807,13 @@ async fn websocket(
                             .metrics
                             .activity(&connection_id, "Reducer", Some(&call.path));
                         let control_write = call.scope == Some(ExecutionScope::Control);
-                        let response = call_reducer(
+                        let (response, presence_short) = call_reducer_with_presence(
                             &runtime,
                             tenant_session.as_ref(),
                             &control_connection,
                             call,
+                            sent_replica_revision,
+                            presence_negotiated,
                         )
                         .await;
                         let terminal_watermark = call_watermark_after_sent_replica_work(
@@ -2713,7 +2828,7 @@ async fn websocket(
                         );
                         let control_succeeded = control_write
                             && matches!(response, ServerMessage::ReducerResult { .. });
-                        let control_updates = if control_succeeded {
+                        let control_updates = if control_succeeded && !presence_short {
                             runtime
                                 .refresh_control_queries(
                                     &control_connection,
@@ -2735,11 +2850,8 @@ async fn websocket(
                             }
                         }
                         if let Some(watermark) = terminal_watermark {
-                            let frames = if own_membership_changed(
-                                &runtime,
-                                tenant_session.as_ref(),
-                            )
-                            .await
+                            let frames = if !presence_short
+                                && own_membership_changed(&runtime, tenant_session.as_ref()).await
                             {
                                 discard_tenant_session!();
                                 membership_changed_frames(Some(watermark))
@@ -2753,7 +2865,7 @@ async fn websocket(
                                 return;
                             }
                         }
-                        if control_succeeded {
+                        if control_succeeded && !presence_short {
                             runtime.notify_control_changed(&control_connection.project_id);
                         }
                     }
@@ -2996,6 +3108,45 @@ async fn websocket(
                     {
                         break;
                     }
+                }
+                Ok(ClientMessage::PresenceSet { state }) => {
+                    if let (Some((scope, member)), Some(state)) = (
+                        presence_member_scope(&presence_hub, tenant_session.as_ref()),
+                        presence::parse_state(&state),
+                    ) {
+                        presence_hub.set_state(
+                            &connection_id, &scope, &member, state, false,
+                            std::time::Instant::now(),
+                        );
+                    }
+                }
+                Ok(ClientMessage::PresenceSubscribe { id }) => {
+                    let response = match presence_member_scope(&presence_hub, tenant_session.as_ref()) {
+                        Some((scope, _)) => {
+                            let (slot, snapshot) = presence_hub.subscribe(
+                                &connection_id, &scope, &id, std::time::Instant::now(),
+                            );
+                            presence_slot = Some(slot);
+                            snapshot
+                        }
+                        None => serde_json::to_string(&ServerMessage::PresenceError {
+                            id,
+                            error: if presence_hub.enabled() {
+                                "presence requires an authenticated tenant member session"
+                            } else {
+                                "presence v2 is disabled"
+                            }
+                            .to_owned(),
+                        })
+                        .unwrap_or_default(),
+                    };
+                    if socket.send(Message::Text(response.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(ClientMessage::PresenceUnsubscribe {}) => {
+                    presence_hub.unsubscribe(&connection_id);
+                    presence_slot = None;
                 }
                 Ok(ClientMessage::ErrorHeartbeat { id }) => {
                     let response = runtime
@@ -3988,6 +4139,164 @@ fn query_result(id: String, path: String, result: serde_json::Value) -> ServerMe
     }
 }
 
+/// The presence scope of a tenant Member session. Anonymous (public) and
+/// service-principal sessions have no presence.
+fn presence_member_scope(
+    hub: &presence::PresenceHub,
+    session: Option<&TenantSession>,
+) -> Option<(presence::ScopeKey, String)> {
+    let session = session?;
+    if !hub.enabled()
+        || session.is_anonymous()
+        || session.delegation.is_some()
+        || session.member.id.is_empty()
+        || session.member.id.starts_with("_gonvex_service:")
+    {
+        return None;
+    }
+    Some((
+        presence::ScopeKey::new(&session.route.project_id, &session.route.tenant_id),
+        session.member.id.clone(),
+    ))
+}
+
+const SUPPORT_HEARTBEAT: &str = "control.support.heartbeat";
+
+fn support_heartbeat_fields(args: &serde_json::Value) -> (String, String) {
+    let field = |name: &str| {
+        args.get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    (field("release"), field("environment"))
+}
+
+/// `call_reducer` plus the presence v2 short-circuits. Returns the response
+/// and whether it was answered in memory (no V8, no write, no fan-out), in
+/// which case the caller skips control refresh/notification and the
+/// membership re-read.
+///
+/// * A repeated `control.support.heartbeat` from the connection that already
+///   registered the same session attribution returns its session id.
+/// * A configured legacy keepalive Reducer (`GONVEX_PRESENCE_LEGACY_BEAT_PATHS`)
+///   marks the caller present and returns the server time. It reports the
+///   connection's last sent replica watermark as `committedRevision` so the
+///   client retires its optimistic local prediction.
+///
+/// After a normal call it records support sessions and, for clients without
+/// presence v2, configured legacy transition Reducers.
+async fn call_reducer_with_presence(
+    runtime: &Runtime,
+    session: Option<&TenantSession>,
+    control_connection: &control::ControlConnection,
+    call: ReducerCallRequest,
+    sent_replica_revision: u64,
+    presence_negotiated: bool,
+) -> (ServerMessage, bool) {
+    let hub = &runtime.inner.presence;
+    if !hub.enabled() {
+        return (call_reducer(runtime, session, control_connection, call).await, false);
+    }
+    let control_scope = call.scope == Some(ExecutionScope::Control);
+    let support_heartbeat = control_scope && call.path == SUPPORT_HEARTBEAT;
+    let support_attribution = support_heartbeat
+        .then(|| {
+            let identity = control_connection.identity.as_ref()?;
+            let tenant = control_connection
+                .tenant
+                .as_ref()
+                .map(|tenant| tenant.route.tenant_id.clone())
+                .unwrap_or_default();
+            let (release, environment) = support_heartbeat_fields(&call.args);
+            Some((identity.account.id.clone(), tenant, release, environment))
+        })
+        .flatten();
+    let session_id = format!("support_{}", control_connection.connection_id);
+    if let Some((account, tenant, release, environment)) = &support_attribution {
+        if hub.support_is_current(
+            &session_id,
+            &control_connection.project_id,
+            &control_connection.connection_id,
+            tenant,
+            account,
+            Some(release),
+            Some(environment),
+        ) {
+            return (
+                ServerMessage::ReducerResult {
+                    id: call.id.clone(),
+                    path: Some(call.path),
+                    result: serde_json::json!({ "sessionId": session_id }),
+                    origin_command_id: call.id,
+                    committed_revision: None,
+                    trace: call.trace,
+                },
+                true,
+            );
+        }
+    }
+    if !control_scope && sent_replica_revision > 0 && hub.is_legacy_beat(&call.path) {
+        if let Some((scope, member)) = presence_member_scope(hub, session) {
+            hub.legacy_beat(
+                &control_connection.connection_id,
+                &scope,
+                &member,
+                std::time::Instant::now(),
+            );
+            return (
+                ServerMessage::ReducerResult {
+                    id: call.id.clone(),
+                    path: Some(call.path),
+                    result: serde_json::json!(presence::now_ms()),
+                    origin_command_id: call.id,
+                    committed_revision: Some(sent_replica_revision),
+                    trace: call.trace,
+                },
+                true,
+            );
+        }
+    }
+    let legacy_transition = (!control_scope
+        && !presence_negotiated
+        && hub.is_legacy_transition(&call.path))
+    .then(|| {
+        call.args
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .and_then(presence::parse_state)
+    })
+    .flatten();
+    let response = call_reducer(runtime, session, control_connection, call).await;
+    if matches!(response, ServerMessage::ReducerResult { .. }) {
+        if let Some((account, tenant, release, environment)) = &support_attribution {
+            hub.support_register(
+                &session_id,
+                &control_connection.project_id,
+                &control_connection.connection_id,
+                tenant,
+                account,
+                Some(release),
+                Some(environment),
+            );
+        }
+        if let (Some(state), Some((scope, member))) =
+            (legacy_transition, presence_member_scope(hub, session))
+        {
+            hub.set_state(
+                &control_connection.connection_id,
+                &scope,
+                &member,
+                state,
+                true,
+                std::time::Instant::now(),
+            );
+        }
+    }
+    (response, false)
+}
+
 async fn call_reducer(
     runtime: &Runtime,
     session: Option<&TenantSession>,
@@ -4651,6 +4960,7 @@ mod tests {
             storage: Default::default(),
             service_principals: Vec::new(),
             public_functions: Default::default(),
+            presence: Default::default(),
         }
     }
 
