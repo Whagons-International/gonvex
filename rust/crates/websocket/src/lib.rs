@@ -3,7 +3,7 @@ mod connection;
 mod frame_limits;
 mod negotiation;
 pub use connection::{
-    Backlog, OutboundLimits, TrySendError, WebSocket, CLOSE_SEND_STALLED,
+    Backlog, OutboundLimits, SocketWatch, TrySendError, WebSocket, CLOSE_SEND_STALLED,
 };
 use connection::{Outbound, Shared, Watched, Writer};
 use frame_limits::FrameLimits;

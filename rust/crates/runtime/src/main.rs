@@ -6,11 +6,10 @@ use std::process::ExitCode;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use axum::serve::ListenerExt;
 use gonvex_runtime::config::Config;
 use gonvex_runtime::Runtime;
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
@@ -95,6 +94,7 @@ async fn run() -> ExitCode {
         },
         None => None,
     };
+    let runtime_socket_tuning = config.connection.socket;
     let runtime = Runtime::new(config);
     if let Err(error) = runtime.start().await {
         error!(%error, "Gonvex runtime startup failed");
@@ -110,11 +110,14 @@ async fn run() -> ExitCode {
     };
 
     info!(%addr, "starting Gonvex Rust runtime");
+    // Nagle off plus per-socket kernel buffer caps on every accepted socket.
+    let listener =
+        gonvex_runtime::accept::TunedListener::new(listener, runtime_socket_tuning);
     let server = axum::serve(
-        listener.tap_io(disable_nagle),
+        listener,
         runtime
             .router()
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            .into_make_service_with_connect_info::<gonvex_runtime::accept::AcceptedSocket>(),
     )
     .with_graceful_shutdown(shutdown_signal());
     // After the signal the listener stops accepting. In-flight HTTP requests
@@ -184,14 +187,6 @@ fn lock_data_dir(data_dir: &std::path::Path) -> Result<gonvex_store::DataDirLock
         })
 }
 
-fn disable_nagle(stream: &mut tokio::net::TcpStream) {
-    // Protocol frames already batch their headers and payloads. Holding a
-    // following small delta/ready frame for a delayed ACK adds a network stall.
-    if let Err(error) = stream.set_nodelay(true) {
-        warn!(%error, "failed to enable TCP_NODELAY");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,17 +198,5 @@ mod tests {
         assert!(lock_data_dir(data.path()).is_err());
         drop(first);
         assert!(lock_data_dir(data.path()).is_ok());
-    }
-
-    #[tokio::test]
-    async fn accepted_connections_disable_nagle() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
-        let (client, accepted) = tokio::join!(client, listener.accept());
-        let _client = client.unwrap();
-        let (mut stream, _) = accepted.unwrap();
-        stream.set_nodelay(false).unwrap();
-        disable_nagle(&mut stream);
-        assert!(stream.nodelay().unwrap());
     }
 }

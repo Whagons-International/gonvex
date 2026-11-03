@@ -1,3 +1,4 @@
+pub mod accept;
 pub mod action_calls;
 #[cfg(test)]
 mod bridge_bench;
@@ -1468,13 +1469,17 @@ async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response 
 
 async fn websocket_upgrade(
     State(runtime): State<Runtime>,
+    accepted: Option<axum::Extension<axum::extract::ConnectInfo<accept::AcceptedSocket>>>,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
     request: axum::extract::Request,
 ) -> Response {
-    let peer = peer
-        .map(|peer| peer.0 .0.ip())
+    let accepted = accepted.map(|accepted| accepted.0 .0);
+    let socket_fd = accepted.and_then(|accepted| accepted.fd);
+    let peer = accepted
+        .map(|accepted| accepted.peer.ip())
+        .or_else(|| peer.map(|peer| peer.0 .0.ip()))
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let limits = &runtime.inner.config.public_functions;
     let ip = public_functions::client_ip(peer, &headers, limits);
@@ -1516,12 +1521,17 @@ async fn websocket_upgrade(
     } else {
         16 << 20
     };
-    websocket_transport::upgrade(
-        request,
-        runtime.inner.config.websocket_compression,
-        runtime.inner.config.websocket_compression_threshold,
+    let options = websocket_transport::UpgradeOptions {
+        compression: runtime.inner.config.websocket_compression,
+        threshold: runtime.inner.config.websocket_compression_threshold,
         max_message,
         max_frame,
+        outbound: runtime.inner.config.connection.outbound,
+        socket_fd,
+    };
+    websocket_transport::upgrade(
+        request,
+        options,
         move |socket| {
             gonvex_profiler::instrument(
                 gonvex_profiler::TaskKind::WsConnection,
@@ -1576,6 +1586,7 @@ async fn websocket(
     let mut presence_slot: Option<Arc<presence::PresenceSlot>> = None;
     let mut presence_negotiated = false;
     let mut last_inbound = tokio::time::Instant::now();
+    let socket_watch = socket.watch();
     let mut presence_ping = tokio::time::interval(presence_hub.config().ping_interval);
     presence_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     presence_ping.tick().await;
@@ -1675,9 +1686,17 @@ async fn websocket(
             // forever for capacity that can never exist.
             bytes > replica_open_queue::MAX_BYTES || replica_opens.has_capacity(&request.id, bytes)
         });
-        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
-        let presence_wait = presence_slot.clone();
+        // While the client is behind, produce nothing new: presence keeps
+        // merging per member in its slot and feed events stay in the shared
+        // broadcast ring (lagging it resets and resyncs the subscription), so
+        // the client gets fewer, newer updates once it catches up. The
+        // transport bounds queued bytes and resets a connection whose
+        // writes stop making progress.
+        let backlogged = socket_watch.is_backlogged();
+        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
+        let presence_wait = presence_slot.clone().filter(|_| !backlogged);
         let message = tokio::select! {
+            _ = socket_watch.writable(), if backlogged => continue,
             _ = std::future::ready(()), if admit_replica => {
                 let request = pending_replica_opens.pop_front().unwrap();
                 snapshot_delivery.remove(&request.id);
@@ -1947,7 +1966,14 @@ async fn websocket(
                 continue;
             }
             _ = presence_ping.tick(), if presence_negotiated => {
-                if last_inbound.elapsed() >= presence_hub.config().liveness_timeout {
+                // Inbound frames, a blocked write resuming (the client is
+                // draining a large send) and the server's own read
+                // backpressure all count; a client that reads nothing does
+                // not. Stuck writes are reset by the transport's stall timeout.
+                let alive = socket_watch
+                    .last_activity()
+                    .map_or(last_inbound, |activity| activity.max(last_inbound));
+                if alive.elapsed() >= presence_hub.config().liveness_timeout {
                     let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 4000, reason: "presence liveness timeout".into(),
                     }))).await;
@@ -4821,7 +4847,7 @@ mod tests {
             "/proof",
             axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async {
                 upgrade.on_upgrade(|socket| async move {
-                    let mut socket = super::WebSocket::Plain(Box::new(socket));
+                    let mut socket = super::WebSocket::from_axum(socket, Default::default());
                     let mut delivery = super::snapshot_delivery::SnapshotDelivery::default();
                     let cursor = ReplicaCursor {
                         epoch: "e".into(),
@@ -5097,6 +5123,7 @@ mod tests {
             service_principals: Vec::new(),
             public_functions: Default::default(),
             presence: Default::default(),
+            connection: Default::default(),
         }
     }
 

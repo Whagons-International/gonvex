@@ -66,6 +66,7 @@ fn test_config(database_url: String, presence: PresenceConfig) -> Config {
         service_principals: Vec::new(),
         public_functions: Default::default(),
         presence,
+        connection: Default::default(),
     }
 }
 

@@ -541,12 +541,52 @@ impl WebSocket {
         }
     }
 
+    /// A cheap handle for backlog and liveness checks that does not borrow
+    /// the socket (usable in the same `select!` as `next()`).
+    pub fn watch(&self) -> SocketWatch {
+        SocketWatch(Arc::clone(&self.shared))
+    }
+
     pub fn backlog(&self) -> Backlog {
-        let queue = self.shared.queue.lock().unwrap();
+        self.watch().backlog()
+    }
+
+    pub fn is_backlogged(&self) -> bool {
+        self.watch().is_backlogged()
+    }
+
+    pub async fn writable(&self) {
+        self.watch().writable().await
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.watch().is_closed()
+    }
+
+    pub fn send_stalled(&self) -> bool {
+        self.watch().send_stalled()
+    }
+
+    pub fn last_activity(&self) -> Option<Instant> {
+        self.watch().last_activity()
+    }
+
+    pub fn limits(&self) -> OutboundLimits {
+        self.shared.limits
+    }
+}
+
+/// Backlog and liveness view of one connection.
+#[derive(Clone)]
+pub struct SocketWatch(Arc<Shared>);
+
+impl SocketWatch {
+    pub fn backlog(&self) -> Backlog {
+        let queue = self.0.queue.lock().unwrap();
         Backlog {
             bytes: queue.bytes,
             frames: queue.frames,
-            write_blocked: queue.frames > 0 && self.shared.write_blocked.load(Relaxed),
+            write_blocked: queue.frames > 0 && self.0.write_blocked.load(Relaxed),
         }
     }
 
@@ -554,13 +594,13 @@ impl WebSocket {
     /// queue more frames, and send once `writable()` resolves.
     pub fn is_backlogged(&self) -> bool {
         let backlog = self.backlog();
-        backlog.bytes >= self.shared.limits.low_water || backlog.write_blocked
+        backlog.bytes >= self.0.limits.low_water || backlog.write_blocked
     }
 
     /// Resolves when the connection is no longer backlogged, or is closed.
     pub async fn writable(&self) {
         loop {
-            let space = self.shared.space.notified();
+            let space = self.0.space.notified();
             tokio::pin!(space);
             space.as_mut().enable();
             if !self.is_backlogged() || self.is_closed() {
@@ -571,12 +611,12 @@ impl WebSocket {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.shared.queue.lock().unwrap().closed
+        self.0.queue.lock().unwrap().closed
     }
 
     /// The writer gave up on this connection because writes made no progress.
     pub fn send_stalled(&self) -> bool {
-        self.shared.stalled.load(Relaxed)
+        self.0.stalled.load(Relaxed)
     }
 
     /// Latest evidence that the peer is alive and keeping up: an inbound
@@ -585,17 +625,14 @@ impl WebSocket {
     /// client draining a large send is therefore alive even if its replies
     /// queue behind that data; a client that stopped reading is not.
     pub fn last_activity(&self) -> Option<Instant> {
-        if self.shared.reader_waiting.load(Relaxed) {
+        if self.0.reader_waiting.load(Relaxed) {
             return Some(Instant::now());
         }
-        let inbound = self.shared.inbound_at.load(Relaxed);
-        let drained = self.shared.drained_at.load(Relaxed);
-        self.shared.instant(inbound.max(drained))
+        let inbound = self.0.inbound_at.load(Relaxed);
+        let drained = self.0.drained_at.load(Relaxed);
+        self.0.instant(inbound.max(drained))
     }
 
-    pub fn limits(&self) -> OutboundLimits {
-        self.shared.limits
-    }
 }
 
 impl Stream for WebSocket {

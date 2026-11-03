@@ -52,10 +52,10 @@ uuid.workspace = true
 url.workspace = true
 duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
+socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-socket2 = "0.6"
 tempfile = "3"
 tokio-tungstenite = "0.29"
 tower.workspace = true

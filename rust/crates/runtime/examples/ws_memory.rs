@@ -235,7 +235,6 @@ mod server {
         extract::{ws::Message, Request, State},
         response::Response,
         routing::get,
-        serve::ListenerExt,
         Router,
     };
 
@@ -244,19 +243,34 @@ mod server {
         let compression = arg(args, "--compression", "on") == "on";
         let port_file = arg(args, "--port-file", "");
         let data = arg(args, "--data", "");
-        let sndbuf: usize = arg(args, "--sndbuf", "0").parse().unwrap();
-        let rcvbuf: usize = arg(args, "--rcvbuf", "0").parse().unwrap();
+        // Production socket options and outbound limits, with overrides:
+        // a 0 buffer/lowat keeps the platform default (the old behaviour).
+        let mut connection = gonvex_runtime::config::ConnectionConfig::default();
+        let bytes = |name: &str, default: Option<usize>| -> Option<usize> {
+            let value: usize = arg(args, name, &default.unwrap_or(0).to_string()).parse().unwrap();
+            (value > 0).then_some(value)
+        };
+        connection.socket.send_buffer = bytes("--sndbuf", connection.socket.send_buffer);
+        connection.socket.receive_buffer = bytes("--rcvbuf", connection.socket.receive_buffer);
+        connection.socket.notsent_lowat =
+            bytes("--notsent", connection.socket.notsent_lowat.map(|v| v as usize)).map(|v| v as u32);
+        connection.outbound.stall_timeout = Duration::from_secs(
+            arg(args, "--stall-seconds", &connection.outbound.stall_timeout.as_secs().to_string())
+                .parse()
+                .unwrap(),
+        );
+        eprintln!("ws_memory server connection config: {connection:?}");
         let mem = Router::new().route("/__mem", get(|| async { mem_json() }));
         let (app, _guard) = match mode.as_str() {
             "transport" => (
                 Router::new()
                     .route("/ws", get(transport))
-                    .with_state(compression)
+                    .with_state((compression, connection.outbound))
                     .merge(mem),
                 None,
             ),
             "runtime" => {
-                let (runtime, token) = runtime_fixture(&data, compression).await;
+                let (runtime, token) = runtime_fixture(&data, compression, connection).await;
                 std::fs::write(format!("{port_file}.token"), &token).unwrap();
                 (runtime.router().merge(mem), Some(runtime))
             }
@@ -267,47 +281,47 @@ mod server {
         std::fs::write(&port_file, port.to_string()).unwrap();
         eprintln!("ws_memory server mode={mode} compression={compression} port={port}");
         axum::serve(
-            listener.tap_io(move |stream| {
-                let _ = stream.set_nodelay(true);
-                // Optional SO_SNDBUF/SO_RCVBUF caps (each disables that direction's autotuning).
-                if sndbuf > 0 {
-                    let _ = socket2::SockRef::from(&*stream).set_send_buffer_size(sndbuf);
-                }
-                if rcvbuf > 0 {
-                    let _ = socket2::SockRef::from(&*stream).set_recv_buffer_size(rcvbuf);
-                }
-            }),
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            gonvex_runtime::accept::TunedListener::new(listener, connection.socket),
+            app.into_make_service_with_connect_info::<gonvex_runtime::accept::AcceptedSocket>(),
         )
         .await
         .unwrap();
     }
 
-    async fn transport(State(compression): State<bool>, request: Request) -> Response {
-        gonvex_websocket::upgrade(
-            request,
+    async fn transport(
+        State((compression, outbound)): State<(bool, gonvex_websocket::OutboundLimits)>,
+        accepted: Option<axum::Extension<axum::extract::ConnectInfo<gonvex_runtime::accept::AcceptedSocket>>>,
+        request: Request,
+    ) -> Response {
+        let options = gonvex_websocket::UpgradeOptions {
             compression,
-            1024,
-            64 << 20,
-            16 << 20,
-            |mut socket| async move {
-                while let Some(Ok(message)) = socket.next().await {
-                    match message {
-                        Message::Text(text) => {
-                            if socket.send(Message::Text(text)).await.is_err() {
-                                return;
-                            }
+            threshold: 1024,
+            max_message: 64 << 20,
+            max_frame: 16 << 20,
+            outbound,
+            socket_fd: accepted.and_then(|accepted| accepted.0 .0.fd),
+        };
+        gonvex_websocket::upgrade(request, options, |mut socket| async move {
+            while let Some(Ok(message)) = socket.next().await {
+                match message {
+                    Message::Text(text) => {
+                        if socket.send(Message::Text(text)).await.is_err() {
+                            return;
                         }
-                        Message::Close(_) => return,
-                        _ => {}
                     }
+                    Message::Close(_) => return,
+                    _ => {}
                 }
-            },
-        )
+            }
+        })
         .await
     }
 
-    async fn runtime_fixture(data: &str, compression: bool) -> (gonvex_runtime::Runtime, String) {
+    async fn runtime_fixture(
+        data: &str,
+        compression: bool,
+        connection: gonvex_runtime::config::ConnectionConfig,
+    ) -> (gonvex_runtime::Runtime, String) {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         use gonvex_runtime::config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig};
         use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
@@ -394,6 +408,7 @@ mod server {
             service_principals: Vec::new(),
             public_functions: Default::default(),
             presence: Default::default(),
+            connection,
         };
         let runtime = gonvex_runtime::Runtime::new(config);
         runtime.start().await.unwrap();
