@@ -41,22 +41,21 @@ services:
       timeout: 2s
       retries: 120
   runtime:
-    image: alpine:latest
+    image: debian:bookworm-slim
     container_name: gvsq-runtime
     network_mode: service:namespace
-    # Run as the lab owner so fill/reset scripts can open the SQLite files.
-    user: '${LOAD_UID:-1000}:${LOAD_GID:-1000}'
-    cpus: 4
-    mem_limit: 4g
+    user: '${LOAD_UID:-0}:${LOAD_GID:-0}'
+    cpus: ${LOAD_RUNTIME_CPUS:-4}
+    mem_limit: ${LOAD_RUNTIME_MEMORY:-4g}
+    memswap_limit: ${LOAD_RUNTIME_MEMORY:-4g}
     working_dir: /state
     command: [/binhost/gonvex-runtime]
     volumes:
+      # Linux binaries from build.sh (built in rust:bookworm, same glibc).
       - ${LOAD_BIN_DIR:?set LOAD_BIN_DIR}:/binhost:ro
-      # Locally built Arch Linux ELF binaries need the workstation's loader.
-      - /usr/lib:/usr/lib:ro
-      - /usr/lib64:/usr/lib64:ro
-      - /lib64:/lib64:ro
-      - ${LOAD_LAB_ROOT}/runtime:/state
+      # SQLite files live on a Docker volume (ext4 in the Docker VM), so sync
+      # costs resemble a Linux server rather than a host file share.
+      - state:/state
     environment:
       GONVEX_ADDR: 127.0.0.1:8080
       GONVEX_ENV: test
@@ -74,12 +73,46 @@ services:
       GONVEX_REPLICA_SNAPSHOT_CONCURRENCY: ${LOAD_SNAPSHOTS:-4}
       GONVEX_MODULE_HOST_MAX_CONCURRENT_CALLS: ${LOAD_MODULE_CONCURRENCY:-32}
       GONVEX_DB_MAX_TOTAL_CONNS: ${LOAD_SHARED:-64}
+      GONVEX_SQLITE_CACHE_KIB: ${LOAD_SQLITE_CACHE_KIB:-8192}
       RUST_LOG: warn
     healthcheck:
-      test: [CMD, wget, -q, -O, '-', http://127.0.0.1:8080/healthz]
+      test: [CMD, bash, -c, 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf "GET /healthz HTTP/1.0\r\n\r\n" >&3 && head -1 <&3 | grep -q " 200"']
       interval: 1s
       timeout: 2s
       retries: 120
+  # Lab data scripts (reset/fill/staff) against the runtime's volume. Run only
+  # while the runtime is stopped.
+  tools:
+    profiles: [tools]
+    image: python:3.13-slim-bookworm
+    container_name: gvsq-tools
+    network_mode: none
+    user: '${LOAD_UID:-0}:${LOAD_GID:-0}'
+    working_dir: /harness
+    entrypoint: [python3]
+    environment:
+      LOAD_LAB_ROOT: /lab
+      LOAD_RUNTIME_CHECKED: '1'
+    volumes:
+      - ${LOAD_LAB_ROOT}:/lab
+      - state:/lab/runtime
+      - .:/harness:ro
+  # Container cgroup and pressure telemetry from inside the Docker VM.
+  monitor:
+    profiles: [tools]
+    build:
+      dockerfile_inline: |
+        FROM docker:28-cli
+        RUN apk add --no-cache python3
+    container_name: gvsq-monitor
+    pid: host
+    cgroup: host
+    privileged: true
+    entrypoint: [python3, /harness/monitor.py]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${LOAD_LAB_ROOT}:/lab
+      - .:/harness:ro
   generator:
     profiles: [load]
     image: node:26-bookworm-slim
@@ -112,6 +145,9 @@ services:
       LOAD_RESULT: /state/${LOAD_LABEL:-step}.json
       LOAD_SHARDS: ${LOAD_SHARDS:-1}
     entrypoint: [/bin/sh, /harness/shards.sh]
+volumes:
+  state:
+    name: gvsq-state
 networks:
   isolated:
     internal: true

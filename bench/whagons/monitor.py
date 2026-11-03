@@ -4,7 +4,8 @@ import json,pathlib,subprocess,sys,time,os,signal,uuid,threading
 out=pathlib.Path(sys.argv[1]);out.mkdir(parents=True,exist_ok=True)
 done=threading.Event();containers={}
 def full_psi(kind):
- return float(pathlib.Path('/proc/pressure/'+kind).read_text().split('full avg10=')[1].split()[0])
+ try:return float(pathlib.Path('/proc/pressure/'+kind).read_text().split('full avg10=')[1].split()[0])
+ except (OSError,IndexError,ValueError):return 0.0
 def locate(name):
  if name not in containers:
   try:

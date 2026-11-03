@@ -18,6 +18,9 @@ def runtime_running():
 
 
 def require_stopped():
+    # In the tools container the caller (run-case.sh) checked before starting it.
+    if os.environ.get('LOAD_RUNTIME_CHECKED') == '1':
+        return
     if runtime_running():
         raise SystemExit(f'stop {RUNTIME} first: the runtime owns the SQLite files while running')
 

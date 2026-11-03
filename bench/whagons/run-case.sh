@@ -16,7 +16,7 @@ compose=(docker compose -f "$bench/compose.yaml")
 export LOAD_LAB_ROOT="$lab"
 headroom
 "${compose[@]}" stop -t 20 runtime > "$lab/$label/runtime-stop.log" 2>&1 || true
-python3 "$bench/reset.py" "$lab/fixture.json" > "$lab/$label/reset.log"
+"${compose[@]}" run --rm --no-deps tools reset.py /lab/fixture.json > "$lab/$label/reset.log" 2>&1
 "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 runtime > "$lab/$label/runtime-start.log" 2>&1
 for name in runtime auth; do
  [ "$(docker inspect "gvsq-$name" --format '{{index .Config.Labels "com.docker.compose.project"}}')" = gonvex-sqlite-load ] || exit 2
@@ -25,10 +25,9 @@ done
 durability=$(docker inspect gvsq-runtime --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^GONVEX_SQLITE_SYNCHRONOUS=//p')
 case "$durability" in full|normal) ;; *) echo 'Durability preflight failed' >&2;exit 2;; esac
 printf '%s\n' "$durability" > "$lab/$label/durability"
-python3 "$bench/monitor.py" "$lab/$label" & monitor=$!
+"${compose[@]}" run -d --rm --no-deps --name gvsq-monitor monitor "/lab/$label" > /dev/null
 finish() {
- kill "$monitor" 2>/dev/null || true
- wait "$monitor" 2>/dev/null || true
+ docker stop -t 5 gvsq-monitor >/dev/null 2>&1 || true
  if [ "$(docker inspect gvsq-generator --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || true)" = gonvex-sqlite-load ]; then docker stop -t 2 gvsq-generator >/dev/null 2>&1 || true;fi
 }
 trap finish EXIT

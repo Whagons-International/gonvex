@@ -4,7 +4,7 @@ import { readFile, writeFile, appendFile, realpath } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { randomUUID, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { loopback, quantiles } from './safety.mjs';
+import { loopback, quantiles, passRule } from './safety.mjs';
 
 async function main() {
  const profileHash=createHash('sha256').update(await readFile(process.argv[1])).digest('hex');
@@ -213,7 +213,7 @@ async function main() {
  if(!measurements.delivery.length) error(new Error('No update delivery samples'));
  const result={sdkVersion:sdkPackage.version,sdkPatch:expectedPatch,steadyStartMs:deadline-seconds*1000,steadyEndMs:deadline,profileHash,distributionProfile:process.env.LOAD_ALL_TENANTS_ACTIVE==='true'?'all-tenants':'observed-seven',pathLatencyMs:Object.fromEntries(Object.entries(perPath).map(([path,p])=>[path,{samples:p.durations.length,errors:p.errors,...quantiles(p.durations)}])),aborted,snapshots,targetUsers:myTarget,connectedUsers:users.length,shard,shards,...(shards>1?{raw:measurements,rawPaths:perPath}:{}),rampSeconds:ramp,steadySeconds:seconds,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),note:'Delivery uses presence row timestamps on the same workstation. Task snapshot latency is separate. Setup excluded from sign-in timing.'};
  const q:any=result.latencyMs;
- (result as any).clientSloPassed=!aborted&&users.length===myTarget&&Object.keys(errors).length===0&&q.save.samples>0&&q.taskDelivery.samples>0&&q.save.p95<1000&&q.reducer.p95<1000&&q.taskDelivery.p95<1000;
+ {const rule=passRule({latencyMs:q,errors,connectedUsers:users.length,targetUsers:myTarget,aborted});Object.assign(result,{clientSloPassed:rule.passed,errorRate:rule.errorRate,failingKinds:rule.failingKinds});}
  console.log(JSON.stringify(result));await writeFile(process.env.LOAD_RESULT||state+'.result',JSON.stringify(result,null,2));
 }
 main().catch(e=>{console.error(e);process.exit(1);});

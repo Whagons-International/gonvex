@@ -1,7 +1,7 @@
 // Merges per-shard generator results (raw samples) into one result with the
 // same pass rule as an unsharded run.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { quantiles } from './safety.mjs';
+import { quantiles, passRule } from './safety.mjs';
 const [out, count] = [process.argv[2], Number(process.argv[3])];
 const parts = [];
 let partial = false;
@@ -37,8 +37,7 @@ const result = {
   errors,
   latencyMs,
 };
-const q = latencyMs;
-result.clientSloPassed = !result.aborted && result.connectedUsers === result.targetUsers && Object.keys(errors).length === 0
-  && q.save?.samples > 0 && q.taskDelivery?.samples > 0 && q.save.p95 < 1000 && q.reducer.p95 < 1000 && q.taskDelivery.p95 < 1000;
+const rule = passRule(result);
+Object.assign(result, { clientSloPassed: rule.passed, errorRate: rule.errorRate, failingKinds: rule.failingKinds });
 writeFileSync(partial ? out + '.partial.json' : out, JSON.stringify(result, null, 2));
 console.log(JSON.stringify({ merged: parts.length, of: count, connectedUsers: result.connectedUsers, passed: result.clientSloPassed }));
