@@ -293,6 +293,11 @@ impl Fixture {
         overrides.insert("GONVEX_DATA_DIR".into(), run_dir.display().to_string());
         overrides.insert("GONVEX_MODULE_HOST_ENABLED".into(), "true".into());
         overrides.insert("GONVEX_MODULE_HOST_ENDPOINT".into(), host.endpoint());
+        // Builds with the in-process V8 host (`GONVEX_MODULE_HOST_IN_PROCESS`,
+        // default true there) would otherwise bypass the fake socket host and
+        // run the placeholder bundle, which exports nothing
+        // (`function_not_found`). Builds without the flag ignore it.
+        overrides.insert("GONVEX_MODULE_HOST_IN_PROCESS".into(), "false".into());
         overrides.remove("GONVEX_MODULE_HOST_BINARY");
         let config = Config::perf_from_lookup(|name| overrides.get(name).cloned())?;
         let compression_threshold = config.websocket_compression_threshold;
