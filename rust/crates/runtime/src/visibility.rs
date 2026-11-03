@@ -1338,7 +1338,55 @@ pub fn validate_manifest(plans: &BTreeMap<String, VisibilityPlan>) -> Result<(),
 // set contents and permissions stay unknown; their dependencies are retained.
 // SQL compilation uses the same pruning for v2 masks so it never asks for a
 // set that the resolver deliberately omitted.
+thread_local! {
+    /// Memo of `role_only_value` by expression node address, active only
+    /// inside `with_role_memo` (synchronous callers, so nodes stay put).
+    static ROLE_MEMO: std::cell::RefCell<Option<(String, std::collections::HashMap<usize, Option<bool>>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `body` with `role_only_value` memoized per node. Callers that walk an
+/// expression and ask `role_only_value` at every node (SQL compilation,
+/// active sets) were quadratic in the size of large v2 masks.
+fn with_role_memo<R>(role: &str, body: impl FnOnce() -> R) -> R {
+    let installed = ROLE_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if memo.is_some() {
+            return false;
+        }
+        *memo = Some((role.to_owned(), std::collections::HashMap::new()));
+        true
+    });
+    let result = body();
+    if installed {
+        ROLE_MEMO.with(|memo| *memo.borrow_mut() = None);
+    }
+    result
+}
+
 fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool> {
+    let address = expression as *const VisibilityExpression as usize;
+    let cached = ROLE_MEMO.with(|memo| {
+        memo.borrow()
+            .as_ref()
+            .filter(|(memo_role, _)| memo_role == role)
+            .and_then(|(_, values)| values.get(&address).copied())
+    });
+    if let Some(value) = cached {
+        return value;
+    }
+    let value = role_only_value_uncached(expression, role);
+    ROLE_MEMO.with(|memo| {
+        if let Some((memo_role, values)) = memo.borrow_mut().as_mut() {
+            if memo_role == role {
+                values.insert(address, value);
+            }
+        }
+    });
+    value
+}
+
+fn role_only_value_uncached(expression: &VisibilityExpression, role: &str) -> Option<bool> {
     match expression.operator.as_str() {
         "public" => Some(true),
         "role" => expression
@@ -1373,7 +1421,7 @@ fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool
 /// set maps from, transitively.
 fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
     let mut active = BTreeSet::new();
-    active_visibility_sets(&plan.predicate, role, &mut active);
+    with_role_memo(role, || active_visibility_sets(&plan.predicate, role, &mut active));
     let mut pending = active.iter().cloned().collect::<Vec<_>>();
     while let Some(name) = pending.pop() {
         if let Some(set) = plan.sets.get(&name) {
@@ -1946,14 +1994,16 @@ pub fn compile_predicate(
     row_alias: &str,
     parameters: &mut Vec<Value>,
 ) -> Result<String, VisibilityError> {
-    compile_expression(
-        &plan.predicate,
-        plan,
-        resolved,
-        row_alias,
-        parameters,
-        &mut None,
-    )
+    with_role_memo(&resolved.role, || {
+        compile_expression(
+            &plan.predicate,
+            plan,
+            resolved,
+            row_alias,
+            parameters,
+            &mut None,
+        )
+    })
 }
 
 pub fn row_matches(plan: &VisibilityPlan, resolved: &ResolvedVisibility, row: &Value) -> bool {
