@@ -605,7 +605,7 @@ impl Runtime {
         if old.is_none() && projection.is_none() {
             return Ok(());
         }
-        if old.is_some() && old.as_ref().map(|entry| &entry.row) == projection.as_ref() {
+        if old.is_some() && old.as_ref().map(|entry| &*entry.row) == projection.as_ref() {
             return Ok(());
         }
         let new_hash = projection.as_ref().map(row_hash);
@@ -624,7 +624,7 @@ impl Runtime {
                     &subscription.definition.table,
                     id,
                     &hash,
-                    row,
+                    row.clone(),
                 );
                 subscription
                     .hashes

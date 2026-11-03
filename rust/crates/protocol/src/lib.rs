@@ -674,7 +674,9 @@ pub enum ServerMessage {
     #[serde(rename = "replica.snapshot")]
     ReplicaSnapshot {
         id: String,
-        result: Vec<Value>,
+        /// Shared with the runtime's interned replica rows (serialized as
+        /// plain values), so a snapshot does not copy every row it sends.
+        result: Vec<std::sync::Arc<Value>>,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]
@@ -699,7 +701,9 @@ pub enum ServerMessage {
         sequence: u64,
         last: bool,
         id: String,
-        result: Vec<Value>,
+        /// Shared with the runtime's interned replica rows (serialized as
+        /// plain values), so a snapshot does not copy every row it sends.
+        result: Vec<std::sync::Arc<Value>>,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]

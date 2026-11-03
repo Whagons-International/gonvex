@@ -149,7 +149,8 @@ fn snapshot_permits() -> &'static tokio::sync::Semaphore {
 pub struct ReplicaEntry {
     pub key: RowKey,
     pub hash: RowHash,
-    pub row: Value,
+    /// Shared with snapshot messages that send this row.
+    pub row: Arc<Value>,
 }
 
 impl ReplicaEntry {
@@ -158,7 +159,7 @@ impl ReplicaEntry {
         Arc::new(Self {
             key: key.into(),
             hash: row_hash(&row).into(),
-            row,
+            row: Arc::new(row),
         })
     }
 }
@@ -190,8 +191,8 @@ fn row_interner() -> &'static std::sync::Mutex<Interner> {
 }
 
 /// The shared entry for `row` (identified by database, table, key and hash).
-/// Only a row not already held by some subscription is copied.
-pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row: &Value) -> SharedRow {
+/// A new row is moved in; a row some subscription already holds is dropped.
+pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row: Value) -> SharedRow {
     let identity: Box<str> = format!("{database}\u{0}{table}\u{0}{key}\u{0}{hash}").into();
     let mut rows = row_interner().lock().unwrap();
     if let Some(shared) = rows.get(&identity).and_then(std::sync::Weak::upgrade) {
@@ -204,7 +205,7 @@ pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row
     let shared = Arc::new(ReplicaEntry {
         key: key.into(),
         hash: hash.into(),
-        row: row.clone(),
+        row: Arc::new(row),
     });
     rows.insert(identity, Arc::downgrade(&shared));
     shared
@@ -218,7 +219,8 @@ pub(crate) fn row_hashes(rows: &RowMap) -> RowHashes {
 }
 
 struct Snapshot {
-    rows: Vec<Value>,
+    /// The interned rows (shared with `by_key`), in query order.
+    rows: Vec<Arc<Value>>,
     by_key: RowMap,
     hashes: RowHashes,
     truncated: bool,
@@ -244,7 +246,9 @@ impl Runtime {
         let snapshot = self
             .replica_snapshot(session, definition, visibility, args)
             .await?;
-        Ok(Value::Array(snapshot.rows))
+        Ok(Value::Array(
+            snapshot.rows.into_iter().map(Arc::unwrap_or_clone).collect(),
+        ))
     }
 
     pub async fn open_replica(
@@ -531,20 +535,24 @@ impl Runtime {
         transaction.commit().await?;
         let mut by_key = BTreeMap::new();
         let mut hashes = BTreeMap::new();
-        for (index, row) in rows.iter().enumerate() {
+        let mut shared_rows = Vec::with_capacity(rows.len());
+        for (index, row) in rows.into_iter().enumerate() {
             if index % 32 == 0 {
                 tokio::task::yield_now().await;
             }
-            let key = row_key(row, &definition.key)?;
-            let hash = row_hash(row);
+            let key = row_key(&row, &definition.key)?;
+            let hash = row_hash(&row);
+            // Moves the decoded row into the interner (or drops it when an
+            // identical row is already held), so it is never held twice.
             let shared = intern_row(&session.route.database_url, &definition.table, &key, &hash, row);
             hashes.insert(shared.key.clone(), shared.hash.clone());
+            shared_rows.push(shared.row.clone());
             if by_key.insert(shared.key.clone(), shared).is_some() {
                 return Err(ReplicaError::DuplicateKey(key));
             }
         }
         Ok(Snapshot {
-            rows,
+            rows: shared_rows,
             by_key,
             hashes,
             truncated,
@@ -719,7 +727,7 @@ impl Runtime {
                             entity: subscription.definition.table.clone(),
                             id: key.clone(),
                             operation: "delete".to_owned(),
-                            old_value: subscription.rows.get(key.as_str()).map(|row| row.row.clone()),
+                            old_value: subscription.rows.get(key.as_str()).map(|row| (*row.row).clone()),
                             new_value: None,
                             changed_columns: Vec::new(),
                         },
@@ -798,7 +806,7 @@ impl Runtime {
                             &subscription.definition.table,
                             &change.row_id,
                             &hash,
-                            new_projection,
+                            new_projection.clone(),
                         );
                         subscription
                             .hashes
@@ -1552,7 +1560,7 @@ where
             client_hashes.get(key.as_ref()).map(AsRef::as_ref)
                 != current_hashes.get(key.as_ref()).map(AsRef::as_ref)
         })
-        .map(|(_, row)| row.row.clone())
+        .map(|(_, row)| (*row.row).clone())
         .collect();
     let deleted = client_keys
         .iter()
@@ -1635,7 +1643,7 @@ pub(crate) struct SnapshotPages {
     key: String,
     metadata: BTreeMap<String, Value>,
     digest: Value,
-    rows: std::iter::Peekable<std::vec::IntoIter<Value>>,
+    rows: std::iter::Peekable<std::vec::IntoIter<Arc<Value>>>,
     sequence: u64,
     finished: bool,
     native_rows: bool,
@@ -1709,7 +1717,7 @@ impl SnapshotPages {
         }
     }
 
-    fn page(&self, result: Vec<Value>, last: bool) -> ServerMessage {
+    fn page(&self, result: Vec<Arc<Value>>, last: bool) -> ServerMessage {
         let mut metadata = self.metadata.clone();
         if last {
             metadata.insert("digest".to_owned(), self.digest.clone());
@@ -1722,7 +1730,7 @@ impl SnapshotPages {
                 key: self.key.clone(),
                 sequence: self.sequence,
                 last,
-                canonical_rows: result.iter().map(stable_json).collect(),
+                canonical_rows: result.iter().map(|row| stable_json(row)).collect(),
                 metadata,
             };
         }
@@ -2032,7 +2040,7 @@ mod tests {
             .collect();
         ServerMessage::ReplicaSnapshot {
             id: "open".into(),
-            result: rows,
+            result: rows.into_iter().map(Arc::new).collect(),
             cursor: ReplicaCursor {
                 epoch: "e".into(),
                 revision: 10,
