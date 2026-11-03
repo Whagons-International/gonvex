@@ -47,8 +47,16 @@ extern "C" {
         >,
         context: *mut c_void,
     ) -> *mut c_void;
-    fn sqlite3_preupdate_old(db: *mut ffi::sqlite3, index: c_int, value: *mut *mut ffi::sqlite3_value) -> c_int;
-    fn sqlite3_preupdate_new(db: *mut ffi::sqlite3, index: c_int, value: *mut *mut ffi::sqlite3_value) -> c_int;
+    fn sqlite3_preupdate_old(
+        db: *mut ffi::sqlite3,
+        index: c_int,
+        value: *mut *mut ffi::sqlite3_value,
+    ) -> c_int;
+    fn sqlite3_preupdate_new(
+        db: *mut ffi::sqlite3,
+        index: c_int,
+        value: *mut *mut ffi::sqlite3_value,
+    ) -> c_int;
     fn sqlite3_preupdate_count(db: *mut ffi::sqlite3) -> c_int;
 }
 
@@ -110,7 +118,9 @@ unsafe fn value_cell(value: *mut ffi::sqlite3_value) -> Cell {
             if text.is_null() {
                 Cell::Text(String::new())
             } else {
-                Cell::Text(String::from_utf8_lossy(std::slice::from_raw_parts(text, len)).into_owned())
+                Cell::Text(
+                    String::from_utf8_lossy(std::slice::from_raw_parts(text, len)).into_owned(),
+                )
             }
         }
         ffi::SQLITE_BLOB => {
@@ -144,7 +154,11 @@ unsafe extern "C" fn preupdate(
         return;
     };
     let count = sqlite3_preupdate_count(db).max(0);
-    let read = |getter: unsafe extern "C" fn(*mut ffi::sqlite3, c_int, *mut *mut ffi::sqlite3_value) -> c_int,
+    let read = |getter: unsafe extern "C" fn(
+        *mut ffi::sqlite3,
+        c_int,
+        *mut *mut ffi::sqlite3_value,
+    ) -> c_int,
                 rowid: i64| {
         let mut cells = Vec::with_capacity(count as usize);
         for index in 0..count {
@@ -154,17 +168,27 @@ unsafe extern "C" fn preupdate(
             } else {
                 Cell::Null
             };
-            cells.push(if shape.rowid_alias == Some(index as usize) && cell == Cell::Null {
-                Cell::Integer(rowid)
-            } else {
-                cell
-            });
+            cells.push(
+                if shape.rowid_alias == Some(index as usize) && cell == Cell::Null {
+                    Cell::Integer(rowid)
+                } else {
+                    cell
+                },
+            );
         }
         cells
     };
     let (old, new, rowid) = match op {
-        ffi::SQLITE_INSERT => (None, Some(read(sqlite3_preupdate_new, new_rowid)), new_rowid),
-        ffi::SQLITE_DELETE => (Some(read(sqlite3_preupdate_old, old_rowid)), None, old_rowid),
+        ffi::SQLITE_INSERT => (
+            None,
+            Some(read(sqlite3_preupdate_new, new_rowid)),
+            new_rowid,
+        ),
+        ffi::SQLITE_DELETE => (
+            Some(read(sqlite3_preupdate_old, old_rowid)),
+            None,
+            old_rowid,
+        ),
         ffi::SQLITE_UPDATE => (
             Some(read(sqlite3_preupdate_old, old_rowid)),
             Some(read(sqlite3_preupdate_new, new_rowid)),
@@ -184,12 +208,20 @@ unsafe extern "C" fn preupdate(
 /// Events left unconsumed (a statement that failed after the hook fired)
 /// end with the transaction.
 unsafe extern "C" fn transaction_end(context: *mut c_void) -> c_int {
-    (*(context as *const Context)).events.lock().unwrap().clear();
+    (*(context as *const Context))
+        .events
+        .lock()
+        .unwrap()
+        .clear();
     0
 }
 
 unsafe extern "C" fn transaction_rollback(context: *mut c_void) {
-    (*(context as *const Context)).events.lock().unwrap().clear();
+    (*(context as *const Context))
+        .events
+        .lock()
+        .unwrap()
+        .clear();
 }
 
 fn cell_json(cell: &Cell, kind: JsonKind) -> Value {
@@ -201,9 +233,13 @@ fn cell_json(cell: &Cell, kind: JsonKind) -> Value {
             serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
         }
         (Cell::Integer(value), _) => Value::Number((*value).into()),
-        (Cell::Real(value), _) => Number::from_f64(*value).map(Value::Number).unwrap_or(Value::Null),
+        (Cell::Real(value), _) => Number::from_f64(*value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         (Cell::Text(text), _) => Value::String(text.clone()),
-        (Cell::Blob(bytes), _) => Value::String(bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
+        (Cell::Blob(bytes), _) => {
+            Value::String(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        }
     }
 }
 
@@ -251,7 +287,9 @@ unsafe extern "C" fn capture_function(
             .rposition(|event| event.table == table && event.rowid == rowid && event.op == op)
         else {
             drop(events);
-            return fail("gonvex_capture: no pending row change (writer without the capture hook?)");
+            return fail(
+                "gonvex_capture: no pending row change (writer without the capture hook?)",
+            );
         };
         events.remove(position)
     };
@@ -304,7 +342,11 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
     let mut handle = connection.lock_handle().await?;
     let db = handle.as_raw_handle().as_ptr();
     let key = db as usize;
-    let existing = contexts().lock().unwrap().get(&key).and_then(std::sync::Weak::upgrade);
+    let existing = contexts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade);
     let context = match existing {
         Some(context) => context,
         None => {
@@ -326,7 +368,9 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
                 );
                 if rc != ffi::SQLITE_OK {
                     drop(Box::from_raw(data));
-                    return Err(DatabaseError::Decode(format!("register {CAPTURE_FUNCTION}: code {rc}")));
+                    return Err(DatabaseError::Decode(format!(
+                        "register {CAPTURE_FUNCTION}: code {rc}"
+                    )));
                 }
                 sqlite3_preupdate_hook(db, Some(preupdate), raw);
                 ffi::sqlite3_commit_hook(db, Some(transaction_end), raw);
@@ -348,7 +392,11 @@ pub async fn refresh(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
         let mut handle = connection.lock_handle().await?;
         handle.as_raw_handle().as_ptr() as usize
     };
-    let context = contexts().lock().unwrap().get(&key).and_then(std::sync::Weak::upgrade);
+    let context = contexts()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade);
     if let Some(context) = context {
         let shapes = load_shapes(connection).await?;
         *context.tables.write().unwrap() = shapes;
@@ -384,9 +432,14 @@ async fn load_shapes(
         if pk == 1 && pk_columns == 1 && declared.trim().eq_ignore_ascii_case("INTEGER") {
             shape.rowid_alias = Some(shape.columns.len());
         }
-        shape.columns.push((name, JsonKind::from_declared(&declared)));
+        shape
+            .columns
+            .push((name, JsonKind::from_declared(&declared)));
     }
-    Ok(shapes.into_iter().map(|(table, shape)| (table, Arc::new(shape))).collect())
+    Ok(shapes
+        .into_iter()
+        .map(|(table, shape)| (table, Arc::new(shape)))
+        .collect())
 }
 
 #[cfg(test)]
@@ -398,8 +451,14 @@ mod tests {
 
     async fn connection_with(table_sql: &str, table: &str, key: &str) -> SqliteConnection {
         let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
-        sqlx::raw_sql(SYNC_INFRASTRUCTURE_SQL).execute(&mut connection).await.unwrap();
-        sqlx::raw_sql(table_sql).execute(&mut connection).await.unwrap();
+        sqlx::raw_sql(SYNC_INFRASTRUCTURE_SQL)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::raw_sql(table_sql)
+            .execute(&mut connection)
+            .await
+            .unwrap();
         let columns = table_columns(&mut connection, table).await.unwrap();
         sqlx::raw_sql(&capture_triggers_sql(table, key, &columns))
             .execute(&mut connection)
@@ -439,19 +498,34 @@ mod tests {
         )
         .await;
         let mut tx = connection.begin().await.unwrap();
-        sqlx::query("INSERT INTO m VALUES ('a', 'old', 1)").execute(&mut *tx).await.unwrap();
-        sqlx::query("UPDATE m SET name = 'new' WHERE id = 'a'").execute(&mut *tx).await.unwrap();
-        finalize(&mut tx, &Provenance::default()).await.unwrap().unwrap();
+        sqlx::query("INSERT INTO m VALUES ('a', 'old', 1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE m SET name = 'new' WHERE id = 'a'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        finalize(&mut tx, &Provenance::default())
+            .await
+            .unwrap()
+            .unwrap();
         tx.commit().await.unwrap();
         let rows = changes(&mut connection).await;
         assert_eq!(rows[0].0, "insert");
         assert_eq!(rows[0].2, json!({"id":"a","name":"old","updated_at":1}));
-        let updates = rows.iter().filter(|row| row.0 == "update").collect::<Vec<_>>();
+        let updates = rows
+            .iter()
+            .filter(|row| row.0 == "update")
+            .collect::<Vec<_>>();
         assert_eq!(updates.len(), 2, "{rows:?}");
         let name_change = updates.iter().find(|row| row.3 == json!(["name"])).unwrap();
         assert_eq!(name_change.1, json!({"id":"a","name":"old","updated_at":1}));
         assert_eq!(name_change.2, json!({"id":"a","name":"new","updated_at":1}));
-        let stamp = updates.iter().find(|row| row.3 == json!(["updated_at"])).unwrap();
+        let stamp = updates
+            .iter()
+            .find(|row| row.3 == json!(["updated_at"]))
+            .unwrap();
         assert_eq!(stamp.1, json!({"id":"a","name":"new","updated_at":1}));
         assert_eq!(stamp.2, json!({"id":"a","name":"new","updated_at":99}));
     }
@@ -465,21 +539,39 @@ mod tests {
         )
         .await;
         let mut tx = connection.begin().await.unwrap();
-        sqlx::query("INSERT INTO t VALUES ('a', 1), ('c', 4)").execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO t VALUES ('a', 1), ('c', 4)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         // One statement: 'a' becomes 3 (hook fires, its change row is
         // written), then 'c' becomes 12 and fails the CHECK. SQLite rolls the
         // whole statement back, including the change row already written.
-        let failed = sqlx::query("UPDATE t SET n = n * 3").execute(&mut *tx).await;
+        let failed = sqlx::query("UPDATE t SET n = n * 3")
+            .execute(&mut *tx)
+            .await;
         assert!(failed.is_err());
-        sqlx::query("UPDATE t SET n = 2 WHERE id = 'a'").execute(&mut *tx).await.unwrap();
-        finalize(&mut tx, &Provenance::default()).await.unwrap().unwrap();
+        sqlx::query("UPDATE t SET n = 2 WHERE id = 'a'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        finalize(&mut tx, &Provenance::default())
+            .await
+            .unwrap()
+            .unwrap();
         tx.commit().await.unwrap();
         let rows = changes(&mut connection).await;
         let last = rows.last().unwrap();
         assert_eq!(last.0, "update");
         assert_eq!(last.2, json!({"id":"a","n":2}));
-        assert!(rows.iter().all(|row| row.2 != json!({"id":"a","n":3})), "{rows:?}");
-        assert_eq!(rows.iter().filter(|row| row.0 == "update").count(), 1, "{rows:?}");
+        assert!(
+            rows.iter().all(|row| row.2 != json!({"id":"a","n":3})),
+            "{rows:?}"
+        );
+        assert_eq!(
+            rows.iter().filter(|row| row.0 == "update").count(),
+            1,
+            "{rows:?}"
+        );
         assert_eq!(last.1, json!({"id":"a","n":1}));
     }
 }

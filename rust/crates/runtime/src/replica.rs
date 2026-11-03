@@ -2,16 +2,16 @@
 
 #[path = "replica_mask.rs"]
 mod mask;
-use std::sync::Arc;
 use mask::MaskStep;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
-use gonvex_store::{TenantSession, TenantTransaction};
 use gonvex_protocol::replica_digest::ReplicaSetDigest;
 use gonvex_protocol::{
     PublicInvocationProvenance, ReplicaChange, ReplicaCursor, ReplicaOpenRequest, ServerMessage,
 };
+use gonvex_store::{TenantSession, TenantTransaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -212,7 +212,13 @@ fn row_interner() -> &'static std::sync::Mutex<Interner> {
 
 /// The shared entry for `row` (identified by database, table, key and hash).
 /// A new row is moved in; a row some subscription already holds is dropped.
-pub(crate) fn intern_row(database: &str, table: &str, key: &str, hash: &str, row: Value) -> SharedRow {
+pub(crate) fn intern_row(
+    database: &str,
+    table: &str,
+    key: &str,
+    hash: &str,
+    row: Value,
+) -> SharedRow {
     let identity: Box<str> = format!("{database}\u{0}{table}\u{0}{key}\u{0}{hash}").into();
     let mut rows = row_interner().lock().unwrap();
     if let Some(shared) = rows.get(&identity).and_then(std::sync::Weak::upgrade) {
@@ -267,7 +273,11 @@ impl Runtime {
             .replica_snapshot(session, definition, visibility, args)
             .await?;
         Ok(Value::Array(
-            snapshot.rows.into_iter().map(Arc::unwrap_or_clone).collect(),
+            snapshot
+                .rows
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect(),
         ))
     }
 
@@ -561,7 +571,13 @@ impl Runtime {
             let hash = row_hash(&row);
             // Moves the decoded row into the interner (or drops it when an
             // identical row is already held), so it is never held twice.
-            let shared = intern_row(&session.route.database_url, &definition.table, &key, &hash, row);
+            let shared = intern_row(
+                &session.route.database_url,
+                &definition.table,
+                &key,
+                &hash,
+                row,
+            );
             hashes.insert(shared.key.clone(), shared.hash.clone());
             shared_rows.push(shared.row.clone());
             if by_key.insert(shared.key.clone(), shared).is_some() {
@@ -744,7 +760,10 @@ impl Runtime {
                             entity: subscription.definition.table.clone(),
                             id: key.clone(),
                             operation: "delete".to_owned(),
-                            old_value: subscription.rows.get(key.as_str()).map(|row| (*row.row).clone()),
+                            old_value: subscription
+                                .rows
+                                .get(key.as_str())
+                                .map(|row| (*row.row).clone()),
                             new_value: None,
                             changed_columns: Vec::new(),
                         },
@@ -1083,14 +1102,12 @@ async fn query_rows_filtered(
         quote(column)?;
     }
     // Declared types decide how each column is encoded (JSON, BOOLEAN).
-    let declared = gonvex_store::rows::table_columns(
-        &mut **transaction.transaction(),
-        &definition.table,
-    )
-    .await?
-    .into_iter()
-    .map(|column| (column.name.clone(), column.kind()))
-    .collect::<BTreeMap<_, _>>();
+    let declared =
+        gonvex_store::rows::table_columns(&mut **transaction.transaction(), &definition.table)
+            .await?
+            .into_iter()
+            .map(|column| (column.name.clone(), column.kind()))
+            .collect::<BTreeMap<_, _>>();
     let columns = definition
         .columns
         .iter()
@@ -1128,11 +1145,10 @@ async fn query_rows_filtered(
     if let Some(expected) = expected_revision {
         // One read transaction sees one WAL snapshot, so the clock read here
         // is the clock of the rows below (SQLite has no LATERAL join).
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1",
-        )
-        .fetch_one(&mut **transaction.transaction())
-        .await?;
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM _gonvex_sync_clock WHERE singleton = 1")
+                .fetch_one(&mut **transaction.transaction())
+                .await?;
         if revision.max(0) as u64 != expected {
             return Err(ReplicaError::SnapshotAdvanced);
         }
@@ -1519,7 +1535,11 @@ fn write_stable_string(out: &mut String, value: &str) {
     }
     if out[start..].contains(['\u{2028}', '\u{2029}']) {
         let tail = out.split_off(start);
-        out.push_str(&tail.replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029"));
+        out.push_str(
+            &tail
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029"),
+        );
     }
 }
 
@@ -1990,7 +2010,12 @@ fn hex_digest(value: &[u8]) -> String {
 mod tests {
     fn shared_rows(rows: std::collections::BTreeMap<String, serde_json::Value>) -> super::RowMap {
         rows.into_iter()
-            .map(|(key, row)| (key.as_str().into(), super::ReplicaEntry::detached(&key, row)))
+            .map(|(key, row)| {
+                (
+                    key.as_str().into(),
+                    super::ReplicaEntry::detached(&key, row),
+                )
+            })
             .collect()
     }
     use super::*;
@@ -2464,7 +2489,10 @@ mod tests {
             Some(ServerMessage::ReplicaNeedHashes { .. })
         ));
         let (upserts, deleted) = diff_rows(
-            &shared_rows(BTreeMap::from([("1".into(), new.clone()), ("2".into(), inserted.clone())])),
+            &shared_rows(BTreeMap::from([
+                ("1".into(), new.clone()),
+                ("2".into(), inserted.clone()),
+            ])),
             &current,
             &prior,
             &["1".to_owned(), "3".to_owned()],

@@ -858,7 +858,9 @@ async fn prune_completed_jobs(
 async fn next_due_at(
     connection: &mut sqlx::SqliteConnection,
 ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
-    let next: Option<i64> = sqlx::query_scalar(NEXT_DUE_SQL).fetch_one(connection).await?;
+    let next: Option<i64> = sqlx::query_scalar(NEXT_DUE_SQL)
+        .fetch_one(connection)
+        .await?;
     Ok(next.map(millis_to_datetime))
 }
 
@@ -933,7 +935,6 @@ mod tests {
             None => tempfile::tempdir().unwrap(),
         }
     }
-
 
     #[test]
     fn interval_and_five_field_crons_have_a_next_occurrence() {
@@ -1150,7 +1151,11 @@ mod tests {
             .iter()
             .map(|row| row.get::<String, _>("detail"))
             .collect();
-        assert!(!table_scan(&plan), "claim scans the job table:\n{}", plan.join("\n"));
+        assert!(
+            !table_scan(&plan),
+            "claim scans the job table:\n{}",
+            plan.join("\n")
+        );
 
         let plan: Vec<String> = sqlx::query(&format!("EXPLAIN QUERY PLAN {NEXT_DUE_SQL}"))
             .fetch_all(&mut *connection)

@@ -28,10 +28,10 @@ macro_rules! now_ms {
 
 pub mod capture;
 mod data_dir;
-mod sync_barrier;
 pub mod feed;
 mod registry;
 pub mod rows;
+mod sync_barrier;
 pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
@@ -1212,7 +1212,10 @@ impl ControlPlane {
 pub fn retry_delay_ms(attempts: i32) -> i64 {
     const CAP_MS: i64 = 15 * 60 * 1000;
     let exponent = attempts.clamp(1, 30) - 1;
-    1000i64.checked_shl(exponent as u32).unwrap_or(CAP_MS).min(CAP_MS)
+    1000i64
+        .checked_shl(exponent as u32)
+        .unwrap_or(CAP_MS)
+        .min(CAP_MS)
 }
 
 /// Host-owned attribution installed on one Reducer transaction before commit.

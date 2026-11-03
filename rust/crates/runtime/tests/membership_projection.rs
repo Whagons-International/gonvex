@@ -11,7 +11,10 @@ async fn write(pools: &PoolRegistry, url: &str, statement: &str, bind: Option<&s
     if let Some(value) = bind {
         query = query.bind(value);
     }
-    query.execute(&mut **transaction.transaction()).await.unwrap();
+    query
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
     transaction.commit().await.unwrap();
 }
 
@@ -101,10 +104,12 @@ async fn membership_projection_is_resumable_and_revision_guarded() {
         ("revoked".to_owned(), 2)
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _gonvex_control_plane_membership_outbox")
-            .fetch_one(&pools.reader(&tenant_url).await.unwrap())
-            .await
-            .unwrap(),
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM _gonvex_control_plane_membership_outbox"
+        )
+        .fetch_one(&pools.reader(&tenant_url).await.unwrap())
+        .await
+        .unwrap(),
         0
     );
     pools.close().await;

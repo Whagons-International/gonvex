@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use gonvex_store::{TenantSession, TenantTransaction};
 use gonvex_protocol::{ServerMessage, SubscriptionRevision};
+use gonvex_store::{TenantSession, TenantTransaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::Row;
@@ -1480,14 +1480,14 @@ fn compile_search_filtered(
                     // A materialized candidate set lets SQLite probe the
                     // projection key index and stop early on the requested
                     // ordering index.
-                    alternatives.push(format!(
-                        "g.{} IN ({documents})",
-                        quote(&index.key)?
-                    ));
+                    alternatives.push(format!("g.{} IN ({documents})", quote(&index.key)?));
                 } else if search.columns.is_empty() {
                     document_sets.push(format!("({documents})"));
                 } else {
-                    alternatives.push(format!("CAST(r.{} AS TEXT) IN ({documents})", quote(&plan.key)?));
+                    alternatives.push(format!(
+                        "CAST(r.{} AS TEXT) IN ({documents})",
+                        quote(&plan.key)?
+                    ));
                 }
             }
         }
@@ -2165,10 +2165,13 @@ mod tests {
         let mut transaction = begin_transaction(&pools, &database_url, false)
             .await
             .unwrap();
-        gonvex_store::execute_script(&mut **transaction.transaction(), "CREATE TABLE live_count_items (id INTEGER PRIMARY KEY);
+        gonvex_store::execute_script(
+            &mut **transaction.transaction(),
+            "CREATE TABLE live_count_items (id INTEGER PRIMARY KEY);
              INSERT INTO live_count_items VALUES (0), (1);
              CREATE TABLE members (account_id TEXT, status TEXT);
-             INSERT INTO members VALUES ('account', 'active');")
+             INSERT INTO members VALUES ('account', 'active');",
+        )
         .await
         .unwrap();
         let plan: LiveQueryPlan = serde_json::from_value(serde_json::json!({
@@ -2397,7 +2400,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            sql.contains("IN (SELECT CAST(r_related.\"itemId\" AS TEXT) FROM \"routing\" AS r_related"),
+            sql.contains(
+                "IN (SELECT CAST(r_related.\"itemId\" AS TEXT) FROM \"routing\" AS r_related"
+            ),
             "{sql}"
         );
         assert!(
@@ -2576,7 +2581,8 @@ mod tests {
         assert_eq!(
             index_predicate(
                 &plan,
-                "CAST(r.\"_id\" AS TEXT) IN (SELECT member_id FROM related) OR r.\"name\" = $1".into()
+                "CAST(r.\"_id\" AS TEXT) IN (SELECT member_id FROM related) OR r.\"name\" = $1"
+                    .into()
             )
             .unwrap(),
             "g.\"itemId\" IN (SELECT member_id FROM related) OR g.\"name\" = $1"

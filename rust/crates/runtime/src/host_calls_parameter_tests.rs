@@ -179,10 +179,7 @@ async fn caught_sql_errors_cannot_commit_earlier_writes() {
 async fn rollback_to_savepoint_recovers_from_a_caught_sql_error() {
     let fixture = Fixture::new().await;
     let mut calls = fixture.calls().await;
-    for statement in [
-        "INSERT INTO tasks VALUES (2,'kept')",
-        "SAVEPOINT attempt",
-    ] {
+    for statement in ["INSERT INTO tasks VALUES (2,'kept')", "SAVEPOINT attempt"] {
         calls.query(statement, Value::Null).await.unwrap();
     }
     assert!(calls
@@ -238,7 +235,8 @@ async fn raw_query_type_changes_and_array_parameters_preserve_values() {
         (serde_json::json!([1, 2]), serde_json::json!([1, 2])),
         (serde_json::json!([{"x": 1}]), serde_json::json!([{"x": 1}])),
     ] {
-        let statement = "SELECT value AS n, t.id FROM json_each($1) LEFT JOIN tasks t ON 0 ORDER BY key";
+        let statement =
+            "SELECT value AS n, t.id FROM json_each($1) LEFT JOIN tasks t ON 0 ORDER BY key";
         for _ in 0..2 {
             let rows = calls
                 .query(statement, Value::Array(vec![value.clone()]))
@@ -423,9 +421,10 @@ impl SyncFixture {
             .await
             .unwrap();
         let columns = table_columns(&mut connection, "tasks").await.unwrap();
-        gonvex_store::execute_script(&mut connection, &gonvex_store::feed::capture_triggers_sql(
-            "tasks", "id", &columns,
-        ))
+        gonvex_store::execute_script(
+            &mut connection,
+            &gonvex_store::feed::capture_triggers_sql("tasks", "id", &columns),
+        )
         .await
         .unwrap();
         Self { database }
