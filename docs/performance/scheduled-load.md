@@ -179,11 +179,10 @@ SQLite page cache across 26 tenants), so these are not steady-state values. B is
 lowest because it barely enters V8. A's higher module-host RSS is within that
 drift and was not investigated further.
 
-### Cron :00 window at 200 users
+### Cron :00 window under load
 
-Pending: `integrate/docs/performance/step-log.md` has no such section yet. The
-integration agent's `base-cron-150` case (lab-5k, 150 users) was running when
-this was written.
+200 users OOM-killed the base before :00; the 150-user window is in
+`integrate/docs/performance/step-log.md` and analysed under "Actions at :00" below.
 
 ## Fixes
 
@@ -318,6 +317,102 @@ Generated manifests in the Whagons branch were not regenerated.
 * `workplans` / `taskRecurrences` reconcile (6 h) did not fire during the runs;
   their cost was not measured.
 
+## Actions at :00 (input from the integration step log, 150 users)
+
+The integration thread measured the base at 150 users across 14:00
+(`integrate/docs/performance/step-log.md`, "Cron :00 window"): the module host went
+from 395 to 788 MiB, the 2 GiB cgroup sat at `memory.max`, direct reclaim took the
+vCPU, heartbeat p95 was 29.6 s for two minutes, and one `outbox` task poll blocked
+the only tokio worker for 33.7 s. At :00 the binding problem is Action memory.
+
+### Which crons lead to Actions at :00
+
+| cron (fires at :00) | what it starts |
+| --- | --- |
+| `centerClassification.queue` (`*/15`) | `actions.enqueue('centerClassification.classify')` per tenant with pending items. The Action loops up to 20 batches: `prepare` Reducer → OpenRouter → `apply` Reducer (both as Action tools) |
+| `analyticsDelivery.processQueue` (`* * * * *`) | one `analyticsDelivery.deliver` Action (Resend email) per due delivery, then `runAfter(2_000, processQueue)` while work remains |
+| `workflowRuntime.resumeDueDelays` (hourly) | `runAfter(0, resumeDelay)` per due delay; a resumed workflow enqueues `deliverWorkflowEmail`, `sendWorkflowWebhook`, `journeySync.requestTaskReconciliation` or custom Actions |
+| `slaExecution.evaluate` (hourly) | `runAfter(0, evaluateTask)` per task (Reducers, no Action directly) |
+| `cleaning.tick`, `boards.generateBirthdayMessages` | none |
+| interval crons (any second) | `agents.dispatch` → `agents.executeRun`, `deepResearch.tick` → `deepResearch.execute`; `journeySync.processDue` and `billing.synchronize` are Actions themselves |
+
+Which of these actually fired in base-cron-150 depends on that lab's data; the step
+log does not break `fn.total action` down by function.
+
+### How many Action isolates and invokes run at once
+
+* The engine leases one call per isolate. Each **nesting depth** has its own pool
+  (`module-runtime-v8/src/lib.rs`, 9 pools for depths 0–8) of
+  `GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE` isolates, default `min(CPUs, 4)` = 1 on
+  1 vCPU. So concurrent invokes are at most 1 per depth, at most 9 in total.
+* Depth is not only call nesting. Durable hops add one too: cron jobs are stored
+  with `provenance: Null` (`scheduler.rs:746`) and run at depth 0 + 1 = **1**
+  (`scheduler.rs:566`). `runAfter` jobs run at the scheduling call's depth + 1, and
+  outbox Actions at the enqueuing Reducer's depth + 1 (`execution.rs:1068`). Action
+  tools add one more (`action_calls.rs:320`). The result:
+
+  | work | depth / pool |
+  | --- | --- |
+  | user calls | 0 |
+  | every cron run | 1 |
+  | Action or `runAfter` job started by a cron | 2 |
+  | that Action's tool Reducers (`prepare`/`apply`) | 3 |
+  | each `processQueue` → `runAfter` self-hop | +1, up to 8, after which it fails with "exceeded the maximum depth" |
+
+* Each pool starts its isolate lazily with the **complete bundle** and keeps it idle
+  until `recycle_after_calls` (10,000), after which the next call starts a
+  replacement; nothing reaps an idle pool. Measured (baseline lab, 0 users,
+  2026-11-03 14:29–14:30): 1 isolate, 169 MB, until the first cron at 14:30:07; then 2
+  isolates, 274 MB (+105 MB for the depth-1 pool alone). perf/v8-memory measured
+  ≈ 80 MB RSS per extra complete-bundle isolate (pool 1 → 4: 176 → 420 MB), heap
+  limit 64 MB each. The +393 MiB at :00 fits **4–5 more depth pools** (the Action at
+  2, its tools at 3, `runAfter` chains above). This is an inference from code and the
+  idle measurement, not a capture on lab-5k.
+* Outbox drains are unbounded: one `tokio::spawn` per committing Reducer that wrote
+  the outbox, plus the 30-s sweep over every tenant. Each drain claims up to 100
+  Actions sequentially. They wait cheaply in `pool.acquire`, but they run on the
+  runtime's only tokio worker (the network thread). That is where the 33.7-s
+  `outbox` poll ran; whether it was page-fault/reclaim stall or synchronous work is
+  still undetermined.
+
+### Does the scheduled lane bound them?
+
+Partly. The lane (cap 2, niced thread) covers everything the scheduler runs: crons,
+`runAfter` jobs, and cron-scheduled Actions (`journeySync`, `billing`). It does
+**not** cover outbox-drained Actions. Those run from `drain_action_outbox` on the
+network worker and count as user calls, so cron runs yield to them rather than
+the reverse. Nor does the lane reduce isolate count, which comes from depth.
+
+### Recommendation
+
+1. **Durable hops reset the pool depth.** Cron, `runAfter` and outbox jobs start at
+   depth 0 for pool selection, with a separate hop counter for loop protection. That
+   removes up to 8 lazily-started complete-bundle isolates (≈ 80 MB each on the base)
+   and fixes the self-rescheduling `processQueue` chain dying at depth 8. Change sites:
+   `scheduler.rs:566`, `execution.rs:1068`.
+2. **One Action at a time process-wide on 1 vCPU, at low priority.**
+   `GONVEX_ACTION_CONCURRENCY` defaulting to `1` when CPUs = 1 (`min(CPUs, 2)`
+   otherwise), as a priority semaphore: direct user Actions first, then outbox, then
+   cron. The drain claims an outbox row only after it holds the permit, so queued
+   work stays durable in SQLite instead of piling up in memory and leases cannot
+   expire. The drain runs on the scheduled lane thread, never on the network worker.
+   Claims rotate across tenants so one tenant's backlog does not starve the others.
+   An Action waiting on `fetch` keeps the permit; on 1 vCPU that is the intended
+   trade (memory, not CPU, binds), and the 15-min Action timeout is the bound.
+3. **Run Actions in one on-demand isolate** (perf/v8-memory: complete bundle on
+   demand, +29 MB while warm, reaped after 60 s idle). With (1) and (2), Action memory
+   at :00 is one Action isolate plus its tools' depth-1 reducer isolate, about
+   +50 MB, released after a minute, instead of +400 MB kept.
+4. **perf/native-reducers** keeps the same per-depth pools inside the runtime
+   process, so without (1)–(3) the extra isolates land in runtime RSS and an OOM
+   takes down the runtime itself rather than only the module host. Apply (1) and (2)
+   before that bridge ships.
+
+Not implemented on this branch; (1) and (2) are small runtime changes (the permit
+and lane plumbing exist in `scheduled_lane.rs`). Next measurement: a perf capture at
+14:01–14:03 on the next :00 run, plus isolate-thread counts of the module host
+(`/proc/<pid>/task/*/comm` = `gonvex-module-is…`) across the window.
+
 ## Risks
 
 * Stagger delays five-field crons by up to `min(period, 10 min)`. Daily
@@ -336,7 +431,8 @@ Generated manifests in the Whagons branch were not regenerated.
 
 ## Not measured
 
-* The 200-user :00 window (pending, see above).
+* The 200-user :00 window (base OOM-killed before :00; 150 users measured by the integration thread).
+* Module-host isolate count across a loaded :00 window (only the idle depth-1 step was captured).
 * Runtime user-space frames in the :00 flamegraphs (dwarf unwinding stopped at
   libc; kernel symbols hidden).
 * Memory at steady state (all runs were still drifting).
