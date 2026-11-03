@@ -1242,6 +1242,15 @@ pub struct TenantTransaction {
     _writer_held: Option<gonvex_profiler::GaugeGuard>,
 }
 
+/// What a commit published.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommitOutcome {
+    /// The revision, when the transaction changed tracked rows.
+    pub revision: Option<u64>,
+    /// Change rows in that revision.
+    pub changes: u64,
+}
+
 /// Opens a transaction on the writer (or, when read-only, on a reader whose
 /// WAL snapshot stays fixed for the whole transaction).
 pub async fn begin_transaction(
@@ -1420,7 +1429,12 @@ impl TenantTransaction {
     }
 
     /// Commits and returns the revision it published, if it changed rows.
-    pub async fn commit_with_revision(mut self) -> Result<Option<u64>, DatabaseError> {
+    pub async fn commit_with_revision(self) -> Result<Option<u64>, DatabaseError> {
+        self.commit_with_outcome().await.map(|outcome| outcome.revision)
+    }
+
+    /// Commits and returns the published revision with its change-row count.
+    pub async fn commit_with_outcome(mut self) -> Result<CommitOutcome, DatabaseError> {
         if let Some(reason) = self.failed.take() {
             self.transaction.rollback().await?;
             return Err(DatabaseError::TransactionAborted(reason));
@@ -1453,7 +1467,10 @@ impl TenantTransaction {
             pools.durable(database_url).await?;
             timer.lap(Stage::CommitFsync, label);
         }
-        let revision = notice.as_ref().map(|notice| notice.revision);
+        let outcome = CommitOutcome {
+            revision: notice.as_ref().map(|notice| notice.revision),
+            changes: notice.as_ref().map_or(0, |notice| notice.changes),
+        };
         if let (Some(notice), Some((pools, database_url))) = (notice, self.publisher.take()) {
             pools
                 .notify(&database_url, feed::CHANGE_FEED_CHANNEL, &notice.payload())
@@ -1463,7 +1480,7 @@ impl TenantTransaction {
             timer.lap(Stage::CommitPublish, label);
             self.committed = Some(notice);
         }
-        Ok(revision)
+        Ok(outcome)
     }
 
     pub async fn commit(self) -> Result<(), DatabaseError> {

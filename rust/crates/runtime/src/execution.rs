@@ -414,7 +414,12 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
-        let profile_label = gonvex_profiler::Label::classify("reducer", path);
+        let scheduled = crate::cron_profile::active();
+        let profile_label = if scheduled {
+            gonvex_profiler::Label::Cron
+        } else {
+            gonvex_profiler::Label::classify("reducer", path)
+        };
         let _profile = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
         let mut profile_timer = gonvex_profiler::Timer::start();
         let profile_started = profile_timer;
@@ -543,11 +548,13 @@ impl Runtime {
         }
         invocation.context.intent_entropy = access.intent_entropy;
         let profile_prepare = profile_timer.lap(gonvex_profiler::Stage::FnPrepare, profile_label);
+        let invoke_timer = crate::cron_profile::InvokeTimer::start(scheduled);
         let result = self
             .inner
             .module_host
             .invoke(invocation, &mut handler)
             .await;
+        drop(invoke_timer);
         let fault = handler.transient_fault();
         match result {
             Ok(value) => {
@@ -569,7 +576,31 @@ impl Runtime {
                 }
                 profile_timer.skip();
                 let (invoke_times, writer_wait, sql) = handler.profile_times();
-                let finished = handler.finish_with_revision(true).await;
+                let writer_acquired = handler.writer_acquired_ns();
+                let finished = handler.finish_with_outcome(true).await;
+                if scheduled {
+                    crate::cron_profile::add(|run| &run.host_calls, invoke_times.host_call_count);
+                    if writer_acquired != 0 {
+                        crate::cron_profile::add(
+                            |run| &run.writer_hold_ns,
+                            gonvex_profiler::now_ns().saturating_sub(writer_acquired),
+                        );
+                    }
+                    if let Ok(outcome) = &finished {
+                        crate::cron_profile::add(|run| &run.rows_written, outcome.changes);
+                        if outcome.revision.is_some() {
+                            crate::cron_profile::add(|run| &run.revisions, 1);
+                            crate::cron_profile::add(
+                                |run| &run.fanout,
+                                self.inner
+                                    .change_feeds
+                                    .receiver_count(&session.route.database_url)
+                                    as u64,
+                            );
+                        }
+                    }
+                }
+                let finished = finished.map(|outcome| outcome.revision);
                 let profile_finish =
                     profile_timer.lap(gonvex_profiler::Stage::FnFinish, profile_label);
                 let profile_total = profile_started.elapsed_ns();
@@ -624,7 +655,14 @@ impl Runtime {
                         .await;
                 }
                 // A rollback that fails means the connection itself is gone.
+                let writer_acquired = handler.writer_acquired_ns();
                 let rolled_back = handler.finish(false).await.is_ok();
+                if scheduled && writer_acquired != 0 {
+                    crate::cron_profile::add(
+                        |run| &run.writer_hold_ns,
+                        gonvex_profiler::now_ns().saturating_sub(writer_acquired),
+                    );
+                }
                 let error = ExecutionError::from(error);
                 if !rolled_back || fault.observed() {
                     Err(ExecutionError::Transient(Box::new(error)))
@@ -683,7 +721,11 @@ impl Runtime {
     ) -> Result<ActionExecution, ExecutionError> {
         let _profile = gonvex_profiler::ScopeTimer::new(
             gonvex_profiler::Stage::FnTotal,
-            gonvex_profiler::Label::Action,
+            if crate::cron_profile::active() {
+                gonvex_profiler::Label::Cron
+            } else {
+                gonvex_profiler::Label::Action
+            },
         );
         let committed_revisions = access.committed_revisions.clone().unwrap_or_default();
         let module = match access.module {
@@ -767,6 +809,7 @@ impl Runtime {
         invocation.context.environment = environment;
         invocation.context.action_tools = handler.tools();
         let deadline = invocation.context.deadline_unix_ms;
+        let _invoke_timer = crate::cron_profile::InvokeTimer::start(crate::cron_profile::active());
         let call = self.inner.module_host.invoke(invocation, &mut handler);
         let value = if session.is_anonymous() {
             // The host's engine watchdog has transport slack. Do not let that

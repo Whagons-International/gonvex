@@ -102,6 +102,9 @@ pub struct CronSpec {
     pub interval_ms: Option<u64>,
     #[serde(default)]
     pub expression: Option<String>,
+    /// Profiler cron-table slot, assigned once at module install.
+    #[serde(skip)]
+    pub slot: u16,
 }
 
 #[derive(Default)]
@@ -304,7 +307,7 @@ fn crons_from_module(
         .get("crons")
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()));
-    let crons: Vec<CronSpec> = serde_json::from_value(values)
+    let mut crons: Vec<CronSpec> = serde_json::from_value(values)
         .map_err(|error| invalid(format!("invalid crons: {error}")))?;
     let mut names = std::collections::BTreeSet::new();
     for cron in &crons {
@@ -329,6 +332,9 @@ fn crons_from_module(
                 cron.name
             )));
         }
+    }
+    for cron in &mut crons {
+        cron.slot = gonvex_profiler::cron::register(cron.name.trim());
     }
     Ok(crons)
 }

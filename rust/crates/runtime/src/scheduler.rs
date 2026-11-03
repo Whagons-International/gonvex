@@ -349,7 +349,17 @@ impl Scheduler {
                 }
             }
         });
-        let result = self.execute_job(runtime, &job).await;
+        let started = gonvex_profiler::now_ns();
+        let start_delay = (Utc::now() - job.scheduled_for)
+            .num_nanoseconds()
+            .unwrap_or(0)
+            .max(0) as u64;
+        let (result, mut sample) =
+            crate::cron_profile::scope(self.execute_job(runtime, &job)).await;
+        sample.total_ns = gonvex_profiler::now_ns().saturating_sub(started);
+        sample.start_delay_ns = start_delay;
+        sample.error = result.is_err();
+        gonvex_profiler::cron::record(cron_slot(runtime, &job).await, &sample);
         let _ = stop_lease.send(true);
         let _ = renewal.await;
         if let Err(error) = self.finish(runtime, &job, result.is_ok()).await {
@@ -905,6 +915,21 @@ fn next_occurrence(spec: &CronSpec, after: DateTime<Utc>) -> Result<Option<DateT
     Ok(schedule.after(&after).next())
 }
 
+/// The profiler cron-table slot of a claimed job (one-shot jobs share slot 0).
+async fn cron_slot(runtime: &Runtime, job: &ScheduledJob) -> u16 {
+    if job.cron_name.is_empty() || !gonvex_profiler::enabled() {
+        return gonvex_profiler::cron::ONE_SHOT_SLOT;
+    }
+    match runtime.inner.modules.project(&job.project_id).await {
+        Some(module) => module
+            .crons
+            .iter()
+            .find(|spec| spec.name == job.cron_name)
+            .map_or(gonvex_profiler::cron::ONE_SHOT_SLOT, |spec| spec.slot),
+        None => gonvex_profiler::cron::ONE_SHOT_SLOT,
+    }
+}
+
 fn cron_id(project: &str, tenant: &str, name: &str, at: DateTime<Utc>) -> String {
     let source = format!("{project}\0{tenant}\0{name}\0{}", at.to_rfc3339());
     let digest = Sha256::digest(source.as_bytes());
@@ -945,6 +970,7 @@ mod tests {
             scope: "tenant".to_owned(),
             interval_ms: Some(1_000),
             expression: None,
+            slot: 0,
         };
         assert_eq!(
             next_occurrence(&interval, now).unwrap(),
@@ -967,6 +993,7 @@ mod tests {
             scope: "tenant".to_owned(),
             interval_ms: None,
             expression: Some("* * * * *".to_owned()),
+            slot: 0,
         }
     }
 

@@ -131,6 +131,8 @@ pub struct DatabaseHostCalls {
     /// host invocation timing (profiler slow traces).
     sql_ns: u64,
     invoke_times: crate::module_host::InvokeTimes,
+    /// Profiler clock when the lazy write transaction opened (0: not open).
+    writer_acquired_ns: u64,
 }
 
 impl DatabaseHostCalls {
@@ -156,6 +158,7 @@ impl DatabaseHostCalls {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         }
     }
 
@@ -182,6 +185,7 @@ impl DatabaseHostCalls {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         };
         handler.transaction = None;
         handler
@@ -236,6 +240,7 @@ impl DatabaseHostCalls {
                 }
                 self.writer_wait_ns +=
                     timer.lap(gonvex_profiler::Stage::WriterWait, self.profile_label);
+                self.writer_acquired_ns = timer.at_ns();
                 transaction.set_profile_label(self.profile_label);
                 self.transaction = Some(transaction);
             }
@@ -326,13 +331,28 @@ impl DatabaseHostCalls {
 
     /// Commits (Reducer success) or rolls back, returning the revision the
     /// commit published, if it changed tracked rows.
-    pub async fn finish_with_revision(mut self, success: bool) -> Result<Option<u64>, String> {
+    pub async fn finish_with_revision(self, success: bool) -> Result<Option<u64>, String> {
+        self.finish_with_outcome(success)
+            .await
+            .map(|outcome| outcome.revision)
+    }
+
+    /// Profiler clock when the write transaction opened (0: never opened).
+    pub(crate) fn writer_acquired_ns(&self) -> u64 {
+        self.writer_acquired_ns
+    }
+
+    /// Like [`Self::finish_with_revision`], with the published change count.
+    pub(crate) async fn finish_with_outcome(
+        mut self,
+        success: bool,
+    ) -> Result<gonvex_store::CommitOutcome, String> {
         if self.claim_conflict {
             return Err(RECEIPT_REPLAY.to_owned());
         }
         if self.transaction.is_none() && self.pending.take().is_some() {
             // The Reducer never touched the database: nothing to commit.
-            return Ok(None);
+            return Ok(Default::default());
         }
         let transaction = self
             .transaction
@@ -348,14 +368,14 @@ impl DatabaseHostCalls {
         }
         if self.capability == DatabaseCapability::Reducer && success {
             transaction
-                .commit_with_revision()
+                .commit_with_outcome()
                 .await
                 .map_err(|error| fault.database(error))
         } else {
             transaction
                 .rollback()
                 .await
-                .map(|_| None)
+                .map(|_| Default::default())
                 .map_err(|error| fault.database(error))
         }
     }
@@ -417,7 +437,13 @@ impl HostCallHandler for DatabaseHostCalls {
         );
         let started = gonvex_profiler::now_ns();
         let writer_wait_before = self.writer_wait_ns;
+        let query = matches!(call, HostCallFrame::DbQuery { .. });
         let result = self.handle_call(call).await;
+        if query && crate::cron_profile::active() {
+            if let Ok(Value::Array(rows)) = &result {
+                crate::cron_profile::add(|run| &run.rows_read, rows.len() as u64);
+            }
+        }
         // The first database call also opens the write transaction; that wait
         // is its own stage (db.writer_wait), so SQL time excludes it.
         let elapsed = gonvex_profiler::now_ns()
@@ -1217,6 +1243,7 @@ mod tests {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         };
         let mut calls = calls;
         assert_eq!(
@@ -1257,6 +1284,7 @@ mod tests {
             writer_wait_ns: 0,
             sql_ns: 0,
             invoke_times: Default::default(),
+            writer_acquired_ns: 0,
         };
         let mut calls = calls;
         assert!(calls.resolve_table_key("tasks", "id").await.is_err());

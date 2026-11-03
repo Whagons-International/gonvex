@@ -98,6 +98,8 @@ pub struct CommitNotice {
     pub epoch: String,
     pub revision: u64,
     pub tables: Vec<String>,
+    /// Change rows in the revision (tracked rows written by the transaction).
+    pub changes: u64,
 }
 
 impl CommitNotice {
@@ -159,7 +161,7 @@ pub async fn finalize(
     .await?;
     let revision: i64 = clock.get(0);
     let epoch: String = clock.get(1);
-    sqlx::query(
+    let changes = sqlx::query(
         r#"UPDATE _gonvex_sync_changes
            SET revision = $1, transaction_id = $1, ordinal = ranked.row_ordinal, command_id = $2
            FROM (SELECT event_id, row_number() OVER (ORDER BY event_id) AS row_ordinal
@@ -169,7 +171,8 @@ pub async fn finalize(
     .bind(revision)
     .bind(provenance.command_id.as_deref().filter(|id| !id.is_empty()))
     .execute(&mut *connection)
-    .await?;
+    .await?
+    .rows_affected();
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT table_name FROM _gonvex_sync_changes WHERE revision = $1 ORDER BY table_name",
     )
@@ -215,6 +218,7 @@ pub async fn finalize(
         epoch,
         revision: revision as u64,
         tables,
+        changes,
     }))
 }
 

@@ -199,6 +199,20 @@ pub fn profile_json(runtime: &crate::Runtime) -> Value {
         "watchdog": {"probeSilentMs": ms(silent_ns), "stalls": stalls},
         "longPolls": {"total": gonvex_profiler::long_poll_total(), "recent": long_polls},
         "slowTraces": slow_traces_json(),
+        "crons": crons_json(),
+    })
+}
+
+/// Per-cron totals since start (`gonvex_profiler::cron`), one row per cron
+/// that ran; `(one-shot)` is runAt/runAfter/wakeAt work.
+fn crons_json() -> Value {
+    json!({
+        "fields": gonvex_profiler::cron::CRON_FIELDS,
+        "rows": gonvex_profiler::cron::snapshot().into_iter().map(|row| json!({
+            "slot": row.slot,
+            "name": row.name,
+            "values": row.values,
+        })).collect::<Vec<_>>(),
     })
 }
 
