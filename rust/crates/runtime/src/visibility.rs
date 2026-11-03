@@ -238,7 +238,7 @@ pub struct PreparedParentAcl {
 }
 
 impl PreparedParentAcl {
-    fn get(&self, table: &str, key: &str) -> Result<SharedIndex, VisibilityError> {
+    pub(crate) fn get(&self, table: &str, key: &str) -> Result<SharedIndex, VisibilityError> {
         self.indexes
             .get(&(table.to_owned(), key.to_owned()))
             .cloned()
@@ -409,6 +409,19 @@ impl ParentAclRegistry {
         for plan in roots {
             needed.extend(required_indexes(plans, plan)?);
         }
+        self.ensure_needed(feeds, control, session, plans, needed)
+            .await
+    }
+
+    /// Prepare explicit ACL projections using the same single-writer registry.
+    pub(crate) async fn ensure_needed(
+        &self,
+        feeds: &crate::change_feed::ChangeFeedHub,
+        control: &gonvex_postgres::ControlPlane,
+        session: &TenantSession,
+        plans: &BTreeMap<String, VisibilityPlan>,
+        needed: BTreeSet<(String, String)>,
+    ) -> Result<PreparedParentAcl, VisibilityError> {
         let mut prepared = PreparedParentAcl::default();
         for (table, key) in needed {
             let shape = IndexShape {
