@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn parses_database_idle_timeout_without_changing_pool_defaults() {
         let defaults = config(&[]).expect("defaults");
-        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(60));
+        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(15));
         let tuned = config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1000")]).expect("timeout");
         assert_eq!(tuned.database_idle_timeout, Duration::from_secs(1));
         assert_eq!(
