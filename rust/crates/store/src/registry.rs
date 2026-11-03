@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
-use tokio::sync::{broadcast, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{broadcast, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
 use crate::DatabaseError;
 
@@ -181,7 +181,10 @@ pub struct PoolRegistry {
     limits: PoolLimits,
     durability: Durability,
     admission: Arc<Semaphore>,
-    databases: Arc<RwLock<BTreeMap<String, Database>>>,
+    // Per-file initializers. The map lock is held only to find or insert an
+    // initializer, never across file I/O, so a slow or suspended open of one
+    // file cannot block lookups of every other database.
+    databases: Arc<std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::OnceCell<Database>>>>>,
 }
 
 /// Guard for a keyed in-process lock (replaces `pg_advisory_lock`).
@@ -225,7 +228,7 @@ impl PoolRegistry {
         let limits = limits.bounded();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
-            databases: Arc::new(RwLock::new(BTreeMap::new())),
+            databases: Arc::default(),
             durability,
             limits,
         }
@@ -264,14 +267,20 @@ impl PoolRegistry {
 
     pub(crate) async fn database(&self, database_url: &str) -> Result<Database, DatabaseError> {
         let key = key(database_url);
-        if let Some(database) = self.databases.read().await.get(&key).cloned() {
-            return Ok(database);
-        }
-        let mut databases = self.databases.write().await;
-        if let Some(database) = databases.get(&key).cloned() {
-            return Ok(database);
-        }
-        let path = PathBuf::from(&key);
+        let cell = self
+            .databases
+            .lock()
+            .unwrap()
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        // Concurrent callers for the same file share one open; a failed open
+        // leaves the cell empty so the next caller retries.
+        cell.get_or_try_init(|| self.open(&key)).await.cloned()
+    }
+
+    async fn open(&self, key: &str) -> Result<Database, DatabaseError> {
+        let path = PathBuf::from(key);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| DatabaseError::Io(error.to_string()))?;
@@ -309,8 +318,16 @@ impl PoolRegistry {
             notify,
             locks: Arc::default(),
         };
-        databases.insert(key, database.clone());
         Ok(database)
+    }
+
+    fn open_databases(&self) -> Vec<Database> {
+        self.databases
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|cell| cell.get().cloned())
+            .collect()
     }
 
     /// The writer pool (one connection). Every write must use it.
@@ -375,13 +392,13 @@ impl PoolRegistry {
     }
 
     pub async fn snapshot(&self) -> PoolRegistrySnapshot {
-        let databases = self.databases.read().await;
+        let databases = self.open_databases();
         let open_connections = databases
-            .values()
+            .iter()
             .map(|database| database.writer.size() + database.reader.size())
             .sum::<u32>();
         let idle = databases
-            .values()
+            .iter()
             .map(|database| database.writer.num_idle() + database.reader.num_idle())
             .sum::<usize>();
         PoolRegistrySnapshot {
@@ -402,22 +419,16 @@ impl PoolRegistry {
     }
 
     pub async fn close(&self) {
-        let databases: Vec<Database> = self
-            .databases
-            .write()
-            .await
-            .split_off("")
-            .into_values()
-            .collect();
-        for database in databases {
+        let cells = std::mem::take(&mut *self.databases.lock().unwrap());
+        for database in cells.into_values().filter_map(|cell| cell.get().cloned()) {
             database.reader.close().await;
             database.writer.close().await;
         }
     }
 
     pub async fn close_database(&self, database_url: &str) {
-        let database = self.databases.write().await.remove(&key(database_url));
-        if let Some(database) = database {
+        let cell = self.databases.lock().unwrap().remove(&key(database_url));
+        if let Some(database) = cell.and_then(|cell| cell.get().cloned()) {
             database.reader.close().await;
             database.writer.close().await;
         }

@@ -135,23 +135,35 @@ impl Scheduler {
             tracing::error!(error = %error, "synchronize scheduled crons");
         }
         // An outbox sweep may spend minutes retrying external deliveries across
-        // tenants. Poll one sweep worker alongside the timer instead of awaiting
-        // it before claiming jobs. Keeping this future pinned also prevents
-        // overlapping sweeps, and drops it when the scheduler shuts down.
-        let outbox_scans = async {
-            loop {
-                runtime.drain_all_action_outboxes().await;
-                tokio::time::sleep(OUTBOX_SWEEP_INTERVAL).await;
-            }
+        // tenants, so it runs beside the claim loop instead of before it. It
+        // must run in its own task: a sweep future pinned in this loop is only
+        // polled inside `select!`, so while the loop body awaits claims it sat
+        // suspended holding whatever it held (a pool connection, or the store
+        // registry lock while opening a tenant file), and the claim then
+        // waited on it forever. One task still means no overlapping sweeps.
+        let sweeper = {
+            let runtime = runtime.clone();
+            let mut stop = self.inner.stop.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = async {
+                            runtime.drain_all_action_outboxes().await;
+                            tokio::time::sleep(OUTBOX_SWEEP_INTERVAL).await;
+                        } => {}
+                        changed = stop.changed() => {
+                            if changed.is_err() || *stop.borrow() { break; }
+                        }
+                    }
+                }
+            })
         };
-        tokio::pin!(outbox_scans);
         let mut last_prune: Option<std::time::Instant> = None;
         // Sleep until the next job is due instead of polling. Enqueues, cron
         // syncs and finished cron runs wake the loop early through `wake`.
         let mut idle = std::time::Duration::ZERO;
         loop {
             tokio::select! {
-                _ = &mut outbox_scans => break,
                 _ = tokio::time::sleep(idle) => {}
                 _ = self.inner.wake.notified() => {}
                 changed = stop.changed() => {
@@ -186,6 +198,7 @@ impl Scheduler {
                 });
             }
         }
+        sweeper.abort();
     }
 
     async fn enqueue(
