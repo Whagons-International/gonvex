@@ -79,6 +79,183 @@ const FRAMEWORK_TRIGGERS: &str = r#"SELECT name, sql FROM sqlite_schema
     OR name LIKE 'gonvex\_queue\_control\_plane\_membership\_%' ESCAPE '\')
   ORDER BY name"#;
 
+/// Application triggers (everything but the framework triggers above).
+const APPLICATION_TRIGGERS: &str = r#"SELECT tbl_name, sql FROM sqlite_schema
+  WHERE type='trigger' AND sql IS NOT NULL
+    AND name NOT LIKE '\_gonvex\_sync\_%' ESCAPE '\'
+    AND name NOT LIKE '\_gonvex\_reference\_%' ESCAPE '\'
+    AND name NOT LIKE 'gonvex\_queue\_control\_plane\_membership\_%' ESCAPE '\'
+  ORDER BY name"#;
+
+/// Tokens of a trigger body: upper-cased bare words and quoted identifiers
+/// (unquoted, case kept). String literals and comments are skipped.
+fn sql_tokens(sql: &str) -> Vec<(bool, String)> {
+    let chars = sql.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\'' && chars.get(i + 1) == Some(&'\'') {
+                    i += 2;
+                } else if chars[i] == '\'' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if c == '-' && chars.get(i + 1) == Some(&'-') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+        } else if c == '"' || c == '`' || c == '[' {
+            let close = if c == '[' { ']' } else { c };
+            let mut ident = String::new();
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == close && chars.get(i + 1) == Some(&close) && close != ']' {
+                    ident.push(close);
+                    i += 2;
+                } else if chars[i] == close {
+                    i += 1;
+                    break;
+                } else {
+                    ident.push(chars[i]);
+                    i += 1;
+                }
+            }
+            tokens.push((true, ident));
+        } else if c.is_alphanumeric() || c == '_' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+            {
+                i += 1;
+            }
+            tokens.push((false, chars[start..i].iter().collect::<String>()));
+        } else {
+            i += 1;
+        }
+    }
+    tokens
+}
+
+/// Tables a trigger body writes: `INSERT [OR x] INTO t`, `REPLACE INTO t`,
+/// `UPDATE [OR x] t`, `DELETE FROM t`. Only the body after `BEGIN` counts, so
+/// the trigger's own `AFTER UPDATE OF … ON t` header is not a write.
+fn trigger_writes(sql: &str) -> Vec<String> {
+    let tokens = sql_tokens(sql);
+    let is = |token: Option<&(bool, String)>, word: &str| matches!(token, Some((false, w)) if w.eq_ignore_ascii_case(word));
+    let Some(begin) = tokens.iter().position(|t| is(Some(t), "BEGIN")) else {
+        return Vec::new();
+    };
+    let mut writes = Vec::new();
+    let mut i = begin + 1;
+    while i < tokens.len() {
+        let mut target = None;
+        if is(tokens.get(i), "INSERT") || is(tokens.get(i), "REPLACE") {
+            let mut j = i + 1;
+            if is(tokens.get(j), "OR") {
+                j += 2;
+            }
+            if is(tokens.get(j), "INTO") {
+                target = Some(j + 1);
+            }
+        } else if is(tokens.get(i), "UPDATE") {
+            let mut j = i + 1;
+            if is(tokens.get(j), "OR") {
+                j += 2;
+            }
+            // `ON CONFLICT … DO UPDATE SET` names no table.
+            if !is(tokens.get(j), "SET") {
+                target = Some(j);
+            }
+        } else if is(tokens.get(i), "DELETE") && is(tokens.get(i + 1), "FROM") {
+            target = Some(i + 2);
+        }
+        // SQLite forbids schema-qualified names inside trigger bodies.
+        if let Some((_, name)) = target.and_then(|j| tokens.get(j)) {
+            if !writes.contains(name) {
+                writes.push(name.clone());
+            }
+        }
+        i += 1;
+    }
+    writes
+}
+
+/// Stable order in which every table that application triggers write into is
+/// copied after the tables whose triggers write it. `copy_rows` deletes before
+/// inserting, so such a table ends with exactly its source rows. Tables in a
+/// trigger cycle keep their original relative order.
+fn trigger_copy_order(
+    names: &[String],
+    triggers: &[(String, String)],
+) -> (Vec<usize>, Vec<String>) {
+    let index = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect::<BTreeMap<_, _>>();
+    // after[b] = tables whose triggers write b (b must follow them).
+    let mut after = vec![BTreeSet::new(); names.len()];
+    for (table, sql) in triggers {
+        let Some(&writer) = index.get(table.as_str()) else {
+            continue;
+        };
+        for written in trigger_writes(sql) {
+            if let Some(&target) = index.get(written.as_str()) {
+                if target != writer {
+                    after[target].insert(writer);
+                }
+            }
+        }
+    }
+    let mut placed = vec![false; names.len()];
+    let mut order = Vec::with_capacity(names.len());
+    loop {
+        let next = (0..names.len()).find(|&i| !placed[i] && after[i].iter().all(|&w| placed[w]));
+        match next {
+            Some(i) => {
+                placed[i] = true;
+                order.push(i);
+            }
+            None => match (0..names.len()).find(|&i| !placed[i]) {
+                // A cycle: place the earliest remaining table as-is.
+                Some(i) => {
+                    placed[i] = true;
+                    order.push(i);
+                }
+                None => break,
+            },
+        }
+    }
+    let adjustments = (0..names.len())
+        .filter(|&i| !after[i].is_empty())
+        .map(|i| {
+            format!(
+                "{} <- [{}]",
+                names[i],
+                after[i]
+                    .iter()
+                    .map(|&w| names[w].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
+    (order, adjustments)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MigrationDirs {
     pub default: Option<PathBuf>,
@@ -260,6 +437,11 @@ pub struct DatabaseReport {
     pub skipped_source_tables: BTreeMap<String, String>,
     /// Target tables with no source table (left as provisioning created them).
     pub target_only_tables: Vec<String>,
+    /// Tables moved later in the copy because application triggers on other
+    /// copied tables write into them (`table <- [writers]`); their source rows
+    /// then replace whatever the triggers derived mid-copy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copy_order_adjustments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clock: Option<ClockReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -941,6 +1123,22 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
                 .insert(name, "no SQLite table (--allow-drop-tables)".to_owned());
         }
     }
+
+    // Copy tables that application triggers write into after their writers.
+    let application_triggers: Vec<(String, String)> = sqlx::query_as(APPLICATION_TRIGGERS)
+        .fetch_all(&mut target)
+        .await?;
+    let names = work
+        .iter()
+        .map(|(table, _, _)| table.name.clone())
+        .collect::<Vec<_>>();
+    let (order, adjustments) = trigger_copy_order(&names, &application_triggers);
+    job.report.copy_order_adjustments = adjustments;
+    let mut slots = work.into_iter().map(Some).collect::<Vec<_>>();
+    let work = order
+        .into_iter()
+        .map(|i| slots[i].take().expect("each table placed once"))
+        .collect::<Vec<_>>();
 
     let mut transaction = target.begin().await?;
     let triggers: Vec<(String, String)> = sqlx::query_as(FRAMEWORK_TRIGGERS)
@@ -1698,5 +1896,94 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("--allow-drop-columns"), "{error}");
+    }
+
+    #[test]
+    fn trigger_writes_reads_only_the_body() {
+        let label = r#"CREATE TRIGGER "task_grid_workspace_search_label_update" AFTER UPDATE OF "name" ON "workspaces" BEGIN
+  UPDATE "taskGridRows" SET ("searchText") = (
+    SELECT v."searchText" FROM "whTaskGridProjection" AS v WHERE v."taskId" = "taskGridRows"."taskId")
+  WHERE "workspaceId" = NEW."_id" AND EXISTS (SELECT 1 FROM "tasks" AS t WHERE t."_id" = "taskGridRows"."taskId");
+END"#;
+        assert_eq!(trigger_writes(label), vec!["taskGridRows"]);
+        let upsert = r#"CREATE TRIGGER t AFTER INSERT ON "tasks" BEGIN
+  -- DELETE FROM commented_out
+  INSERT INTO "taskGridRows" ("taskId") SELECT 'UPDATE literal' FROM x
+    ON CONFLICT ("taskId") DO UPDATE SET "taskId" = excluded."taskId";
+  DELETE FROM [taskRelatedSearchDocuments] WHERE 1 = 0;
+  INSERT OR REPLACE INTO peopleDirectory SELECT 1;
+END"#;
+        assert_eq!(
+            trigger_writes(upsert),
+            vec![
+                "taskGridRows",
+                "taskRelatedSearchDocuments",
+                "peopleDirectory"
+            ]
+        );
+    }
+
+    #[test]
+    fn trigger_targets_are_copied_after_their_writers() {
+        let names = [
+            "taskGridRows",
+            "tasks",
+            "members",
+            "workspaces",
+            "peopleDirectory",
+        ]
+        .map(String::from);
+        let triggers = vec![
+            (
+                "tasks".to_owned(),
+                r#"CREATE TRIGGER a AFTER INSERT ON tasks BEGIN INSERT INTO "taskGridRows" SELECT 1; END"#.to_owned(),
+            ),
+            (
+                "workspaces".to_owned(),
+                r#"CREATE TRIGGER b AFTER UPDATE OF name ON workspaces BEGIN UPDATE "taskGridRows" SET x = 1; END"#.to_owned(),
+            ),
+            (
+                "members".to_owned(),
+                r#"CREATE TRIGGER c AFTER INSERT ON members BEGIN INSERT INTO peopleDirectory SELECT 1; END"#.to_owned(),
+            ),
+            // Not copied: ignored.
+            (
+                "elsewhere".to_owned(),
+                r#"CREATE TRIGGER d AFTER INSERT ON elsewhere BEGIN DELETE FROM tasks; END"#.to_owned(),
+            ),
+        ];
+        let (order, adjustments) = trigger_copy_order(&names, &triggers);
+        let ordered = order.iter().map(|&i| names[i].as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                "tasks",
+                "members",
+                "workspaces",
+                "taskGridRows",
+                "peopleDirectory"
+            ]
+        );
+        assert_eq!(
+            adjustments,
+            vec![
+                "taskGridRows <- [tasks, workspaces]".to_owned(),
+                "peopleDirectory <- [members]".to_owned()
+            ]
+        );
+
+        // A cycle keeps the original order instead of failing.
+        let names = ["a", "b"].map(String::from);
+        let triggers = vec![
+            (
+                "a".to_owned(),
+                "CREATE TRIGGER x AFTER INSERT ON a BEGIN INSERT INTO b SELECT 1; END".to_owned(),
+            ),
+            (
+                "b".to_owned(),
+                "CREATE TRIGGER y AFTER INSERT ON b BEGIN INSERT INTO a SELECT 1; END".to_owned(),
+            ),
+        ];
+        assert_eq!(trigger_copy_order(&names, &triggers).0, vec![0, 1]);
     }
 }
