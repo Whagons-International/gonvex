@@ -1,18 +1,21 @@
 //! Optional RFC 7692 transport. JSON and the application protocol are unchanged.
+mod connection;
 mod frame_limits;
 mod negotiation;
+pub use connection::{
+    Backlog, OutboundLimits, TrySendError, WebSocket, CLOSE_SEND_STALLED,
+};
+use connection::{Outbound, Shared, Watched, Writer};
 use frame_limits::FrameLimits;
-use futures_util::Stream;
+use futures_util::{SinkExt, StreamExt};
 use std::{
     future::Future,
     io,
-    pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll},
 };
 
 use axum::{
-    extract::{ws, FromRequestParts, Request},
+    extract::{ws, Request},
     http::{header::SEC_WEBSOCKET_EXTENSIONS, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -23,46 +26,55 @@ use ratchet_ext::{
     Extension, ExtensionDecoder, ExtensionEncoder, FrameHeader, OpCode, RsvBits,
     SplittableExtension,
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::mpsc,
+};
 mod inflate;
 use inflate::inflate_message;
 
 /// Initial read buffer of a connection that did not negotiate compression.
 const PLAIN_READ_BUFFER: usize = 4096;
 
-pub async fn upgrade<F, Fut>(
-    mut request: Request,
-    enabled: bool,
-    threshold: usize,
-    max_message: usize,
-    max_frame: usize,
-    callback: F,
-) -> Response
+/// The upgraded byte stream.
+trait Io: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Io for T {}
+type BoxIo = Box<dyn Io>;
+
+/// How to run one upgraded connection.
+#[derive(Clone, Copy, Debug)]
+pub struct UpgradeOptions {
+    /// Offer permessage-deflate to clients that ask for it.
+    pub compression: bool,
+    pub threshold: usize,
+    pub max_message: usize,
+    pub max_frame: usize,
+    pub outbound: OutboundLimits,
+    /// The accepted TCP socket, so a stalled connection can be reset
+    /// (SO_LINGER 0) and its kernel buffers freed at once.
+    pub socket_fd: Option<i32>,
+}
+
+pub async fn upgrade<F, Fut>(mut request: Request, options: UpgradeOptions, callback: F) -> Response
 where
     F: FnOnce(WebSocket) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let selection = if enabled {
+    let UpgradeOptions {
+        compression,
+        threshold,
+        max_message,
+        max_frame,
+        outbound,
+        socket_fd,
+    } = options;
+    let selection = if compression {
         match negotiation::negotiate(request.headers()) {
             Ok(selection) => selection,
             Err(()) => return StatusCode::BAD_REQUEST.into_response(),
         }
     } else {
         None
-    };
-    let Some(selection) = selection else {
-        let (mut parts, _) = request.into_parts();
-        return match ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
-            Ok(upgrade) => upgrade
-                .max_message_size(max_message)
-                .max_frame_size(max_frame)
-                // tungstenite allocates and zero-fills 128 KiB per connection
-                // by default. Frames larger than this still grow the buffer.
-                .read_buffer_size(PLAIN_READ_BUFFER)
-                .on_upgrade(move |socket| callback(WebSocket::Plain(Box::new(socket))))
-                .into_response(),
-            Err(error) => error.into_response(),
-        };
     };
     let Ok(mut response) = ratchet_core::server::response_from_headers(
         request.headers(),
@@ -72,57 +84,154 @@ where
     .map(|parts| parts.response) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    response
-        .headers_mut()
-        .insert(SEC_WEBSOCKET_EXTENSIONS, selection.response.clone());
+    if let Some(selection) = &selection {
+        response
+            .headers_mut()
+            .insert(SEC_WEBSOCKET_EXTENSIONS, selection.response.clone());
+    }
     let upgraded = hyper::upgrade::on(&mut request);
     tokio::spawn(async move {
-        if let Ok(stream) = upgraded.await {
-            let alternative = Arc::default();
-            let extension = Deflate {
-                encoder: Encode {
-                    window_bits: selection.server_window,
-                    threshold,
-                    alternative: Arc::clone(&alternative),
-                },
-                decoder: Decode {
-                    window_bits: selection.client_window,
-                    max_message,
-                    compressed: false,
-                },
-            };
-            // FrameLimits coalesces small frame headers and payloads to avoid
-            // delayed-ACK stalls, and frees that buffer after each flush.
-            let socket = ratchet_core::WebSocket::from_upgraded(
-                ratchet_core::WebSocketConfig {
-                    max_message_size: max_message,
-                },
-                FrameLimits::new(TokioIo::new(stream), max_frame),
-                Some(extension),
-                BytesMut::new(),
-                ratchet_core::Role::Server,
-            );
-            callback(WebSocket::compressed(socket, threshold, alternative)).await;
+        let Ok(stream) = upgraded.await else {
+            return;
+        };
+        let shared = Shared::new(outbound);
+        if let Some(fd) = socket_fd {
+            shared.set_fd(fd);
         }
+        let io: BoxIo = Box::new(TokioIo::new(stream));
+        let socket = match selection {
+            None => plain(shared, io, max_message, max_frame).await,
+            Some(selection) => compressed(shared, io, selection, threshold, max_message, max_frame),
+        };
+        callback(socket).await;
     });
     response.map(|_| axum::body::Body::empty()).into_response()
 }
 
-type IoStream = FrameLimits<TokioIo<hyper::upgrade::Upgraded>>;
-type CompressedSocket = ratchet_core::WebSocket<IoStream, Deflate>;
-
-pub enum WebSocket {
-    Plain(Box<ws::WebSocket>),
-    Compressed(Box<Compressed>),
+/// No compression: tungstenite, configured exactly as axum's upgrade did.
+async fn plain(shared: Arc<Shared>, io: BoxIo, max_message: usize, max_frame: usize) -> WebSocket {
+    use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(max_message))
+        .max_frame_size(Some(max_frame))
+        // tungstenite allocates and zero-fills 128 KiB per connection by
+        // default. Frames larger than this still grow the buffer.
+        .read_buffer_size(PLAIN_READ_BUFFER);
+    let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        Watched::new(io, Arc::clone(&shared)),
+        Role::Server,
+        Some(config),
+    )
+    .await;
+    let (sink, stream) = socket.split();
+    let sink = sink
+        .sink_map_err(axum::Error::new)
+        .with(|message| std::future::ready(Ok(connection::plain::to_tungstenite(message))));
+    let stream = stream.filter_map(|message| {
+        std::future::ready(match message {
+            Ok(message) => connection::plain::from_tungstenite(message).map(Ok),
+            Err(error) => Some(Err(axum::Error::new(error))),
+        })
+    });
+    WebSocket::start(shared, None, Writer::Sink(Box::pin(sink)), |shared, tx| {
+        tokio::spawn(gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::WsReader,
+            connection::read_stream(shared, Box::pin(stream), tx),
+        ))
+    })
 }
 
-pub struct Compressed {
+type RatchetIo = FrameLimits<Watched<BoxIo>>;
+pub(crate) type RatchetSender = ratchet_core::Sender<RatchetIo, Encode>;
+
+fn compressed(
+    shared: Arc<Shared>,
+    io: BoxIo,
+    selection: negotiation::Agreement,
     threshold: usize,
-    alternative: Arc<Mutex<Option<Vec<u8>>>>,
-    sender: ratchet_core::Sender<IoStream, Encode>,
-    /// Inbound messages with the profiler time they were read off the socket.
-    receiver: mpsc::Receiver<(u64, Result<ws::Message, axum::Error>)>,
-    reader: JoinHandle<()>,
+    max_message: usize,
+    max_frame: usize,
+) -> WebSocket {
+    let alternative = Arc::default();
+    let extension = Deflate {
+        encoder: Encode {
+            window_bits: selection.server_window,
+            threshold,
+            alternative: Arc::clone(&alternative),
+        },
+        decoder: Decode {
+            window_bits: selection.client_window,
+            max_message,
+            compressed: false,
+        },
+    };
+    // FrameLimits coalesces small frame headers and payloads to avoid
+    // delayed-ACK stalls, and frees that buffer after each flush.
+    let socket = ratchet_core::WebSocket::from_upgraded(
+        ratchet_core::WebSocketConfig {
+            max_message_size: max_message,
+        },
+        FrameLimits::new(Watched::new(io, Arc::clone(&shared)), max_frame),
+        Some(extension),
+        BytesMut::new(),
+        ratchet_core::Role::Server,
+    );
+    let (sender, receiver) = socket.split().expect("fresh socket");
+    let writer = Writer::Ratchet {
+        sender: Box::new(sender),
+        alternative,
+    };
+    WebSocket::start(shared, Some(threshold), writer, |shared, tx| {
+        // Ratchet reads are not cancellation safe. Keep them in an owned task;
+        // the runtime can cancel channel receives without losing a partial frame.
+        tokio::spawn(gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::WsReader,
+            read_ratchet(shared, receiver, tx),
+        ))
+    })
+}
+
+async fn read_ratchet(
+    shared: Arc<Shared>,
+    mut receiver: ratchet_core::Receiver<RatchetIo, Decode>,
+    tx: mpsc::Sender<(u64, Result<ws::Message, axum::Error>)>,
+) {
+    let mut payload = BytesMut::new();
+    loop {
+        let result = match receiver.read(&mut payload).await {
+            // Hand over the whole buffer: `split()` would leave an empty
+            // view that keeps the message's allocation alive while idle.
+            Ok(ratchet_core::Message::Text) => {
+                match ws::Utf8Bytes::try_from(std::mem::take(&mut payload).freeze()) {
+                    Ok(text) => Ok(ws::Message::Text(text)),
+                    Err(error) => {
+                        let _ = receiver
+                            .close(ratchet_core::CloseReason::new(
+                                ratchet_core::CloseCode::Invalid,
+                                None,
+                            ))
+                            .await;
+                        Err(axum::Error::new(error))
+                    }
+                }
+            }
+            Ok(ratchet_core::Message::Binary) => {
+                Ok(ws::Message::Binary(std::mem::take(&mut payload).freeze()))
+            }
+            Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
+            Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
+            Ok(ratchet_core::Message::Close(reason)) => {
+                Ok(ws::Message::Close(reason.map(|reason| ws::CloseFrame {
+                    code: reason.code.into(),
+                    reason: reason.description.unwrap_or_default().into(),
+                })))
+            }
+            Err(error) => Err(axum::Error::new(error)),
+        };
+        if !connection::forward(&shared, &tx, result).await {
+            break;
+        }
+    }
 }
 
 // Cancellation or an early write error must never leave a candidate armed for
@@ -134,167 +243,39 @@ impl Drop for AlternativeGuard {
     }
 }
 
-impl Drop for Compressed {
-    fn drop(&mut self) {
-        self.reader.abort();
-    }
-}
-
-impl Stream for WebSocket {
-    type Item = Result<ws::Message, axum::Error>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.get_mut() {
-            Self::Plain(socket) => Pin::new(socket.as_mut()).poll_next(cx),
-            Self::Compressed(socket) => socket.receiver.poll_recv(cx).map(|item| item.map(inbound)),
+/// Writes one queued item on a compressed connection.
+async fn write_ratchet(
+    sender: &mut RatchetSender,
+    alternative: &Arc<Mutex<Option<Vec<u8>>>>,
+    outbound: Outbound,
+) -> Result<(), ratchet_core::Error> {
+    let message = match outbound {
+        Outbound::BestText { full, patch } => {
+            let guard = AlternativeGuard(Arc::clone(alternative));
+            *alternative.lock().unwrap() = Some(patch.into_bytes());
+            let result = sender.write_text(full).await;
+            drop(guard);
+            return result;
         }
-    }
-}
-
-impl WebSocket {
-    fn compressed(
-        socket: CompressedSocket,
-        threshold: usize,
-        alternative: Arc<Mutex<Option<Vec<u8>>>>,
-    ) -> Self {
-        let (sender, mut receiver) = socket.split().expect("fresh socket");
-        let (tx, rx) = mpsc::channel(1);
-        // Ratchet reads are not cancellation safe. Keep them in an owned task;
-        // the runtime can cancel channel receives without losing a partial frame.
-        let reader = tokio::spawn(gonvex_profiler::instrument(
-            gonvex_profiler::TaskKind::WsReader,
-            async move {
-                let mut payload = BytesMut::new();
-                loop {
-                    let result = match receiver.read(&mut payload).await {
-                        // Hand over the whole buffer: `split()` would leave an empty
-                        // view that keeps the message's allocation alive while idle.
-                        Ok(ratchet_core::Message::Text) => {
-                            match ws::Utf8Bytes::try_from(std::mem::take(&mut payload).freeze()) {
-                                Ok(text) => Ok(ws::Message::Text(text)),
-                                Err(error) => {
-                                    let _ = receiver
-                                        .close(ratchet_core::CloseReason::new(
-                                            ratchet_core::CloseCode::Invalid,
-                                            None,
-                                        ))
-                                        .await;
-                                    Err(axum::Error::new(error))
-                                }
-                            }
-                        }
-                        Ok(ratchet_core::Message::Binary) => {
-                            Ok(ws::Message::Binary(std::mem::take(&mut payload).freeze()))
-                        }
-                        Ok(ratchet_core::Message::Ping(bytes)) => Ok(ws::Message::Ping(bytes)),
-                        Ok(ratchet_core::Message::Pong(bytes)) => Ok(ws::Message::Pong(bytes)),
-                        Ok(ratchet_core::Message::Close(reason)) => {
-                            Ok(ws::Message::Close(reason.map(|reason| ws::CloseFrame {
-                                code: reason.code.into(),
-                                reason: reason.description.unwrap_or_default().into(),
-                            })))
-                        }
-                        Err(error) => Err(axum::Error::new(error)),
-                    };
-                    let done = result.is_err() || matches!(result, Ok(ws::Message::Close(_)));
-                    let read_at = if gonvex_profiler::enabled() {
-                        gonvex_profiler::now_ns()
-                    } else {
-                        0
-                    };
-                    if tx.send((read_at, result)).await.is_err() || done {
-                        break;
-                    }
-                }
-            },
-        ));
-        Self::Compressed(Box::new(Compressed {
-            threshold,
-            alternative,
-            sender,
-            receiver: rx,
-            reader,
-        }))
-    }
-
-    /// The actual negotiated transport threshold; plain fallback cannot compress.
-    pub fn compression_threshold(&self) -> Option<usize> {
-        match self {
-            Self::Plain(_) => None,
-            Self::Compressed(socket) => Some(socket.threshold),
+        Outbound::Message(message) => message,
+    };
+    match message {
+        ws::Message::Text(text) => sender.write_text(text.as_str()).await,
+        ws::Message::Binary(bytes) => sender.write_binary(bytes).await,
+        ws::Message::Ping(bytes) => sender.write_ping(bytes).await,
+        ws::Message::Pong(bytes) => sender.write_pong(bytes).await,
+        ws::Message::Close(reason) => {
+            let reason = reason
+                .map(|reason| ratchet_core::CloseReason {
+                    code: ratchet_core::CloseCode::try_from(reason.code.to_be_bytes())
+                        .unwrap_or(ratchet_core::CloseCode::Protocol),
+                    description: Some(reason.reason.to_string()),
+                })
+                .unwrap_or_else(|| {
+                    ratchet_core::CloseReason::new(ratchet_core::CloseCode::Normal, None)
+                });
+            sender.close(reason).await
         }
-    }
-
-    pub async fn next(&mut self) -> Option<Result<ws::Message, axum::Error>> {
-        match self {
-            Self::Plain(socket) => socket.recv().await,
-            Self::Compressed(socket) => socket.receiver.recv().await.map(inbound),
-        }
-    }
-
-    /// Compare both complete text messages using the actual negotiated PMD
-    /// settings. The extension sends the selected compressed bytes directly;
-    /// it does not recompress the winner. Plain connections compare raw bytes.
-    pub async fn send_best_text(&mut self, full: &str, patch: &str) -> Result<(), axum::Error> {
-        let _sending = gonvex_profiler::gauge(gonvex_profiler::GaugeId::WsSending).guard();
-        let _write = gonvex_profiler::ScopeTimer::new(
-            gonvex_profiler::Stage::WsWrite,
-            gonvex_profiler::Label::None,
-        );
-        match self {
-            Self::Plain(socket) => {
-                socket
-                    .send(ws::Message::Text(
-                        if patch.len() < full.len() {
-                            patch
-                        } else {
-                            full
-                        }
-                        .to_owned()
-                        .into(),
-                    ))
-                    .await
-            }
-            Self::Compressed(socket) => {
-                let guard = AlternativeGuard(Arc::clone(&socket.alternative));
-                *socket.alternative.lock().unwrap() = Some(patch.as_bytes().to_vec());
-                let result = socket.sender.write_text(full).await;
-                drop(guard);
-                result.map_err(axum::Error::new)
-            }
-        }
-    }
-
-    pub async fn send(&mut self, message: ws::Message) -> Result<(), axum::Error> {
-        let _sending = gonvex_profiler::gauge(gonvex_profiler::GaugeId::WsSending).guard();
-        let _write = gonvex_profiler::ScopeTimer::new(
-            gonvex_profiler::Stage::WsWrite,
-            gonvex_profiler::Label::None,
-        );
-        let Self::Compressed(socket) = self else {
-            if let Self::Plain(socket) = self {
-                return socket.send(message).await;
-            }
-            unreachable!();
-        };
-        let result = match message {
-            ws::Message::Text(text) => socket.sender.write_text(text.as_str()).await,
-            ws::Message::Binary(bytes) => socket.sender.write_binary(bytes).await,
-            ws::Message::Ping(bytes) => socket.sender.write_ping(bytes).await,
-            ws::Message::Pong(bytes) => socket.sender.write_pong(bytes).await,
-            ws::Message::Close(reason) => {
-                let reason = reason
-                    .map(|reason| ratchet_core::CloseReason {
-                        code: ratchet_core::CloseCode::try_from(reason.code.to_be_bytes())
-                            .unwrap_or(ratchet_core::CloseCode::Protocol),
-                        description: Some(reason.reason.to_string()),
-                    })
-                    .unwrap_or_else(|| {
-                        ratchet_core::CloseReason::new(ratchet_core::CloseCode::Normal, None)
-                    });
-                socket.sender.close(reason).await
-            }
-        };
-        result.map_err(axum::Error::new)
     }
 }
 
@@ -472,6 +453,9 @@ impl SplittableExtension for Deflate {
 }
 
 #[cfg(test)]
+mod outbound_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -518,6 +502,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpStream,
+        task::JoinHandle,
     };
 
     async fn echo(
@@ -526,15 +511,19 @@ mod tests {
     ) -> Response {
         upgrade(
             request,
-            enabled,
-            threshold,
-            limit,
-            limit,
+            UpgradeOptions {
+                compression: enabled,
+                threshold,
+                max_message: limit,
+                max_frame: limit,
+                outbound: OutboundLimits::default(),
+                socket_fd: None,
+            },
             move |mut socket| async move {
-                assert_eq!(
+                assert!(matches!(
                     socket.compression_threshold(),
-                    matches!(socket, WebSocket::Compressed(_)).then_some(threshold),
-                );
+                    None | Some(_) if socket.compression_threshold().is_none_or(|t| t == threshold)
+                ));
                 loop {
                     // Exercise the same repeated cancellation as the runtime select loop.
                     let frame = match tokio::time::timeout(
