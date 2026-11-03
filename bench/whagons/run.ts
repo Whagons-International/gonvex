@@ -218,7 +218,7 @@ async function main() {
   // The reconnect wave replaces it mid-run.
   let c:any,member='',tw:any,stopPresence=()=>{},stopTasks=()=>{},extras:any;
   let initial=true,presenceReadyAt=Infinity,actionAt=Infinity,subscribedAt=Infinity;
-  const seen=new Map<string,number>(),seenTasks=new Map<string,number>();
+  const seen=new Map<string,number>(),seenTasks=new Map<string,number>(),firstSeen=new Map<string,number>();
   const connect=async(kind:string)=>{
    const session=await timed(kind,()=>login(email,f.tenant));if(!session)return false;
    c=session.c;member=session.grant.tenants.find((t:any)=>t.id===f.tenant)?.memberId;
@@ -231,7 +231,7 @@ async function main() {
    const w=c.watchReplica(api.tasks.recentWorkspaceTasks,{});const q0=performance.now();let first=true;
    stopTasks=w.onUpdate(()=>{try{
     if(first&&w.status().isUpToDate&&w.localReplicaState()?.completeness==='complete'){first=false;sample(kind==='login'?'initialLoad':'reconnect',performance.now()-q0);if(initial){initial=false;subscribedAt=Date.now();actionAt=Date.now()+think();}snapshots.push({received:(w.localReplicaResult()||[]).length,kind});}
-    for(const row of w.localReplicaResult()||[]){const op=pendingTasks.get(f.tenant+':'+row._id);const ts=op?.at;if(op&&ts&&ts>=subscribedAt&&op.matches(row,ts)&&seenTasks.get(row._id)!==ts){seenTasks.set(row._id,ts);sample('taskDelivery',Date.now()-ts,ts);}}
+    for(const row of w.localReplicaResult()||[]){if(!firstSeen.has(row._id))firstSeen.set(row._id,Date.now());const op=pendingTasks.get(f.tenant+':'+row._id);const ts=op?.at;if(op&&ts&&ts>=subscribedAt&&firstSeen.get(row._id)!<=ts&&op.matches(row,ts)&&seenTasks.get(row._id)!==ts){seenTasks.set(row._id,ts);sample('taskDelivery',Date.now()-ts,ts);}}
    }catch(e){error(e);}});
    tw=w;return true;
   };
@@ -260,6 +260,8 @@ async function main() {
   const expectTask=(id:string,matches:(row:any,at:number)=>boolean)=>pendingTasks.set(f.tenant+':'+id,{at:Date.now(),matches});
   const save=(ref:any,args:any)=>timed('save',()=>reducer(c,ref,args));
   const others=()=>(tenantUsers.get(f.tenant)||[]).filter(h=>h.member!==member&&!h.admin);
+  // Workspaces this user may create in (team-linked), from its workspace replica.
+  const myWorkspaces=()=>new Set(extras.rows(0).map((w:any)=>w._id));
   // Weighted foreground actions for every user (weights in percent).
   const actions:[number,()=>Promise<unknown>][]=[
    // Reads (25): task detail dwell, workspace switch, notifications, chat.
@@ -280,12 +282,12 @@ async function main() {
    // Assignments (5): assigning another member makes the task visible to them.
    [5,async()=>{const t=pick(open(),random),h=pick(others(),random);if(!t||!h)return;await save(api.taskResources.assignUser,{taskId:t._id,userId:h.member});}],
    // Creates (20): tasks, comments, relations, workspace chat.
-   [6,async()=>{const entityId=randomUUID();const workspace=rows().find(r=>r.workspaceId===f.workspaceIds?.[1])&&random()<.4?1:0;expectTask(entityId,()=>true);await save(api.tasks.create,{entityId,name:'E2E load '+randomUUID(),workspaceId:(f.workspaceIds||[f.workspaceId])[workspace],categoryId:(f.categoryIds||[f.categoryId])[workspace],priorityId:f.priorityId,spotId:random()<.8&&f.spotChildren?pick(f.spotChildren as string[],random):undefined});}],
+   [6,async()=>{const entityId=randomUUID();const allowed=(f.workspaceIds||[f.workspaceId]).map((w:string,k:number)=>[w,k] as [string,number]).filter(([w])=>myWorkspaces().has(w));if(!allowed.length)return;const workspace=pick(allowed,random)[1];expectTask(entityId,()=>true);await save(api.tasks.create,{entityId,name:'E2E load '+randomUUID(),workspaceId:(f.workspaceIds||[f.workspaceId])[workspace],categoryId:(f.categoryIds||[f.categoryId])[workspace],priorityId:f.priorityId,spotId:random()<.8&&f.spotChildren?pick(f.spotChildren as string[],random):undefined});}],
    [8,async()=>{const t=pick(rows(),random);if(!t)return;await save(api.taskResources.createNote,{entity:{_id:randomUUID(),_creationTime:Date.now(),taskId:t._id,userId:member,source:'web',note:'Synthetic local comment '+randomUUID()}});}],
    [2,async()=>{const t=pick(open(),random),u=pick(open(),random);if(!t||!u||t._id===u._id)return;await save(api.taskResources.createTaskRelation,{relationId:randomUUID(),taskId:t._id,relatedTaskId:u._id,relationType:random()<.5?'blocks':'related'});}],
    [4,async()=>{const t=pick(rows(),random);if(!t)return;await save(api.chat.sendWorkspaceChat,{entity:{_id:randomUUID(),_creationTime:Date.now(),userId:member,workspaceId:t.workspaceId,message:'Synthetic chat '+randomUUID()}});}],
    // Approvals (10): tasks that enter approval, and approver decisions.
-   [6,async()=>{if(!f.approvalCategoryId||!rows().some(r=>r.workspaceId===f.workspaceId))return;const entityId=randomUUID();expectTask(entityId,()=>true);const v=await save(api.tasks.create,{entityId,name:'Needs approval '+randomUUID().slice(0,8),workspaceId:f.workspaceId,categoryId:f.approvalCategoryId,priorityId:f.priorityId});if(v!==undefined)(approvalQueue.get(f.tenant)??approvalQueue.set(f.tenant,[]).get(f.tenant)!).push(entityId);}],
+   [6,async()=>{if(!f.approvalCategoryId||!myWorkspaces().has(f.workspaceId))return;const entityId=randomUUID();expectTask(entityId,()=>true);const v=await save(api.tasks.create,{entityId,name:'Needs approval '+randomUUID().slice(0,8),workspaceId:f.workspaceId,categoryId:f.approvalCategoryId,priorityId:f.priorityId});if(v!==undefined)(approvalQueue.get(f.tenant)??approvalQueue.set(f.tenant,[]).get(f.tenant)!).push(entityId);}],
    [4,async()=>{if(!approver)return;const queue=approvalQueue.get(f.tenant)||[];const taskId=queue.find(id=>rows().some(r=>r._id===id));if(!taskId)return;queue.splice(queue.indexOf(taskId),1);await save(api.approvals.decideByTask,{taskId,decision:random()<.85?'approved':'rejected',comment:'Synthetic decision'});}],
   ];
   const totalWeight=actions.reduce((a,[w])=>a+w,0);
@@ -301,7 +303,7 @@ async function main() {
    const choice=random();let v:any;
    if(choice<.2&&spot)v=await timed('permission',()=>reducer(c,api.members.assignMemberSpot,{memberId:target.member,spotId:spot}));
    else if(choice<.35&&spot)v=await timed('permission',()=>reducer(c,api.members.removeMemberSpot,{memberId:target.member,spotId:spot}));
-   else if(choice<.5&&team)v=await timed('permission',()=>reducer(c,api.members.addMemberTeam,{memberId:target.member,teamId:team,roleKey:'member'}));
+   else if(choice<.5&&team){if(extras.rows(4).some((r:any)=>r.memberId===target.member&&r.teamId===team&&!r.deletedAt))return;v=await timed('permission',()=>reducer(c,api.members.addMemberTeam,{memberId:target.member,teamId:team,roleKey:'member'}));}
    else if(choice<.65){const mt=extras.rows(4).find((r:any)=>r.memberId===target.member&&!r.deletedAt);if(!mt)return;v=await timed('permission',()=>reducer(c,api.members.removeMemberTeam,{id:mt._id}));}
    else if(choice<.8&&hidden.length){const t=pick(hidden,random);const share=await timed('permission',()=>reducer(c,api.taskResources.shareTask,{taskId:t._id,sharedToUserId:target.member}));v=share;if(typeof share==='string'&&random()<.5)setTimeout(()=>launch(async()=>{const at=Date.now(),b=ids(target.tw().localReplicaResult()||[]);if(await timed('permission',()=>reducer(c,api.taskResources.revokeShare,{id:share}))!==undefined)await verifyVisibility(target,at,b);}),60000);}
    else if(choice<.9&&hidden.length){const t=pick(hidden,random);v=await timed('permission',()=>reducer(c,api.tasks.assign,{taskId:t._id,userIds:[target.member]}));}
@@ -317,7 +319,7 @@ async function main() {
    const at=Date.now();
    if(numbers.length)await timed('permission',()=>reducer(c,api.tasks.bulkReassign,{ids:numbers,userIds:[target.member]}));
    const team=pick((f.teamIds||[]) as string[],random);
-   if(team)await timed('permission',()=>reducer(c,api.members.addMemberTeam,{memberId:target.member,teamId:team,roleKey:'member'}));
+   if(team&&!extras.rows(4).some((r:any)=>r.memberId===target.member&&r.teamId===team&&!r.deletedAt))await timed('permission',()=>reducer(c,api.members.addMemberTeam,{memberId:target.member,teamId:team,roleKey:'member'}));
    await verifyVisibility(target,at,before);
   };
   // Reconnect wave: ~30% of users reconnect within 10 s, mid-plateau.
