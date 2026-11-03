@@ -178,6 +178,11 @@ writers at 100/s offered: p99 137-138 ms in the writer vs 139-215 ms
 background, within run-to-run noise): commit latency then is the WAL fsync
 (below).
 
+The cap is approximate: an inline checkpoint that meets a running background
+one retries on the next commit, and the WAL restarts only when the writer's
+next transaction starts on a fully copied WAL (the test with a 200-frame cap
+saw the WAL peak at 440-490 frames).
+
 Costs and risks: a busy tenant's WAL file reaches ~64 MB on disk (it is
 reused, not grown further); readers look pages up in a larger WAL index and
 read WAL-resident pages with `pread` instead of the mmap (not measured

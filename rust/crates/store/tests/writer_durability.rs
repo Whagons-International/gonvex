@@ -185,15 +185,18 @@ async fn checkpoints_run_off_the_writer_and_the_wal_stays_bounded() {
         gonvex_store::checkpoint::BACKGROUND_CHECKPOINTS.load(Ordering::Relaxed) > background,
         "the background thread checkpointed"
     );
-    // 600 commits of several pages each would be far past 200 frames without
-    // checkpoints; the cap (200 frames + one commit) bounds it.
+    // 600 commits of ~5 pages each would reach ~3,000 frames without
+    // checkpoints. The cap (200 frames) is approximate: an inline checkpoint
+    // that meets a running background one retries on the next commit, and
+    // the WAL restarts only when the writer's next transaction starts on a
+    // fully copied WAL, so allow a few multiples of it.
     let wal = std::fs::metadata(dir.0.join("tenant.db-wal")).unwrap().len();
     let page: i64 = sqlx::query_scalar("PRAGMA page_size")
         .fetch_one(&pools.reader(&url).await.unwrap())
         .await
         .unwrap();
     assert!(
-        wal <= (400 * (page + 24) + 32) as u64,
+        wal <= (1_000 * (page + 24) + 32) as u64,
         "WAL stays near its cap: {wal} bytes"
     );
     assert_eq!(values(&pools, &url).await.len(), 600);
