@@ -33,6 +33,7 @@ hmac.workspace = true
 ipnet.workspace = true
 gonvex-module-host = { path = "../module-host" }
 gonvex-module-runtime = { path = "../module-runtime" }
+gonvex-module-runtime-v8 = { path = "../module-runtime-v8" }
 gonvex-protocol = { path = "../protocol" }
 gonvex-store = { path = "../store" }
 serde.workspace = true
@@ -56,6 +57,8 @@ duckdb = { workspace = true, optional = true }
 gonvex-websocket = { path = "../websocket" }
 
 [dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+socket2 = "0.6"
 tempfile = "3"
 tokio-tungstenite = "0.29"
 tower.workspace = true

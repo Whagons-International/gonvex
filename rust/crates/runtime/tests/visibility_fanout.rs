@@ -1,15 +1,15 @@
 //! Production Replica Collection feed budgets, measured after admission.
 use base64::Engine as _;
-use gonvex_store::{
-    Account, ControlPlane, Member, PoolLimits, PoolRegistry, RuntimeManifestRecord,
-    SessionIdentity, TenantRoute, TenantSession,
-};
 use gonvex_protocol::ReplicaOpenRequest;
 use gonvex_runtime::change_feed::{self, FeedEvent};
 use gonvex_runtime::replica::ReplicaSubscription;
 use gonvex_runtime::{
     config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig},
     Runtime,
+};
+use gonvex_store::{
+    Account, ControlPlane, Member, PoolLimits, PoolRegistry, RuntimeManifestRecord,
+    SessionIdentity, TenantRoute, TenantSession,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -56,7 +56,10 @@ async fn write<'q>(
     let mut transaction = gonvex_store::begin_transaction(pools, url, false)
         .await
         .unwrap();
-    query.execute(&mut **transaction.transaction()).await.unwrap();
+    query
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
     transaction.commit().await.unwrap();
 }
 
@@ -119,6 +122,8 @@ fn test_config(database_url: String) -> Config {
         database_idle_timeout: std::time::Duration::from_secs(60),
         module_host: ModuleHostConfig {
             enabled: false,
+            in_process: false,
+            max_heap_bytes: 64 << 20,
             binary: None,
             endpoint: None,
             start_timeout: Duration::from_secs(30),
@@ -134,6 +139,7 @@ fn test_config(database_url: String) -> Config {
         storage: StorageConfig::default(),
         service_principals: Vec::new(),
         public_functions: Default::default(),
+        presence: Default::default(),
     }
 }
 
@@ -408,17 +414,31 @@ async fn run_visibility_fixture(legacy: bool) {
         .await
         .unwrap();
     for i in 0..n {
-        write(&pools, &url, sqlx::query(
-            "INSERT INTO members(id,account_id,status,display_name) VALUES($1,$1,'active',$1)",
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "INSERT INTO members(id,account_id,status,display_name) VALUES($1,$1,'active',$1)",
+            )
+            .bind(format!("m{i}")),
         )
-        .bind(format!("m{i}"))).await;
-        write(&pools, &url, sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$1,'team')")
-            .bind(format!("m{i}"))).await;
+        .await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$1,'team')").bind(format!("m{i}")),
+        )
+        .await;
     }
     for i in 1..=3 {
-        write(&pools, &url, sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$2,'grant-team')")
-            .bind(format!("grant-team-{i}"))
-            .bind(format!("m{i}"))).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$2,'grant-team')")
+                .bind(format!("grant-team-{i}"))
+                .bind(format!("m{i}")),
+        )
+        .await;
     }
     let (manifest, hash) = fixture_manifest(legacy);
     control
@@ -568,7 +588,12 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     runtime.visibility_metrics().reset_for_test();
-    write(&pools, &url, sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')")).await;
+    write(
+        &pools,
+        &url,
+        sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')"),
+    )
+    .await;
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
     if legacy {
@@ -621,7 +646,12 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     runtime.visibility_metrics().reset_for_test();
-    write(&pools, &url, sqlx::query("INSERT INTO \"memberTeams\" VALUES('extra','m1','extra')")).await;
+    write(
+        &pools,
+        &url,
+        sqlx::query("INSERT INTO \"memberTeams\" VALUES('extra','m1','extra')"),
+    )
+    .await;
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
     assert!(
@@ -654,7 +684,12 @@ async fn run_visibility_fixture(legacy: bool) {
     );
     }
     runtime.visibility_metrics().reset_for_test();
-    write(&pools, &url, sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)")).await;
+    write(
+        &pools,
+        &url,
+        sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)"),
+    )
+    .await;
     let event = committed(&pools, &route, &mut revision).await;
     if legacy {
         let worked = deliver(&runtime, &mut connections, &event).await;
@@ -945,7 +980,12 @@ async fn run_visibility_fixture(legacy: bool) {
                 .unwrap()
                 .subscription,
         );
-        write(&pools, &url, sqlx::query("UPDATE tasks SET \"workspaceId\"='team' WHERE id='granted'")).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("UPDATE tasks SET \"workspaceId\"='team' WHERE id='granted'"),
+        )
+        .await;
         let moved = committed(&pools, &route, &mut revision).await;
         runtime
             .apply_live_query_feed_event(&session, &mut lq_only, &moved)
@@ -965,7 +1005,12 @@ async fn run_visibility_fixture(legacy: bool) {
                 .subscription
                 .unwrap(),
         );
-        write(&pools, &url, sqlx::query("INSERT INTO \"taskLinks\" VALUES('granted-link','granted','Now visible')")).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("INSERT INTO \"taskLinks\" VALUES('granted-link','granted','Now visible')"),
+        )
+        .await;
         let link = committed(&pools, &route, &mut revision).await;
         runtime.visibility_metrics().reset_for_test();
         runtime
@@ -984,13 +1029,18 @@ async fn run_visibility_fixture(legacy: bool) {
 
         // Derived and grant revocations must cross both inheritance edges:
         // attachments -> taskNotes -> tasks -> projects.
-        script(&pools, &url, r#"
+        script(
+            &pools,
+            &url,
+            r#"
             INSERT INTO tasks VALUES('chain-task','chain-private','Chain');
             INSERT INTO "taskNotes" VALUES('chain-note','chain-task','Chain note');
             INSERT INTO attachments VALUES('chain-attachment','chain-note','Attachment');
             INSERT INTO projects VALUES('chain-project','chain-private');
             INSERT INTO "taskUsers" VALUES('chain-grant','chain-project','m4',NULL);
-        "#).await;
+        "#,
+        )
+        .await;
         let _ = committed(&pools, &route, &mut revision).await;
         let mut holders = Vec::new();
         for member in [4, 5] {
@@ -1098,9 +1148,14 @@ async fn run_visibility_fixture(legacy: bool) {
                 .unwrap(),
         );
         assert!(!direct_parent["direct"].rows.contains_key("chain-note"));
-        write(&pools, &url, sqlx::query(
-            "INSERT INTO \"taskUsers\" VALUES('chain-grant-again','chain-project','m4',NULL)",
-        )).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "INSERT INTO \"taskUsers\" VALUES('chain-grant-again','chain-project','m4',NULL)",
+            ),
+        )
+        .await;
         let grant_again = committed(&pools, &route, &mut revision).await;
         runtime
             .apply_feed_event(&member_session, &mut direct_parent, grant_again)
@@ -1113,10 +1168,15 @@ async fn run_visibility_fixture(legacy: bool) {
 
         // A lagging connection must never receive pre-share sensitive text
         // admitted by a parent index that has already reached the sharing write.
-        script(&pools, &url, r#"
+        script(
+            &pools,
+            &url,
+            r#"
             INSERT INTO tasks VALUES('lag-parent','lag-private','Lagged');
             INSERT INTO "memberTeams" VALUES('lag-team','m6','lag-space');
-        "#).await;
+        "#,
+        )
+        .await;
         let _ = committed(&pools, &route, &mut revision).await;
         let lag_session = connections
             .iter()
@@ -1142,9 +1202,21 @@ async fn run_visibility_fixture(legacy: bool) {
             "INSERT INTO \"taskNotes\" VALUES('lag-note','lag-parent','must-never-be-delivered')",
         )).await;
         let old_note = committed(&pools, &route, &mut revision).await;
-        write(&pools, &url, sqlx::query("UPDATE \"taskNotes\" SET body='Redacted before sharing' WHERE id='lag-note'")).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "UPDATE \"taskNotes\" SET body='Redacted before sharing' WHERE id='lag-note'",
+            ),
+        )
+        .await;
         let redaction = committed(&pools, &route, &mut revision).await;
-        write(&pools, &url, sqlx::query("UPDATE tasks SET \"workspaceId\"='lag-space' WHERE id='lag-parent'")).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("UPDATE tasks SET \"workspaceId\"='lag-space' WHERE id='lag-parent'"),
+        )
+        .await;
         let sharing = committed(&pools, &route, &mut revision).await;
         let clock = change_feed::read_clock(&pools, &route).await.unwrap();
         assert!(
@@ -1182,11 +1254,21 @@ async fn run_visibility_fixture(legacy: bool) {
         );
         // Completeness can advance on an unrelated commit without changing any
         // ACL rows. A held-row edit must stay entirely in memory in that case.
-        write(&pools, &url, sqlx::query("UPDATE \"taskNotes\" SET body='Current edit' WHERE id='lag-note'")).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("UPDATE \"taskNotes\" SET body='Current edit' WHERE id='lag-note'"),
+        )
+        .await;
         let edit = committed(&pools, &route, &mut revision).await;
-        write(&pools, &url, sqlx::query(
-            "INSERT INTO attachments VALUES('unrelated-attachment','chain-note','Unrelated')",
-        )).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "INSERT INTO attachments VALUES('unrelated-attachment','chain-note','Unrelated')",
+            ),
+        )
+        .await;
         let _ = committed(&pools, &route, &mut revision).await;
         let clock = change_feed::read_clock(&pools, &route).await.unwrap();
         assert!(

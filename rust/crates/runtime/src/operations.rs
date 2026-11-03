@@ -1672,16 +1672,18 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|row| json!({
-        "time":row_time_opt(&row,"completed_at"),
-        "project":project,
-        "tenant":row.get::<String,_>("tenant_id"),
-        "function":row.get::<String,_>("function_path"),
-        "cron":row.get::<String,_>("cron_name"),
-        "outcome":"completed",
-        "lagMs":row.get::<f64,_>("lag_ms"),
-        "durationMs":row.get::<f64,_>("duration_ms"),
-    }))
+    .map(|row| {
+        json!({
+            "time":row_time_opt(&row,"completed_at"),
+            "project":project,
+            "tenant":row.get::<String,_>("tenant_id"),
+            "function":row.get::<String,_>("function_path"),
+            "cron":row.get::<String,_>("cron_name"),
+            "outcome":"completed",
+            "lagMs":row.get::<f64,_>("lag_ms"),
+            "durationMs":row.get::<f64,_>("duration_ms"),
+        })
+    })
     .collect::<Vec<_>>();
     let websocket = runtime.inner.metrics.snapshot(project);
     let database = runtime.inner.pools.snapshot().await;
@@ -2069,7 +2071,10 @@ async fn delete_project(
         );
     }
     let Some(base_url) = runtime.inner.config.default_database_url.as_deref() else {
-        return error(StatusCode::BAD_REQUEST, "database provisioning is not configured");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "database provisioning is not configured",
+        );
     };
     let Some(control) = runtime.inner.control_plane.read().await.clone() else {
         return error(

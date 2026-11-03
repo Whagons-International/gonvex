@@ -222,11 +222,10 @@ impl Runtime {
             transaction.commit().await?;
             return Ok(serde_json::json!({"found":false}));
         }
-        let clock =
-            sqlx::query("SELECT epoch,revision FROM _gonvex_sync_clock WHERE singleton=1")
-                .fetch_one(&mut **transaction.transaction())
-                .await
-                .map_err(gonvex_store::DatabaseError::from)?;
+        let clock = sqlx::query("SELECT epoch,revision FROM _gonvex_sync_clock WHERE singleton=1")
+            .fetch_one(&mut **transaction.transaction())
+            .await
+            .map_err(gonvex_store::DatabaseError::from)?;
         let epoch: String = clock.get("epoch");
         let revision: i64 = clock.get("revision");
         if epoch.is_empty() || !(0..=9_007_199_254_740_991).contains(&revision) {
@@ -415,7 +414,8 @@ impl Runtime {
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
         let profile_label = gonvex_profiler::Label::classify("reducer", path);
-        let _profile = gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
+        let _profile =
+            gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
         let mut profile_timer = gonvex_profiler::Timer::start();
         let profile_started = profile_timer;
         let committed_revisions = access.committed_revisions.clone();
@@ -494,7 +494,11 @@ impl Runtime {
                 agent_execution_id: provenance.agent_execution_id.clone(),
             },
             claim: idempotency_key.map(|key| {
-                (session.identity.account.id.clone(), key.to_owned(), receipt_path.clone())
+                (
+                    session.identity.account.id.clone(),
+                    key.to_owned(),
+                    receipt_path.clone(),
+                )
             }),
         };
         let mut handler = DatabaseHostCalls::lazy_reducer(pending)
@@ -562,7 +566,13 @@ impl Runtime {
                     if handler.claim_conflict() {
                         let _ = handler.finish(false).await;
                         return self
-                            .replay_receipt(&control, session, key, &receipt_path, committed_revisions)
+                            .replay_receipt(
+                                &control,
+                                session,
+                                key,
+                                &receipt_path,
+                                committed_revisions,
+                            )
                             .await;
                     }
                     stored?;
@@ -648,7 +658,12 @@ impl Runtime {
         committed_revisions: Option<CommittedRevisionTracker>,
     ) -> Result<ReducerExecution, ExecutionError> {
         let value = control
-            .replay_reducer_result(&session.route, &session.identity.account.id, key, receipt_path)
+            .replay_reducer_result(
+                &session.route,
+                &session.identity.account.id,
+                key,
+                receipt_path,
+            )
             .await?;
         let committed_revision = Some(
             crate::change_feed::read_clock(&self.inner.pools, &session.route)

@@ -446,9 +446,9 @@ impl Runtime {
         if visibility::indexes_ahead(&subscription.resolved, revision)
             && (!fetch.is_empty()
                 || !hidden_removals.is_empty()
-                || source
-                    .iter()
-                    .any(|(change, now)| *now || subscription.rows.contains_key(change.row_id.as_str())))
+                || source.iter().any(|(change, now)| {
+                    *now || subscription.rows.contains_key(change.row_id.as_str())
+                }))
         {
             return Ok(MaskStep::Refresh);
         }

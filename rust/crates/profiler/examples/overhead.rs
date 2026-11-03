@@ -82,7 +82,10 @@ fn main() {
         "instrumented poll overhead       {:>7.1} ns/op  (bare {bare_poll:.1}, wrapped {instrumented_poll:.1})",
         instrumented_poll - bare_poll
     );
-    let threads_max = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let threads_max = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(16);
     let mut threads = 1;
     while threads <= threads_max {
         const M: u64 = 5_000_000;
@@ -98,7 +101,9 @@ fn main() {
             }
         });
         let per = start.elapsed().as_nanos() as f64 / M as f64;
-        println!("contended Timer::lap, {threads:>2} threads  {per:>7.1} ns/op per thread (same stage)");
+        println!(
+            "contended Timer::lap, {threads:>2} threads  {per:>7.1} ns/op per thread (same stage)"
+        );
         threads *= 2;
     }
     let rate = 50_000.0;

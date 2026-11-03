@@ -1064,11 +1064,13 @@ pub(crate) fn install_change_feed_locked(
         let tables = application_tables(&mut tx).await?;
         let mut columns_by_table = all_table_columns(&mut tx).await?;
         let receipts: std::collections::HashMap<String, String> =
-            sqlx::query_as::<_, (String, String)>("SELECT name, digest FROM _gonvex_sync_bootstrap")
-                .fetch_all(&mut *tx)
-                .await?
-                .into_iter()
-                .collect();
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT name, digest FROM _gonvex_sync_bootstrap",
+            )
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
         let triggers: std::collections::HashMap<(String, String), String> =
             sqlx::query_as::<_, (String, String, Option<String>)>(
                 "SELECT tbl_name, name, sql FROM sqlite_schema WHERE type='trigger'",
@@ -1089,8 +1091,8 @@ pub(crate) fn install_change_feed_locked(
                 })?;
             let script = feed::capture_triggers_sql(&table, &key, &columns);
             let receipt = format!("table:{table}");
-            let receipt_matches =
-                receipts.get(&receipt).map(String::as_str) == Some(bootstrap_digest(&script).as_str());
+            let receipt_matches = receipts.get(&receipt).map(String::as_str)
+                == Some(bootstrap_digest(&script).as_str());
             if !receipt_matches || !triggers_match(&triggers, &table, &script) {
                 crate::execute_script(&mut *tx, &script).await?;
                 record_bootstrap(&mut tx, &receipt, &script).await?;
