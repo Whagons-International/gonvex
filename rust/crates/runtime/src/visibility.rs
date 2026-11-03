@@ -15,6 +15,9 @@ use crate::sql_parameters::Parameters;
 use crate::visibility_index::ParentAclIndex;
 use crate::visibility_mask::{match_expression, scalar};
 
+#[path = "visibility_snapshot.rs"]
+mod snapshot;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisibilityPlan {
@@ -182,13 +185,69 @@ impl std::fmt::Debug for InheritedParent {
 /// member's team ids for a grant set joined to memberTeams.
 pub const GRANT_JOIN_SUFFIX: &str = "::join";
 
-/// Parent ACL indexes shared by every connection of a tenant database. Each
-/// index is loaded once and then advanced by feed transactions in revision
-/// order; applying a revision a second time is a no-op.
+type SharedIndex = Arc<std::sync::RwLock<ParentAclIndex>>;
+
+#[cfg(test)]
+#[path = "visibility_registry_tests.rs"]
+mod registry_tests;
+
+/// Parent ACL indexes shared by every connection of a tenant database.
+///
+/// Each index has exactly one writer: an applier task that subscribed to the
+/// tenant change feed *before* the index's own REPEATABLE READ load snapshot
+/// and then applies every later transaction in feed order. Revisions are
+/// assigned under the `_gonvex_sync_clock` row lock at commit time, so a commit
+/// after revision R of the load snapshot is broadcast only after the applier's
+/// receiver exists: the stream is gap-free. Connections never mutate or reset
+/// an index. A feed reset, receiver lag, epoch change, projection change or
+/// applier exit poisons the index; every holder then rebuilds through `ensure`.
 #[derive(Default)]
 pub struct ParentAclRegistry {
-    indexes: std::sync::Mutex<BTreeMap<String, Arc<std::sync::RwLock<ParentAclIndex>>>>,
-    loading: tokio::sync::Mutex<()>,
+    indexes: std::sync::Mutex<BTreeMap<String, RegistryEntry>>,
+    loading: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+struct RegistryEntry {
+    shape: IndexShape,
+    index: SharedIndex,
+}
+
+/// What an index projects. A module change that alters any of it (columns,
+/// row id column) replaces the index instead of reusing a stale projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexShape {
+    pub table: String,
+    pub key: String,
+    pub id_column: String,
+    pub columns: BTreeSet<String>,
+}
+
+/// One index load: rows as (row id, key, projected row) at `revision` of `epoch`.
+pub struct IndexLoad {
+    pub epoch: String,
+    pub revision: u64,
+    pub rows: Vec<(String, String, Value)>,
+}
+
+/// Indexes a caller prepared before opening its snapshot transaction. Inside
+/// the transaction only lookups happen, so a snapshot never waits on a second
+/// pool admission while it holds one.
+#[derive(Clone, Default)]
+pub struct PreparedParentAcl {
+    indexes: BTreeMap<(String, String), SharedIndex>,
+}
+
+impl PreparedParentAcl {
+    fn get(&self, table: &str, key: &str) -> Result<SharedIndex, VisibilityError> {
+        self.indexes
+            .get(&(table.to_owned(), key.to_owned()))
+            .cloned()
+            .ok_or_else(|| {
+                VisibilityError::Invalid(format!(
+                    "parent ACL index {table}.{key} was not prepared before the snapshot"
+                ))
+            })
+    }
 }
 
 fn parent_index_key(session: &TenantSession, table: &str, key: &str) -> String {
@@ -198,11 +257,65 @@ fn parent_index_key(session: &TenantSession, table: &str, key: &str) -> String {
     )
 }
 
-fn tenant_index_prefix(session: &TenantSession) -> String {
-    format!(
-        "{}\u{0}{}\u{0}{}\u{0}",
-        session.route.project_id, session.route.tenant_id, session.route.database_url
-    )
+/// Every (table, key column) index `resolve_with_parents` binds for `plan`:
+/// inherited parents (recursively), both columns of each `inheritsAny`
+/// association, and every derived set (a superset of the role's active ones).
+pub fn required_indexes(
+    plans: &BTreeMap<String, VisibilityPlan>,
+    plan: &VisibilityPlan,
+) -> Result<BTreeSet<(String, String)>, VisibilityError> {
+    fn visit(
+        plans: &BTreeMap<String, VisibilityPlan>,
+        plan: &VisibilityPlan,
+        output: &mut BTreeSet<(String, String)>,
+        seen: &mut BTreeSet<String>,
+    ) -> Result<(), VisibilityError> {
+        if plan.version != Some(2) || !seen.insert(plan.table.clone()) {
+            return Ok(());
+        }
+        for table in inherited_tables(plan) {
+            let parent = plans.get(&table).ok_or_else(|| {
+                VisibilityError::Invalid(format!("unknown inherited parent {table:?}"))
+            })?;
+            output.insert((parent.table.clone(), parent.key.clone()));
+            visit(plans, parent, output, seen)?;
+        }
+        for expression in inherits_any(plan) {
+            let Some(via) = &expression.via else { continue };
+            output.insert((via.table.clone(), via.child_column.clone()));
+            output.insert((via.table.clone(), via.parent_column.clone()));
+        }
+        for set in plan.sets.values() {
+            if set.kind == "derived" {
+                output.insert((set.table.clone(), set.key.clone()));
+            }
+        }
+        Ok(())
+    }
+    let mut output = BTreeSet::new();
+    visit(plans, plan, &mut output, &mut BTreeSet::new())?;
+    Ok(output)
+}
+
+/// Whether every index bound into `resolved` (recursively through inherited
+/// parents) reflects all transactions through `revision` of `epoch`. False
+/// means the holder must rebuild (Replica) or rerun (Live Query).
+pub async fn indexes_ready(resolved: &ResolvedVisibility, revision: u64, epoch: &str) -> bool {
+    let mut indexes = Vec::new();
+    let mut pending = vec![resolved];
+    while let Some(resolved) = pending.pop() {
+        indexes.extend(resolved.indexes.values().cloned());
+        for parent in resolved.inherited.values() {
+            indexes.push(parent.index.clone());
+            pending.push(&parent.resolved);
+        }
+    }
+    for index in indexes {
+        if !crate::visibility_index::ready_at(&index, revision, epoch).await {
+            return false;
+        }
+    }
+    true
 }
 
 /// Columns a tenant index of `table` keyed by `key` projects: what the table's
@@ -281,145 +394,256 @@ pub fn index_columns(
 }
 
 impl ParentAclRegistry {
-    async fn get_or_load(
+    /// Prepare every index the given plans bind, before the caller begins its
+    /// snapshot transaction. Each missing or poisoned index is loaded in its
+    /// own short transaction after its applier subscribed to the feed.
+    pub async fn ensure(
         &self,
-        transaction: &mut TenantTransaction,
+        feeds: &crate::change_feed::ChangeFeedHub,
+        control: &gonvex_store::ControlPlane,
         session: &TenantSession,
         plans: &BTreeMap<String, VisibilityPlan>,
-        table: &str,
-        key_column: &str,
-        revision: u64,
-    ) -> Result<Arc<std::sync::RwLock<ParentAclIndex>>, VisibilityError> {
-        let key = parent_index_key(session, table, key_column);
-        if let Some(index) = self.indexes.lock().expect("parent ACL registry").get(&key) {
-            return Ok(index.clone());
+        roots: &[&VisibilityPlan],
+    ) -> Result<PreparedParentAcl, VisibilityError> {
+        let mut needed = BTreeSet::new();
+        for plan in roots {
+            needed.extend(required_indexes(plans, plan)?);
         }
-        let _loading = self.loading.lock().await;
-        if let Some(index) = self.indexes.lock().expect("parent ACL registry").get(&key) {
-            return Ok(index.clone());
+        let mut prepared = PreparedParentAcl::default();
+        for (table, key) in needed {
+            let shape = IndexShape {
+                columns: index_columns(plans, &table, &key),
+                id_column: row_id_column(plans, &table),
+                table,
+                key,
+            };
+            let index = self
+                .ensure_index(
+                    parent_index_key(session, &shape.table, &shape.key),
+                    shape.clone(),
+                    || feeds.subscribe(&session.route),
+                    |shape| load_index(control, session, shape),
+                )
+                .await?;
+            prepared.indexes.insert((shape.table, shape.key), index);
         }
-        let columns = index_columns(plans, table, key_column);
-        // Declared types keep JSON and BOOLEAN columns typed in the projection.
-        let kinds = gonvex_store::rows::table_columns(&mut **transaction.transaction(), table)
-            .await?
-            .into_iter()
-            .map(|column| (column.name.clone(), column.kind()))
-            .collect::<BTreeMap<_, _>>();
-        let projection = columns
-            .iter()
-            .map(|column| {
-                Ok(format!(
-                    "{}, {}",
-                    sql_text_literal(column),
-                    gonvex_store::rows::json_value_expr(
-                        &format!("r.{}", quote(column)?),
-                        kinds
-                            .get(column)
-                            .copied()
-                            .unwrap_or(gonvex_store::rows::JsonKind::Text),
-                    )
-                ))
-            })
-            .collect::<Result<Vec<_>, VisibilityError>>()?
-            .join(", ");
-        let id_column = row_id_column(plans, table);
-        let statement = format!(
-            "SELECT CAST(r.{} AS TEXT), CAST(r.{} AS TEXT), json_object({projection}) FROM {} AS r",
-            quote(&id_column)?,
-            quote(key_column)?,
-            quote(table)?
+        Ok(prepared)
+    }
+
+    /// The single-flight lifecycle of one index. `subscribe` must return a
+    /// receiver of the tenant feed; it is called before `load`, whose snapshot
+    /// must start after it returns.
+    pub(crate) async fn ensure_index<S, SF, L, LF>(
+        &self,
+        key: String,
+        shape: IndexShape,
+        subscribe: S,
+        load: L,
+    ) -> Result<SharedIndex, VisibilityError>
+    where
+        S: FnOnce() -> SF,
+        SF: std::future::Future<
+            Output = tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>,
+        >,
+        L: FnOnce(IndexShape) -> LF,
+        LF: std::future::Future<Output = Result<IndexLoad, VisibilityError>>,
+    {
+        if let Some(index) = self.current(&key, &shape) {
+            return Ok(index);
+        }
+        let gate = self
+            .loading
+            .lock()
+            .expect("parent ACL loading")
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let _loading = gate.lock().await;
+        if let Some(index) = self.current(&key, &shape) {
+            return Ok(index);
+        }
+        let receiver = subscribe().await;
+        let loaded = load(shape.clone()).await?;
+        let index = Arc::new(std::sync::RwLock::new(ParentAclIndex::maintained(
+            loaded.epoch,
+            loaded.revision,
+            loaded.rows,
+        )));
+        let previous = self.indexes.lock().expect("parent ACL registry").insert(
+            key,
+            RegistryEntry {
+                shape: shape.clone(),
+                index: index.clone(),
+            },
         );
-        let rows = sqlx::query(&statement)
-            .fetch_all(&mut **transaction.transaction())
-            .await?;
-        let mut projected = Vec::new();
-        for row in rows {
-            let id: Option<String> = row.try_get(0)?;
-            let key: Option<String> = row.try_get(1)?;
-            let value: String = row.try_get(2)?;
-            if let (Some(id), Some(key)) = (id, key) {
-                projected.push((
-                    id,
-                    key,
-                    serde_json::from_str(&value).map_err(|error| {
-                        VisibilityError::Invalid(format!("parent ACL row: {error}"))
-                    })?,
-                ));
+        if let Some(previous) = previous {
+            if let Ok(mut previous) = previous.index.write() {
+                previous.poison();
             }
         }
-        let index = Arc::new(std::sync::RwLock::new(ParentAclIndex::from_rows(
-            revision, projected,
-        )));
-        self.indexes
-            .lock()
-            .expect("parent ACL registry")
-            .insert(key, index.clone());
+        tokio::spawn(run_applier(receiver, index.clone(), shape));
         Ok(index)
     }
 
-    /// Advance every loaded parent index of this tenant database by one feed
-    /// transaction. Called by each connection; only the first call applies it.
-    pub fn apply(
-        &self,
-        session: &TenantSession,
-        plans: &BTreeMap<String, VisibilityPlan>,
-        revision: u64,
-        changes: &[crate::change_feed::LogChange],
-    ) {
-        let prefix = tenant_index_prefix(session);
-        let indexes = self
-            .indexes
-            .lock()
-            .expect("parent ACL registry")
-            .iter()
-            .filter(|(key, _)| key.starts_with(&prefix))
-            .filter_map(|(key, index)| {
-                let (table, key_column) = key[prefix.len()..].split_once('\u{0}')?;
-                Some((table.to_owned(), key_column.to_owned(), index.clone()))
-            })
-            .collect::<Vec<_>>();
-        for (table, key_column, index) in indexes {
-            let columns = index_columns(plans, &table, &key_column);
-            let updates = changes
-                .iter()
-                .filter(|change| change.table == table)
-                .map(|change| {
-                    let row = change.new_value.as_object().and_then(|row| {
-                        let key = match row.get(&key_column) {
-                            None | Some(Value::Null) => return None,
-                            Some(value) => scalar(Some(value)),
-                        };
-                        Some((
-                            key,
-                            Value::Object(
-                                columns
-                                    .iter()
-                                    .map(|column| {
-                                        (
-                                            column.clone(),
-                                            row.get(column).cloned().unwrap_or(Value::Null),
-                                        )
-                                    })
-                                    .collect(),
-                            ),
-                        ))
-                    });
-                    (change.row_id.clone(), row)
-                })
-                .collect::<Vec<_>>();
-            if let Ok(mut index) = index.write() {
-                index.apply_rows(revision, updates);
-            }
+    fn current(&self, key: &str, shape: &IndexShape) -> Option<SharedIndex> {
+        let indexes = self.indexes.lock().expect("parent ACL registry");
+        let entry = indexes.get(key)?;
+        let usable =
+            entry.shape == *shape && entry.index.read().is_ok_and(|index| !index.is_poisoned());
+        usable.then(|| entry.index.clone())
+    }
+}
+
+async fn load_index(
+    control: &gonvex_store::ControlPlane,
+    session: &TenantSession,
+    shape: IndexShape,
+) -> Result<IndexLoad, VisibilityError> {
+    let mut transaction = control
+        .begin_tenant_transaction(&session.route, true)
+        .await?;
+    // Declared types keep JSON and BOOLEAN columns typed in the projection.
+    let kinds = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &shape.table)
+        .await?
+        .into_iter()
+        .map(|column| (column.name.clone(), column.kind()))
+        .collect::<BTreeMap<_, _>>();
+    let projection = shape
+        .columns
+        .iter()
+        .map(|column| {
+            Ok(format!(
+                "{}, {}",
+                sql_text_literal(column),
+                gonvex_store::rows::json_value_expr(
+                    &format!("r.{}", quote(column)?),
+                    kinds
+                        .get(column)
+                        .copied()
+                        .unwrap_or(gonvex_store::rows::JsonKind::Text),
+                )
+            ))
+        })
+        .collect::<Result<Vec<_>, VisibilityError>>()?
+        .join(", ");
+    let statement = format!(
+        "SELECT CAST(r.{} AS TEXT), CAST(r.{} AS TEXT), json_object({projection}) FROM {} AS r",
+        quote(&shape.id_column)?,
+        quote(&shape.key)?,
+        quote(&shape.table)?
+    );
+    let clock =
+        sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = 1")
+            .fetch_one(&mut **transaction.transaction())
+            .await?;
+    let epoch: String = clock.try_get("epoch")?;
+    let revision = clock.try_get::<i64, _>("revision")?.max(0) as u64;
+    let rows = sqlx::query(&statement)
+        .fetch_all(&mut **transaction.transaction())
+        .await?;
+    transaction.commit().await?;
+    let mut projected = Vec::new();
+    for row in rows {
+        let id: Option<String> = row.try_get(0)?;
+        let key: Option<String> = row.try_get(1)?;
+        let value: String = row.try_get(2)?;
+        if let (Some(id), Some(key)) = (id, key) {
+            projected.push((
+                id,
+                key,
+                serde_json::from_str(&value).map_err(|error| {
+                    VisibilityError::Invalid(format!("parent ACL row: {error}"))
+                })?,
+            ));
         }
     }
+    Ok(IndexLoad {
+        epoch,
+        revision,
+        rows: projected,
+    })
+}
 
-    /// A database reset invalidates every projection of that tenant database.
-    pub fn reset(&self, session: &TenantSession) {
-        let prefix = tenant_index_prefix(session);
-        self.indexes
-            .lock()
-            .expect("parent ACL registry")
-            .retain(|key, _| !key.starts_with(&prefix));
+/// One transaction's rows of `shape.table`, projected to the index columns.
+fn project_changes(
+    shape: &IndexShape,
+    changes: &[crate::change_feed::LogChange],
+) -> Vec<(String, Option<(String, Value)>)> {
+    changes
+        .iter()
+        .filter(|change| change.table == shape.table)
+        .map(|change| {
+            let row = change.new_value.as_object().and_then(|row| {
+                let key = match row.get(&shape.key) {
+                    None | Some(Value::Null) => return None,
+                    Some(value) => scalar(Some(value)),
+                };
+                Some((
+                    key,
+                    Value::Object(
+                        shape
+                            .columns
+                            .iter()
+                            .map(|column| {
+                                (
+                                    column.clone(),
+                                    row.get(column).cloned().unwrap_or(Value::Null),
+                                )
+                            })
+                            .collect(),
+                    ),
+                ))
+            });
+            (change.row_id.clone(), row)
+        })
+        .collect()
+}
+
+/// The only writer of one index. Exits, poisoning the index, on feed reset,
+/// lag, close, epoch change, replacement, panic or cancellation.
+struct PoisonOnExit(SharedIndex);
+
+impl Drop for PoisonOnExit {
+    fn drop(&mut self) {
+        self.0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .poison();
+    }
+}
+
+async fn run_applier(
+    mut receiver: tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>,
+    index: SharedIndex,
+    shape: IndexShape,
+) {
+    let _poison = PoisonOnExit(index.clone());
+    let Ok(mut signal) = index.read().map(|index| index.subscribe()) else {
+        return;
+    };
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = signal.wait_for(|state| state.poisoned) => return,
+            event = receiver.recv() => event,
+        };
+        let Ok(crate::change_feed::FeedEvent::Transaction {
+            database_epoch,
+            revision,
+            changes,
+        }) = event
+        else {
+            // Reset, Lagged or Closed: completeness can no longer be proven.
+            return;
+        };
+        let updates = project_changes(&shape, &changes);
+        let Ok(mut guard) = index.write() else {
+            return;
+        };
+        if guard.epoch() != database_epoch {
+            return;
+        }
+        guard.apply_rows(revision, updates);
     }
 }
 
@@ -790,6 +1014,11 @@ impl VisibilityPlan {
         let active = active_sets(self, &resolved.role);
         for name in &active {
             let set = &self.sets[name];
+            // Derived inputs are data rows, routed through their source tokens
+            // by derived_change_concerns. They never reload every principal.
+            if set.kind == "derived" {
+                continue;
+            }
             let base = if set.alias.is_empty() {
                 set.table.as_str()
             } else {
@@ -1322,7 +1551,8 @@ pub fn resolve_with_parents<'a>(
     plan: &'a VisibilityPlan,
     revision: u64,
     plans: &'a BTreeMap<String, VisibilityPlan>,
-    registry: &'a ParentAclRegistry,
+    acl: &'a PreparedParentAcl,
+    metrics: &'a crate::visibility_metrics::VisibilityMetrics,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<ResolvedVisibility, VisibilityError>> + Send + 'a>,
 > {
@@ -1336,18 +1566,9 @@ pub fn resolve_with_parents<'a>(
                 VisibilityError::Invalid(format!("unknown inherited parent {table:?}"))
             })?;
             let parent_resolved =
-                resolve_with_parents(transaction, session, parent, revision, plans, registry)
+                resolve_with_parents(transaction, session, parent, revision, plans, acl, metrics)
                     .await?;
-            let index = registry
-                .get_or_load(
-                    transaction,
-                    session,
-                    plans,
-                    &parent.table,
-                    &parent.key,
-                    revision,
-                )
-                .await?;
+            let index = acl.get(&parent.table, &parent.key)?;
             resolved.inherited.insert(
                 table,
                 InheritedParent {
@@ -1360,9 +1581,7 @@ pub fn resolve_with_parents<'a>(
         for expression in inherits_any(plan) {
             let Some(via) = &expression.via else { continue };
             for column in [&via.child_column, &via.parent_column] {
-                let index = registry
-                    .get_or_load(transaction, session, plans, &via.table, column, revision)
-                    .await?;
+                let index = acl.get(&via.table, column)?;
                 resolved.indexes.insert(via_index_name(via, column), index);
             }
         }
@@ -1371,12 +1590,12 @@ pub fn resolve_with_parents<'a>(
             if set.kind != "derived" {
                 continue;
             }
-            let index = registry
-                .get_or_load(transaction, session, plans, &set.table, &set.key, revision)
-                .await?;
+            let index = acl.get(&set.table, &set.key)?;
             resolved.indexes.insert(name, index);
         }
-        recompute_derived(plan, &mut resolved);
+        for _ in 0..snapshot::resolve_derived(transaction, plan, &mut resolved).await? {
+            metrics.record_visibility_sql_statement();
+        }
         Ok(resolved)
     })
 }
@@ -1388,10 +1607,11 @@ pub fn recompute_derived(
     resolved: &mut ResolvedVisibility,
 ) -> Vec<(String, BTreeSet<String>, BTreeSet<String>)> {
     let mut changes: Vec<(String, BTreeSet<String>, BTreeSet<String>)> = Vec::new();
+    let active = active_sets(plan, &resolved.role);
     // Chains are at most two deep: two passes reach a fixed point.
     for _ in 0..2 {
         for (name, set) in &plan.sets {
-            if set.kind != "derived" {
+            if set.kind != "derived" || !active.contains(name) {
                 continue;
             }
             let Some(index) = resolved.indexes.get(name).cloned() else {
@@ -1474,6 +1694,96 @@ pub fn derived_change_concerns(
                         .is_some_and(|key| source.contains(&key))
                 }) || source.contains(row_id)
             })
+    })
+}
+
+/// An inherited principal can depend on derived data at any admitted depth.
+/// Rebuild only the members whose source tokens name the changed row.
+pub fn ancestor_derived_change_concerns(
+    resolved: &ResolvedVisibility,
+    table: &str,
+    row_id: &str,
+    old: &Value,
+    new: &Value,
+) -> bool {
+    resolved.inherited.values().any(|parent| {
+        derived_change_concerns(&parent.plan, &parent.resolved, table, row_id, old, new)
+            || ancestor_derived_change_concerns(&parent.resolved, table, row_id, old, new)
+    })
+}
+
+/// Grant rows also route recursively. Direct-parent replica grants keep their
+/// targeted delta path; more distant grants require a fresh principal.
+pub fn grant_change_concerns(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    table: &str,
+    old: &Value,
+    new: &Value,
+) -> bool {
+    plan.active_grant_sets(resolved)
+        .into_iter()
+        .any(|(name, set)| {
+            set.table == table
+                && [old, new].into_iter().any(|row| {
+                    grant_contribution(name, set, resolved, row) != GrantContribution::None
+                })
+        })
+        || resolved
+            .inherited
+            .values()
+            .any(|parent| grant_change_concerns(&parent.plan, &parent.resolved, table, old, new))
+}
+
+/// Changes to a more distant ancestor's row or association can reveal or hide
+/// existing descendants without moving any principal, grant or derived token.
+pub fn ancestor_row_change_concerns(
+    resolved: &ResolvedVisibility,
+    table: &str,
+    old: &Value,
+    new: &Value,
+) -> bool {
+    resolved.inherited.values().any(|parent| {
+        let state = &parent.resolved;
+        let flip = state.inherited.get(table).is_some_and(|ancestor| {
+            let admitted = |row: &Value| {
+                !row.is_null() && parent.plan.parent_admits(state, table, ancestor, row)
+            };
+            admitted(old) != admitted(new)
+        });
+        let association = inherits_any(&parent.plan).into_iter().any(|expression| {
+            let (Some(via), Some(ancestor)) =
+                (&expression.via, state.inherited.get(&expression.table))
+            else {
+                return false;
+            };
+            via.table == table
+                && [old, new].into_iter().any(|row| {
+                    row.get(&via.parent_column)
+                        .filter(|value| !value.is_null())
+                        .and_then(|value| ancestor.row(&scalar(Some(value))))
+                        .is_some_and(|row| {
+                            parent
+                                .plan
+                                .parent_admits(state, &expression.table, ancestor, &row)
+                        })
+                })
+        });
+        flip || association || ancestor_row_change_concerns(state, table, old, new)
+    })
+}
+
+/// Check after making row decisions. If a bound index already contains later
+/// ACL changes, an old event payload must not become a newly authorized value.
+pub fn indexes_ahead(resolved: &ResolvedVisibility, revision: u64) -> bool {
+    resolved.indexes.values().any(|index| {
+        index.read().map_or(true, |index| {
+            index.is_poisoned() || index.modified_revision() > revision
+        })
+    }) || resolved.inherited.values().any(|parent| {
+        parent.index.read().map_or(true, |index| {
+            index.is_poisoned() || index.modified_revision() > revision
+        }) || indexes_ahead(&parent.resolved, revision)
     })
 }
 
@@ -3422,6 +3732,70 @@ mod mask_tests {
             &alice_row,
             &alice_row
         ));
+    }
+
+    #[test]
+    fn derived_input_rows_do_not_become_unanchored_principal_changes() {
+        let mut plan = tasks_plan();
+        plan.sets.insert(
+            "noted".into(),
+            serde_json::from_value(json!({
+                "kind":"derived", "from":"assigned", "table":"taskNotes",
+                "key":"taskId", "select":"taskId"
+            }))
+            .unwrap(),
+        );
+        plan.predicate.children.push(
+            serde_json::from_value(json!({
+                "operator":"inSet", "column":"_id", "set":"noted"
+            }))
+            .unwrap(),
+        );
+        plan.validate().unwrap();
+        let mut alice = member("alice", &[("assigned", &["mine"])]);
+        // Runtime resolutions always bind the active derived index before
+        // routing feed changes. Model that prepared state in this fixture.
+        alice.indexes.insert(
+            "noted".into(),
+            Arc::new(std::sync::RwLock::new(ParentAclIndex::from_rows(
+                1,
+                [("note".into(), "mine".into(), json!({"taskId":"mine"}))],
+            ))),
+        );
+        for task in ["mine", "another-members-task"] {
+            let row = json!({"_id":"note", "taskId":task});
+            assert!(!plan.principal_change_concerns(
+                &alice,
+                "taskNotes",
+                "insert",
+                &[],
+                &Value::Null,
+                &row
+            ));
+            assert_eq!(
+                derived_change_concerns(&plan, &alice, "taskNotes", "note", &Value::Null, &row),
+                task == "mine",
+                "only a source token belonging to this member routes derived work"
+            );
+        }
+        let mut inactive = alice;
+        inactive.role = "admin".into();
+        inactive.indexes.insert(
+            "noted".into(),
+            Arc::new(std::sync::RwLock::new(ParentAclIndex::from_rows(
+                1,
+                [("note".into(), "mine".into(), json!({"taskId":"mine"}))],
+            ))),
+        );
+        plan.predicate = serde_json::from_value(json!({"operator":"or","children":[
+            {"operator":"role","value":"admin"}, plan.predicate
+        ]}))
+        .unwrap();
+        assert!(recompute_derived(&plan, &mut inactive).is_empty());
+        assert!(
+            !inactive.sets.contains_key("noted"),
+            "role-pruned sets stay inactive during feed updates"
+        );
     }
 
     fn parent(rows: &[(&str, Value)]) -> InheritedParent {

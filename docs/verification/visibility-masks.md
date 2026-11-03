@@ -49,7 +49,36 @@ Compiler errors do not count as failed-proof controls. Receipts must name the
 Verus version, source/extractor/harness hashes, proof boundaries and all controls,
 following call-budgets.md and verus.md. No Verus result is claimed here.
 
-## Measured legacy and v2 status
+## Snapshot and feed consistency
+
+Snapshot derived sets are computed in the same REPEATABLE READ transaction as
+the visible rows. Each active derived set with nonempty source tokens adds one
+SQL statement, recorded in `visibility_sql_statements`. Empty-source chains do
+not query the database. This work happens on snapshots and Live Query reruns,
+not on ordinary in-memory deltas.
+
+Parent ACL indexes have one feed applier per tenant, table and key. Its receiver
+is subscribed before its load snapshot. Connections prepare indexes before
+opening their own transactions, then wait for feed completeness before using
+them. Reset, lag, epoch changes, changed projections and applier exit poison
+held indexes. Derived inputs, grants and ancestor row flips route recursively.
+
+Completeness revision and last ACL-row modification revision are distinct.
+Unrelated commits and unchanged projections must not turn a normal held-row
+edit into SQL. If later ACL content could authorize an older payload, the
+affected subscription takes a current SQL snapshot instead. Targeted fetches
+check the SQL clock in their existing streaming statement; if it differs from
+the event principal's revision, they also require a current snapshot. Under
+concurrent writes, this can replace a grant/parent targeted fetch with a full
+snapshot for an affected member. These fallbacks count as
+`consistency_rebuilds`, separately from `principal_rebuilds`.
+
+The native fixture includes nested revocations and workspace moves, a direct
+parent grant feeding a derived set, redaction before a delayed sharing event,
+and an unrelated later commit that must leave a held-row edit at zero SQL.
+These are executable regression contracts, not a formal proof.
+
+## Historical collection fixture measurement
 
 Both real-collection tests passed on 1b503997 plus the legacy-baseline fixture
 change, with 200 members and 201 connections. The baseline uses the current

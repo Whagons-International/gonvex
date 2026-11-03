@@ -6,6 +6,7 @@ import {
   assertDashboardHealth,
   assertPromotionCandidate,
   assertRuntimeHealth,
+  verifyDeployedEndpoints,
 } from "./release-gates.mjs";
 
 const sha = "a".repeat(40);
@@ -94,4 +95,15 @@ test("promotion rejects missing, skipped, or failed app compatibility", () => {
     if (conclusion) checkRuns.push({ name: "Whagons compatibility", status: "completed", conclusion });
     assert.throws(() => assertPromotionCandidate(candidate({ checkRuns })), /successful Whagons compatibility/);
   }
+});
+
+
+test("deployment verification authenticates exact-version diagnostics", async () => {
+  await verifyDeployedEndpoints({ runtimeURL: "https://runtime.test", dashboardURL: "https://dashboard.test", sha, runtimeToken: "test-operator-token", fetchImpl: async (url, options) => {
+    if (url.hostname === "runtime.test") {
+      assert.equal(options.headers.Authorization, "Bearer test-operator-token");
+      return new Response(JSON.stringify({ok: true, version: sha}));
+    }
+    return new Response("ok\n");
+  }});
 });
