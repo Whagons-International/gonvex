@@ -152,7 +152,10 @@ impl CronRow {
 
 /// Every registered slot that has run at least once.
 pub fn snapshot() -> Vec<CronRow> {
-    let names = NAMES.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
+    let names = NAMES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
     let mut out = Vec::new();
     for (slot, counters) in TABLE.iter().enumerate() {
         let mut values = [0u64; FIELD_COUNT];
@@ -162,10 +165,13 @@ pub fn snapshot() -> Vec<CronRow> {
         if values[CronField::Invocations as usize] == 0 {
             continue;
         }
-        let name = names
-            .get(slot)
-            .cloned()
-            .unwrap_or_else(|| if slot == 0 { "(one-shot)".to_owned() } else { format!("slot-{slot}") });
+        let name = names.get(slot).cloned().unwrap_or_else(|| {
+            if slot == 0 {
+                "(one-shot)".to_owned()
+            } else {
+                format!("slot-{slot}")
+            }
+        });
         out.push(CronRow {
             slot: slot as u16,
             name,

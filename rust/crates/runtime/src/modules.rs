@@ -351,9 +351,8 @@ fn crons_from_module(
             if statement.trim().is_empty() {
                 cron.due_when = None;
             } else {
-                crate::host_calls::admit_read_statement(statement).map_err(|error| {
-                    invalid(format!("cron {:?} dueWhen: {error}", cron.name))
-                })?;
+                crate::host_calls::admit_read_statement(statement)
+                    .map_err(|error| invalid(format!("cron {:?} dueWhen: {error}", cron.name)))?;
             }
         }
         cron.slot = gonvex_profiler::cron::register(cron.name.trim());

@@ -117,7 +117,11 @@ impl ChangeFeedHub {
         self.feeds
             .try_read()
             .ok()
-            .and_then(|feeds| feeds.get(database_url).map(broadcast::Sender::receiver_count))
+            .and_then(|feeds| {
+                feeds
+                    .get(database_url)
+                    .map(broadcast::Sender::receiver_count)
+            })
             .unwrap_or(0)
     }
 }

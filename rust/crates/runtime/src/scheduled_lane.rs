@@ -114,7 +114,10 @@ impl LaneConfig {
             ),
             nice: number("GONVEX_SCHEDULER_NICE").map_or(5, |value| value.clamp(0, 19) as i32),
             dedicated_thread: !matches!(
-                std::env::var("GONVEX_SCHEDULER_THREAD").ok().as_deref().map(str::trim),
+                std::env::var("GONVEX_SCHEDULER_THREAD")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim),
                 Some("0" | "false" | "off")
             ),
         }
@@ -167,7 +170,10 @@ impl ScheduledLane {
 
     /// The per-tenant run lock (one scheduled run per tenant at a time).
     pub(crate) fn tenant_lock(&self, tenant: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut tenants = self.tenants.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut tenants = self
+            .tenants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if tenants.len() > 4_096 {
             tenants.retain(|_, lock| Arc::strong_count(lock) > 1);
         }
@@ -259,7 +265,10 @@ mod tests {
             drop(call);
         });
         let waited = yield_to_users(Duration::from_secs(5)).await;
-        assert!(waited < Duration::from_secs(2), "woken when the user call ended: {waited:?}");
+        assert!(
+            waited < Duration::from_secs(2),
+            "woken when the user call ended: {waited:?}"
+        );
         release.await.unwrap();
         // Scheduled work does not count as a user call.
         let _scheduled = UserCall::enter(true);

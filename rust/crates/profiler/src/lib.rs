@@ -234,7 +234,15 @@ pub enum Label {
     Cron = 6,
 }
 
-pub const LABELS: [&str; 7] = ["-", "heartbeat", "presence", "reducer", "query", "action", "cron"];
+pub const LABELS: [&str; 7] = [
+    "-",
+    "heartbeat",
+    "presence",
+    "reducer",
+    "query",
+    "action",
+    "cron",
+];
 pub const LABEL_COUNT: usize = LABELS.len();
 
 impl Label {
@@ -383,7 +391,11 @@ fn record_always(stage: Stage, label: Label, value: u64) {
 /// Records a [`Duration`].
 #[inline]
 pub fn record_duration(stage: Stage, label: Label, duration: Duration) {
-    record(stage, label, duration.as_nanos().min(u64::MAX as u128) as u64);
+    record(
+        stage,
+        label,
+        duration.as_nanos().min(u64::MAX as u128) as u64,
+    );
 }
 
 /// A stage-boundary clock: one clock read per boundary. Inert (no clock reads)
@@ -543,7 +555,11 @@ impl Gauge {
         let (peak_window, peak) = (packed >> PEAK_BITS, packed & ((1 << PEAK_BITS) - 1));
         if peak_window != window || value > peak {
             let value = value.min((1 << PEAK_BITS) - 1);
-            let value = if peak_window == window { value.max(peak) } else { value };
+            let value = if peak_window == window {
+                value.max(peak)
+            } else {
+                value
+            };
             self.peak.store((window << PEAK_BITS) | value, Relaxed);
         }
     }
@@ -612,7 +628,9 @@ impl Backlog {
     pub fn sent(&mut self) {
         if self.remaining > 0 {
             self.remaining -= 1;
-            gauge(GaugeId::OutboundFrames).current.fetch_add(-1, Relaxed);
+            gauge(GaugeId::OutboundFrames)
+                .current
+                .fetch_add(-1, Relaxed);
         }
     }
 }
@@ -1186,10 +1204,22 @@ mod tests {
             assert!(index >= previous);
             previous = index;
         }
-        for ns in [0, 1023, 1024, 1500, 3000, 1 << 35, (1 << 36) - 1, 70_000_000_000] {
+        for ns in [
+            0,
+            1023,
+            1024,
+            1500,
+            3000,
+            1 << 35,
+            (1 << 36) - 1,
+            70_000_000_000,
+        ] {
             let index = bucket_of(ns);
             let (lower, upper) = bucket_bounds(index);
-            assert!(lower <= ns && ns < upper, "{ns} not in {lower}..{upper} (bucket {index})");
+            assert!(
+                lower <= ns && ns < upper,
+                "{ns} not in {lower}..{upper} (bucket {index})"
+            );
         }
         assert_eq!(bucket_of(u64::MAX), BUCKETS - 1);
         for index in 1..BUCKETS - 1 {
@@ -1258,9 +1288,14 @@ mod tests {
         let before = long_poll_total();
         let waker = std::task::Waker::noop();
         let mut future = std::pin::pin!(instrument(TaskKind::Outbox, Slow));
-        assert!(future.as_mut().poll(&mut Context::from_waker(waker)).is_ready());
+        assert!(future
+            .as_mut()
+            .poll(&mut Context::from_waker(waker))
+            .is_ready());
         assert!(long_poll_total() > before);
-        assert!(long_polls().iter().any(|poll| poll.task == "outbox" && poll.duration_ns >= 5_000_000));
+        assert!(long_polls()
+            .iter()
+            .any(|poll| poll.task == "outbox" && poll.duration_ns >= 5_000_000));
     }
 
     #[test]
@@ -1274,15 +1309,25 @@ mod tests {
         record_slow_trace(Label::Heartbeat, &values);
         let (traces, _) = slow_traces();
         assert!(traces.iter().all(|trace| trace.values[0] >= 100_000_000));
-        assert!(traces.iter().any(|trace| trace.values[6] == 400_000_000
-            && trace.label == Label::Heartbeat));
+        assert!(traces
+            .iter()
+            .any(|trace| trace.values[6] == 400_000_000 && trace.label == Label::Heartbeat));
     }
 
     #[test]
     fn classify_is_fixed_and_cheap() {
-        assert_eq!(Label::classify("reducer", "presence.beat"), Label::Heartbeat);
-        assert_eq!(Label::classify("reducer", "control.support.heartbeat"), Label::Heartbeat);
-        assert_eq!(Label::classify("reducer", "presence.transition"), Label::Presence);
+        assert_eq!(
+            Label::classify("reducer", "presence.beat"),
+            Label::Heartbeat
+        );
+        assert_eq!(
+            Label::classify("reducer", "control.support.heartbeat"),
+            Label::Heartbeat
+        );
+        assert_eq!(
+            Label::classify("reducer", "presence.transition"),
+            Label::Presence
+        );
         assert_eq!(Label::classify("reducer", "tasks.save"), Label::Reducer);
         assert_eq!(Label::classify("query", "tasks.list"), Label::Query);
         assert_eq!(Label::from_u8(Label::Cron as u8), Label::Cron);

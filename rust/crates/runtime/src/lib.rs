@@ -3,7 +3,6 @@ pub mod change_feed;
 pub mod config;
 pub mod control;
 mod cron_profile;
-mod scheduled_lane;
 mod dashboard;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
@@ -28,12 +27,15 @@ pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
 pub mod sandbox;
+mod scheduled_lane;
 pub mod scheduler;
 mod service_principal;
 mod snapshot_ack;
 mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
+// Kept for the Verus proof and benchmark in verification/; unused by the SQLite store.
+#[allow(dead_code)]
 mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
@@ -54,11 +56,11 @@ use axum::routing::{get, post};
 use axum::{body, body::Body, Json, Router};
 use chrono::{SecondsFormat, Utc};
 use futures_util::{Stream, StreamExt};
-use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_protocol::{
     ClientMessage, ExecutionScope, ReducerCallRequest, ReducerErrorClass, ReplicaOpenRequest,
     ServerCapabilities, ServerMessage, PROTOCOL_VERSION,
 };
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_websocket::{self as websocket_transport, WebSocket};
 use serde::Serialize;
 use thiserror::Error;
@@ -131,7 +133,9 @@ pub enum RuntimeStartError {
     ModuleHost(#[from] module_host::ModuleHostError),
     #[error(transparent)]
     Database(#[from] gonvex_store::DatabaseError),
-    #[error("a Control Plane database (GONVEX_DATA_DIR) is required when authentication is enabled")]
+    #[error(
+        "a Control Plane database (GONVEX_DATA_DIR) is required when authentication is enabled"
+    )]
     MissingControlPlane,
     #[error(transparent)]
     Module(#[from] ModuleRegistryError),
@@ -4358,7 +4362,10 @@ async fn send_connection_all(
 async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
     let mut timer = gonvex_profiler::Timer::start();
     let encoded = serde_json::to_string(message).map_err(|_| ())?;
-    timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
+    timer.lap(
+        gonvex_profiler::Stage::WsEncode,
+        gonvex_profiler::Label::None,
+    );
     socket
         .send(Message::Text(encoded.into()))
         .await
@@ -4390,7 +4397,11 @@ mod tests {
                         key: "id".into(),
                         cursor: cursor.clone(),
                         result: (0..1000)
-                            .map(|id| std::sync::Arc::new(serde_json::json!({"id":id,"body":"x".repeat(1000)})))
+                            .map(|id| {
+                                std::sync::Arc::new(
+                                    serde_json::json!({"id":id,"body":"x".repeat(1000)}),
+                                )
+                            })
                             .collect(),
                         metadata: std::collections::BTreeMap::from([(
                             "pageDigest".into(),
@@ -4991,10 +5002,14 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         // before revoking its tenant.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if runtime.inner.pools.snapshot().await.admission_active > 0 { break; }
+                if runtime.inner.pools.snapshot().await.admission_active > 0 {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&control_fixture).await.unwrap();
         let first = read_socket(&mut socket).await;
         assert_eq!(first["type"], "reducer.result");

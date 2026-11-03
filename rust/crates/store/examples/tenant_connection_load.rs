@@ -52,7 +52,7 @@ async fn main() {
             let mut step = 0u64;
             while Instant::now() < deadline {
                 step += 1;
-                let read_only = step % 5 != 0;
+                let read_only = !step.is_multiple_of(5);
                 let mut transaction = begin_transaction(&pools, &url, read_only).await.unwrap();
                 if read_only {
                     sqlx::query("SELECT id, title, done FROM tasks ORDER BY id LIMIT 100")

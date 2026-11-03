@@ -251,10 +251,10 @@ impl ModuleHost {
             )),
             _ => None,
         };
-        let _inflight =
-            gonvex_profiler::gauge(gonvex_profiler::GaugeId::ModuleInflight).guard();
-        let _total = label
-            .map(|label| gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::InvokeTotal, label));
+        let _inflight = gonvex_profiler::gauge(gonvex_profiler::GaugeId::ModuleInflight).guard();
+        let _total = label.map(|label| {
+            gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::InvokeTotal, label)
+        });
         let mut timer = gonvex_profiler::Timer::start();
         let mut connect_ns = 0;
         let mut stream = self.connect().await?;
@@ -463,7 +463,11 @@ impl InvokeProfile {
             label,
             connect,
             first_frame: 0,
-            mark: if label.is_some() { gonvex_profiler::now_ns() } else { 0 },
+            mark: if label.is_some() {
+                gonvex_profiler::now_ns()
+            } else {
+                0
+            },
             first: true,
             js: 0,
             host: 0,

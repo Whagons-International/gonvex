@@ -995,7 +995,9 @@ async fn prune_completed_jobs(
 async fn next_due_at(
     connection: &mut sqlx::SqliteConnection,
 ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
-    let next: Option<i64> = sqlx::query_scalar(NEXT_DUE_SQL).fetch_one(connection).await?;
+    let next: Option<i64> = sqlx::query_scalar(NEXT_DUE_SQL)
+        .fetch_one(connection)
+        .await?;
     Ok(next.map(millis_to_datetime))
 }
 
@@ -1174,7 +1176,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn interval_and_five_field_crons_have_a_next_occurrence() {
         let now = Utc::now();
@@ -1226,7 +1227,9 @@ mod tests {
             Some(on_time + ChronoDuration::minutes(1))
         );
         let six_days_late = now - ChronoDuration::days(6);
-        let next = next_cron_run(&spec, six_days_late, now, 0, Stagger::OFF).unwrap().unwrap();
+        let next = next_cron_run(&spec, six_days_late, now, 0, Stagger::OFF)
+            .unwrap()
+            .unwrap();
         assert!(next > now && next <= now + ChronoDuration::minutes(1));
     }
 
@@ -1236,7 +1239,9 @@ mod tests {
     };
 
     fn at(text: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&Utc)
     }
 
     fn expression_cron(expression: &str) -> CronSpec {
@@ -1261,9 +1266,17 @@ mod tests {
         assert_ne!(key, stagger_key("project", "tenant-b", "jobs.every-minute"));
         assert_ne!(key, stagger_key("project", "tenant-a", "jobs.hourly"));
         let now = at("2026-11-03T12:59:59.500Z");
-        for spec in [expression_cron("* * * * *"), interval_cron(60_000), expression_cron("0 * * * *")] {
+        for spec in [
+            expression_cron("* * * * *"),
+            interval_cron(60_000),
+            expression_cron("0 * * * *"),
+        ] {
             let first = next_run(&spec, now, key, STAGGER).unwrap();
-            assert_eq!(first, next_run(&spec, now, key, STAGGER).unwrap(), "same inputs, same run");
+            assert_eq!(
+                first,
+                next_run(&spec, now, key, STAGGER).unwrap(),
+                "same inputs, same run"
+            );
             // 26 tenants no longer share one instant.
             let distinct: std::collections::BTreeSet<_> = (0..26)
                 .map(|tenant| {
@@ -1271,7 +1284,12 @@ mod tests {
                     next_run(&spec, now, key, STAGGER).unwrap().unwrap()
                 })
                 .collect();
-            assert!(distinct.len() >= 24, "{:?}: {} distinct run times", spec.expression, distinct.len());
+            assert!(
+                distinct.len() >= 24,
+                "{:?}: {} distinct run times",
+                spec.expression,
+                distinct.len()
+            );
         }
     }
 
@@ -1297,7 +1315,10 @@ mod tests {
                     let run = next_run(&spec, after, key, STAGGER).unwrap().unwrap();
                     let nominal = latest_occurrence_at_or_before(&schedule, run).unwrap();
                     let delay = (run - nominal).num_milliseconds();
-                    assert!((0..max_delay).contains(&delay), "{expression}: delay {delay} ms");
+                    assert!(
+                        (0..max_delay).contains(&delay),
+                        "{expression}: delay {delay} ms"
+                    );
                     if let Some(previous) = previous {
                         assert_eq!((run - previous).num_milliseconds(), period, "{expression}");
                     }
@@ -1310,7 +1331,9 @@ mod tests {
         // interval apart and a restart lands on the same lattice.
         let spec = interval_cron(60_000);
         let key = stagger_key("project", "tenant-a", &spec.name);
-        let first = next_run(&spec, at("2026-11-03T12:00:00Z"), key, STAGGER).unwrap().unwrap();
+        let first = next_run(&spec, at("2026-11-03T12:00:00Z"), key, STAGGER)
+            .unwrap()
+            .unwrap();
         assert!(first > at("2026-11-03T12:00:00Z") && first <= at("2026-11-03T12:01:00Z"));
         let second = next_run(&spec, first, key, STAGGER).unwrap().unwrap();
         assert_eq!((second - first).num_milliseconds(), 60_000);
@@ -1320,7 +1343,13 @@ mod tests {
         assert_eq!(after_restart, second, "a restart keeps the phase");
         // Off restores nominal times.
         assert_eq!(
-            next_run(&expression_cron("0 * * * *"), at("2026-11-03T12:10:00Z"), key, Stagger::OFF).unwrap(),
+            next_run(
+                &expression_cron("0 * * * *"),
+                at("2026-11-03T12:10:00Z"),
+                key,
+                Stagger::OFF
+            )
+            .unwrap(),
             Some(at("2026-11-03T13:00:00Z"))
         );
     }
@@ -1334,13 +1363,22 @@ mod tests {
             .map(|tenant| stagger_key("project", &format!("tenant-{tenant}"), &spec.name))
             .find(|key| key % 600_000 > 300_000)
             .unwrap();
-        let run = next_run(&spec, at("2026-11-03T12:05:00Z"), key, STAGGER).unwrap().unwrap();
-        assert!(run > at("2026-11-03T12:05:00Z") && run < at("2026-11-03T12:10:00Z"), "{run}");
-        let next = next_cron_run(&spec, run, run, key, STAGGER).unwrap().unwrap();
+        let run = next_run(&spec, at("2026-11-03T12:05:00Z"), key, STAGGER)
+            .unwrap()
+            .unwrap();
+        assert!(
+            run > at("2026-11-03T12:05:00Z") && run < at("2026-11-03T12:10:00Z"),
+            "{run}"
+        );
+        let next = next_cron_run(&spec, run, run, key, STAGGER)
+            .unwrap()
+            .unwrap();
         assert_eq!((next - run).num_minutes(), 60);
         // Fell behind: the next run is in the future, never replayed.
         let now = run + ChronoDuration::hours(5);
-        let late = next_cron_run(&spec, run, now, key, STAGGER).unwrap().unwrap();
+        let late = next_cron_run(&spec, run, now, key, STAGGER)
+            .unwrap()
+            .unwrap();
         assert!(late > now && late <= now + ChronoDuration::hours(1));
     }
 
@@ -1357,8 +1395,15 @@ mod tests {
             ("SELECT EXISTS (SELECT 1 WHERE 1 = 0)", false),
             ("SELECT 1 WHERE 0", false),
         ] {
-            let row = sqlx::query(sql).fetch_optional(&fixture.reader).await.unwrap();
-            assert_eq!(row.is_some_and(|row| due_value_is_truthy(&row)), expected, "{sql}");
+            let row = sqlx::query(sql)
+                .fetch_optional(&fixture.reader)
+                .await
+                .unwrap();
+            assert_eq!(
+                row.is_some_and(|row| due_value_is_truthy(&row)),
+                expected,
+                "{sql}"
+            );
         }
     }
 
@@ -1526,7 +1571,11 @@ mod tests {
             .iter()
             .map(|row| row.get::<String, _>("detail"))
             .collect();
-        assert!(!table_scan(&plan), "claim scans the job table:\n{}", plan.join("\n"));
+        assert!(
+            !table_scan(&plan),
+            "claim scans the job table:\n{}",
+            plan.join("\n")
+        );
 
         let plan: Vec<String> = sqlx::query(&format!("EXPLAIN QUERY PLAN {NEXT_DUE_SQL}"))
             .fetch_all(&mut *connection)

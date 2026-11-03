@@ -26,10 +26,12 @@ use crate::sql_parameters::{Parameter, Parameters};
 
 const DEFAULT_KEY: &str = "id";
 pub(crate) const SCHEDULE_OUTBOX_PATH: &str = "_gonvex.scheduler.enqueue";
-const ABORTED: &str = "current transaction is aborted, commands ignored until end of transaction block";
+const ABORTED: &str =
+    "current transaction is aborted, commands ignored until end of transaction block";
 /// Returned to module code when a lazily opened Reducer transaction finds its
 /// idempotency key already claimed; the caller replays the stored result.
-pub(crate) const RECEIPT_REPLAY: &str = "idempotency key already committed; replaying the stored result";
+pub(crate) const RECEIPT_REPLAY: &str =
+    "idempotency key already committed; replaying the stored result";
 
 /// Provenance recorded on a Reducer transaction when it opens.
 pub(crate) struct WriteAttribution {
@@ -238,7 +240,10 @@ impl DatabaseHostCalls {
                         .await
                         .map_err(|error| fault.database(error))?;
                     if !claimed {
-                        transaction.rollback().await.map_err(|error| fault.database(error))?;
+                        transaction
+                            .rollback()
+                            .await
+                            .map_err(|error| fault.database(error))?;
                         self.claim_conflict = true;
                         return Err(RECEIPT_REPLAY.to_owned());
                     }
@@ -644,7 +649,8 @@ impl DatabaseHostCalls {
         let email = self.actor_email.clone();
         let provenance = self.provenance.clone();
         let fault = self.fault.clone();
-        self.ensure_transaction().await?
+        self.ensure_transaction()
+            .await?
             .enqueue_action(
                 SCHEDULE_OUTBOX_PATH,
                 &payload,
@@ -678,7 +684,8 @@ impl DatabaseHostCalls {
             .iter()
             .enumerate()
             .map(|(index, value)| {
-                Parameter::scalar(value).map_err(|error| format!("parameter ${}: {error}", index + 1))
+                Parameter::scalar(value)
+                    .map_err(|error| format!("parameter ${}: {error}", index + 1))
             })
             .collect::<Result<Vec<_>, _>>()?;
         // `INSERT/UPDATE/DELETE … RETURNING` columns carry no reliable declared
@@ -694,7 +701,7 @@ impl DatabaseHostCalls {
         // Exact declared types of the result columns (sqlx reports `JSON` as
         // NULL). A statement that fails to prepare fails again below with the
         // real error, so a describe failure only means "unknown".
-        let kinds = rows::result_column_kinds(&mut **transaction, statement.trim())
+        let kinds = rows::result_column_kinds(transaction, statement.trim())
             .await
             .ok();
         let rows = query.fetch_all(&mut **transaction).await;
@@ -706,7 +713,9 @@ impl DatabaseHostCalls {
             }
         }
         rows.iter()
-            .map(|row| query_row_to_json(row, target.as_deref(), kinds.as_deref().map(Vec::as_slice)))
+            .map(|row| {
+                query_row_to_json(row, target.as_deref(), kinds.as_deref().map(Vec::as_slice))
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array)
     }
@@ -844,9 +853,8 @@ impl DatabaseHostCalls {
         let table = quote_identifier(table)?;
         // One JSON array parameter instead of up to 10,000 placeholders
         // (SQLite's default variable limit is 32,766).
-        let statement = format!(
-            "DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))"
-        );
+        let statement =
+            format!("DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))");
         let query = Parameters::new(vec![Parameter::Json(Value::Array(ids.clone()).to_string())])
             .bind(sqlx::query(&statement));
         let transaction = self.ensure_transaction().await?.transaction();
@@ -922,8 +930,7 @@ impl DatabaseHostCalls {
                 column: column.clone(),
                 data_type: Some(declared.clone()),
                 // INTEGER PRIMARY KEY aliases the rowid, which SQLite assigns.
-                database_generated: *has_default
-                    || declared.trim().eq_ignore_ascii_case("INTEGER"),
+                database_generated: *has_default || declared.trim().eq_ignore_ascii_case("INTEGER"),
             },
             _ => {
                 return Err(format!(
@@ -1199,7 +1206,9 @@ mod tests {
             let url = gonvex_store::database_url(&directory.path().join("tenant.db"));
             let pools = PoolRegistry::with_durability(PoolLimits::default(), Durability::Normal);
             let pool = pools.pool(&url).await.unwrap();
-            gonvex_store::execute_script(&mut pool.acquire().await.unwrap(), ddl).await.unwrap();
+            gonvex_store::execute_script(&mut pool.acquire().await.unwrap(), ddl)
+                .await
+                .unwrap();
             Self {
                 _directory: directory,
                 pools,
@@ -1519,8 +1528,14 @@ mod tests {
                 .unwrap(),
             serde_json::json!([{"n": 0}])
         );
-        assert_eq!(write_target("/* x */ INSERT INTO \"tasks\"(a) VALUES (1)").as_deref(), Some("tasks"));
-        assert_eq!(write_target("update main.tasks SET a=1").as_deref(), Some("main.tasks"));
+        assert_eq!(
+            write_target("/* x */ INSERT INTO \"tasks\"(a) VALUES (1)").as_deref(),
+            Some("tasks")
+        );
+        assert_eq!(
+            write_target("update main.tasks SET a=1").as_deref(),
+            Some("main.tasks")
+        );
         assert_eq!(write_target("SELECT 1"), None);
         let mut query = database.calls(DatabaseCapability::Query).await;
         assert!(query

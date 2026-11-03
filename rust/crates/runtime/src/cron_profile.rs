@@ -42,7 +42,11 @@ impl InvokeTimer {
                 depth == 0
             })
             .unwrap_or(false);
-        Self(if outermost { gonvex_profiler::now_ns().max(1) } else { u64::MAX })
+        Self(if outermost {
+            gonvex_profiler::now_ns().max(1)
+        } else {
+            u64::MAX
+        })
     }
 }
 
@@ -53,10 +57,12 @@ impl Drop for InvokeTimer {
         }
         let started = self.0;
         let _ = SCHEDULED.try_with(|run| {
-            run.invoke_depth.set(run.invoke_depth.get().saturating_sub(1));
+            run.invoke_depth
+                .set(run.invoke_depth.get().saturating_sub(1));
             if started != u64::MAX {
                 let elapsed = gonvex_profiler::now_ns().saturating_sub(started);
-                run.invoke_ns.set(run.invoke_ns.get().saturating_add(elapsed));
+                run.invoke_ns
+                    .set(run.invoke_ns.get().saturating_add(elapsed));
             }
         });
     }
