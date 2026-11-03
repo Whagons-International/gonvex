@@ -148,6 +148,11 @@ impl Default for SandboxConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleHostConfig {
     pub enabled: bool,
+    /// Run the V8 isolates inside the runtime process. Host calls are then
+    /// direct function calls instead of JSON frames on a socket; `binary` and
+    /// `endpoint` are ignored. `GONVEX_MODULE_HOST_IN_PROCESS=false` keeps the
+    /// separate module-host process.
+    pub in_process: bool,
     pub binary: Option<PathBuf>,
     pub endpoint: Option<String>,
     pub start_timeout: Duration,
@@ -157,6 +162,10 @@ pub struct ModuleHostConfig {
     pub isolate_pool_size: usize,
     pub execution_timeout: Duration,
     pub action_execution_timeout: Duration,
+    /// V8 heap ceiling per isolate (in-process mode; the separate host takes
+    /// its own `--max-heap-mb`). Crossing it terminates the call and retires
+    /// the isolate.
+    pub max_heap_bytes: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -280,6 +289,16 @@ impl Config {
                     lookup("GONVEX_MODULE_HOST_ENABLED"),
                     true,
                 )?,
+                in_process: boolean(
+                    "GONVEX_MODULE_HOST_IN_PROCESS",
+                    lookup("GONVEX_MODULE_HOST_IN_PROCESS"),
+                    true,
+                )?,
+                max_heap_bytes: integer(
+                    "GONVEX_MODULE_HOST_MAX_HEAP_MB",
+                    lookup("GONVEX_MODULE_HOST_MAX_HEAP_MB"),
+                    64,
+                )? << 20,
                 binary: non_empty(lookup("GONVEX_MODULE_HOST_BINARY")).map(PathBuf::from),
                 endpoint: non_empty(lookup("GONVEX_MODULE_HOST_ENDPOINT")),
                 start_timeout: duration_ms(

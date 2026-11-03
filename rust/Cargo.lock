@@ -1555,6 +1555,7 @@ dependencies = [
  "futures-util",
  "gonvex-module-host",
  "gonvex-module-runtime",
+ "gonvex-module-runtime-v8",
  "gonvex-protocol",
  "gonvex-store",
  "gonvex-websocket",
