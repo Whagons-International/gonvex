@@ -45,15 +45,26 @@ for _ in $(seq 50); do [ -S "$lab/proxy/runtime.sock" ] && [ -S "$lab/proxy/auth
 docker inspect "$prefix-runtime" --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' > "$out/runtime-limits"
 docker inspect "$prefix-runtime" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^GONVEX_' > "$out/runtime-env"
 tunnel=gvperf-tunnel-$label
+# LOAD_TUNNEL=mac (default): the generator host opens one ssh -L tunnel per shard
+# (remote-shards.sh); arch3's sshd sessions are then not in a measured cgroup.
+# LOAD_TUNNEL=reverse: one ssh -R from here (caps at ~240 sockets on macOS).
+if [ "${LOAD_TUNNEL:-mac}" = reverse ]; then
 systemd-run --user --quiet --unit="$tunnel" --collect -- ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 \
  -R "127.0.0.1:$rport:$lab/proxy/runtime.sock" -R "127.0.0.1:$aport:$lab/proxy/auth.sock" "$remote"
 tunnel_cg=/sys/fs/cgroup$(systemctl --user show -p ControlGroup --value "$tunnel.service")
+tunnelenv=""
+else
+tunnel_cg=/nonexistent
+tunnelenv="LOAD_TUNNEL_HOST=${LOAD_TUNNEL_HOST:-arch3} LOAD_TUNNEL_RUNTIME_SOCK=$lab/proxy/runtime.sock LOAD_TUNNEL_AUTH_SOCK=$lab/proxy/auth.sock"
+fi
 proxy_cg=/sys/fs/cgroup$(sed -n 's/^0:://p' "/proc/$(docker inspect "$prefix-remote-proxy" --format '{{.State.Pid}}')/cgroup")
 "${compose[@]}" run -d --rm --no-deps --name "$prefix-monitor" monitor "/lab/$label" "$proxy_cg" "$tunnel_cg" > /dev/null
 # /dev/metrics and /dev/profile snapshots every 10 s from this side (independent of the generator).
 pid=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["projectId"])' "$lab/fixture.json")
 ( while :; do
    m=$(curl -s --max-time 5 --unix-socket "$lab/proxy/runtime.sock" -H 'authorization: Bearer local-load-admin' "http://127.0.0.1/dev/metrics?project=$pid" || true)
+   # Per-connection details (websocket.details) grow with users; keep the totals.
+   [ -z "$m" ] || m=$(printf '%s' "$m" | jq -c 'del(.websocket.details)' 2>/dev/null || printf '%s' "$m")
    [ -z "$m" ] || printf '{"at":%s,"metrics":%s}\n' "$(date +%s%3N)" "$m" >> "$out/dev-metrics.jsonl"
    # /dev/profile dumps (perf/profiler); pick the two that bracket the plateau
    # and diff them with bench/profiler/top.py --delta.
@@ -71,7 +82,7 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-for _ in $(seq 50); do ssh "$remote" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$rport/healthz" 2>/dev/null | grep -q 200 && break; sleep 0.2; done
+[ -n "$tunnelenv" ] || for _ in $(seq 50); do ssh "$remote" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$rport/healthz" 2>/dev/null | grep -q 200 && break; sleep 0.2; done
 # Ship this commit's harness and the lab fixture to the generator host.
 rh="$rroot/harness-$(git -C "$bench" rev-parse --short HEAD)$( [ -z "$(git -C "$bench" status --porcelain -- .)" ] || echo -dirty)"
 tar -C "$bench" --exclude ./results -cf - . | ssh "$remote" "rm -rf $rh && mkdir -p $rh && tar -C $rh -xf -"
@@ -105,7 +116,7 @@ status=0
 ssh "$remote" "cd $rroot && env WHAGONS_CHECKOUT=$rroot/${LOAD_REMOTE_APP:-app} LOAD_STATE=$rroot/fixture.json LOAD_ADMIN_KEY=local-load-admin \
  LOAD_URL=http://127.0.0.1:$rport LOAD_AUTH_URL=http://127.0.0.1:$aport LOAD_RESULT=$rresult \
  LOAD_NODE_BIN=$rroot/tools/node-v26.13.0-darwin-arm64/bin/node LOAD_HARNESS_ROOT=$rh LOAD_RTT_HOST=${LOAD_RTT_HOST:-100.85.148.8} \
- PATH=$rroot/tools/node-v26.13.0-darwin-arm64/bin:/usr/bin:/bin:/usr/sbin:/sbin $fwd sh $rh/remote-shards.sh" > "$out/generator.log" 2>&1 || status=$?
+ PATH=$rroot/tools/node-v26.13.0-darwin-arm64/bin:/usr/bin:/bin:/usr/sbin:/sbin $fwd $tunnelenv sh $rh/remote-shards.sh" > "$out/generator.log" 2>&1 || status=$?
 finish
 trap - EXIT INT TERM
 ssh "$remote" "cd $rroot/results && tar -cf - $label.json*" | tar -C "$lab" -xf - || true
