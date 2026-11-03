@@ -73,6 +73,62 @@ struct SchedulerInner {
     stop: watch::Sender<bool>,
     wake: Notify,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    lane: crate::scheduled_lane::ScheduledLane,
+    stagger: Stagger,
+}
+
+/// Per-tenant stagger of cron runs.
+///
+/// Without it, every tenant's five-field cron fires at the same instant and
+/// every interval cron is anchored to process start, so all tenants run each
+/// cron together: a thundering herd every minute and a bigger one at :00.
+///
+/// With it, each (project, tenant, cron) gets a fixed offset from a hash:
+/// * interval crons run at Unix-time phase `hash mod interval`, so runs stay
+///   exactly one interval apart, tenants spread evenly over the interval, and
+///   a restart neither shifts the phase nor runs a cron twice in one interval;
+/// * five-field crons run `hash mod min(gap, spread)` after each nominal
+///   occurrence, where `gap` is the time to the next occurrence and `spread`
+///   is `GONVEX_SCHEDULER_CRON_SPREAD_MS` (default 10 minutes). A run is
+///   therefore always inside its own period (never two runs per period) and
+///   at most `min(period, spread) - 1 ms` late.
+///
+/// `GONVEX_SCHEDULER_STAGGER=0` restores nominal times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stagger {
+    enabled: bool,
+    spread_ms: i64,
+}
+
+impl Stagger {
+    const DEFAULT_SPREAD_MS: i64 = 600_000;
+    #[cfg(test)]
+    const OFF: Self = Self {
+        enabled: false,
+        spread_ms: 0,
+    };
+
+    fn from_env() -> Self {
+        let enabled = !matches!(
+            std::env::var("GONVEX_SCHEDULER_STAGGER")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("0" | "false" | "off")
+        );
+        let spread_ms = std::env::var("GONVEX_SCHEDULER_CRON_SPREAD_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|value| *value >= 0)
+            .unwrap_or(Self::DEFAULT_SPREAD_MS);
+        Self { enabled, spread_ms }
+    }
+}
+
+/// The stable hash behind a tenant's cron offset.
+fn stagger_key(project: &str, tenant: &str, cron: &str) -> u64 {
+    let digest = Sha256::digest(format!("{project}\0{tenant}\0{cron}").as_bytes());
+    u64::from_be_bytes(digest[..8].try_into().unwrap_or_default())
 }
 
 #[derive(Clone)]
@@ -108,6 +164,10 @@ impl Scheduler {
                 stop,
                 wake: Notify::new(),
                 task: Mutex::new(None),
+                lane: crate::scheduled_lane::ScheduledLane::new(
+                    crate::scheduled_lane::LaneConfig::from_env(),
+                ),
+                stagger: Stagger::from_env(),
             }),
         }
     }
@@ -177,7 +237,17 @@ impl Scheduler {
                 last_prune = Some(std::time::Instant::now());
                 self.prune_completed(&runtime).await;
             }
-            let jobs = match self.claim_due(&runtime, CLAIM_BATCH).await {
+            // Claim only as many jobs as the lane can start now, so a claimed
+            // job never waits behind the concurrency cap with its lease running.
+            let permits = tokio::select! {
+                permits = self.inner.lane.acquire_free() => permits,
+                changed = stop.changed() => {
+                    if changed.is_err() || *stop.borrow() { break; }
+                    continue;
+                }
+            };
+            let limit = (permits.len() as i64).clamp(1, CLAIM_BATCH);
+            let jobs = match self.claim_due(&runtime, limit).await {
                 Ok(jobs) => jobs,
                 Err(error) => {
                     tracing::error!(error = %error, "claim scheduled work");
@@ -185,16 +255,17 @@ impl Scheduler {
                     continue;
                 }
             };
-            idle = if jobs.len() as i64 == CLAIM_BATCH {
+            idle = if jobs.len() as i64 == limit {
                 std::time::Duration::ZERO
             } else {
                 self.until_next_due(&runtime).await
             };
-            for job in jobs {
+            for (job, permit) in jobs.into_iter().zip(permits) {
                 let scheduler = self.clone();
                 let runtime = runtime.clone();
-                tokio::spawn(async move {
+                self.inner.lane.spawn(async move {
                     scheduler.execute(&runtime, job).await;
+                    drop(permit);
                 });
             }
         }
@@ -349,16 +420,26 @@ impl Scheduler {
                 }
             }
         });
+        // One scheduled run per tenant at a time, and user calls first.
+        let tenant = self.inner.lane.tenant_lock(&job.tenant_id);
+        let tenant_turn = tenant.lock_owned().await;
+        crate::scheduled_lane::yield_to_users(self.inner.lane.config().yield_limit).await;
         let started = gonvex_profiler::now_ns();
         let start_delay = (Utc::now() - job.scheduled_for)
             .num_nanoseconds()
             .unwrap_or(0)
             .max(0) as u64;
-        let (result, mut sample) =
-            crate::cron_profile::scope(self.execute_job(runtime, &job)).await;
+        let skip = self.due_check(runtime, &job).await == Some(false);
+        let (result, mut sample) = if skip {
+            (Ok(()), gonvex_profiler::cron::CronSample::default())
+        } else {
+            crate::cron_profile::scope(self.execute_job(runtime, &job)).await
+        };
+        drop(tenant_turn);
         sample.total_ns = gonvex_profiler::now_ns().saturating_sub(started);
         sample.start_delay_ns = start_delay;
         sample.error = result.is_err();
+        sample.skipped = skip;
         gonvex_profiler::cron::record(cron_slot(runtime, &job).await, &sample);
         let _ = stop_lease.send(true);
         let _ = renewal.await;
@@ -393,6 +474,50 @@ impl Scheduler {
         } else {
             let _ = transaction.rollback().await;
             false
+        }
+    }
+
+    /// Evaluates the cron's `dueWhen` pre-check on a tenant reader. `None`
+    /// when the cron has none or it failed (the run then happens).
+    async fn due_check(&self, runtime: &Runtime, job: &ScheduledJob) -> Option<bool> {
+        if job.cron_name.is_empty() {
+            return None;
+        }
+        let module = runtime.inner.modules.project(&job.project_id).await?;
+        let statement = module
+            .crons
+            .iter()
+            .find(|spec| spec.name == job.cron_name)?
+            .due_when
+            .clone()?;
+        let control = runtime.inner.control_plane.read().await.clone()?;
+        let checked = async {
+            let route = control
+                .tenant_routes(&job.project_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .find(|route| route.tenant_id == job.tenant_id)
+                .ok_or_else(|| "scheduled tenant is unavailable".to_owned())?;
+            let mut transaction = control
+                .begin_tenant_transaction(&route, true)
+                .await
+                .map_err(|error| error.to_string())?;
+            let row = sqlx::query(statement.trim())
+                .bind(Utc::now().timestamp_millis())
+                .fetch_optional(&mut **transaction.transaction())
+                .await
+                .map_err(|error| error.to_string());
+            let _ = transaction.rollback().await;
+            Ok::<bool, String>(row?.is_some_and(|row| due_value_is_truthy(&row)))
+        }
+        .await;
+        match checked {
+            Ok(due) => Some(due),
+            Err(error) => {
+                tracing::warn!(cron = %job.cron_name, error = %error, "cron dueWhen failed; running the cron");
+                None
+            }
         }
     }
 
@@ -537,7 +662,8 @@ impl Scheduler {
         let Some(spec) = module.crons.iter().find(|spec| spec.name == job.cron_name) else {
             return Ok(None);
         };
-        next_cron_run(spec, job.scheduled_for, Utc::now())
+        let key = stagger_key(&job.project_id, &job.tenant_id, &spec.name);
+        next_cron_run(spec, job.scheduled_for, Utc::now(), key, self.inner.stagger)
     }
 
     async fn sync_all_crons(&self, runtime: &Runtime) -> Result<(), String> {
@@ -603,10 +729,11 @@ impl Scheduler {
                 "project" => routes.first().into_iter().collect(),
                 _ => Vec::new(),
             };
-            let Some(next) = next_occurrence(spec, now)? else {
-                continue;
-            };
             for route in targets {
+                let key = stagger_key(project, &route.tenant_id, &spec.name);
+                let Some(next) = next_run(spec, now, key, self.inner.stagger)? else {
+                    continue;
+                };
                 let job = ScheduledJob {
                     id: cron_id(project, &route.tenant_id, &spec.name, next),
                     project_id: project.to_owned(),
@@ -890,11 +1017,96 @@ fn next_cron_run(
     spec: &CronSpec,
     scheduled_for: DateTime<Utc>,
     now: DateTime<Utc>,
+    key: u64,
+    stagger: Stagger,
 ) -> Result<Option<DateTime<Utc>>, String> {
-    match next_occurrence(spec, scheduled_for)? {
-        Some(next) if next <= now => next_occurrence(spec, now),
+    match next_run(spec, scheduled_for, key, stagger)? {
+        Some(next) if next <= now => next_run(spec, now, key, stagger),
         next => Ok(next),
     }
+}
+
+/// `dueWhen` result: the first column of the first row is truthy.
+fn due_value_is_truthy(row: &sqlx::sqlite::SqliteRow) -> bool {
+    use sqlx::{TypeInfo, ValueRef};
+    let Ok(value) = row.try_get_raw(0) else {
+        return false;
+    };
+    if value.is_null() {
+        return false;
+    }
+    match value.type_info().name() {
+        "INTEGER" | "BOOLEAN" => row.try_get::<i64, _>(0).is_ok_and(|value| value != 0),
+        "REAL" => row.try_get::<f64, _>(0).is_ok_and(|value| value != 0.0),
+        "TEXT" => row
+            .try_get::<String, _>(0)
+            .is_ok_and(|value| !value.is_empty() && value != "0"),
+        _ => true,
+    }
+}
+
+/// The next run strictly after `after`, staggered per tenant (see [`Stagger`]).
+fn next_run(
+    spec: &CronSpec,
+    after: DateTime<Utc>,
+    key: u64,
+    stagger: Stagger,
+) -> Result<Option<DateTime<Utc>>, String> {
+    if !stagger.enabled {
+        return next_occurrence(spec, after);
+    }
+    if let Some(interval_ms) = spec.interval_ms {
+        let interval = i64::try_from(interval_ms)
+            .map_err(|_| format!("cron {:?} interval is too large", spec.name))?;
+        let phase = (key % interval_ms) as i64;
+        let after_ms = after.timestamp_millis();
+        let next = after_ms - (after_ms - phase).rem_euclid(interval) + interval;
+        return Ok(Some(millis_to_datetime(next)));
+    }
+    let schedule = parse_schedule(spec)?;
+    // The latest nominal occurrence at or before `after` may still be due at
+    // its staggered time.
+    if let Some(previous) = latest_occurrence_at_or_before(&schedule, after) {
+        if let Some(at) = staggered(&schedule, previous, key, stagger.spread_ms) {
+            if at > after {
+                return Ok(Some(at));
+            }
+        }
+    }
+    let Some(nominal) = schedule.after(&after).next() else {
+        return Ok(None);
+    };
+    Ok(staggered(&schedule, nominal, key, stagger.spread_ms))
+}
+
+/// The latest nominal occurrence `<= at` (cron resolution is one second).
+fn latest_occurrence_at_or_before(schedule: &Schedule, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let mut earlier = schedule.after(&(at + ChronoDuration::seconds(1)));
+    let mut previous = earlier.next_back();
+    while previous.is_some_and(|occurrence| occurrence > at) {
+        previous = earlier.next_back();
+    }
+    previous
+}
+
+/// `nominal` plus this tenant's offset inside `min(gap to the next nominal
+/// occurrence, spread)`.
+fn staggered(
+    schedule: &Schedule,
+    nominal: DateTime<Utc>,
+    key: u64,
+    spread_ms: i64,
+) -> Option<DateTime<Utc>> {
+    let gap = schedule
+        .after(&nominal)
+        .next()
+        .map_or(spread_ms, |next| (next - nominal).num_milliseconds());
+    let window = gap.min(spread_ms);
+    if window <= 1 {
+        return Some(nominal);
+    }
+    let offset = (key % window as u64) as i64;
+    nominal.checked_add_signed(ChronoDuration::milliseconds(offset))
 }
 
 fn next_occurrence(spec: &CronSpec, after: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, String> {
@@ -903,6 +1115,10 @@ fn next_occurrence(spec: &CronSpec, after: DateTime<Utc>) -> Result<Option<DateT
             .map_err(|_| format!("cron {:?} interval is too large", spec.name))?;
         return Ok(Some(after + ChronoDuration::milliseconds(interval)));
     }
+    Ok(parse_schedule(spec)?.after(&after).next())
+}
+
+fn parse_schedule(spec: &CronSpec) -> Result<Schedule, String> {
     let expression = spec.expression.as_deref().unwrap_or("").trim();
     let fields = expression.split_whitespace().count();
     let normalized = if fields == 5 {
@@ -910,9 +1126,8 @@ fn next_occurrence(spec: &CronSpec, after: DateTime<Utc>) -> Result<Option<DateT
     } else {
         expression.to_owned()
     };
-    let schedule = Schedule::from_str(&normalized)
-        .map_err(|error| format!("cron {:?} has invalid expression: {error}", spec.name))?;
-    Ok(schedule.after(&after).next())
+    Schedule::from_str(&normalized)
+        .map_err(|error| format!("cron {:?} has invalid expression: {error}", spec.name))
 }
 
 /// The profiler cron-table slot of a claimed job (one-shot jobs share slot 0).
@@ -970,6 +1185,7 @@ mod tests {
             scope: "tenant".to_owned(),
             interval_ms: Some(1_000),
             expression: None,
+            due_when: None,
             slot: 0,
         };
         assert_eq!(
@@ -993,6 +1209,7 @@ mod tests {
             scope: "tenant".to_owned(),
             interval_ms: None,
             expression: Some("* * * * *".to_owned()),
+            due_when: None,
             slot: 0,
         }
     }
@@ -1005,12 +1222,144 @@ mod tests {
             .with_timezone(&Utc);
         let on_time = now - ChronoDuration::seconds(20);
         assert_eq!(
-            next_cron_run(&spec, on_time, now).unwrap(),
+            next_cron_run(&spec, on_time, now, 0, Stagger::OFF).unwrap(),
             Some(on_time + ChronoDuration::minutes(1))
         );
         let six_days_late = now - ChronoDuration::days(6);
-        let next = next_cron_run(&spec, six_days_late, now).unwrap().unwrap();
+        let next = next_cron_run(&spec, six_days_late, now, 0, Stagger::OFF).unwrap().unwrap();
         assert!(next > now && next <= now + ChronoDuration::minutes(1));
+    }
+
+    const STAGGER: Stagger = Stagger {
+        enabled: true,
+        spread_ms: Stagger::DEFAULT_SPREAD_MS,
+    };
+
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc)
+    }
+
+    fn expression_cron(expression: &str) -> CronSpec {
+        CronSpec {
+            expression: Some(expression.to_owned()),
+            ..minute_cron()
+        }
+    }
+
+    fn interval_cron(interval_ms: u64) -> CronSpec {
+        CronSpec {
+            interval_ms: Some(interval_ms),
+            expression: None,
+            ..minute_cron()
+        }
+    }
+
+    #[test]
+    fn stagger_offsets_are_deterministic_and_spread_tenants() {
+        let key = stagger_key("project", "tenant-a", "jobs.every-minute");
+        assert_eq!(key, stagger_key("project", "tenant-a", "jobs.every-minute"));
+        assert_ne!(key, stagger_key("project", "tenant-b", "jobs.every-minute"));
+        assert_ne!(key, stagger_key("project", "tenant-a", "jobs.hourly"));
+        let now = at("2026-11-03T12:59:59.500Z");
+        for spec in [expression_cron("* * * * *"), interval_cron(60_000), expression_cron("0 * * * *")] {
+            let first = next_run(&spec, now, key, STAGGER).unwrap();
+            assert_eq!(first, next_run(&spec, now, key, STAGGER).unwrap(), "same inputs, same run");
+            // 26 tenants no longer share one instant.
+            let distinct: std::collections::BTreeSet<_> = (0..26)
+                .map(|tenant| {
+                    let key = stagger_key("project", &format!("tenant-{tenant}"), &spec.name);
+                    next_run(&spec, now, key, STAGGER).unwrap().unwrap()
+                })
+                .collect();
+            assert!(distinct.len() >= 24, "{:?}: {} distinct run times", spec.expression, distinct.len());
+        }
+    }
+
+    /// Consecutive staggered runs of one tenant: exactly one per nominal
+    /// period, each no earlier than its occurrence and less than
+    /// min(period, spread) after it.
+    #[test]
+    fn staggered_runs_keep_the_period_and_bound_the_delay() {
+        let cases: [(&str, i64, i64); 4] = [
+            ("* * * * *", 60_000, 60_000),
+            ("*/15 * * * *", 900_000, 600_000),
+            ("0 * * * *", 3_600_000, 600_000),
+            ("0 8 * * *", 86_400_000, 600_000),
+        ];
+        for tenant in 0..20 {
+            for (expression, period, max_delay) in cases {
+                let spec = expression_cron(expression);
+                let schedule = parse_schedule(&spec).unwrap();
+                let key = stagger_key("project", &format!("tenant-{tenant}"), &spec.name);
+                let mut after = at("2026-11-03T07:59:00Z");
+                let mut previous: Option<DateTime<Utc>> = None;
+                for _ in 0..6 {
+                    let run = next_run(&spec, after, key, STAGGER).unwrap().unwrap();
+                    let nominal = latest_occurrence_at_or_before(&schedule, run).unwrap();
+                    let delay = (run - nominal).num_milliseconds();
+                    assert!((0..max_delay).contains(&delay), "{expression}: delay {delay} ms");
+                    if let Some(previous) = previous {
+                        assert_eq!((run - previous).num_milliseconds(), period, "{expression}");
+                    }
+                    previous = Some(run);
+                    after = run;
+                }
+            }
+        }
+        // Interval crons: a fixed Unix-time phase, so runs are exactly one
+        // interval apart and a restart lands on the same lattice.
+        let spec = interval_cron(60_000);
+        let key = stagger_key("project", "tenant-a", &spec.name);
+        let first = next_run(&spec, at("2026-11-03T12:00:00Z"), key, STAGGER).unwrap().unwrap();
+        assert!(first > at("2026-11-03T12:00:00Z") && first <= at("2026-11-03T12:01:00Z"));
+        let second = next_run(&spec, first, key, STAGGER).unwrap().unwrap();
+        assert_eq!((second - first).num_milliseconds(), 60_000);
+        let after_restart = next_run(&spec, first + ChronoDuration::seconds(17), key, STAGGER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_restart, second, "a restart keeps the phase");
+        // Off restores nominal times.
+        assert_eq!(
+            next_run(&expression_cron("0 * * * *"), at("2026-11-03T12:10:00Z"), key, Stagger::OFF).unwrap(),
+            Some(at("2026-11-03T13:00:00Z"))
+        );
+    }
+
+    /// A process that starts between an occurrence and this tenant's offset
+    /// still runs that occurrence instead of skipping a whole period.
+    #[test]
+    fn startup_inside_the_stagger_window_keeps_the_current_occurrence() {
+        let spec = expression_cron("0 * * * *");
+        let key = (0..)
+            .map(|tenant| stagger_key("project", &format!("tenant-{tenant}"), &spec.name))
+            .find(|key| key % 600_000 > 300_000)
+            .unwrap();
+        let run = next_run(&spec, at("2026-11-03T12:05:00Z"), key, STAGGER).unwrap().unwrap();
+        assert!(run > at("2026-11-03T12:05:00Z") && run < at("2026-11-03T12:10:00Z"), "{run}");
+        let next = next_cron_run(&spec, run, run, key, STAGGER).unwrap().unwrap();
+        assert_eq!((next - run).num_minutes(), 60);
+        // Fell behind: the next run is in the future, never replayed.
+        let now = run + ChronoDuration::hours(5);
+        let late = next_cron_run(&spec, run, now, key, STAGGER).unwrap().unwrap();
+        assert!(late > now && late <= now + ChronoDuration::hours(1));
+    }
+
+    #[tokio::test]
+    async fn due_when_values_follow_sql_truthiness() {
+        let fixture = control_fixture().await;
+        for (sql, expected) in [
+            ("SELECT 1", true),
+            ("SELECT 0", false),
+            ("SELECT NULL", false),
+            ("SELECT ''", false),
+            ("SELECT 'x'", true),
+            ("SELECT 0.5", true),
+            ("SELECT EXISTS (SELECT 1 WHERE 1 = 0)", false),
+            ("SELECT 1 WHERE 0", false),
+        ] {
+            let row = sqlx::query(sql).fetch_optional(&fixture.reader).await.unwrap();
+            assert_eq!(row.is_some_and(|row| due_value_is_truthy(&row)), expected, "{sql}");
+        }
     }
 
     #[test]

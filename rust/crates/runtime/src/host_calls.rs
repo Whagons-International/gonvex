@@ -1123,6 +1123,12 @@ fn require_read_head(head: &str) -> Result<(), String> {
     }
 }
 
+/// Admits one read-only statement (a cron's `dueWhen` pre-check).
+pub(crate) fn admit_read_statement(statement: &str) -> Result<(), String> {
+    let admitted = require_single_statement(statement)?;
+    require_read_head(&admitted.first_word)
+}
+
 #[cfg(test)]
 fn require_read_statement(statement: &str) -> Result<(), String> {
     let admitted = require_single_statement(statement)?;

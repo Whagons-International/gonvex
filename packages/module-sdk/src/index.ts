@@ -618,6 +618,16 @@ export type CronSpec = Readonly<{
   function: string;
   args?: JsonValue;
   scope: CronScope;
+  /**
+   * Optional "anything due?" pre-check: one read-only SQL statement the
+   * runtime evaluates on a tenant reader before each run, with `$1` bound to
+   * the current time (Unix ms). The function runs only when the first column
+   * of the first row is truthy (not NULL, 0 or ''); otherwise the run is
+   * recorded as skipped without entering the JavaScript engine. If the check
+   * fails (for example a missing table), the function runs. Requires a
+   * runtime that understands `dueWhen` (older runtimes reject the manifest).
+   */
+  dueWhen?: string;
 } & CronSchedule>;
 export type CronOptions = Omit<CronSpec, "scope">;
 
@@ -1241,11 +1251,16 @@ const validateCron = (options: CronSpec): CronSpec => {
   }
   const expression = options.expression?.trim();
   if (hasExpression && !expression) throw new Error(`cron ${JSON.stringify(name)} expression must be non-empty`);
+  const dueWhen = options.dueWhen?.trim();
+  if (options.dueWhen !== undefined && (!dueWhen || !/^(select|with|values)\b/i.test(dueWhen))) {
+    throw new Error(`cron ${JSON.stringify(name)} dueWhen must be one read-only SELECT statement`);
+  }
   return freeze({
     name,
     function: functionPath,
     scope: options.scope,
     ...(options.args === undefined ? {} : { args: options.args }),
+    ...(dueWhen ? { dueWhen } : {}),
     ...(hasInterval ? { intervalMs: options.intervalMs } : { expression: expression! }),
   } as CronSpec);
 };

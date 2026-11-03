@@ -245,6 +245,7 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<Value, ExecutionError> {
+        let _user_call = crate::scheduled_lane::UserCall::enter(crate::cron_profile::active());
         let _profile = gonvex_profiler::ScopeTimer::new(
             gonvex_profiler::Stage::FnTotal,
             gonvex_profiler::Label::Query,
@@ -415,6 +416,7 @@ impl Runtime {
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
         let scheduled = crate::cron_profile::active();
+        let _user_call = crate::scheduled_lane::UserCall::enter(scheduled);
         let profile_label = if scheduled {
             gonvex_profiler::Label::Cron
         } else {
@@ -600,6 +602,11 @@ impl Runtime {
                         }
                     }
                 }
+                let (members_changed, outbox_written) = finished
+                    .as_ref()
+                    .map_or((false, false), |outcome| {
+                        (outcome.members_changed, outcome.outbox_written)
+                    });
                 let finished = finished.map(|outcome| outcome.revision);
                 let profile_finish =
                     profile_timer.lap(gonvex_profiler::Stage::FnFinish, profile_label);
@@ -630,18 +637,28 @@ impl Runtime {
                         ExecutionError::HostCall(error)
                     }
                 })?;
-                self.inner.membership_projector.wake();
+                // Only commits that changed `members` give the membership
+                // projector work, and only commits that wrote the Action
+                // outbox give the drain work; the projector's periodic pass
+                // and the 30-second outbox sweep remain the safety nets. A
+                // no-op cron used to wake both: a full scan of every tenant's
+                // membership outbox and a writer claim on its own outbox.
+                if members_changed {
+                    self.inner.membership_projector.wake();
+                }
                 if let Some(tracker) = committed_revisions {
                     tracker.observe(committed_revision);
                 }
-                let runtime = self.clone();
-                let session = session.clone();
-                tokio::spawn(gonvex_profiler::instrument(
-                    gonvex_profiler::TaskKind::Outbox,
-                    async move {
-                        runtime.drain_action_outbox(session).await;
-                    },
-                ));
+                if outbox_written {
+                    let runtime = self.clone();
+                    let session = session.clone();
+                    tokio::spawn(gonvex_profiler::instrument(
+                        gonvex_profiler::TaskKind::Outbox,
+                        async move {
+                            runtime.drain_action_outbox(session).await;
+                        },
+                    ));
+                }
                 Ok(ReducerExecution {
                     value,
                     committed_revision,
@@ -719,6 +736,7 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ActionExecution, ExecutionError> {
+        let _user_call = crate::scheduled_lane::UserCall::enter(crate::cron_profile::active());
         let _profile = gonvex_profiler::ScopeTimer::new(
             gonvex_profiler::Stage::FnTotal,
             if crate::cron_profile::active() {

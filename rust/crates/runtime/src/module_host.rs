@@ -242,6 +242,9 @@ impl ModuleHost {
         mut handler: Option<&mut dyn HostCallHandler>,
     ) -> Result<ResponsePayload, ModuleHostError> {
         let label = match &operation {
+            RequestOp::Invoke(_) if crate::cron_profile::active() => {
+                Some(gonvex_profiler::Label::Cron)
+            }
             RequestOp::Invoke(request) => Some(gonvex_profiler::Label::classify(
                 &request.kind,
                 &request.function,

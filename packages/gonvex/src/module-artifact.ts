@@ -241,6 +241,16 @@ export async function buildModuleArtifact(options: ModuleArtifactOptions): Promi
   };
 }
 
+/** Optional `dueWhen` pre-check: one literal read-only SQL statement. */
+function cronDueWhen(name: string, value: JsonValue | undefined): string | undefined {
+  if (readMember(value, "dueWhen") === undefined) return undefined;
+  const dueWhen = stringMember(value, "dueWhen")?.trim();
+  if (!dueWhen || !/^(select|with|values)\b/i.test(dueWhen)) {
+    throw new Error(`cron ${JSON.stringify(name)} dueWhen must be a literal read-only SELECT statement`);
+  }
+  return dueWhen;
+}
+
 function parseCronDefinitions(source: string): ModuleCron[] {
   const crons: ModuleCron[] = [];
   cronDefinitionPattern.lastIndex = 0;
@@ -267,12 +277,14 @@ function parseCronDefinitions(source: string): ModuleCron[] {
       throw new Error(`cron ${JSON.stringify(name)} expression must be non-empty`);
     }
     const args = readMember(value, "args");
+    const dueWhen = cronDueWhen(name, value);
     crons.push({
       name,
       function: functionPath,
       scope: match[2] === "tenantCron" ? "tenant" : "project",
       ...(args === undefined ? {} : { args }),
       ...(intervalMs === undefined ? { expression } : { intervalMs }),
+      ...(dueWhen === undefined ? {} : { dueWhen }),
     });
   }
 
@@ -302,12 +314,14 @@ function parseCronDefinitions(source: string): ModuleCron[] {
       throw new Error(`cron ${JSON.stringify(name)} expression must be non-empty`);
     }
     const args = readMember(value, "args");
+    const dueWhen = cronDueWhen(name, value);
     crons.push({
       name,
       function: functionPath,
       scope: match[1] === "tenantCron" ? "tenant" : "project",
       ...(args === undefined ? {} : { args }),
       ...(intervalMs === undefined ? { expression } : { intervalMs }),
+      ...(dueWhen === undefined ? {} : { dueWhen }),
     });
   }
   return crons;

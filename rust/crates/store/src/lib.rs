@@ -1240,6 +1240,10 @@ pub struct TenantTransaction {
     /// Function class for the commit-stage histograms.
     profile_label: gonvex_profiler::Label,
     _writer_held: Option<gonvex_profiler::GaugeGuard>,
+    /// The writer's per-database stats (carries the change-feed flag).
+    writer_stats: Option<Arc<registry::WriterStats>>,
+    /// An Action-outbox row was written in this transaction.
+    outbox_written: bool,
 }
 
 /// What a commit published.
@@ -1249,6 +1253,11 @@ pub struct CommitOutcome {
     pub revision: Option<u64>,
     /// Change rows in that revision.
     pub changes: u64,
+    /// The revision changed `members` (the membership directory projection
+    /// has work).
+    pub members_changed: bool,
+    /// The transaction wrote an Action-outbox row (the outbox has work).
+    pub outbox_written: bool,
 }
 
 /// Opens a transaction on the writer (or, when read-only, on a reader whose
@@ -1260,12 +1269,12 @@ pub async fn begin_transaction(
 ) -> Result<TenantTransaction, DatabaseError> {
     use gonvex_profiler::{Label, Stage, Timer};
     let admission = pools.admit(database_url).await?;
-    let (transaction, writer_held) = if read_only {
+    let (transaction, writer_held, writer_stats) = if read_only {
         let pool = pools.reader(database_url).await?;
         let mut timer = Timer::start();
         let transaction = pool.begin().await?;
         timer.lap(Stage::ReaderBegin, Label::None);
-        (transaction, None)
+        (transaction, None, None)
     } else {
         let (pool, stats) = pools.writer_with_stats(database_url).await?;
         let waiting = stats.enter();
@@ -1277,6 +1286,7 @@ pub async fn begin_transaction(
         (
             transaction,
             Some(gonvex_profiler::gauge(gonvex_profiler::GaugeId::WriterHeld).guard()),
+            Some(stats),
         )
     };
     Ok(TenantTransaction {
@@ -1289,6 +1299,8 @@ pub async fn begin_transaction(
         failed: None,
         profile_label: Label::None,
         _writer_held: writer_held,
+        writer_stats,
+        outbox_written: false,
     })
 }
 
@@ -1392,6 +1404,7 @@ impl TenantTransaction {
         actor_email: &str,
         provenance: &Value,
     ) -> Result<String, DatabaseError> {
+        self.outbox_written = true;
         sqlx::query(
             r#"INSERT INTO _gonvex_action_outbox
                (id, action_path, args, actor_user_id, actor_email, provenance)
@@ -1445,9 +1458,10 @@ impl TenantTransaction {
         let notice = if self.read_only {
             None
         } else {
+            let feed_known = self.writer_stats.as_ref().map(|stats| &stats.has_feed);
             let finalized = async {
                 reference_integrity::flush(&mut self.transaction).await?;
-                feed::finalize(&mut self.transaction, &self.provenance).await
+                feed::finalize_known(&mut self.transaction, &self.provenance, feed_known).await
             }
             .await;
             match finalized {
@@ -1470,6 +1484,10 @@ impl TenantTransaction {
         let outcome = CommitOutcome {
             revision: notice.as_ref().map(|notice| notice.revision),
             changes: notice.as_ref().map_or(0, |notice| notice.changes),
+            members_changed: notice
+                .as_ref()
+                .is_some_and(|notice| notice.tables.iter().any(|table| table == "members")),
+            outbox_written: self.outbox_written,
         };
         if let (Some(notice), Some((pools, database_url))) = (notice, self.publisher.take()) {
             pools

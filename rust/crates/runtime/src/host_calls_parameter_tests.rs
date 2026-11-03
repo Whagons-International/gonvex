@@ -645,3 +645,50 @@ async fn sync_finalization_reports_the_committed_revision() {
     assert_eq!(transaction.commit_with_revision().await.unwrap(), None);
     assert_eq!(fixture.facts().await.revision, 1);
 }
+
+/// A cron that reads, or rewrites rows with the values they already have,
+/// publishes no revision (nothing for subscribers, no fan-out), while a real
+/// change right after it still does: a skipped revision can never hide one.
+#[tokio::test]
+async fn no_op_commits_publish_no_revision_and_report_their_outcome() {
+    let fixture = SyncFixture::new().await;
+    let mut calls = fixture.calls("cron_seed").await;
+    calls
+        .insert("tasks", serde_json::json!({"id": 1, "title": "A"}), None)
+        .await
+        .unwrap();
+    let outcome = calls.transaction.take().unwrap().commit_with_outcome().await.unwrap();
+    assert_eq!(outcome.revision, Some(1));
+    assert_eq!(outcome.changes, 1);
+    assert!(!outcome.members_changed && !outcome.outbox_written);
+
+    // Read only, then an update that changes no column: no revision.
+    for statement in [
+        "SELECT count(*) AS n FROM tasks",
+        "UPDATE tasks SET title = 'A' WHERE id = 1",
+    ] {
+        let mut calls = fixture.calls("cron_noop").await;
+        calls.query(statement, Value::Null).await.unwrap();
+        let outcome = calls.transaction.take().unwrap().commit_with_outcome().await.unwrap();
+        assert_eq!(outcome.revision, None, "{statement}");
+        assert_eq!(outcome.changes, 0, "{statement}");
+    }
+    assert_eq!(fixture.facts().await.revision, 1);
+
+    // The next real change gets the next revision and is fully captured.
+    let mut calls = fixture.calls("cron_real").await;
+    calls
+        .query("UPDATE tasks SET title = 'B' WHERE id = 1", Value::Null)
+        .await
+        .unwrap();
+    let transaction = calls.transaction.as_mut().unwrap();
+    transaction
+        .enqueue_action("jobs.notify", &Value::Null, "", "", &Value::Null)
+        .await
+        .unwrap();
+    let outcome = calls.transaction.take().unwrap().commit_with_outcome().await.unwrap();
+    assert_eq!(outcome.revision, Some(2));
+    assert_eq!(outcome.changes, 1);
+    assert!(outcome.outbox_written);
+    assert_eq!(fixture.facts().await.revision, 2);
+}

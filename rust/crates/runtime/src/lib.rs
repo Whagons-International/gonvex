@@ -3,6 +3,7 @@ pub mod change_feed;
 pub mod config;
 pub mod control;
 mod cron_profile;
+mod scheduled_lane;
 mod dashboard;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
