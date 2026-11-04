@@ -362,6 +362,70 @@ async fn batched_revalidation_revokes_only_invalid_sessions() {
     fixture.runtime.shutdown().await;
 }
 
+/// Disabling a tenant in the Control Plane ends its authenticated sessions
+/// at the next revalidation round (at most `auth_revalidation::INTERVAL`
+/// later), leaves other tenants' sessions alone, and refuses new sign-ins.
+#[tokio::test]
+async fn batched_revalidation_revokes_sessions_of_a_disabled_tenant() {
+    let fixture = fixture(PresenceConfig::default()).await;
+    let (_, kept_token) = fixture.member("tenant-a", "kept@example.test").await;
+    let (_, gone_token) = fixture.member("tenant-b", "gone@example.test").await;
+    let mut kept = fixture.connect(&kept_token, "tenant-a", false).await;
+    let mut gone = fixture.connect(&gone_token, "tenant-b", false).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while fixture.runtime.session_revalidation_counters().0 < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connections not registered"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pool = control(&fixture).await;
+    sqlx::query(
+        "UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-b'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    fixture.runtime.revalidate_sessions_now().await;
+    let error = auth_error(&mut gone, Duration::from_secs(5))
+        .await
+        .expect("a session on a disabled tenant is told so");
+    assert_eq!(error["id"], "session-expired", "{error}");
+    assert!(auth_error(&mut kept, Duration::from_millis(300))
+        .await
+        .is_none());
+    // The revoked connection holds no tenant session: a call is refused.
+    send(
+        &mut gone,
+        json!({"type":"reducer.call","id":"after-disable","path":"anything","args":{}}),
+    )
+    .await;
+    let refused = next_json(&mut gone).await;
+    assert_ne!(refused["type"], "reducer.result", "{refused}");
+    // Signing in again to the disabled tenant is refused.
+    let (mut again, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", fixture.address))
+        .await
+        .unwrap();
+    assert_eq!(next_json(&mut again).await["type"], "session.ready");
+    send(
+        &mut again,
+        json!({"type":"auth","id":"auth","token":gone_token,"project":"project","tenant":"tenant-b"}),
+    )
+    .await;
+    loop {
+        let frame = next_json(&mut again).await;
+        match frame["type"].as_str() {
+            Some("auth.error") => break,
+            Some("auth.result") => panic!("signed in to a disabled tenant: {frame}"),
+            _ => {}
+        }
+    }
+    drop(kept);
+    fixture.server.abort();
+    fixture.runtime.shutdown().await;
+}
+
 #[tokio::test]
 async fn batched_revalidation_revokes_a_member_that_left() {
     let fixture = fixture(PresenceConfig::default()).await;
