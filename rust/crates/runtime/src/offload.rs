@@ -376,12 +376,13 @@ impl Runtime {
         subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
         event: FeedEvent,
         prewarm: Option<(bool, Option<u8>)>,
+        record: bool,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let pool = offload();
         let tables = feed_tables(&event);
         if pool.is_inline() || subscriptions.is_empty() || !pool.offload_apply(&tables) {
             let started = Instant::now();
-            let result = self.apply_feed_event_with(session, subscriptions, event, prewarm.is_some()).await;
+            let result = self.apply_feed_event_with(session, subscriptions, event, record).await;
             if !pool.is_inline() {
                 pool.record_apply(&tables, started.elapsed());
             }
@@ -395,7 +396,7 @@ impl Runtime {
                 gonvex_profiler::TaskKind::Feed,
                 async move {
                     let started = Instant::now();
-                    let result = runtime.apply_feed_event_with(&session, &mut owned, event, prewarm.is_some()).await;
+                    let result = runtime.apply_feed_event_with(&session, &mut owned, event, record).await;
                     // Delivery v3: encode and compress the shared items here,
                     // not at push time on the network thread.
                     if let (Ok(messages), Some((native, window))) = (&result, prewarm) {

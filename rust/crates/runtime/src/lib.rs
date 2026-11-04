@@ -1878,14 +1878,14 @@ async fn websocket(
                             // Delivery v4: a connection whose shape already has a
                             // shared outcome for this event only appends it.
                             let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
-                                runtime.fan_out_hit(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
-                            } else { None };
+                                runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
+                            } else { replica::fanout::FanOut::Miss { record: false } };
                             let applied = match shared {
-                                Some(Ok(())) => Ok(Vec::new()),
-                                Some(Err(_)) => return,
-                                None => {
+                                replica::fanout::FanOut::Served(Ok(())) => Ok(Vec::new()),
+                                replica::fanout::FanOut::Served(Err(_)) => return,
+                                replica::fanout::FanOut::Miss { record } => {
                                     let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
-                                    runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm).await
+                                    runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await
                                 }
                             };
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);

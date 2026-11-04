@@ -848,17 +848,18 @@ impl ReplicaBatcher {
 /// decided per subscription by its own class or its own decision.
 fn class_id(replicas: &std::collections::BTreeMap<String, ReplicaSubscription>) -> u64 {
     use crate::visibility_class::MemberHandle;
-    let mut ids: Vec<u64> = replicas
-        .values()
-        .map(|subscription| match subscription.mask.peek() {
-            Some(MemberHandle::Compiled(member)) => member.class().stable_id(),
-            _ => {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                subscription.resolved.fingerprint.hash(&mut hasher);
-                hasher.finish()
-            }
-        })
-        .collect();
+    let id = |subscription: &ReplicaSubscription| match subscription.mask.peek() {
+        Some(MemberHandle::Compiled(member)) => member.class().stable_id(),
+        _ => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            subscription.resolved.fingerprint.hash(&mut hasher);
+            hasher.finish()
+        }
+    };
+    if replicas.len() == 1 {
+        return replicas.values().next().map_or(0, id);
+    }
+    let mut ids: Vec<u64> = replicas.values().map(id).collect();
     ids.sort_unstable();
     ids.dedup();
     if let [only] = ids.as_slice() {

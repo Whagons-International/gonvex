@@ -331,6 +331,9 @@ async fn run() {
         let mut busy = Duration::ZERO;
         let mut feed_busy = Duration::ZERO;
         let mut feed_allocs = 0u64;
+        // (ns, connections) served by the shared fan-out / by the full path.
+        let mut shared = (0u128, 0u64);
+        let mut full = (0u128, 0u64);
         let mut frames = 0u64;
         let mut receivers = 0u64;
         let before = AllocSnapshot::now();
@@ -357,9 +360,15 @@ async fn run() {
             let feed_started = Instant::now();
             let feed_before = AllocSnapshot::now();
             for (connection, conn) in connections.iter_mut().zip(v.iter_mut()) {
+                let served = gonvex_runtime::replica::fanout_stats().0;
+                let one = Instant::now();
                 if feed_one(&fixture, &hub, &tenant_id, false, connection, conn, event).await {
                     receivers += 1;
                 }
+                let elapsed = one.elapsed().as_nanos();
+                let path = if gonvex_runtime::replica::fanout_stats().0 > served { &mut shared } else { &mut full };
+                path.0 += elapsed;
+                path.1 += 1;
             }
             feed_allocs += AllocSnapshot::now().since(feed_before).allocations as u64;
             feed_busy += feed_started.elapsed();
@@ -425,6 +434,15 @@ async fn run() {
             "flushMsPerWrite".into(),
             json!((busy - feed_busy).as_secs_f64() * 1e3 / writes as f64),
         );
+        extra.insert(
+            "sharedPathNsPerConnection".into(),
+            json!(shared.0 as f64 / shared.1.max(1) as f64),
+        );
+        extra.insert(
+            "fullPathNsPerConnection".into(),
+            json!(full.0 as f64 / full.1.max(1) as f64),
+        );
+        extra.insert("fullPathConnectionsPerWrite".into(), json!(full.1 as f64 / writes as f64));
         let (hits, recorded, data_hits) = gonvex_runtime::replica::fanout_stats();
         extra.insert(
             "fanout".into(),

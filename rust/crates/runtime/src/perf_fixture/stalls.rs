@@ -249,9 +249,63 @@ pub async fn connection_loop(
     mut events: tokio::sync::broadcast::Receiver<(Instant, FeedEvent)>,
     counters: Arc<FanoutCounters>,
 ) -> MemberConnection {
+    // `STALL_BATCH=1`: a `replicaBatchFrames` connection, as the socket
+    // loop runs it in delivery v4: the shared fan-out outcome inline when
+    // its shape has one, else the offloaded full path (recording it).
+    let batched = std::env::var("STALL_BATCH").is_ok_and(|value| value.trim() == "1");
+    let mut batcher = crate::delivery::ReplicaBatcher::default();
+    batcher.set_enabled(batched);
+    let mut batch = gonvex_websocket::OutboundBatch::default();
     while let Ok((committed, event)) = events.recv().await {
+        if batched {
+            let tenant_id = connection.session.route.tenant_id.clone();
+            let applied = match runtime.fan_out(
+                &connection.session,
+                &mut connection.subscriptions,
+                &event,
+                &mut batcher,
+                &mut batch,
+                false,
+            ) {
+                crate::replica::fanout::FanOut::Served(result) => result.map(|_| Vec::new()).map_err(|_| ()),
+                crate::replica::fanout::FanOut::Miss { record } => runtime
+                    .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event.clone(), Some((false, None)), record)
+                    .await
+                    .map_err(|_| ()),
+            };
+            let Ok(messages) = applied else {
+                counters.errors.fetch_add(1, Relaxed);
+                continue;
+            };
+            let mut bytes = 0;
+            for message in messages {
+                match batcher.push(&mut batch, &runtime.inner.delivery, &tenant_id, false, &connection.subscriptions, message) {
+                    Ok(None) => {}
+                    Ok(Some(message)) => bytes += serde_json::to_string(&message).map_or(0, |text| text.len()),
+                    Err(_) => {
+                        counters.errors.fetch_add(1, Relaxed);
+                    }
+                }
+            }
+            if let crate::change_feed::FeedEvent::Transaction { revision, .. } = &event {
+                batcher.watermark(&mut batch, &tenant_id, &connection.subscriptions, *revision);
+            }
+            let items = batcher.has_items();
+            if let Some(frame) = batcher.take_frame(&mut batch, None) {
+                bytes += frame.bytes.len();
+            }
+            counters.deliveries.fetch_add(1, Relaxed);
+            counters.messages.fetch_add(usize::from(items), Relaxed);
+            counters.bytes.fetch_add(bytes, Relaxed);
+            counters
+                .latency_us
+                .lock()
+                .unwrap()
+                .push(committed.elapsed().as_micros() as u64);
+            continue;
+        }
         match runtime
-            .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None)
+            .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None, false)
             .await
         {
             Ok(messages) => {
@@ -283,7 +337,7 @@ pub async fn apply_offloaded(
     event: FeedEvent,
 ) -> Result<Vec<ServerMessage>, crate::replica::ReplicaError> {
     runtime
-        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None)
+        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None, false)
         .await
 }
 

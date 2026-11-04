@@ -6,14 +6,19 @@
 //! object keys sorted, integers as written, other numbers in JavaScript's
 //! shortest form, strings escaped as serde_json does plus U+2028/U+2029). Most
 //! rows SQLite writes are already canonical except for the order of their
-//! top-level columns: no REAL values, no nested objects with unsorted keys, no
-//! unusual escapes. [`canonical`] verifies that in one pass over the bytes and
-//! returns them (top-level members re-ordered by key when needed, which keeps
-//! the length). Anything it cannot prove canonical (a fraction or exponent, a
-//! long integer, `-0`, an escape serde would not write, U+2028/U+2029,
-//! unsorted or duplicate nested keys, whitespace, deep nesting) falls back to
-//! parsing the row and writing `stable_json`, so the hash is always
-//! byte-identical to the `Value` path.
+//! top-level columns and the spelling of non-integer numbers: no nested
+//! objects with unsorted keys, no unusual escapes. [`check`] verifies that in
+//! one pass over the bytes, recording each number token whose canonical form
+//! differs (a REAL written by SQLite with 17 significant digits, `1.0`,
+//! `1E5`, `-0`, an integer beyond 64 bits): it is parsed as serde_json does
+//! (correctly rounded f64) and written as `stable_json` writes it (JavaScript
+//! shortest form, `ryu_js`). [`canonical`] then returns the bytes, borrowed
+//! when nothing differs, else re-assembled (top-level members in key order,
+//! numbers replaced). Anything else it cannot prove canonical (an escape
+//! serde would not write, U+2028/U+2029, unsorted or duplicate nested keys,
+//! whitespace, deep nesting, a non-finite number) falls back to parsing the
+//! row and writing `stable_json`, so the hash is always byte-identical to the
+//! `Value` path.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -22,9 +27,6 @@ use serde_json::Value;
 
 /// Nesting deeper than this is not checked (falls back).
 const MAX_DEPTH: usize = 64;
-/// Integers with at most this many digits are exact in i64 / u64 and written
-/// back unchanged by the canonical writer.
-const MAX_INTEGER_DIGITS: usize = 18;
 
 /// One top-level member of a row object: key text (no escapes) and the byte
 /// range of its value.
@@ -39,11 +41,21 @@ pub(crate) struct Checked {
     pub members: Vec<Member>,
     /// Top-level keys already in canonical (byte) order.
     pub sorted: bool,
+    /// Number tokens whose canonical spelling differs, in text order.
+    pub numbers: Vec<(Range<usize>, String)>,
+}
+
+impl Checked {
+    /// Whether the row text already is its canonical JSON.
+    pub fn canonical(&self) -> bool {
+        self.sorted && self.numbers.is_empty()
+    }
 }
 
 struct Checker<'a> {
     bytes: &'a [u8],
     at: usize,
+    numbers: Vec<(Range<usize>, String)>,
 }
 
 impl Checker<'_> {
@@ -113,6 +125,9 @@ impl Checker<'_> {
         }
     }
 
+    /// A number token. Recorded for replacement when serde_json would not
+    /// parse it to an integer written back unchanged (`stable_json` writes
+    /// i64 / u64 as digits and every other number as `ryu_js` of its f64).
     fn number(&mut self) -> Option<()> {
         let start = self.at;
         let negative = self.peek() == Some(b'-');
@@ -123,19 +138,54 @@ impl Checker<'_> {
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.at += 1;
         }
-        let digits = &self.bytes[digits_start..self.at];
-        if digits.is_empty()
-            || digits.len() > MAX_INTEGER_DIGITS
-            || (digits.len() > 1 && digits[0] == b'0')
-            || (negative && digits == b"0")
-        {
+        let digits = self.at - digits_start;
+        if digits == 0 || (digits > 1 && self.bytes[digits_start] == b'0') {
             return None;
         }
-        // A fraction or exponent is a float: written in its shortest form.
-        if matches!(self.peek(), Some(b'.' | b'e' | b'E')) {
-            return None;
+        let mut float = false;
+        if self.peek() == Some(b'.') {
+            float = true;
+            self.at += 1;
+            let fraction = self.at;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.at += 1;
+            }
+            if self.at == fraction {
+                return None;
+            }
         }
-        debug_assert!(self.at > start);
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            float = true;
+            self.at += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.at += 1;
+            }
+            let exponent = self.at;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.at += 1;
+            }
+            if self.at == exponent {
+                return None;
+            }
+        }
+        let token = std::str::from_utf8(&self.bytes[start..self.at]).ok()?;
+        if !float {
+            // serde_json: u64 when positive and in range, i64 when negative
+            // and in range; `-0` and anything out of range become an f64.
+            let integer = if negative {
+                token.parse::<i64>().ok().filter(|value| *value != 0).is_some()
+            } else {
+                token.parse::<u64>().is_ok()
+            };
+            if integer {
+                return Some(());
+            }
+        }
+        let value = token.parse::<f64>().ok().filter(|value| value.is_finite())?;
+        let canonical = ryu_js::Buffer::new().format(value).to_owned();
+        if canonical != token {
+            self.numbers.push((start..self.at, canonical));
+        }
         Some(())
     }
 
@@ -253,7 +303,11 @@ impl Checker<'_> {
                 return None;
             }
         }
-        Some(Checked { members, sorted })
+        Some(Checked {
+            members,
+            sorted,
+            numbers: self.numbers,
+        })
     }
 }
 
@@ -263,6 +317,7 @@ pub(crate) fn check(row: &str) -> Option<Checked> {
     Checker {
         bytes: row.as_bytes(),
         at: 0,
+        numbers: Vec::new(),
     }
     .row()
 }
@@ -278,14 +333,16 @@ pub(crate) fn canonical<'a>(
     scratch: &'a mut String,
 ) -> Result<Cow<'a, str>, serde_json::Error> {
     match checked {
-        Some(checked) if checked.sorted => Ok(Cow::Borrowed(row)),
+        Some(checked) if checked.canonical() => Ok(Cow::Borrowed(row)),
         Some(checked) => {
             let mut members: Vec<&Member> = checked.members.iter().collect();
-            members.sort_unstable_by(|left, right| {
-                row.as_bytes()[left.key.clone()].cmp(&row.as_bytes()[right.key.clone()])
-            });
+            if !checked.sorted {
+                members.sort_unstable_by(|left, right| {
+                    row.as_bytes()[left.key.clone()].cmp(&row.as_bytes()[right.key.clone()])
+                });
+            }
             scratch.clear();
-            scratch.reserve(row.len());
+            scratch.reserve(row.len() + 16);
             scratch.push('{');
             for (index, member) in members.into_iter().enumerate() {
                 if index > 0 {
@@ -294,7 +351,20 @@ pub(crate) fn canonical<'a>(
                 scratch.push('"');
                 scratch.push_str(&row[member.key.clone()]);
                 scratch.push_str("\":");
-                scratch.push_str(&row[member.value.clone()]);
+                // The value, with its replaced number tokens.
+                let mut at = member.value.start;
+                let first = checked
+                    .numbers
+                    .partition_point(|(range, _)| range.start < member.value.start);
+                for (range, canonical) in checked.numbers[first..]
+                    .iter()
+                    .take_while(|(range, _)| range.end <= member.value.end)
+                {
+                    scratch.push_str(&row[at..range.start]);
+                    scratch.push_str(canonical);
+                    at = range.end;
+                }
+                scratch.push_str(&row[at..member.value.end]);
             }
             scratch.push('}');
             Ok(Cow::Borrowed(scratch.as_str()))
@@ -361,17 +431,21 @@ mod tests {
         let cases = [
             (r#"{"a":1,"b":"x"}"#, true),
             (r#"{"b":"x","a":1}"#, true),
-            (r#"{"a":0.10000000000000001}"#, false),
-            (r#"{"a":0.1}"#, false),
-            (r#"{"a":1.0}"#, false),
-            (r#"{"a":1e21}"#, false),
-            (r#"{"a":1E5}"#, false),
-            (r#"{"a":-0}"#, false),
+            (r#"{"a":0.10000000000000001}"#, true),
+            (r#"{"a":0.1}"#, true),
+            (r#"{"b":[1.5,{"c":2.50}],"a":1e-7}"#, true),
+            (r#"{"a":1e-400,"b":5e-324}"#, true),
+            (r#"{"a":1.0}"#, true),
+            (r#"{"a":1e21}"#, true),
+            (r#"{"a":1E5}"#, true),
+            (r#"{"a":-0}"#, true),
+            (r#"{"a":-0.0,"b":-9223372036854775808,"c":-9223372036854775809}"#, true),
             (r#"{"a":-5,"b":0}"#, true),
             (r#"{"a":123456789012345678}"#, true),
-            (r#"{"a":1234567890123456789}"#, false),
-            (r#"{"a":18446744073709551615}"#, false),
-            (r#"{"a":99999999999999999999999}"#, false),
+            (r#"{"a":1234567890123456789}"#, true),
+            (r#"{"a":18446744073709551615}"#, true),
+            (r#"{"a":18446744073709551616}"#, true),
+            (r#"{"a":99999999999999999999999}"#, true),
             (r#"{"a":"\u001f\n\t\"\\"}"#, true),
             (r#"{"a":"\u001F"}"#, false),
             (r#"{"a":"\u000a"}"#, false),
@@ -476,7 +550,8 @@ mod tests {
             assert_eq!(raw, value, "hash of {row}");
             fast += usize::from(checked);
         }
-        // Rows without REAL values or nested objects take the fast path.
+        // REAL values take the fast path too (numbers are replaced in place).
+        assert!(fast > 0);
         let integer_only = format!(
             "SELECT {} FROM t AS r",
             json_object_expr("r", &[("_id".to_owned(), JsonKind::Text), ("n".to_owned(), JsonKind::Integer), ("s".to_owned(), JsonKind::Text), ("Zed".to_owned(), JsonKind::Text), ("b".to_owned(), JsonKind::Boolean)])

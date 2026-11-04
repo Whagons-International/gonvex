@@ -322,6 +322,14 @@ pub(crate) fn shape(
 ) -> Option<Shape> {
     let layout = share.layout.get_or_init(|| layout(share.changes()));
     let changes = share.changes();
+    // Cheap static checks first: a connection with a collection the fan-out
+    // never serves (inherited plans, legacy plans) is rejected before any
+    // per-row work.
+    for subscription in subscriptions.values_mut() {
+        if revision > subscription.cursor.revision && !keys(subscription).shareable {
+            return None;
+        }
+    }
     let mut shape: Shape = Vec::with_capacity(subscriptions.len());
     let mut memo = None;
     for subscription in subscriptions.values_mut() {
@@ -523,6 +531,24 @@ impl Runtime {
     /// caller runs the full path, which may record the outcome). On
     /// `Some(Ok)` the connection's frames for the event are in `batch`
     /// (except its watermark, which the caller adds as before).
+    /// [`Self::fan_out_hit`], also saying on a miss whether the full path
+    /// should record an outcome (the connection has a shape).
+    pub(crate) fn fan_out(
+        &self,
+        session: &TenantSession,
+        subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+        event: &FeedEvent,
+        batcher: &mut ReplicaBatcher,
+        batch: &mut OutboundBatch,
+        native: bool,
+    ) -> FanOut {
+        let mut eligible = false;
+        match self.fan_out_inner(session, subscriptions, event, batcher, batch, native, &mut eligible) {
+            Some(result) => FanOut::Served(result),
+            None => FanOut::Miss { record: eligible },
+        }
+    }
+
     pub fn fan_out_hit(
         &self,
         session: &TenantSession,
@@ -531,6 +557,21 @@ impl Runtime {
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
         native: bool,
+    ) -> Option<Result<(), DeliveryError>> {
+        let mut eligible = false;
+        self.fan_out_inner(session, subscriptions, event, batcher, batch, native, &mut eligible)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fan_out_inner(
+        &self,
+        session: &TenantSession,
+        subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+        event: &FeedEvent,
+        batcher: &mut ReplicaBatcher,
+        batch: &mut OutboundBatch,
+        native: bool,
+        eligible: &mut bool,
     ) -> Option<Result<(), DeliveryError>> {
         let FeedEvent::Transaction {
             database_epoch,
@@ -546,6 +587,7 @@ impl Runtime {
         let tenant = self.inner.delivery.tenant(&session.route.tenant_id);
         let share = tenant.events.share(database_epoch, *revision, changes)?;
         let shape = shape(subscriptions, &share, database_epoch, *revision)?;
+        *eligible = true;
         let outcome = if shape.iter().any(|entry| entry.state == State::Apply) {
             Some(share.outcomes.lock().unwrap().get(&shape).cloned()?)
         } else {
@@ -646,6 +688,14 @@ impl Runtime {
     }
 }
 
+/// Result of [`Runtime::fan_out`].
+pub(crate) enum FanOut {
+    /// The connection's frames are in its batch.
+    Served(Result<(), DeliveryError>),
+    /// Not served; `record`: the full path should record the outcome.
+    Miss { record: bool },
+}
+
 /// Records `outcome` for `shape` (first writer wins).
 pub(crate) fn record(share: &EventShare, shape: Shape, outcome: Outcome) {
     let mut outcomes = share.outcomes.lock().unwrap();
@@ -681,11 +731,10 @@ impl Runtime {
         native: bool,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let delivery = |_| ReplicaError::InvalidIdentifier("replica batch delivery failed".to_owned());
-        match self.fan_out_hit(session, subscriptions, &event, batcher, batch, native) {
-            Some(result) => return result.map(|_| Vec::new()).map_err(delivery),
-            None => {}
-        }
-        let record = batcher.enabled();
+        let record = match self.fan_out(session, subscriptions, &event, batcher, batch, native) {
+            FanOut::Served(result) => return result.map(|_| Vec::new()).map_err(delivery),
+            FanOut::Miss { record } => record,
+        };
         let messages = self
             .apply_feed_event_with(session, subscriptions, event, record)
             .await?;

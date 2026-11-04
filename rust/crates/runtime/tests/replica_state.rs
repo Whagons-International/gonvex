@@ -18,7 +18,7 @@ use gonvex_runtime::perf_fixture::{
 use gonvex_runtime::replica::ReplicaSubscription;
 use gonvex_store::TenantSession;
 use replica_client::{ClientModel, DigestKind};
-use serde_json::{json, Value};
+use serde_json::json;
 
 const TASKS: &str = "tasks.recentWorkspaceTasks";
 

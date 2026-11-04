@@ -2583,10 +2583,14 @@ fn quote(value: &str) -> Result<String, ReplicaError> {
 }
 
 fn hex_digest(value: &[u8]) -> String {
-    Sha256::digest(value)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(value);
+    let mut out = String::with_capacity(64);
+    for byte in digest.iter() {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 15)] as char);
+    }
+    out
 }
 
 #[cfg(test)]
