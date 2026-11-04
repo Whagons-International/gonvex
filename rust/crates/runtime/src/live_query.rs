@@ -842,6 +842,7 @@ impl Runtime {
                 &module.visibility,
                 &acl,
                 &self.inner.visibility_metrics,
+                None,
             )
             .await?
         } else {
@@ -864,6 +865,7 @@ impl Runtime {
                         &module.visibility,
                         &acl,
                         &self.inner.visibility_metrics,
+                        None,
                     )
                     .await?
                 } else {

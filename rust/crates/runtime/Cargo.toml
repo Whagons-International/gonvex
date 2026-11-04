@@ -143,7 +143,16 @@ required-features = ["perf-fixture"]
 name = "snapshot_cache_oracle"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "principal_cache_oracle"
+required-features = ["perf-fixture"]
+
 [[bench]]
 name = "snapshot_cache"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "open_visibility"
 harness = false
 required-features = ["perf-fixture"]

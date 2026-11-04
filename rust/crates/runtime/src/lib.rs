@@ -64,6 +64,7 @@ mod visibility_corpus;
 pub mod visibility_index;
 mod visibility_mask;
 pub mod visibility_metrics;
+pub mod principal_cache;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -121,6 +122,7 @@ struct RuntimeInner {
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
     snapshot_cache: snapshot_cache::SnapshotCache,
+    principal_cache: principal_cache::PrincipalCache,
     delivery: delivery::DeliveryHub,
     permissions: permission_bits::PermissionRegistry,
     /// Process-wide root-Action admission (`action_gate.rs`).
@@ -294,6 +296,7 @@ impl Runtime {
                 visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 parent_acl: visibility::ParentAclRegistry::default(),
                 snapshot_cache: snapshot_cache::SnapshotCache::default(),
+                principal_cache: principal_cache::PrincipalCache::default(),
                 delivery: delivery::DeliveryHub::default(),
                 permissions: permission_bits::PermissionRegistry::default(),
                 action_gate: action_gate::ActionGate::from_env(),

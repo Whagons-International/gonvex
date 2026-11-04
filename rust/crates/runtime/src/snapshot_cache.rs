@@ -67,6 +67,13 @@ pub struct CacheConfig {
     pub sparse_min_rows: usize,
     pub sparse_ratio: u64,
     pub sparse_hold: Duration,
+    /// Keys with equality-filter arguments (one task's detail collections:
+    /// a few rows through an index) build their entry inside the open's own
+    /// read transaction, at its clock, instead of in a separate admitted
+    /// transaction before it. At 1k users these entries were hit 0.1-0.3
+    /// times per build, so the separate build doubled the reads and snapshot
+    /// permits of most detail opens. false restores the separate build.
+    pub keyed_inline: bool,
 }
 
 impl CacheConfig {
@@ -92,6 +99,9 @@ impl CacheConfig {
             sparse_hold: Duration::from_secs(
                 number("GONVEX_SNAPSHOT_CACHE_SPARSE_HOLD_SECS").unwrap_or(600),
             ),
+            keyed_inline: std::env::var("GONVEX_SNAPSHOT_CACHE_KEYED_INLINE")
+                .map(|value| !matches!(value.trim(), "0" | "off" | "false"))
+                .unwrap_or(true),
         }
     }
 }
@@ -438,6 +448,8 @@ pub struct CacheStats {
     pub evictions: u64,
     pub entries: u64,
     pub bytes: u64,
+    /// Keyed entries built inside the opening read (`keyed_inline`).
+    pub keyed_inline_builds: u64,
 }
 
 #[derive(Default)]
@@ -454,12 +466,20 @@ pub struct SnapshotCache {
     /// Entries dropped as sparse, and opens that skipped a sparse key.
     sparse_drops: AtomicU64,
     sparse_skips: AtomicU64,
+    keyed_inline_builds: AtomicU64,
     disabled: std::sync::atomic::AtomicBool,
 }
 
 pub fn config() -> &'static CacheConfig {
     static CONFIG: OnceLock<CacheConfig> = OnceLock::new();
     CONFIG.get_or_init(CacheConfig::from_env)
+}
+
+/// [`SnapshotCache::lookup`].
+pub(crate) enum Lookup {
+    Hit(Arc<CacheEntry>),
+    Missing,
+    Skip,
 }
 
 /// What an open needs to look up an entry.
@@ -498,6 +518,7 @@ impl SnapshotCache {
             evictions: self.evictions.load(Relaxed),
             entries: count,
             bytes,
+            keyed_inline_builds: self.keyed_inline_builds.load(Relaxed),
         }
     }
 
@@ -682,6 +703,52 @@ impl SnapshotCache {
         let entry = Arc::new(entry);
         self.install(owned, entry.clone());
         Ok(Some(entry))
+    }
+
+    /// Keyed entries (`keyed_inline`): the current entry of `key` (a hit),
+    /// or `Missing` when the open should build one in its own read, or
+    /// `Skip` for a sparse key (read SQL).
+    pub(crate) fn lookup(&self, key: &CacheKey<'_>) -> Lookup {
+        let owned = key.owned();
+        if self
+            .slots
+            .lock()
+            .unwrap()
+            .get(&owned)
+            .is_some_and(Slot::sparse)
+        {
+            self.sparse_skips.fetch_add(1, Relaxed);
+            return Lookup::Skip;
+        }
+        let max_age = config().max_age;
+        match self
+            .current(&owned)
+            .filter(|entry| entry.built.elapsed() <= max_age)
+        {
+            Some(entry) => {
+                self.count_hit(&owned);
+                Lookup::Hit(entry)
+            }
+            None => Lookup::Missing,
+        }
+    }
+
+    /// Installs an entry an open built in its own read (`keyed_inline`).
+    pub(crate) fn insert_built(&self, key: &CacheKey<'_>, entry: CacheEntry) -> Arc<CacheEntry> {
+        let owned = key.owned();
+        self.builds.fetch_add(1, Relaxed);
+        self.keyed_inline_builds.fetch_add(1, Relaxed);
+        {
+            let mut slots = self.slots.lock().unwrap();
+            let slot = slots.entry(owned.clone()).or_insert_with(|| {
+                self.keys.fetch_add(1, Relaxed);
+                Slot::empty()
+            });
+            slot.builds += 1;
+        }
+        let entry = Arc::new(entry);
+        self.install(owned, entry.clone());
+        entry
     }
 
     /// Replaces `stale` by `rolled` (a roll-forward) unless another open

@@ -54,7 +54,7 @@ pub use fake_host::{FakeModuleHost, JsTimeMode};
 
 /// Bump whenever the schema, module JSON or data generator changes: it keys
 /// the cached SQLite template.
-pub const FIXTURE_VERSION: u32 = 1;
+pub const FIXTURE_VERSION: u32 = 2;
 /// Project id of the fixture module.
 pub const PROJECT_ID: &str = "whagons";
 const SCHEMA_SQL: &str = include_str!("whagons_schema.sql");
@@ -74,6 +74,35 @@ pub const WHAGONS_SUBSCRIPTIONS: [&str; 10] = [
     "taskResources.taskTags",
     "workspacePreferences.workspacePreferences",
     "tasks.recentWorkspaceTasks",
+];
+
+/// A cold login: [`WHAGONS_SUBSCRIPTIONS`] plus the notifications list (the
+/// 11 `watchReplica` collections of a Whagons user).
+pub const WHAGONS_COLD_LOGIN: [&str; 11] = [
+    "presence.list",
+    "workspaces.list",
+    "statuses.statuses",
+    "tags.tags",
+    "members.listMembers",
+    "members.listMemberTeams",
+    "taskResources.taskUsers",
+    "taskResources.taskTags",
+    "workspacePreferences.workspacePreferences",
+    "tasks.recentWorkspaceTasks",
+    "notifications.listNotifications",
+];
+
+/// The 8 collections of a task detail window (`bench/whagons/run.ts`) and
+/// the argument naming the task.
+pub const WHAGONS_DETAIL_WINDOW: [(&str, &str); 8] = [
+    ("tasks.get", "id"),
+    ("taskResources.listTaskNotes", "taskId"),
+    ("taskResources.listTaskLogs", "taskId"),
+    ("taskResources.listTaskViewsByTaskId", "taskId"),
+    ("approvals.listTaskApprovals", "taskId"),
+    ("taskFindings.listForTask", "taskId"),
+    ("taskResources.listTaskUsers", "taskId"),
+    ("customFields.listTaskValues", "taskId"),
 ];
 
 pub type FixtureResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -404,6 +433,22 @@ impl Fixture {
     ) -> FixtureResult<ReplicaOpenResult> {
         let request: ReplicaOpenRequest =
             serde_json::from_value(json!({"id": id, "path": path, "args": {}}))?;
+        Ok(self
+            .runtime
+            .open_replica_negotiated(session, request, false)
+            .await?)
+    }
+
+    /// [`Fixture::open_replica`] with arguments.
+    pub async fn open_replica_args(
+        &self,
+        session: &TenantSession,
+        id: &str,
+        path: &str,
+        args: Value,
+    ) -> FixtureResult<ReplicaOpenResult> {
+        let request: ReplicaOpenRequest =
+            serde_json::from_value(json!({"id": id, "path": path, "args": args}))?;
         Ok(self
             .runtime
             .open_replica_negotiated(session, request, false)

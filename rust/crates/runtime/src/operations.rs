@@ -1650,8 +1650,9 @@ fn memory_json(runtime: &Runtime) -> Value {
         "snapshotCache": {"entries": cache.entries, "bytes": cache.bytes, "hits": cache.hits,
             "builds": cache.builds, "rollForwards": cache.roll_forwards, "fallbacks": cache.fallbacks,
             "evictions": cache.evictions, "keysSeen": runtime.snapshot_cache_keys_seen(),
-            "sparseDrops": sparse.0, "sparseSkips": sparse.1,
+            "sparseDrops": sparse.0, "sparseSkips": sparse.1, "keyedInlineBuilds": cache.keyed_inline_builds,
             "byPath": by_path, "top": top},
+        "principalCache": runtime.principal_cache_stats(),
         "v8": {"isolates": isolates, "totalHeapBytes": v8[0], "usedHeapBytes": v8[1],
             "physicalBytes": v8[2], "externalBytes": v8[3], "mallocedBytes": v8[4]},
     })

@@ -70,6 +70,22 @@ CREATE TABLE IF NOT EXISTS "memberTeams" (
 CREATE UNIQUE INDEX IF NOT EXISTS "memberTeams_active_pair_unique" ON "memberTeams" ("memberId", "teamId") WHERE ("deletedAt" IS NULL);
 CREATE INDEX IF NOT EXISTS "memberTeams_by_memberId" ON "memberTeams" ("memberId");
 CREATE INDEX IF NOT EXISTS "memberTeams_by_teamId" ON "memberTeams" ("teamId");
+CREATE TABLE IF NOT EXISTS "notifications" (
+  "_creationTime" BIGINT,
+  "_id" TEXT NOT NULL,
+  "data" JSON,
+  "deletedAt" BIGINT,
+  "isRead" BOOLEAN,
+  "message" TEXT,
+  "readAt" BIGINT,
+  "title" TEXT,
+  "type" TEXT,
+  "updatedAt" BIGINT,
+  "userId" TEXT,
+  PRIMARY KEY ("_id")
+);
+CREATE INDEX IF NOT EXISTS "notifications_by_userId" ON notifications ("userId");
+CREATE INDEX IF NOT EXISTS notifications_by_user_unread ON notifications ("userId", "readAt");
 CREATE TABLE IF NOT EXISTS "personalWorkspaceMembers" (
   "_id" TEXT NOT NULL,
   "_creationTime" BIGINT,
@@ -171,6 +187,77 @@ CREATE TABLE IF NOT EXISTS "taskApprovalInstances" (
 );
 CREATE INDEX IF NOT EXISTS "taskApprovalInstances_by_taskId" ON "taskApprovalInstances" ("taskId");
 CREATE INDEX IF NOT EXISTS "taskApprovalInstances_by_tenant_signature_task" ON "taskApprovalInstances" ("signatureStorageId", "taskId");
+CREATE TABLE IF NOT EXISTS "taskCustomFieldValues" (
+  "_creationTime" BIGINT,
+  "_id" TEXT NOT NULL,
+  "fieldId" TEXT,
+  "name" TEXT,
+  "taskId" TEXT,
+  "type" TEXT,
+  "value" JSON,
+  "valueDate" BIGINT,
+  "valueJson" JSON,
+  "valueNumeric" REAL,
+  PRIMARY KEY ("_id")
+);
+CREATE INDEX IF NOT EXISTS "taskCustomFieldValues_by_taskId" ON "taskCustomFieldValues" ("taskId");
+CREATE TABLE IF NOT EXISTS "taskFindings" (
+  "_creationTime" BIGINT,
+  "_id" TEXT NOT NULL,
+  "assignedUserId" TEXT,
+  "createdAt" BIGINT,
+  "createdBy" TEXT,
+  "deletedAt" BIGINT,
+  "dueDate" BIGINT,
+  "evidenceFiles" JSON,
+  "findingCategory" TEXT,
+  "linkedTaskId" TEXT,
+  "locationId" TEXT,
+  "notes" TEXT,
+  "priority" TEXT,
+  "priorityId" TEXT,
+  "resolved" BOOLEAN,
+  "sortOrder" BIGINT,
+  "spotId" TEXT,
+  "tagIds" JSON,
+  "taskId" TEXT,
+  "text" TEXT,
+  "updatedAt" BIGINT,
+  "values" JSON,
+  PRIMARY KEY ("_id")
+);
+CREATE INDEX IF NOT EXISTS "taskFindings_by_linkedTaskId" ON "taskFindings" ("linkedTaskId");
+CREATE INDEX IF NOT EXISTS "taskFindings_by_taskId" ON "taskFindings" ("taskId");
+CREATE TABLE IF NOT EXISTS "taskLogs" (
+  "_creationTime" BIGINT,
+  "_id" TEXT NOT NULL,
+  "action" TEXT,
+  "newValues" JSON,
+  "oldValues" JSON,
+  "taskId" TEXT,
+  "timestamp" REAL,
+  "userId" TEXT,
+  "uuid" TEXT,
+  PRIMARY KEY ("_id")
+);
+CREATE INDEX IF NOT EXISTS "taskLogs_by_taskId" ON "taskLogs" ("taskId");
+CREATE TABLE IF NOT EXISTS "taskNotes" (
+  "_creationTime" BIGINT,
+  "_id" TEXT NOT NULL,
+  "attachments" JSON,
+  "authorKind" TEXT,
+  "authorName" TEXT,
+  "note" TEXT,
+  "source" TEXT,
+  "taskId" TEXT,
+  "userId" TEXT,
+  "uuid" TEXT,
+  PRIMARY KEY ("_id")
+);
+CREATE INDEX IF NOT EXISTS "taskNotes_by_taskId" ON "taskNotes" ("taskId");
+CREATE INDEX IF NOT EXISTS "taskNotes_by_tenant_source_task" ON "taskNotes" (source, "taskId");
+CREATE INDEX IF NOT EXISTS "taskNotes_by_userId" ON "taskNotes" ("userId");
+CREATE INDEX IF NOT EXISTS "taskNotes_task_id_idx" ON "taskNotes" ("taskId");
 CREATE TABLE IF NOT EXISTS "taskShares" (
   "_id" TEXT NOT NULL,
   "acknowledgedAt" BIGINT,
@@ -223,6 +310,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS "taskUsers_active_pair_unique" ON "taskUsers" 
 CREATE INDEX IF NOT EXISTS "taskUsers_by_taskId" ON "taskUsers" ("taskId");
 CREATE INDEX IF NOT EXISTS "taskUsers_by_userId" ON "taskUsers" ("userId");
 CREATE INDEX IF NOT EXISTS "taskUsers_by_workspaceId" ON "taskUsers" ("workspaceId");
+CREATE TABLE IF NOT EXISTS "taskViews" (
+  "_creationTime" BIGINT,
+  "_id" TEXT NOT NULL,
+  "taskId" TEXT,
+  "userId" TEXT,
+  "viewedAt" BIGINT,
+  PRIMARY KEY ("_id")
+);
+CREATE INDEX IF NOT EXISTS "taskViews_by_taskId" ON "taskViews" ("taskId");
+CREATE INDEX IF NOT EXISTS "taskViews_by_taskId_viewedAt" ON "taskViews" ("taskId", "viewedAt");
+CREATE INDEX IF NOT EXISTS "taskViews_by_userId" ON "taskViews" ("userId");
+CREATE INDEX IF NOT EXISTS "taskViews_task_id_idx" ON "taskViews" ("taskId");
+CREATE INDEX IF NOT EXISTS "taskViews_task_viewed_idx" ON "taskViews" ("taskId", "viewedAt");
 CREATE TABLE IF NOT EXISTS "taskWorkspaceContexts" (
   "_id" TEXT NOT NULL,
   "acknowledgmentMode" TEXT,
