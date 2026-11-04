@@ -173,7 +173,11 @@ impl Checker<'_> {
             // serde_json: u64 when positive and in range, i64 when negative
             // and in range; `-0` and anything out of range become an f64.
             let integer = if negative {
-                token.parse::<i64>().ok().filter(|value| *value != 0).is_some()
+                token
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|value| *value != 0)
+                    .is_some()
             } else {
                 token.parse::<u64>().is_ok()
             };
@@ -181,7 +185,10 @@ impl Checker<'_> {
                 return Some(());
             }
         }
-        let value = token.parse::<f64>().ok().filter(|value| value.is_finite())?;
+        let value = token
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())?;
         let canonical = ryu_js::Buffer::new().format(value).to_owned();
         if canonical != token {
             self.numbers.push((start..self.at, canonical));
@@ -401,7 +408,11 @@ pub(crate) fn hashes(row: &str) -> Result<(String, String, bool), serde_json::Er
     let mut scratch = String::new();
     let raw = hex(&canonical(row, checked.as_ref(), &mut scratch)?);
     let value: Value = serde_json::from_str(row)?;
-    Ok((raw, hex(&super::replica::stable_json_text(&value)), checked.is_some()))
+    Ok((
+        raw,
+        hex(&super::replica::stable_json_text(&value)),
+        checked.is_some(),
+    ))
 }
 
 #[cfg(test)]
@@ -423,7 +434,11 @@ mod tests {
         let mut scratch = String::new();
         let raw = canonical(row, checked.as_ref(), &mut scratch).unwrap();
         let value: Value = serde_json::from_str(row).unwrap();
-        (hash(&raw), hash(&crate::replica::stable_json_text(&value)), fast)
+        (
+            hash(&raw),
+            hash(&crate::replica::stable_json_text(&value)),
+            fast,
+        )
     }
 
     #[test]
@@ -439,7 +454,10 @@ mod tests {
             (r#"{"a":1e21}"#, true),
             (r#"{"a":1E5}"#, true),
             (r#"{"a":-0}"#, true),
-            (r#"{"a":-0.0,"b":-9223372036854775808,"c":-9223372036854775809}"#, true),
+            (
+                r#"{"a":-0.0,"b":-9223372036854775808,"c":-9223372036854775809}"#,
+                true,
+            ),
             (r#"{"a":-5,"b":0}"#, true),
             (r#"{"a":123456789012345678}"#, true),
             (r#"{"a":1234567890123456789}"#, true),
@@ -488,16 +506,42 @@ mod tests {
         .await
         .unwrap();
         let reals = [
-            0.1, 0.2, 0.30000000000000004, 1.0, -0.0, 1e21, 1e-7, 123.456, 5e-324, 1.7976931348623157e308,
-            2.5, 100.0, -3.75, 1.0 / 3.0,
+            0.1,
+            0.2,
+            0.30000000000000004,
+            1.0,
+            -0.0,
+            1e21,
+            1e-7,
+            123.456,
+            5e-324,
+            1.7976931348623157e308,
+            2.5,
+            100.0,
+            -3.75,
+            1.0 / 3.0,
         ];
         let texts = [
-            "plain", "é ü 日本 😀", "quote \" backslash \\", "ctl \u{1} \u{1f} \n \t \r \u{8} \u{c}",
-            "sep \u{2028} \u{2029}", "del \u{7f}", "", "slash /",
+            "plain",
+            "é ü 日本 😀",
+            "quote \" backslash \\",
+            "ctl \u{1} \u{1f} \n \t \r \u{8} \u{c}",
+            "sep \u{2028} \u{2029}",
+            "del \u{7f}",
+            "",
+            "slash /",
         ];
         let jsons = [
-            r#"{"b":1,"a":[2,3]}"#, r#"{"a":1.5}"#, r#"[1,"x",{"z":null,"y":true}]"#, r#"{"a":{"d":1,"c":2}}"#,
-            r#"{"a":1,"b":"x"}"#, "not json", r#"  {"spaced" : 1 }  "#, r#""str""#, "12", "1e3",
+            r#"{"b":1,"a":[2,3]}"#,
+            r#"{"a":1.5}"#,
+            r#"[1,"x",{"z":null,"y":true}]"#,
+            r#"{"a":{"d":1,"c":2}}"#,
+            r#"{"a":1,"b":"x"}"#,
+            "not json",
+            r#"  {"spaced" : 1 }  "#,
+            r#""str""#,
+            "12",
+            "1e3",
         ];
         let mut id = 0;
         for (index, real) in reals.iter().enumerate() {
@@ -542,7 +586,10 @@ mod tests {
         ]
         .map(|(name, kind)| (name.to_owned(), kind));
         let statement = format!("SELECT {} FROM t AS r", json_object_expr("r", &columns));
-        let rows: Vec<String> = sqlx::query_scalar(&statement).fetch_all(&pool).await.unwrap();
+        let rows: Vec<String> = sqlx::query_scalar(&statement)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), id + 1);
         let mut fast = 0;
         for row in &rows {
@@ -554,16 +601,32 @@ mod tests {
         assert!(fast > 0);
         let integer_only = format!(
             "SELECT {} FROM t AS r",
-            json_object_expr("r", &[("_id".to_owned(), JsonKind::Text), ("n".to_owned(), JsonKind::Integer), ("s".to_owned(), JsonKind::Text), ("Zed".to_owned(), JsonKind::Text), ("b".to_owned(), JsonKind::Boolean)])
+            json_object_expr(
+                "r",
+                &[
+                    ("_id".to_owned(), JsonKind::Text),
+                    ("n".to_owned(), JsonKind::Integer),
+                    ("s".to_owned(), JsonKind::Text),
+                    ("Zed".to_owned(), JsonKind::Text),
+                    ("b".to_owned(), JsonKind::Boolean)
+                ]
+            )
         );
-        let rows: Vec<String> = sqlx::query_scalar(&integer_only).fetch_all(&pool).await.unwrap();
+        let rows: Vec<String> = sqlx::query_scalar(&integer_only)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
         let mut integer_fast = 0;
         for row in &rows {
             let (raw, value, checked) = both(row);
             assert_eq!(raw, value, "hash of {row}");
             integer_fast += usize::from(checked);
         }
-        eprintln!("fast path: {fast} of {} mixed rows, {integer_fast} of {} integer/text rows", id + 1, rows.len());
+        eprintln!(
+            "fast path: {fast} of {} mixed rows, {integer_fast} of {} integer/text rows",
+            id + 1,
+            rows.len()
+        );
         assert!(integer_fast * 4 > rows.len());
     }
 
@@ -571,7 +634,10 @@ mod tests {
     fn member_values_parse_only_their_slice() {
         let row = r#"{"_id":"a\"b","order":12,"x":{"y":1}}"#;
         let checked = check(row).unwrap();
-        assert_eq!(member_value(row, &checked, "_id"), Some(Value::from("a\"b")));
+        assert_eq!(
+            member_value(row, &checked, "_id"),
+            Some(Value::from("a\"b"))
+        );
         assert_eq!(member_value(row, &checked, "order"), Some(Value::from(12)));
         assert_eq!(member_value(row, &checked, "missing"), None);
     }

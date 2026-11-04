@@ -366,7 +366,11 @@ async fn run() {
                     receivers += 1;
                 }
                 let elapsed = one.elapsed().as_nanos();
-                let path = if gonvex_runtime::replica::fanout_stats().0 > served { &mut shared } else { &mut full };
+                let path = if gonvex_runtime::replica::fanout_stats().0 > served {
+                    &mut shared
+                } else {
+                    &mut full
+                };
                 path.0 += elapsed;
                 path.1 += 1;
             }
@@ -442,7 +446,10 @@ async fn run() {
             "fullPathNsPerConnection".into(),
             json!(full.0 as f64 / full.1.max(1) as f64),
         );
-        extra.insert("fullPathConnectionsPerWrite".into(), json!(full.1 as f64 / writes as f64));
+        extra.insert(
+            "fullPathConnectionsPerWrite".into(),
+            json!(full.1 as f64 / writes as f64),
+        );
         let (hits, recorded, data_hits) = gonvex_runtime::replica::fanout_stats();
         extra.insert(
             "fanout".into(),

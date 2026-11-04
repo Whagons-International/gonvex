@@ -416,7 +416,9 @@ pub struct ReplicaBatcher {
     data: usize,
     watermark: Option<u64>,
     last_watermark: u64,
-    urgent_through: u64,
+    /// Revisions call results on this connection wait for (their
+    /// `replica.watermark`), until a sent batch's watermark covers them.
+    waiting: std::collections::BTreeSet<u64>,
 }
 
 impl Default for ReplicaBatcher {
@@ -440,7 +442,7 @@ impl ReplicaBatcher {
             data: 0,
             watermark: None,
             last_watermark: 0,
-            urgent_through: 0,
+            waiting: std::collections::BTreeSet::new(),
         }
     }
 
@@ -465,22 +467,39 @@ impl ReplicaBatcher {
     pub fn clear_bindings(&mut self) {
         self.bindings.clear();
         self.token_owner.clear();
+        self.waiting.clear();
     }
 
-    /// A call result waits for `revision`: a watermark-only batch covering it
-    /// is sent at the next tick instead of after the idle delay.
+    /// A call result waits for `revision`: as soon as the open batch's
+    /// watermark covers it, the batch is due (no tick, no idle delay). Every
+    /// waiting revision is tracked on its own, so a later call never delays
+    /// an earlier one whose revision is already covered.
     pub fn urgent(&mut self, revision: u64) {
-        self.urgent_through = self.urgent_through.max(revision);
+        if revision > 0 {
+            self.waiting.insert(revision);
+        }
     }
 
-    /// When the open batch must be sent.
+    /// Whether the open batch's watermark covers a revision a call result
+    /// waits for: send it now.
+    pub fn call_waiting(&self) -> bool {
+        self.open
+            && self.watermark.is_some_and(|watermark| {
+                self.waiting
+                    .first()
+                    .is_some_and(|first| *first <= watermark)
+            })
+    }
+
+    /// When the open batch must be sent: now when a call waits for its
+    /// watermark, after the tick when it holds data, else after the idle
+    /// delay.
     pub fn deadline(&mut self, socket: &OutboundBatch) -> Option<Instant> {
         self.sync(socket);
         let opened_at = self.opened_at?;
-        let urgent = self
-            .watermark
-            .is_some_and(|watermark| self.urgent_through > 0 && watermark >= self.urgent_through);
-        Some(if self.data > 0 || urgent {
+        Some(if self.call_waiting() {
+            opened_at
+        } else if self.data > 0 {
             opened_at + self.config.tick
         } else {
             opened_at + self.config.idle
@@ -514,9 +533,7 @@ impl ReplicaBatcher {
             self.data = 0;
             if let Some(watermark) = self.watermark.take() {
                 self.last_watermark = self.last_watermark.max(watermark);
-                if watermark >= self.urgent_through {
-                    self.urgent_through = 0;
-                }
+                self.waiting = self.waiting.split_off(&(watermark + 1));
             }
         }
     }
@@ -868,4 +885,63 @@ fn class_id(replicas: &std::collections::BTreeMap<String, ReplicaSubscription>) 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     ids.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn batcher() -> ReplicaBatcher {
+        let mut batcher = ReplicaBatcher::with_config(BatchConfig {
+            tick: Duration::from_millis(50),
+            idle: Duration::from_secs(1),
+            max_bytes: 512 << 10,
+        });
+        batcher.set_enabled(true);
+        batcher
+    }
+
+    #[tokio::test]
+    async fn a_watermark_a_call_waits_for_is_due_at_once() {
+        let replicas = std::collections::BTreeMap::new();
+        let mut batch = OutboundBatch::default();
+        let mut batcher = batcher();
+        // No call waiting: a data-free batch waits for the idle delay.
+        batcher.watermark(&mut batch, "t", &replicas, 4);
+        let opened = Instant::now();
+        let deadline = batcher.deadline(&batch).unwrap();
+        assert!(deadline >= opened + Duration::from_millis(900));
+        assert!(!batcher.call_waiting());
+        batcher.take_frame(&mut batch, None).unwrap();
+        // A call waits for revision 5: the batch carrying watermark 5 is due
+        // now, not after the 50 ms tick.
+        batcher.urgent(5);
+        batcher.watermark(&mut batch, "t", &replicas, 5);
+        assert!(batcher.call_waiting());
+        assert!(batcher.deadline(&batch).unwrap() <= Instant::now());
+        batcher.take_frame(&mut batch, None).unwrap();
+        assert!(!batcher.call_waiting());
+    }
+
+    #[tokio::test]
+    async fn a_later_call_never_delays_an_earlier_covered_one() {
+        let replicas = std::collections::BTreeMap::new();
+        let mut batch = OutboundBatch::default();
+        let mut batcher = batcher();
+        batcher.urgent(5);
+        batcher.urgent(9);
+        // Watermark 5 covers the first call (the second still waits): due now.
+        batcher.watermark(&mut batch, "t", &replicas, 5);
+        assert!(batcher.call_waiting());
+        assert!(batcher.deadline(&batch).unwrap() <= Instant::now());
+        batcher.take_frame(&mut batch, None).unwrap();
+        // Revision 9 still waits; watermark 7 does not cover it.
+        batcher.watermark(&mut batch, "t", &replicas, 7);
+        assert!(!batcher.call_waiting());
+        batcher.watermark(&mut batch, "t", &replicas, 9);
+        assert!(batcher.call_waiting());
+        batcher.take_frame(&mut batch, None).unwrap();
+        batcher.watermark(&mut batch, "t", &replicas, 10);
+        assert!(!batcher.call_waiting(), "every waiting call was covered");
+    }
 }

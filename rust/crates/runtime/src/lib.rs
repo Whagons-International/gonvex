@@ -1911,7 +1911,9 @@ async fn websocket(
                                         batcher.watermark(socket.batch_mut(), tenant_id, &replicas, revision);
                                         sent_replica_revision = sent_replica_revision.max(revision);
                                     }
-                                    if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
+                                    // A call result waiting for this watermark completes
+                                    // now, not at the next tick or idle deadline.
+                                    if (batcher.full(socket.batch()) || batcher.call_waiting()) && batcher.flush(&mut socket).await.is_err() { return; }
                                     if reset {
                                         replicas.clear();
                                         replica_opens.clear();
@@ -3773,7 +3775,8 @@ fn bootstrap_watermark_after_sent_snapshots(
         .then_some(ServerMessage::ReplicaWatermark { revision })
 }
 
-/// The revision a durable call result waits for before it settles.
+/// The revision a durable call result waits for before it settles (a
+/// reducer/action commit, or a found reducer receipt's cursor).
 fn committed_revision(response: &ServerMessage) -> Option<u64> {
     match response {
         ServerMessage::ReducerResult {
@@ -3782,6 +3785,19 @@ fn committed_revision(response: &ServerMessage) -> Option<u64> {
         | ServerMessage::ActionResult {
             committed_revision, ..
         } => *committed_revision,
+        ServerMessage::QueryResult { payload, .. }
+            if payload.get("path").and_then(serde_json::Value::as_str)
+                == Some(execution::REDUCER_RECEIPT_QUERY) =>
+        {
+            payload
+                .get("result")
+                .filter(|result| {
+                    result.get("found").and_then(serde_json::Value::as_bool) == Some(true)
+                })
+                .and_then(|result| result.get("cursor"))
+                .and_then(|cursor| cursor.get("revision"))
+                .and_then(serde_json::Value::as_u64)
+        }
         _ => None,
     }
 }
@@ -3810,28 +3826,7 @@ fn call_watermark_after_sent_replica_work(
     if !is_authenticated_tenant_call {
         return None;
     }
-    let committed_revision = match response {
-        ServerMessage::ReducerResult {
-            committed_revision, ..
-        }
-        | ServerMessage::ActionResult {
-            committed_revision, ..
-        } => *committed_revision,
-        ServerMessage::QueryResult { payload, .. }
-            if payload.get("path").and_then(serde_json::Value::as_str)
-                == Some(execution::REDUCER_RECEIPT_QUERY) =>
-        {
-            payload
-                .get("result")
-                .filter(|result| {
-                    result.get("found").and_then(serde_json::Value::as_bool) == Some(true)
-                })
-                .and_then(|result| result.get("cursor"))
-                .and_then(|cursor| cursor.get("revision"))
-                .and_then(serde_json::Value::as_u64)
-        }
-        _ => None,
-    }?;
+    let committed_revision = committed_revision(response)?;
     if lowest_sent_revision.is_some_and(|sent| sent < committed_revision) {
         return None;
     }

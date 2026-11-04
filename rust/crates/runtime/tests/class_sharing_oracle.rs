@@ -212,7 +212,12 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let sets: [&[&str]; 3] = [
         &gonvex_runtime::perf_fixture::WHAGONS_SUBSCRIPTIONS,
         &["tasks.recentWorkspaceTasks"],
-        &["presence.list", "statuses.statuses", "tags.tags", "tasks.recentWorkspaceTasks"],
+        &[
+            "presence.list",
+            "statuses.statuses",
+            "tags.tags",
+            "tasks.recentWorkspaceTasks",
+        ],
     ];
     struct Side {
         connection: gonvex_runtime::perf_fixture::MemberConnection,
@@ -265,8 +270,16 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                     )
                     .await
                     .unwrap();
-                let rest_a: Vec<Value> = rest.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
-                a.batcher.watermark(&mut a.batch, &tenant_id, &a.connection.subscriptions, revision);
+                let rest_a: Vec<Value> = rest
+                    .iter()
+                    .map(|m| serde_json::to_value(m).unwrap())
+                    .collect();
+                a.batcher.watermark(
+                    &mut a.batch,
+                    &tenant_id,
+                    &a.connection.subscriptions,
+                    revision,
+                );
                 feed_share::set_sharing(Some(false));
                 let messages = fixture
                     .runtime
@@ -281,27 +294,68 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                 for message in messages {
                     if let Some(rest) = b
                         .batcher
-                        .push(&mut b.batch, &hub_alone, &tenant_id, native, &b.connection.subscriptions, message)
+                        .push(
+                            &mut b.batch,
+                            &hub_alone,
+                            &tenant_id,
+                            native,
+                            &b.connection.subscriptions,
+                            message,
+                        )
                         .unwrap()
                     {
                         rest_b.push(serde_json::to_value(&rest).unwrap());
                     }
                 }
-                assert_eq!(rest_a, rest_b, "unbatched frames, connection {index}, event {name}");
-                b.batcher.watermark(&mut b.batch, &tenant_id, &b.connection.subscriptions, revision);
+                assert_eq!(
+                    rest_a, rest_b,
+                    "unbatched frames, connection {index}, event {name}"
+                );
+                b.batcher.watermark(
+                    &mut b.batch,
+                    &tenant_id,
+                    &b.connection.subscriptions,
+                    revision,
+                );
                 let data = b.batcher.has_items();
-                assert_eq!(a.batcher.has_items(), data, "connection {index}, event {name}");
-                let with = a.batcher.take_frame(&mut a.batch, None).map(|frame| frame.bytes.to_vec());
-                let without = b.batcher.take_frame(&mut b.batch, None).map(|frame| frame.bytes.to_vec());
+                assert_eq!(
+                    a.batcher.has_items(),
+                    data,
+                    "connection {index}, event {name}"
+                );
+                let with = a
+                    .batcher
+                    .take_frame(&mut a.batch, None)
+                    .map(|frame| frame.bytes.to_vec());
+                let without = b
+                    .batcher
+                    .take_frame(&mut b.batch, None)
+                    .map(|frame| frame.bytes.to_vec());
                 assert_eq!(
                     with.as_deref().map(String::from_utf8_lossy),
                     without.as_deref().map(String::from_utf8_lossy),
                     "connection {index}, event {name}, native {native}"
                 );
-                for (x, y) in a.connection.subscriptions.values().zip(b.connection.subscriptions.values()) {
-                    assert_eq!(x.digest(), y.digest(), "digest, connection {index}, event {name}");
-                    assert_eq!(x.cursor, y.cursor, "cursor, connection {index}, event {name}");
-                    assert_eq!(x.row_count(), y.row_count(), "rows, connection {index}, event {name}");
+                for (x, y) in a
+                    .connection
+                    .subscriptions
+                    .values()
+                    .zip(b.connection.subscriptions.values())
+                {
+                    assert_eq!(
+                        x.digest(),
+                        y.digest(),
+                        "digest, connection {index}, event {name}"
+                    );
+                    assert_eq!(
+                        x.cursor, y.cursor,
+                        "cursor, connection {index}, event {name}"
+                    );
+                    assert_eq!(
+                        x.row_count(),
+                        y.row_count(),
+                        "rows, connection {index}, event {name}"
+                    );
                 }
                 frames += 1;
                 data_frames += usize::from(data);
@@ -315,5 +369,8 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     eprintln!("{} events, {frames} frames ({data_frames} with data), {hits} fan-out hits ({data_hits} with decided rows), {recorded} outcomes recorded", events.len());
     assert!(data_hits > 0, "no shared outcome with rows was used");
     assert!(data_frames > 0);
-    assert!(hits > 0, "no connection was served by the fan-out: the oracle exercised nothing");
+    assert!(
+        hits > 0,
+        "no connection was served by the fan-out: the oracle exercised nothing"
+    );
 }

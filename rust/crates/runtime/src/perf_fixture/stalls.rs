@@ -239,6 +239,10 @@ pub struct FanoutCounters {
     /// Event commit to this connection's last encoded message (us), summed.
     pub latency_us: Mutex<Vec<u64>>,
     pub errors: AtomicU64,
+    /// `STALL_BATCH=1`: longest inline fan-out call and longest inline
+    /// push + frame of one event on the network thread (us).
+    pub fanout_max_us: AtomicU64,
+    pub push_max_us: AtomicU64,
 }
 
 /// One connection's feed loop as the websocket runs it: receive the event,
@@ -259,14 +263,19 @@ pub async fn connection_loop(
     while let Ok((committed, event)) = events.recv().await {
         if batched {
             let tenant_id = connection.session.route.tenant_id.clone();
-            let applied = match runtime.fan_out(
+            let inline = Instant::now();
+            let served = runtime.fan_out(
                 &connection.session,
                 &mut connection.subscriptions,
                 &event,
                 &mut batcher,
                 &mut batch,
                 false,
-            ) {
+            );
+            counters
+                .fanout_max_us
+                .fetch_max(inline.elapsed().as_micros() as u64, Relaxed);
+            let applied = match served {
                 crate::replica::fanout::FanOut::Served(result) => result.map(|_| Vec::new()).map_err(|_| ()),
                 crate::replica::fanout::FanOut::Miss { record } => runtime
                     .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event.clone(), Some((false, None)), record)
@@ -277,6 +286,7 @@ pub async fn connection_loop(
                 counters.errors.fetch_add(1, Relaxed);
                 continue;
             };
+            let pushed = Instant::now();
             let mut bytes = 0;
             for message in messages {
                 match batcher.push(&mut batch, &runtime.inner.delivery, &tenant_id, false, &connection.subscriptions, message) {
@@ -294,6 +304,9 @@ pub async fn connection_loop(
             if let Some(frame) = batcher.take_frame(&mut batch, None) {
                 bytes += frame.bytes.len();
             }
+            counters
+                .push_max_us
+                .fetch_max(pushed.elapsed().as_micros() as u64, Relaxed);
             counters.deliveries.fetch_add(1, Relaxed);
             counters.messages.fetch_add(usize::from(items), Relaxed);
             counters.bytes.fetch_add(bytes, Relaxed);

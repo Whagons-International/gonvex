@@ -49,7 +49,6 @@ static HITS: AtomicU64 = AtomicU64::new(0);
 static RECORDED: AtomicU64 = AtomicU64::new(0);
 static DATA_HITS: AtomicU64 = AtomicU64::new(0);
 
-
 /// (connections served without the full path, outcomes recorded, of the
 /// served connections those whose outcome decided rows), process totals
 /// (tests and benchmarks).
@@ -140,7 +139,9 @@ fn keys(subscription: &mut ReplicaSubscription) -> Arc<FanoutKeys> {
         },
     );
     let args = serde_json::to_string(&subscription.args).unwrap_or_default();
-    let args = interned(ARGS.get_or_init(Default::default), args.clone(), || Arc::from(args));
+    let args = interned(ARGS.get_or_init(Default::default), args.clone(), || {
+        Arc::from(args)
+    });
     let keys = Arc::new(FanoutKeys {
         args,
         identity: crate::delivery::stream_identity(subscription),
@@ -282,14 +283,15 @@ impl Outcome {
                 for sub in &self.subs {
                     subs.push(match sub {
                         SubOutcome::Delta(delta) => {
-                            let item = crate::delivery::encode_shared(&delta.delta, native, true).ok()?;
+                            let item =
+                                crate::delivery::encode_shared(&delta.delta, native, true).ok()?;
                             let ready = serde_json::to_string(&delta.ready).ok()?;
                             const DIGEST: &str = "\"digest\":\"";
                             let at = ready.find(&format!("{DIGEST}\""))? + DIGEST.len();
                             Some((
                                 Arc::new(item),
-                                Bytes::copy_from_slice(ready[..at].as_bytes()),
-                                Bytes::copy_from_slice(ready[at..].as_bytes()),
+                                Bytes::copy_from_slice(&ready.as_bytes()[..at]),
+                                Bytes::copy_from_slice(&ready.as_bytes()[at..]),
                             ))
                         }
                         _ => None,
@@ -378,7 +380,8 @@ pub(crate) fn shape(
         if subscription.window.truncated {
             return None;
         }
-        let Some(crate::visibility_class::MemberHandle::Compiled(member)) = subscription.mask.peek()
+        let Some(crate::visibility_class::MemberHandle::Compiled(member)) =
+            subscription.mask.peek()
         else {
             return None;
         };
@@ -543,7 +546,15 @@ impl Runtime {
         native: bool,
     ) -> FanOut {
         let mut eligible = false;
-        match self.fan_out_inner(session, subscriptions, event, batcher, batch, native, &mut eligible) {
+        match self.fan_out_inner(
+            session,
+            subscriptions,
+            event,
+            batcher,
+            batch,
+            native,
+            &mut eligible,
+        ) {
             Some(result) => FanOut::Served(result),
             None => FanOut::Miss { record: eligible },
         }
@@ -559,7 +570,15 @@ impl Runtime {
         native: bool,
     ) -> Option<Result<(), DeliveryError>> {
         let mut eligible = false;
-        self.fan_out_inner(session, subscriptions, event, batcher, batch, native, &mut eligible)
+        self.fan_out_inner(
+            session,
+            subscriptions,
+            event,
+            batcher,
+            batch,
+            native,
+            &mut eligible,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -600,7 +619,8 @@ impl Runtime {
             // the socket's stream tokens are the default ones.
             for ((id, subscription), sub) in subscriptions.iter().zip(&outcome.subs) {
                 if let SubOutcome::Delta(delta) = sub {
-                    if !batcher.default_binding(id, crate::delivery::stream_identity(subscription)) {
+                    if !batcher.default_binding(id, crate::delivery::stream_identity(subscription))
+                    {
                         return None;
                     }
                     if subscription.bounded() {
@@ -658,7 +678,11 @@ impl Runtime {
             }
         }
         for (index, digest) in digests {
-            let id = subscriptions.keys().nth(index).expect("subscription").as_str();
+            let id = subscriptions
+                .keys()
+                .nth(index)
+                .expect("subscription")
+                .as_str();
             {
                 {
                     let SubOutcome::Delta(delta) = &outcome.subs[index] else {
@@ -671,14 +695,22 @@ impl Runtime {
                     tail.push_str("\",\"truncated\":");
                     tail.push_str(if delta.truncated { "true" } else { "false" });
                     tail.push('}');
-                    if !batcher.push_delta(batch, tenant_id, subscriptions, id, Arc::clone(item), tail) {
+                    if !batcher.push_delta(
+                        batch,
+                        tenant_id,
+                        subscriptions,
+                        id,
+                        Arc::clone(item),
+                        tail,
+                    ) {
                         return Some(Err(DeliveryError));
                     }
                     let mut ready = Vec::with_capacity(prefix.len() + digest.len() + suffix.len());
                     ready.extend_from_slice(prefix);
                     ready.extend_from_slice(digest.as_bytes());
                     ready.extend_from_slice(suffix);
-                    if !batcher.push_ready(batch, tenant_id, subscriptions, id, Bytes::from(ready)) {
+                    if !batcher.push_ready(batch, tenant_id, subscriptions, id, Bytes::from(ready))
+                    {
                         return Some(Err(DeliveryError));
                     }
                 }
@@ -698,10 +730,11 @@ pub(crate) enum FanOut {
 
 /// Records `outcome` for `shape` (first writer wins).
 pub(crate) fn record(share: &EventShare, shape: Shape, outcome: Outcome) {
-    let mut outcomes = share.outcomes.lock().unwrap();
-    if !outcomes.contains_key(&shape) {
+    if let std::collections::hash_map::Entry::Vacant(entry) =
+        share.outcomes.lock().unwrap().entry(shape)
+    {
         RECORDED.fetch_add(1, Ordering::Relaxed);
-        outcomes.insert(shape, Arc::new(outcome));
+        entry.insert(Arc::new(outcome));
     }
 }
 
@@ -730,7 +763,8 @@ impl Runtime {
         hub: &crate::delivery::DeliveryHub,
         native: bool,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
-        let delivery = |_| ReplicaError::InvalidIdentifier("replica batch delivery failed".to_owned());
+        let delivery =
+            |_| ReplicaError::InvalidIdentifier("replica batch delivery failed".to_owned());
         let record = match self.fan_out(session, subscriptions, &event, batcher, batch, native) {
             FanOut::Served(result) => return result.map(|_| Vec::new()).map_err(delivery),
             FanOut::Miss { record } => record,
@@ -741,7 +775,14 @@ impl Runtime {
         let mut rest = Vec::new();
         for message in messages {
             if let Some(message) = batcher
-                .push(batch, hub, &session.route.tenant_id, native, subscriptions, message)
+                .push(
+                    batch,
+                    hub,
+                    &session.route.tenant_id,
+                    native,
+                    subscriptions,
+                    message,
+                )
                 .map_err(delivery)?
             {
                 rest.push(message);
