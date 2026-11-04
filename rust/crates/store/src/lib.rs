@@ -1647,7 +1647,9 @@ impl TenantTransaction {
     }
 
     fn failure(&self) -> std::sync::MutexGuard<'_, Option<String>> {
-        self.failed.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.failed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Reference-integrity flush and change-feed finalize, before COMMIT.
@@ -1661,7 +1663,11 @@ impl TenantTransaction {
         let provenance = self.provenance.clone();
         let stats = self.writer_stats.clone();
         self.with_direct(move |conn| {
-            feed::finalize_direct(conn, &provenance, stats.as_deref().map(|stats| &stats.has_feed))
+            feed::finalize_direct(
+                conn,
+                &provenance,
+                stats.as_deref().map(|stats| &stats.has_feed),
+            )
         })
         .await
     }
@@ -1736,7 +1742,6 @@ impl TenantTransaction {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod transaction_commit_tests;

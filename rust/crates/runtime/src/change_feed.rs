@@ -93,7 +93,9 @@ pub fn merge_transactions(events: &[FeedEvent]) -> Option<FeedEvent> {
 /// The first revision of a feed event (`None` for a reset).
 pub fn first_revision(event: &FeedEvent) -> Option<u64> {
     match event {
-        FeedEvent::Transaction { revision, changes, .. } => Some(
+        FeedEvent::Transaction {
+            revision, changes, ..
+        } => Some(
             changes
                 .iter()
                 .map(|change| change.revision)

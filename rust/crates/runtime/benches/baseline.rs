@@ -172,8 +172,9 @@ async fn run() {
                 .run_simple(&name, BenchConfig::new(2, 15), 1.0, "query", |_| {
                     let (pools, url, sql, rows) = (pools.clone(), url.clone(), sql.clone(), &rows);
                     async move {
-                        let mut transaction =
-                            gonvex_store::begin_transaction(&pools, &url, true).await.unwrap();
+                        let mut transaction = gonvex_store::begin_transaction(&pools, &url, true)
+                            .await
+                            .unwrap();
                         let mut decoded = Vec::new();
                         let mut bytes = 0usize;
                         if variant == "sqlx_value" {

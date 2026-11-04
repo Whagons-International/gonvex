@@ -213,7 +213,8 @@ impl Fixture {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.address))
             .await
             .unwrap();
-        self.authenticate(&mut socket, token, tenant, capabilities).await;
+        self.authenticate(&mut socket, token, tenant, capabilities)
+            .await;
         socket
     }
 
@@ -244,7 +245,13 @@ impl Fixture {
         socket
     }
 
-    async fn authenticate(&self, socket: &mut Socket, token: &str, tenant: &str, capabilities: Value) {
+    async fn authenticate(
+        &self,
+        socket: &mut Socket,
+        token: &str,
+        tenant: &str,
+        capabilities: Value,
+    ) {
         let ready = next_json(socket).await;
         assert_eq!(ready["type"], "session.ready");
         assert_eq!(ready["capabilities"]["presence"], 1);
@@ -769,10 +776,17 @@ async fn presence_patches_ride_in_the_replica_batch() {
     let snapshot = next_presence(&mut bob).await;
     assert_eq!(snapshot["type"], "presence.snapshot");
     let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
-    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    send(
+        &mut alice_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
     let batch = loop {
         let frame = next_json(&mut bob).await;
-        assert_ne!(frame["type"], "presence.patch", "presence outside the batch: {frame}");
+        assert_ne!(
+            frame["type"], "presence.patch",
+            "presence outside the batch: {frame}"
+        );
         if frame["type"] == "replica.batch" {
             break frame;
         }
@@ -828,7 +842,11 @@ async fn a_client_that_stops_reading_is_reset_by_the_send_stall_timeout() {
     send(&mut bob, json!({"type":"presence.subscribe","id":"watch"})).await;
     next_presence(&mut bob).await;
     let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
-    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    send(
+        &mut alice_socket,
+        json!({"type":"presence.set","state":"active"}),
+    )
+    .await;
     assert_eq!(
         changes(&next_presence(&mut bob).await),
         vec![(alice.clone(), "active".into())]
@@ -849,7 +867,11 @@ async fn a_client_that_stops_reading_is_reset_by_the_send_stall_timeout() {
         vec![(alice.clone(), "offline".into())]
     );
     // Stall timeout + offline grace, far below the 30 s liveness timeout.
-    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
     // Alice's socket was reset: reading ends in an error or EOF, never a
     // liveness close.
     let ended = tokio::time::timeout(Duration::from_secs(10), async {
@@ -897,7 +919,10 @@ async fn a_client_draining_a_large_send_outlives_the_liveness_timeout() {
         .await;
     let total = 24;
     for index in 0..total {
-        alice.send(large_reply_request(index, 32 << 10)).await.unwrap();
+        alice
+            .send(large_reply_request(index, 32 << 10))
+            .await
+            .unwrap();
     }
     // Read the first replies quickly, then the last 8 at one per 800 ms: the
     // server has read every request by then, and the client's Pong replies

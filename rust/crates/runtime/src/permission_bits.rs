@@ -278,7 +278,10 @@ impl PermissionIndex {
 
     /// Approximate heap bytes.
     pub fn heap_bytes(&self) -> usize {
-        self.positions.keys().map(|key| key.len() + 32).sum::<usize>()
+        self.positions
+            .keys()
+            .map(|key| key.len() + 32)
+            .sum::<usize>()
             + self
                 .members
                 .iter()
@@ -386,19 +389,14 @@ impl PermissionRegistry {
         // Subscribe before the load snapshot: every later commit reaches the
         // applier, and `apply` skips those the snapshot already contains.
         let receiver = feeds.subscribe(route).await;
-        let index = Arc::new(std::sync::RwLock::new(
-            load(control, route, source).await?,
-        ));
+        let index = Arc::new(std::sync::RwLock::new(load(control, route, source).await?));
         let previous = self
             .indexes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, (source.clone(), index.clone()));
         if let Some((_, previous)) = previous {
-            previous
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .poison();
+            previous.write().unwrap_or_else(|e| e.into_inner()).poison();
         }
         tokio::spawn(run_applier(receiver, index.clone(), source.clone()));
         Ok(index)
@@ -534,9 +532,7 @@ mod tests {
     #[test]
     fn grants_are_bits_with_reference_counts_and_soft_deletes() {
         let source = source();
-        let grant = |member: &str, permission: &str, scope: Value| {
-            json!({"memberId": member, "permission": permission, "scope": scope, "deletedAt": null})
-        };
+        let grant = |member: &str, permission: &str, scope: Value| json!({"memberId": member, "permission": permission, "scope": scope, "deletedAt": null});
         let mut index = PermissionIndex::from_rows(
             &source,
             "e".into(),
@@ -553,28 +549,60 @@ mod tests {
         );
         assert!(index.has("m1", "edit-tasks", "w1"));
         assert!(!index.has("m1", "edit-tasks", "w2"));
-        assert!(!index.has("m2", "edit-tasks", "w1"), "soft-deleted rows grant nothing");
+        assert!(
+            !index.has("m2", "edit-tasks", "w1"),
+            "soft-deleted rows grant nothing"
+        );
         assert!(index.has("m2", "view", ""), "null scope is tenant-wide");
         assert_eq!(index.size(), (2, 2));
         // One of two duplicate rows deleted: the bit stays.
-        index.apply(&source, 2, &[change("g1", grant("m1", "edit-tasks", json!("w1")), Value::Null)]);
+        index.apply(
+            &source,
+            2,
+            &[change(
+                "g1",
+                grant("m1", "edit-tasks", json!("w1")),
+                Value::Null,
+            )],
+        );
         assert!(index.has("m1", "edit-tasks", "w1"));
         // An update moving the grant to another scope.
         index.apply(
             &source,
             3,
-            &[change("g2", grant("m1", "edit-tasks", json!("w1")), grant("m1", "edit-tasks", json!("w2")))],
+            &[change(
+                "g2",
+                grant("m1", "edit-tasks", json!("w1")),
+                grant("m1", "edit-tasks", json!("w2")),
+            )],
         );
         assert!(!index.has("m1", "edit-tasks", "w1"));
         assert!(index.has("m1", "edit-tasks", "w2"));
         // Revisions at or below the loaded one are already in the snapshot.
-        index.apply(&source, 3, &[change("g9", Value::Null, grant("m3", "x", json!("y")))]);
+        index.apply(
+            &source,
+            3,
+            &[change("g9", Value::Null, grant("m3", "x", json!("y")))],
+        );
         assert!(!index.has("m3", "x", "y"));
         // Soft delete then restore.
-        let deleted = json!({"memberId": "m2", "permission": "view", "scope": null, "deletedAt": 9});
-        index.apply(&source, 4, &[change("g3", grant("m2", "view", Value::Null), deleted.clone())]);
+        let deleted =
+            json!({"memberId": "m2", "permission": "view", "scope": null, "deletedAt": 9});
+        index.apply(
+            &source,
+            4,
+            &[change(
+                "g3",
+                grant("m2", "view", Value::Null),
+                deleted.clone(),
+            )],
+        );
         assert!(!index.has("m2", "view", ""));
-        index.apply(&source, 5, &[change("g3", deleted, grant("m2", "view", Value::Null))]);
+        index.apply(
+            &source,
+            5,
+            &[change("g3", deleted, grant("m2", "view", Value::Null))],
+        );
         assert!(index.has("m2", "view", ""));
         assert_eq!(index.revision(), 5);
     }
@@ -656,7 +684,11 @@ mod fixture_tests {
                 for role in &roles {
                     for team in &teams {
                         let want = expected.contains(&(member.clone(), role.clone(), team.clone()));
-                        assert_eq!(guard.has(member, role, team), want, "{label}: {member} {role}@{team}");
+                        assert_eq!(
+                            guard.has(member, role, team),
+                            want,
+                            "{label}: {member} {role}@{team}"
+                        );
                         checked += 1;
                     }
                 }
@@ -668,7 +700,9 @@ mod fixture_tests {
         let second = tenant.members[1].id.clone();
         let fresh_team = teams
             .iter()
-            .find(|team| !team.is_empty() && *team != "nowhere" && !tenant.members[0].teams.contains(team))
+            .find(|team| {
+                !team.is_empty() && *team != "nowhere" && !tenant.members[0].teams.contains(team)
+            })
             .cloned()
             .unwrap_or_else(|| "nowhere".to_owned());
         let steps: Vec<(&str, Vec<SqlValue>)> = vec![
@@ -683,11 +717,17 @@ mod fixture_tests {
         for (number, (statement, binds)) in steps.into_iter().enumerate() {
             fixture.commit(0, statement, binds).await.unwrap();
             let revision = fixture.revision(0).await.unwrap();
-            assert!(PermissionIndex::wait_for(&index, revision).await, "applier reached {revision}");
+            assert!(
+                PermissionIndex::wait_for(&index, revision).await,
+                "applier reached {revision}"
+            );
             let expected = sql_grants(&fixture).await;
             checked += check(&format!("step {number}"), &expected);
         }
-        assert!(index.read().unwrap().position("lead", "nowhere").is_some(), "steps reached the index");
+        assert!(
+            index.read().unwrap().position("lead", "nowhere").is_some(),
+            "steps reached the index"
+        );
         // A rolled-back grant never becomes a bit.
         let before = sql_grants(&fixture).await;
         {
@@ -704,7 +744,11 @@ mod fixture_tests {
             transaction.rollback().await.unwrap();
         }
         fixture
-            .commit(0, "UPDATE memberTeams SET updatedAt = 1 WHERE memberId = $1", vec![first.as_str().into()])
+            .commit(
+                0,
+                "UPDATE memberTeams SET updatedAt = 1 WHERE memberId = $1",
+                vec![first.as_str().into()],
+            )
             .await
             .unwrap();
         let revision = fixture.revision(0).await.unwrap();
@@ -712,7 +756,10 @@ mod fixture_tests {
         assert!(!index.read().unwrap().has(&first, "manager", "phantom-team"));
         checked += check("after rollback", &before);
         assert!(checked > 500, "{checked}");
-        assert!(Arc::ptr_eq(&index, &ensure().await.unwrap()), "a live index is reused");
+        assert!(
+            Arc::ptr_eq(&index, &ensure().await.unwrap()),
+            "a live index is reused"
+        );
         drop(index);
         fixture.shutdown().await;
     }

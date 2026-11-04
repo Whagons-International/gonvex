@@ -204,7 +204,10 @@ pub async fn socket_open(
     {
         return Err(serde_json::to_string(&error)?.into());
     }
-    let outcome = queue.next().await.ok_or("replica open produced no outcome")?;
+    let outcome = queue
+        .next()
+        .await
+        .ok_or("replica open produced no outcome")?;
     let mut replicas = BTreeMap::new();
     let messages = crate::install_replica_open_outcomes(&mut replicas, vec![outcome]);
     let mut rows = 0;
@@ -251,7 +254,12 @@ pub async fn connection_loop(
 ) -> MemberConnection {
     while let Ok((committed, event)) = events.recv().await {
         match runtime
-            .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None)
+            .apply_feed_event_offloaded(
+                &connection.session,
+                &mut connection.subscriptions,
+                event,
+                None,
+            )
             .await
         {
             Ok(messages) => {
@@ -283,7 +291,12 @@ pub async fn apply_offloaded(
     event: FeedEvent,
 ) -> Result<Vec<ServerMessage>, crate::replica::ReplicaError> {
     runtime
-        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None)
+        .apply_feed_event_offloaded(
+            &connection.session,
+            &mut connection.subscriptions,
+            event,
+            None,
+        )
         .await
 }
 

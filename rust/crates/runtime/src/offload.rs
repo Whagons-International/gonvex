@@ -194,9 +194,7 @@ impl Offload {
                 let future = crate::perf_fixture::stalls::timed(future);
                 Offloaded::Join(tokio::spawn(future))
             }
-            Strategy::Runtime => {
-                Offloaded::Join(self.runtime.as_ref().unwrap().spawn(future))
-            }
+            Strategy::Runtime => Offloaded::Join(self.runtime.as_ref().unwrap().spawn(future)),
             Strategy::Blocking | Strategy::Threads => {
                 let (abort, registration) = AbortHandle::new_pair();
                 let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -241,9 +239,10 @@ impl Offload {
                 Offloaded::Ready(Some(std::panic::catch_unwind(AssertUnwindSafe(work))))
             }
             Strategy::Runtime => Offloaded::Join(self.runtime.as_ref().unwrap().spawn(
-                gonvex_profiler::instrument(gonvex_profiler::TaskKind::Other, async move {
-                    work()
-                }),
+                gonvex_profiler::instrument(
+                    gonvex_profiler::TaskKind::Other,
+                    async move { work() },
+                ),
             )),
             Strategy::Blocking | Strategy::Threads => {
                 let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -474,7 +473,8 @@ impl<K: Ord + Send + 'static, V: Send + 'static> Drop for RetiringMap<K, V> {
 fn feed_tables(event: &FeedEvent) -> String {
     match event {
         FeedEvent::Transaction { changes, .. } => {
-            let mut tables: Vec<&str> = changes.iter().map(|change| change.table.as_str()).collect();
+            let mut tables: Vec<&str> =
+                changes.iter().map(|change| change.table.as_str()).collect();
             tables.sort_unstable();
             tables.dedup();
             tables.join(",")
@@ -687,7 +687,9 @@ impl SnapshotPermit {
 
 impl Drop for SnapshotPermit {
     fn drop(&mut self) {
-        self.admission.reserved_kib.fetch_sub(self.reserved_kib, Relaxed);
+        self.admission
+            .reserved_kib
+            .fetch_sub(self.reserved_kib, Relaxed);
     }
 }
 
@@ -721,7 +723,9 @@ mod tests {
         // 64 KiB budget, generous count: bytes are the binding bound.
         let admission = leak(SnapshotAdmission::new(64, 64 * 1024));
         // Teach sizes: 40 KiB for "big" keys, 4 KiB for the others.
-        let big = vec![Value::String("x".repeat(40 * 1024 / HEAP_PER_JSON_BYTE - 2))];
+        let big = vec![Value::String(
+            "x".repeat(40 * 1024 / HEAP_PER_JSON_BYTE - 2),
+        )];
         let small = vec![Value::String("x".repeat(4 * 1024 / HEAP_PER_JSON_BYTE - 2))];
         for n in 0..10 {
             let key = format!("member-{n}");
@@ -764,9 +768,11 @@ mod tests {
         // The whole budget is held: a small build waits.
         let waiting = admission.admit("small".into(), "other");
         tokio::pin!(waiting);
-        assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiting)
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
         drop(first);
         tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
@@ -779,10 +785,16 @@ mod tests {
         assert_eq!(admission.estimate("a", "tasks"), UNKNOWN_SNAPSHOT_BYTES);
         let rows: Vec<Value> = (0..1000).map(|n| serde_json::json!({ "n": n })).collect();
         admission.admit("a".into(), "tasks").await.observe(&rows);
-        let exact: usize = rows.iter().map(crate::replica::json_byte_len).sum::<usize>()
+        let exact: usize = rows
+            .iter()
+            .map(crate::replica::json_byte_len)
+            .sum::<usize>()
             * HEAP_PER_JSON_BYTE;
         let estimate = admission.estimate("b", "tasks");
-        assert!(estimate.abs_diff(exact) * 10 < exact, "{estimate} vs {exact}");
+        assert!(
+            estimate.abs_diff(exact) * 10 < exact,
+            "{estimate} vs {exact}"
+        );
         assert_eq!(admission.estimate("a", "tasks"), estimate);
     }
 

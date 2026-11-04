@@ -413,7 +413,8 @@ impl Fixture {
     /// Opens a member's full [`WHAGONS_SUBSCRIPTIONS`] set, one after another
     /// (the websocket queue runs up to 8 concurrently).
     pub async fn connect(&self, tenant: usize, member: usize) -> FixtureResult<MemberConnection> {
-        self.connect_paths(tenant, member, &WHAGONS_SUBSCRIPTIONS).await
+        self.connect_paths(tenant, member, &WHAGONS_SUBSCRIPTIONS)
+            .await
     }
 
     /// [`Fixture::connect`] opening only `paths`.

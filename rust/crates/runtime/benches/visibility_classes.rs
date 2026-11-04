@@ -48,7 +48,11 @@ async fn sample_changes(fixture: &Fixture, tenant: usize, count: usize) -> Vec<L
         // Spread over the task table: spotless, blank-spot and spotted tasks.
         let task = (i * 7919) % tasks;
         let event = fixture
-            .update_task(tenant, task, json!({"description": format!("visibility sample {i}")}))
+            .update_task(
+                tenant,
+                task,
+                json!({"description": format!("visibility sample {i}")}),
+            )
             .await
             .unwrap();
         changes.push(task_change(&event));
@@ -62,7 +66,12 @@ async fn bench_tenant(report: &mut Report, label: &str, fixture: &Fixture, tenan
     let (connections, opened) = retained(async {
         let mut connections = Vec::with_capacity(members);
         for member in 0..members {
-            connections.push(fixture.connect_paths(tenant, member, &[TASKS]).await.unwrap());
+            connections.push(
+                fixture
+                    .connect_paths(tenant, member, &[TASKS])
+                    .await
+                    .unwrap(),
+            );
         }
         connections
     })
@@ -85,32 +94,58 @@ async fn bench_tenant(report: &mut Report, label: &str, fixture: &Fixture, tenan
     let mut index = 0;
     let mut admitted = 0;
     let name = format!("visibility/{label}/task_update/{members}_members/interpreted");
-    if let Some(result) = report.run_sync(&name, BenchConfig::new(5, 100), members as f64, "subscriber", |_| {
-        index += 1;
-        admitted = std::hint::black_box(Fixture::evaluate_visibility(
-            &connections,
-            TASKS,
-            &changes[index % changes.len()],
-        ));
-    }) {
-        result.extra.insert("checksPerChange".into(), json!(members));
+    if let Some(result) = report.run_sync(
+        &name,
+        BenchConfig::new(5, 100),
+        members as f64,
+        "subscriber",
+        |_| {
+            index += 1;
+            admitted = std::hint::black_box(Fixture::evaluate_visibility(
+                &connections,
+                TASKS,
+                &changes[index % changes.len()],
+            ));
+        },
+    ) {
+        result
+            .extra
+            .insert("checksPerChange".into(), json!(members));
     }
     let mut stats = Default::default();
     let name = format!("visibility/{label}/task_update/{members}_members/compiled");
-    if let Some(result) = report.run_sync(&name, BenchConfig::new(5, 100), members as f64, "subscriber", |_| {
-        index += 1;
-        let (count, run) = Fixture::evaluate_visibility_compiled(
-            &mut connections,
-            TASKS,
-            &changes[index % changes.len()],
+    if let Some(result) = report.run_sync(
+        &name,
+        BenchConfig::new(5, 100),
+        members as f64,
+        "subscriber",
+        |_| {
+            index += 1;
+            let (count, run) = Fixture::evaluate_visibility_compiled(
+                &mut connections,
+                TASKS,
+                &changes[index % changes.len()],
+            );
+            admitted = std::hint::black_box(count);
+            stats = run;
+        },
+    ) {
+        result.extra.insert(
+            "classEvaluationsPerChange".into(),
+            json!(stats.class_evaluations),
         );
-        admitted = std::hint::black_box(count);
-        stats = run;
-    }) {
-        result.extra.insert("classEvaluationsPerChange".into(), json!(stats.class_evaluations));
-        result.extra.insert("memberEvaluationsPerChange".into(), json!(stats.member_evaluations));
-        result.extra.insert("compiledChecksPerChange".into(), json!(stats.compiled_checks));
-        result.extra.insert("fallbackChecksPerChange".into(), json!(stats.fallback_checks));
+        result.extra.insert(
+            "memberEvaluationsPerChange".into(),
+            json!(stats.member_evaluations),
+        );
+        result.extra.insert(
+            "compiledChecksPerChange".into(),
+            json!(stats.compiled_checks),
+        );
+        result.extra.insert(
+            "fallbackChecksPerChange".into(),
+            json!(stats.fallback_checks),
+        );
     }
 
     // ---- classes, memory -------------------------------------------------
@@ -145,19 +180,37 @@ async fn bench_tenant(report: &mut Report, label: &str, fixture: &Fixture, tenan
     extra.insert("members".into(), json!(members));
     extra.insert("classes".into(), json!(stats.classes));
     extra.insert("gatedClasses".into(), json!(stats.gated_classes));
-    extra.insert("largestClasses".into(), json!(sizes.iter().take(8).collect::<Vec<_>>()));
-    extra.insert("singletonClasses".into(), json!(sizes.iter().filter(|size| **size == 1).count()));
+    extra.insert(
+        "largestClasses".into(),
+        json!(sizes.iter().take(8).collect::<Vec<_>>()),
+    );
+    extra.insert(
+        "singletonClasses".into(),
+        json!(sizes.iter().filter(|size| **size == 1).count()),
+    );
     extra.insert(
         "classesPerKind".into(),
-        json!(per_kind.iter().map(|(kind, ids)| (kind.clone(), ids.len())).collect::<BTreeMap<_, _>>()),
+        json!(per_kind
+            .iter()
+            .map(|(kind, ids)| (kind.clone(), ids.len()))
+            .collect::<BTreeMap<_, _>>()),
     );
     extra.insert("classBytes".into(), json!(stats.class_bytes));
-    extra.insert("bytesPerClass".into(), json!(stats.class_bytes / stats.classes.max(1)));
+    extra.insert(
+        "bytesPerClass".into(),
+        json!(stats.class_bytes / stats.classes.max(1)),
+    );
     extra.insert("memberBindingBytes".into(), json!(member_bytes));
-    extra.insert("bytesPerMemberBinding".into(), json!(member_bytes / compiled.len().max(1)));
+    extra.insert(
+        "bytesPerMemberBinding".into(),
+        json!(member_bytes / compiled.len().max(1)),
+    );
     extra.insert("internedTokens".into(), json!(stats.tokens));
     extra.insert("internerBytes".into(), json!(stats.interner_bytes));
-    extra.insert("resolvedVisibilityBytesPerMember".into(), json!(resolved_bytes / members.max(1)));
+    extra.insert(
+        "resolvedVisibilityBytesPerMember".into(),
+        json!(resolved_bytes / members.max(1)),
+    );
     extra.insert("openLiveBytes".into(), json!(opened.live_bytes));
     report.record(&format!("visibility/{label}/classes"), extra);
 
@@ -190,8 +243,12 @@ async fn bench_tenant(report: &mut Report, label: &str, fixture: &Fixture, tenan
         }
         admitted_routed = std::hint::black_box(admitted);
     }) {
-        result.extra.insert("visitedClassesAndMembers".into(), json!(visits));
-        result.extra.insert("admitted".into(), json!(admitted_routed));
+        result
+            .extra
+            .insert("visitedClassesAndMembers".into(), json!(visits));
+        result
+            .extra
+            .insert("admitted".into(), json!(admitted_routed));
         result.extra.insert(
             "note".into(),
             json!("includes the O(members) admission tally; visits is the routing work"),
@@ -207,8 +264,14 @@ async fn bench_tenant(report: &mut Report, label: &str, fixture: &Fixture, tenan
         // Soundness: no member that sees the row is outside the candidates.
         for member in &compiled {
             let routed = candidates.members.iter().any(|m| Arc::ptr_eq(m, member))
-                || candidates.classes.iter().any(|c| Arc::ptr_eq(c, member.class()));
-            assert!(routed || !member.visible_row(&new), "{label}: routing missed a member");
+                || candidates
+                    .classes
+                    .iter()
+                    .any(|c| Arc::ptr_eq(c, member.class()));
+            assert!(
+                routed || !member.visible_row(&new),
+                "{label}: routing missed a member"
+            );
         }
     }
     let mut extra = BTreeMap::new();
@@ -223,12 +286,24 @@ async fn bench_tenant(report: &mut Report, label: &str, fixture: &Fixture, tenan
     // Decoding: from a parsed Value vs raw JSON bytes.
     let raw = serde_json::to_vec(&changes[0].new_value).unwrap();
     let value = &changes[0].new_value;
-    report.run_sync(&format!("visibility/{label}/decode/value"), BenchConfig::new(100, 5000), 1.0, "row", |_| {
-        std::hint::black_box(scope.decode(RowView::Value(value)));
-    });
-    if let Some(result) = report.run_sync(&format!("visibility/{label}/decode/raw_json"), BenchConfig::new(100, 5000), 1.0, "row", |_| {
-        std::hint::black_box(scope.decode(RowView::Json(&raw)));
-    }) {
+    report.run_sync(
+        &format!("visibility/{label}/decode/value"),
+        BenchConfig::new(100, 5000),
+        1.0,
+        "row",
+        |_| {
+            std::hint::black_box(scope.decode(RowView::Value(value)));
+        },
+    );
+    if let Some(result) = report.run_sync(
+        &format!("visibility/{label}/decode/raw_json"),
+        BenchConfig::new(100, 5000),
+        1.0,
+        "row",
+        |_| {
+            std::hint::black_box(scope.decode(RowView::Json(&raw)));
+        },
+    ) {
         result.extra.insert("rowBytes".into(), json!(raw.len()));
     }
     // One member check without the memo (decode included).
@@ -240,9 +315,15 @@ async fn bench_tenant(report: &mut Report, label: &str, fixture: &Fixture, tenan
         })
         .map(|(member, _)| member.clone())
         .unwrap_or_else(|| first.clone());
-    report.run_sync(&format!("visibility/{label}/single_check/TeamSpots"), BenchConfig::new(100, 5000), 1.0, "check", |_| {
-        std::hint::black_box(member.visible(RowView::Value(value)));
-    });
+    report.run_sync(
+        &format!("visibility/{label}/single_check/TeamSpots"),
+        BenchConfig::new(100, 5000),
+        1.0,
+        "check",
+        |_| {
+            std::hint::black_box(member.visible(RowView::Value(value)));
+        },
+    );
     let mut memo = EvalMemo::default();
     std::hint::black_box(member.visible_memo(&mut memo, value));
     drop(connections);
@@ -262,7 +343,9 @@ async fn run() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(9000);
-    if report.enabled(&format!("visibility/large/task_update/{members}_members")) || report.enabled("visibility/large/") {
+    if report.enabled(&format!("visibility/large/task_update/{members}_members"))
+        || report.enabled("visibility/large/")
+    {
         let started = std::time::Instant::now();
         let fixture = Fixture::build(FixtureOptions {
             tenants: vec![TenantSpec::new("large", tasks, members)],
@@ -270,7 +353,10 @@ async fn run() {
         })
         .await
         .unwrap();
-        eprintln!("large fixture ready in {:.1}s", started.elapsed().as_secs_f64());
+        eprintln!(
+            "large fixture ready in {:.1}s",
+            started.elapsed().as_secs_f64()
+        );
         bench_tenant(&mut report, "large", &fixture, 0).await;
         fixture.shutdown().await;
     }

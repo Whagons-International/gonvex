@@ -797,8 +797,15 @@ impl Runtime {
                     // index complete through this revision.
                     Step::Resync(Resync::Consistency)
                 } else {
-                    self.mask_step(session, subscription, revision, &changes, &collapsed, share.as_deref())
-                        .await?
+                    self.mask_step(
+                        session,
+                        subscription,
+                        revision,
+                        &changes,
+                        &collapsed,
+                        share.as_deref(),
+                    )
+                    .await?
                 }
             } else {
                 legacy_step(subscription, &changes)
@@ -848,8 +855,7 @@ impl Runtime {
                     None,
                 ),
             };
-            let Some(delta) = applied?
-            else {
+            let Some(delta) = applied? else {
                 self.resync(subscription, Resync::Window, &mut messages, &mut resynced);
                 continue;
             };
@@ -918,7 +924,9 @@ impl Runtime {
             );
         }
         self.inner.visibility_metrics.record_eval_stats(&memo.stats);
-        self.inner.visibility_metrics.record_eval_stats(&shared_stats);
+        self.inner
+            .visibility_metrics
+            .record_eval_stats(&shared_stats);
         Ok(messages)
     }
 
@@ -1376,7 +1384,9 @@ fn row_step(
             return None;
         }
         match compiled.handle {
-            MemberHandle::Compiled(member) if memoize => Some(member.visible_memo(compiled.memo, row)),
+            MemberHandle::Compiled(member) if memoize => {
+                Some(member.visible_memo(compiled.memo, row))
+            }
             MemberHandle::Compiled(member) => {
                 compiled.memo.stats.compiled_checks += 1;
                 Some(member.visible(RowView::Value(row)))

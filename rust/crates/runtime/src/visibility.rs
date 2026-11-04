@@ -1774,8 +1774,12 @@ fn shared_parent_resolution(
     resolved: ResolvedVisibility,
 ) -> Arc<ResolvedVisibility> {
     type Key = (String, String, String, u64);
-    static SHARED: std::sync::OnceLock<std::sync::Mutex<(BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>, usize)>> =
-        std::sync::OnceLock::new();
+    static SHARED: std::sync::OnceLock<
+        std::sync::Mutex<(
+            BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>,
+            usize,
+        )>,
+    > = std::sync::OnceLock::new();
     fn same(left: &ResolvedVisibility, right: &ResolvedVisibility) -> bool {
         left.ephemeral_member == right.ephemeral_member
             && left.revision == right.revision
@@ -1791,12 +1795,16 @@ fn shared_parent_resolution(
                 .zip(&right.indexes)
                 .all(|((a, x), (b, y))| a == b && Arc::ptr_eq(x, y))
             && left.inherited.len() == right.inherited.len()
-            && left.inherited.iter().zip(&right.inherited).all(|((a, x), (b, y))| {
-                a == b
-                    && Arc::ptr_eq(&x.plan, &y.plan)
-                    && Arc::ptr_eq(&x.resolved, &y.resolved)
-                    && Arc::ptr_eq(&x.index, &y.index)
-            })
+            && left
+                .inherited
+                .iter()
+                .zip(&right.inherited)
+                .all(|((a, x), (b, y))| {
+                    a == b
+                        && Arc::ptr_eq(&x.plan, &y.plan)
+                        && Arc::ptr_eq(&x.resolved, &y.resolved)
+                        && Arc::ptr_eq(&x.index, &y.index)
+                })
     }
     let key = (
         database.to_owned(),

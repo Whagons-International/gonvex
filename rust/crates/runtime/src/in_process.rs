@@ -411,7 +411,11 @@ export const swallow = async (ctx) => {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        for (function, name) in artifact.functions.iter_mut().zip(["crud", "recover", "swallow", "spin"]) {
+        for (function, name) in artifact
+            .functions
+            .iter_mut()
+            .zip(["crud", "recover", "swallow", "spin"])
+        {
             function.path = format!("t.{name}");
             function.handler = Some(name.into());
             function.export = Some(name.into());
@@ -463,12 +467,20 @@ export const swallow = async (ctx) => {
                 action_execution_timeout: Duration::from_secs(5),
             });
             host.start().await.unwrap();
-            host.load(LoadRequest { module_id: "t".into(), generation: Some(1), artifact: sql_artifact() })
-                .await
-                .unwrap();
-            host.activate(ActivateRequest { module_id: "t".into(), generation: 1, drain_ms: None })
-                .await
-                .unwrap();
+            host.load(LoadRequest {
+                module_id: "t".into(),
+                generation: Some(1),
+                artifact: sql_artifact(),
+            })
+            .await
+            .unwrap();
+            host.activate(ActivateRequest {
+                module_id: "t".into(),
+                generation: 1,
+                drain_ms: None,
+            })
+            .await
+            .unwrap();
             let calls = || async {
                 let transaction = begin_transaction(&pools, &url, false).await.unwrap();
                 DatabaseHostCalls::new(transaction, DatabaseCapability::Reducer)
@@ -477,11 +489,17 @@ export const swallow = async (ctx) => {
             // Same results whether the isolate answers SQL itself or every
             // call takes the async path.
             let mut inline = calls().await;
-            let direct = host.invoke(request("crud", json!({"id": "a"})), &mut inline).await.unwrap();
+            let direct = host
+                .invoke(request("crud", json!({"id": "a"})), &mut inline)
+                .await
+                .unwrap();
             assert!(inline.inline_calls() >= 5, "{}", inline.inline_calls());
             inline.finish(false).await.unwrap();
             let mut asynchronous = AsyncOnly(calls().await);
-            let routed = host.invoke(request("crud", json!({"id": "a"})), &mut asynchronous).await.unwrap();
+            let routed = host
+                .invoke(request("crud", json!({"id": "a"})), &mut asynchronous)
+                .await
+                .unwrap();
             assert_eq!(asynchronous.0.inline_calls(), 0);
             asynchronous.0.finish(false).await.unwrap();
             assert_eq!(direct, routed);
@@ -501,21 +519,39 @@ export const swallow = async (ctx) => {
 
             // A failed statement aborts the transaction until ROLLBACK TO.
             let mut handler = calls().await;
-            let value = host.invoke(request("recover", json!(null)), &mut handler).await.unwrap();
+            let value = host
+                .invoke(request("recover", json!(null)), &mut handler)
+                .await
+                .unwrap();
             assert!(
                 value["failed"].as_str().unwrap().contains(
                     "db_read host call failed [host_call_failed]: error returned from database: (code: 1555) UNIQUE constraint failed: items.id"
                 ),
                 "{value}"
             );
-            assert!(value["refused"].as_str().unwrap().contains("current transaction is aborted"), "{value}");
+            assert!(
+                value["refused"]
+                    .as_str()
+                    .unwrap()
+                    .contains("current transaction is aborted"),
+                "{value}"
+            );
             assert_eq!(value["after"], json!([{"n": 0}]));
             assert_eq!(handler.finish_with_revision(true).await.unwrap(), None);
 
             // A caught failure never commits.
             let mut handler = calls().await;
-            assert_eq!(host.invoke(request("swallow", json!(null)), &mut handler).await.unwrap(), json!("ok"));
-            assert!(handler.finish(true).await.unwrap_err().contains("current transaction is aborted"));
+            assert_eq!(
+                host.invoke(request("swallow", json!(null)), &mut handler)
+                    .await
+                    .unwrap(),
+                json!("ok")
+            );
+            assert!(handler
+                .finish(true)
+                .await
+                .unwrap_err()
+                .contains("current transaction is aborted"));
             let count: i64 = sqlx::query_scalar("SELECT count(*) FROM items")
                 .fetch_one(&pools.reader(&url).await.unwrap())
                 .await

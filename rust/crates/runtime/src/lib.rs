@@ -11,16 +11,16 @@ pub mod config;
 pub mod control;
 mod cron_profile;
 mod dashboard;
-pub mod delivery;
-pub mod feed_share;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
 #[cfg(not(feature = "duckdb"))]
 #[path = "data_ingest_disabled.rs"]
 mod data_ingest;
+pub mod delivery;
 pub mod error_class;
 pub mod execution;
 pub mod external_auth;
+pub mod feed_share;
 pub mod host_calls;
 mod in_process;
 pub mod live_query;
@@ -49,12 +49,12 @@ mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
 // Kept for the Verus proof and benchmark in verification/; unused by the SQLite store.
+pub mod permission_bits;
 #[allow(dead_code)]
 mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
-pub mod permission_bits;
 pub mod visibility_class;
 #[cfg(test)]
 mod visibility_corpus;
@@ -1556,23 +1556,19 @@ async fn websocket_upgrade(
         outbound: runtime.inner.config.connection.outbound,
         socket_fd,
     };
-    websocket_transport::upgrade(
-        request,
-        options,
-        move |socket| {
-            gonvex_profiler::instrument(
-                gonvex_profiler::TaskKind::WsConnection,
-                websocket(
-                    socket,
-                    runtime,
-                    ip,
-                    public_transport,
-                    public_connection,
-                    pending,
-                ),
-            )
-        },
-    )
+    websocket_transport::upgrade(request, options, move |socket| {
+        gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::WsConnection,
+            websocket(
+                socket,
+                runtime,
+                ip,
+                public_transport,
+                public_connection,
+                pending,
+            ),
+        )
+    })
     .await
 }
 
@@ -1627,7 +1623,8 @@ async fn websocket(
     // Delivery v3, slow readers: a feed event taken while merging that could
     // not be merged (processed next), and whether the socket fell behind
     // since the feed receiver was last drained.
-    let mut pending_feed: Option<Result<change_feed::FeedEvent, broadcast::error::RecvError>> = None;
+    let mut pending_feed: Option<Result<change_feed::FeedEvent, broadcast::error::RecvError>> =
+        None;
     let mut catching_up = false;
     let mut sent_replica_revision = 0u64;
     let mut sent_zero_bootstrap_watermark = false;
@@ -1732,7 +1729,11 @@ async fn websocket(
         let backlogged = socket_watch.is_backlogged();
         catching_up |= backlogged;
         let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
-        let batch_deadline = if backlogged { None } else { batcher.deadline(socket.batch()) };
+        let batch_deadline = if backlogged {
+            None
+        } else {
+            batcher.deadline(socket.batch())
+        };
         let presence_wait = presence_slot.clone().filter(|_| !backlogged);
         let message = tokio::select! {
             _ = socket_watch.writable(), if backlogged => continue,
@@ -3359,7 +3360,11 @@ async fn websocket(
                             })
                             .unwrap_or_default(),
                         };
-                    if socket.send(gonvex_websocket::text_message(response)).await.is_err() {
+                    if socket
+                        .send(gonvex_websocket::text_message(response))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -4887,13 +4892,18 @@ async fn send_replica_open(
         let mut pages = offload::PageEncoder::new(replica::SnapshotPages::new(message));
         while let Some(page) = pages.next().await {
             let page = page.map_err(|_| ())?;
-            socket.send(gonvex_websocket::text_message(page)).await.map_err(|_| ())?;
+            socket
+                .send(gonvex_websocket::text_message(page))
+                .await
+                .map_err(|_| ())?;
         }
         Ok(())
     } else {
         let message = replica::legacy_snapshot_frame(message);
         if matches!(message, ServerMessage::ReplicaSnapshot { .. }) && !delivery.native() {
-            let encoded = offload::encode_snapshot_json(message).await.map_err(|_| ())?;
+            let encoded = offload::encode_snapshot_json(message)
+                .await
+                .map_err(|_| ())?;
             return socket
                 .send(gonvex_websocket::text_message(encoded))
                 .await

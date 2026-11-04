@@ -351,7 +351,9 @@ impl PoolRegistry {
         if !read_only {
             // Serialized mode: direct sessions finalize their cached
             // statements on the writer from any thread (see `direct`).
-            options = options.journal_mode(SqliteJournalMode::Wal).serialized(true);
+            options = options
+                .journal_mode(SqliteJournalMode::Wal)
+                .serialized(true);
         }
         let options = options
             // COMMIT never syncs while holding the single writer; Full

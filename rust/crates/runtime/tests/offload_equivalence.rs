@@ -26,7 +26,11 @@ async fn offloaded_opens_feeds_and_pages_match_inline() {
                 .await
                 .unwrap();
             let pooled_subscription = pooled.subscription.unwrap();
-            assert_eq!(direct.digest(), pooled_subscription.digest(), "{path} member {member}");
+            assert_eq!(
+                direct.digest(),
+                pooled_subscription.digest(),
+                "{path} member {member}"
+            );
             assert_eq!(direct.cursor, pooled_subscription.cursor);
             assert_eq!(pooled.rows, direct.row_count());
         }
@@ -40,7 +44,12 @@ async fn offloaded_opens_feeds_and_pages_match_inline() {
     let snapshot = opened
         .messages
         .into_iter()
-        .find(|message| matches!(message, gonvex_protocol::ServerMessage::ReplicaSnapshot { .. }))
+        .find(|message| {
+            matches!(
+                message,
+                gonvex_protocol::ServerMessage::ReplicaSnapshot { .. }
+            )
+        })
         .unwrap();
     let inline = stalls::snapshot_page_frames(snapshot.clone(), false).await;
     let pooled = stalls::snapshot_page_frames(snapshot, true).await;
@@ -54,7 +63,11 @@ async fn offloaded_opens_feeds_and_pages_match_inline() {
     for n in 0..6 {
         let event = if n % 2 == 0 {
             fixture
-                .update_task(0, n * 37 % tasks, json!({"description": format!("offload {n}")}))
+                .update_task(
+                    0,
+                    n * 37 % tasks,
+                    json!({"description": format!("offload {n}")}),
+                )
                 .await
                 .unwrap()
         } else {

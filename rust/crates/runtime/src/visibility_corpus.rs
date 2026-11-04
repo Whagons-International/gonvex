@@ -151,7 +151,9 @@ pub(crate) fn corpus() -> Corpus {
         },
         CorpusPlan {
             name: "owner",
-            plan: tasks(json!({"operator": "eqContext", "column": "createdBy", "context": "member.id"})),
+            plan: tasks(
+                json!({"operator": "eqContext", "column": "createdBy", "context": "member.id"}),
+            ),
             fallback: false,
         },
         CorpusPlan {
@@ -184,7 +186,8 @@ pub(crate) fn corpus() -> Corpus {
         },
         CorpusPlan {
             name: "noteOverride",
-            plan: notes(json!({"operator": "inherits", "column": "taskId", "table": "tasks", "key": "_id",
+            plan: notes(
+                json!({"operator": "inherits", "column": "taskId", "table": "tasks", "key": "_id",
                 "where": [{"column": "deletedAt", "value": {"literal": null}}],
                 "predicate": {"operator": "or", "children": [
                     {"operator": "eqContext", "column": "createdBy", "context": "member.id"},
@@ -192,7 +195,8 @@ pub(crate) fn corpus() -> Corpus {
                     {"operator": "and", "children": [
                         {"operator": "inSet", "column": "workspaceId", "set": "workspaces"},
                         {"operator": "not", "children": [
-                            {"operator": "eq", "column": "spotId", "value": {"literal": "s2"}}]}]}]}})),
+                            {"operator": "eq", "column": "spotId", "value": {"literal": "s2"}}]}]}]}}),
+            ),
             fallback: false,
         },
     ];
@@ -222,27 +226,133 @@ pub(crate) fn corpus() -> Corpus {
         ]),
     };
     let principals = vec![
-        principal("alice", "member", json!({}), &["w1"], &["s1"], false, &["p1"], &["t-w2-s2-bob-web-0"]),
+        principal(
+            "alice",
+            "member",
+            json!({}),
+            &["w1"],
+            &["s1"],
+            false,
+            &["p1"],
+            &["t-w2-s2-bob-web-0"],
+        ),
         // Same shared tokens as alice: must share alice's class.
-        principal("carol", "member", json!({}), &["w1"], &["s1"], false, &[], &[]),
-        principal("bob", "member", json!({}), &["w1", "w2"], &[], true, &["p2"], &[]),
-        principal("dave", "system_admin", json!({}), &["w1"], &["s1"], false, &[], &[]),
-        principal("erin", "member", json!({"tasks.viewAll": true}), &[], &[], false, &[], &[]),
+        principal(
+            "carol",
+            "member",
+            json!({}),
+            &["w1"],
+            &["s1"],
+            false,
+            &[],
+            &[],
+        ),
+        principal(
+            "bob",
+            "member",
+            json!({}),
+            &["w1", "w2"],
+            &[],
+            true,
+            &["p2"],
+            &[],
+        ),
+        principal(
+            "dave",
+            "system_admin",
+            json!({}),
+            &["w1"],
+            &["s1"],
+            false,
+            &[],
+            &[],
+        ),
+        principal(
+            "erin",
+            "member",
+            json!({"tasks.viewAll": true}),
+            &[],
+            &[],
+            false,
+            &[],
+            &[],
+        ),
         principal("frank", "member", json!({}), &[], &[], false, &[], &[]),
-        principal("gina", "guest", json!({"tasks.viewAll": "1"}), &["w2"], &["s2"], false, &[], &[]),
-        principal("hank", "admin", json!({"tasks.viewAll": false}), &["w2"], &["s1", "s2"], false, &[], &["missing-task"]),
+        principal(
+            "gina",
+            "guest",
+            json!({"tasks.viewAll": "1"}),
+            &["w2"],
+            &["s2"],
+            false,
+            &[],
+            &[],
+        ),
+        principal(
+            "hank",
+            "admin",
+            json!({"tasks.viewAll": false}),
+            &["w2"],
+            &["s1", "s2"],
+            false,
+            &[],
+            &["missing-task"],
+        ),
         // Principal changes: alice after joining w2, after a new grant, after
         // losing her spot.
-        principal("alice", "member", json!({}), &["w1", "w2"], &["s1"], false, &["p1"], &["t-w2-s2-bob-web-0"]),
-        principal("alice", "member", json!({}), &["w1"], &["s1"], false, &["p1"], &["t-w2-s2-bob-web-0", "t-w3-null-null-web-1"]),
-        principal("alice", "member", json!({}), &["w1"], &[], false, &["p1"], &[]),
+        principal(
+            "alice",
+            "member",
+            json!({}),
+            &["w1", "w2"],
+            &["s1"],
+            false,
+            &["p1"],
+            &["t-w2-s2-bob-web-0"],
+        ),
+        principal(
+            "alice",
+            "member",
+            json!({}),
+            &["w1"],
+            &["s1"],
+            false,
+            &["p1"],
+            &["t-w2-s2-bob-web-0", "t-w3-null-null-web-1"],
+        ),
+        principal(
+            "alice",
+            "member",
+            json!({}),
+            &["w1"],
+            &[],
+            false,
+            &["p1"],
+            &[],
+        ),
         // Another system admin with other teams: team sets cannot change an
         // admin's decision, so both admins share one class.
-        principal("ivan", "system_admin", json!({}), &["w2"], &["s2"], true, &[], &[]),
+        principal(
+            "ivan",
+            "system_admin",
+            json!({}),
+            &["w2"],
+            &["s2"],
+            true,
+            &[],
+            &[],
+        ),
     ];
 
     let mut task_rows = Vec::new();
-    for workspace in [Some("w1"), Some("w2"), Some("w3"), Some("p1"), Some("p2"), None] {
+    for workspace in [
+        Some("w1"),
+        Some("w2"),
+        Some("w3"),
+        Some("p1"),
+        Some("p2"),
+        None,
+    ] {
         for spot in [None, Some(""), Some("s1"), Some("s2")] {
             for creator in [Some("alice"), Some("bob"), None] {
                 for (via, deleted) in [("finding", 0), ("web", 0), ("web", 1)] {
@@ -546,7 +656,9 @@ fn compiled_evaluator_matches_the_interpreter_on_irregular_rows() {
         panic!("owner plan compiles");
     };
     assert!(member.visible(RowView::Json(br#"{"createdBy":"alice"}"#)));
-    assert!(!member.visible(RowView::Json(br#"{"createdBy":"bob","x":[{"createdBy":"alice"}]}"#)));
+    assert!(!member.visible(RowView::Json(
+        br#"{"createdBy":"bob","x":[{"createdBy":"alice"}]}"#
+    )));
     assert!(!member.visible(RowView::Json(b"not json")));
 }
 
@@ -571,7 +683,10 @@ fn identical_principals_share_a_class_and_principal_changes_move_members() {
     );
     assert!(!Arc::ptr_eq(alice.class(), bob.class()));
     let joined = bind(8);
-    assert!(!Arc::ptr_eq(alice.class(), joined.class()), "team change moves alice");
+    assert!(
+        !Arc::ptr_eq(alice.class(), joined.class()),
+        "team change moves alice"
+    );
     let granted = bind(9);
     assert!(
         Arc::ptr_eq(alice.class(), granted.class()),
@@ -581,15 +696,25 @@ fn identical_principals_share_a_class_and_principal_changes_move_members() {
     assert!(Arc::ptr_eq(lost_spot.class(), bind(10).class()));
     assert!(!Arc::ptr_eq(alice.class(), lost_spot.class()));
     let stats = alice.scope().stats();
-    assert_eq!(stats.classes, 4, "alice/carol, bob, joined, lost spot: {stats:?}");
+    assert_eq!(
+        stats.classes, 4,
+        "alice/carol, bob, joined, lost spot: {stats:?}"
+    );
     drop((joined, lost_spot));
-    assert_eq!(alice.scope().stats().classes, 2, "dead classes leave the registry");
+    assert_eq!(
+        alice.scope().stats().classes,
+        2,
+        "dead classes leave the registry"
+    );
     // The admin class is ungated (sees rows without tokens); team classes are gated.
     assert!(alice.class().gated());
     let dave = bind(3);
     assert!(!dave.class().gated());
     let ivan = bind(11);
-    assert!(Arc::ptr_eq(dave.class(), ivan.class()), "admins share a class");
+    assert!(
+        Arc::ptr_eq(dave.class(), ivan.class()),
+        "admins share a class"
+    );
     assert_eq!(dave.class().stable_id(), ivan.class().stable_id());
     assert_ne!(alice.class().stable_id(), dave.class().stable_id());
 }
@@ -627,7 +752,10 @@ fn candidates_cover_every_member_that_sees_a_row() {
         let mut visited = 0;
         let mut seen = 0;
         for (old, new) in rows.iter().zip(rows.iter().skip(1)) {
-            let (old, new) = (scope.decode(RowView::Value(old)), scope.decode(RowView::Value(new)));
+            let (old, new) = (
+                scope.decode(RowView::Value(old)),
+                scope.decode(RowView::Value(new)),
+            );
             let candidates = scope.candidates(Some(&old), Some(&new));
             visited += candidates.classes.len() + candidates.members.len();
             for member in &members {

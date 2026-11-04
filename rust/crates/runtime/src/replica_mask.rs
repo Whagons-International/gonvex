@@ -182,7 +182,11 @@ impl Runtime {
             let mut tables = std::collections::HashSet::new();
             tables.insert(subscription.definition.table.clone());
             tables.insert("members".to_owned());
-            concern_tables(&subscription.visibility, &subscription.resolved, &mut tables);
+            concern_tables(
+                &subscription.visibility,
+                &subscription.resolved,
+                &mut tables,
+            );
             Arc::new(tables)
         }));
         let mut source = false;
@@ -390,13 +394,19 @@ impl Runtime {
                 // the parent admits its children (parent visibility reads
                 // only those columns).
                 if context.before.is_none() && !image.is_null() && !last.is_null() {
-                    let columns = Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
-                        Arc::new(parent_acl_columns(&subscription.visibility, &subscription.resolved))
-                    }));
+                    let columns =
+                        Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
+                            Arc::new(parent_acl_columns(
+                                &subscription.visibility,
+                                &subscription.resolved,
+                            ))
+                        }));
                     let unchanged = net.is_some_and(|net| {
                         !net.changed_columns.is_empty()
                             && columns.get(&change.table).is_some_and(|acl| {
-                                net.changed_columns.iter().all(|column| !acl.contains(*column))
+                                net.changed_columns
+                                    .iter()
+                                    .all(|column| !acl.contains(*column))
                             })
                     });
                     if unchanged {

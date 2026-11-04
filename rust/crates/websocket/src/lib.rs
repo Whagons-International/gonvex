@@ -3,14 +3,14 @@ mod connection;
 mod frame_limits;
 mod negotiation;
 mod shared;
-use shared::{deflate_segment, COMPRESSION_LEVEL};
-pub use shared::{BatchFrame, OutboundBatch, Segment, SharedText};
 pub use connection::{
     Backlog, OutboundLimits, SocketWatch, TrySendError, WebSocket, CLOSE_SEND_STALLED,
 };
 use connection::{Outbound, Shared, Watched, Writer};
 use frame_limits::FrameLimits;
 use futures_util::{SinkExt, StreamExt};
+use shared::{deflate_segment, COMPRESSION_LEVEL};
+pub use shared::{BatchFrame, OutboundBatch, Segment, SharedText};
 use std::{
     future::Future,
     io,
@@ -163,12 +163,18 @@ async fn plain(shared: Arc<Shared>, io: BoxIo, max_message: usize, max_frame: us
             Err(error) => Some(Err(axum::Error::new(error))),
         })
     });
-    WebSocket::start(shared, None, None, Writer::Sink(Box::pin(sink)), |shared, tx| {
-        tokio::spawn(gonvex_profiler::instrument(
-            gonvex_profiler::TaskKind::WsReader,
-            connection::read_stream(shared, Box::pin(stream), tx),
-        ))
-    })
+    WebSocket::start(
+        shared,
+        None,
+        None,
+        Writer::Sink(Box::pin(sink)),
+        |shared, tx| {
+            tokio::spawn(gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::WsReader,
+                connection::read_stream(shared, Box::pin(stream), tx),
+            ))
+        },
+    )
 }
 
 type RatchetIo = FrameLimits<Watched<BoxIo>>;

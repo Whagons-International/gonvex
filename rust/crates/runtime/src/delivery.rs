@@ -233,7 +233,9 @@ pub fn perf_legacy_encode(
 
 fn encode_item(message: &ServerMessage, native: bool) -> Result<String, DeliveryError> {
     if native {
-        if let Some(encoded) = crate::replica::native_control_message(message).map_err(|_| DeliveryError)? {
+        if let Some(encoded) =
+            crate::replica::native_control_message(message).map_err(|_| DeliveryError)?
+        {
             return serde_json::to_string(&encoded).map_err(|_| DeliveryError);
         }
     }
@@ -322,18 +324,25 @@ pub fn prewarm(
 pub fn merge_waiting_feed(
     event: crate::change_feed::FeedEvent,
     receiver: &mut Option<tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>>,
-    pending: &mut Option<Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>>,
+    pending: &mut Option<
+        Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>,
+    >,
     replicas: &std::collections::BTreeMap<String, crate::replica::ReplicaSubscription>,
     allowed: bool,
 ) -> crate::change_feed::FeedEvent {
     const MAX_MERGED: usize = 256;
-    let (Some(receiver), Some(first)) = (receiver.as_mut(), crate::change_feed::first_revision(&event)) else {
+    let (Some(receiver), Some(first)) = (
+        receiver.as_mut(),
+        crate::change_feed::first_revision(&event),
+    ) else {
         return event;
     };
     if !allowed
         || pending.is_some()
         || receiver.is_empty()
-        || replicas.values().any(|subscription| subscription.cursor.revision >= first)
+        || replicas
+            .values()
+            .any(|subscription| subscription.cursor.revision >= first)
     {
         return event;
     }
@@ -352,7 +361,9 @@ pub fn merge_waiting_feed(
                 break;
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                *pending = Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)));
+                *pending = Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(
+                    skipped,
+                )));
                 break;
             }
             Err(_) => break,

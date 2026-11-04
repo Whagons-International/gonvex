@@ -905,7 +905,10 @@ mod tests {
         assert_eq!(defaults.socket.send_buffer, Some(256 << 10));
         assert_eq!(defaults.socket.notsent_lowat, Some(128 << 10));
         assert_eq!(defaults.socket.receive_buffer, None);
-        assert_eq!(defaults.outbound, gonvex_websocket::OutboundLimits::default());
+        assert_eq!(
+            defaults.outbound,
+            gonvex_websocket::OutboundLimits::default()
+        );
         assert_eq!(defaults.outbound.stall_timeout, Duration::from_secs(30));
         let custom = config(&[
             ("GONVEX_TCP_SEND_BUFFER_BYTES", "0"),
