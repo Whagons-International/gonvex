@@ -3,11 +3,13 @@
 
 pub mod accept;
 pub mod action_calls;
+mod action_gate;
 #[cfg(test)]
 mod bridge_bench;
 pub mod change_feed;
 pub mod config;
 pub mod control;
+mod cron_profile;
 mod dashboard;
 pub mod delivery;
 pub mod feed_share;
@@ -39,6 +41,7 @@ pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
 pub mod sandbox;
+mod scheduled_lane;
 pub mod scheduler;
 mod service_principal;
 mod snapshot_ack;
@@ -116,6 +119,10 @@ struct RuntimeInner {
     parent_acl: visibility::ParentAclRegistry,
     delivery: delivery::DeliveryHub,
     permissions: permission_bits::PermissionRegistry,
+    /// Process-wide root-Action admission (`action_gate.rs`).
+    action_gate: Arc<action_gate::ActionGate>,
+    /// Tenants whose Action outbox the single drainer should visit.
+    outbox_queue: Arc<action_gate::OutboxQueue>,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -284,6 +291,8 @@ impl Runtime {
                 parent_acl: visibility::ParentAclRegistry::default(),
                 delivery: delivery::DeliveryHub::default(),
                 permissions: permission_bits::PermissionRegistry::default(),
+                action_gate: action_gate::ActionGate::from_env(),
+                outbox_queue: Arc::default(),
             }),
         }
     }
@@ -4981,6 +4990,7 @@ async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    mod action_depth;
     mod receipt_guarantee_tests;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {

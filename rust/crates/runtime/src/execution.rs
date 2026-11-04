@@ -13,7 +13,8 @@ use gonvex_module_runtime::{
     InvocationDelegationActor, InvocationProvenance, MemberIdentity, TenantIdentity,
 };
 use gonvex_store::{
-    Account, Member, SessionIdentity, TenantRoute, TenantSession, TransactionAttribution,
+    Account, Member, OutboxClaim, SessionIdentity, TenantRoute, TenantSession,
+    TransactionAttribution,
 };
 use serde_json::Value;
 use sqlx::Row;
@@ -112,6 +113,9 @@ pub(crate) struct ExecutionAccess {
     pub provenance: Option<InvocationProvenance>,
     pub module: Option<ModuleCallLease>,
     pub committed_revisions: Option<CommittedRevisionTracker>,
+    /// A root Action admitted by its caller (the outbox drainer claims a row
+    /// only after it holds the permit). Otherwise a root Action takes one.
+    pub action_permit: Option<crate::action_gate::ActionPermit>,
 }
 
 pub(crate) struct NestedExecutionAccess {
@@ -244,6 +248,7 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<Value, ExecutionError> {
+        let _user_call = crate::scheduled_lane::UserCall::enter(crate::cron_profile::active());
         let _profile = gonvex_profiler::ScopeTimer::new(
             gonvex_profiler::Stage::FnTotal,
             gonvex_profiler::Label::Query,
@@ -413,7 +418,13 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
-        let profile_label = gonvex_profiler::Label::classify("reducer", path);
+        let scheduled = crate::cron_profile::active();
+        let _user_call = crate::scheduled_lane::UserCall::enter(scheduled);
+        let profile_label = if scheduled {
+            gonvex_profiler::Label::Cron
+        } else {
+            gonvex_profiler::Label::classify("reducer", path)
+        };
         let _profile =
             gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::FnTotal, profile_label);
         let mut profile_timer = gonvex_profiler::Timer::start();
@@ -505,15 +516,10 @@ impl Runtime {
             .with_profile_label(profile_label)
             .with_intent(&session.route.tenant_id, command_id)
             .with_schema(&module.schema)
-            .with_schedulable_functions(
-                module
-                    .functions
-                    .iter()
-                    .filter(|(_, definition)| {
-                        matches!(definition.kind.as_str(), "reducer" | "action")
-                    })
-                    .map(|(path, _)| path.clone()),
-            )
+            // Every Reducer call used to copy all ~2,000 function names into
+            // a fresh BTreeSet here; the module's own table answers the same
+            // question.
+            .with_schedulable_module(module.shared())
             .with_actor(
                 &session.identity.account.id,
                 &session.identity.account.email,
@@ -547,11 +553,13 @@ impl Runtime {
         }
         invocation.context.intent_entropy = access.intent_entropy;
         let profile_prepare = profile_timer.lap(gonvex_profiler::Stage::FnPrepare, profile_label);
+        let invoke_timer = crate::cron_profile::InvokeTimer::start(scheduled);
         let result = self
             .inner
             .module_host
             .invoke(invocation, &mut handler)
             .await;
+        drop(invoke_timer);
         let fault = handler.transient_fault();
         match result {
             Ok(value) => {
@@ -579,7 +587,35 @@ impl Runtime {
                 }
                 profile_timer.skip();
                 let (invoke_times, writer_wait, sql) = handler.profile_times();
-                let finished = handler.finish_with_revision(true).await;
+                let writer_acquired = handler.writer_acquired_ns();
+                let finished = handler.finish_with_outcome(true).await;
+                if scheduled {
+                    crate::cron_profile::add(|run| &run.host_calls, invoke_times.host_call_count);
+                    if writer_acquired != 0 {
+                        crate::cron_profile::add(
+                            |run| &run.writer_hold_ns,
+                            gonvex_profiler::now_ns().saturating_sub(writer_acquired),
+                        );
+                    }
+                    if let Ok(outcome) = &finished {
+                        crate::cron_profile::add(|run| &run.rows_written, outcome.changes);
+                        if outcome.revision.is_some() {
+                            crate::cron_profile::add(|run| &run.revisions, 1);
+                            crate::cron_profile::add(
+                                |run| &run.fanout,
+                                self.inner
+                                    .change_feeds
+                                    .receiver_count(&session.route.database_url)
+                                    as u64,
+                            );
+                        }
+                    }
+                }
+                let (members_changed, outbox_written) =
+                    finished.as_ref().map_or((false, false), |outcome| {
+                        (outcome.members_changed, outcome.outbox_written)
+                    });
+                let finished = finished.map(|outcome| outcome.revision);
                 let profile_finish =
                     profile_timer.lap(gonvex_profiler::Stage::FnFinish, profile_label);
                 let profile_total = profile_started.elapsed_ns();
@@ -609,18 +645,22 @@ impl Runtime {
                         ExecutionError::HostCall(error)
                     }
                 })?;
-                self.inner.membership_projector.wake();
+                // Only commits that changed `members` give the membership
+                // projector work, and only commits that wrote the Action
+                // outbox give the drain work; the projector's periodic pass
+                // and the 30-second outbox sweep remain the safety nets. A
+                // no-op cron used to wake both: a full scan of every tenant's
+                // membership outbox and a writer claim on its own outbox.
+                if members_changed {
+                    self.inner.membership_projector.wake();
+                }
                 if let Some(tracker) = committed_revisions {
                     tracker.observe(committed_revision);
                 }
-                let runtime = self.clone();
-                let session = session.clone();
-                tokio::spawn(gonvex_profiler::instrument(
-                    gonvex_profiler::TaskKind::Outbox,
-                    async move {
-                        runtime.drain_action_outbox(session).await;
-                    },
-                ));
+                if outbox_written {
+                    // Queue the tenant for the single drainer; no task per commit.
+                    self.wake_outbox(session.clone());
+                }
                 Ok(ReducerExecution {
                     value,
                     committed_revision,
@@ -634,7 +674,14 @@ impl Runtime {
                         .await;
                 }
                 // A rollback that fails means the connection itself is gone.
+                let writer_acquired = handler.writer_acquired_ns();
                 let rolled_back = handler.finish(false).await.is_ok();
+                if scheduled && writer_acquired != 0 {
+                    crate::cron_profile::add(
+                        |run| &run.writer_hold_ns,
+                        gonvex_profiler::now_ns().saturating_sub(writer_acquired),
+                    );
+                }
                 let error = ExecutionError::from(error);
                 if !rolled_back || fault.observed() {
                     Err(ExecutionError::Transient(Box::new(error)))
@@ -696,11 +743,17 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ActionExecution, ExecutionError> {
+        let _user_call = crate::scheduled_lane::UserCall::enter(crate::cron_profile::active());
         let _profile = gonvex_profiler::ScopeTimer::new(
             gonvex_profiler::Stage::FnTotal,
-            gonvex_profiler::Label::Action,
+            if crate::cron_profile::active() {
+                gonvex_profiler::Label::Cron
+            } else {
+                gonvex_profiler::Label::Action
+            },
         );
         let committed_revisions = access.committed_revisions.clone().unwrap_or_default();
+        let preadmitted = access.action_permit;
         let module = match access.module {
             Some(module) => module,
             None => self
@@ -751,6 +804,9 @@ impl Runtime {
         if !provenance.action_stack.iter().any(|item| item == path) {
             provenance.action_stack.push(path.to_owned());
         }
+        // Root Actions run one at a time process-wide (`action_gate.rs`);
+        // nested ones run inside their root's permit.
+        let root_action = provenance.depth == 0;
         let mut handler = ActionHostCalls::new(
             self.clone(),
             session.clone(),
@@ -782,7 +838,29 @@ impl Runtime {
         invocation.context.environment = environment;
         invocation.context.action_tools = handler.tools();
         let deadline = invocation.context.deadline_unix_ms;
-        let call = self.inner.module_host.invoke(invocation, &mut handler);
+        let gate = &self.inner.action_gate;
+        let call = async {
+            // Waiting for the permit counts against an anonymous Action's
+            // deadline (the timeout below) but not as V8 time.
+            let _permit = match preadmitted {
+                Some(permit) => Some(permit),
+                None if root_action => Some(
+                    gate.acquire(if crate::cron_profile::active() {
+                        crate::action_gate::ActionClass::Cron
+                    } else {
+                        crate::action_gate::ActionClass::User
+                    })
+                    .await,
+                ),
+                None => None,
+            };
+            let _invoke_timer =
+                crate::cron_profile::InvokeTimer::start(crate::cron_profile::active());
+            self.inner
+                .module_host
+                .invoke(invocation, &mut handler)
+                .await
+        };
         let value = if session.is_anonymous() {
             // The host's engine watchdog has transport slack. Do not let that
             // grace period keep an anonymous connection's serial loop occupied.
@@ -942,115 +1020,89 @@ impl Runtime {
         Ok(result)
     }
 
-    pub(crate) async fn drain_action_outbox(&self, fallback_session: TenantSession) {
+    /// Queues a tenant for the outbox drainer and makes sure it runs.
+    pub(crate) fn wake_outbox(&self, session: TenantSession) {
+        self.inner.outbox_queue.push(session);
+        if self.inner.outbox_queue.claim_start() {
+            let weak = Arc::downgrade(&self.inner);
+            self.inner
+                .scheduler
+                .spawn_on_lane(gonvex_profiler::instrument(
+                    gonvex_profiler::TaskKind::Outbox,
+                    run_outbox_drainer(weak),
+                ));
+        }
+    }
+
+    /// One drain turn for a tenant: promote due scheduled-job rows, then,
+    /// holding the Action permit, claim and deliver at most one Action.
+    /// Returns whether the tenant may have more due work (it then goes to the
+    /// back of the queue).
+    pub(crate) async fn drain_outbox_turn(&self, fallback_session: &TenantSession) -> bool {
         let Some(control) = self.inner.control_plane.read().await.clone() else {
-            return;
+            return false;
         };
+        let route = &fallback_session.route;
+        // A read-only probe first: an idle tenant costs no writer claim.
+        let (schedules, actions) = control
+            .outbox_due(route, SCHEDULE_OUTBOX_PATH)
+            .await
+            .unwrap_or((true, true));
+        let mut more = false;
+        if schedules {
+            more = self.promote_due_schedules(&control, fallback_session).await;
+        }
+        if !actions {
+            return more;
+        }
+        // Claim only once the permit is held, so the backlog waits in SQLite
+        // and a claimed row's lease never runs down in a queue.
+        let permit = self
+            .inner
+            .action_gate
+            .acquire(crate::action_gate::ActionClass::Outbox)
+            .await;
+        let claimed = match control
+            .claim_outbox(route, OutboxClaim::NotPath(SCHEDULE_OUTBOX_PATH))
+            .await
+        {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) | Err(_) => return more,
+        };
+        self.deliver_outbox_action(&control, fallback_session, claimed, permit)
+            .await;
+        true
+    }
+
+    /// Moves due `runAfter`/`runAt` rows from the outbox to the scheduler (no
+    /// V8, no permit). Returns whether the batch limit was hit.
+    async fn promote_due_schedules(
+        &self,
+        control: &gonvex_store::ControlPlane,
+        fallback_session: &TenantSession,
+    ) -> bool {
         for _ in 0..100 {
-            let claimed = match control.claim_action(&fallback_session.route).await {
+            let claimed = match control
+                .claim_outbox(
+                    &fallback_session.route,
+                    OutboxClaim::Path(SCHEDULE_OUTBOX_PATH),
+                )
+                .await
+            {
                 Ok(Some(claimed)) => claimed,
-                Ok(None) | Err(_) => return,
+                Ok(None) | Err(_) => return false,
             };
-            if claimed.path == SCHEDULE_OUTBOX_PATH {
-                let result = self
-                    .promote_scheduled_outbox(&fallback_session, &claimed)
-                    .await;
-                match result {
-                    Ok(()) => {
-                        if control
-                            .complete_action(&fallback_session.route, &claimed.id)
-                            .await
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = control
-                            .retry_action(
-                                &fallback_session.route,
-                                &claimed.id,
-                                claimed.attempts,
-                                &error,
-                            )
-                            .await;
-                        // No inline sleep: the claim skips Actions that are not
-                        // due, so one failing Action no longer delays the rest.
-                    }
-                }
-                continue;
-            }
-            let session = if claimed.actor_account_id.starts_with("_gonvex_") {
-                Ok(fallback_session.clone())
-            } else {
-                // Durable work keeps attribution, not stale authority. Resolve
-                // the tenant Member again before the Action can call a Query
-                // or Reducer, including when the original actor matches the
-                // session that happened to start this drain.
-                control
-                    .tenant_session_for_account(
-                        &fallback_session.identity.project_id,
-                        &fallback_session.route.tenant_id,
-                        &claimed.actor_account_id,
-                    )
-                    .await
-            };
-            let delivery = async {
-                match session {
-                    Ok(session) => {
-                        let mut provenance = serde_json::from_value::<InvocationProvenance>(
-                            claimed.provenance.clone(),
-                        )
-                        .unwrap_or_else(|_| {
-                            direct_provenance(&session, InvocationChannel::System, &claimed.id, "")
-                        });
-                        // Durable work starts after the queuing transaction,
-                        // possibly after a restart. Its old deadline is not valid.
-                        provenance.deadline_unix_ms = None;
-                        provenance.parent_command_id = Some(provenance.command_id.clone());
-                        provenance.command_id = format!("outbox-{}", claimed.id);
-                        provenance.channel = InvocationChannel::System;
-                        provenance.depth = provenance.depth.saturating_add(1);
-                        self.execute_tenant_action_with_access(
-                            &session,
-                            &claimed.path,
-                            claimed.args.clone(),
-                            ExecutionAccess {
-                                provenance: Some(provenance),
-                                ..ExecutionAccess::default()
-                            },
-                        )
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                    }
-                    Err(error) => Err(error.to_string()),
-                }
-            };
-            tokio::pin!(delivery);
-            let mut renewal = tokio::time::interval(std::time::Duration::from_secs(30));
-            renewal.tick().await;
-            let result = loop {
-                tokio::select! {
-                    result = &mut delivery => break result,
-                    _ = renewal.tick() => {
-                        if !matches!(control.renew_action(&fallback_session.route, &claimed.id, claimed.attempts).await, Ok(true)) {
-                            // Drop this delivery without modifying a newer owner's
-                            // claim. A failed renewal leaves durable work recoverable.
-                            eprintln!("Action delivery lost its queue lease; leaving it for recovery");
-                            return;
-                        }
-                    }
-                }
-            };
-            match result {
+            match self
+                .promote_scheduled_outbox(fallback_session, &claimed)
+                .await
+            {
                 Ok(()) => {
                     if control
                         .complete_action(&fallback_session.route, &claimed.id)
                         .await
                         .is_err()
                     {
-                        return;
+                        return false;
                     }
                 }
                 Err(error) => {
@@ -1062,9 +1114,120 @@ impl Runtime {
                             &error,
                         )
                         .await;
-                    // No inline sleep: the claim skips Actions that are not
-                    // due, so one failing Action no longer delays the rest.
                 }
+            }
+        }
+        true
+    }
+
+    async fn deliver_outbox_action(
+        &self,
+        control: &gonvex_store::ControlPlane,
+        fallback_session: &TenantSession,
+        claimed: gonvex_store::ClaimedAction,
+        permit: crate::action_gate::ActionPermit,
+    ) {
+        let mut provenance =
+            match serde_json::from_value::<InvocationProvenance>(claimed.provenance.clone()) {
+                Ok(provenance) => Some(provenance),
+                Err(_) => None,
+            };
+        if let Some(provenance) = provenance.as_mut() {
+            if let Err(error) = provenance.durable_hop(max_durable_hops()) {
+                // A loop guard, not a transient failure: retrying would only
+                // repeat it. Drop the row and say so.
+                tracing::error!(
+                    action = %claimed.path,
+                    id = %claimed.id,
+                    error = %error,
+                    "dropping outbox Action"
+                );
+                let _ = control
+                    .complete_action(&fallback_session.route, &claimed.id)
+                    .await;
+                return;
+            }
+        }
+        let session = if claimed.actor_account_id.starts_with("_gonvex_") {
+            Ok(fallback_session.clone())
+        } else {
+            // Durable work keeps attribution, not stale authority. Resolve
+            // the tenant Member again before the Action can call a Query
+            // or Reducer, including when the original actor matches the
+            // session that happened to start this drain.
+            control
+                .tenant_session_for_account(
+                    &fallback_session.identity.project_id,
+                    &fallback_session.route.tenant_id,
+                    &claimed.actor_account_id,
+                )
+                .await
+        };
+        let delivery = async {
+            match session {
+                Ok(session) => {
+                    let mut provenance = provenance.unwrap_or_else(|| {
+                        let mut provenance =
+                            direct_provenance(&session, InvocationChannel::System, &claimed.id, "");
+                        provenance.durable_hops = 1;
+                        provenance
+                    });
+                    // Durable work starts after the queuing transaction,
+                    // possibly after a restart. Its old deadline is not valid.
+                    provenance.deadline_unix_ms = None;
+                    provenance.parent_command_id = Some(provenance.command_id.clone());
+                    provenance.command_id = format!("outbox-{}", claimed.id);
+                    provenance.channel = InvocationChannel::System;
+                    self.execute_tenant_action_with_access(
+                        &session,
+                        &claimed.path,
+                        claimed.args.clone(),
+                        ExecutionAccess {
+                            provenance: Some(provenance),
+                            action_permit: Some(permit),
+                            ..ExecutionAccess::default()
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        tokio::pin!(delivery);
+        let mut renewal = tokio::time::interval(std::time::Duration::from_secs(30));
+        renewal.tick().await;
+        let result = loop {
+            tokio::select! {
+                result = &mut delivery => break result,
+                _ = renewal.tick() => {
+                    if !matches!(control.renew_action(&fallback_session.route, &claimed.id, claimed.attempts).await, Ok(true)) {
+                        // Drop this delivery without modifying a newer owner's
+                        // claim. A failed renewal leaves durable work recoverable.
+                        eprintln!("Action delivery lost its queue lease; leaving it for recovery");
+                        return;
+                    }
+                }
+            }
+        };
+        match result {
+            Ok(()) => {
+                let _ = control
+                    .complete_action(&fallback_session.route, &claimed.id)
+                    .await;
+            }
+            Err(error) => {
+                let _ = control
+                    .retry_action(
+                        &fallback_session.route,
+                        &claimed.id,
+                        claimed.attempts,
+                        &error,
+                    )
+                    .await;
+                // No inline sleep: the claim skips Actions that are not
+                // due, so one failing Action no longer delays the rest.
             }
         }
     }
@@ -1130,12 +1293,56 @@ impl Runtime {
                 continue;
             };
             for route in routes {
-                self.drain_action_outbox(system_tenant_session(project_id, route))
-                    .await;
+                self.wake_outbox(system_tenant_session(project_id, route));
             }
         }
     }
 }
+
+/// The single outbox drainer (scheduled-work thread). It holds the runtime
+/// only while it works, so a dropped runtime ends it.
+async fn run_outbox_drainer(runtime: std::sync::Weak<crate::RuntimeInner>) {
+    loop {
+        let queue = match runtime.upgrade() {
+            Some(inner) => Arc::clone(&inner.outbox_queue),
+            None => return,
+        };
+        if queue.len() == 0 {
+            // `notify_one` keeps a permit, so a push since the check wakes this.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), queue.notified()).await;
+            continue;
+        }
+        let Some(inner) = runtime.upgrade() else {
+            return;
+        };
+        let runtime_now = Runtime { inner };
+        if runtime_now.inner.scheduler.is_stopped() {
+            return;
+        }
+        if let Some(session) = queue.pop() {
+            if runtime_now.drain_outbox_turn(&session).await {
+                // Rotate: the tenant waits behind every other queued tenant.
+                queue.push(session);
+            }
+        }
+    }
+}
+
+/// Bound on durable hops (`GONVEX_MAX_DURABLE_HOPS`, default
+/// `MAX_DURABLE_HOPS`).
+pub(crate) fn max_durable_hops() -> u8 {
+    static VALUE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("GONVEX_MAX_DURABLE_HOPS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u8>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(gonvex_module_runtime::MAX_DURABLE_HOPS)
+    })
+}
+
+/// The account id of `system_tenant_session` (crons, sweeps).
+pub(crate) const SYSTEM_ACCOUNT_ID: &str = "_gonvex_system";
 
 pub(crate) fn system_tenant_session(project: &str, route: TenantRoute) -> TenantSession {
     TenantSession {
@@ -1300,6 +1507,7 @@ pub(crate) fn direct_provenance(
         tool_call_id: None,
         artifact_hash: artifact_hash.to_owned(),
         depth: 0,
+        durable_hops: 0,
         action_stack: Vec::new(),
         deadline_unix_ms: None,
         delegation,
@@ -1377,6 +1585,7 @@ fn delegated_provenance(
         tool_call_id: parent.tool_call_id.clone(),
         artifact_hash: artifact_hash.to_owned(),
         depth: parent.depth.saturating_add(1),
+        durable_hops: parent.durable_hops,
         action_stack: parent.action_stack.clone(),
         deadline_unix_ms: parent.deadline_unix_ms,
         // The re-admitted session is built from the account alone, so the

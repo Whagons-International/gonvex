@@ -304,4 +304,6 @@ export type ModuleCron = {
   scope: "project" | "tenant";
   intervalMs?: number;
   expression?: string;
+  /** Read-only SQL pre-check (`$1` = now, Unix ms); the run enters V8 only when it is truthy. */
+  dueWhen?: string;
 };

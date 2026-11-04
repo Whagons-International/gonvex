@@ -113,7 +113,12 @@ impl IsolatePool {
         evicted.len()
     }
 
-    /// Live idle isolates, for tests and diagnostics.
+    /// Live idle isolates, for diagnostics.
+    pub(crate) fn idle(&self) -> usize {
+        self.idle.lock().expect("isolate pool lock").len()
+    }
+
+    /// Live idle isolates, for tests.
     #[cfg(test)]
     pub(crate) fn idle_count(&self) -> usize {
         self.idle.lock().expect("isolate pool lock").len()

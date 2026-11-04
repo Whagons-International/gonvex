@@ -254,6 +254,14 @@ pub struct RuntimeManifestRecord {
     pub manifest: Value,
 }
 
+/// Which outbox rows `claim_outbox` may claim.
+#[derive(Clone, Copy, Debug)]
+pub enum OutboxClaim<'a> {
+    Any,
+    Path(&'a str),
+    NotPath(&'a str),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClaimedAction {
     pub id: String,
@@ -1115,6 +1123,51 @@ impl ControlPlane {
         &self,
         route: &TenantRoute,
     ) -> Result<Option<ClaimedAction>, DatabaseError> {
+        self.claim_outbox(route, OutboxClaim::Any).await
+    }
+
+    /// Whether due (or lease-expired) outbox rows exist: `(rows whose path
+    /// is `path`, all other rows)`. Read-only; lets the drainer skip writer
+    /// claims for a tenant with nothing to do.
+    pub async fn outbox_due(
+        &self,
+        route: &TenantRoute,
+        path: &str,
+    ) -> Result<(bool, bool), DatabaseError> {
+        let pool = self.pools.pool(&route.database_url).await?;
+        let _admission = self.pools.admit(&route.database_url).await?;
+        let row = sqlx::query(concat!(
+            r#"SELECT COALESCE(MAX(action_path = $1), 0) AS matching,
+                      COALESCE(MAX(action_path <> $1), 0) AS other
+               FROM _gonvex_action_outbox
+               WHERE (status = 'pending' AND available_at <= "#,
+            now_ms!(),
+            r#")
+                  OR (status = 'processing' AND locked_at < "#,
+            now_ms!(),
+            r#" - 300000)"#
+        ))
+        .bind(path)
+        .fetch_one(&pool)
+        .await?;
+        Ok((
+            row.get::<i64, _>("matching") != 0,
+            row.get::<i64, _>("other") != 0,
+        ))
+    }
+
+    /// Claims the next due outbox row of one kind: `Path(p)` only rows whose
+    /// path is `p`, `NotPath(p)` every other row.
+    pub async fn claim_outbox(
+        &self,
+        route: &TenantRoute,
+        claim: OutboxClaim<'_>,
+    ) -> Result<Option<ClaimedAction>, DatabaseError> {
+        let (path, want_match) = match claim {
+            OutboxClaim::Any => (None, true),
+            OutboxClaim::Path(path) => (Some(path), true),
+            OutboxClaim::NotPath(path) => (Some(path), false),
+        };
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
         let row = sqlx::query(concat!(
@@ -1123,18 +1176,21 @@ impl ControlPlane {
             r#", attempts = attempts + 1
                WHERE id = (
                  SELECT id FROM _gonvex_action_outbox
-                 WHERE (status = 'pending' AND available_at <= "#,
+                 WHERE ((status = 'pending' AND available_at <= "#,
             now_ms!(),
             r#")
                     OR (status = 'processing' AND locked_at < "#,
             now_ms!(),
-            r#" - 300000)
+            r#" - 300000))
+                   AND ($1 IS NULL OR (action_path = $1) = $2)
                  ORDER BY available_at, created_at LIMIT 1)
                RETURNING id, action_path, args,
                          COALESCE(actor_user_id, '') AS actor_account_id,
                          COALESCE(actor_email, '') AS actor_email,
                          attempts AS next_attempt, provenance"#
         ))
+        .bind(path)
+        .bind(want_match)
         .fetch_optional(&pool)
         .await?;
         Ok(row.map(|row| ClaimedAction {
@@ -1258,6 +1314,24 @@ pub struct TenantTransaction {
     /// Function class for the commit-stage histograms.
     profile_label: gonvex_profiler::Label,
     _writer_held: Option<gonvex_profiler::GaugeGuard>,
+    /// The writer's per-database stats (carries the change-feed flag).
+    writer_stats: Option<Arc<registry::WriterStats>>,
+    /// An Action-outbox row was written in this transaction.
+    outbox_written: bool,
+}
+
+/// What a commit published.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommitOutcome {
+    /// The revision, when the transaction changed tracked rows.
+    pub revision: Option<u64>,
+    /// Change rows in that revision.
+    pub changes: u64,
+    /// The revision changed `members` (the membership directory projection
+    /// has work).
+    pub members_changed: bool,
+    /// The transaction wrote an Action-outbox row (the outbox has work).
+    pub outbox_written: bool,
 }
 
 /// The connection locked out of sqlx's worker for direct statements. The
@@ -1296,11 +1370,11 @@ pub async fn begin_transaction(
     use gonvex_profiler::{Label, Stage, Timer};
     let admission = pools.admit(database_url).await?;
     let database = pools.database(database_url).await?;
-    let (transaction, statements, writer_held) = if read_only {
+    let (transaction, statements, writer_held, writer_stats) = if read_only {
         let mut timer = Timer::start();
         let transaction = database.reader.begin().await?;
         timer.lap(Stage::ReaderBegin, Label::None);
-        (transaction, None, None)
+        (transaction, None, None, None)
     } else {
         let stats = database.writer_stats.clone();
         let waiting = stats.enter();
@@ -1313,6 +1387,7 @@ pub async fn begin_transaction(
             transaction,
             Some(database.statements),
             Some(gonvex_profiler::gauge(gonvex_profiler::GaugeId::WriterHeld).guard()),
+            Some(stats),
         )
     };
     Ok(TenantTransaction {
@@ -1327,6 +1402,8 @@ pub async fn begin_transaction(
         failed: Arc::default(),
         profile_label: Label::None,
         _writer_held: writer_held,
+        writer_stats,
+        outbox_written: false,
     })
 }
 
@@ -1487,6 +1564,7 @@ impl TenantTransaction {
         actor_email: &str,
         provenance: &Value,
     ) -> Result<String, DatabaseError> {
+        self.outbox_written = true;
         use direct::Bind::Text;
         let (args, provenance) = (args.to_string(), provenance.to_string());
         self.with_direct(|conn| {
@@ -1581,12 +1659,22 @@ impl TenantTransaction {
             reference_integrity::flush(&mut *self.transaction()).await?;
         }
         let provenance = self.provenance.clone();
-        self.with_direct(|conn| feed::finalize_direct(conn, &provenance))
-            .await
+        let stats = self.writer_stats.clone();
+        self.with_direct(move |conn| {
+            feed::finalize_direct(conn, &provenance, stats.as_deref().map(|stats| &stats.has_feed))
+        })
+        .await
     }
 
     /// Commits and returns the revision it published, if it changed rows.
-    pub async fn commit_with_revision(mut self) -> Result<Option<u64>, DatabaseError> {
+    pub async fn commit_with_revision(self) -> Result<Option<u64>, DatabaseError> {
+        self.commit_with_outcome()
+            .await
+            .map(|outcome| outcome.revision)
+    }
+
+    /// Commits and returns the published revision with its change-row count.
+    pub async fn commit_with_outcome(mut self) -> Result<CommitOutcome, DatabaseError> {
         let failed = self.failure().take();
         if let Some(reason) = failed {
             self.release_direct();
@@ -1618,7 +1706,14 @@ impl TenantTransaction {
             pools.durable(database_url).await?;
             timer.lap(Stage::CommitFsync, label);
         }
-        let revision = notice.as_ref().map(|notice| notice.revision);
+        let outcome = CommitOutcome {
+            revision: notice.as_ref().map(|notice| notice.revision),
+            changes: notice.as_ref().map_or(0, |notice| notice.changes),
+            members_changed: notice
+                .as_ref()
+                .is_some_and(|notice| notice.tables.iter().any(|table| table == "members")),
+            outbox_written: self.outbox_written,
+        };
         if let (Some(notice), Some((pools, database_url))) = (notice, self.publisher.take()) {
             pools
                 .notify(&database_url, feed::CHANGE_FEED_CHANNEL, &notice.payload())
@@ -1628,7 +1723,7 @@ impl TenantTransaction {
             timer.lap(Stage::CommitPublish, label);
             self.committed = Some(notice);
         }
-        Ok(revision)
+        Ok(outcome)
     }
 
     pub async fn commit(self) -> Result<(), DatabaseError> {

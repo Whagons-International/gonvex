@@ -201,6 +201,39 @@ pub fn profile_json(runtime: &crate::Runtime) -> Value {
         "watchdog": {"probeSilentMs": ms(silent_ns), "stalls": stalls},
         "longPolls": {"total": gonvex_profiler::long_poll_total(), "recent": long_polls},
         "slowTraces": slow_traces_json(),
+        "crons": crons_json(),
+        "actions": actions_json(runtime),
+    })
+}
+
+/// The Action permit per class, the outbox drain queue and live V8 isolates
+/// of this process (in-process bridge; 0 with the separate module host).
+fn actions_json(runtime: &crate::Runtime) -> Value {
+    let gate = &runtime.inner.action_gate;
+    let classes = ["user", "outbox", "cron"];
+    let snapshot = gate.snapshot();
+    let (isolates, complete) = gonvex_module_runtime_v8::live_isolates();
+    json!({
+        "capacity": gate.capacity(),
+        "classes": classes.iter().zip(snapshot).map(|(name, (running, waiting, admitted))| json!({
+            "class": name, "running": running, "waiting": waiting, "admitted": admitted,
+        })).collect::<Vec<_>>(),
+        "outboxQueuedTenants": runtime.inner.outbox_queue.len(),
+        "v8Isolates": isolates,
+        "v8CompleteIsolates": complete,
+    })
+}
+
+/// Per-cron totals since start (`gonvex_profiler::cron`), one row per cron
+/// that ran; `(one-shot)` is runAt/runAfter/wakeAt work.
+fn crons_json() -> Value {
+    json!({
+        "fields": gonvex_profiler::cron::CRON_FIELDS,
+        "rows": gonvex_profiler::cron::snapshot().into_iter().map(|row| json!({
+            "slot": row.slot,
+            "name": row.name,
+            "values": row.values,
+        })).collect::<Vec<_>>(),
     })
 }
 
