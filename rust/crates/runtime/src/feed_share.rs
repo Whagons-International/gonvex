@@ -168,6 +168,8 @@ struct Recent {
     /// The same shares by revision (a revision may have several: the
     /// broadcast images and copies re-read from the log).
     by_revision: crate::fast_hash::FastMap<u64, Vec<Arc<EventShare>>>,
+    /// Shares created since the last full sweep.
+    since_sweep: usize,
 }
 
 impl Recent {
@@ -220,6 +222,13 @@ impl EventShares {
             layout: Default::default(),
             outcomes: Mutex::default(),
         });
+        SHARES_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if Arc::strong_count(changes) <= 2 {
+            // Only the caller (and this share) hold these images: a
+            // connection's own merged catch-up event. No other connection can
+            // present this `Arc`, so keeping the share would only cost memory.
+            return Some(share);
+        }
         let recent = &mut *recent;
         recent.order.push_back(Arc::clone(&share));
         recent
@@ -227,12 +236,32 @@ impl EventShares {
             .entry(revision)
             .or_default()
             .push(Arc::clone(&share));
-        SHARES_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Beyond the newest few, drop shares whose images nobody else holds
         // (only this share and the index hold them: no connection can still
         // receive that `Arc`), and the oldest past the cap. Swept from the
         // front, so the cost per event is the number dropped (+1).
         let before = recent.order.len();
+        // Every 64 creations, also drop unused shares behind a used one at the
+        // front (merged and refilled catch-up events each get a short-lived
+        // share; one old event still applied must not pin all of them).
+        recent.since_sweep += 1;
+        if recent.since_sweep >= 64 {
+            recent.since_sweep = 0;
+            let keep_from = recent.order.len().saturating_sub(KEEP_EVENTS);
+            let mut index = 0;
+            let mut dropped = Vec::new();
+            recent.order.retain(|share| {
+                let keep = index >= keep_from || Arc::strong_count(&share.changes) > 1;
+                index += 1;
+                if !keep {
+                    dropped.push(Arc::clone(share));
+                }
+                keep
+            });
+            for share in &dropped {
+                recent.forget(share);
+            }
+        }
         while recent.order.len() > KEEP_EVENTS {
             let front = &recent.order[0];
             let unused = Arc::strong_count(&front.changes) <= 1;
