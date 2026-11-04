@@ -60,6 +60,13 @@ pub struct CacheConfig {
     pub roll_revisions: u64,
     /// Rebuild from SQL when the last SQL build is older than this.
     pub max_age: Duration,
+    /// Sparse entries: an entry of at least `sparse_min_rows` rows whose
+    /// opens admit on average fewer than 1/`sparse_ratio` of its rows (after
+    /// 3 opens) is dropped, and opens of its key read SQL (the member's
+    /// visibility as an indexed predicate) for `sparse_hold`. 0 disables.
+    pub sparse_min_rows: usize,
+    pub sparse_ratio: u64,
+    pub sparse_hold: Duration,
 }
 
 impl CacheConfig {
@@ -78,6 +85,12 @@ impl CacheConfig {
             roll_revisions: number("GONVEX_SNAPSHOT_CACHE_ROLL_REVISIONS").unwrap_or(64),
             max_age: Duration::from_secs(
                 number("GONVEX_SNAPSHOT_CACHE_MAX_AGE_SECS").unwrap_or(900),
+            ),
+            sparse_min_rows: number("GONVEX_SNAPSHOT_CACHE_SPARSE_MIN_ROWS").unwrap_or(1000)
+                as usize,
+            sparse_ratio: number("GONVEX_SNAPSHOT_CACHE_SPARSE_RATIO").unwrap_or(50),
+            sparse_hold: Duration::from_secs(
+                number("GONVEX_SNAPSHOT_CACHE_SPARSE_HOLD_SECS").unwrap_or(600),
             ),
         }
     }
@@ -362,6 +375,13 @@ struct Slot {
     /// Per-key counters (diagnostics: `/dev/metrics` `memory.snapshotCache`).
     hits: u64,
     builds: u64,
+    /// Opens evaluated against this key's entries, the rows they admitted
+    /// and the rows they evaluated (sparse detection).
+    observed: u64,
+    admitted: u64,
+    scanned: u64,
+    /// Opens of this key skip the cache until then (a sparse entry).
+    sparse_until: Option<Instant>,
 }
 
 impl Slot {
@@ -372,7 +392,21 @@ impl Slot {
             last_used: 0,
             hits: 0,
             builds: 0,
+            observed: 0,
+            admitted: 0,
+            scanned: 0,
+            sparse_until: None,
         }
+    }
+
+    fn sparse(&self) -> bool {
+        self.sparse_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Kept while it holds an entry, a build is in flight or it is sparse.
+    fn live(&self) -> bool {
+        self.entry.is_some() || Arc::strong_count(&self.build) > 1 || self.sparse()
     }
 }
 
@@ -389,6 +423,10 @@ pub struct EntryReport {
     pub builds: u64,
     pub revision: u64,
     pub age_secs: u64,
+    /// Opens evaluated, rows they admitted, rows they evaluated.
+    pub observed: u64,
+    pub admitted: u64,
+    pub scanned: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -413,6 +451,9 @@ pub struct SnapshotCache {
     evictions: AtomicU64,
     /// Distinct keys ever given a slot.
     keys: AtomicU64,
+    /// Entries dropped as sparse, and opens that skipped a sparse key.
+    sparse_drops: AtomicU64,
+    sparse_skips: AtomicU64,
     disabled: std::sync::atomic::AtomicBool,
 }
 
@@ -501,6 +542,9 @@ impl SnapshotCache {
                     builds: slot.builds,
                     revision: entry.revision,
                     age_secs: entry.built.elapsed().as_secs(),
+                    observed: slot.observed,
+                    admitted: slot.admitted,
+                    scanned: slot.scanned,
                 })
             })
             .collect::<Vec<_>>();
@@ -511,6 +555,42 @@ impl SnapshotCache {
     /// Distinct keys ever given a slot.
     pub fn keys_seen(&self) -> u64 {
         self.keys.load(Relaxed)
+    }
+
+    /// (entries dropped as sparse, opens that skipped a sparse key).
+    pub fn sparse_counts(&self) -> (u64, u64) {
+        (self.sparse_drops.load(Relaxed), self.sparse_skips.load(Relaxed))
+    }
+
+    /// Records what one open of `key` admitted out of the entry rows it
+    /// evaluated. A large entry whose opens keep admitting a small share is
+    /// dropped and its key skips the cache for a while: every open would
+    /// otherwise evaluate (and every roll-forward copy) all of its rows,
+    /// while SQL finds the member's few rows through an index.
+    pub(crate) fn observe(&self, key: &CacheKey<'_>, admitted: usize, scanned: usize) {
+        let config = config();
+        let mut slots = self.slots.lock().unwrap();
+        let Some(slot) = slots.get_mut(&key.owned()) else {
+            return;
+        };
+        slot.observed += 1;
+        slot.admitted += admitted as u64;
+        slot.scanned += scanned as u64;
+        if Self::sparse_verdict(slot, config) {
+            slot.entry = None;
+            slot.sparse_until = Some(Instant::now() + config.sparse_hold);
+            slot.observed = 0;
+            slot.admitted = 0;
+            slot.scanned = 0;
+            self.sparse_drops.fetch_add(1, Relaxed);
+        }
+    }
+
+    fn sparse_verdict(slot: &Slot, config: &CacheConfig) -> bool {
+        config.sparse_ratio > 0
+            && slot.observed >= 3
+            && slot.scanned / slot.observed >= config.sparse_min_rows as u64
+            && slot.admitted.saturating_mul(config.sparse_ratio) < slot.scanned
     }
 
     fn current(&self, key: &Key) -> Option<Arc<CacheEntry>> {
@@ -555,6 +635,16 @@ impl SnapshotCache {
     {
         let max_age = config().max_age;
         let owned = key.owned();
+        if self
+            .slots
+            .lock()
+            .unwrap()
+            .get(&owned)
+            .is_some_and(Slot::sparse)
+        {
+            self.sparse_skips.fetch_add(1, Relaxed);
+            return Ok(None);
+        }
         let fresh = |entry: &Arc<CacheEntry>| entry.built.elapsed() <= max_age;
         if let Some(entry) = self.current(&owned).filter(fresh) {
             self.count_hit(&owned);
@@ -643,8 +733,28 @@ impl SnapshotCache {
             total -= slot.entry.take().map_or(0, |entry| entry.heap_bytes);
             self.evictions.fetch_add(1, Relaxed);
         }
-        slots.retain(|_, slot| slot.entry.is_some() || Arc::strong_count(&slot.build) > 1);
+        slots.retain(|_, slot| slot.live());
     }
+}
+
+/// The arguments an entry depends on: the ones its equality filters read
+/// (`build_entry` and `view` read no other argument). Non-object arguments
+/// stay as they are (opens with them never use the cache).
+pub(crate) fn cache_arguments(definition: &ReplicaCollectionDefinition, args: &Value) -> Value {
+    let Some(object) = args.as_object() else {
+        return args.clone();
+    };
+    Value::Object(
+        definition
+            .equal_filters
+            .values()
+            .filter_map(|argument| {
+                object
+                    .get(argument)
+                    .map(|value| (argument.clone(), value.clone()))
+            })
+            .collect(),
+    )
 }
 
 /// Columns the cached rows need beyond the projection: visibility, the
@@ -726,7 +836,7 @@ pub(crate) async fn build_entry(
         .stream_json_rows(statement, parameters.into_owned_binds())
         .await?;
     let mut rows = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = crate::fast_hash::FastSet::default();
     let mut scratch = String::new();
     while let Some(batch) = stream.next_batch().await {
         let batch = batch?;
@@ -777,7 +887,7 @@ pub(crate) fn view(
 ) -> Result<Option<View>, ReplicaError> {
     let extra = extra_columns(definition, plan);
     // Keys whose rows the log replaces, and their rows at `revision`.
-    let mut replaced = HashSet::<Arc<str>>::new();
+    let mut replaced = crate::fast_hash::FastSet::<Arc<str>>::default();
     let mut inserted = Vec::new();
     for (id, change) in replica::collapse_changes(changes) {
         if id.0 != definition.table {
@@ -998,6 +1108,73 @@ mod tests {
 
     fn key(name: &str) -> Key {
         ("db".into(), "p".into(), 1, name.into(), "{}".into())
+    }
+
+    fn key_tuple(name: &str) -> Key {
+        key(name)
+    }
+
+    fn cache_key<'a>(path: &'a str, args: &'a Value) -> CacheKey<'a> {
+        CacheKey {
+            database_url: "db",
+            project: "p",
+            generation: 1,
+            path,
+            args,
+        }
+    }
+
+    #[tokio::test]
+    async fn sparse_entries_are_dropped_and_their_key_skips_the_cache() {
+        let cache = SnapshotCache::default();
+        let args = serde_json::json!({});
+        let key = cache_key("notifications", &args);
+        assert_eq!(key.owned(), key_tuple("notifications"));
+        cache.install_within(key.owned(), entry(10), 1000);
+        // Two sparse opens are not enough evidence.
+        cache.observe(&key, 2, 5000);
+        cache.observe(&key, 3, 5000);
+        assert!(cache.current(&key.owned()).is_some());
+        cache.observe(&key, 1, 5000);
+        assert!(cache.current(&key.owned()).is_none());
+        assert_eq!(cache.sparse_counts(), (1, 0));
+        let built = cache
+            .entry(&key, || async { panic!("a sparse key must not build") })
+            .await
+            .unwrap();
+        assert!(built.is_none());
+        assert_eq!(cache.sparse_counts(), (1, 1));
+        // A dense entry stays.
+        let dense = cache_key("tasks", &args);
+        cache.install_within(dense.owned(), entry(10), 1000);
+        for _ in 0..5 {
+            cache.observe(&dense, 900, 5000);
+        }
+        assert!(cache.current(&dense.owned()).is_some());
+        // Small entries never count as sparse.
+        let small = cache_key("tags", &args);
+        cache.install_within(small.owned(), entry(10), 1000);
+        for _ in 0..5 {
+            cache.observe(&small, 0, 200);
+        }
+        assert!(cache.current(&small.owned()).is_some());
+    }
+
+    #[test]
+    fn cache_arguments_keep_only_equality_filter_arguments() {
+        let mut definition: ReplicaCollectionDefinition = serde_json::from_value(serde_json::json!({
+            "table": "taskNotes", "key": "_id", "columns": ["_id", "taskId"],
+            "equalFilters": {"taskId": "taskId"}
+        }))
+        .unwrap();
+        let args = serde_json::json!({"taskId": "t1", "limit": 20, "memberHint": "m9"});
+        assert_eq!(
+            cache_arguments(&definition, &args),
+            serde_json::json!({"taskId": "t1"})
+        );
+        definition.equal_filters.clear();
+        assert_eq!(cache_arguments(&definition, &args), serde_json::json!({}));
+        assert_eq!(cache_arguments(&definition, &Value::Null), Value::Null);
     }
 
     #[test]

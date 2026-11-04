@@ -133,6 +133,20 @@ fn apply_cache_budget() {
     });
 }
 
+/// Run on each writer connection when it opens: `0x10002` re-analyzes every
+/// table whose row count moved ~10x since its statistics (or that has none
+/// while it has indexes), bounded by `analysis_limit` rows per index.
+const OPTIMIZE_AT_OPEN: &str = "PRAGMA analysis_limit=400; PRAGMA optimize=0x10002;";
+/// Periodic form (tables used since the connection opened).
+const OPTIMIZE_PERIODIC: &str = "PRAGMA analysis_limit=400; PRAGMA optimize;";
+
+async fn optimize_at_open(connection: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
+    for statement in OPTIMIZE_AT_OPEN.split_inclusive(';') {
+        sqlx::query(statement.trim()).execute(&mut *connection).await?;
+    }
+    Ok(())
+}
+
 static READER_OPENS: AtomicU64 = AtomicU64::new(0);
 
 /// Reader connections opened since start (each parses the file's schema).
@@ -561,6 +575,10 @@ impl PoolRegistry {
             .after_connect(move |connection, _| {
                 let wal = writer_wal.clone();
                 Box::pin(async move {
+                    // Planner statistics: ANALYZE the tables whose size
+                    // changed a lot since their last statistics (stale
+                    // `sqlite_stat1` rows made indexed lookups full scans).
+                    optimize_at_open(connection).await?;
                     crate::capture::install(connection)
                         .await
                         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -620,6 +638,8 @@ impl PoolRegistry {
         let limits = self.limits.clone();
         tokio::spawn(async move {
             let interval = sweep_interval(&limits);
+            let optimize_every = Duration::from_secs(env_u64("GONVEX_SQLITE_OPTIMIZE_SECS", 3600).max(60));
+            let mut last_optimize = std::time::Instant::now();
             loop {
                 tokio::time::sleep(interval).await;
                 let Some(map) = databases.upgrade() else {
@@ -633,6 +653,18 @@ impl PoolRegistry {
                     .collect();
                 drop(map);
                 sweep_readers(&open, &limits).await;
+                if last_optimize.elapsed() >= optimize_every {
+                    last_optimize = std::time::Instant::now();
+                    for database in &open {
+                        // Cheap when nothing changed (it only compares row
+                        // counts with the recorded statistics).
+                        for statement in OPTIMIZE_PERIODIC.split_inclusive(';') {
+                            let _ = sqlx::query(statement.trim())
+                                .execute(&database.writer)
+                                .await;
+                        }
+                    }
+                }
             }
         });
     }

@@ -7,6 +7,7 @@ mod action_gate;
 #[cfg(test)]
 mod bridge_bench;
 pub mod change_feed;
+mod fast_hash;
 pub mod config;
 pub mod control;
 mod cron_profile;

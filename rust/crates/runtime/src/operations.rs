@@ -1603,6 +1603,7 @@ fn memory_json(runtime: &Runtime) -> Value {
     let cache = runtime.snapshot_cache_stats();
     let (isolates, v8) = gonvex_module_runtime_v8::heap_tally();
     let report = runtime.snapshot_cache_report();
+    let sparse = runtime.snapshot_cache_sparse_counts();
     // Per collection path: entries, bytes, rows, hits, builds of live entries.
     let mut by_path = std::collections::BTreeMap::<&str, [u64; 5]>::new();
     for entry in &report {
@@ -1625,7 +1626,8 @@ fn memory_json(runtime: &Runtime) -> Value {
         .map(|entry| {
             json!({"db": entry.database, "path": entry.path, "args": entry.args, "rows": entry.rows,
                 "bytes": entry.heap_bytes, "hits": entry.hits, "builds": entry.builds,
-                "revision": entry.revision, "ageSecs": entry.age_secs})
+                "revision": entry.revision, "ageSecs": entry.age_secs,
+                "observed": entry.observed, "admitted": entry.admitted, "scanned": entry.scanned})
         })
         .collect::<Vec<_>>();
     let statements = if gonvex_store::statement_profile::enabled() {
@@ -1648,6 +1650,7 @@ fn memory_json(runtime: &Runtime) -> Value {
         "snapshotCache": {"entries": cache.entries, "bytes": cache.bytes, "hits": cache.hits,
             "builds": cache.builds, "rollForwards": cache.roll_forwards, "fallbacks": cache.fallbacks,
             "evictions": cache.evictions, "keysSeen": runtime.snapshot_cache_keys_seen(),
+            "sparseDrops": sparse.0, "sparseSkips": sparse.1,
             "byPath": by_path, "top": top},
         "v8": {"isolates": isolates, "totalHeapBytes": v8[0], "usedHeapBytes": v8[1],
             "physicalBytes": v8[2], "externalBytes": v8[3], "mallocedBytes": v8[4]},

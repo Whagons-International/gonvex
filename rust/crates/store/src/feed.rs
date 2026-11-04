@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS _gonvex_sync_changes (
 );
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_revision
   ON _gonvex_sync_changes (revision, ordinal) WHERE revision IS NOT NULL;
+-- Per-table replays (resume, cache deltas) of a range: skips other tables' rows.
+CREATE INDEX IF NOT EXISTS gonvex_sync_changes_table
+  ON _gonvex_sync_changes (table_name, revision, ordinal) WHERE revision IS NOT NULL;
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_pending
   ON _gonvex_sync_changes (event_id) WHERE revision IS NULL;
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_created_at

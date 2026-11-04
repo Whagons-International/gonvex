@@ -26,7 +26,7 @@
 //! the row id. A connection only reuses a decision computed for its own class;
 //! hit members, principal changes, truncated windows, affected-row reads and
 //! fallback (interpreted) plans decide alone, as before.
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::change_feed::LogChange;
@@ -90,15 +90,15 @@ pub struct EventShare {
     revision: u64,
     changes: Arc<Vec<LogChange>>,
     pub(crate) memo: Mutex<EvalMemo>,
-    decisions: Mutex<HashMap<DecisionKey, Arc<RowDecision>>>,
+    decisions: Mutex<crate::fast_hash::FastMap<DecisionKey, Arc<RowDecision>>>,
     /// Shared copies of change images (parent before-image overlays), by
     /// address in `changes`.
-    images: Mutex<HashMap<usize, Arc<serde_json::Value>>>,
+    images: Mutex<crate::fast_hash::FastMap<usize, Arc<serde_json::Value>>>,
     /// Delivery v4: the event's tables and collapsed rows, and the shared
     /// outcome per connection shape (`replica_fanout`).
     pub(crate) layout: std::sync::OnceLock<crate::replica::fanout::Layout>,
     pub(crate) outcomes:
-        Mutex<HashMap<crate::replica::fanout::Shape, Arc<crate::replica::fanout::Outcome>>>,
+        Mutex<crate::fast_hash::FastMap<crate::replica::fanout::Shape, Arc<crate::replica::fanout::Outcome>>>,
 }
 
 impl EventShare {

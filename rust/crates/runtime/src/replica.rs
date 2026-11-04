@@ -372,6 +372,11 @@ impl Runtime {
         self.inner.snapshot_cache.report()
     }
 
+    /// (entries dropped as sparse, opens that skipped a sparse key).
+    pub fn snapshot_cache_sparse_counts(&self) -> (u64, u64) {
+        self.inner.snapshot_cache.sparse_counts()
+    }
+
     /// Distinct shared snapshot cache keys ever created.
     pub fn snapshot_cache_keys_seen(&self) -> u64 {
         self.inner.snapshot_cache.keys_seen()
@@ -438,12 +443,16 @@ impl Runtime {
         let generation = module.generation;
         let project = module.project_id.clone();
         drop(module);
+        // An entry depends only on the arguments its equality filters read:
+        // key it by those, so arguments the collection ignores (per-member
+        // values, client-side options) never split one entry into many.
+        let cache_args = crate::snapshot_cache::cache_arguments(&definition, &request.args);
         let cache_key = crate::snapshot_cache::CacheKey {
             database_url: &session.route.database_url,
             project: &project,
             generation,
             path: &request.path,
-            args: &request.args,
+            args: &cache_args,
         };
         // The shared base is taken before this open's read transaction, so
         // its revision is never ahead of the open's clock.
@@ -451,7 +460,7 @@ impl Runtime {
             self.inner
                 .snapshot_cache
                 .entry(&cache_key, || {
-                    self.build_cache_entry(session, &definition, &visibility, &request.args)
+                    self.build_cache_entry(session, &definition, &visibility, &cache_args)
                 })
                 .await
                 .unwrap_or_else(|error| {
@@ -935,6 +944,7 @@ impl Runtime {
             return Ok(None);
         }
         if let Some(view) = view.as_mut() {
+            cache.observe(key, view.rows.len(), entry.rows.len());
             if let Some(rolled) = view.rolled.take() {
                 rolled.inherit_acl(entry, &std::mem::take(&mut view.rolled_sources));
                 cache.roll_forward(key, entry, rolled);
@@ -1932,14 +1942,30 @@ pub(crate) async fn resume_changes(
     through: u64,
     tables: BTreeSet<String>,
 ) -> Result<Vec<LogChange>, ReplicaError> {
-    let tables = serde_json::to_string(&tables.into_iter().collect::<Vec<_>>())
-        .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?;
-    let rows = sqlx::query(
-            "SELECT revision, ordinal, table_name, row_id, operation, changed_columns, old_value, new_value
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    // One bound parameter per table (not `IN (SELECT value FROM json_each(..))`):
+    // SQLite then plans the (table_name, revision, ordinal) index, which
+    // skips other tables' rows in the range (a notification-heavy log made
+    // per-table replays walk every row in the range).
+    let placeholders = (0..tables.len())
+        .map(|index| format!("${}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let statement = format!(
+        "SELECT revision, ordinal, table_name, row_id, operation, changed_columns, old_value, new_value
              FROM _gonvex_sync_changes
-             WHERE revision > $1 AND revision <= $2 AND table_name IN (SELECT value FROM json_each($3))
-             ORDER BY revision, ordinal",
-        ).bind(after as i64).bind(through as i64).bind(tables).fetch_all(&mut **transaction.transaction()).await?;
+             WHERE revision > $1 AND revision <= $2 AND table_name IN ({placeholders})
+             ORDER BY revision, ordinal"
+    );
+    let mut query = sqlx::query(&statement)
+        .bind(after as i64)
+        .bind(through as i64);
+    for table in tables {
+        query = query.bind(table);
+    }
+    let rows = query.fetch_all(&mut **transaction.transaction()).await?;
     rows.iter()
         .map(|row| {
             Ok(LogChange {

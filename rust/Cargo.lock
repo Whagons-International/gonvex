@@ -1559,6 +1559,7 @@ dependencies = [
  "cron",
  "duckdb",
  "flate2",
+ "foldhash",
  "futures-util",
  "gonvex-module-host",
  "gonvex-module-runtime",
@@ -1623,6 +1624,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "foldhash",
  "gonvex-profiler",
  "libc",
  "libsqlite3-sys",

@@ -1146,6 +1146,7 @@ async fn infrastructure_present(connection: &mut SqliteConnection) -> Result<boo
         ("table", "_gonvex_sync_transactions"),
         ("table", "_gonvex_action_outbox"),
         ("index", "gonvex_sync_changes_revision"),
+        ("index", "gonvex_sync_changes_table"),
         ("index", "gonvex_sync_changes_pending"),
         ("index", "gonvex_sync_changes_created_at"),
         ("index", "gonvex_sync_changes_command"),
