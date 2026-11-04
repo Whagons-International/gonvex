@@ -14,7 +14,6 @@ on:
       - staging
       - "deploy/**"
       - "perf/release-*"
-      - ci/runtime-image # TEMP: registers the workflow for dispatch; drop before merge
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -139,6 +138,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: staging
+    permissions:
+      contents: write # commits the deploy record to runtime-image/staging
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,6 +148,8 @@ jobs:
         env:
           COOLIFY_API_KEY: ${{ secrets.COOLIFY_API_KEY }}
           COOLIFY_BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if [ -z "$COOLIFY_API_KEY" ] || [ -z "$COOLIFY_BASE_URL" ]; then
             echo "COOLIFY_API_KEY / COOLIFY_BASE_URL secrets are not configured for the staging environment." >&2
