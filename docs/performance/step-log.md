@@ -356,3 +356,47 @@ coincided with the cgroup at `memory.max` (module host 395→788 MiB at :00, dir
 replica-state, ~1.5 GiB) and scheduled-load staggers crons. No synchronous long-running code
 showed on the outbox path in this capture. That is consistent with reclaim, but it does not
 prove the base stall was reclaim alone: the base run had no perf over 14:02.
+
+## Step 5: perf/delivery-v3 adb6bcd9 (0faccf31) — oracle gate
+
+Merged onto 75f180d0 (offload line) because delivery-v3 already carries deploy/sqlite-staging
+f482033c, perf/delivery, replica-state, visibility-masks, sqlite-direct, offload and a rebuild
+of ws-buffers a0a33ff4. Conflicts: Rust hunks taken from delivery-v3 (its side was the
+superset in each); thin client keeps `presenceV2` (opt-in `presence: 1`) and legacy-rows
+default, and adds delivery-v3's `batchFrames` (`LOAD_THIN_BATCH_FRAMES=0` disables). The
+earlier ws-fix and sched-load step builds are superseded (local tags only). Tests on 0faccf31:
+`cargo test -p gonvex-runtime -p gonvex-store -p gonvex-websocket`: 482 passed, 0 failed,
+6 ignored. Runtime sha256 in `lab-5k/bin-delivery-v3/sha256`.
+
+Oracle gate (old-app lab, 100 users: thin + 16 real-SDK users, 2 shards, 45 s ramp, 600 s
+plateau; admins change permissions every 120–300 s: team add/remove, spot add/remove, share,
+assign, setSpot, plus one 50-task reorganization per shard; each change is followed by a
+fresh SDK session's snapshot that the target's long-lived replica must match within 15 s):
+
+| case | checks | converged | no change | mismatched (leaked / missing) | thin frames in | thin bytes in | heartbeat p95/p99 | delivery p50/p95/p99 | save p95/p99 |
+|---|---:|---:|---:|---|---:|---:|---|---|---|
+| dv3-oracle-100 (batch frames on) | 23 | 18 | 5 | 0 (0 / 0) | 42,273 | 757 MB | 101 / 1,398 | 80 / 486 / 5,513 | 153 / 404 |
+| dv3-oracle-100-nobatch (`LOAD_THIN_BATCH_FRAMES=0`) | 23 | 18 | 5 | 0 (0 / 0) | 119,030 | 756 MB | 55 / 164 | 34 / 198 / 4,882 | 133 / 346 |
+
+**Gate: pass** (zero leaked, zero missing, `client.thin.unsupported` empty in both). Batch frames
+cut frames received 2.8× for the same bytes. Cost: with batching, reducer/heartbeat p99 is
+1.4 s vs 164 ms. A reducer resolves only after the replica watermark covering its commit,
+and a commit that carries no rows for the caller (heartbeats) gets that watermark in a
+data-free batch on the 1 s tick. Delivery p50 also rises 34 → 80 ms (50 ms data tick).
+Runtime: 0.12–0.13 cores, 1.38–1.46 GiB peak.
+
+## Step 6: perf/action-depth 3f5a2ed2 (6a934356) + deploy/sqlite-staging bc1f0a06 (d87f934e)
+
+action-depth carries scheduled-load edffa51a, whose store/host-call changes overlap
+sqlite-direct's direct SQL path. Ported, not hand-merged blindly:
+`TenantTransaction` keeps `writer_stats`/`outbox_written`; `commit_with_outcome` wraps the
+direct commit and returns `CommitOutcome {revision, changes, members_changed,
+outbox_written}`; `feed::finalize_direct` takes the per-database feed-known flag, probes for
+staged rows first and returns the change count; the direct outbox insert sets
+`outbox_written`; cron `rows_read` is counted in the profiled host-call path (SQL answered
+inline on the isolate thread is not counted). The lab's encoded-row-size cache (af869fb1, via
+scheduled-load) targets replica.rs functions the replica-state rewrite removed, so it is not on
+this line. bc1f0a06 is admin-cli/export only (runtime binary unchanged); its Postgres test
+uses `capture::install`, our `check_restart.py` registers a no-op `gonvex_capture` for the
+same root cause. Tests on 6a934356: 497 passed, 0 failed, 6 ignored (admin-cli's Postgres
+export test not run: needs Postgres).
