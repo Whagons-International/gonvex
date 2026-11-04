@@ -552,13 +552,38 @@ pub(crate) fn shape(
             // derived sets or ancestors needs its own decisions.
             let concern = mask::subscription_concern_tables(subscription);
             let mut concerned = false;
-            for change in changes.iter() {
+            for (position, change) in changes.iter().enumerate() {
                 if !concern.contains(change.table.as_str()) {
                     continue;
                 }
                 concerned = true;
                 if let Some(checks) = keys.moving.get(change.table.as_str()) {
-                    if !mask::member_unmoved(subscription, change, *checks) {
+                    let mut checks = *checks;
+                    if checks.principal {
+                        // Member-independent: once per event and plans.
+                        let key = (Arc::as_ptr(&keys.moving) as *const u8 as usize, position);
+                        let known = share.principal_possible.lock().unwrap().get(&key).copied();
+                        checks.principal = known.unwrap_or_else(|| {
+                            let possible = std::iter::once(subscription.visibility.as_ref())
+                                .chain(
+                                    subscription
+                                        .resolved
+                                        .inherited
+                                        .values()
+                                        .map(|parent| parent.plan.as_ref()),
+                                )
+                                .any(|plan| {
+                                    plan.principal_change_possible(
+                                        &change.table,
+                                        &change.operation,
+                                        &change.changed_columns,
+                                    )
+                                });
+                            share.principal_possible.lock().unwrap().insert(key, possible);
+                            possible
+                        });
+                    }
+                    if !mask::member_unmoved(subscription, change, checks) {
                         return Err(Path::PrincipalMoved);
                     }
                 }

@@ -135,6 +135,10 @@ pub struct EventShare {
     /// Delivery coverage: shapes whose first connection is computing the
     /// outcome right now (others wait for it), or whose outcome could not be
     /// recorded (others take their own path at once).
+    /// Delivery coverage: per (plan combination, change position) whether the
+    /// change can concern any member's principal
+    /// (`VisibilityPlan::principal_change_possible`), evaluated once.
+    pub(crate) principal_possible: Mutex<crate::fast_hash::FastMap<(usize, usize), bool>>,
     pub(crate) claims:
         Mutex<crate::fast_hash::FastMap<crate::replica::fanout::Shape, crate::replica::fanout::ClaimState>>,
 }
@@ -250,6 +254,7 @@ impl EventShares {
             layout: Default::default(),
             collapsed: Default::default(),
             outcomes: Mutex::default(),
+            principal_possible: Mutex::default(),
             claims: Mutex::default(),
         });
         SHARES_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

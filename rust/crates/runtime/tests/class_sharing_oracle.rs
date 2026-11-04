@@ -199,6 +199,20 @@ async fn events(fixture: &Fixture) -> Vec<(String, FeedEvent)> {
         ),
         ("tag a missing task", vec![tag("cov-tag-5", "no-such-task")]),
         (
+            "member availability (not visibility)",
+            vec![(
+                r#"UPDATE "members" SET "availability_status"='busy', "updated_at"=99 WHERE "id"=$1"#.into(),
+                vec![text(&tenant_members[3].id)],
+            )],
+        ),
+        (
+            "member sees all spots",
+            vec![(
+                r#"UPDATE "members" SET "see_all_spots"=1 WHERE "id"=$1"#.into(),
+                vec![text(&tenant_members[4].id)],
+            )],
+        ),
+        (
             "tag and touch the task",
             vec![
                 tag("cov-tag-6", &tasks[14].id),

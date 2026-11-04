@@ -1104,6 +1104,41 @@ impl VisibilityPlan {
     /// principal set, a grant set's permission join, or the member row itself?
     /// Grant source rows are not principal inputs; they are patched in memory.
     /// Inherited parents are checked recursively with their own resolution.
+    /// A member- and role-independent superset of
+    /// [`Self::principal_change_concerns`] for this plan alone (not its
+    /// parents): false means the change concerns no member's principal.
+    /// Delivery coverage evaluates it once per event and plan instead of per
+    /// member.
+    pub fn principal_change_possible(
+        &self,
+        table: &str,
+        operation: &str,
+        changed_columns: &[String],
+    ) -> bool {
+        if table == "members"
+            && (!operation.eq_ignore_ascii_case("update")
+                || changed_columns.iter().any(|column| {
+                    matches!(
+                        column.as_str(),
+                        "id" | "account_id" | "status" | "role" | "permissions"
+                    )
+                }))
+        {
+            return true;
+        }
+        self.sets.iter().any(|(name, set)| {
+            if set.kind == "derived" {
+                return false;
+            }
+            let reads = (set.kind != "grant" && set.table == table)
+                || set.joins.iter().any(|join| join.table == table);
+            reads
+                && self
+                    .dependency_columns_for_sets(Some(&BTreeSet::from([name.clone()])))
+                    .change_affects(table, operation, changed_columns)
+        })
+    }
+
     pub fn principal_change_concerns(
         &self,
         resolved: &ResolvedVisibility,
