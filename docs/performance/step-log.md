@@ -815,3 +815,78 @@ The default mix stays as is for comparability (Gabriel asked for the heavier mix
 sample does not record assignees at create) gives that share of creates the creator as assignee.
 Each step with the default mix gets one companion run with `LOAD_MIX=production` at the same user
 count.
+
+Oracle gate on 19803c3e (old-app lab, 100 users, 16 SDK, 600 s; nice env set):
+
+| case | checks | conv. | no change | mismatched | batches | frames in | unsupported | errors | heartbeat p95/p99 | save p95/p99 | delivery p95/p99 | clock offset |
+|---|---:|---:|---:|---|---:|---:|---|---:|---|---|---|---|
+| ch-oracle-100 (batch on) | 23 | 18 | 5 | 0 (0/0) | 26,256 | 42,197 | {} | 0.06 % | 60 / 146 | 139 / 816 | 178 / 1,407 | −15.8 / −30.3 ms |
+| ch-oracle-100-nobatch | 23 | 18 | 5 | 0 (0/0) | 0 | 118,267 | {} | 0.06 % | 161 / 1,756 | 522 / 2,591 | 1,702 / 3,128 | −30.5 / −32.1 ms |
+
+**Gate: pass.** (The no-batch run's tail is worse than earlier no-batch gates: 360 throttled
+periods vs 109; host io PSI was elevated by other labs. Not investigated.)
+
+### ch-500 (default mix) and ch-500-prod (production mix), 500 users, new app, artifact da98a666
+
+| | ch-500 (default mix) | ch-500-prod (`LOAD_MIX=production`) |
+|---|---|---|
+| users connected | 500/500 | 500/500 |
+| errors | 11.54 % (140 × task detail queries never current, 3 × reducer timeout 20 s) | 0.08 % |
+| oracle | 8 checks, 1 mismatch (0 leaked) | 8 checks, 0 mismatched |
+| save p50 / p95 / p99 | 19,105 / 79,437 / 106,054 | 83 / 493 / 1,109 |
+| taskDelivery | 8,165 / 53,811 / 77,969 | 138 / 506 / 1,086 |
+| presence delivery | 729 / 2,125 / 4,565 | 522 / 1,000 / 1,060 |
+| query | 12,121 / 28,759 / 29,858 | 55 / 910 / 2,087 |
+| reconnect | 288 / 1,003 / 2,389 | 79 / 238 / 367 |
+| tasks.create calls (plateau) | 124 | 24 |
+| runtime CPU (throttled periods) | 1.00 (1,755/1,757) | 0.41 (195/1,754) |
+| cgroup peak / anon peak | 2,048 / 1,280 MiB | 1,833 / 892 MiB |
+| `invoke.isolate_wait` reducer p50 / p99 / max | 855 ms / 6.80 s / 7.19 s (94 % of invoke time) | 0.04 / 336 / 624 ms (73 %) |
+| `invoke.isolate_wait` cron p50 / p99 / max | 1.6 ms / 10.0 s / 10.0 s (57 %) | 0.02 / 7.3 / 361 ms |
+| scheduled vs user | cron 0.5/s (`fn.total` mean 1.96 s, p99 10 s), reducer 5.8/s (mean 1.72 s) | cron 2.4/s (mean 30 ms), reducer 5.2/s (mean 90 ms) |
+| 3 s scheduled slice errors | none (one `notifyIfUnassigned` hit the 10 s deadline) | none |
+| `snapshot.build` p50 / p99 | 12.4 s / 44.6 s | 9 ms / 2.76 s |
+| `delivery.queue_wait` p50 / p99 | 8.4 s / 105.8 s | 1.4 ms / 2.39 s |
+| clock offset Mac − arch3 | −32.3 / −32.7 ms | −33.8 / −35.1 ms |
+
+Background work (ms of wall clock per s), ch-500: SQLite checkpoint 84.4 (0.71/s, 4,472 pages/s)
++ inline checkpoint 25.8, V8 GC minor 56.9 (27/s) + major 6.9, malloc_trim 0.6, snapshot cache
+build 130,570 (7.7 builds/s; summed wall time of concurrent builds, stretched by starvation),
+offload busy 680. ch-500-prod: checkpoint 45.2, inline 2.2, GC minor 3.6, major 0.2, cache build
+1,195 (8.0/s), offload busy 142.
+
+Top functions by server time, ch-500: recordTaskViewByTaskId 12.5 % (195 calls, mean 1.26 s),
+tasks.create 12.0 % (124, 1.90 s), createNote 10.7 % (103, 2.05 s), notifyIfUnassigned 9.3 % (93,
+1.96 s, 1 error), updateDescription 8.7 %, update 7.7 %, chat.sendWorkspaceChat 5.6 %, start 5.0 %.
+The means are mostly isolate wait (94 %).
+
+Heap by owner (ch-500 plateau, `/dev/metrics memory`): SQLite allocator 126–142 MiB (budget 128
+soft), snapshot cache 74–77 MiB with **0 evictions** (cache-heap fixed the thrash; 1,763 entries,
+mostly small per-task detail keys), V8 heaps 26–56 MiB, rest of anon ~0.9–0.95 GiB (anon peak
+1,280 MiB). The 2 GiB cgroup figure is page cache (file 600–1,000 MiB, reclaimable); jemalloc
+call-site profiling (cache-heap's `jemalloc-prof` build) not run here.
+
+CPU by thread (on-CPU perf, self time, symfs-resolved), ch-500:
+
+| thread | total | SQLite | JSON | replica/cache/hash | visibility | deflate | V8 | alloc | libc | other | kernel |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `tokio-rt-worker` | 36.3 | 0.6 | 4.5 | 6.0 | 0 | 1.9 | 0 | 3.6 | 2.7 | 3.8 | 13.0 |
+| `gonvex-offload` | 34.5 | 0.4 | 4.1 | 7.2 | 4.9 | 0 | 0 | 3.0 | 3.4 | 2.2 | 9.3 |
+| `gonvex-module-isolate` | 17.4 | 1.4 | 1.3 | 0.4 | 0 | 0 | 3.9 | 0.3 | 2.2 | 1.8 | 6.2 |
+| `sqlx-sqlite-worker` | 9.2 | 2.5 | 0 | 0 | 0 | 0 | 0 | 0.2 | 1.0 | 1.2 | 4.3 |
+| **all** | 100 | 5.0 | 10.0 | 13.6 | 4.9 | 2.0 | 3.9 | 7.1 | 9.5 | 9.3 | 34.7 |
+
+Top self symbols: SipHash 3.2 %, `indexmap::Bucket<String, Value>::clone` 2.1 %, foldhash
+`hash_one<&(&str,&str)>` 1.9 %, `drop_glue<serde_json::Value>` 1.6 %, std `hash_one<&String>` 1.4 %,
+`mi_free` 1.35 %, `HashMap<(&str,&str),usize>::insert` 1.0 %, `BTreeMap<(&str,&str),
+replica::CollapsedChange>` 0.9 %, deflate 0.8 %, `visibility_class::CompiledPlan::eval` 0.7 %.
+SQLite CPU fell from 34 % of samples (rl-500) to 9 % (cache-heap + reader nice).
+
+**Binding constraint at 500, default mix: CPU on the network worker and the offload pool:**
+feed/delivery work (change collapsing, `serde_json::Value` clones and drops, hashing) and
+per-open snapshot/visibility work, with a delivery backlog of 8 s at p50 (perf/feed-backlog,
+perf/open-visibility). Reducers are cheap (~1 ms) but wait for the isolate. **With the production
+mix (≈1/5 of the creates, no chat sends) the same 500 users run at 0.41 cores** and miss the
+pass rule only narrowly: presence delivery p95 1,000 ms (p50 522 ms ≈ half the 1 s presence-v2
+tick, so this kind cannot reach p95 < 500 ms by design), query p95 910 ms, and p99s of
+1.06–1.11 s on save/taskDelivery/presence. Not stepped to 1k: 500 fails in both mixes.
