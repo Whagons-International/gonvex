@@ -1065,22 +1065,22 @@ pub(crate) fn install_change_feed_locked(
         // 26 Whagons tenants); a warm boot now reads three result sets.
         let tables = application_tables(&mut tx).await?;
         let mut columns_by_table = all_table_columns(&mut tx).await?;
-        let receipts: std::collections::HashMap<String, String> =
-            sqlx::query_as::<_, (String, String)>(
-                "SELECT name, digest FROM _gonvex_sync_bootstrap",
-            )
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .collect();
+        let receipts: std::collections::HashMap<String, String> = json_rows::<(String, String)>(
+            &mut tx,
+            "SELECT json_group_array(json_array(name, digest)) FROM _gonvex_sync_bootstrap",
+        )
+        .await?
+        .into_iter()
+        .collect();
         let triggers: std::collections::HashMap<(String, String), String> =
-            sqlx::query_as::<_, (String, String, Option<String>)>(
-                "SELECT tbl_name, name, sql FROM sqlite_schema WHERE type='trigger'",
+            json_rows::<(String, String, String)>(
+                &mut tx,
+                "SELECT json_group_array(json_array(tbl_name, name, sql)) FROM sqlite_schema
+                 WHERE type='trigger' AND sql IS NOT NULL",
             )
-            .fetch_all(&mut *tx)
             .await?
             .into_iter()
-            .filter_map(|(table, name, sql)| sql.map(|sql| ((table, name), sql)))
+            .map(|(table, name, sql)| ((table, name), sql))
             .collect();
         for table in tables {
             let columns = columns_by_table.remove(&table).unwrap_or_default();
@@ -1114,21 +1114,29 @@ pub(crate) fn install_change_feed_locked(
 pub(crate) async fn application_tables(
     connection: &mut SqliteConnection,
 ) -> Result<Vec<String>, DatabaseError> {
-    Ok(sqlx::query_scalar(
-        r#"SELECT list.name FROM pragma_table_list list
-           WHERE list.schema='main' AND list.type='table'
-             AND list.name NOT LIKE '\_gonvex%' ESCAPE '\'
-             AND list.name NOT LIKE 'gonvex\_%' ESCAPE '\'
-             AND list.name NOT LIKE 'sqlite\_%' ESCAPE '\'
-             AND NOT EXISTS (
-               SELECT 1 FROM sqlite_schema virtual
-               WHERE virtual.type='table' AND virtual.sql LIKE 'CREATE VIRTUAL TABLE%'
-                 AND list.name IN (virtual.name, virtual.name||'_data', virtual.name||'_idx',
-                   virtual.name||'_content', virtual.name||'_docsize', virtual.name||'_config'))
-           ORDER BY list.name"#,
+    // A correlated scan of `sqlite_schema` per listed table cost ~70 ms on
+    // the Whagons schema (396 tables); the excluded names are collected once
+    // instead (<1 ms).
+    json_rows(
+        connection,
+        r#"WITH virtual(name) AS MATERIALIZED (
+             SELECT name FROM sqlite_schema
+             WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'),
+           excluded(name) AS MATERIALIZED (
+             SELECT name FROM virtual
+             UNION ALL SELECT name||'_data' FROM virtual
+             UNION ALL SELECT name||'_idx' FROM virtual
+             UNION ALL SELECT name||'_content' FROM virtual
+             UNION ALL SELECT name||'_docsize' FROM virtual
+             UNION ALL SELECT name||'_config' FROM virtual)
+           SELECT json_group_array(name ORDER BY name) FROM pragma_table_list
+           WHERE schema='main' AND type='table'
+             AND name NOT LIKE '\_gonvex%' ESCAPE '\'
+             AND name NOT LIKE 'gonvex\_%' ESCAPE '\'
+             AND name NOT LIKE 'sqlite\_%' ESCAPE '\'
+             AND name NOT IN excluded"#,
     )
-    .fetch_all(connection)
-    .await?)
+    .await
 }
 
 async fn infrastructure_present(connection: &mut SqliteConnection) -> Result<bool, DatabaseError> {
@@ -1184,27 +1192,40 @@ fn trigger_statements(script: &str) -> Vec<&str> {
 async fn all_table_columns(
     connection: &mut SqliteConnection,
 ) -> Result<std::collections::HashMap<String, Vec<crate::rows::ColumnInfo>>, DatabaseError> {
-    let rows = sqlx::query(
-        r#"SELECT m.name, p.name, p.type, p."notnull", p.pk
+    let rows = json_rows::<(String, String, String, i64, i64)>(
+        connection,
+        r#"SELECT json_group_array(json_array(m.name, p.name, p.type, p."notnull", p.pk)
+                                   ORDER BY m.name, p.cid)
            FROM sqlite_schema AS m JOIN pragma_table_info(m.name) AS p
-           WHERE m.type = 'table' ORDER BY m.name, p.cid"#,
+           WHERE m.type = 'table'"#,
     )
-    .fetch_all(connection)
     .await?;
     let mut tables: std::collections::HashMap<String, Vec<crate::rows::ColumnInfo>> =
         std::collections::HashMap::new();
-    for row in rows {
+    for (table, name, declared, not_null, primary_key) in rows {
         tables
-            .entry(row.get(0))
+            .entry(table)
             .or_default()
             .push(crate::rows::ColumnInfo {
-                name: row.get(1),
-                declared: row.get::<String, _>(2),
-                not_null: row.get::<i64, _>(3) != 0,
-                primary_key: row.get::<i64, _>(4) != 0,
+                name,
+                declared,
+                not_null: not_null != 0,
+                primary_key: primary_key != 0,
             });
     }
     Ok(tables)
+}
+
+/// Rows of a catalog query that aggregates them into one JSON array
+/// (`json_group_array`). Each result row crosses sqlx's worker thread on its
+/// own, so a 4,000-row catalog read cost far more in hand-offs than in SQL.
+async fn json_rows<T: serde::de::DeserializeOwned>(
+    connection: &mut SqliteConnection,
+    sql: &str,
+) -> Result<Vec<T>, DatabaseError> {
+    let encoded: Option<String> = sqlx::query_scalar(sql).fetch_one(connection).await?;
+    serde_json::from_str(encoded.as_deref().unwrap_or("[]"))
+        .map_err(|error| DatabaseError::Decode(format!("schema catalog: {error}")))
 }
 
 /// The in-memory form of `installed_triggers_match` for a prefetched

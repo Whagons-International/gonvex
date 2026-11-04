@@ -13,6 +13,9 @@
 
 #[path = "replica_mask.rs"]
 mod mask;
+#[path = "replica_fanout.rs"]
+pub(crate) mod fanout;
+pub use fanout::stats as fanout_stats;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -96,6 +99,8 @@ pub struct ReplicaSubscription {
     /// Per inherited parent table: the parent ACL index columns (the only
     /// parent columns its visibility reads), computed on first use.
     pub(crate) parent_acl_columns: Option<Arc<BTreeMap<String, BTreeSet<String>>>>,
+    /// Delivery v4 shape keys (`replica_fanout`), computed on first use.
+    pub(crate) fanout: Option<Arc<fanout::FanoutKeys>>,
 }
 
 /// Counters of the rows a client holds, and for a truncated ordered window
@@ -261,11 +266,12 @@ pub(crate) fn snapshot_permits_available() -> usize {
     crate::offload::SnapshotAdmission::global().available_permits()
 }
 
-/// One row of a collection scan: its key, decoded projection and canonical
-/// hash. The scan visitor owns it (moves, no clones).
+/// One row of a collection scan: its key, its projection as the JSON text
+/// SQLite produced (never parsed into a `Value`, see `canonical_row`) and
+/// its canonical hash. The scan visitor owns it (moves, no clones).
 pub(crate) struct ScannedRow {
     pub key: String,
-    pub row: Value,
+    pub row: gonvex_protocol::JsonRow,
     pub hash: String,
 }
 
@@ -313,7 +319,7 @@ impl Runtime {
             &read.resolved,
             args,
             |row| {
-                rows.push(row.row);
+                rows.push(row.row.to_value());
                 Ok(())
             },
         )
@@ -426,7 +432,7 @@ impl Runtime {
                             inline = None;
                         }
                     }
-                    rows.push(Arc::new(row.row));
+                    rows.push(row.row);
                     Ok(())
                 },
             )
@@ -583,7 +589,7 @@ impl Runtime {
                         |row| {
                             digest.add(&row.hash);
                             if request.hashes.get(&row.key) != Some(&row.hash) {
-                                upserts.push(row.row);
+                                upserts.push(row.row.to_value());
                             }
                             seen.insert(row.key);
                             Ok(())
@@ -639,6 +645,7 @@ impl Runtime {
                 mask: Default::default(),
                 concern_tables: None,
                 parent_acl_columns: None,
+                fanout: None,
             }),
         })
     }
@@ -752,6 +759,20 @@ impl Runtime {
         subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
         event: FeedEvent,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
+        self.apply_feed_event_with(session, subscriptions, event, false)
+            .await
+    }
+
+    /// `apply_feed_event`; with `record` (a batch connection), also records
+    /// the shared outcome of the connection's shape for the delivery v4
+    /// fan-out (`replica_fanout`) when its result is a function of it.
+    pub async fn apply_feed_event_with(
+        &self,
+        session: &TenantSession,
+        subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+        event: FeedEvent,
+        record: bool,
+    ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let FeedEvent::Transaction {
             database_epoch,
             revision,
@@ -785,6 +806,12 @@ impl Runtime {
             .events
             .share(&database_epoch, revision, &changes);
         let mut shared_stats = crate::visibility_class::EvalStats::default();
+        let mut recording = match (&share, record && fanout::enabled()) {
+            (Some(share), true) => fanout::shape(subscriptions, share, &database_epoch, revision)
+                .filter(|shape| !share.outcomes.lock().unwrap().contains_key(shape))
+                .map(|shape| (shape, fanout::Recorder::new())),
+            _ => None,
+        };
         for subscription in subscriptions.values_mut() {
             if revision <= subscription.cursor.revision {
                 continue;
@@ -811,6 +838,9 @@ impl Runtime {
                     continue;
                 }
                 Step::Resync(reason) => {
+                    if let Some((_, recorder)) = &mut recording {
+                        recorder.clean = false;
+                    }
                     self.resync(subscription, reason, &mut messages, &mut resynced);
                     continue;
                 }
@@ -850,9 +880,17 @@ impl Runtime {
             };
             let Some(delta) = applied?
             else {
+                if let Some((_, recorder)) = &mut recording {
+                    recorder.clean = false;
+                }
                 self.resync(subscription, Resync::Window, &mut messages, &mut resynced);
                 continue;
             };
+            if let Some((_, recorder)) = &mut recording {
+                if context.before.is_some() || context.overlay.is_some() || !context.affected.is_empty() {
+                    recorder.clean = false;
+                }
+            }
             subscription.cursor.revision = revision;
             for (key, touch) in delta.touches {
                 touches
@@ -887,6 +925,19 @@ impl Runtime {
                 subscription.digest.digest(),
                 subscription.window.truncated,
             ));
+            if let Some((_, recorder)) = &mut recording {
+                let [.., delta_message, ready_message] = messages.as_slice() else {
+                    unreachable!()
+                };
+                recorder.delta(
+                    subscription,
+                    delta.ops,
+                    delta.rows,
+                    delta.bytes,
+                    delta_message,
+                    ready_message,
+                );
+            }
         }
         // The client reopens these with their row hashes; until then they
         // receive nothing.
@@ -919,6 +970,15 @@ impl Runtime {
         }
         self.inner.visibility_metrics.record_eval_stats(&memo.stats);
         self.inner.visibility_metrics.record_eval_stats(&shared_stats);
+        if let (Some((shape, mut recorder)), Some(share)) = (recording, &share) {
+            recorder.transaction = messages
+                .first()
+                .filter(|message| matches!(message, ServerMessage::ReplicaTransaction { .. }))
+                .cloned();
+            if let Some(outcome) = recorder.finish(subscriptions, &shape) {
+                fanout::record(share, shape, outcome);
+            }
+        }
         Ok(messages)
     }
 
@@ -1048,6 +1108,11 @@ pub(crate) struct SubscriptionDelta {
     upserts: BTreeMap<String, Value>,
     deleted: BTreeSet<String>,
     touches: Vec<((String, String), RowTouch)>,
+    /// Digest operations (remove, hash) in order, and the window change
+    /// (delivery v4 fan-out outcomes).
+    ops: Vec<(bool, String)>,
+    rows: isize,
+    bytes: i64,
 }
 
 /// Applies the event's source rows (and rows a visibility change affected)
@@ -1422,11 +1487,17 @@ fn row_step(
                 subscription.digest.remove(&hash);
                 subscription.window.rows = subscription.window.rows.saturating_sub(1);
                 subscription.window.bytes -= bytes;
+                delta.ops.push((true, hash));
+                delta.rows -= 1;
+                delta.bytes -= bytes;
                 old
             });
             subscription.digest.add(&hash);
             subscription.window.rows += 1;
             subscription.window.bytes += bytes;
+            delta.ops.push((false, hash));
+            delta.rows += 1;
+            delta.bytes += bytes;
             delta.deleted.remove(id);
             delta.upserts.insert(id.to_owned(), row.clone());
             (true, old, Some(row))
@@ -1435,6 +1506,9 @@ fn row_step(
             subscription.digest.remove(&hash);
             subscription.window.rows = subscription.window.rows.saturating_sub(1);
             subscription.window.bytes -= bytes;
+            delta.ops.push((true, hash));
+            delta.rows -= 1;
+            delta.bytes -= bytes;
             delta.upserts.remove(id);
             delta.deleted.insert(id.to_owned());
             (true, Some(old), None)
@@ -1594,7 +1668,7 @@ pub(super) async fn query_rows(
 ) -> Result<(Vec<Value>, bool), ReplicaError> {
     let mut rows = Vec::new();
     let window = scan_window(transaction, definition, plan, resolved, args, |row| {
-        rows.push(row.row);
+        rows.push(row.row.to_value());
         Ok(())
     })
     .await?;
@@ -1674,10 +1748,13 @@ pub(crate) async fn scan_window(
     })
     .flat_map(|batch| {
         futures_util::stream::iter(match batch {
+            // Rows stay JSON text (delivery v4); only the key and order
+            // columns are decoded (`collect_window`).
             Ok(batch) => batch
                 .rows()
                 .map(|row| {
-                    serde_json::from_slice::<Value>(row)
+                    std::str::from_utf8(row)
+                        .map(str::to_owned)
                         .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))
                 })
                 .collect::<Vec<_>>(),
@@ -1714,7 +1791,7 @@ async fn declared_columns<'a>(
 }
 
 async fn collect_window(
-    rows: impl Stream<Item = Result<Value, ReplicaError>>,
+    rows: impl Stream<Item = Result<String, ReplicaError>>,
     definition: &ReplicaCollectionDefinition,
     mut visit: impl FnMut(ScannedRow) -> Result<(), ReplicaError>,
 ) -> Result<ReplicaWindow, ReplicaError> {
@@ -1723,12 +1800,46 @@ async fn collect_window(
     let mut seen = std::collections::HashSet::new();
     let mut last = None;
     let ordered = !definition.order_by.is_empty();
+    let mut scratch = String::new();
+    let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
     while let Some(row) = rows.next().await {
         if window.rows % 32 == 0 {
             tokio::task::yield_now().await;
         }
-        let row = row?;
-        let key = row_key(&row, &definition.key)?;
+        let text = row?;
+        // Canonical bytes without a `Value` when the row is provably
+        // canonical up to column order (the common case); otherwise the
+        // row is parsed once and written by `stable_json`, exactly as before.
+        let checked = crate::canonical_row::check(&text);
+        let parsed;
+        // (key, (order value, key value) when ordered, canonical text)
+        let (key, boundary, canonical) = match &checked {
+            Some(checked) => {
+                let member = |name: &str| crate::canonical_row::member_value(&text, checked, name);
+                let key_value = member(&definition.key)
+                    .ok_or_else(|| ReplicaError::MissingKey(definition.key.clone()))?;
+                let key = scalar_key(&key_value, &definition.key)?;
+                let boundary = ordered
+                    .then(|| (member(&definition.order_by).unwrap_or(Value::Null), key_value));
+                let canonical = crate::canonical_row::canonical(&text, Some(checked), &mut scratch)
+                    .map_err(invalid)?;
+                (key, boundary, canonical)
+            }
+            None => {
+                parsed = serde_json::from_str::<Value>(&text).map_err(invalid)?;
+                let key = row_key(&parsed, &definition.key)?;
+                let boundary = ordered.then(|| {
+                    (
+                        parsed
+                            .get(&definition.order_by)
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        parsed.get(&definition.key).cloned().unwrap_or(Value::Null),
+                    )
+                });
+                (key, boundary, std::borrow::Cow::Owned(stable_json(&parsed)))
+            }
+        };
         if !seen.insert(key.clone()) {
             return Err(ReplicaError::DuplicateKey(key));
         }
@@ -1736,26 +1847,22 @@ async fn collect_window(
             window.truncated = true;
             break;
         }
-        let canonical = stable_json(&row);
         let bytes = canonical.len() as i64;
         if definition.max_bytes > 0 && window.bytes + bytes > definition.max_bytes {
             window.truncated = true;
             break;
         }
+        let hash = hex_digest(canonical.as_bytes());
+        drop(canonical);
         window.rows += 1;
         window.bytes += bytes;
-        if ordered {
-            last = Some((
-                row.get(&definition.order_by)
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                row.get(&definition.key).cloned().unwrap_or(Value::Null),
-            ));
+        if boundary.is_some() {
+            last = boundary;
         }
         visit(ScannedRow {
             key,
-            hash: hex_digest(canonical.as_bytes()),
-            row,
+            hash,
+            row: gonvex_protocol::JsonRow::from_json(text).map_err(invalid)?,
         })?;
     }
     if window.truncated {
@@ -1884,9 +1991,17 @@ fn project_row(
 
 fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
     match row.get(key) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(Value::Number(value)) => Ok(value.to_string()),
-        Some(Value::Bool(value)) => Ok(value.to_string()),
+        Some(value) => scalar_key(value, key),
+        None => Err(ReplicaError::MissingKey(key.to_owned())),
+    }
+}
+
+/// A key column's value as the row key (`row_key`).
+fn scalar_key(value: &Value, key: &str) -> Result<String, ReplicaError> {
+    match value {
+        Value::String(value) => Ok(value.clone()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::Bool(value) => Ok(value.to_string()),
         _ => Err(ReplicaError::MissingKey(key.to_owned())),
     }
 }
@@ -1955,6 +2070,11 @@ fn hashes_digest<K: Ord + AsRef<str>, V: AsRef<str>>(hashes: &BTreeMap<K, V>) ->
     }
     out.push(']');
     hex_digest(out.as_bytes())
+}
+
+/// Canonical JSON of `value` (row hashes hash these bytes).
+pub(crate) fn stable_json_text(value: &Value) -> String {
+    stable_json(value)
 }
 
 fn stable_json(value: &Value) -> String {
@@ -2068,7 +2188,7 @@ fn cursor_for(
 fn replica_snapshot_message(
     request: &ReplicaOpenRequest,
     definition: &ReplicaCollectionDefinition,
-    rows: Vec<Arc<Value>>,
+    rows: Vec<gonvex_protocol::JsonRow>,
     inline_hashes: Option<BTreeMap<String, String>>,
     truncated: bool,
     cursor: ReplicaCursor,
@@ -2142,7 +2262,7 @@ pub(crate) struct SnapshotPages {
     key: String,
     metadata: BTreeMap<String, Value>,
     digest: Value,
-    rows: std::iter::Peekable<std::vec::IntoIter<Arc<Value>>>,
+    rows: std::iter::Peekable<std::vec::IntoIter<gonvex_protocol::JsonRow>>,
     sequence: u64,
     finished: bool,
     native_rows: bool,
@@ -2221,7 +2341,7 @@ impl SnapshotPages {
         }
     }
 
-    fn page(&self, result: Vec<Arc<Value>>, last: bool) -> ServerMessage {
+    fn page(&self, result: Vec<gonvex_protocol::JsonRow>, last: bool) -> ServerMessage {
         let mut metadata = self.metadata.clone();
         if last {
             metadata.insert("digest".to_owned(), self.digest.clone());
@@ -2234,7 +2354,7 @@ impl SnapshotPages {
                 key: self.key.clone(),
                 sequence: self.sequence,
                 last,
-                canonical_rows: result.iter().map(|row| stable_json(row)).collect(),
+                canonical_rows: result.iter().map(|row| canonical_text(row.get())).collect(),
                 metadata,
             };
         }
@@ -2248,6 +2368,16 @@ impl SnapshotPages {
             result,
             metadata,
         }
+    }
+}
+
+/// Canonical JSON of a row's text (`stable_json` of the parsed row).
+fn canonical_text(row: &str) -> String {
+    let checked = crate::canonical_row::check(row);
+    let mut scratch = String::new();
+    match crate::canonical_row::canonical(row, checked.as_ref(), &mut scratch) {
+        Ok(text) => text.into_owned(),
+        Err(_) => "null".to_owned(),
     }
 }
 
@@ -2299,9 +2429,10 @@ impl Iterator for SnapshotPages {
         let mut rows = Vec::new();
         while let Some(row) = self.rows.peek() {
             let row_bytes = (if self.native_rows {
-                json_string_byte_len(&stable_json(row))
+                json_string_byte_len(&canonical_text(row.get()))
             } else {
-                json_byte_len(row)
+                // Rows are sent verbatim: their text is their encoding.
+                row.get().len()
             }) + usize::from(!rows.is_empty());
             if !rows.is_empty()
                 && (bytes + row_bytes
@@ -2452,10 +2583,14 @@ fn quote(value: &str) -> Result<String, ReplicaError> {
 }
 
 fn hex_digest(value: &[u8]) -> String {
-    Sha256::digest(value)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(value);
+    let mut out = String::with_capacity(64);
+    for byte in digest.iter() {
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 15)] as char);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2469,7 +2604,7 @@ mod tests {
             .collect();
         ServerMessage::ReplicaSnapshot {
             id: "open".into(),
-            result: rows.into_iter().map(Arc::new).collect(),
+            result: rows.iter().map(gonvex_protocol::JsonRow::from_value).collect(),
             cursor: ReplicaCursor {
                 epoch: "e".into(),
                 revision: 10,
@@ -2728,7 +2863,7 @@ mod tests {
                 panic!("page");
             };
             assert_eq!(cursor.revision, 10);
-            assert!(result.iter().all(|row| row["value"] == 0));
+            assert!(result.iter().all(|row| row.to_value()["value"] == 0));
             count += result.len();
         }
         assert_eq!(count, 1_200);
@@ -3139,6 +3274,7 @@ mod tests {
             mask: Default::default(),
             concern_tables: None,
             parent_acl_columns: None,
+            fanout: None,
         }
     }
 
@@ -3508,9 +3644,11 @@ mod tests {
         definition: &ReplicaCollectionDefinition,
     ) -> Result<(Vec<Value>, ReplicaWindow), ReplicaError> {
         let mut kept = Vec::new();
+        let rows = rows.map(|row| row.map(|row| row.to_string()));
         let window = collect_window(rows, definition, |row| {
-            assert_eq!(row.hash, row_hash(&row.row));
-            kept.push(row.row);
+            let value = row.row.to_value();
+            assert_eq!(row.hash, row_hash(&value));
+            kept.push(value);
             Ok(())
         })
         .await?;

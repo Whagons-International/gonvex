@@ -566,6 +566,37 @@ impl<'a> AclValue<'a> {
         }
     }
 
+    /// `self.scalar() == expected` without formatting integers into a new
+    /// string (member context atoms compare every changed row per member).
+    fn scalar_eq(&self, expected: &str) -> bool {
+        if let AclValue::Number(number) = self {
+            let integer = number
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| number.as_u64().map(i128::from));
+            if let Some(integer) = integer {
+                let mut buffer = [0u8; 48];
+                let mut at = buffer.len();
+                let negative = integer < 0;
+                let mut rest = integer.unsigned_abs();
+                loop {
+                    at -= 1;
+                    buffer[at] = b'0' + (rest % 10) as u8;
+                    rest /= 10;
+                    if rest == 0 {
+                        break;
+                    }
+                }
+                if negative {
+                    at -= 1;
+                    buffer[at] = b'-';
+                }
+                return &buffer[at..] == expected.as_bytes();
+            }
+        }
+        self.scalar() == expected
+    }
+
     /// `row.get(column) == Some(literal)`.
     fn equals(&self, literal: &Value) -> bool {
         match (self, literal) {
@@ -1305,7 +1336,7 @@ impl CompiledPlan {
             Node::Context { column, context } => member.is_some_and(|member| {
                 member.contexts[*context as usize]
                     .as_deref()
-                    .is_some_and(|expected| row.value(*column).scalar() == expected)
+                    .is_some_and(|expected| row.value(*column).scalar_eq(expected))
             }),
             Node::Inherits(spec) => self.eval_inherits(*spec, row, class, member),
             Node::And(start, length) => self
@@ -1468,6 +1499,35 @@ impl MemberVisibility {
         self.hit(decoded)
     }
 
+    /// For a change row that outlives `memo`: None when a member atom hits
+    /// the row (this member needs its own evaluation), else its class
+    /// default (memoized once per class and row). One decode per scope.
+    pub fn class_default_memo(&self, memo: &mut EvalMemo, row: &Value) -> Option<bool> {
+        let scope = &self.class.scope;
+        let row_key = row as *const Value as usize;
+        let decoded = memo
+            .rows
+            .entry((Arc::as_ptr(scope) as usize, row_key))
+            .or_insert_with(|| AclRow::from_value(row, &self.class.plan.columns).into_owned());
+        decoded.current(scope);
+        if !decoded.object {
+            return Some(false);
+        }
+        if self.has_member_atoms && self.hit(decoded) {
+            return None;
+        }
+        let class = &self.class;
+        Some(match memo.defaults.get(&(class.id, row_key)) {
+            Some(visible) => *visible,
+            None => {
+                memo.stats.class_evaluations += 1;
+                let visible = class.visible_default(decoded);
+                memo.defaults.insert((class.id, row_key), visible);
+                visible
+            }
+        })
+    }
+
     /// Is some member atom true on this row (directly or on a parent row)?
     /// When false, the member sees exactly what its class's default sees.
     pub fn hit(&self, row: &AclRow<'_>) -> bool {
@@ -1481,7 +1541,7 @@ impl MemberVisibility {
                 .is_some_and(|token| contains(&self.member_sets[set as usize], token)),
             MemberAtom::Context { column, context } => self.contexts[context as usize]
                 .as_deref()
-                .is_some_and(|expected| row.value(column).scalar() == expected),
+                .is_some_and(|expected| row.value(column).scalar_eq(expected)),
         };
         if plan.member_atoms.iter().any(|atom| atom_true(atom, row)) {
             return true;
@@ -1926,5 +1986,29 @@ impl HandleCache {
 
     pub fn clear(&mut self) {
         self.0 = None;
+    }
+}
+
+#[cfg(test)]
+mod scalar_eq_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_eq_matches_scalar() {
+        let values = [
+            json_number("0"), json_number("-1"), json_number("42"), json_number("9223372036854775807"),
+            json_number("-9223372036854775808"), json_number("18446744073709551615"), json_number("1.5"),
+            json_number("1e3"),
+        ];
+        for value in &values {
+            let value = AclValue::from_value(Some(value));
+            for expected in ["0", "-1", "42", "9223372036854775807", "-9223372036854775808", "18446744073709551615", "1.5", "1000.0", "x", ""] {
+                assert_eq!(value.scalar_eq(expected), value.scalar() == expected, "{value:?} {expected}");
+            }
+        }
+    }
+
+    fn json_number(text: &str) -> Value {
+        serde_json::from_str(text).unwrap()
     }
 }

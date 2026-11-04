@@ -450,6 +450,10 @@ pub struct DatabaseReport {
     /// `--resume`: this file was copied and verified by an earlier run.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub resumed: bool,
+    /// Pending scheduled jobs / outbox Actions whose actor was rewritten after
+    /// the copy (see `classify_actor`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actor_rewrites: Vec<ActorRewrite>,
     pub tables: Vec<TableReport>,
     /// Source tables intentionally not copied, with the reason.
     pub skipped_source_tables: BTreeMap<String, String>,
@@ -1116,6 +1120,8 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
             Some("revision carried over; epoch set explicitly")
         } else if name == "gonvex_migrations" {
             Some("Postgres migration ledger; the SQLite ledger records the SQLite migrations")
+        } else if name == "legacy_account_map" {
+            Some("identity-migration mapping; read to rewrite pending job actors, not copied")
         } else if name == "gonvex_runtime_manifests" {
             Some("Postgres-era module artifact (its migrations are Postgres SQL); deploy the module again after the export")
         } else if name.starts_with("_gonvex_reference_") {
@@ -1420,6 +1426,13 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Orchestration
 
+/// Findings that fail the export (`warning:` findings are reported only).
+fn has_errors(findings: &[String]) -> bool {
+    findings
+        .iter()
+        .any(|finding| !finding.starts_with("warning:"))
+}
+
 /// Marker written next to a database file once its copy verified cleanly.
 const EXPORT_OK_SUFFIX: &str = ".export-ok";
 
@@ -1530,6 +1543,199 @@ fn route_of(database: &DatabasePlan) -> TenantRoute {
             .unwrap_or_else(|| database.project_id.clone()),
         database_url: database.target_url.clone(),
     }
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorRewrite {
+    pub table: String,
+    pub id: String,
+    pub function: String,
+    pub from: String,
+    /// The new account id, or `system` when the actor was removed.
+    pub to: String,
+}
+
+/// What the export does with the actor of a pending scheduled job or outbox
+/// Action. Durable work keeps running as whoever queued it; only actors the
+/// SQLite runtime can no longer resolve are touched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ActorFix {
+    /// Resolves to an enabled account in the project's realm (or no actor).
+    Keep,
+    /// A `_gonvex_*` pseudo-actor (`_gonvex_system` from crons): run as the
+    /// system identity, which it already was.
+    System,
+    /// A pre-migration user id with exactly one account in `legacy_account_map`.
+    Account(String),
+    /// Unknown, disabled, or ambiguous: left as is and reported. Rewriting a
+    /// user's job to the system identity would widen its authority, and an
+    /// owner cannot be guessed; the job fails at run time as it did before.
+    Unresolvable(&'static str),
+}
+
+fn classify_actor(
+    actor: &str,
+    resolves: impl Fn(&str) -> bool,
+    legacy: &BTreeMap<String, BTreeSet<String>>,
+) -> ActorFix {
+    let actor = actor.trim();
+    if actor.is_empty() || resolves(actor) {
+        return ActorFix::Keep;
+    }
+    if actor.starts_with("_gonvex_") {
+        return ActorFix::System;
+    }
+    match legacy.get(actor) {
+        Some(accounts) if accounts.len() == 1 => {
+            let account = accounts.iter().next().expect("one account").clone();
+            if resolves(&account) {
+                ActorFix::Account(account)
+            } else {
+                ActorFix::Unresolvable("legacy id maps to an account that is missing or disabled")
+            }
+        }
+        Some(_) => ActorFix::Unresolvable("legacy id maps to several accounts"),
+        None => ActorFix::Unresolvable("no enabled account and no legacy mapping"),
+    }
+}
+
+async fn enabled_accounts(control: &mut SqliteConnection) -> Result<BTreeSet<(String, String)>> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT auth_realm_id, id FROM accounts WHERE disabled_at IS NULL")
+            .fetch_all(&mut *control)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+async fn legacy_account_map(source: &PgPool) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('legacy_account_map') IS NOT NULL")
+        .fetch_one(source)
+        .await?;
+    let mut map = BTreeMap::<String, BTreeSet<String>>::new();
+    if exists {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT legacy_user_id, account_id FROM legacy_account_map")
+                .fetch_all(source)
+                .await?;
+        for (legacy, account) in rows {
+            map.entry(legacy).or_default().insert(account);
+        }
+    }
+    Ok(map)
+}
+
+/// Rewrites the actors of pending durable work that the SQLite runtime could
+/// not resolve (see `ActorFix`). Runs after the copy was verified and before
+/// the installer check, in one transaction per file.
+async fn rewrite_pending_actors(
+    control_url: &str,
+    legacy: &BTreeMap<String, BTreeSet<String>>,
+    control_report: Option<&mut DatabaseReport>,
+    databases: &mut [(String, String, &mut DatabaseReport)],
+) -> Result<()> {
+    let mut control = open_target(control_url).await?;
+    let accounts = enabled_accounts(&mut control).await?;
+    if let Some(report) = control_report {
+        let jobs: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            r#"SELECT id, project_id, function_path, json_extract(provenance, '$.actorAccountId')
+               FROM gonvex_scheduled_jobs WHERE status = 'pending' ORDER BY id"#,
+        )
+        .fetch_all(&mut control)
+        .await?;
+        let mut transaction = control.begin().await?;
+        for (id, project, function, actor) in jobs {
+            let actor = actor.unwrap_or_default();
+            let fix = classify_actor(
+                &actor,
+                |account| accounts.contains(&(project.clone(), account.to_owned())),
+                legacy,
+            );
+            let to = match &fix {
+                ActorFix::Keep => continue,
+                ActorFix::System => {
+                    sqlx::query(
+                        r#"UPDATE gonvex_scheduled_jobs
+                           SET provenance = json_remove(provenance, '$.actorAccountId', '$.actorMemberId')
+                           WHERE id = $1"#,
+                    )
+                    .bind(&id)
+                    .execute(&mut *transaction)
+                    .await?;
+                    "system".to_owned()
+                }
+                ActorFix::Account(account) => {
+                    sqlx::query(
+                        r#"UPDATE gonvex_scheduled_jobs
+                           SET provenance = json_remove(json_set(provenance, '$.actorAccountId', $2), '$.actorMemberId')
+                           WHERE id = $1"#,
+                    )
+                    .bind(&id)
+                    .bind(account)
+                    .execute(&mut *transaction)
+                    .await?;
+                    account.clone()
+                }
+                ActorFix::Unresolvable(reason) => {
+                    report.findings.push(format!(
+                        "warning: pending scheduled job {id} ({function}) keeps actor {actor:?}: {reason}"
+                    ));
+                    continue;
+                }
+            };
+            report.actor_rewrites.push(ActorRewrite {
+                table: "gonvex_scheduled_jobs".to_owned(),
+                id,
+                function,
+                from: actor,
+                to,
+            });
+        }
+        transaction.commit().await?;
+    }
+    control.close().await?;
+
+    for (target_url, project, report) in databases.iter_mut() {
+        let mut tenant = open_target(target_url).await?;
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, action_path, actor_user_id FROM _gonvex_action_outbox ORDER BY id",
+        )
+        .fetch_all(&mut tenant)
+        .await?;
+        let mut transaction = tenant.begin().await?;
+        for (id, function, actor) in rows {
+            let actor = actor.unwrap_or_default();
+            let fix = classify_actor(
+                &actor,
+                |account| accounts.contains(&(project.clone(), account.to_owned())),
+                legacy,
+            );
+            match fix {
+                // The outbox drain already runs `_gonvex_*` actors as the system.
+                ActorFix::Keep | ActorFix::System => {}
+                ActorFix::Account(account) => {
+                    sqlx::query("UPDATE _gonvex_action_outbox SET actor_user_id = $2 WHERE id = $1")
+                        .bind(&id)
+                        .bind(&account)
+                        .execute(&mut *transaction)
+                        .await?;
+                    report.actor_rewrites.push(ActorRewrite {
+                        table: "_gonvex_action_outbox".to_owned(),
+                        id,
+                        function,
+                        from: actor,
+                        to: account,
+                    });
+                }
+                ActorFix::Unresolvable(reason) => report.findings.push(format!(
+                    "warning: pending outbox Action {id} ({function}) keeps actor {actor:?}: {reason}"
+                )),
+            }
+        }
+        transaction.commit().await?;
+        tenant.close().await?;
+    }
+    Ok(())
 }
 
 /// Removes the throwaway `--preflight` data directory however the run ends.
@@ -1789,6 +1995,28 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         }
         report.databases.push(job.report);
     }
+
+    // 3b. Pending durable work whose actor the SQLite runtime cannot resolve.
+    if !options.preflight {
+        let legacy = legacy_account_map(&control_source).await?;
+        let control_report = report
+            .control_plane
+            .as_mut()
+            .filter(|control| !control.resumed);
+        let mut databases = selected
+            .iter()
+            .zip(report.databases.iter_mut())
+            .filter(|(_, database_report)| !database_report.resumed)
+            .map(|(database, database_report)| {
+                (
+                    database.target_url.clone(),
+                    database.project_id.clone(),
+                    database_report,
+                )
+            })
+            .collect::<Vec<_>>();
+        rewrite_pending_actors(&control_url, &legacy, control_report, &mut databases).await?;
+    }
     control_source.close().await;
 
     // 4. The store's installer must accept every file as current (change
@@ -1836,12 +2064,12 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
     // 5. --resume markers: every file this run copied and fully verified.
     if !options.preflight {
         if let Some(control) = &report.control_plane {
-            if !control.resumed && control.findings.is_empty() {
+            if !control.resumed && !has_errors(&control.findings) {
                 mark_verified(&control_path, control)?;
             }
         }
         for (database, database_report) in selected.iter().zip(&report.databases) {
-            if !database_report.resumed && database_report.findings.is_empty() {
+            if !database_report.resumed && !has_errors(&database_report.findings) {
                 mark_verified(&database.target_path, database_report)?;
             }
         }
@@ -2071,6 +2299,48 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("--allow-drop-columns"), "{error}");
+    }
+
+    #[test]
+    fn pending_actors_are_rewritten_only_when_unresolvable() {
+        let enabled = ["acct-2"];
+        let resolves = |account: &str| enabled.contains(&account);
+        let legacy = BTreeMap::from([
+            (
+                "legacy-bo".to_owned(),
+                BTreeSet::from(["acct-2".to_owned()]),
+            ),
+            (
+                "legacy-off".to_owned(),
+                BTreeSet::from(["acct-off".to_owned()]),
+            ),
+            (
+                "legacy-dup".to_owned(),
+                BTreeSet::from(["acct-1".to_owned(), "acct-2".to_owned()]),
+            ),
+        ]);
+        assert_eq!(classify_actor("", resolves, &legacy), ActorFix::Keep);
+        assert_eq!(classify_actor("acct-2", resolves, &legacy), ActorFix::Keep);
+        assert_eq!(
+            classify_actor("_gonvex_system", resolves, &legacy),
+            ActorFix::System
+        );
+        assert_eq!(
+            classify_actor("legacy-bo", resolves, &legacy),
+            ActorFix::Account("acct-2".to_owned())
+        );
+        // Never widen a user's job to the system identity or guess an owner.
+        for actor in ["ghost", "legacy-off", "legacy-dup"] {
+            assert!(
+                matches!(
+                    classify_actor(actor, resolves, &legacy),
+                    ActorFix::Unresolvable(_)
+                ),
+                "{actor}"
+            );
+        }
+        assert!(!has_errors(&["warning: kept".to_owned()]));
+        assert!(has_errors(&["row count mismatch".to_owned()]));
     }
 
     #[test]

@@ -208,6 +208,18 @@ replaces only the others, so a run that failed halfway does not redo the
 databases it finished. Use it only while the source is still stopped; `--force`
 without `--resume` replaces every file and its marker.
 
+**Pending durable work.** After the copy, the actor of every pending
+scheduled job (`gonvex_scheduled_jobs.provenance.actorAccountId`) and outbox
+Action (`_gonvex_action_outbox.actor_user_id`) is checked against the enabled
+accounts of its project. An actor that resolves is kept. A `_gonvex_*`
+pseudo-actor (`_gonvex_system` on runAfter jobs a cron queued) is removed from
+the job, so it runs as the system identity it already was (the outbox drain
+does this at run time). A pre-migration user id with exactly one account in
+`legacy_account_map` becomes that account. Anything else (unknown, disabled, or
+an ambiguous legacy id) is left unchanged and reported as a `warning:` finding:
+running a user's job as the system would widen its authority, and an owner
+cannot be guessed. Each rewrite is listed under `actorRewrites`.
+
 **Module manifests.** `gonvex_runtime_manifests` is not copied: a Postgres-era
 module artifact carries Postgres migrations the SQLite runtime would try to
 apply. Deploy the module again after the export; until then the runtime starts

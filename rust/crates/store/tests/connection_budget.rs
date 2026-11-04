@@ -32,6 +32,7 @@ async fn idle_readers_close_and_databases_stay_within_their_budget() {
         max_connections_per_database: 2,
         max_idle_connections_per_database: 2,
         idle_timeout: Duration::from_millis(100),
+        warm_reader_window: Duration::ZERO,
         ..PoolLimits::default()
     });
     let mut listeners = Vec::new();
@@ -60,6 +61,49 @@ async fn idle_readers_close_and_databases_stay_within_their_budget() {
     drop(listeners);
     registry.close().await;
     assert_eq!(registry.snapshot().await.pools, 0);
+}
+
+#[tokio::test]
+async fn one_warm_reader_outlives_the_idle_timeout_until_the_warm_window_ends() {
+    let dir = TestDir::new("gonvex-warm");
+    let registry = PoolRegistry::new(PoolLimits {
+        max_connections_per_database: 3,
+        max_idle_connections_per_database: 3,
+        idle_timeout: Duration::from_millis(400),
+        warm_reader_window: Duration::from_millis(2000),
+        ..PoolLimits::default()
+    });
+    let urls = (0..4)
+        .map(|index| dir.url(&format!("warm-{index}")))
+        .collect::<Vec<_>>();
+    for url in &urls {
+        let reader = registry.reader(url).await.unwrap();
+        let held = (
+            reader.acquire().await.unwrap(),
+            reader.acquire().await.unwrap(),
+            reader.acquire().await.unwrap(),
+        );
+        drop(held);
+    }
+    assert_eq!(registry.snapshot().await.open_connections, 4 * 4);
+    // Past the idle timeout, each database keeps exactly one warm reader.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(registry.snapshot().await.open_connections, 4 + 4);
+    // A read within the window keeps it warm without opening another.
+    let reader = registry.reader(&urls[0]).await.unwrap();
+    let one: i64 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&reader)
+        .await
+        .unwrap();
+    assert_eq!(one, 1);
+    assert_eq!(registry.snapshot().await.open_connections, 4 + 4);
+    // Past the window, unread databases close their warm reader; the one
+    // read 1 s later is still inside its window.
+    tokio::time::sleep(Duration::from_millis(1400)).await;
+    assert_eq!(registry.snapshot().await.open_connections, 4 + 1);
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(registry.snapshot().await.open_connections, 4);
+    registry.close().await;
 }
 
 #[tokio::test]

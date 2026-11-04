@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use libsqlite3_sys as ffi;
 use serde_json::{Map, Number, Value};
-use sqlx::{Row, SqliteConnection};
+use sqlx::SqliteConnection;
 
 use crate::rows::JsonKind;
 use crate::DatabaseError;
@@ -92,9 +92,15 @@ struct TableShape {
     rowid_alias: Option<usize>,
 }
 
+/// Captured tables of one schema, shared by every connection whose schema
+/// has the same digest (every tenant of a module, typically).
+type Shapes = Arc<HashMap<String, Arc<TableShape>>>;
+
 #[derive(Default)]
 struct Context {
-    tables: RwLock<HashMap<String, Arc<TableShape>>>,
+    tables: RwLock<Shapes>,
+    /// Digest of the definitions `tables` was built from.
+    digest: Mutex<[u8; 32]>,
     events: Mutex<Vec<Event>>,
 }
 
@@ -338,7 +344,8 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
             "the linked SQLite lacks SQLITE_ENABLE_PREUPDATE_HOOK; build with rust/.cargo/config.toml".into(),
         ));
     }
-    let shapes = load_shapes(connection).await?;
+    let digest = catalog_digest(connection).await?;
+    let shapes = load_shapes(connection, digest).await?;
     let mut handle = connection.lock_handle().await?;
     let db = handle.as_raw_handle().as_ptr();
     let key = db as usize;
@@ -383,10 +390,13 @@ pub async fn install(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
         }
     };
     *context.tables.write().unwrap() = shapes;
+    *context.digest.lock().unwrap() = digest;
     Ok(())
 }
 
 /// Reloads the captured-table catalog of this connection, if it captures.
+/// Only a digest is read when the captured tables did not change (scripts
+/// re-run at every boot mostly leave them untouched).
 pub async fn refresh(connection: &mut SqliteConnection) -> Result<(), DatabaseError> {
     let key = {
         let mut handle = connection.lock_handle().await?;
@@ -398,48 +408,104 @@ pub async fn refresh(connection: &mut SqliteConnection) -> Result<(), DatabaseEr
         .get(&key)
         .and_then(std::sync::Weak::upgrade);
     if let Some(context) = context {
-        let shapes = load_shapes(connection).await?;
+        let digest = catalog_digest(connection).await?;
+        if digest == *context.digest.lock().unwrap() {
+            return Ok(());
+        }
+        let shapes = load_shapes(connection, digest).await?;
         *context.tables.write().unwrap() = shapes;
+        *context.digest.lock().unwrap() = digest;
     }
     Ok(())
 }
 
-/// Tables that carry capture triggers, with their column shapes.
-async fn load_shapes(
-    connection: &mut SqliteConnection,
-) -> Result<HashMap<String, Arc<TableShape>>, DatabaseError> {
-    let rows = sqlx::query(
-        r#"SELECT m.name, p.name, p.type, p.pk,
-                  (SELECT count(*) FROM pragma_table_info(m.name) AS k WHERE k.pk > 0)
-           FROM sqlite_schema AS m JOIN pragma_table_info(m.name) AS p
-           WHERE m.type = 'table'
-             AND EXISTS (SELECT 1 FROM sqlite_schema AS t
-                         WHERE t.type = 'trigger' AND t.tbl_name = m.name
-                           AND t.sql LIKE '%' || $1 || '(%')
-           ORDER BY m.name, p.cid"#,
+/// Digest of the `sqlite_schema` rows the capture catalog is a function of:
+/// every table definition and every capture trigger (one row).
+async fn catalog_digest(connection: &mut SqliteConnection) -> Result<[u8; 32], DatabaseError> {
+    use sha2::{Digest, Sha256};
+    let definitions: Option<String> = sqlx::query_scalar(
+        r#"SELECT group_concat(type || char(31) || name || char(31) || tbl_name || char(31)
+                               || coalesce(sql, ''), char(30) ORDER BY type, name)
+           FROM sqlite_schema
+           WHERE type = 'table'
+              OR (type = 'trigger' AND sql LIKE '%' || $1 || '(%')"#,
     )
     .bind(CAPTURE_FUNCTION)
-    .fetch_all(connection)
+    .fetch_one(connection)
     .await?;
-    let mut shapes: HashMap<String, TableShape> = HashMap::new();
-    for row in rows {
-        let table: String = row.get(0);
-        let name: String = row.get(1);
-        let declared: String = row.get(2);
-        let pk: i64 = row.get(3);
-        let pk_columns: i64 = row.get(4);
-        let shape = shapes.entry(table).or_default();
-        if pk == 1 && pk_columns == 1 && declared.trim().eq_ignore_ascii_case("INTEGER") {
+    Ok(Sha256::digest(definitions.unwrap_or_default().as_bytes()).into())
+}
+
+/// Catalogs by schema digest. Every tenant file of a module has the same
+/// schema, so a boot over N tenants builds the catalog once instead of N
+/// times (each build is a 4,303-row `pragma_table_info` join for Whagons).
+fn shape_cache() -> &'static Mutex<HashMap<[u8; 32], Shapes>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<[u8; 32], Shapes>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Distinct schemas kept in [`shape_cache`]; more are rebuilt on demand.
+const SHAPE_CACHE_ENTRIES: usize = 16;
+
+/// Tables that carry capture triggers, with their column shapes, for the
+/// schema whose [`catalog_digest`] is `digest` (from the cache when any
+/// connection already built it).
+async fn load_shapes(
+    connection: &mut SqliteConnection,
+    digest: [u8; 32],
+) -> Result<Shapes, DatabaseError> {
+    if let Some(shapes) = shape_cache().lock().unwrap().get(&digest).cloned() {
+        return Ok(shapes);
+    }
+    // One JSON row instead of one row per column: each row crosses sqlx's
+    // worker thread separately, which made this the slowest boot statement.
+    let encoded: Option<String> = sqlx::query_scalar(
+        r#"WITH captured(name) AS MATERIALIZED (
+             SELECT DISTINCT tbl_name FROM sqlite_schema
+             WHERE type = 'trigger' AND sql LIKE '%' || $1 || '(%')
+           SELECT json_group_array(json_array(m.name, p.name, p.type, p.pk)
+                                   ORDER BY m.name, p.cid)
+           FROM sqlite_schema AS m JOIN pragma_table_info(m.name) AS p
+           WHERE m.type = 'table' AND m.name IN captured"#,
+    )
+    .bind(CAPTURE_FUNCTION)
+    .fetch_one(connection)
+    .await?;
+    let rows: Vec<(String, String, String, i64)> =
+        serde_json::from_str(encoded.as_deref().unwrap_or("[]"))
+            .map_err(|error| DatabaseError::Decode(format!("capture catalog: {error}")))?;
+    let mut shapes: HashMap<String, (TableShape, usize)> = HashMap::new();
+    for (table, name, declared, pk) in rows {
+        let (shape, pk_columns) = shapes.entry(table).or_default();
+        if pk > 0 {
+            *pk_columns += 1;
+        }
+        if pk == 1 && declared.trim().eq_ignore_ascii_case("INTEGER") {
             shape.rowid_alias = Some(shape.columns.len());
         }
         shape
             .columns
             .push((name, JsonKind::from_declared(&declared)));
     }
-    Ok(shapes
-        .into_iter()
-        .map(|(table, shape)| (table, Arc::new(shape)))
-        .collect())
+    let shapes: Shapes = Arc::new(
+        shapes
+            .into_iter()
+            .map(|(table, (mut shape, pk_columns))| {
+                // Only a single-column INTEGER PRIMARY KEY aliases the rowid.
+                if pk_columns != 1 {
+                    shape.rowid_alias = None;
+                }
+                (table, Arc::new(shape))
+            })
+            .collect(),
+    );
+    let mut cache = shape_cache().lock().unwrap();
+    if cache.len() >= SHAPE_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(digest, shapes.clone());
+    Ok(shapes)
 }
 
 #[cfg(test)]
