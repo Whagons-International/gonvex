@@ -141,6 +141,13 @@ struct RuntimeInner {
     outbox_queue: Arc<action_gate::OutboxQueue>,
 }
 
+impl Drop for RuntimeInner {
+    fn drop(&mut self) {
+        // Stops the presence scheduler task.
+        self.presence.close();
+    }
+}
+
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
 // Replica snapshots are independent read-only plans, but each one consumes
 // tenant-pool and visibility work. Bound fan-out below both the runtime's
@@ -329,8 +336,6 @@ impl Runtime {
         }
     }
 
-    /// Presence v2 tick (coalesced transition publishing) and the batched
-    /// support-session `last_seen_at` flusher. Both stop with the runtime.
     /// One task revalidates every plain session connection per interval
     /// (`auth_revalidation.rs`), instead of a timer and six SQL statements per
     /// connection.
@@ -366,23 +371,14 @@ impl Runtime {
         (self.inner.auth_revalidation.registered(), rounds, revoked)
     }
 
+    /// Presence v2 scheduler (leading-edge publishing, trailing windows and
+    /// offline graces) and the batched support-session `last_seen_at`
+    /// flusher. Both stop with the runtime.
     fn start_presence_tasks(&self) {
         if !self.inner.presence.enabled() {
             return;
         }
-        let weak = Arc::downgrade(&self.inner);
-        let tick = self.inner.presence.config().tick;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tick);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                interval.tick().await;
-                let Some(inner) = weak.upgrade() else { return };
-                inner
-                    .presence
-                    .tick(std::time::Instant::now(), presence::now_ms());
-            }
-        });
+        tokio::spawn(presence_scheduler(self.inner.presence.clone()));
         // Closed sessions: their final `last_seen_at`, batched every 5 s.
         let weak = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
@@ -1644,6 +1640,34 @@ async fn websocket_upgrade(
     .await
 }
 
+/// Presence publishing. One task for the whole process: it sleeps until
+/// the earliest due scope (a trailing window end or an offline grace) and
+/// otherwise waits for a change, so there is no wakeup while nothing is
+/// pending and none per connection. It ends when the runtime is dropped
+/// (`RuntimeInner::drop` closes the hub).
+async fn presence_scheduler(hub: presence::PresenceHub) {
+    if !hub.config().leading_edge {
+        // `GONVEX_PRESENCE_LEADING_EDGE=0`: one fixed process-wide tick.
+        let mut interval = tokio::time::interval(hub.config().tick);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        while !hub.closed() {
+            interval.tick().await;
+            hub.tick(std::time::Instant::now(), presence::now_ms());
+        }
+        return;
+    }
+    while !hub.closed() {
+        let (_, next) = hub.run_due(std::time::Instant::now(), presence::now_ms());
+        match next {
+            Some(at) => tokio::select! {
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(at)) => {}
+                _ = hub.changed() => {}
+            },
+            None => hub.changed().await,
+        }
+    }
+}
+
 async fn websocket(
     mut socket: WebSocket,
     runtime: Runtime,
@@ -2214,11 +2238,15 @@ async fn websocket(
                 if let Some(slot) = presence_slot.as_ref() {
                     if let Some(frame) = presence_hub.drain(&connection_id, slot) {
                         match tenant_session.as_ref() {
-                            // Delivery v3: presence rides in the tick's batch
-                            // (one frame per tick per connection).
+                            // Presence rides in the connection's batch. It is
+                            // sent at once (leading edge) unless the open batch
+                            // already holds row changes, which go within the
+                            // batch tick anyway: then it rides along.
                             Some(session) if batcher.enabled() => {
+                                let riding = !presence_hub.config().leading_edge
+                                    || (batcher.deadline(socket.batch()).is_some() && batcher.has_items());
                                 batcher.push_item(socket.batch_mut(), &session.route.tenant_id, &replicas, frame);
-                                if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
+                                if (!riding || batcher.full(socket.batch())) && batcher.flush(&mut socket).await.is_err() { return; }
                             }
                             _ => {
                                 if socket.send(gonvex_websocket::text_message(frame)).await.is_err() { return; }

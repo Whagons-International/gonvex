@@ -751,8 +751,8 @@ async fn periodic_refresh_updates_open_sessions_without_control_fanout() {
 }
 
 /// Delivery v3: a connection that negotiated `replicaBatchFrames` receives
-/// its presence changes as items of the tick's `replica.batch` (one frame per
-/// tick), never as separate `presence.patch` frames.
+/// its presence changes as items of its `replica.batch`, never as separate
+/// `presence.patch` frames.
 #[tokio::test]
 async fn presence_patches_ride_in_the_replica_batch() {
     let fixture = fixture(config()).await;
@@ -781,6 +781,94 @@ async fn presence_patches_ride_in_the_replica_batch() {
     let items = batch["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "{batch}");
     assert_eq!(changes(&items[0]), vec![(alice.clone(), "active".into())]);
+}
+
+/// The next `replica.batch`'s presence items (failing on a bare patch).
+async fn next_presence_items(socket: &mut Socket) -> Vec<Value> {
+    loop {
+        let frame = next_json(socket).await;
+        assert_ne!(frame["type"], "presence.patch", "presence outside the batch: {frame}");
+        if frame["type"] == "replica.batch" {
+            let items: Vec<Value> = frame["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "presence.patch")
+                .cloned()
+                .collect();
+            if !items.is_empty() {
+                return items;
+            }
+        }
+    }
+}
+
+/// Leading edge: a change after a quiet window reaches subscribers at once
+/// (no tick, no batch tick). Changes inside the window coalesce into one
+/// trailing emission at the window's end, latest state per Member.
+#[tokio::test]
+async fn presence_leading_edge_then_one_trailing_emission_per_window() {
+    let window = Duration::from_millis(600);
+    let fixture = fixture(PresenceConfig {
+        tick: window,
+        ..config()
+    })
+    .await;
+    let (alice, alice_token) = fixture.member("tenant-a", "alice@example.test").await;
+    let (dave, dave_token) = fixture.member("tenant-a", "dave@example.test").await;
+    let (_bob, bob_token) = fixture.member("tenant-a", "bob@example.test").await;
+    let mut bob = fixture
+        .connect_with(
+            &bob_token,
+            "tenant-a",
+            json!({"preserveSubscriptions":1,"replicaBatchFrames":1,"presence":1}),
+        )
+        .await;
+    send(&mut bob, json!({"type":"presence.subscribe","id":"watch"})).await;
+    assert_eq!(next_presence(&mut bob).await["type"], "presence.snapshot");
+    let mut alice_socket = fixture.connect(&alice_token, "tenant-a", true).await;
+    let mut dave_socket = fixture.connect(&dave_token, "tenant-a", true).await;
+
+    let sent = std::time::Instant::now();
+    send(&mut alice_socket, json!({"type":"presence.set","state":"active"})).await;
+    let items = next_presence_items(&mut bob).await;
+    let leading = sent.elapsed();
+    assert_eq!(items.len(), 1);
+    assert_eq!(changes(&items[0]), vec![(alice.clone(), "active".into())]);
+    assert!(leading < window / 2, "leading edge took {leading:?}");
+
+    // Inside the window: Alice idle -> active -> idle, Dave comes online.
+    let first = std::time::Instant::now();
+    for state in ["idle", "active", "idle"] {
+        send(&mut alice_socket, json!({"type":"presence.set","state":state})).await;
+    }
+    send(&mut dave_socket, json!({"type":"presence.set","state":"active"})).await;
+    let items = next_presence_items(&mut bob).await;
+    let trailing = first.elapsed();
+    assert_eq!(items.len(), 1, "one emission for the whole window");
+    let mut got = changes(&items[0]);
+    got.sort();
+    let mut want = vec![(alice.clone(), "idle".to_owned()), (dave.clone(), "active".to_owned())];
+    want.sort();
+    assert_eq!(got, want);
+    // Due at the end of the window opened by the leading publication.
+    assert!(
+        trailing + leading >= window - Duration::from_millis(50),
+        "trailing emission after {trailing:?} (+ leading {leading:?})"
+    );
+    assert!(trailing < window * 3, "trailing emission took {trailing:?}");
+    quiet(&mut bob, window + window / 2).await;
+
+    // A quiet window later the next change is a leading edge again.
+    let sent = std::time::Instant::now();
+    send(&mut dave_socket, json!({"type":"presence.set","state":"idle"})).await;
+    let items = next_presence_items(&mut bob).await;
+    assert_eq!(changes(&items[0]), vec![(dave.clone(), "idle".into())]);
+    assert!(sent.elapsed() < window / 2, "second leading edge took {:?}", sent.elapsed());
+
+    fixture.server.abort();
+    fixture.runtime.shutdown().await;
+    fixture.pools.close().await;
 }
 
 /// Small kernel send buffers and a short stall timeout, as for slow readers.
