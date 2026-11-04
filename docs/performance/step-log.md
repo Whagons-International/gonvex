@@ -679,3 +679,16 @@ function signature changed (`workspaces.create`), artifact 8e7aa7b4d461 → 8366
 into the new-lab baseline (`POST /dev/sync`, generation 2, 1,982 functions; old baseline kept as
 `baseline-data-8e7aa7b4`), Mac `app-new` refreshed with it and SDK packages rebuilt from this
 branch. Lab runs after this point use 83669147bb63.
+
+### rl-500b: 500 users, resume-lazy line, artifact 83669147 (visibility-v2 merge) — FAIL
+
+save p50/p95/p99 41,370 / 95,803 / 115,663 ms (rl-500 with 8e7aa7b4: 24,851 / 83,415 /
+110,202), taskDelivery 8,440 / 61,733 / 84,399, presence delivery 697 / 6,771 / 15,932,
+reconnect 193 / 307 / 405; errors 92 % (6,304 × task update not delivered before teardown,
+113 × `budget_exceeded` in `taskResources.recordTaskViewByTaskId`, was 28); oracle 5 checks, 2
+mismatched. Runtime 1.00 core, cgroup at 2,048 MiB. `fn.total reducer` p50 **8.7 s** / p99 10.1 s
+(rl-500: 3.1 s), i.e. reducers run into the 10 s deadline; `snapshot.build` p50 4.7 s (mean
+15.9 s), `delivery.queue_wait` p50 12.6 s. One run only. The app change (16 commits of the
+staging-deploy line arrived with f38c1dd28; visibility plans are unchanged) makes the reducer
+path heavier at this load; which function is not yet isolated (slow traces in
+`rl-500b/profile/*.json`, `top.py --file`).
