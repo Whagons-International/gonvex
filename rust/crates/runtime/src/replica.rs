@@ -1236,8 +1236,14 @@ impl Runtime {
         };
         let mut shared_stats = crate::visibility_class::EvalStats::default();
         let mut recording = match (&share, record && fanout::enabled()) {
-            (Some(share), true) => fanout::shape(subscriptions, share, &database_epoch, revision)
-                .ok()
+            (Some(share), true) => fanout::shape(
+                subscriptions,
+                share,
+                &database_epoch,
+                revision,
+                &session.route.database_url,
+            )
+            .ok()
                 .filter(|shape| !share.outcomes.lock().unwrap().contains_key(shape))
                 .map(|shape| (shape, fanout::Recorder::new())),
             _ => None,
@@ -1317,7 +1323,14 @@ impl Runtime {
                 continue;
             };
             if let Some((_, recorder)) = &mut recording {
-                if context.before.is_some() || context.overlay.is_some() || !context.affected.is_empty() {
+                // A parent overlay that decided no row (an inherited
+                // collection whose parents changed without flipping: the
+                // shape's `Skip`) leaves the outcome a function of the shape.
+                let decided = !delta.upserts.is_empty() || !delta.deleted.is_empty() || !delta.ops.is_empty();
+                if context.before.is_some()
+                    || !context.affected.is_empty()
+                    || (context.overlay.is_some() && decided)
+                {
                     recorder.clean = false;
                 }
             }

@@ -1087,7 +1087,7 @@ impl VisibilityPlan {
                             row.get(&anchor.column),
                             resolved.direct.get(&anchor.context),
                         ) {
-                            (Some(value), Some(expected)) => scalar(Some(value)) != *expected,
+                            (Some(value), Some(expected)) => !scalar_is(value, expected),
                             _ => false,
                         }
                     });
@@ -1210,7 +1210,7 @@ impl VisibilityPlan {
                             row.get(&anchor.column),
                             resolved.direct.get(&anchor.context),
                         ) {
-                            (Some(value), Some(expected)) => scalar(Some(value)) != *expected,
+                            (Some(value), Some(expected)) => !scalar_is(value, expected),
                             _ => false,
                         }
                     });
@@ -1230,6 +1230,17 @@ impl VisibilityPlan {
                 new,
             )
         })
+    }
+
+    /// [`Self::active_grant_sets`] without collecting.
+    pub fn active_grant_sets_iter<'a>(
+        &'a self,
+        resolved: &ResolvedVisibility,
+    ) -> impl Iterator<Item = (&'a String, &'a VisibilitySet)> + 'a {
+        let active = active_sets(self, &resolved.role);
+        self.sets
+            .iter()
+            .filter(move |(name, set)| set.kind == "grant" && active.contains(*name))
     }
 
     /// Active grant sets of a version 2 plan, by name.
@@ -1983,8 +1994,7 @@ pub fn derived_change_concerns(
             && resolved.sets.get(&set.from).is_some_and(|source| {
                 [old, new].into_iter().any(|row| {
                     row.get(&set.key)
-                        .map(|value| scalar(Some(value)))
-                        .is_some_and(|key| source.contains(&key))
+                        .is_some_and(|value| scalar_in(value, source))
                 }) || source.contains(row_id)
             })
     })
@@ -2158,6 +2168,25 @@ pub enum GrantContribution {
     Unknown,
 }
 
+/// `scalar(Some(value)) == expected` without allocating for strings and null.
+fn scalar_is(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::String(value) => value == expected,
+        Value::Null => expected == "null",
+        value => scalar(Some(value)) == expected,
+    }
+}
+
+/// `set.contains(&scalar(Some(value)))` without allocating for strings and
+/// null.
+fn scalar_in(value: &Value, set: &BTreeSet<String>) -> bool {
+    match value {
+        Value::String(value) => set.contains(value.as_str()),
+        Value::Null => set.contains("null"),
+        value => set.contains(&scalar(Some(value))),
+    }
+}
+
 /// Decide in memory whether a grant row contributes to this member's set. Uses
 /// only the row, the member's direct context and its resolved join tokens.
 pub fn grant_contribution(
@@ -2195,7 +2224,7 @@ pub fn grant_contribution(
             }
         } else {
             match resolved.direct.get(&constraint.context) {
-                Some(expected) => scalar(Some(value)) == *expected,
+                Some(expected) => scalar_is(value, expected),
                 None => return GrantContribution::Unknown,
             }
         };
@@ -2208,7 +2237,7 @@ pub fn grant_contribution(
             return GrantContribution::Unknown;
         };
         match row.get(&first.left_column) {
-            Some(value) if tokens.contains(&scalar(Some(value))) => {}
+            Some(value) if scalar_in(value, tokens) => {}
             Some(_) => return GrantContribution::None,
             None => return GrantContribution::Unknown,
         }

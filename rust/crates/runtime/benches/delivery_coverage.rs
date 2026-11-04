@@ -86,6 +86,23 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Adds the time since `.0` to `.1` when dropped.
+struct Elapsed<'a>(Instant, &'a mut u64);
+
+impl Drop for Elapsed<'_> {
+    fn drop(&mut self) {
+        *self.1 += self.0.elapsed().as_nanos() as u64;
+    }
+}
+
+/// (count, sum ns) of a profiler stage.
+fn stage(stage: gonvex_profiler::Stage) -> (u64, u64) {
+    gonvex_profiler::snapshot()
+        .into_iter()
+        .filter(|snapshot| snapshot.stage == stage)
+        .fold((0, 0), |(count, sum), snapshot| (count + snapshot.count, sum + snapshot.sum))
+}
+
 struct Conn {
     batcher: ReplicaBatcher,
     batch: OutboundBatch,
@@ -182,6 +199,7 @@ async fn feed_one(
     connection: &mut MemberConnection,
     conn: &mut Conn,
     event: &FeedEvent,
+    frame_ns: &mut u64,
 ) -> bool {
     let rest = fixture
         .runtime
@@ -197,6 +215,8 @@ async fn feed_one(
         .await
         .unwrap();
     assert!(rest.is_empty(), "unexpected unbatched frames {rest:?}");
+    let started = Instant::now();
+    let _frame = Elapsed(started, frame_ns);
     conn.batcher.watermark(
         &mut conn.batch,
         tenant_id,
@@ -216,6 +236,7 @@ async fn feed_one(
 
 async fn run() {
     let mut report = Report::new();
+    gonvex_profiler::set_enabled(true);
     let options = match (std::env::var("DC_MEMBERS").ok(), std::env::var("DC_TASKS").ok()) {
         (None, None) => FixtureOptions::whagons(),
         _ => FixtureOptions {
@@ -264,15 +285,24 @@ async fn run() {
         let mut allocs = AllocSnapshot::default();
         let mut receivers = 0u64;
         let mut paths = vec![0u64; FANOUT_PATHS.len()];
+        let mut frame_total = 0u64;
+        let mut stages_before = ((0u64, 0u64), (0u64, 0u64));
         for i in 0..warmup + iterations {
             n += 1;
             let event = commit(&fixture, kind, n, &spots).await;
+            if i == warmup {
+                stages_before = (
+                    stage(gonvex_profiler::Stage::DeliveryShared),
+                    stage(gonvex_profiler::Stage::DeliveryIndividual),
+                );
+            }
             let before_paths = fanout_path_counts();
+            let mut frame_ns = 0u64;
             let before = AllocSnapshot::now();
             let started = Instant::now();
             let mut received = 0;
             for (connection, conn) in connections.iter_mut().zip(conns.iter_mut()) {
-                if feed_one(&fixture, &hub, &tenant_id, connection, conn, &event).await {
+                if feed_one(&fixture, &hub, &tenant_id, connection, conn, &event, &mut frame_ns).await {
                     received += 1;
                 }
             }
@@ -284,11 +314,24 @@ async fn run() {
                 allocs.allocations += delta.allocations;
                 allocs.allocated_bytes += delta.allocated_bytes;
                 receivers += received;
+                frame_total += frame_ns;
                 for (index, path) in paths.iter_mut().enumerate() {
                     *path += after_paths[index] - before_paths[index];
                 }
             }
         }
+        let (shared_after, full_after) = (
+            stage(gonvex_profiler::Stage::DeliveryShared),
+            stage(gonvex_profiler::Stage::DeliveryIndividual),
+        );
+        let (shared_count, shared_ns) = (
+            shared_after.0 - stages_before.0 .0,
+            shared_after.1 - stages_before.0 .1,
+        );
+        let (full_count, full_ns) = (
+            full_after.0 - stages_before.1 .0,
+            full_after.1 - stages_before.1 .1,
+        );
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let iterations_f = iterations as f64;
         let median = samples[samples.len() / 2];
@@ -319,6 +362,23 @@ async fn run() {
         let shared = paths[0] + paths[1];
         let total: u64 = paths.iter().sum();
         extra.insert("pathsPerChange".into(), json!(split));
+        extra.insert(
+            "frameNsPerChange".into(),
+            json!(frame_total as f64 / iterations_f),
+        );
+        extra.insert(
+            "sharedNsPerConnection".into(),
+            json!(shared_ns as f64 / shared_count.max(1) as f64),
+        );
+        extra.insert(
+            "fullNsPerConnection".into(),
+            json!(full_ns as f64 / full_count.max(1) as f64),
+        );
+        extra.insert(
+            "sharedNsPerChange".into(),
+            json!(shared_ns as f64 / iterations_f),
+        );
+        extra.insert("fullNsPerChange".into(), json!(full_ns as f64 / iterations_f));
         extra.insert(
             "sharedFraction".into(),
             json!(if total == 0 { 0.0 } else { shared as f64 / total as f64 }),

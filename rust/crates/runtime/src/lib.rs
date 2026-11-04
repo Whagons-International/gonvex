@@ -1907,6 +1907,7 @@ async fn websocket(
                             // Delivery v4: a connection whose shape already has a
                             // shared outcome for this event only appends it.
                             let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
+                                replica::fanout::await_indexes(&replicas, &event).await;
                                 runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
                             } else {
                                 replica::fanout::count(replica::fanout::Path::NotBatch);

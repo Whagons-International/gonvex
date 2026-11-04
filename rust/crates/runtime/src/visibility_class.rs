@@ -1540,6 +1540,39 @@ impl MemberVisibility {
         })
     }
 
+    /// For a changed row of an inherited parent `table` (one plain `inherits`
+    /// spec on it, no predicate override): whether the parent admits its
+    /// children differently before (`old`) and after (`new`), for this member
+    /// by its parent class's default (memoized once per class and row). None
+    /// when the parent member is hit on either image or the spec is not of
+    /// that form: the member decides alone (`parent_admits`).
+    pub fn parent_default_flip(
+        &self,
+        memo: &mut EvalMemo,
+        table: &str,
+        old: &Value,
+        new: &Value,
+    ) -> Option<bool> {
+        let plan = &self.class.plan;
+        let mut specs = plan
+            .inherits
+            .iter()
+            .enumerate()
+            .filter(|(_, spec)| spec.table == table);
+        let (index, spec) = specs.next()?;
+        if specs.next().is_some() || spec.override_root.is_some() {
+            return None;
+        }
+        let parent = self.parents[index].as_deref()?;
+        let mut admits = |row: &Value| -> Option<bool> {
+            if !row.is_object() || !literal_constraints_hold(&spec.parent_where, row) {
+                return Some(false);
+            }
+            parent.class_default_memo(memo, row)
+        };
+        Some(admits(old)? != admits(new)?)
+    }
+
     /// Is some member atom true on this row (directly or on a parent row)?
     /// When false, the member sees exactly what its class's default sees.
     pub fn hit(&self, row: &AclRow<'_>) -> bool {

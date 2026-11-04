@@ -125,6 +125,97 @@ async fn events(fixture: &Fixture) -> Vec<(String, FeedEvent)> {
             fixture.commit(0, &statement, binds).await.unwrap(),
         ));
     }
+    // Delivery coverage: transactions that reach inherited collections
+    // (`taskTags` / `taskUsers` follow their parent task), several statements
+    // per transaction as the Whagons reducers commit them.
+    let log = |id: &str, task: &str| -> (String, Vec<SqlValue>) {
+        (
+            r#"INSERT INTO "taskLogs"("_id","_creationTime","action","taskId","userId","timestamp","uuid") VALUES($1,1,'updated',$2,$3,1.0,$1)"#.into(),
+            vec![text(id), text(task), text(&tenant_members[0].id)],
+        )
+    };
+    let tag = |id: &str, task: &str| -> (String, Vec<SqlValue>) {
+        (
+            r#"INSERT INTO "taskTags"("_id","_creationTime","taskId","tagId","userId") VALUES($1,1,$2,$1,$3)"#.into(),
+            vec![text(id), text(task), text(&tenant_members[0].id)],
+        )
+    };
+    let transactions: Vec<(&str, Vec<(String, Vec<SqlValue>)>)> = vec![
+        ("tag a task", vec![tag("cov-tag-1", &tasks[5].id)]),
+        (
+            "tag two tasks",
+            vec![tag("cov-tag-2", &tasks[6].id), tag("cov-tag-3", &tasks[9].id)],
+        ),
+        (
+            "untag",
+            vec![(r#"DELETE FROM "taskTags" WHERE "_id"='cov-tag-1'"#.into(), Vec::new())],
+        ),
+        (
+            "view",
+            vec![(
+                r#"INSERT INTO "taskViews"("_id","_creationTime","taskId","userId","viewedAt") VALUES('cov-view',1,$1,$2,1)"#.into(),
+                vec![text(&tasks[6].id), text(&tenant_members[1].id)],
+            )],
+        ),
+        (
+            "notification",
+            vec![(
+                r#"INSERT INTO "notifications"("_id","_creationTime","userId","title","isRead") VALUES('cov-note',1,$1,'t',0)"#.into(),
+                vec![text(&tenant_members[2].id)],
+            )],
+        ),
+        (
+            "edit and log",
+            vec![
+                (
+                    r#"UPDATE "tasks" SET "description"='coverage edit' WHERE "_id"=$1"#.into(),
+                    vec![text(&tasks[6].id)],
+                ),
+                log("cov-log-1", &tasks[6].id),
+            ],
+        ),
+        (
+            "spot move and log",
+            vec![
+                (
+                    r#"UPDATE "tasks" SET "spotId"=$1 WHERE "_id"=$2"#.into(),
+                    vec![
+                        tasks[11].spot_id.clone().map_or(SqlValue::Null, SqlValue::Text),
+                        text(&tasks[9].id),
+                    ],
+                ),
+                log("cov-log-2", &tasks[9].id),
+            ],
+        ),
+        (
+            "create task with a tag",
+            vec![
+                (
+                    r#"INSERT INTO "tasks"("_id","id","workspaceId","statusId","name","createdAt","updatedAt","_creationTime") VALUES('cov-task',999997,$1,$2,'New',1,1,1)"#.into(),
+                    vec![text(&tasks[1].workspace_id), text(&tasks[1].status_id)],
+                ),
+                tag("cov-tag-4", "cov-task"),
+            ],
+        ),
+        ("tag a missing task", vec![tag("cov-tag-5", "no-such-task")]),
+        (
+            "workspace move of a tagged task",
+            vec![(
+                r#"UPDATE "tasks" SET "workspaceId"=$1 WHERE "_id"=$2"#.into(),
+                vec![text(&tasks[12].workspace_id), text(&tasks[6].id)],
+            )],
+        ),
+        (
+            "delete a tagged task",
+            vec![(r#"DELETE FROM "tasks" WHERE "_id"=$1"#.into(), vec![text(&tasks[9].id)])],
+        ),
+    ];
+    for (name, statements) in transactions {
+        events.push((
+            name.to_owned(),
+            fixture.commit_all(0, statements).await.unwrap(),
+        ));
+    }
     events
 }
 
@@ -209,7 +300,7 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let fixture = Fixture::build(options).await.unwrap();
     let members = fixture.tenants[0].members.len();
     let tenant_id = fixture.tenants[0].route.tenant_id.clone();
-    let sets: [&[&str]; 3] = [
+    let sets: [&[&str]; 4] = [
         &gonvex_runtime::perf_fixture::WHAGONS_SUBSCRIPTIONS,
         &["tasks.recentWorkspaceTasks"],
         &[
@@ -218,6 +309,7 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
             "tags.tags",
             "tasks.recentWorkspaceTasks",
         ],
+        &["taskResources.taskTags", "taskResources.taskUsers"],
     ];
     struct Side {
         connection: gonvex_runtime::perf_fixture::MemberConnection,
@@ -245,6 +337,10 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let hub_shared = DeliveryHub::default();
     let hub_alone = DeliveryHub::default();
     let (hits_before, _, data_before) = gonvex_runtime::replica::fanout_stats();
+    let paths_before = gonvex_runtime::replica::fanout_path_counts();
+    // Connections of sets with inherited collections (0 and 3) served by the
+    // fan-out with decided rows, per event.
+    let mut inherited_data = 0usize;
     let mut frames = 0usize;
     let mut data_frames = 0usize;
     {
@@ -257,6 +353,7 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                 // Half the connections use native row encoding.
                 let native = index % 2 == 1;
                 feed_share::set_sharing(Some(true));
+                let data_before = gonvex_runtime::replica::fanout_stats().2;
                 let rest = fixture
                     .runtime
                     .deliver_feed_event(
@@ -270,6 +367,12 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                     )
                     .await
                     .unwrap();
+                let set = index / members;
+                if (set == 0 || set == 3)
+                    && gonvex_runtime::replica::fanout_stats().2 > data_before
+                {
+                    inherited_data += 1;
+                }
                 let rest_a: Vec<Value> = rest
                     .iter()
                     .map(|m| serde_json::to_value(m).unwrap())
@@ -367,6 +470,15 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let hits = hits_after - hits_before;
     let data_hits = data_after - data_before;
     eprintln!("{} events, {frames} frames ({data_frames} with data), {hits} fan-out hits ({data_hits} with decided rows), {recorded} outcomes recorded", events.len());
+    let paths_after = gonvex_runtime::replica::fanout_path_counts();
+    for (index, (path, _)) in gonvex_runtime::replica::FANOUT_PATHS.iter().enumerate() {
+        eprintln!("  {path}: {}", paths_after[index] - paths_before[index]);
+    }
+    eprintln!("  inherited connections served with decided rows: {inherited_data}");
+    assert!(
+        inherited_data > 0,
+        "no connection holding inherited collections was served rows by the fan-out"
+    );
     assert!(data_hits > 0, "no shared outcome with rows was used");
     assert!(data_frames > 0);
     assert!(
