@@ -170,3 +170,7 @@ required-features = ["perf-fixture"]
 [[test]]
 name = "feed_backlog"
 required-features = ["perf-fixture"]
+
+[[test]]
+name = "resume_log_only"
+required-features = ["perf-fixture"]

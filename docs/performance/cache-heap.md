@@ -45,6 +45,24 @@ Entries at the eviction point (before, `ch-diag-500`, 883 entries, 259 MiB):
   only the arguments the equality filters read (`cache_arguments`), so extra args cannot split
   an entry.
 
+* **Per-member sparse decisions** (perf/resume-fix). The rule above was per key. On a
+  mixed collection a few narrow opens (GrantOnly members see 45 of 10,500 tasks) dropped
+  the entry and sent *every* member's open and resume back to the full SQL scan for
+  10 minutes. Broad members lost the log-only resume: el-rey Admin resume 7.9 → 132 ms
+  (`snapshot_cache` bench). Now:
+  * a member whose opens admit < 1/50 of a ≥ 1,000-row entry is marked narrow, and its
+    opens read SQL (as before, but only that member's);
+  * a member admitting more is marked broad and always uses the cache;
+  * a key is dropped and made sparse only when no open in its window (≤ 64 opens) was
+    broad;
+  * on a sparse key, members not known yet read SQL; one whose SQL result is broad
+    revives the key.
+
+  Members are remembered for `GONVEX_SNAPSHOT_CACHE_SPARSE_HOLD_SECS`, at most 16,384 per
+  key. All-narrow keys such as notifications behave as before. Test: `tests/resume_log_only.rs`
+  (valid-cursor resumes read 0 SQL rows, counted by `raw_sites`, on a mixed key and after a
+  sparse drop).
+
 Cache over the plateau:
 
 | case | hit rate | builds/s | evictions | peak bytes | sparse skips |

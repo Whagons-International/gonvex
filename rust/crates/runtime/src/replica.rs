@@ -465,6 +465,7 @@ impl Runtime {
             generation,
             path: &request.path,
             args: &cache_args,
+            member: &session.member.id,
         };
         // Keyed entries (one task's detail collections) are looked up here
         // and, when missing, built inside this open's read below.
@@ -578,6 +579,7 @@ impl Runtime {
             }
         }
         let cached = entry.as_ref().map(|entry| (&cache_key, entry));
+        let skipped_cache = use_cache && entry.is_none();
         let cursor = cursor_for(&read.clock, &definition, &directive.visibility_scope);
         let resumable = cursor_resumable(
             request.cursor.as_ref(),
@@ -817,6 +819,14 @@ impl Runtime {
                     }
                 }
             }
+        }
+        if skipped_cache {
+            // A member that skipped a sparse key, or was marked narrow: its
+            // SQL result decides whether it is broad (then its next opens
+            // use the cache, and its resumes are log-only again).
+            self.inner
+                .snapshot_cache
+                .observe_skipped(&cache_key, window.rows);
         }
         messages.push(replica_ready(
             &request.id,
