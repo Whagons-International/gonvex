@@ -2625,7 +2625,13 @@ async fn websocket(
         {
             if let Ok(frame) = serde_json::from_str::<ClientMessage>(text) {
                 if !matches!(&frame, ClientMessage::Auth { .. })
-                    && !check_public_admission(&runtime, admission, scope).await
+                    && !check_public_admission(
+                        &runtime,
+                        admission,
+                        scope,
+                        public_frame_runs_tenant_code(&frame),
+                    )
+                    .await
                 {
                     for response in public_admission_errors(frame) {
                         let _ =
@@ -3293,7 +3299,7 @@ async fn websocket(
                     }
                     for call in calls {
                         if let (Some(admission), Some(scope)) = (&public_admission, &public_scope) {
-                            if !check_public_admission(&runtime, admission, scope).await {
+                            if !check_public_admission(&runtime, admission, scope, true).await {
                                 let response = ReducerErrorClass::Rejected.reducer_error(
                                     call.id,
                                     Some(call.path),
@@ -3816,16 +3822,40 @@ async fn validate_public_scope(runtime: &Runtime, scope: &(String, String)) -> b
     }
 }
 
+/// Public sessions are anonymous: the only thing admitting them is that the
+/// tenant is still active and public in the Control Plane. `fresh` re-reads
+/// that before work that runs tenant code or opens tenant data, so a call
+/// after the tenant was disabled is refused (not up to 30 s later); other
+/// frames (acks, telemetry, presence) accept a check up to 30 s old.
 async fn check_public_admission(
     runtime: &Runtime,
     admission: &public_functions::PublicAdmission,
     scope: &(String, String),
+    fresh: bool,
 ) -> bool {
+    let max_age = if fresh {
+        std::time::Duration::ZERO
+    } else {
+        std::time::Duration::from_secs(30)
+    };
     admission
-        .check(std::time::Duration::from_secs(30), || {
-            validate_public_scope(runtime, scope)
-        })
+        .check(max_age, || validate_public_scope(runtime, scope))
         .await
+}
+
+/// Frames whose handling runs tenant functions or reads tenant data.
+/// `reducer.callMany` is checked per call where it is executed.
+fn public_frame_runs_tenant_code(frame: &ClientMessage) -> bool {
+    matches!(
+        frame,
+        ClientMessage::QueryCall { .. }
+            | ClientMessage::QuerySubscribe { .. }
+            | ClientMessage::QuerySubscribeMany { .. }
+            | ClientMessage::ReplicaOpen(_)
+            | ClientMessage::ReplicaOpenMany { .. }
+            | ClientMessage::ReducerCall(_)
+            | ClientMessage::ActionCall { .. }
+    )
 }
 
 fn public_admission_errors(frame: ClientMessage) -> Vec<ServerMessage> {
@@ -5799,6 +5829,11 @@ export async function fail(ctx) { throw new Error("refused"); }
         use sqlx::Row;
 
         let Some(binary) = std::env::var("GONVEX_TEST_MODULE_HOST_BINARY").ok() else {
+            // CI sets this so the contract cannot silently skip.
+            assert!(
+                std::env::var_os("GONVEX_TEST_REQUIRE_MODULE_HOST").is_none(),
+                "GONVEX_TEST_REQUIRE_MODULE_HOST is set but GONVEX_TEST_MODULE_HOST_BINARY is not"
+            );
             return;
         };
         let data = test_data_dir();
@@ -7294,7 +7329,7 @@ mod connection_future_sizes {
         );
         println!(
             "future_size {:>6} check_public_admission",
-            size3(check_public_admission)
+            size4(check_public_admission)
         );
         println!(
             "future_size {:>6} revalidate_connection",
