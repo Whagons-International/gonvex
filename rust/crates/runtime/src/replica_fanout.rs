@@ -93,6 +93,8 @@ static PATH_COUNTS: [AtomicU64; PATH_COUNT] = [ZERO; PATH_COUNT];
 
 static WAITS: AtomicU64 = AtomicU64::new(0);
 static WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static MERGED: AtomicU64 = AtomicU64::new(0);
+static MERGED_SHARED: AtomicU64 = AtomicU64::new(0);
 static NOOP_WAKEUPS: AtomicU64 = AtomicU64::new(0);
 
 /// Counts one batch connection's feed arm for one transaction; `noop`: it
@@ -125,6 +127,8 @@ pub fn coverage_json() -> serde_json::Value {
         "shared": shared,
         "sharedFraction": if total == 0 { 0.0 } else { shared as f64 / total as f64 },
         "waits": WAITS.load(Ordering::Relaxed),
+        "merged": MERGED.load(Ordering::Relaxed),
+        "mergedShared": MERGED_SHARED.load(Ordering::Relaxed),
         "wakeups": WAKEUPS.load(Ordering::Relaxed),
         "noopWakeups": NOOP_WAKEUPS.load(Ordering::Relaxed),
         "paths": PATHS.iter().zip(counts).map(|((name, doc), count)| serde_json::json!({
@@ -921,7 +925,18 @@ impl Runtime {
         native: bool,
     ) -> FanOut {
         let mut timer = gonvex_profiler::Timer::start();
-        match self.fan_out_inner(session, subscriptions, event, batcher, batch, native) {
+        // A lagging connection's merged catch-up event (burst control): more
+        // than one revision in one event.
+        let merged = matches!(event, FeedEvent::Transaction { revision, .. }
+            if crate::change_feed::first_revision(event).is_some_and(|first| first < *revision));
+        let result = self.fan_out_inner(session, subscriptions, event, batcher, batch, native);
+        if merged && !matches!(result, Err(Missed::Wait(_))) {
+            MERGED.fetch_add(1, Ordering::Relaxed);
+            if result.is_ok() {
+                MERGED_SHARED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        match result {
             Ok((path, result)) => {
                 timer.lap(
                     gonvex_profiler::Stage::DeliveryShared,

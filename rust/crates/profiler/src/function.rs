@@ -243,6 +243,9 @@ mod tests {
         assert!(row.get(FunctionField::TotalNs) >= row.get(FunctionField::MaxNs));
         assert!(row.get(FunctionField::LastAtNs) > 0);
         assert!(!rows.iter().any(|row| row.slot == b));
-        assert_eq!(name(a).unwrap(), ("p-fn".to_owned(), "tasks.save".to_owned()));
+        assert_eq!(
+            name(a).unwrap(),
+            ("p-fn".to_owned(), "tasks.save".to_owned())
+        );
     }
 }

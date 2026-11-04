@@ -214,6 +214,7 @@ stages! {
     WsWrite => "ws.write", "transport", "Outbound socket write (includes compression and backpressure)";
     // Snapshot path.
     SnapshotPermitWait => "snapshot.permit_wait", "snapshot", "Wait for the process-wide snapshot semaphore";
+    SnapshotPermitHold => "snapshot.permit_hold", "snapshot", "Snapshot permit held (admitted .. released): the build's service time under admission";
     SnapshotAcl => "snapshot.acl", "snapshot", "Parent ACL index preparation";
     SnapshotBegin => "snapshot.begin", "snapshot", "Read transaction open + clock read";
     SnapshotVisibility => "snapshot.visibility", "snapshot", "Visibility resolution for the subscriber";
@@ -1063,7 +1064,8 @@ pub fn record_slow_trace(label: Label, function: u16, values: &TraceValues) {
     let slot = &TRACES[(seq as usize) % TRACE_RING];
     slot.seq.store(0, std::sync::atomic::Ordering::Release);
     slot.at_unix_ms.store(unix_ms(), Relaxed);
-    slot.label.store(label as u64 | u64::from(function) << 8, Relaxed);
+    slot.label
+        .store(label as u64 | u64::from(function) << 8, Relaxed);
     for (target, value) in slot.values.iter().zip(values) {
         target.store(*value, Relaxed);
     }

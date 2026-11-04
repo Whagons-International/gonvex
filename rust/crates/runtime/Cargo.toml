@@ -140,6 +140,10 @@ name = "call_watermark_latency"
 required-features = ["perf-fixture"]
 
 [[test]]
+name = "burst_control"
+required-features = ["perf-fixture"]
+
+[[test]]
 name = "snapshot_cache_oracle"
 required-features = ["perf-fixture"]
 
@@ -169,6 +173,11 @@ required-features = ["perf-fixture"]
 
 [[bench]]
 name = "delivery_coverage"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "burst_control"
 harness = false
 required-features = ["perf-fixture"]
 

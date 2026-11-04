@@ -64,6 +64,10 @@ if cov_a and cov_b:
         print(f'- batch connection wakeups for transactions: {wakeups} ({wakeups / seconds:.0f}/s'
               + (f', {wakeups / reads:.1f} per transaction' if reads else '')
               + f'); with nothing but a watermark to send (no-op): {noop} ({noop / max(wakeups, 1):.1%})')
+    if 'merged' in cov_b:
+        merged = cov_b['merged'] - cov_a.get('merged', 0)
+        merged_shared = cov_b['mergedShared'] - cov_a.get('mergedShared', 0)
+        print(f'- merged catch-up events (lagging connections): {merged} deliveries, {merged_shared} shared, {merged - merged_shared} individual because merged')
     print()
     print('| path | count | share |')
     print('|---|---:|---:|')

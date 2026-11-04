@@ -386,7 +386,28 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
             }
         }
     }
-    let events = events(&fixture).await;
+    let mut events = events(&fixture).await;
+    // Burst control: a lagging connection merges the transactions waiting
+    // for it into one event, its own copy. Three more transactions merged;
+    // every connection receives a private copy of the same range (found by
+    // revision range, `feed_share`).
+    let mut tail = Vec::new();
+    for (index, task) in [20usize, 21, 22].into_iter().enumerate() {
+        tail.push(if index == 1 {
+            fixture.beat_presence(0, 1).await.unwrap()
+        } else {
+            fixture
+                .update_task(0, task, json!({"description": format!("merged {index}")}))
+                .await
+                .unwrap()
+        });
+    }
+    let merged_index = events.len();
+    events.push((
+        "merged range (private copies)".to_owned(),
+        gonvex_runtime::change_feed::merge_transactions(&tail).unwrap(),
+    ));
+    let shares_before = feed_share::metrics()["foundByRange"].as_u64().unwrap();
     let hub_shared = DeliveryHub::default();
     let hub_alone = DeliveryHub::default();
     let (hits_before, _, data_before) = gonvex_runtime::replica::fanout_stats();
@@ -414,8 +435,17 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                 event: &FeedEvent,
                 index: usize,
                 a: &mut Side,
+                private: bool,
             ) -> Vec<gonvex_protocol::ServerMessage> {
                 let session = a.connection.session.clone();
+                // A private copy (new change list `Arc`) of the same range.
+                let event = if private {
+                    gonvex_runtime::change_feed::merge_transactions(std::slice::from_ref(event))
+                        .unwrap()
+                } else {
+                    event.clone()
+                };
+                let event = &event;
                 fixture
                     .runtime
                     .deliver_feed_event(
@@ -436,13 +466,18 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                     shared
                         .iter_mut()
                         .enumerate()
-                        .map(|(index, a)| deliver(&fixture, &hub_shared, event, index, a)),
+                        .map(|(index, a)| {
+                            deliver(&fixture, &hub_shared, event, index, a, event_index == merged_index)
+                        }),
                 )
                 .await;
             } else {
                 for (index, a) in shared.iter_mut().enumerate() {
                     let data_before = gonvex_runtime::replica::fanout_stats().2;
-                    rests.push(deliver(&fixture, &hub_shared, event, index, a).await);
+                    rests.push(
+                        deliver(&fixture, &hub_shared, event, index, a, event_index == merged_index)
+                            .await,
+                    );
                     let set = index / members;
                     if (set == 0 || set == 3)
                         && gonvex_runtime::replica::fanout_stats().2 > data_before
@@ -561,6 +596,17 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let waits = gonvex_runtime::replica::fanout_coverage()["waits"].as_u64().unwrap();
     eprintln!("  waits for another connection's outcome: {waits}");
     assert!(waits > 0, "concurrent deliveries never waited on a claimed shape");
+    let coverage = gonvex_runtime::replica::fanout_coverage();
+    let by_range = feed_share::metrics()["foundByRange"].as_u64().unwrap() - shares_before;
+    eprintln!(
+        "  merged deliveries {} (shared {}), shares found by range {by_range}",
+        coverage["merged"], coverage["mergedShared"]
+    );
+    assert!(by_range > 0, "private merged copies never found the range's share");
+    assert!(
+        coverage["mergedShared"].as_u64().unwrap() > 0,
+        "no merged delivery was served by the fan-out"
+    );
     assert!(
         inherited_data > 0,
         "no connection holding inherited collections was served rows by the fan-out"

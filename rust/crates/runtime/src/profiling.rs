@@ -109,6 +109,21 @@ fn gauges_json() -> Value {
         "snapshot.permits_available".to_owned(),
         json!({"current": crate::replica::snapshot_permits_available(), "peak": Value::Null}),
     );
+    let admission = crate::offload::SnapshotAdmission::global();
+    let (short, long) = admission.waiting();
+    gauges.insert(
+        "snapshot.waiting_short".to_owned(),
+        json!({"current": short, "peak": Value::Null}),
+    );
+    gauges.insert(
+        "snapshot.waiting_long".to_owned(),
+        json!({"current": long, "peak": Value::Null}),
+    );
+    // Cumulative: builds refused by the waiter cap or the admission deadline.
+    gauges.insert(
+        "snapshot.shed_total".to_owned(),
+        json!({"current": admission.shed_total(), "peak": Value::Null}),
+    );
     Value::Object(gauges)
 }
 
