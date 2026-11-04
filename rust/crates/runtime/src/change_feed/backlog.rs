@@ -51,6 +51,9 @@ pub(crate) enum FeedSignal {
         database_epoch: Arc<str>,
         revision: u64,
         changes: Weak<Vec<LogChange>>,
+        /// Alive while a receiver has not taken this signal yet (the ring
+        /// drops a slot's value once every receiver read it).
+        unread: Arc<()>,
     },
     Reset {
         reason: Arc<str>,
@@ -65,6 +68,7 @@ struct Counters {
     peak_bytes: AtomicUsize,
     published: AtomicU64,
     evicted: AtomicU64,
+    released: AtomicU64,
     fills: AtomicU64,
     fill_revisions: AtomicU64,
     fill_events: AtomicU64,
@@ -101,6 +105,7 @@ pub fn metrics() -> Value {
         "entries": c.entries.load(Ordering::Relaxed),
         "published": c.published.load(Ordering::Relaxed),
         "evicted": c.evicted.load(Ordering::Relaxed),
+        "released": c.released.load(Ordering::Relaxed),
         "fills": c.fills.load(Ordering::Relaxed),
         "fillRevisions": c.fill_revisions.load(Ordering::Relaxed),
         "fillEvents": c.fill_events.load(Ordering::Relaxed),
@@ -164,7 +169,8 @@ pub(crate) fn change_bytes(change: &LogChange) -> usize {
 }
 
 struct StoreState {
-    entries: VecDeque<(u64, Arc<Vec<LogChange>>, usize)>,
+    /// (revision, images, estimated bytes, unread token of its signal).
+    entries: VecDeque<(u64, Arc<Vec<LogChange>>, usize, Weak<()>)>,
     bytes: usize,
     /// Every revision at or below it has been broadcast (or predates the feed).
     latest: u64,
@@ -329,15 +335,19 @@ impl FeedStore {
             + std::mem::size_of::<Vec<LogChange>>()
             + 32;
         let changes = Arc::new(changes);
+        let unread = Arc::new(());
+        let token = Arc::downgrade(&unread);
         let signal = FeedSignal::Transaction {
             database_epoch: Arc::clone(database_epoch),
             revision,
             changes: Arc::downgrade(&changes),
+            unread,
         };
         let budget = budget_bytes();
         let c = counters();
         let mut state = self.state();
-        state.entries.push_back((revision, changes, bytes));
+        Self::release_read(&mut state);
+        state.entries.push_back((revision, changes, bytes, token));
         state.bytes += bytes;
         let total = c.bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
         c.peak_bytes.fetch_max(total, Ordering::Relaxed);
@@ -349,7 +359,7 @@ impl FeedStore {
             && (state.entries.len() > STORE_MAX_ENTRIES
                 || c.bytes.load(Ordering::Relaxed) > budget)
         {
-            let Some((_, _, evicted)) = state.entries.pop_front() else {
+            let Some((_, _, evicted, _)) = state.entries.pop_front() else {
                 break;
             };
             state.bytes -= evicted;
@@ -359,6 +369,30 @@ impl FeedStore {
         }
         state.latest = state.latest.max(revision);
         let _ = self.sender.send(signal);
+    }
+
+    /// Drops the oldest transactions every receiver has already taken: a feed
+    /// whose connections keep up holds (almost) nothing.
+    fn release_read(state: &mut StoreState) {
+        let c = counters();
+        while state
+            .entries
+            .front()
+            .is_some_and(|entry| entry.3.strong_count() == 0)
+        {
+            let Some((_, _, bytes, _)) = state.entries.pop_front() else {
+                break;
+            };
+            state.bytes -= bytes;
+            c.bytes.fetch_sub(bytes, Ordering::Relaxed);
+            c.entries.fetch_sub(1, Ordering::Relaxed);
+            c.released.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Called by the receiver that took a signal last.
+    fn release(&self) {
+        Self::release_read(&mut self.state());
     }
 
     pub(crate) fn reset(&self, reason: String, revision: Option<u64>) {
@@ -484,6 +518,7 @@ impl HubReceiver {
             }
             Ok(FeedSignal::Reset { reason }) => {
                 self.last = None;
+                self.epoch = None;
                 self.gap_until = None;
                 Step::Yield(Ok(FeedEvent::Reset {
                     reason: reason.to_string(),
@@ -510,11 +545,18 @@ impl HubReceiver {
                 if let Some(changes) = changes.upgrade() {
                     self.last = Some(revision);
                     self.epoch = Some(Arc::clone(database_epoch));
-                    return Step::Yield(Ok(FeedEvent::Transaction {
+                    let event = FeedEvent::Transaction {
                         database_epoch: database_epoch.to_string(),
                         revision,
                         changes,
-                    }));
+                    };
+                    // The last receiver to take it: the store can let go.
+                    let last_reader = matches!(&signal, FeedSignal::Transaction { unread, .. } if Arc::strong_count(unread) == 1);
+                    drop(signal);
+                    if last_reader {
+                        self.store.release();
+                    }
+                    return Step::Yield(Ok(event));
                 }
                 // Evicted: re-read it (and the evicted ones after it) from
                 // the log, from this receiver's cursor.
@@ -524,9 +566,9 @@ impl HubReceiver {
                 if let Some(oldest) = oldest.filter(|oldest| *oldest > revision) {
                     through = through.min(oldest - 1);
                 }
-                if self.epoch.is_none() {
-                    self.epoch = Some(Arc::clone(database_epoch));
-                }
+                // The signal's epoch is authoritative: a refill whose clock
+                // differs means the database changed since (reset).
+                self.epoch = Some(Arc::clone(database_epoch));
                 self.stashed = Some(signal);
                 Step::Fill {
                     after,
@@ -612,6 +654,7 @@ impl HubReceiver {
                     Err(error) => error,
                 };
                 self.last = None;
+                self.epoch = None;
                 self.gap_until = None;
                 self.ready.clear();
                 Step::Yield(Ok(FeedEvent::Reset { reason }))

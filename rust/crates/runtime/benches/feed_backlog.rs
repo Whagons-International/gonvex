@@ -136,6 +136,23 @@ async fn run() {
     let held = AllocSnapshot::now().live_bytes.saturating_sub(base.live_bytes);
     let peak = peak_live_bytes().saturating_sub(base.live_bytes);
 
+    // A call committed while the stalled receivers are behind: its result
+    // waits for the connection's watermark, i.e. until its feed reaches the
+    // call's revision.
+    let save_started = Instant::now();
+    {
+        let mut transaction =
+            gonvex_store::begin_transaction(fixture.pools(), &route.database_url, false).await.unwrap();
+        sqlx::query(r#"UPDATE "tasks" SET "description"=$1 WHERE "_id"=$2"#)
+            .bind("feed backlog save")
+            .bind(tasks[0].clone())
+            .execute(&mut **transaction.transaction())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+    }
+    let save_revision = fixture.revision(0).await.unwrap();
+    let last_revision = save_revision;
     // Stalled receivers drain.
     reset_peak();
     let drain_started = Instant::now();
@@ -144,6 +161,8 @@ async fn run() {
     for mut receiver in slow {
         drains.push(tokio::spawn(async move {
         let (mut events, mut lagged, mut resets, mut ordered, mut last, mut changes) = (0, 0, 0, true, 0u64, 0usize);
+        let mut save_ms = None;
+        let mut first_lag_ms = None;
         loop {
             match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
                 Ok(Ok(FeedEvent::Transaction { revision, changes: c, .. })) => {
@@ -151,6 +170,9 @@ async fn run() {
                     changes += c.len();
                     ordered &= revision > last;
                     last = revision;
+                    if revision >= save_revision && save_ms.is_none() {
+                        save_ms = Some(save_started.elapsed().as_secs_f64() * 1e3);
+                    }
                     if revision >= last_revision {
                         break;
                     }
@@ -159,11 +181,12 @@ async fn run() {
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                     // The base resets the connection here: its subscriptions reopen.
                     lagged += 1;
+                    first_lag_ms.get_or_insert(save_started.elapsed().as_secs_f64() * 1e3);
                 }
                 Ok(Err(_)) | Err(_) => break,
             }
         }
-        json!({"events": events, "changes": changes, "ordered": ordered, "lastRevision": last, "lagged": lagged, "resets": resets})
+        json!({"events": events, "changes": changes, "ordered": ordered, "lastRevision": last, "lagged": lagged, "resets": resets, "saveVisibleMs": save_ms, "lagAtMs": first_lag_ms})
         }));
     }
     // Stalled connections catch up concurrently, as on a server.
