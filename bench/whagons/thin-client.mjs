@@ -132,7 +132,7 @@ class Subscription {
 }
 
 export class ThinClient {
-  static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0,
+  static stats = { unsupported: {}, framesIn: 0, framesOut: 0, bytesIn: 0, snapshotPages: 0, reconnects: 0, reopens: 0, resets: 0, batches: 0, batchItems: 0,
     presence: { snapshots: 0, patches: 0, changes: 0 } };
 
   // nativeRows defaults to false: the Whagons app's SDK (0.5.2-staging.31 +
@@ -450,6 +450,7 @@ export class ThinClient {
 
   /** Delivery v2: shared, stream-addressed items, one message per tick (same expansion as the SDK). */
   onBatch(m) {
+    ThinClient.stats.batches++; ThinClient.stats.batchItems += m.items?.length ?? 0;
     for (const item of m.items ?? []) {
       if (item.type === 'replica.stream') {
         for (const [stream, ids] of this.streams) {
