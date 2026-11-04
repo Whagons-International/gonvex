@@ -598,10 +598,19 @@ async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64
             .run(|conn| {
                 if step % 10 == 0 {
                     let id = ((writer as i64 * 7919 + step as i64) % TASK_ROWS) + 1;
-                    conn.query_i64("SELECT length(status) FROM tasks WHERE id = $1", &[Bind::Integer(id)]).unwrap().unwrap();
+                    conn.query_i64(
+                        "SELECT length(status) FROM tasks WHERE id = $1",
+                        &[Bind::Integer(id)],
+                    )
+                    .unwrap()
+                    .unwrap();
                     conn.execute(
                         "UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3",
-                        &[Bind::Text(if step % 20 == 0 { "doing" } else { "done" }), Bind::Integer(now), Bind::Integer(id)],
+                        &[
+                            Bind::Text(if step % 20 == 0 { "doing" } else { "done" }),
+                            Bind::Integer(now),
+                            Bind::Integer(id),
+                        ],
                     )
                     .unwrap();
                     conn.execute(
@@ -611,7 +620,11 @@ async fn reducer_write(pools: &PoolRegistry, url: &str, writer: usize, step: u64
                     .unwrap();
                 } else {
                     let id = format!("p{}", writer as i64 % PRESENCE_ROWS + 1);
-                    conn.execute(HEARTBEAT, &[Bind::Integer(now), Bind::Text("online"), Bind::Text(&id)]).unwrap();
+                    conn.execute(
+                        HEARTBEAT,
+                        &[Bind::Integer(now), Bind::Text("online"), Bind::Text(&id)],
+                    )
+                    .unwrap();
                 }
             })
             .unwrap();
@@ -771,20 +784,33 @@ async fn txn() {
         provision(&mut connection, TASK_ROWS, PRESENCE_ROWS).await;
     }
     let report = |label: &str, ops, wall, lat_ns, before, after| Report {
-        label: label.into(), ops, wall, lat_ns, before, after,
+        label: label.into(),
+        ops,
+        wall,
+        lat_ns,
+        before,
+        after,
     };
     let direct = std::env::var("BENCH_PATH").as_deref() != Ok("sqlx");
     // (a) point reads inside one open write transaction, sqlx
     {
         let mut tx = begin_transaction(&pools, &url, false).await.unwrap();
         for i in 0..200 {
-            sqlx::query(POINT_READ).bind(format!("p{}", i % 100 + 1)).fetch_optional(&mut **tx.transaction()).await.unwrap();
+            sqlx::query(POINT_READ)
+                .bind(format!("p{}", i % 100 + 1))
+                .fetch_optional(&mut **tx.transaction())
+                .await
+                .unwrap();
         }
         let mut lat = Vec::with_capacity(n as usize);
         let (u0, t0) = (usage(), Instant::now());
         for i in 0..n {
             let s = Instant::now();
-            sqlx::query(POINT_READ).bind(format!("p{}", i % 2000 + 1)).fetch_optional(&mut **tx.transaction()).await.unwrap();
+            sqlx::query(POINT_READ)
+                .bind(format!("p{}", i % 2000 + 1))
+                .fetch_optional(&mut **tx.transaction())
+                .await
+                .unwrap();
             lat.push(s.elapsed().as_nanos() as u64);
         }
         report("tx point-read sqlx", n, t0.elapsed(), lat, u0, usage()).print();
@@ -802,12 +828,25 @@ async fn txn() {
             let s = Instant::now();
             let mut tx = begin_transaction(&pools, &url, false).await.unwrap();
             tx.set_command_id("cmd").await.unwrap();
-            sqlx::query(HEARTBEAT).bind(i as i64).bind("online").bind(format!("p{}", i % 2000 + 1))
-                .execute(&mut **tx.transaction()).await.unwrap();
+            sqlx::query(HEARTBEAT)
+                .bind(i as i64)
+                .bind("online")
+                .bind(format!("p{}", i % 2000 + 1))
+                .execute(&mut **tx.transaction())
+                .await
+                .unwrap();
             tx.commit_with_revision().await.unwrap();
             lat.push(s.elapsed().as_nanos() as u64);
         }
-        report("txn heartbeat, statement via sqlx", n, t0.elapsed(), lat, u0, usage()).print();
+        report(
+            "txn heartbeat, statement via sqlx",
+            n,
+            t0.elapsed(),
+            lat,
+            u0,
+            usage(),
+        )
+        .print();
     }
     if direct {
         bench_direct_heartbeats(&pools, &url, n).await;
@@ -824,7 +863,10 @@ async fn bench_direct_reads(pools: &PoolRegistry, url: &str, n: u64) {
             .run(|conn| {
                 let mut statement = conn.prepare(POINT_READ).unwrap();
                 statement.bind(&[Bind::Text(id)]).unwrap();
-                statement.step().unwrap().then(|| statement.str(0).unwrap().to_owned())
+                statement
+                    .step()
+                    .unwrap()
+                    .then(|| statement.str(0).unwrap().to_owned())
             })
             .unwrap()
     };
@@ -838,7 +880,15 @@ async fn bench_direct_reads(pools: &PoolRegistry, url: &str, n: u64) {
         read(&format!("p{}", i % 2000 + 1));
         lat.push(s.elapsed().as_nanos() as u64);
     }
-    Report { label: "tx point-read direct session".into(), ops: n, wall: t0.elapsed(), lat_ns: lat, before: u0, after: usage() }.print();
+    Report {
+        label: "tx point-read direct session".into(),
+        ops: n,
+        wall: t0.elapsed(),
+        lat_ns: lat,
+        before: u0,
+        after: usage(),
+    }
+    .print();
     tx.rollback().await.unwrap();
 }
 
@@ -853,13 +903,30 @@ async fn bench_direct_heartbeats(pools: &PoolRegistry, url: &str, n: u64) {
         let session = tx.direct().await.unwrap();
         let id = format!("p{}", i % 2000 + 1);
         session
-            .run(|conn| conn.execute(HEARTBEAT, &[Bind::Integer((i + n) as i64), Bind::Text("online"), Bind::Text(&id)]))
+            .run(|conn| {
+                conn.execute(
+                    HEARTBEAT,
+                    &[
+                        Bind::Integer((i + n) as i64),
+                        Bind::Text("online"),
+                        Bind::Text(&id),
+                    ],
+                )
+            })
             .unwrap()
             .unwrap();
         tx.commit_with_revision().await.unwrap();
         lat.push(s.elapsed().as_nanos() as u64);
     }
-    Report { label: "txn heartbeat, statement via direct".into(), ops: n, wall: t0.elapsed(), lat_ns: lat, before: u0, after: usage() }.print();
+    Report {
+        label: "txn heartbeat, statement via direct".into(),
+        ops: n,
+        wall: t0.elapsed(),
+        lat_ns: lat,
+        before: u0,
+        after: usage(),
+    }
+    .print();
 }
 
 // ----------------------------------------------------------------- 5. cache

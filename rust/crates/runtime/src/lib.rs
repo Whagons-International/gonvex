@@ -3,26 +3,27 @@
 
 pub mod accept;
 pub mod action_calls;
-mod auth_revalidation;
 mod action_gate;
+mod auth_revalidation;
 #[cfg(test)]
 mod bridge_bench;
+pub(crate) mod canonical_row;
 pub mod change_feed;
-mod fast_hash;
 pub mod config;
 pub mod control;
 mod cron_profile;
 mod dashboard;
-pub mod delivery;
-pub mod feed_share;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
 #[cfg(not(feature = "duckdb"))]
 #[path = "data_ingest_disabled.rs"]
 mod data_ingest;
+pub mod delivery;
 pub mod error_class;
 pub mod execution;
 pub mod external_auth;
+mod fast_hash;
+pub mod feed_share;
 pub mod host_calls;
 mod in_process;
 pub mod live_query;
@@ -39,9 +40,8 @@ pub mod perf_fixture;
 pub mod presence;
 pub mod profiling;
 pub mod public_functions;
-pub(crate) mod canonical_row;
-pub mod raw_sites;
 mod raw_log;
+pub mod raw_sites;
 pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
@@ -55,12 +55,13 @@ mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
 // Kept for the Verus proof and benchmark in verification/; unused by the SQLite store.
+pub mod permission_bits;
+pub mod principal_cache;
 #[allow(dead_code)]
 mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
-pub mod permission_bits;
 pub mod visibility_class;
 #[cfg(test)]
 mod visibility_corpus;
@@ -68,7 +69,6 @@ pub mod visibility_index;
 mod visibility_mask;
 pub mod visibility_metrics;
 pub(crate) mod wake;
-pub mod principal_cache;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -1621,23 +1621,19 @@ async fn websocket_upgrade(
         outbound: runtime.inner.config.connection.outbound,
         socket_fd,
     };
-    websocket_transport::upgrade(
-        request,
-        options,
-        move |socket| {
-            gonvex_profiler::instrument(
-                gonvex_profiler::TaskKind::WsConnection,
-                websocket(
-                    socket,
-                    runtime,
-                    ip,
-                    public_transport,
-                    public_connection,
-                    pending,
-                ),
-            )
-        },
-    )
+    websocket_transport::upgrade(request, options, move |socket| {
+        gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::WsConnection,
+            websocket(
+                socket,
+                runtime,
+                ip,
+                public_transport,
+                public_connection,
+                pending,
+            ),
+        )
+    })
     .await
 }
 
@@ -1730,7 +1726,8 @@ async fn websocket(
     // Delivery v3, slow readers: a feed event taken while merging that could
     // not be merged (processed next), and whether the socket fell behind
     // since the feed receiver was last drained.
-    let mut pending_feed: Option<Result<change_feed::FeedEvent, broadcast::error::RecvError>> = None;
+    let mut pending_feed: Option<Result<change_feed::FeedEvent, broadcast::error::RecvError>> =
+        None;
     let mut catching_up = false;
     let mut sent_replica_revision = 0u64;
     let mut sent_zero_bootstrap_watermark = false;
@@ -1825,13 +1822,19 @@ async fn websocket(
     }
 
     loop {
-        runtime.inner.auth_revalidation.sync(&mut auth_watch, &control_connection);
+        runtime
+            .inner
+            .auth_revalidation
+            .sync(&mut auth_watch, &control_connection);
         let wants_presence_events = !control_queries.is_empty()
-            && control_queries.values().any(|query: &control::ControlSubscription| {
-                query.path == "control.support.listTenants"
-            });
+            && control_queries
+                .values()
+                .any(|query: &control::ControlSubscription| {
+                    query.path == "control.support.listTenants"
+                });
         if wants_presence_events != presence_events.is_some() {
-            presence_events = wants_presence_events.then(|| runtime.inner.presence_events.subscribe());
+            presence_events =
+                wants_presence_events.then(|| runtime.inner.presence_events.subscribe());
         }
         let preparing_replicas = !replica_opens.is_empty();
         let admit_replica = pending_replica_opens.front().is_some_and(|request| {
@@ -1855,7 +1858,11 @@ async fn websocket(
         // while a preparation may be reading (`OpenProgress`).
         let reading_replicas = preparing_replicas && replica_opens.reading();
         let defer_feed = reading_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
-        let batch_deadline = if backlogged { None } else { batcher.deadline(socket.batch()) };
+        let batch_deadline = if backlogged {
+            None
+        } else {
+            batcher.deadline(socket.batch())
+        };
         let presence_wait = presence_slot.clone().filter(|_| !backlogged);
         // Targeted wakeups: an idle batch connection with replica
         // subscriptions only waits on its wake slot instead of the broadcast
@@ -1878,10 +1885,16 @@ async fn websocket(
             && !batcher.call_pending()
             && !replicas.is_empty()
             && feed_scheduler.remaining_snapshot_feed_events == 0
-            && tenant_session.as_ref().is_some_and(|session| !session.is_anonymous());
+            && tenant_session
+                .as_ref()
+                .is_some_and(|session| !session.is_anonymous());
         let wake_wait = match feed.as_mut().and_then(change_feed::FeedReceiver::wake) {
             Some((registry, slot)) if targeted => {
-                let key = if wake_dirty { replica::fanout::wake_key(&replicas) } else { wake_key };
+                let key = if wake_dirty {
+                    replica::fanout::wake_key(&replicas)
+                } else {
+                    wake_key
+                };
                 if key != wake_key || wake_interest.is_none() {
                     wake_interest = Some(std::sync::Arc::new(replica::fanout::wake_interest(
                         &mut replicas,
@@ -3656,7 +3669,11 @@ async fn websocket(
                             })
                             .unwrap_or_default(),
                         };
-                    if socket.send(gonvex_websocket::text_message(response)).await.is_err() {
+                    if socket
+                        .send(gonvex_websocket::text_message(response))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -4056,7 +4073,10 @@ async fn next_feed_event_or_wake(
     wake: Option<&wake::Slot>,
 ) -> Result<change_feed::FeedEvent, broadcast::error::RecvError> {
     if let Some(slot) = wake {
-        while receiver.as_ref().is_some_and(change_feed::FeedReceiver::is_empty) {
+        while receiver
+            .as_ref()
+            .is_some_and(change_feed::FeedReceiver::is_empty)
+        {
             slot.notified().await;
         }
     }
@@ -5200,13 +5220,18 @@ async fn send_replica_open(
         let mut pages = offload::PageEncoder::new(replica::SnapshotPages::new(message));
         while let Some(page) = pages.next().await {
             let page = page.map_err(|_| ())?;
-            socket.send(gonvex_websocket::text_message(page)).await.map_err(|_| ())?;
+            socket
+                .send(gonvex_websocket::text_message(page))
+                .await
+                .map_err(|_| ())?;
         }
         Ok(())
     } else {
         let message = replica::legacy_snapshot_frame(message);
         if matches!(message, ServerMessage::ReplicaSnapshot { .. }) && !delivery.native() {
-            let encoded = offload::encode_snapshot_json(message).await.map_err(|_| ())?;
+            let encoded = offload::encode_snapshot_json(message)
+                .await
+                .map_err(|_| ())?;
             return socket
                 .send(gonvex_websocket::text_message(encoded))
                 .await
@@ -5658,7 +5683,8 @@ export async function fail(ctx) { throw new Error("refused"); }
             let mut module = serde_json::json!({"generation":1,"language":"typescript","entrypoint":"test.js",
                 "files":{},"visibility":{},"crons":[],"functions":functions,
                 "javascript":{"path":"test.js","hash":format!("{:x}", Sha256::digest(code.as_bytes())),"code":base64::engine::general_purpose::STANDARD.encode(code)}});
-            let hash = crate::modules::canonical_artifact_hash(module.as_object().unwrap()).unwrap();
+            let hash =
+                crate::modules::canonical_artifact_hash(module.as_object().unwrap()).unwrap();
             module["hash"] = serde_json::json!(hash);
             runtime
                 .inner
@@ -5734,7 +5760,11 @@ export async function fail(ctx) { throw new Error("refused"); }
                 "invoke.host_call_count",
                 "invoke.total",
             ] {
-                assert!(stage(name, "reducer") >= 4, "{name}: {}", stage(name, "reducer"));
+                assert!(
+                    stage(name, "reducer") >= 4,
+                    "{name}: {}",
+                    stage(name, "reducer")
+                );
             }
             assert!(stage("v8.isolate_start", "-") >= 1);
             let traces = profile["slowTraces"]["recent"].as_array().unwrap();
@@ -6420,7 +6450,9 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let mut scheduler = FeedFirstScheduler::default();
 
         assert_eq!(
-            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await),
+            scheduled_socket(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
+            ),
             "call-one"
         );
         sender.send(feed_transaction(41)).unwrap();
@@ -6431,7 +6463,9 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             41
         );
         assert_eq!(
-            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await),
+            scheduled_socket(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
+            ),
             "call-two"
         );
     }
@@ -6462,7 +6496,9 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             52
         );
         assert_eq!(
-            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await),
+            scheduled_socket(
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
+            ),
             "queued-call"
         );
         assert_eq!(
@@ -7081,8 +7117,12 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 row_id: "member".to_owned(),
                 operation: "UPDATE".to_owned(),
                 changed_columns: changed_columns.into_iter().map(str::to_owned).collect(),
-                old_value: std::sync::Arc::new(serde_json::json!({"id":"member","account_id":"account","status":"active"})),
-                new_value: std::sync::Arc::new(serde_json::json!({"id":"member","account_id":"account","status":"revoked"})),
+                old_value: std::sync::Arc::new(
+                    serde_json::json!({"id":"member","account_id":"account","status":"active"}),
+                ),
+                new_value: std::sync::Arc::new(
+                    serde_json::json!({"id":"member","account_id":"account","status":"revoked"}),
+                ),
                 provenance: change_feed::TransactionProvenance::default(),
             }]),
         };

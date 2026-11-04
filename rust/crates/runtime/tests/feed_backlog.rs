@@ -7,16 +7,24 @@
 use std::time::Duration;
 
 use gonvex_runtime::change_feed::{self, FeedEvent, FeedReceiver, LogChange};
-use gonvex_runtime::perf_fixture::{Fixture, FixtureOptions};
 use gonvex_runtime::perf_fixture::SqlValue;
+use gonvex_runtime::perf_fixture::{Fixture, FixtureOptions};
 
 async fn write(fixture: &Fixture, count: usize, rows: usize, offset: usize) -> u64 {
     let tasks = &fixture.tenant(0).tasks;
     for i in 0..count {
         let ids: Vec<SqlValue> = (0..rows)
-            .map(|r| tasks[(offset + i * rows + r) % tasks.len()].id.clone().into())
+            .map(|r| {
+                tasks[(offset + i * rows + r) % tasks.len()]
+                    .id
+                    .clone()
+                    .into()
+            })
             .collect();
-        let placeholders = (0..rows).map(|r| format!("${}", r + 2)).collect::<Vec<_>>().join(",");
+        let placeholders = (0..rows)
+            .map(|r| format!("${}", r + 2))
+            .collect::<Vec<_>>()
+            .join(",");
         let mut binds = vec![SqlValue::from(format!("backlog {offset} {i}"))];
         binds.extend(ids);
         fixture
@@ -130,7 +138,10 @@ async fn evicted_and_lagged_receivers_resume_from_the_log() {
     assert_matches_log(&fixture, &fast_events, start, through).await;
     let slow_events = drain(&mut slow, through, false).await;
     assert_matches_log(&fixture, &slow_events, start, through).await;
-    assert!(counter("fills") > fills_before, "evicted events came from the log");
+    assert!(
+        counter("fills") > fills_before,
+        "evicted events came from the log"
+    );
     assert!(counter("evicted") > 0);
 
     // Lagged: 100 transactions overflow the ring of both stalled receivers.
@@ -141,8 +152,15 @@ async fn evicted_and_lagged_receivers_resume_from_the_log() {
     assert_matches_log(&fixture, &lagged, through, second).await;
     let lagged_try = drain(&mut slow_try, second, true).await;
     assert_matches_log(&fixture, &lagged_try, start, second).await;
-    assert!(counter("lagResumes") >= lag_before + 2, "both stalled receivers lagged");
+    assert!(
+        counter("lagResumes") >= lag_before + 2,
+        "both stalled receivers lagged"
+    );
 
     // The store never holds more than the newest transaction (budget 1 byte).
-    assert!(counter("entries") <= 1, "{}", change_feed::backlog::metrics());
+    assert!(
+        counter("entries") <= 1,
+        "{}",
+        change_feed::backlog::metrics()
+    );
 }

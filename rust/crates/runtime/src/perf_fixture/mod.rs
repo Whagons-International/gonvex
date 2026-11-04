@@ -458,7 +458,8 @@ impl Fixture {
     /// Opens a member's full [`WHAGONS_SUBSCRIPTIONS`] set, one after another
     /// (the websocket queue runs up to 8 concurrently).
     pub async fn connect(&self, tenant: usize, member: usize) -> FixtureResult<MemberConnection> {
-        self.connect_paths(tenant, member, &WHAGONS_SUBSCRIPTIONS).await
+        self.connect_paths(tenant, member, &WHAGONS_SUBSCRIPTIONS)
+            .await
     }
 
     /// [`Fixture::connect`] opening only `paths`.
@@ -559,11 +560,12 @@ impl Fixture {
         .await?;
         let (mut rows, mut fast, mut mismatched, mut first) = (0, 0, 0, None);
         for table in tables {
-            let columns = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &table)
-                .await?
-                .into_iter()
-                .map(|column| (column.name.clone(), column.kind()))
-                .collect::<Vec<_>>();
+            let columns =
+                gonvex_store::rows::table_columns(&mut **transaction.transaction(), &table)
+                    .await?
+                    .into_iter()
+                    .map(|column| (column.name.clone(), column.kind()))
+                    .collect::<Vec<_>>();
             if columns.is_empty() {
                 continue;
             }

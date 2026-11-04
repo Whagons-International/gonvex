@@ -171,7 +171,11 @@ async fn an_idle_connection_skips_unrelated_commits_but_gets_their_watermark_and
         }
     }
 
-    let skipped = || gonvex_runtime::replica::fanout_coverage()["wake"]["skipped"].as_u64().unwrap();
+    let skipped = || {
+        gonvex_runtime::replica::fanout_coverage()["wake"]["skipped"]
+            .as_u64()
+            .unwrap()
+    };
     let mut watermark = 0u64;
     // Let the open settle into targeted mode (an idle loop iteration).
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -197,14 +201,26 @@ async fn an_idle_connection_skips_unrelated_commits_but_gets_their_watermark_and
             if frame["type"] == "replica.watermark" {
                 watermark = watermark.max(frame["revision"].as_u64().unwrap());
             }
-            assert_ne!(frame["type"], "replica.delta", "an unrelated commit sent rows: {frame}");
+            assert_ne!(
+                frame["type"], "replica.delta",
+                "an unrelated commit sent rows: {frame}"
+            );
         }
     }
     let covered = started.elapsed();
-    eprintln!("unrelated commit {unrelated}: watermark after {covered:?}, skips {}", skipped() - before);
-    assert!(skipped() > before, "the unrelated commit woke the connection's feed arm");
+    eprintln!(
+        "unrelated commit {unrelated}: watermark after {covered:?}, skips {}",
+        skipped() - before
+    );
+    assert!(
+        skipped() > before,
+        "the unrelated commit woke the connection's feed arm"
+    );
     // One flush delay (set to 1 s above).
-    assert!(covered < Duration::from_millis(1800), "watermark for a skipped commit after {covered:?}");
+    assert!(
+        covered < Duration::from_millis(1800),
+        "watermark for a skipped commit after {covered:?}"
+    );
 
     // 2. A commit to its own collection: delivered at once.
     let started = Instant::now();
@@ -228,7 +244,10 @@ async fn an_idle_connection_skips_unrelated_commits_but_gets_their_watermark_and
     }
     let delivered = started.elapsed();
     eprintln!("own collection change delivered after {delivered:?}");
-    assert!(delivered < Duration::from_millis(900), "a relevant commit waited {delivered:?} (idle delay or flush)");
+    assert!(
+        delivered < Duration::from_millis(900),
+        "a relevant commit waited {delivered:?} (idle delay or flush)"
+    );
 
     // 3. A call whose commit sends the caller no rows: result and covering
     //    watermark promptly.
@@ -263,7 +282,10 @@ async fn an_idle_connection_skips_unrelated_commits_but_gets_their_watermark_and
             }
         }
         let gap = result_at.unwrap().elapsed();
-        assert!(gap < Duration::from_millis(250), "call {call}: covering watermark {gap:?} after its result");
+        assert!(
+            gap < Duration::from_millis(250),
+            "call {call}: covering watermark {gap:?} after its result"
+        );
     }
     server.abort();
     fixture.shutdown().await;

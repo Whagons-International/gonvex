@@ -125,7 +125,10 @@ async fn compare(
     );
     assert_eq!(shared.rows, sql.rows, "{context} {who} {path}: rows");
     assert_eq!(shared.keys, sql.keys, "{context} {who} {path}: order");
-    assert_eq!(shared.metadata, sql.metadata, "{context} {who} {path}: metadata");
+    assert_eq!(
+        shared.metadata, sql.metadata,
+        "{context} {who} {path}: metadata"
+    );
     assert_eq!(
         shared.ready_digest, sql.ready_digest,
         "{context} {who} {path}: digest"
@@ -163,8 +166,14 @@ async fn compare_cached_detail(
                 continue;
             }
             let who = &session.member.id;
-            assert_eq!(cached.rows, fresh.rows, "{context} {who} {path} #{attempt}: rows");
-            assert_eq!(cached.keys, fresh.keys, "{context} {who} {path} #{attempt}: order");
+            assert_eq!(
+                cached.rows, fresh.rows,
+                "{context} {who} {path} #{attempt}: rows"
+            );
+            assert_eq!(
+                cached.keys, fresh.keys,
+                "{context} {who} {path} #{attempt}: order"
+            );
             assert_eq!(
                 cached.metadata, fresh.metadata,
                 "{context} {who} {path} #{attempt}: metadata"
@@ -320,7 +329,11 @@ async fn shared_principals_match_sql_resolution() {
         for session in &sessions {
             cached += compare_cached_detail(&fixture, session, &detail_task, name).await;
         }
-        assert_eq!(cached, sessions.len() * WHAGONS_DETAIL_WINDOW.len() * 3, "{name}");
+        assert_eq!(
+            cached,
+            sessions.len() * WHAGONS_DETAIL_WINDOW.len() * 3,
+            "{name}"
+        );
         eprintln!("{name}: {compared} comparisons, {after:?}");
         assert_eq!(
             compared,
@@ -344,7 +357,10 @@ async fn shared_principals_match_sql_resolution() {
 
     let snapshot = fixture.runtime.snapshot_cache_stats();
     eprintln!("snapshot cache after steps: {snapshot:?}");
-    assert!(snapshot.keyed_inline_builds > 0 && snapshot.hits > 0, "{snapshot:?}");
+    assert!(
+        snapshot.keyed_inline_builds > 0 && snapshot.hits > 0,
+        "{snapshot:?}"
+    );
 
     // Writes landing during opens.
     let writer = {
@@ -369,7 +385,11 @@ async fn shared_principals_match_sql_resolution() {
                         .unwrap();
                 } else {
                     fixture
-                        .update_task(0, (i * 37) % tasks.len(), json!({"name": format!("race {i}")}))
+                        .update_task(
+                            0,
+                            (i * 37) % tasks.len(),
+                            json!({"name": format!("race {i}")}),
+                        )
                         .await
                         .unwrap();
                 }
@@ -380,8 +400,13 @@ async fn shared_principals_match_sql_resolution() {
     let readers = async {
         let mut compared = 0;
         for round in 0..2 {
-            compared +=
-                compare_all(&fixture, &sessions, &detail_task, &format!("racing {round}")).await;
+            compared += compare_all(
+                &fixture,
+                &sessions,
+                &detail_task,
+                &format!("racing {round}"),
+            )
+            .await;
         }
         compared
     };

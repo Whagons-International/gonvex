@@ -140,6 +140,9 @@ mod tests {
 
     #[test]
     fn normalizes_whitespace() {
-        assert_eq!(normalize("  SELECT\n  a,\tb FROM t  "), "SELECT a, b FROM t");
+        assert_eq!(
+            normalize("  SELECT\n  a,\tb FROM t  "),
+            "SELECT a, b FROM t"
+        );
     }
 }

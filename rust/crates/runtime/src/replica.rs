@@ -11,14 +11,16 @@
 //! revision) asks the client for its row hashes (`replica.needHashes`) and
 //! reconciles that one collection against SQL on the reopen.
 
-#[path = "replica_mask.rs"]
-mod mask;
 #[path = "replica_fanout.rs"]
 pub(crate) mod fanout;
+#[path = "replica_mask.rs"]
+mod mask;
 pub use fanout::stats as fanout_stats;
-pub(crate) use mask::MovingChecks as MovingChecksPub;
 pub use fanout::wake_skips;
-pub use fanout::{coverage_json as fanout_coverage, path_counts as fanout_path_counts, PATHS as FANOUT_PATHS};
+pub use fanout::{
+    coverage_json as fanout_coverage, path_counts as fanout_path_counts, PATHS as FANOUT_PATHS,
+};
+pub(crate) use mask::MovingChecks as MovingChecksPub;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -899,7 +901,8 @@ impl Runtime {
                 }
                 // Cached views learn their size too (admission lane and byte
                 // reservation of the member's next open of this collection).
-                read.permit.observe_json_bytes(view.window.bytes.max(0) as usize);
+                read.permit
+                    .observe_json_bytes(view.window.bytes.max(0) as usize);
                 return Ok(view.window);
             }
             self.inner.snapshot_cache.record_fallback();
@@ -1281,8 +1284,8 @@ impl Runtime {
                 &session.route.database_url,
             )
             .ok()
-                .filter(|shape| !share.outcomes.lock().unwrap().contains_key(&shape.key))
-                .map(|shape| (shape, fanout::Recorder::new())),
+            .filter(|shape| !share.outcomes.lock().unwrap().contains_key(&shape.key))
+            .map(|shape| (shape, fanout::Recorder::new())),
             _ => None,
         };
         for subscription in subscriptions.values_mut() {
@@ -1297,8 +1300,15 @@ impl Runtime {
                     // index complete through this revision.
                     Step::Resync(Resync::Consistency)
                 } else {
-                    self.mask_step(session, subscription, revision, &changes, &collapsed, share.as_deref())
-                        .await?
+                    self.mask_step(
+                        session,
+                        subscription,
+                        revision,
+                        &changes,
+                        &collapsed,
+                        share.as_deref(),
+                    )
+                    .await?
                 }
             } else {
                 legacy_step(subscription, &changes)
@@ -1351,8 +1361,7 @@ impl Runtime {
                     None,
                 ),
             };
-            let Some(delta) = applied?
-            else {
+            let Some(delta) = applied? else {
                 if let Some((_, recorder)) = &mut recording {
                     recorder.clean = false;
                 }
@@ -1389,7 +1398,11 @@ impl Runtime {
                 &subscription.id,
                 &subscription.path,
                 subscription.cursor.clone(),
-                delta.upserts.into_values().map(Arc::unwrap_or_clone).collect(),
+                delta
+                    .upserts
+                    .into_values()
+                    .map(Arc::unwrap_or_clone)
+                    .collect(),
                 delta.deleted.into_iter().collect(),
                 subscription.digest.digest(),
                 subscription.window.truncated,
@@ -1446,7 +1459,9 @@ impl Runtime {
             );
         }
         self.inner.visibility_metrics.record_eval_stats(&memo.stats);
-        self.inner.visibility_metrics.record_eval_stats(&shared_stats);
+        self.inner
+            .visibility_metrics
+            .record_eval_stats(&shared_stats);
         if let (Some((shape, mut recorder)), Some(share)) = (recording, &share) {
             recorder.transaction = messages
                 .first()
@@ -1765,10 +1780,7 @@ fn apply_rows_with(
     let mut delta = SubscriptionDelta::default();
     let table = subscription.definition.table.clone();
     for (id, change) in collapsed.table(&table) {
-        let changed_columns = change
-            .changed_columns()
-            .map(str::to_owned)
-            .collect();
+        let changed_columns = change.changed_columns().map(str::to_owned).collect();
         if !row_step(
             subscription,
             context,
@@ -2018,7 +2030,9 @@ fn row_step(
             return None;
         }
         match compiled.handle {
-            MemberHandle::Compiled(member) if memoize => Some(member.visible_memo(compiled.memo, row)),
+            MemberHandle::Compiled(member) if memoize => {
+                Some(member.visible_memo(compiled.memo, row))
+            }
             MemberHandle::Compiled(member) => {
                 compiled.memo.stats.compiled_checks += 1;
                 Some(member.visible(RowView::Value(row)))
@@ -2428,7 +2442,12 @@ impl<'d> WindowCollector<'d> {
                     )
                 });
                 let row = gonvex_protocol::JsonRow::from_json(text.to_owned()).map_err(invalid)?;
-                (key, boundary, std::borrow::Cow::Owned(stable_json(&parsed)), row)
+                (
+                    key,
+                    boundary,
+                    std::borrow::Cow::Owned(stable_json(&parsed)),
+                    row,
+                )
             }
         };
         if !self.seen.insert(Arc::clone(&key)) {
@@ -2775,7 +2794,8 @@ fn table_change_relevance<'a, C: ChangeMeta + 'a>(
         if change.table() == source {
             source_changed = true;
         }
-        if dependencies.change_affects(change.table(), change.operation(), change.changed_columns()) {
+        if dependencies.change_affects(change.table(), change.operation(), change.changed_columns())
+        {
             dependency_changed = true;
         }
     }
@@ -3219,7 +3239,10 @@ mod tests {
             .collect();
         ServerMessage::ReplicaSnapshot {
             id: "open".into(),
-            result: rows.iter().map(gonvex_protocol::JsonRow::from_value).collect(),
+            result: rows
+                .iter()
+                .map(gonvex_protocol::JsonRow::from_value)
+                .collect(),
             cursor: ReplicaCursor {
                 epoch: "e".into(),
                 revision: 10,

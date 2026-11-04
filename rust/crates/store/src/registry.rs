@@ -142,7 +142,9 @@ const OPTIMIZE_PERIODIC: &str = "PRAGMA analysis_limit=400; PRAGMA optimize;";
 
 async fn optimize_at_open(connection: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
     for statement in OPTIMIZE_AT_OPEN.split_inclusive(';') {
-        sqlx::query(statement.trim()).execute(&mut *connection).await?;
+        sqlx::query(statement.trim())
+            .execute(&mut *connection)
+            .await?;
     }
     Ok(())
 }
@@ -532,7 +534,9 @@ impl PoolRegistry {
         if !read_only {
             // Serialized mode: direct sessions finalize their cached
             // statements on the writer from any thread (see `direct`).
-            options = options.journal_mode(SqliteJournalMode::Wal).serialized(true);
+            options = options
+                .journal_mode(SqliteJournalMode::Wal)
+                .serialized(true);
             // COMMIT never syncs while holding the single writer; Full
             // durability is provided by waiting on the database's batched
             // WAL sync before a commit is acknowledged (`durable`). Readers
@@ -666,7 +670,8 @@ impl PoolRegistry {
         let limits = self.limits.clone();
         tokio::spawn(async move {
             let interval = sweep_interval(&limits);
-            let optimize_every = Duration::from_secs(env_u64("GONVEX_SQLITE_OPTIMIZE_SECS", 3600).max(60));
+            let optimize_every =
+                Duration::from_secs(env_u64("GONVEX_SQLITE_OPTIMIZE_SECS", 3600).max(60));
             // First pass about a minute after start (indexes provisioning
             // created have no statistics yet), then every `optimize_every`.
             let mut last_optimize = std::time::Instant::now()

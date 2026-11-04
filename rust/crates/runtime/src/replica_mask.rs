@@ -115,7 +115,11 @@ pub(super) fn subscription_concern_tables(
         let mut tables = crate::fast_hash::FastSet::default();
         tables.insert(subscription.definition.table.clone());
         tables.insert("members".to_owned());
-        concern_tables(&subscription.visibility, &subscription.resolved, &mut tables);
+        concern_tables(
+            &subscription.visibility,
+            &subscription.resolved,
+            &mut tables,
+        );
         Arc::new(tables)
     }))
 }
@@ -125,7 +129,10 @@ pub(super) fn subscription_parent_acl_columns(
     subscription: &mut ReplicaSubscription,
 ) -> Arc<BTreeMap<String, BTreeSet<String>>> {
     Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
-        Arc::new(parent_acl_columns(&subscription.visibility, &subscription.resolved))
+        Arc::new(parent_acl_columns(
+            &subscription.visibility,
+            &subscription.resolved,
+        ))
     }))
 }
 
@@ -244,7 +251,10 @@ pub(super) fn member_unmoved(
     !checks.grant
         || (matches!(grant_delta(plan, resolved, change), GrantDelta::None)
             && resolved.inherited.values().all(|parent| {
-                matches!(grant_delta(&parent.plan, &parent.resolved, change), GrantDelta::None)
+                matches!(
+                    grant_delta(&parent.plan, &parent.resolved, change),
+                    GrantDelta::None
+                )
             }))
 }
 

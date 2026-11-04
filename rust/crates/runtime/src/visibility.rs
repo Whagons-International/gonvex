@@ -556,9 +556,7 @@ impl ParentAclRegistry {
     ) -> Result<SharedIndex, VisibilityError>
     where
         S: FnOnce() -> SF,
-        SF: std::future::Future<
-            Output = crate::change_feed::FeedReceiver,
-        >,
+        SF: std::future::Future<Output = crate::change_feed::FeedReceiver>,
         L: FnOnce(IndexShape) -> LF,
         LF: std::future::Future<Output = Result<IndexLoad, VisibilityError>>,
     {
@@ -1790,7 +1788,9 @@ pub fn resolve_with_parents<'a>(
                         let resolved =
                             resolve_member_sql(transaction, session, plan, revision, metrics)
                                 .await?;
-                        cache.store(key, plan, transaction, clock, &resolved).await?;
+                        cache
+                            .store(key, plan, transaction, clock, &resolved)
+                            .await?;
                         resolved
                     }
                 }
@@ -1879,8 +1879,12 @@ fn shared_parent_resolution(
     resolved: ResolvedVisibility,
 ) -> Arc<ResolvedVisibility> {
     type Key = (String, String, String, u64);
-    static SHARED: std::sync::OnceLock<std::sync::Mutex<(BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>, usize)>> =
-        std::sync::OnceLock::new();
+    static SHARED: std::sync::OnceLock<
+        std::sync::Mutex<(
+            BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>,
+            usize,
+        )>,
+    > = std::sync::OnceLock::new();
     fn same(left: &ResolvedVisibility, right: &ResolvedVisibility) -> bool {
         left.ephemeral_member == right.ephemeral_member
             && left.revision == right.revision
@@ -1896,12 +1900,16 @@ fn shared_parent_resolution(
                 .zip(&right.indexes)
                 .all(|((a, x), (b, y))| a == b && Arc::ptr_eq(x, y))
             && left.inherited.len() == right.inherited.len()
-            && left.inherited.iter().zip(&right.inherited).all(|((a, x), (b, y))| {
-                a == b
-                    && Arc::ptr_eq(&x.plan, &y.plan)
-                    && Arc::ptr_eq(&x.resolved, &y.resolved)
-                    && Arc::ptr_eq(&x.index, &y.index)
-            })
+            && left
+                .inherited
+                .iter()
+                .zip(&right.inherited)
+                .all(|((a, x), (b, y))| {
+                    a == b
+                        && Arc::ptr_eq(&x.plan, &y.plan)
+                        && Arc::ptr_eq(&x.resolved, &y.resolved)
+                        && Arc::ptr_eq(&x.index, &y.index)
+                })
     }
     let key = (
         database.to_owned(),

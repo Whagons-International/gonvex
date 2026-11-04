@@ -218,7 +218,10 @@ pub async fn socket_open_request(
     {
         return Err(serde_json::to_string(&error)?.into());
     }
-    let outcome = queue.next().await.ok_or("replica open produced no outcome")?;
+    let outcome = queue
+        .next()
+        .await
+        .ok_or("replica open produced no outcome")?;
     let mut replicas = BTreeMap::new();
     let messages = crate::install_replica_open_outcomes(&mut replicas, vec![outcome]);
     let mut rows = 0;
@@ -309,11 +312,19 @@ pub async fn connection_loop(
                 }
             };
             let applied = match served {
-                crate::replica::fanout::FanOut::Served(result) => result.map(|_| Vec::new()).map_err(|_| ()),
+                crate::replica::fanout::FanOut::Served(result) => {
+                    result.map(|_| Vec::new()).map_err(|_| ())
+                }
                 crate::replica::fanout::FanOut::Wait(_) => unreachable!(),
                 crate::replica::fanout::FanOut::Miss { record, claim } => {
                     let applied = runtime
-                        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event.clone(), Some((false, None)), record)
+                        .apply_feed_event_offloaded(
+                            &connection.session,
+                            &mut connection.subscriptions,
+                            event.clone(),
+                            Some((false, None)),
+                            record,
+                        )
                         .await
                         .map_err(|_| ());
                     drop(claim);
@@ -327,9 +338,18 @@ pub async fn connection_loop(
             let pushed = Instant::now();
             let mut bytes = 0;
             for message in messages {
-                match batcher.push(&mut batch, &runtime.inner.delivery, &tenant_id, false, &connection.subscriptions, message) {
+                match batcher.push(
+                    &mut batch,
+                    &runtime.inner.delivery,
+                    &tenant_id,
+                    false,
+                    &connection.subscriptions,
+                    message,
+                ) {
                     Ok(None) => {}
-                    Ok(Some(message)) => bytes += serde_json::to_string(&message).map_or(0, |text| text.len()),
+                    Ok(Some(message)) => {
+                        bytes += serde_json::to_string(&message).map_or(0, |text| text.len())
+                    }
                     Err(_) => {
                         counters.errors.fetch_add(1, Relaxed);
                     }
@@ -356,7 +376,13 @@ pub async fn connection_loop(
             continue;
         }
         match runtime
-            .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None, false)
+            .apply_feed_event_offloaded(
+                &connection.session,
+                &mut connection.subscriptions,
+                event,
+                None,
+                false,
+            )
             .await
         {
             Ok(messages) => {
@@ -388,7 +414,13 @@ pub async fn apply_offloaded(
     event: FeedEvent,
 ) -> Result<Vec<ServerMessage>, crate::replica::ReplicaError> {
     runtime
-        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event, None, false)
+        .apply_feed_event_offloaded(
+            &connection.session,
+            &mut connection.subscriptions,
+            event,
+            None,
+            false,
+        )
         .await
 }
 

@@ -211,7 +211,8 @@ impl ScheduledLane {
             .unwrap_or_else(|poison| poison.into_inner()) = Some(stop);
         let (sender, receiver) = std::sync::mpsc::channel();
         // Created by the base-priority spawner: runs at base + `nice` whoever starts it.
-        let started = gonvex_profiler::thread_priority::spawn_at("gonvex-scheduled", nice, move || {
+        let started =
+            gonvex_profiler::thread_priority::spawn_at("gonvex-scheduled", nice, move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .thread_name("gonvex-scheduled")

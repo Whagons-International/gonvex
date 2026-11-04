@@ -212,7 +212,9 @@ impl DatabaseHostCalls {
     }
 
     fn sql(&self) -> MutexGuard<'_, SqlCalls> {
-        self.sql.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.sql
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn capability(&self) -> DatabaseCapability {
@@ -287,7 +289,11 @@ impl DatabaseHostCalls {
     /// Opens the transaction if needed and lends its connection to module
     /// SQL (here and on the isolate thread).
     async fn ensure_session(&mut self) -> Result<(), String> {
-        let active = self.sql().session.as_ref().is_some_and(DirectSession::active);
+        let active = self
+            .sql()
+            .session
+            .as_ref()
+            .is_some_and(DirectSession::active);
         if active {
             return Ok(());
         }
@@ -304,7 +310,11 @@ impl DatabaseHostCalls {
 
     /// Profiler slow-trace inputs: module-host timing, writer wait, SQL time.
     pub(crate) fn profile_times(&self) -> (crate::module_host::InvokeTimes, u64, u64) {
-        (self.invoke_times, self.writer_wait_ns, self.sql_ns + self.sql().inline_sql_ns)
+        (
+            self.invoke_times,
+            self.writer_wait_ns,
+            self.sql_ns + self.sql().inline_sql_ns,
+        )
     }
 
     /// Labels this handler's profiler stages with a function class.
@@ -463,9 +473,7 @@ impl DatabaseHostCalls {
     }
 
     fn transaction(&mut self) -> Result<&mut TenantTransaction, String> {
-        self.transaction
-            .as_mut()
-            .ok_or_else(|| CLOSED.to_owned())
+        self.transaction.as_mut().ok_or_else(|| CLOSED.to_owned())
     }
 
     pub fn transaction_mut(&mut self) -> &mut TenantTransaction {
@@ -484,8 +492,17 @@ impl DatabaseHostCalls {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn query(&mut self, statement: &str, parameters: Value) -> Result<Value, String> {
-        let bytes = self.db_bytes(HostCallFrame::DbQuery { statement: statement.to_owned(), parameters }).await?;
+    pub(crate) async fn query(
+        &mut self,
+        statement: &str,
+        parameters: Value,
+    ) -> Result<Value, String> {
+        let bytes = self
+            .db_bytes(HostCallFrame::DbQuery {
+                statement: statement.to_owned(),
+                parameters,
+            })
+            .await?;
         decode_response(&bytes)
     }
 
@@ -497,31 +514,64 @@ impl DatabaseHostCalls {
         generated_id: Option<String>,
     ) -> Result<Value, String> {
         let bytes = self
-            .db_bytes(HostCallFrame::DbInsert { table: table.to_owned(), row, generated_id })
+            .db_bytes(HostCallFrame::DbInsert {
+                table: table.to_owned(),
+                row,
+                generated_id,
+            })
             .await?;
         decode_response(&bytes)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn update(&mut self, table: &str, key: &str, id: Value, patch: Value) -> Result<Value, String> {
+    pub(crate) async fn update(
+        &mut self,
+        table: &str,
+        key: &str,
+        id: Value,
+        patch: Value,
+    ) -> Result<Value, String> {
         let bytes = self
-            .db_bytes(HostCallFrame::DbUpdate { table: table.to_owned(), key: key.to_owned(), id, patch })
+            .db_bytes(HostCallFrame::DbUpdate {
+                table: table.to_owned(),
+                key: key.to_owned(),
+                id,
+                patch,
+            })
             .await?;
         decode_response(&bytes)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn delete(&mut self, table: &str, key: &str, id: Value) -> Result<Value, String> {
+    pub(crate) async fn delete(
+        &mut self,
+        table: &str,
+        key: &str,
+        id: Value,
+    ) -> Result<Value, String> {
         let bytes = self
-            .db_bytes(HostCallFrame::DbDelete { table: table.to_owned(), key: key.to_owned(), id })
+            .db_bytes(HostCallFrame::DbDelete {
+                table: table.to_owned(),
+                key: key.to_owned(),
+                id,
+            })
             .await?;
         decode_response(&bytes)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn delete_many(&mut self, table: &str, key: &str, ids: Value) -> Result<Value, String> {
+    pub(crate) async fn delete_many(
+        &mut self,
+        table: &str,
+        key: &str,
+        ids: Value,
+    ) -> Result<Value, String> {
         let bytes = self
-            .db_bytes(HostCallFrame::DbDeleteMany { table: table.to_owned(), key: key.to_owned(), ids })
+            .db_bytes(HostCallFrame::DbDeleteMany {
+                table: table.to_owned(),
+                key: key.to_owned(),
+                ids,
+            })
             .await?;
         decode_response(&bytes)
     }
@@ -651,7 +701,8 @@ impl InlineHost for SqlInline {
         sql.inline_calls += 1;
         let writes = !matches!(frame, HostCallFrame::DbQuery { .. });
         let started = gonvex_profiler::enabled().then(gonvex_profiler::now_ns);
-        let result = if writes { sql.require_write() } else { Ok(()) }.and_then(|()| sql.call(frame));
+        let result =
+            if writes { sql.require_write() } else { Ok(()) }.and_then(|()| sql.call(frame));
         if let Some(started) = started {
             let elapsed = gonvex_profiler::now_ns().saturating_sub(started);
             sql.inline_sql_ns += elapsed;
@@ -684,7 +735,8 @@ impl DatabaseHostCalls {
             return self.db_bytes(call).await;
         }
         let value = self.handle_other(call).await?;
-        serde_json::to_vec(&value).map_err(|error| format!("host response could not be re-encoded: {error}"))
+        serde_json::to_vec(&value)
+            .map_err(|error| format!("host response could not be re-encoded: {error}"))
     }
 
     /// Records one host call's stage. The first database call also opens the
@@ -825,10 +877,11 @@ impl DatabaseHostCalls {
                 return Err("permission bits are rebuilding; retry".to_owned());
             }
         }
-        let held = index
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .has(&session.member.id, permission, scope);
+        let held = index.read().unwrap_or_else(|e| e.into_inner()).has(
+            &session.member.id,
+            permission,
+            scope,
+        );
         Ok(Value::Bool(held))
     }
 
@@ -990,7 +1043,10 @@ impl SqlCalls {
         let result = self.run(|conn| {
             let rows = {
                 let mut statement = conn.prepare(sql)?;
-                let binds = parameters.iter().map(Parameter::as_bind).collect::<Vec<_>>();
+                let binds = parameters
+                    .iter()
+                    .map(Parameter::as_bind)
+                    .collect::<Vec<_>>();
                 statement.bind(&binds)?;
                 write_query_rows(&mut statement, target.as_deref())?
             };
@@ -1012,7 +1068,12 @@ impl SqlCalls {
         Ok(rows)
     }
 
-    fn insert(&mut self, table: &str, row: Value, generated_id: Option<String>) -> Result<Vec<u8>, String> {
+    fn insert(
+        &mut self,
+        table: &str,
+        row: Value,
+        generated_id: Option<String>,
+    ) -> Result<Vec<u8>, String> {
         self.require_open()?;
         let row = object(row, "row")?;
         if row.is_empty() {
@@ -1063,7 +1124,13 @@ impl SqlCalls {
         self.run(|conn| returning_row(conn, &statement, &parameters, &catalog))
     }
 
-    fn update(&mut self, table: &str, key: &str, id: Value, patch: Value) -> Result<Vec<u8>, String> {
+    fn update(
+        &mut self,
+        table: &str,
+        key: &str,
+        id: Value,
+        patch: Value,
+    ) -> Result<Vec<u8>, String> {
         self.require_open()?;
         let key = self.resolve_table_key(table, key)?;
         require_row_id(&id)?;
@@ -1120,9 +1187,8 @@ impl SqlCalls {
         let table = quote_identifier(table)?;
         // One JSON array parameter instead of up to 10,000 placeholders
         // (SQLite's default variable limit is 32,766).
-        let statement = format!(
-            "DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))"
-        );
+        let statement =
+            format!("DELETE FROM {table} WHERE {key} IN (SELECT value FROM json_each($1))");
         let ids = Value::Array(ids.clone()).to_string();
         let deleted = self.run(|conn| Ok(conn.execute(&statement, &[Bind::Text(&ids)])?))?;
         Ok(format!(r#"{{"deleted":{deleted}}}"#).into_bytes())
@@ -1247,7 +1313,10 @@ fn returning_row(
     catalog: &TableCatalog,
 ) -> Result<Vec<u8>, Failure> {
     let mut statement = conn.prepare(sql)?;
-    let binds = parameters.iter().map(Parameter::as_bind).collect::<Vec<_>>();
+    let binds = parameters
+        .iter()
+        .map(Parameter::as_bind)
+        .collect::<Vec<_>>();
     statement.bind(&binds)?;
     if !statement.step()? {
         return Ok(b"null".to_vec());
@@ -1286,11 +1355,17 @@ fn sqlx_declared_kind(declared: Option<&str>) -> JsonKind {
         "boolean" | "bool" => JsonKind::Boolean,
         "date" | "time" | "datetime" | "timestamp" => JsonKind::Text,
         _ if declared.contains("int") => JsonKind::Integer,
-        _ if declared.contains("char") || declared.contains("clob") || declared.contains("text") => {
+        _ if declared.contains("char")
+            || declared.contains("clob")
+            || declared.contains("text") =>
+        {
             JsonKind::Text
         }
         _ if declared.contains("blob") => JsonKind::Text,
-        _ if declared.contains("real") || declared.contains("floa") || declared.contains("doub") => {
+        _ if declared.contains("real")
+            || declared.contains("floa")
+            || declared.contains("doub") =>
+        {
             JsonKind::Real
         }
         _ => JsonKind::Text,
@@ -1323,7 +1398,11 @@ fn write_query_rows(
                     key.push(b':');
                     let kind = target
                         .and_then(|table| table.columns.get(name).copied())
-                        .or_else(|| statement.column_decltype(index).map(JsonKind::from_declared));
+                        .or_else(|| {
+                            statement
+                                .column_decltype(index)
+                                .map(JsonKind::from_declared)
+                        });
                     (key, kind)
                 })
                 .collect()

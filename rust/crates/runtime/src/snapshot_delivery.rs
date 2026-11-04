@@ -375,7 +375,9 @@ mod tests {
                 revision: 1,
             },
             result: (0..n)
-                .map(|id| gonvex_protocol::JsonRow::from_value(&json!({"_id":id,"body":"a".repeat(1000)})))
+                .map(|id| {
+                    gonvex_protocol::JsonRow::from_value(&json!({"_id":id,"body":"a".repeat(1000)}))
+                })
                 .collect(),
             metadata: BTreeMap::from([(
                 "digest".into(),

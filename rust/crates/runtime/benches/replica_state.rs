@@ -247,7 +247,10 @@ impl ModelConnection {
             };
             let expected = result
                 .iter()
-                .map(|row| { let row = row.to_value(); (replica_client::key_of(&row, key), row) })
+                .map(|row| {
+                    let row = row.to_value();
+                    (replica_client::key_of(&row, key), row)
+                })
                 .collect::<BTreeMap<_, _>>();
             if expected != window.rows {
                 let missing = expected

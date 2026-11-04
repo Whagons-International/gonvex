@@ -125,7 +125,10 @@ impl Admission {
             state.waiters.insert(key, sender);
             (key, granted)
         };
-        let waiting = Waiting { admission: self, key };
+        let waiting = Waiting {
+            admission: self,
+            key,
+        };
         let permit = granted.await.map_err(|_| Closed)?;
         drop(waiting);
         Ok(permit)
@@ -238,7 +241,12 @@ mod tests {
             let held = admission.acquire(Lane::User).await.unwrap();
             let scheduled = tokio::spawn({
                 let admission = Arc::clone(&admission);
-                async move { admission.acquire(Lane::Scheduled).await.map(|_| Instant::now()) }
+                async move {
+                    admission
+                        .acquire(Lane::Scheduled)
+                        .await
+                        .map(|_| Instant::now())
+                }
             });
             tokio::task::yield_now().await;
             // Rank of the scheduled waiter is arrival + 5 s: pretend the user
@@ -246,7 +254,9 @@ mod tests {
             {
                 let mut state = admission.state.lock().unwrap();
                 let (key, sender) = state.waiters.pop_first().unwrap();
-                state.waiters.insert((key.0.saturating_sub(6_000_000_000), key.1), sender);
+                state
+                    .waiters
+                    .insert((key.0.saturating_sub(6_000_000_000), key.1), sender);
             }
             let user = tokio::spawn({
                 let admission = Arc::clone(&admission);
@@ -256,7 +266,10 @@ mod tests {
             drop(held);
             let scheduled_at = scheduled.await.unwrap().unwrap();
             let user_at = user.await.unwrap().unwrap();
-            assert!(scheduled_at <= user_at, "an aged scheduled waiter goes first");
+            assert!(
+                scheduled_at <= user_at,
+                "an aged scheduled waiter goes first"
+            );
         });
     }
 
@@ -266,12 +279,11 @@ mod tests {
             let admission = Admission::new(1, true);
             let held = admission.acquire(Lane::User).await.unwrap();
             // A waiter that times out while queued.
-            assert!(tokio::time::timeout(
-                Duration::from_millis(5),
-                admission.acquire(Lane::User)
-            )
-            .await
-            .is_err());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(5), admission.acquire(Lane::User))
+                    .await
+                    .is_err()
+            );
             assert!(admission.state.lock().unwrap().waiters.is_empty());
             // A waiter whose permit is granted but who is canceled before it
             // runs: the permit passes on instead of being lost.

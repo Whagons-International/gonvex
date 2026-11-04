@@ -439,7 +439,15 @@ impl Runtime {
         // Per-function counters (/dev/metrics, /dev/profile `functions`).
         let mut call = gonvex_profiler::function::Call::start();
         let result = self
-            .execute_tenant_reducer_with_access_counted(session, command_id, idempotency_key, path, args, access, &mut call)
+            .execute_tenant_reducer_with_access_counted(
+                session,
+                command_id,
+                idempotency_key,
+                path,
+                args,
+                access,
+                &mut call,
+            )
             .await;
         call.finish(result.is_ok());
         result

@@ -99,7 +99,9 @@ pub fn merge_transactions(events: &[FeedEvent]) -> Option<FeedEvent> {
 /// The first revision of a feed event (`None` for a reset).
 pub fn first_revision(event: &FeedEvent) -> Option<u64> {
     match event {
-        FeedEvent::Transaction { revision, changes, .. } => Some(
+        FeedEvent::Transaction {
+            revision, changes, ..
+        } => Some(
             changes
                 .iter()
                 .map(|change| change.revision)
@@ -179,11 +181,7 @@ impl ChangeFeedHub {
         self.feeds
             .try_read()
             .ok()
-            .and_then(|feeds| {
-                feeds
-                    .get(database_url)
-                    .map(|store| store.receiver_count())
-            })
+            .and_then(|feeds| feeds.get(database_url).map(|store| store.receiver_count()))
             .unwrap_or(0)
     }
 }
@@ -236,7 +234,10 @@ async fn run_feed(
                 );
             }
             Err(error) => {
-                sender.reset(format!("change feed startup recovery failed: {error}"), None);
+                sender.reset(
+                    format!("change feed startup recovery failed: {error}"),
+                    None,
+                );
                 continue;
             }
         }
@@ -386,7 +387,10 @@ async fn deliver_committed(
 ) -> Result<u64, gonvex_store::DatabaseError> {
     let clock = read_clock(pools, route).await?;
     if after < clock.retained_revision {
-        sender.reset("change feed cursor expired".to_owned(), Some(clock.revision));
+        sender.reset(
+            "change feed cursor expired".to_owned(),
+            Some(clock.revision),
+        );
         return Ok(clock.revision);
     }
     if clock.revision <= after {

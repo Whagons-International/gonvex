@@ -130,7 +130,12 @@ pub(crate) struct SubInterest {
 impl Interest {
     /// Whether the transaction could change anything this connection sees
     /// (false: its feed arm would decide nothing and send nothing).
-    pub(crate) fn affected(&self, revision: u64, changes: &[LogChange], memo: &mut EvalMemo) -> bool {
+    pub(crate) fn affected(
+        &self,
+        revision: u64,
+        changes: &[LogChange],
+        memo: &mut EvalMemo,
+    ) -> bool {
         if revision > self.admission_revision && self.membership_affects(changes) {
             return true;
         }
@@ -146,7 +151,11 @@ impl Interest {
                     && change.changed_columns.iter().any(|column| {
                         matches!(
                             column.as_str(),
-                            "account_id" | "status" | "role" | "permissions" | "membership_revision"
+                            "account_id"
+                                | "status"
+                                | "role"
+                                | "permissions"
+                                | "membership_revision"
                         )
                     })
             })
@@ -179,7 +188,11 @@ impl SubInterest {
                 }
                 if checks.principal
                     && self.plans.iter().any(|plan| {
-                        plan.principal_change_possible(table, &change.operation, &change.changed_columns)
+                        plan.principal_change_possible(
+                            table,
+                            &change.operation,
+                            &change.changed_columns,
+                        )
                     })
                 {
                     return true;
@@ -192,7 +205,10 @@ impl SubInterest {
                     // Created: no children beyond this transaction's rows.
                 } else if new.is_null()
                     || change.changed_columns.is_empty()
-                    || change.changed_columns.iter().any(|column| acl.contains(column))
+                    || change
+                        .changed_columns
+                        .iter()
+                        .any(|column| acl.contains(column))
                 {
                     return true;
                 }
@@ -201,7 +217,8 @@ impl SubInterest {
                 continue;
             }
             let admits = |row: &Value| {
-                !row.is_null() && crate::replica::collection_filters_admit(row, &self.args, &self.definition)
+                !row.is_null()
+                    && crate::replica::collection_filters_admit(row, &self.args, &self.definition)
             };
             if !admits(old) && !admits(new) {
                 // The collection's own filters reject both images.
@@ -266,12 +283,20 @@ impl Slot {
     pub(crate) fn take(&self, revision: u64) -> bool {
         let mut state = self.state.lock().unwrap();
         if revision <= state.full_until {
-            while state.marked.front().is_some_and(|marked| *marked <= revision) {
+            while state
+                .marked
+                .front()
+                .is_some_and(|marked| *marked <= revision)
+            {
                 state.marked.pop_front();
             }
             return true;
         }
-        while state.marked.front().is_some_and(|marked| *marked < revision) {
+        while state
+            .marked
+            .front()
+            .is_some_and(|marked| *marked < revision)
+        {
             state.marked.pop_front();
         }
         if state.marked.front() == Some(&revision) {

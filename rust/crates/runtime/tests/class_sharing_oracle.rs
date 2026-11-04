@@ -374,7 +374,12 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                     for (path, argument) in gonvex_runtime::perf_fixture::WHAGONS_DETAIL_WINDOW {
                         let id = format!("~detail {path}");
                         let opened = fixture
-                            .open_replica_args(&connection.session, &id, path, json!({ argument: task }))
+                            .open_replica_args(
+                                &connection.session,
+                                &id,
+                                path,
+                                json!({ argument: task }),
+                            )
                             .await
                             .unwrap();
                         if let Some(subscription) = opened.subscription {
@@ -466,21 +471,32 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
             }
             let mut rests = Vec::new();
             if concurrent {
-                rests = futures_util::future::join_all(
-                    shared
-                        .iter_mut()
-                        .enumerate()
-                        .map(|(index, a)| {
-                            deliver(&fixture, &hub_shared, event, index, a, event_index == merged_index)
-                        }),
-                )
+                rests = futures_util::future::join_all(shared.iter_mut().enumerate().map(
+                    |(index, a)| {
+                        deliver(
+                            &fixture,
+                            &hub_shared,
+                            event,
+                            index,
+                            a,
+                            event_index == merged_index,
+                        )
+                    },
+                ))
                 .await;
             } else {
                 for (index, a) in shared.iter_mut().enumerate() {
                     let data_before = gonvex_runtime::replica::fanout_stats().2;
                     rests.push(
-                        deliver(&fixture, &hub_shared, event, index, a, event_index == merged_index)
-                            .await,
+                        deliver(
+                            &fixture,
+                            &hub_shared,
+                            event,
+                            index,
+                            a,
+                            event_index == merged_index,
+                        )
+                        .await,
                     );
                     let set = index / members;
                     if (set == 0 || set == 3)
@@ -621,18 +637,29 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
         eprintln!("  {path}: {}", paths_after[index] - paths_before[index]);
     }
     eprintln!("  inherited connections served with decided rows: {inherited_data}");
-    let waits = gonvex_runtime::replica::fanout_coverage()["waits"].as_u64().unwrap();
+    let waits = gonvex_runtime::replica::fanout_coverage()["waits"]
+        .as_u64()
+        .unwrap();
     eprintln!("  waits for another connection's outcome: {waits}");
-    assert!(waits > 0, "concurrent deliveries never waited on a claimed shape");
+    assert!(
+        waits > 0,
+        "concurrent deliveries never waited on a claimed shape"
+    );
     let coverage = gonvex_runtime::replica::fanout_coverage();
     let by_range = feed_share::metrics()["foundByRange"].as_u64().unwrap() - shares_before;
     eprintln!(
         "  merged deliveries {} (shared {}), shares found by range {by_range}",
         coverage["merged"], coverage["mergedShared"]
     );
-    assert!(by_range > 0, "private merged copies never found the range's share");
+    assert!(
+        by_range > 0,
+        "private merged copies never found the range's share"
+    );
     eprintln!("  connections the tenant feed would skip (verified idle): {wake_skipped} of {frames} ({wake_resyncs} index-ahead resyncs not needed)");
-    assert!(wake_skipped > 0, "targeted wakeups never skipped a connection: the check proved nothing");
+    assert!(
+        wake_skipped > 0,
+        "targeted wakeups never skipped a connection: the check proved nothing"
+    );
     assert!(
         coverage["mergedShared"].as_u64().unwrap() > 0,
         "no merged delivery was served by the fan-out"

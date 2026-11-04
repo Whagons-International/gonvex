@@ -787,7 +787,9 @@ async fn client_run() {
         }
     }
     stats.measuring.store(false, Relaxed);
-    let window_s = window_started.map_or(0.0, |at| at.elapsed().as_secs_f64()).max(1e-9);
+    let window_s = window_started
+        .map_or(0.0, |at| at.elapsed().as_secs_f64())
+        .max(1e-9);
     let mut latencies = std::mem::take(&mut *stats.latencies.lock().unwrap());
     latencies.sort_unstable();
     let load = |counter: &AtomicU64| counter.load(Relaxed);

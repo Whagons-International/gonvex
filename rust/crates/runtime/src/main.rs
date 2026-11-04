@@ -35,7 +35,10 @@ fn start_heap_dumps() {
                 let path = format!("{prefix}.{at}.{sequence:04}.heap\0");
                 // SAFETY: prof.dump takes a NUL-terminated file name.
                 let result = unsafe {
-                    tikv_jemalloc_ctl::raw::write(b"prof.dump\0", path.as_ptr() as *const std::ffi::c_char)
+                    tikv_jemalloc_ctl::raw::write(
+                        b"prof.dump\0",
+                        path.as_ptr() as *const std::ffi::c_char,
+                    )
                 };
                 if let Err(error) = result {
                     eprintln!("gonvex-runtime: heap dump failed: {error}");

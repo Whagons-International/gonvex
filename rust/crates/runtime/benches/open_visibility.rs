@@ -181,7 +181,10 @@ async fn login(fixture: &Fixture, session: &TenantSession, writes: Option<&Atomi
             write_task(fixture, counter.fetch_add(1, Relaxed) as usize).await;
         }
         let (opened, sample) = measure(fixture.open_replica(session, path, path)).await;
-        assert!(opened.unwrap().subscription.is_some(), "{path} did not subscribe");
+        assert!(
+            opened.unwrap().subscription.is_some(),
+            "{path} did not subscribe"
+        );
         total.add(sample);
     }
     total
@@ -202,7 +205,10 @@ async fn detail_window(
         }
         let (opened, sample) =
             measure(fixture.open_replica_args(session, path, path, json!({ argument: id }))).await;
-        assert!(opened.unwrap().subscription.is_some(), "{path} did not subscribe");
+        assert!(
+            opened.unwrap().subscription.is_some(),
+            "{path} did not subscribe"
+        );
         total.add(sample);
     }
     total
@@ -212,7 +218,11 @@ async fn detail_window(
 async fn write_task(fixture: &Fixture, n: usize) {
     let tasks = fixture.tenant(TENANT).tasks.len();
     fixture
-        .update_task(TENANT, (n * 7919) % tasks, json!({"name": format!("bench {n}")}))
+        .update_task(
+            TENANT,
+            (n * 7919) % tasks,
+            json!({"name": format!("bench {n}")}),
+        )
         .await
         .unwrap();
 }
@@ -333,7 +343,9 @@ async fn ab(fixture: &Fixture, used: &mut std::collections::BTreeSet<usize>) {
         samples[mode].0.push(login(fixture, &session, None).await);
         for window in 0..2 {
             let task = 211 + n * 41 + window * 977;
-            samples[mode].1.push(detail_window(fixture, &session, task, None).await);
+            samples[mode]
+                .1
+                .push(detail_window(fixture, &session, task, None).await);
         }
     }
     fixture.runtime.set_principal_cache_enabled(true);
@@ -483,7 +495,8 @@ async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>)
     let user_ms = (process_cpu_split_ns().0 - user_before) as f64 / 1e6;
     let logins = login_ns.lock().unwrap().clone();
     let details = detail_ns.lock().unwrap().clone();
-    let opens = logins.len() * WHAGONS_COLD_LOGIN.len() + details.len() * WHAGONS_DETAIL_WINDOW.len();
+    let opens =
+        logins.len() * WHAGONS_COLD_LOGIN.len() + details.len() * WHAGONS_DETAIL_WINDOW.len();
     let ms = |values: &Vec<u64>, p: f64| percentile(values.clone(), p) as f64 / 1e6;
     let values = json!({
         "elapsed_s": elapsed,

@@ -42,15 +42,16 @@ pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
     database_path, database_url, sqlite_cache_budget_mib, sqlite_connection_heap,
-    sqlite_memory_used, sqlite_reader_opens, AdmissionPermit, DatabaseListener, Durability, KeyedLock, Notification,
-    PoolLimits, PoolRegistry, PoolRegistrySnapshot, WriterQueue, WriterStats,
+    sqlite_memory_used, sqlite_reader_opens, AdmissionPermit, DatabaseListener, Durability,
+    KeyedLock, Notification, PoolLimits, PoolRegistry, PoolRegistrySnapshot, WriterQueue,
+    WriterStats,
 };
 
 mod provision;
+pub mod reader_priority;
 pub mod reference_integrity;
 pub mod sql_lexer;
 pub mod statement_profile;
-pub mod reader_priority;
 pub use provision::{MigrationScope, SqlMigration};
 
 #[derive(Debug, Error)]
@@ -1745,7 +1746,9 @@ impl TenantTransaction {
     }
 
     fn failure(&self) -> std::sync::MutexGuard<'_, Option<String>> {
-        self.failed.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.failed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Reference-integrity flush and change-feed finalize, before COMMIT.
@@ -1759,7 +1762,11 @@ impl TenantTransaction {
         let provenance = self.provenance.clone();
         let stats = self.writer_stats.clone();
         self.with_direct(move |conn| {
-            feed::finalize_direct(conn, &provenance, stats.as_deref().map(|stats| &stats.has_feed))
+            feed::finalize_direct(
+                conn,
+                &provenance,
+                stats.as_deref().map(|stats| &stats.has_feed),
+            )
         })
         .await
     }
@@ -1834,7 +1841,6 @@ impl TenantTransaction {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod transaction_commit_tests;
