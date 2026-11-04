@@ -66,6 +66,7 @@ mod visibility_corpus;
 pub mod visibility_index;
 mod visibility_mask;
 pub mod visibility_metrics;
+pub(crate) mod wake;
 pub mod principal_cache;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -1645,6 +1646,12 @@ async fn websocket(
     };
     let mut feed = None;
     let mut feed_scheduler = FeedFirstScheduler::default();
+    // Targeted wakeups (`wake`): the wake interest needs rebuilding (any
+    // socket message, processed feed event or installed open may change it).
+    let mut wake_dirty = true;
+    // The newest transaction skipped without the feed arm (not yet in a
+    // watermark).
+    let mut wake_skipped = 0u64;
     // Delivery v3, slow readers: a feed event taken while merging that could
     // not be merged (processed next), and whether the socket fell behind
     // since the feed receiver was last drained.
@@ -1761,6 +1768,45 @@ async fn websocket(
         let defer_feed = reading_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
         let batch_deadline = if backlogged { None } else { batcher.deadline(socket.batch()) };
         let presence_wait = presence_slot.clone().filter(|_| !backlogged);
+        // Targeted wakeups: an idle batch connection with replica
+        // subscriptions only waits on its wake slot instead of the broadcast
+        // ring; the tenant feed marks and wakes it only for transactions that
+        // could affect it (`wake::Interest::affected`). Anything that needs
+        // every event (live queries, a call waiting for its watermark,
+        // snapshots or opens in flight, catching up) leaves the mode.
+        let targeted = wake::enabled()
+            && batcher.enabled()
+            && live_queries.is_empty()
+            && control_queries.is_empty()
+            && snapshot_delivery.is_empty()
+            && legacy_snapshot_delivery.is_empty()
+            && pending_replica_opens.is_empty()
+            && !preparing_replicas
+            && !catching_up
+            && !backlogged
+            && !defer_feed
+            && pending_feed.is_none()
+            && !batcher.call_pending()
+            && !replicas.is_empty()
+            && feed_scheduler.remaining_snapshot_feed_events == 0
+            && tenant_session.as_ref().is_some_and(|session| !session.is_anonymous());
+        let wake_wait = match feed.as_mut().and_then(change_feed::FeedReceiver::wake) {
+            Some((registry, slot)) if targeted => {
+                if wake_dirty || !slot.active() {
+                    let interest = replica::fanout::wake_interest(&mut replicas, tenant_session.as_ref().expect("tenant session"));
+                    registry.enter(slot, std::sync::Arc::new(interest));
+                    wake_dirty = false;
+                }
+                Some(std::sync::Arc::clone(slot))
+            }
+            Some((registry, slot)) => {
+                if slot.active() {
+                    registry.leave(slot);
+                }
+                None
+            }
+            None => None,
+        };
         let message = tokio::select! {
             _ = socket_watch.writable(), if backlogged => continue,
             // Delivery v2: one frame per connection per tick.
@@ -1788,6 +1834,7 @@ async fn websocket(
             // re-evaluate `defer_feed`.
             _ = open_progress.settled(), if reading_replicas => continue,
             opened = replica_opens.next(), if preparing_replicas => {
+                wake_dirty = true;
                 if let Some(outcome) = opened {
                     for response in install_replica_open_outcomes(&mut replicas, vec![outcome]) {
                         let response = if replica_snapshot_pages_enabled && !replica_native_rows_enabled {
@@ -1861,7 +1908,7 @@ async fn websocket(
             transport = async {
                 if defer_feed { ScheduledTransport::Socket(socket.next().await) }
                 else if let Some(event) = pending_feed.take() { ScheduledTransport::Feed(event) }
-                else { next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler).await }
+                else { next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler, wake_wait.as_deref()).await }
             }, if pending_replica_opens.is_empty() => {
                 match transport {
                     ScheduledTransport::Socket(message) => {
@@ -1870,13 +1917,37 @@ async fn websocket(
                         message
                     }
                     ScheduledTransport::Feed(event) => match event {
+                    // Targeted wakeups: a transaction the tenant feed did not
+                    // mark for this connection concerns none of its
+                    // subscriptions. Taken without the feed arm; its revision
+                    // goes into the watermark once the queue is drained (a
+                    // watermark-only batch waits for the idle delay anyway).
+                    Ok(change_feed::FeedEvent::Transaction { revision, .. })
+                        if wake_wait.as_ref().is_some_and(|slot| !slot.take(revision)) =>
+                    {
+                        wake::count_skip();
+                        wake_skipped = wake_skipped.max(revision);
+                        if feed.as_ref().is_none_or(change_feed::FeedReceiver::is_empty) && wake_skipped > sent_replica_revision {
+                            if let Some(session) = tenant_session.as_ref() {
+                                batcher.watermark(socket.batch_mut(), &session.route.tenant_id, &replicas, wake_skipped);
+                                sent_replica_revision = wake_skipped;
+                            }
+                            // Drained after the tenant's flush, which already
+                            // waited the idle delay a watermark-only batch
+                            // waits: send it now.
+                            if batcher.flush(&mut socket).await.is_err() { return; }
+                        }
+                        continue;
+                    }
                     // A preparation started reading after this loop chose
                     // to take a feed event: keep it for after installation.
                     Ok(event) if replica_opens.reading() => {
+                        wake_dirty = true;
                         pending_feed = Some(Ok(event));
                         continue;
                     }
                     Ok(event) => {
+                        wake_dirty = true;
                         // A connection that fell behind takes every feed event
                         // waiting for it as one: each row's newest state once.
                         // Burst control: behind also means events already
@@ -2085,6 +2156,7 @@ async fn websocket(
                         continue;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        wake_dirty = true;
                         for subscription in replicas.values() {
                             let response = ServerMessage::ReplicaReset {
                                 id: subscription.id.clone(),
@@ -2218,6 +2290,7 @@ async fn websocket(
                 continue;
             }
         };
+        wake_dirty = true;
         let Ok(message) = message else {
             if public_transport {
                 let _ = socket
@@ -3785,12 +3858,13 @@ async fn next_socket_or_feed<S>(
     socket: &mut S,
     receiver: &mut Option<change_feed::FeedReceiver>,
     scheduler: &mut FeedFirstScheduler,
+    wake: Option<&wake::Slot>,
 ) -> ScheduledTransport<S::Item>
 where
     S: Stream + Unpin,
 {
     if scheduler.remaining_snapshot_feed_events > 0 {
-        let event = next_feed_event(receiver).await;
+        let event = next_feed_event_or_wake(receiver, wake).await;
         scheduler.selected_snapshot_feed();
         return ScheduledTransport::Feed(event);
     }
@@ -3802,7 +3876,7 @@ where
                 scheduler.selected_socket();
                 ScheduledTransport::Socket(message)
             }
-            event = next_feed_event(receiver) => {
+            event = next_feed_event_or_wake(receiver, wake) => {
                 let additional_ready = receiver.as_ref().map_or(0, change_feed::FeedReceiver::len);
                 scheduler.selected_first_feed(additional_ready);
                 ScheduledTransport::Feed(event)
@@ -3811,7 +3885,7 @@ where
     } else {
         tokio::select! {
             biased;
-            event = next_feed_event(receiver) => {
+            event = next_feed_event_or_wake(receiver, wake) => {
                 let additional_ready = receiver.as_ref().map_or(0, change_feed::FeedReceiver::len);
                 scheduler.selected_first_feed(additional_ready);
                 ScheduledTransport::Feed(event)
@@ -3822,6 +3896,22 @@ where
             }
         }
     }
+}
+
+/// [`next_feed_event`]; in targeted-wakeup mode (`wake`), while the receiver
+/// holds nothing, waits on the connection's wake slot instead of the ring
+/// (signals the tenant feed did not mark stay queued until a mark or the
+/// tenant's watermark flush wakes it). Cancel-safe.
+async fn next_feed_event_or_wake(
+    receiver: &mut Option<change_feed::FeedReceiver>,
+    wake: Option<&wake::Slot>,
+) -> Result<change_feed::FeedEvent, broadcast::error::RecvError> {
+    if let Some(slot) = wake {
+        while receiver.as_ref().is_some_and(change_feed::FeedReceiver::is_empty) {
+            slot.notified().await;
+        }
+    }
+    next_feed_event(receiver).await
 }
 
 async fn next_feed_event(
@@ -6181,18 +6271,18 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let mut scheduler = FeedFirstScheduler::default();
 
         assert_eq!(
-            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await),
+            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await),
             "call-one"
         );
         sender.send(feed_transaction(41)).unwrap();
         assert_eq!(
             scheduled_feed_revision(
-                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
             ),
             41
         );
         assert_eq!(
-            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await),
+            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await),
             "call-two"
         );
     }
@@ -6208,7 +6298,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         sender.send(feed_transaction(52)).unwrap();
         assert_eq!(
             scheduled_feed_revision(
-                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
             ),
             51
         );
@@ -6218,17 +6308,17 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         sender.send(feed_transaction(53)).unwrap();
         assert_eq!(
             scheduled_feed_revision(
-                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
             ),
             52
         );
         assert_eq!(
-            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await),
+            scheduled_socket(next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await),
             "queued-call"
         );
         assert_eq!(
             scheduled_feed_revision(
-                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler).await
+                next_socket_or_feed(&mut socket, &mut feed, &mut scheduler, None).await
             ),
             53
         );
@@ -7005,7 +7095,7 @@ mod connection_future_sizes {
         );
         println!(
             "future_size {:>6} next_socket_or_feed",
-            size3(next_socket_or_feed::<WebSocket>)
+            size4(next_socket_or_feed::<WebSocket>)
         );
         println!(
             "future_size {:>6} validate_public_scope",

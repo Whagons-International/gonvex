@@ -187,6 +187,8 @@ pub(crate) struct FeedStore {
     /// Refills of one tenant run one at a time, so receivers at the same
     /// position read the log once and share the result.
     fill_lock: tokio::sync::Mutex<()>,
+    /// Targeted wakeups of idle connections (`crate::wake`).
+    pub(crate) wake: Arc<crate::wake::WakeRegistry>,
 }
 
 /// Events receivers re-read from the log, kept for receivers at about the
@@ -293,6 +295,7 @@ impl FeedStore {
             }),
             refilled: Mutex::new(Refilled::default()),
             fill_lock: tokio::sync::Mutex::new(()),
+            wake: Arc::default(),
         })
     }
 
@@ -323,6 +326,7 @@ impl FeedStore {
                 gap_until: None,
                 fill: None,
             })),
+            wake: None,
         }
     }
 
@@ -342,6 +346,13 @@ impl FeedStore {
             revision,
             changes: Arc::downgrade(&changes),
             unread,
+        };
+        // Targeted wakeups: marked before the signal exists, so a connection
+        // that takes it finds its mark; notified after it is in the ring.
+        let wake = if crate::wake::enabled() {
+            self.wake.dispatch(revision, &changes)
+        } else {
+            Vec::new()
         };
         let budget = budget_bytes();
         let c = counters();
@@ -369,6 +380,10 @@ impl FeedStore {
         }
         state.latest = state.latest.max(revision);
         let _ = self.sender.send(signal);
+        drop(state);
+        for slot in wake {
+            slot.notify_one();
+        }
     }
 
     /// Drops the oldest transactions every receiver has already taken: a feed
@@ -404,6 +419,8 @@ impl FeedStore {
         let _ = self.sender.send(FeedSignal::Reset {
             reason: Arc::from(reason),
         });
+        drop(state);
+        self.wake.wake_all();
     }
 
     fn refilled(&self) -> std::sync::MutexGuard<'_, Refilled> {
@@ -461,6 +478,9 @@ struct HubReceiver {
 /// the change log. `recv` is cancel-safe.
 pub struct FeedReceiver {
     inner: Inner,
+    /// Targeted wakeups (`crate::wake`): this receiver's slot in its tenant
+    /// feed, created on first use.
+    wake: Option<(Arc<crate::wake::WakeRegistry>, Arc<crate::wake::Slot>)>,
 }
 
 enum Inner {
@@ -473,6 +493,7 @@ impl From<broadcast::Receiver<FeedEvent>> for FeedReceiver {
     fn from(receiver: broadcast::Receiver<FeedEvent>) -> Self {
         Self {
             inner: Inner::Plain(receiver),
+            wake: None,
         }
     }
 }
@@ -765,6 +786,21 @@ impl FeedReceiver {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// This receiver's wake slot in its tenant feed (`crate::wake`), created
+    /// on first use; None for a plain channel.
+    pub(crate) fn wake(
+        &mut self,
+    ) -> Option<&(Arc<crate::wake::WakeRegistry>, Arc<crate::wake::Slot>)> {
+        if self.wake.is_none() {
+            if let Inner::Hub(receiver) = &self.inner {
+                let registry = Arc::clone(&receiver.store.wake);
+                let slot = registry.slot();
+                self.wake = Some((registry, slot));
+            }
+        }
+        self.wake.as_ref()
     }
 }
 
