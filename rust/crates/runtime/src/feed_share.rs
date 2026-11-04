@@ -64,6 +64,9 @@ const KEEP_EVENTS: usize = 4;
 
 static SHARES_CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SHARES_FOUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Found by revision range, not by the broadcast's change list (merged or
+/// re-read copies).
+static SHARES_BY_RANGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SHARES_LIVE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// Event shares created, found, and alive (`/dev/metrics` → `memory.eventShares`).
@@ -72,6 +75,7 @@ pub fn metrics() -> serde_json::Value {
     serde_json::json!({
         "created": SHARES_CREATED.load(Relaxed),
         "found": SHARES_FOUND.load(Relaxed),
+        "foundByRange": SHARES_BY_RANGE.load(Relaxed),
         "live": SHARES_LIVE.load(Relaxed),
     })
 }
@@ -119,6 +123,8 @@ pub(crate) struct DecisionKey {
 pub struct EventShare {
     epoch: String,
     revision: u64,
+    /// Lowest change revision: below `revision` for a merged range.
+    first: u64,
     changes: Arc<Vec<LogChange>>,
     pub(crate) memo: Mutex<EvalMemo>,
     decisions: Mutex<crate::fast_hash::FastMap<DecisionKey, Arc<RowDecision>>>,
@@ -132,6 +138,15 @@ pub struct EventShare {
     collapsed: std::sync::OnceLock<Arc<crate::replica::CollapseIndex>>,
     pub(crate) outcomes:
         Mutex<crate::fast_hash::FastMap<crate::replica::fanout::Shape, Arc<crate::replica::fanout::Outcome>>>,
+    /// Delivery coverage: shapes whose first connection is computing the
+    /// outcome right now (others wait for it), or whose outcome could not be
+    /// recorded (others take their own path at once).
+    /// Delivery coverage: per (plan combination, change position) whether the
+    /// change can concern any member's principal
+    /// (`VisibilityPlan::principal_change_possible`), evaluated once.
+    pub(crate) principal_possible: Mutex<crate::fast_hash::FastMap<(usize, usize), bool>>,
+    pub(crate) claims:
+        Mutex<crate::fast_hash::FastMap<crate::replica::fanout::Shape, crate::replica::fanout::ClaimState>>,
 }
 
 impl EventShare {
@@ -215,7 +230,12 @@ impl Drop for EventShares {
 
 impl EventShares {
     /// The share of this event (created by its first connection). Identified
-    /// by epoch, revision and the address of the broadcast's change list.
+    /// by epoch, revision and the address of the broadcast's change list, or
+    /// (delivery coverage) by its revision range: a merged catch-up event or a
+    /// copy re-read from the log covering the same revisions has the same
+    /// changes in the same order. Callers that find a share by range must use
+    /// its change list ([`EventShare::changes`]), not their copy: row memos are
+    /// keyed by image address.
     pub(crate) fn share(
         &self,
         epoch: &str,
@@ -225,12 +245,28 @@ impl EventShares {
         if !enabled() {
             return None;
         }
+        let first = changes
+            .iter()
+            .map(|change| change.revision)
+            .min()
+            .unwrap_or(revision)
+            .min(revision);
         let mut recent = self.recent.lock().unwrap();
         if let Some(share) = recent.by_revision.get(&revision).and_then(|shares| {
             shares
                 .iter()
                 .find(|share| share.epoch == epoch && Arc::ptr_eq(&share.changes, changes))
+                .or_else(|| {
+                    shares.iter().find(|share| {
+                        share.epoch == epoch
+                            && share.first == first
+                            && share.changes.len() == changes.len()
+                    })
+                })
         }) {
+            if !Arc::ptr_eq(&share.changes, changes) {
+                SHARES_BY_RANGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             SHARES_FOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(Arc::clone(share));
@@ -238,6 +274,7 @@ impl EventShares {
         let share = Arc::new(EventShare {
             epoch: epoch.to_owned(),
             revision,
+            first,
             changes: Arc::clone(changes),
             memo: Mutex::default(),
             decisions: Mutex::default(),
@@ -245,14 +282,12 @@ impl EventShares {
             layout: Default::default(),
             collapsed: Default::default(),
             outcomes: Mutex::default(),
+            principal_possible: Mutex::default(),
+            claims: Mutex::default(),
         });
         SHARES_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if Arc::strong_count(changes) <= 2 {
-            // Only the caller (and this share) hold these images: a
-            // connection's own merged catch-up event. No other connection can
-            // present this `Arc`, so keeping the share would only cost memory.
-            return Some(share);
-        }
+        // A connection's own merged catch-up event is kept too: another
+        // connection merging the same revision range finds it by range.
         let recent = &mut *recent;
         recent.order.push_back(Arc::clone(&share));
         recent

@@ -16,6 +16,7 @@ mod mask;
 #[path = "replica_fanout.rs"]
 pub(crate) mod fanout;
 pub use fanout::stats as fanout_stats;
+pub use fanout::{coverage_json as fanout_coverage, path_counts as fanout_path_counts, PATHS as FANOUT_PATHS};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -1217,6 +1218,10 @@ impl Runtime {
         event: FeedEvent,
         record: bool,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
+        let _timer = gonvex_profiler::ScopeTimer::new(
+            gonvex_profiler::Stage::DeliveryIndividual,
+            gonvex_profiler::Label::None,
+        );
         let FeedEvent::Transaction {
             database_epoch,
             revision,
@@ -1248,6 +1253,11 @@ impl Runtime {
             .tenant(&session.route.tenant_id)
             .events
             .share(&database_epoch, revision, &changes);
+        // A share found by revision range (a merged or re-read copy): decide
+        // on its change list, whose image addresses its memos key on.
+        let changes = share
+            .as_ref()
+            .map_or(changes, |share| Arc::clone(share.changes()));
         // Collapsed once per event (the share's), not per connection.
         let collapsed = match &share {
             Some(share) => CollapsedChanges::shared(&changes, share.collapsed()),
@@ -1255,8 +1265,15 @@ impl Runtime {
         };
         let mut shared_stats = crate::visibility_class::EvalStats::default();
         let mut recording = match (&share, record && fanout::enabled()) {
-            (Some(share), true) => fanout::shape(subscriptions, share, &database_epoch, revision)
-                .filter(|shape| !share.outcomes.lock().unwrap().contains_key(shape))
+            (Some(share), true) => fanout::shape(
+                subscriptions,
+                share,
+                &database_epoch,
+                revision,
+                &session.route.database_url,
+            )
+            .ok()
+                .filter(|shape| !share.outcomes.lock().unwrap().contains_key(&shape.key))
                 .map(|shape| (shape, fanout::Recorder::new())),
             _ => None,
         };
@@ -1335,7 +1352,11 @@ impl Runtime {
                 continue;
             };
             if let Some((_, recorder)) = &mut recording {
-                if context.before.is_some() || context.overlay.is_some() || !context.affected.is_empty() {
+                // A parent overlay leaves the outcome a function of the shape:
+                // a shape exists only when no parent's admission flipped and,
+                // with source rows, only for parent updates of columns
+                // visibility does not read (overlay and index agree).
+                if context.before.is_some() || !context.affected.is_empty() {
                     recorder.clean = false;
                 }
             }
@@ -1424,7 +1445,7 @@ impl Runtime {
                 .filter(|message| matches!(message, ServerMessage::ReplicaTransaction { .. }))
                 .cloned();
             if let Some(outcome) = recorder.finish(subscriptions, &shape) {
-                fanout::record(share, shape, outcome);
+                fanout::record(share, shape.key, outcome);
             }
         }
         Ok(messages)

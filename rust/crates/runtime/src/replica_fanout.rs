@@ -49,6 +49,94 @@ static HITS: AtomicU64 = AtomicU64::new(0);
 static RECORDED: AtomicU64 = AtomicU64::new(0);
 static DATA_HITS: AtomicU64 = AtomicU64::new(0);
 
+macro_rules! paths {
+    ($($variant:ident => $name:literal, $doc:literal;)*) => {
+        /// Delivery coverage: how one batch connection's feed step for one
+        /// transaction was decided (shared fan-out or its own full path, and
+        /// why). Counted once per connection per event in the connection
+        /// loop (`count`), exported in `/dev/profile` (`deliveryCoverage`).
+        #[repr(u8)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Path { $($variant),* }
+        /// (name, description) per path, indexed by `Path as usize`.
+        pub const PATHS: &[(&str, &str)] = &[$(($name, $doc)),*];
+    };
+}
+
+paths! {
+    SharedAdvance => "shared.advance", "Served from its shape: nothing to decide, cursors advance (no outcome needed)";
+    SharedData => "shared.data", "Served from its shape's recorded outcome (decided rows appended)";
+    Representative => "full.representative", "Has a shape but no outcome yet: the full path runs and records it";
+    ServeRejected => "full.serve_rejected", "Outcome exists but a bounded window would leave its budget, or a non-default stream token";
+    NotBatch => "full.not_batch", "Batching off, a snapshot still being delivered, or a non-transaction event";
+    NoShare => "full.no_share", "No tenant event share (sharing off, or the event left the share ring)";
+    Inherited => "full.inherited", "A reached subscription has an inherited plan the shape cannot follow (inheritsAny, nested inherits)";
+    Legacy => "full.legacy", "A reached subscription has a version 1 (SQL) plan";
+    DuplicateStream => "full.duplicate_stream", "Two subscriptions share one stream identity";
+    PrincipalMoved => "full.principal_moved", "A changed row moves this member's principal, grants, derived sets or ancestors (the mask step's per-change checks): it re-resolves or re-decides affected rows";
+    ParentAcl => "full.parent_acl", "A parent row of an inherited plan changed visibility columns or was deleted (children may flip)";
+    ParentAndSource => "full.parent_and_source", "An inherited plan's source rows and a parent row that was created or changed visibility columns in one transaction (decided against the parents' before-images)";
+    IndexWaiting => "full.index_waiting", "A bound shared index is not at the event's revision yet";
+    CursorEpoch => "full.cursor_epoch", "Cursor of another epoch, or a bound index already ahead of the event";
+    Truncated => "full.truncated", "A reached collection of a changed table has a truncated window";
+    NotCompiled => "full.not_compiled", "The member's visibility is not compiled (fallback evaluation)";
+    Hit => "full.hit", "A changed row hits a member atom (personal grant, assignment, own row): decided individually";
+    ManyRows => "full.many_rows", "More than 32 changed rows of one collection's table";
+    Empty => "empty", "No replica subscriptions (nothing to decide)";
+    Unclean => "full.unclean", "Its shape's first connection could not record an outcome (resync, principal change): decided alone";
+}
+
+const PATH_COUNT: usize = PATHS.len();
+#[allow(clippy::declare_interior_mutable_const)]
+const ZERO: AtomicU64 = AtomicU64::new(0);
+static PATH_COUNTS: [AtomicU64; PATH_COUNT] = [ZERO; PATH_COUNT];
+
+static WAITS: AtomicU64 = AtomicU64::new(0);
+static WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static MERGED: AtomicU64 = AtomicU64::new(0);
+static MERGED_SHARED: AtomicU64 = AtomicU64::new(0);
+static NOOP_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts one batch connection's feed arm for one transaction; `noop`: it
+/// added no data item (nothing but its watermark to send).
+pub fn count_wakeup(noop: bool) {
+    WAKEUPS.fetch_add(1, Ordering::Relaxed);
+    if noop {
+        NOOP_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Counts one connection's feed step (`Path`).
+pub fn count(path: Path) {
+    PATH_COUNTS[path as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Counts per path since start, indexed by `Path as usize`.
+pub fn path_counts() -> [u64; PATH_COUNT] {
+    std::array::from_fn(|index| PATH_COUNTS[index].load(Ordering::Relaxed))
+}
+
+/// `/dev/profile` `deliveryCoverage`: per path its count, plus the shared
+/// and individual (full path) per-connection time histograms.
+pub fn coverage_json() -> serde_json::Value {
+    let counts = path_counts();
+    let shared: u64 = counts[..2].iter().sum();
+    let total: u64 = counts.iter().sum();
+    serde_json::json!({
+        "total": total,
+        "shared": shared,
+        "sharedFraction": if total == 0 { 0.0 } else { shared as f64 / total as f64 },
+        "waits": WAITS.load(Ordering::Relaxed),
+        "merged": MERGED.load(Ordering::Relaxed),
+        "mergedShared": MERGED_SHARED.load(Ordering::Relaxed),
+        "wakeups": WAKEUPS.load(Ordering::Relaxed),
+        "noopWakeups": NOOP_WAKEUPS.load(Ordering::Relaxed),
+        "paths": PATHS.iter().zip(counts).map(|((name, doc), count)| serde_json::json!({
+            "path": name, "count": count, "doc": doc,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// (connections served without the full path, outcomes recorded, of the
 /// served connections those whose outcome decided rows), process totals
 /// (tests and benchmarks).
@@ -72,18 +160,47 @@ pub fn enabled() -> bool {
         })
 }
 
-/// Per subscription, computed once: what its shape entry and its slow-table
+/// Per subscription, computed once: what its shape entry needs.
 /// check need.
 pub(crate) struct FanoutKeys {
     /// Interned argument JSON: equal arguments share one allocation, so a
     /// shape compares its address.
     args: Arc<str>,
     identity: u64,
-    /// Tables whose change can move this plan's principal, sets or grants
-    /// (one set per plan, shared).
-    slow: Arc<FastSet<String>>,
+    shareable: Shareable,
+    /// Tables whose change may move this member's principal, grants or
+    /// derived sets (`members`, every set and join table of its plan and its
+    /// parents' plans), with the checks that can fire for each: only their
+    /// changes need the per-member checks (`replica_mask::member_unmoved`).
+    /// One map per combination of plans, shared.
+    moving: Arc<FastMap<String, mask::MovingChecks>>,
+}
+
+/// Whether and how a subscription's plan can take the shared path.
+pub(crate) enum Shareable {
     /// Version 2 plan without inherited visibility (`shareable_plan`).
-    shareable: bool,
+    Plain,
+    /// Version 2 plan with plain `inherits` parents (no `inheritsAny`, no
+    /// parent that inherits again): its source rows are decided by its class
+    /// through the shared parent index; parent rows are followed below.
+    Inherited(Inherited),
+    /// Never (why).
+    No(Path),
+}
+
+pub(crate) struct Inherited {
+    /// Per direct parent table, its ACL index columns: an update that
+    /// changes none of them cannot flip whether the parent admits children.
+    acl: Arc<BTreeMap<String, BTreeSet<String>>>,
+}
+
+impl Shareable {
+    fn no(&self) -> Option<Path> {
+        match self {
+            Self::No(path) => Some(*path),
+            _ => None,
+        }
+    }
 }
 
 /// One shared value per key while any holder keeps it (`Weak` registry).
@@ -115,27 +232,46 @@ fn keys(subscription: &mut ReplicaSubscription) -> Arc<FanoutKeys> {
         return Arc::clone(keys);
     }
     type Registry<K, V> = std::sync::Mutex<std::collections::HashMap<K, std::sync::Weak<V>>>;
-    static SLOW: OnceLock<Registry<usize, FastSet<String>>> = OnceLock::new();
     static ARGS: OnceLock<Registry<String, str>> = OnceLock::new();
-    let plan = &subscription.visibility;
-    // Keyed by the shared plan's address; the entry holds no reference to
-    // the plan, so an address reused by another plan after the old one is
-    // gone is only a problem while the old set lives: it is held by keys of
-    // subscriptions of the old plan only, and plans are never mutated.
-    let slow = interned(
-        SLOW.get_or_init(Default::default),
-        Arc::as_ptr(plan) as usize,
+    static MOVING: OnceLock<Registry<Vec<usize>, FastMap<String, mask::MovingChecks>>> =
+        OnceLock::new();
+    let shareable = shareable(subscription);
+    // Shared plans never mutate; a key of addresses is valid while the set
+    // lives (held only by keys of subscriptions of these plans). Followed
+    // parents never inherit again, so the plans determine the set.
+    let plans: Vec<&VisibilityPlan> = std::iter::once(subscription.visibility.as_ref())
+        .chain(subscription.resolved.inherited.values().map(|parent| parent.plan.as_ref()))
+        .collect();
+    let moving = interned(
+        MOVING.get_or_init(Default::default),
+        plans
+            .iter()
+            .map(|plan| *plan as *const VisibilityPlan as usize)
+            .collect(),
         || {
-            let mut slow = FastSet::default();
-            slow.insert("members".to_owned());
-            for set in plan.sets.values() {
-                slow.insert(set.table.clone());
-                for join in &set.joins {
-                    slow.insert(join.table.clone());
+            // Mirrors where each check of `member_unmoved` can fire:
+            // `principal_change_concerns` reads `members` and the tables of
+            // non-derived sets (a grant set only through its joins),
+            // derived checks the derived sets' tables, `grant_delta` the
+            // grant sets' tables; each also for the parents' plans.
+            let mut moving = FastMap::<String, mask::MovingChecks>::default();
+            moving.entry("members".to_owned()).or_default().principal = true;
+            for plan in &plans {
+                for set in plan.sets.values() {
+                    let entry = moving.entry(set.table.clone()).or_default();
+                    match set.kind.as_str() {
+                        "derived" => entry.derived = true,
+                        "grant" => entry.grant = true,
+                        _ => entry.principal = true,
+                    }
+                    if set.kind != "derived" {
+                        for join in &set.joins {
+                            moving.entry(join.table.clone()).or_default().principal = true;
+                        }
+                    }
                 }
             }
-            slow.extend(plan.permission_tables.iter().cloned());
-            Arc::new(slow)
+            Arc::new(moving)
         },
     );
     let args = serde_json::to_string(&subscription.args).unwrap_or_default();
@@ -145,11 +281,38 @@ fn keys(subscription: &mut ReplicaSubscription) -> Arc<FanoutKeys> {
     let keys = Arc::new(FanoutKeys {
         args,
         identity: crate::delivery::stream_identity(subscription),
-        slow,
-        shareable: plan.version == Some(2) && shareable_plan(plan),
+        shareable,
+        moving,
     });
     subscription.fanout = Some(Arc::clone(&keys));
     keys
+}
+
+fn shareable(subscription: &mut ReplicaSubscription) -> Shareable {
+    let plan = &subscription.visibility;
+    if plan.version != Some(2) {
+        return Shareable::No(Path::Legacy);
+    }
+    if shareable_plan(plan) {
+        return Shareable::Plain;
+    }
+    let resolved = &subscription.resolved;
+    let followed = visibility::inherits_any(plan).is_empty()
+        && plan
+            .inherited_columns()
+            .keys()
+            .all(|table| resolved.inherited.contains_key(table))
+        && resolved.inherited.values().all(|parent| {
+            parent.resolved.inherited.is_empty()
+                && parent.plan.inherited_columns().is_empty()
+                && visibility::inherits_any(&parent.plan).is_empty()
+        });
+    if !followed {
+        return Shareable::No(Path::Inherited);
+    }
+    Shareable::Inherited(Inherited {
+        acl: mask::subscription_parent_acl_columns(subscription),
+    })
 }
 
 /// The event's changed tables and its collapsed rows (first before-image,
@@ -235,7 +398,26 @@ pub(crate) struct ShapeEntry {
     identity: u64,
 }
 
+/// The outcome key: the entries of the subscriptions the event decides or
+/// asks (collections of changed tables: `Apply`, or `Ahead` for
+/// normalization), in subscription id order. Subscriptions it only advances
+/// (`Skip`) or leaves (`Ahead` of untouched tables) are not part of it:
+/// connections that differ only in those (a task detail window open on
+/// another task) share one outcome.
 pub(crate) type Shape = Vec<ShapeEntry>;
+
+/// A connection's shape for one event: the outcome key and, per
+/// subscription in id order, its state and whether its entry is in the key.
+pub(crate) struct Shaped {
+    pub(crate) key: Shape,
+    states: Vec<(State, bool)>,
+}
+
+impl Shaped {
+    fn decides(&self) -> bool {
+        self.key.iter().any(|entry| entry.state == State::Apply)
+    }
+}
 
 /// What one subscription of a shape does with the event.
 pub(crate) enum SubOutcome {
@@ -307,68 +489,243 @@ impl Outcome {
     }
 }
 
-/// Whether every index bound into `resolved` is at `revision` of `epoch`
-/// right now (no waiting): the synchronous form of `indexes_ready`.
+/// Whether every index bound into `resolved` (and its inherited parents',
+/// with the parent indexes themselves) is at `revision` of `epoch` right now
+/// (no waiting): the synchronous form of `visibility::indexes_ready`.
 fn indexes_ready_now(resolved: &ResolvedVisibility, revision: u64, epoch: &str) -> bool {
-    resolved.inherited.is_empty()
-        && resolved
-            .indexes
-            .values()
-            .all(|index| crate::visibility_index::ready_now(index, revision, epoch) == Some(true))
+    let ready = |index: &std::sync::RwLock<crate::visibility_index::ParentAclIndex>| {
+        crate::visibility_index::ready_now(index, revision, epoch) == Some(true)
+    };
+    resolved.indexes.values().all(|index| ready(index))
+        && resolved.inherited.values().all(|parent| {
+            ready(&parent.index) && indexes_ready_now(&parent.resolved, revision, epoch)
+        })
 }
 
-/// The connection's shape for this event, or None when some subscription
-/// needs its own decisions (see the module documentation). Does not change
-/// any subscription state except its cached keys.
+/// The union of the changed columns of a collapsed row's changes
+/// (`changes[first..=last]` of that table and row): None when some change
+/// names none (unknown).
+fn changed_columns(changes: &[LogChange], first: usize, last: usize) -> Option<Vec<&str>> {
+    let (table, row) = (&changes[first].table, &changes[first].row_id);
+    let mut columns = Vec::new();
+    for change in &changes[first..=last] {
+        if change.table != *table || change.row_id != *row {
+            continue;
+        }
+        if change.changed_columns.is_empty() {
+            return None;
+        }
+        columns.extend(change.changed_columns.iter().map(String::as_str));
+    }
+    (!columns.is_empty()).then_some(columns)
+}
+
+/// The connection's shape for this event, or why some subscription needs
+/// its own decisions (see the module documentation). Does not change any
+/// subscription state except its cached keys.
+///
+/// `scope` is the tenant database (class scope): a subscription that the
+/// full path would decide (`Apply`) is bound to its compiled class here as
+/// the full path binds it, so both leave the same binding behind.
 pub(crate) fn shape(
     subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
     share: &EventShare,
     epoch: &str,
     revision: u64,
-) -> Option<Shape> {
+    scope: &str,
+) -> Result<Shaped, Path> {
     let layout = share.layout.get_or_init(|| layout(share.changes()));
     let changes = share.changes();
     // Cheap static checks first: a connection with a collection the fan-out
     // never serves (inherited plans, legacy plans) is rejected before any
     // per-row work.
     for subscription in subscriptions.values_mut() {
-        if revision > subscription.cursor.revision && !keys(subscription).shareable {
-            return None;
+        if revision > subscription.cursor.revision {
+            if let Some(path) = keys(subscription).shareable.no() {
+                return Err(path);
+            }
         }
     }
-    let mut shape: Shape = Vec::with_capacity(subscriptions.len());
+    let mut shape: Vec<ShapeEntry> = Vec::with_capacity(subscriptions.len());
     let mut memo = None;
     for subscription in subscriptions.values_mut() {
         let keys = keys(subscription);
         if shape.iter().any(|entry| entry.identity == keys.identity) {
-            return None;
+            return Err(Path::DuplicateStream);
         }
         let touched = layout.tables.contains(&subscription.definition.table);
+        // A collection whose own filters (argument equalities, exclusions)
+        // admit neither image of any changed row of its table decides no row
+        // and holds none of them (a task detail window on another task): it
+        // only advances, so it stays out of the outcome key.
+        let filtered_out = touched
+            && layout
+                .rows
+                .iter()
+                .filter(|(table, _, _)| *table == subscription.definition.table)
+                .all(|(_, first, last)| {
+                    let admits = |row: &serde_json::Value| {
+                        !row.is_null()
+                            && collection_filters_admit(row, &subscription.args, &subscription.definition)
+                    };
+                    !admits(&changes[*first].old_value) && !admits(&changes[*last].new_value)
+                });
         let state = if revision <= subscription.cursor.revision {
             State::Ahead
         } else {
-            if !keys.shareable
-                || layout.tables.iter().any(|table| keys.slow.contains(table))
-                || ((!subscription.resolved.indexes.is_empty()
-                    || !subscription.resolved.inherited.is_empty())
-                    && !indexes_ready_now(&subscription.resolved, revision, epoch))
+            if let Some(path) = keys.shareable.no() {
+                return Err(path);
+            }
+            // The mask step's per-change checks, per member: a change of a
+            // table its visibility reads that moves its principal, grants,
+            // derived sets or ancestors needs its own decisions.
+            let concern = mask::subscription_concern_tables(subscription);
+            // Per distinct changed table first (an event has few), per
+            // change only for tables that can move a principal.
+            let concerned = layout.tables.iter().any(|table| concern.contains(table.as_str()));
+            let moving = concerned
+                && layout
+                    .tables
+                    .iter()
+                    .any(|table| concern.contains(table.as_str()) && keys.moving.contains_key(table.as_str()));
+            for (position, change) in changes.iter().enumerate() {
+                if !moving || !concern.contains(change.table.as_str()) {
+                    continue;
+                }
+                if let Some(checks) = keys.moving.get(change.table.as_str()) {
+                    let mut checks = *checks;
+                    if checks.principal {
+                        // Member-independent: once per event and plans.
+                        let key = (Arc::as_ptr(&keys.moving) as *const u8 as usize, position);
+                        let known = share.principal_possible.lock().unwrap().get(&key).copied();
+                        checks.principal = known.unwrap_or_else(|| {
+                            let possible = std::iter::once(subscription.visibility.as_ref())
+                                .chain(
+                                    subscription
+                                        .resolved
+                                        .inherited
+                                        .values()
+                                        .map(|parent| parent.plan.as_ref()),
+                                )
+                                .any(|plan| {
+                                    plan.principal_change_possible(
+                                        &change.table,
+                                        &change.operation,
+                                        &change.changed_columns,
+                                    )
+                                });
+                            share.principal_possible.lock().unwrap().insert(key, possible);
+                            possible
+                        });
+                    }
+                    if !mask::member_unmoved(subscription, change, checks) {
+                        return Err(Path::PrincipalMoved);
+                    }
+                }
+            }
+            if (!subscription.resolved.indexes.is_empty()
+                || !subscription.resolved.inherited.is_empty())
+                && !indexes_ready_now(&subscription.resolved, revision, epoch)
             {
-                return None;
+                return Err(Path::IndexWaiting);
+            }
+            if !concerned {
+                // Nothing its visibility reads changed: the mask step skips it.
+                shape.push(ShapeEntry {
+                    state: State::Skip,
+                    visible: 0,
+                    definition: ByAddress(None),
+                    args: ByAddress(None),
+                    identity: keys.identity,
+                });
+                continue;
+            }
+            if let Shareable::Inherited(inherited) = &keys.shareable {
+                // Parent rows: the mask step re-decides a parent's children
+                // only when the parent's admission flips for this member.
+                let mut parent_changed = false;
+                // Every changed parent is an update of columns its ACL index
+                // does not read: its before-image (the mask step's overlay)
+                // and the shared index agree on everything visibility reads.
+                let mut parents_unmoved = true;
+                for (table, first, last) in &layout.rows {
+                    let Some(acl) = inherited.acl.get(table) else {
+                        continue;
+                    };
+                    parent_changed = true;
+                    let old = &changes[*first].old_value;
+                    let new = &changes[*last].new_value;
+                    if old.is_null() {
+                        // A parent created by this transaction has no
+                        // children beyond the transaction's own rows.
+                        parents_unmoved = false;
+                        continue;
+                    }
+                    if !new.is_null()
+                        && changed_columns(changes, *first, *last)
+                            .is_some_and(|columns| columns.iter().all(|column| !acl.contains(*column)))
+                    {
+                        // No visibility column moved (principal unchanged:
+                        // `member_unmoved` above).
+                        continue;
+                    }
+                    parents_unmoved = false;
+                    let crate::visibility_class::MemberHandle::Compiled(member) = subscription
+                        .mask
+                        .get(&subscription.visibility, &subscription.resolved, scope)
+                    else {
+                        return Err(Path::NotCompiled);
+                    };
+                    let memo = memo.get_or_insert_with(|| share.memo.lock().unwrap());
+                    match member.parent_default_flip(memo, table, old, new) {
+                        Some(false) => {}
+                        Some(true) => return Err(Path::ParentAcl),
+                        None => return Err(Path::Hit),
+                    }
+                }
+                if parent_changed && touched && !parents_unmoved && !filtered_out {
+                    // The mask step decides the source rows against the
+                    // parents' before-images (overlay), which differ from the
+                    // index on what visibility reads.
+                    return Err(Path::ParentAndSource);
+                }
+                if parent_changed {
+                    // The mask step applies it (no rows): it binds the mask.
+                    subscription
+                        .mask
+                        .get(&subscription.visibility, &subscription.resolved, scope);
+                }
             }
             if touched {
                 // Shared deltas carry the representative's cursor.
                 if subscription.cursor.epoch != epoch
-                    || (!subscription.resolved.indexes.is_empty()
+                    || ((!subscription.resolved.indexes.is_empty()
+                        || !subscription.resolved.inherited.is_empty())
                         && visibility::indexes_ahead(&subscription.resolved, revision))
                 {
-                    return None;
+                    return Err(Path::CursorEpoch);
+                }
+                if filtered_out {
+                    // Applied with no row by the full path, which binds the
+                    // mask; the cursor advances.
+                    subscription
+                        .mask
+                        .get(&subscription.visibility, &subscription.resolved, scope);
+                    shape.push(ShapeEntry {
+                        state: State::Skip,
+                        visible: 0,
+                        definition: ByAddress(None),
+                        args: ByAddress(None),
+                        identity: keys.identity,
+                    });
+                    continue;
                 }
                 State::Apply
             } else {
                 State::Skip
             }
         };
-        if !touched {
+        if !touched || filtered_out {
             shape.push(ShapeEntry {
                 state,
                 visible: 0,
@@ -382,12 +739,18 @@ pub(crate) fn shape(
         // it holds the row (normalization); both read its class only when
         // its member is not hit and its window is complete.
         if subscription.window.truncated {
-            return None;
+            return Err(Path::Truncated);
         }
-        let Some(crate::visibility_class::MemberHandle::Compiled(member)) =
-            subscription.mask.peek()
-        else {
-            return None;
+        let member = if state == State::Apply {
+            // Decided by the full path, which binds the mask.
+            subscription
+                .mask
+                .get(&subscription.visibility, &subscription.resolved, scope)
+        } else {
+            subscription.mask.peek().cloned().ok_or(Path::NotCompiled)?
+        };
+        let crate::visibility_class::MemberHandle::Compiled(member) = member else {
+            return Err(Path::NotCompiled);
         };
         let memo = memo.get_or_insert_with(|| share.memo.lock().unwrap());
         let mut visible = 0u64;
@@ -397,13 +760,15 @@ pub(crate) fn shape(
                 continue;
             }
             if row == 32 {
-                return None;
+                return Err(Path::ManyRows);
             }
             let old = &changes[*first].old_value;
             let new = &changes[*last].new_value;
             // Not hit: the class default, evaluated once per class and row.
-            let old_visible = !old.is_null() && member.class_default_memo(memo, old)?;
-            let new_visible = !new.is_null() && member.class_default_memo(memo, new)?;
+            let old_visible =
+                !old.is_null() && member.class_default_memo(memo, old).ok_or(Path::Hit)?;
+            let new_visible =
+                !new.is_null() && member.class_default_memo(memo, new).ok_or(Path::Hit)?;
             visible |= (u64::from(old_visible) | u64::from(new_visible) << 1) << (2 * row);
             row += 1;
         }
@@ -415,7 +780,17 @@ pub(crate) fn shape(
             identity: keys.identity,
         });
     }
-    Some(shape)
+    // Entries of touched tables name their definition; the others are
+    // `Skip` or `Ahead` of untouched tables.
+    let states = shape
+        .iter()
+        .map(|entry| (entry.state, entry.definition.0.is_some()))
+        .collect();
+    let key = shape
+        .into_iter()
+        .filter(|entry| entry.definition.0.is_some())
+        .collect();
+    Ok(Shaped { key, states })
 }
 
 /// Records what the full path did for one subscription of a shape.
@@ -486,20 +861,21 @@ impl Recorder {
         );
     }
 
-    /// The shared outcome, aligned with `subscriptions` (the representative's,
-    /// after the event).
+    /// The shared outcome, aligned with the shape's key (the
+    /// representative's subscriptions, after the event).
     pub(crate) fn finish(
         mut self,
         subscriptions: &BTreeMap<String, ReplicaSubscription>,
-        shape: &Shape,
+        shape: &Shaped,
     ) -> Option<Outcome> {
-        if !self.clean || subscriptions.len() != shape.len() {
+        if !self.clean || subscriptions.len() != shape.states.len() {
             return None;
         }
         let subs = subscriptions
             .keys()
-            .zip(shape)
-            .map(|(id, entry)| match entry.state {
+            .zip(&shape.states)
+            .filter(|(_, (_, keyed))| *keyed)
+            .map(|(id, (state, _))| match state {
                 State::Ahead => SubOutcome::None,
                 State::Skip => SubOutcome::Advance,
                 State::Apply => self.subs.remove(id).unwrap_or(SubOutcome::Advance),
@@ -534,12 +910,11 @@ impl Recorder {
 
 impl Runtime {
     /// Delivery v4: serves a batch connection from the shared outcome of its
-    /// shape, when one was recorded for this event. None: not served (the
+    /// shape, when one was recorded for this event. `Miss`: not served (the
     /// caller runs the full path, which may record the outcome). On
-    /// `Some(Ok)` the connection's frames for the event are in `batch`
-    /// (except its watermark, which the caller adds as before).
-    /// [`Self::fan_out_hit`], also saying on a miss whether the full path
-    /// should record an outcome (the connection has a shape).
+    /// `Served(Ok)` the connection's frames for the event are in `batch`
+    /// (except its watermark, which the caller adds as before). Counts the
+    /// decision (`Path`) once.
     pub(crate) fn fan_out(
         &self,
         session: &TenantSession,
@@ -549,22 +924,49 @@ impl Runtime {
         batch: &mut OutboundBatch,
         native: bool,
     ) -> FanOut {
-        let mut eligible = false;
-        match self.fan_out_inner(
-            session,
-            subscriptions,
-            event,
-            batcher,
-            batch,
-            native,
-            &mut eligible,
-        ) {
-            Some(result) => FanOut::Served(result),
-            None => FanOut::Miss { record: eligible },
+        let mut timer = gonvex_profiler::Timer::start();
+        // A lagging connection's merged catch-up event (burst control): more
+        // than one revision in one event.
+        let merged = matches!(event, FeedEvent::Transaction { revision, .. }
+            if crate::change_feed::first_revision(event).is_some_and(|first| first < *revision));
+        let result = self.fan_out_inner(session, subscriptions, event, batcher, batch, native);
+        if merged && !matches!(result, Err(Missed::Wait(_))) {
+            MERGED.fetch_add(1, Ordering::Relaxed);
+            if result.is_ok() {
+                MERGED_SHARED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        match result {
+            Ok((path, result)) => {
+                timer.lap(
+                    gonvex_profiler::Stage::DeliveryShared,
+                    gonvex_profiler::Label::None,
+                );
+                count(path);
+                FanOut::Served(result)
+            }
+            Err(Missed::Claimed(claim)) => {
+                count(Path::Representative);
+                FanOut::Miss {
+                    record: true,
+                    claim: Some(claim),
+                }
+            }
+            Err(Missed::Wait(receiver)) => FanOut::Wait(receiver),
+            Err(Missed::Path(path)) => {
+                count(path);
+                FanOut::Miss {
+                    record: false,
+                    claim: None,
+                }
+            }
         }
     }
 
-    pub fn fan_out_hit(
+    /// [`Self::fan_out`], waiting for another connection of the same shape
+    /// when it is computing the outcome (never returns `Wait`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fan_out_waiting(
         &self,
         session: &TenantSession,
         subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
@@ -572,19 +974,23 @@ impl Runtime {
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
         native: bool,
-    ) -> Option<Result<(), DeliveryError>> {
-        let mut eligible = false;
-        self.fan_out_inner(
-            session,
-            subscriptions,
-            event,
-            batcher,
-            batch,
-            native,
-            &mut eligible,
-        )
+    ) -> FanOut {
+        await_indexes(subscriptions, event).await;
+        for _ in 0..4 {
+            match self.fan_out(session, subscriptions, event, batcher, batch, native) {
+                FanOut::Wait(receiver) => wait_claim(receiver).await,
+                other => return other,
+            }
+        }
+        count(Path::Unclean);
+        FanOut::Miss {
+            record: false,
+            claim: None,
+        }
     }
 
+    /// Served: (`SharedAdvance` / `SharedData`, result); else why not, or the
+    /// claim on the shape's outcome, or a claim to wait for.
     #[allow(clippy::too_many_arguments)]
     fn fan_out_inner(
         &self,
@@ -594,25 +1000,65 @@ impl Runtime {
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
         native: bool,
-        eligible: &mut bool,
-    ) -> Option<Result<(), DeliveryError>> {
+    ) -> Result<(Path, Result<(), DeliveryError>), Missed> {
         let FeedEvent::Transaction {
             database_epoch,
             revision,
             changes,
         } = event
         else {
-            return None;
+            return Err(Missed::Path(Path::NotBatch));
         };
-        if !enabled() || !batcher.enabled() || subscriptions.is_empty() {
-            return None;
+        if subscriptions.is_empty() {
+            return Err(Missed::Path(Path::Empty));
+        }
+        if !enabled() || !batcher.enabled() {
+            return Err(Missed::Path(Path::NotBatch));
         }
         let tenant = self.inner.delivery.tenant(&session.route.tenant_id);
-        let share = tenant.events.share(database_epoch, *revision, changes)?;
-        let shape = shape(subscriptions, &share, database_epoch, *revision)?;
-        *eligible = true;
-        let outcome = if shape.iter().any(|entry| entry.state == State::Apply) {
-            Some(share.outcomes.lock().unwrap().get(&shape).cloned()?)
+        let share = tenant
+            .events
+            .share(database_epoch, *revision, changes)
+            .ok_or(Missed::Path(Path::NoShare))?;
+        let shaped = shape(
+            subscriptions,
+            &share,
+            database_epoch,
+            *revision,
+            &session.route.database_url,
+        )
+        .map_err(Missed::Path)?;
+        let states = &shaped.states;
+        let shape = &shaped.key;
+        let outcome = if shaped.decides() {
+            let found = share.outcomes.lock().unwrap().get(shape).cloned();
+            match found {
+                Some(outcome) => Some(outcome),
+                None => {
+                    let mut claims = share.claims.lock().unwrap();
+                    // Re-check under the claims lock: a claim is released
+                    // after its outcome is recorded.
+                    if let Some(outcome) = share.outcomes.lock().unwrap().get(shape).cloned() {
+                        drop(claims);
+                        Some(outcome)
+                    } else {
+                        return Err(match claims.get(shape) {
+                            Some(ClaimState::Pending(receiver)) => Missed::Wait(receiver.clone()),
+                            Some(ClaimState::Failed) => Missed::Path(Path::Unclean),
+                            None => {
+                                let (done, receiver) = tokio::sync::watch::channel(false);
+                                claims.insert(shape.clone(), ClaimState::Pending(receiver));
+                                drop(claims);
+                                Missed::Claimed(Claim {
+                                    share: Arc::clone(&share),
+                                    shape: Some(shape.clone()),
+                                    done,
+                                })
+                            }
+                        });
+                    }
+                }
+            }
         } else {
             // Nothing decides a row: cursors advance, no frame (the full path
             // would produce none either).
@@ -621,11 +1067,17 @@ impl Runtime {
         if let Some(outcome) = &outcome {
             // Checks before any change: bounded windows stay in budget and
             // the socket's stream tokens are the default ones.
-            for ((id, subscription), sub) in subscriptions.iter().zip(&outcome.subs) {
+            let mut position = 0;
+            for (index, (id, subscription)) in subscriptions.iter().enumerate() {
+                if !states[index].1 {
+                    continue;
+                }
+                let sub = &outcome.subs[position];
+                position += 1;
                 if let SubOutcome::Delta(delta) = sub {
                     if !batcher.default_binding(id, crate::delivery::stream_identity(subscription))
                     {
-                        return None;
+                        return Err(Missed::Path(Path::ServeRejected));
                     }
                     if subscription.bounded() {
                         let rows = subscription.window.rows as isize + delta.rows;
@@ -635,7 +1087,7 @@ impl Runtime {
                             || (subscription.definition.max_bytes > 0
                                 && bytes > subscription.definition.max_bytes)
                         {
-                            return None;
+                            return Err(Missed::Path(Path::ServeRejected));
                         }
                     }
                 }
@@ -643,16 +1095,16 @@ impl Runtime {
         }
         HITS.fetch_add(1, Ordering::Relaxed);
         let Some(outcome) = outcome else {
-            for (subscription, entry) in subscriptions.values_mut().zip(&shape) {
-                if entry.state == State::Skip {
+            for (subscription, (state, _)) in subscriptions.values_mut().zip(states) {
+                if *state == State::Skip {
                     subscription.cursor.revision = *revision;
                 }
             }
-            return Some(Ok(()));
+            return Ok((Path::SharedAdvance, Ok(())));
         };
         DATA_HITS.fetch_add(1, Ordering::Relaxed);
         let Some(texts) = outcome.texts(native) else {
-            return Some(Err(DeliveryError));
+            return Ok((Path::SharedData, Err(DeliveryError)));
         };
         let tenant_id = session.route.tenant_id.as_str();
         if let Some(text) = &texts.transaction {
@@ -660,9 +1112,19 @@ impl Runtime {
         }
         // Window state first (mutable), then the frames (the batcher reads
         // the subscriptions).
-        let mut digests: Vec<(usize, String)> = Vec::new();
+        // (outcome position, subscription position, digest)
+        let mut digests: Vec<(usize, usize, String)> = Vec::new();
+        let mut at = 0;
         for (index, subscription) in subscriptions.values_mut().enumerate() {
-            match &outcome.subs[index] {
+            if !states[index].1 {
+                if states[index].0 == State::Skip {
+                    subscription.cursor.revision = *revision;
+                }
+                continue;
+            }
+            let position = at;
+            at += 1;
+            match &outcome.subs[position] {
                 SubOutcome::None => {}
                 SubOutcome::Advance => subscription.cursor.revision = *revision,
                 SubOutcome::Delta(delta) => {
@@ -677,11 +1139,11 @@ impl Runtime {
                         (subscription.window.rows as isize + delta.rows).max(0) as usize;
                     subscription.window.bytes += delta.bytes;
                     subscription.cursor.revision = *revision;
-                    digests.push((index, subscription.digest.digest()));
+                    digests.push((position, index, subscription.digest.digest()));
                 }
             }
         }
-        for (index, digest) in digests {
+        for (position, index, digest) in digests {
             let id = subscriptions
                 .keys()
                 .nth(index)
@@ -689,10 +1151,11 @@ impl Runtime {
                 .as_str();
             {
                 {
-                    let SubOutcome::Delta(delta) = &outcome.subs[index] else {
+                    let SubOutcome::Delta(delta) = &outcome.subs[position] else {
                         unreachable!()
                     };
-                    let (item, prefix, suffix) = texts.subs[index].as_ref().expect("delta text");
+                    let (item, prefix, suffix) =
+                        texts.subs[position].as_ref().expect("delta text");
                     let mut tail = String::with_capacity(digest.len() + 32);
                     tail.push_str(",\"digest\":\"");
                     tail.push_str(&digest);
@@ -707,7 +1170,7 @@ impl Runtime {
                         Arc::clone(item),
                         tail,
                     ) {
-                        return Some(Err(DeliveryError));
+                        return Ok((Path::SharedData, Err(DeliveryError)));
                     }
                     let mut ready = Vec::with_capacity(prefix.len() + digest.len() + suffix.len());
                     ready.extend_from_slice(prefix);
@@ -715,21 +1178,120 @@ impl Runtime {
                     ready.extend_from_slice(suffix);
                     if !batcher.push_ready(batch, tenant_id, subscriptions, id, Bytes::from(ready))
                     {
-                        return Some(Err(DeliveryError));
+                        return Ok((Path::SharedData, Err(DeliveryError)));
                     }
                 }
             }
         }
-        Some(Ok(()))
+        Ok((Path::SharedData, Ok(())))
     }
+}
+
+/// Waits until every shared index bound into a subscription that `event`
+/// reaches is at the event's revision (or will never be: poisoned, other
+/// epoch, unmaintained), as the full path's `visibility::indexes_ready`
+/// would before deciding. A parent index applier that has not applied the
+/// event yet otherwise sends the connection down the full path
+/// (`full.index_waiting`) only to wait there. No await when all are ready.
+pub(crate) async fn await_indexes(
+    subscriptions: &BTreeMap<String, ReplicaSubscription>,
+    event: &FeedEvent,
+) {
+    let FeedEvent::Transaction {
+        database_epoch,
+        revision,
+        ..
+    } = event
+    else {
+        return;
+    };
+    fn pending<'a>(
+        resolved: &'a ResolvedVisibility,
+        revision: u64,
+        epoch: &str,
+        out: &mut Vec<&'a Arc<std::sync::RwLock<crate::visibility_index::ParentAclIndex>>>,
+    ) {
+        for index in resolved.indexes.values() {
+            if crate::visibility_index::ready_now(index, revision, epoch).is_none() {
+                out.push(index);
+            }
+        }
+        for parent in resolved.inherited.values() {
+            if crate::visibility_index::ready_now(&parent.index, revision, epoch).is_none() {
+                out.push(&parent.index);
+            }
+            pending(&parent.resolved, revision, epoch, out);
+        }
+    }
+    let mut waiting = Vec::new();
+    for subscription in subscriptions.values() {
+        if *revision > subscription.cursor.revision && subscription.visibility.version == Some(2) {
+            pending(&subscription.resolved, *revision, database_epoch, &mut waiting);
+        }
+    }
+    for index in waiting {
+        crate::visibility_index::ready_at(index, *revision, database_epoch).await;
+    }
+}
+
+/// Why [`Runtime::fan_out_inner`] did not serve a connection.
+pub(crate) enum Missed {
+    Path(Path),
+    Claimed(Claim),
+    Wait(tokio::sync::watch::Receiver<bool>),
 }
 
 /// Result of [`Runtime::fan_out`].
 pub(crate) enum FanOut {
     /// The connection's frames are in its batch.
     Served(Result<(), DeliveryError>),
-    /// Not served; `record`: the full path should record the outcome.
-    Miss { record: bool },
+    /// Not served; `record`: the full path should record the outcome. Hold
+    /// `claim` until the full path has finished (it wakes the connections
+    /// waiting for this shape's outcome).
+    Miss {
+        record: bool,
+        claim: Option<Claim>,
+    },
+    /// Another connection of this shape is computing its outcome: wait for
+    /// it (`wait_claim`), then call `fan_out` again.
+    Wait(tokio::sync::watch::Receiver<bool>),
+}
+
+/// A shape's claim in its event share (`EventShare::claims`).
+pub(crate) enum ClaimState {
+    Pending(tokio::sync::watch::Receiver<bool>),
+    Failed,
+}
+
+/// Held by the connection computing a shape's outcome. Dropping it (the full
+/// path finished, failed or was cancelled) wakes the waiters; when no outcome
+/// was recorded the shape is marked failed, so later connections of it take
+/// their own path without waiting.
+pub(crate) struct Claim {
+    share: Arc<EventShare>,
+    shape: Option<Shape>,
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Some(shape) = self.shape.take() {
+            let recorded = self.share.outcomes.lock().unwrap().contains_key(&shape);
+            let mut claims = self.share.claims.lock().unwrap();
+            if recorded {
+                claims.remove(&shape);
+            } else {
+                claims.insert(shape, ClaimState::Failed);
+            }
+        }
+        let _ = self.done.send(true);
+    }
+}
+
+/// Waits until the claim behind `receiver` is released.
+pub(crate) async fn wait_claim(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    WAITS.fetch_add(1, Ordering::Relaxed);
+    let _ = receiver.wait_for(|done| *done).await;
 }
 
 /// Records `outcome` for `shape` (first writer wins).
@@ -769,13 +1331,23 @@ impl Runtime {
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let delivery =
             |_| ReplicaError::InvalidIdentifier("replica batch delivery failed".to_owned());
-        let record = match self.fan_out(session, subscriptions, &event, batcher, batch, native) {
+        let (record, claim) = match self
+            .fan_out_waiting(session, subscriptions, &event, batcher, batch, native)
+            .await
+        {
             FanOut::Served(result) => return result.map(|_| Vec::new()).map_err(delivery),
-            FanOut::Miss { record } => record,
+            FanOut::Miss { record, claim } => (record, claim),
+            FanOut::Wait(_) => unreachable!("fan_out_waiting waits"),
         };
+        if claim.is_some() {
+            // As the offloaded full path of the connection loop does: other
+            // connections run (and wait for this claim) meanwhile.
+            tokio::task::yield_now().await;
+        }
         let messages = self
             .apply_feed_event_with(session, subscriptions, event, record)
             .await?;
+        drop(claim);
         let mut rest = Vec::new();
         for message in messages {
             if let Some(message) = batcher

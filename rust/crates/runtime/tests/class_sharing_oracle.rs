@@ -125,6 +125,131 @@ async fn events(fixture: &Fixture) -> Vec<(String, FeedEvent)> {
             fixture.commit(0, &statement, binds).await.unwrap(),
         ));
     }
+    // Delivery coverage: transactions that reach inherited collections
+    // (`taskTags` / `taskUsers` follow their parent task), several statements
+    // per transaction as the Whagons reducers commit them.
+    let log = |id: &str, task: &str| -> (String, Vec<SqlValue>) {
+        (
+            r#"INSERT INTO "taskLogs"("_id","_creationTime","action","taskId","userId","timestamp","uuid") VALUES($1,1,'updated',$2,$3,1.0,$1)"#.into(),
+            vec![text(id), text(task), text(&tenant_members[0].id)],
+        )
+    };
+    let tag = |id: &str, task: &str| -> (String, Vec<SqlValue>) {
+        (
+            r#"INSERT INTO "taskTags"("_id","_creationTime","taskId","tagId","userId") VALUES($1,1,$2,$1,$3)"#.into(),
+            vec![text(id), text(task), text(&tenant_members[0].id)],
+        )
+    };
+    let transactions: Vec<(&str, Vec<(String, Vec<SqlValue>)>)> = vec![
+        ("tag a task", vec![tag("cov-tag-1", &tasks[5].id)]),
+        (
+            "tag two tasks",
+            vec![tag("cov-tag-2", &tasks[6].id), tag("cov-tag-3", &tasks[9].id)],
+        ),
+        (
+            "untag",
+            vec![(r#"DELETE FROM "taskTags" WHERE "_id"='cov-tag-1'"#.into(), Vec::new())],
+        ),
+        (
+            "view",
+            vec![(
+                r#"INSERT INTO "taskViews"("_id","_creationTime","taskId","userId","viewedAt") VALUES('cov-view',1,$1,$2,1)"#.into(),
+                vec![text(&tasks[6].id), text(&tenant_members[1].id)],
+            )],
+        ),
+        (
+            "notification",
+            vec![(
+                r#"INSERT INTO "notifications"("_id","_creationTime","userId","title","isRead") VALUES('cov-note',1,$1,'t',0)"#.into(),
+                vec![text(&tenant_members[2].id)],
+            )],
+        ),
+        (
+            "edit and log",
+            vec![
+                (
+                    r#"UPDATE "tasks" SET "description"='coverage edit' WHERE "_id"=$1"#.into(),
+                    vec![text(&tasks[6].id)],
+                ),
+                log("cov-log-1", &tasks[6].id),
+            ],
+        ),
+        (
+            "spot move and log",
+            vec![
+                (
+                    r#"UPDATE "tasks" SET "spotId"=$1 WHERE "_id"=$2"#.into(),
+                    vec![
+                        tasks[11].spot_id.clone().map_or(SqlValue::Null, SqlValue::Text),
+                        text(&tasks[9].id),
+                    ],
+                ),
+                log("cov-log-2", &tasks[9].id),
+            ],
+        ),
+        (
+            "create task with a tag",
+            vec![
+                (
+                    r#"INSERT INTO "tasks"("_id","id","workspaceId","statusId","name","createdAt","updatedAt","_creationTime") VALUES('cov-task',999997,$1,$2,'New',1,1,1)"#.into(),
+                    vec![text(&tasks[1].workspace_id), text(&tasks[1].status_id)],
+                ),
+                tag("cov-tag-4", "cov-task"),
+            ],
+        ),
+        ("tag a missing task", vec![tag("cov-tag-5", "no-such-task")]),
+        (
+            "member availability (not visibility)",
+            vec![(
+                r#"UPDATE "members" SET "availability_status"='busy', "updated_at"=99 WHERE "id"=$1"#.into(),
+                vec![text(&tenant_members[3].id)],
+            )],
+        ),
+        (
+            "member sees all spots",
+            vec![(
+                r#"UPDATE "members" SET "see_all_spots"=1 WHERE "id"=$1"#.into(),
+                vec![text(&tenant_members[4].id)],
+            )],
+        ),
+        (
+            "tag and touch the task",
+            vec![
+                tag("cov-tag-6", &tasks[14].id),
+                (
+                    r#"UPDATE "tasks" SET "updatedAt"=77 WHERE "_id"=$1"#.into(),
+                    vec![text(&tasks[14].id)],
+                ),
+            ],
+        ),
+        (
+            "tag and move the task",
+            vec![
+                tag("cov-tag-7", &tasks[15].id),
+                (
+                    r#"UPDATE "tasks" SET "workspaceId"=$1 WHERE "_id"=$2"#.into(),
+                    vec![text(&tasks[16].workspace_id), text(&tasks[15].id)],
+                ),
+            ],
+        ),
+        (
+            "workspace move of a tagged task",
+            vec![(
+                r#"UPDATE "tasks" SET "workspaceId"=$1 WHERE "_id"=$2"#.into(),
+                vec![text(&tasks[12].workspace_id), text(&tasks[6].id)],
+            )],
+        ),
+        (
+            "delete a tagged task",
+            vec![(r#"DELETE FROM "tasks" WHERE "_id"=$1"#.into(), vec![text(&tasks[9].id)])],
+        ),
+    ];
+    for (name, statements) in transactions {
+        events.push((
+            name.to_owned(),
+            fixture.commit_all(0, statements).await.unwrap(),
+        ));
+    }
     events
 }
 
@@ -209,7 +334,7 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let fixture = Fixture::build(options).await.unwrap();
     let members = fixture.tenants[0].members.len();
     let tenant_id = fixture.tenants[0].route.tenant_id.clone();
-    let sets: [&[&str]; 3] = [
+    let sets: [&[&str]; 4] = [
         &gonvex_runtime::perf_fixture::WHAGONS_SUBSCRIPTIONS,
         &["tasks.recentWorkspaceTasks"],
         &[
@@ -218,6 +343,7 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
             "tags.tags",
             "tasks.recentWorkspaceTasks",
         ],
+        &["taskResources.taskTags", "taskResources.taskUsers"],
     ];
     struct Side {
         connection: gonvex_runtime::perf_fixture::MemberConnection,
@@ -235,52 +361,147 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     };
     let mut shared = Vec::new();
     let mut alone = Vec::new();
-    for paths in sets {
+    // Set 0 also has a task detail window open, on one of 5 tasks: such
+    // connections differ only in collections most events skip, and still
+    // share outcomes (the shape's key leaves skipped subscriptions out).
+    let tasks = fixture.tenants[0].tasks.clone();
+    for (set, paths) in sets.iter().enumerate() {
         for member in 0..members {
-            shared.push(side(fixture.connect_paths(0, member, paths).await.unwrap()));
-            alone.push(side(fixture.connect_paths(0, member, paths).await.unwrap()));
+            for side_list in [&mut shared, &mut alone] {
+                let mut connection = fixture.connect_paths(0, member, paths).await.unwrap();
+                if set == 0 {
+                    let task = &tasks[(member % 5) * 3].id;
+                    for (path, argument) in gonvex_runtime::perf_fixture::WHAGONS_DETAIL_WINDOW {
+                        let id = format!("~detail {path}");
+                        let opened = fixture
+                            .open_replica_args(&connection.session, &id, path, json!({ argument: task }))
+                            .await
+                            .unwrap();
+                        if let Some(subscription) = opened.subscription {
+                            connection.subscriptions.insert(id, subscription);
+                        }
+                    }
+                }
+                side_list.push(side(connection));
+            }
         }
     }
-    let events = events(&fixture).await;
+    let mut events = events(&fixture).await;
+    // Burst control: a lagging connection merges the transactions waiting
+    // for it into one event, its own copy. Three more transactions merged;
+    // every connection receives a private copy of the same range (found by
+    // revision range, `feed_share`).
+    let mut tail = Vec::new();
+    for (index, task) in [20usize, 21, 22].into_iter().enumerate() {
+        tail.push(if index == 1 {
+            fixture.beat_presence(0, 1).await.unwrap()
+        } else {
+            fixture
+                .update_task(0, task, json!({"description": format!("merged {index}")}))
+                .await
+                .unwrap()
+        });
+    }
+    let merged_index = events.len();
+    events.push((
+        "merged range (private copies)".to_owned(),
+        gonvex_runtime::change_feed::merge_transactions(&tail).unwrap(),
+    ));
+    let shares_before = feed_share::metrics()["foundByRange"].as_u64().unwrap();
     let hub_shared = DeliveryHub::default();
     let hub_alone = DeliveryHub::default();
     let (hits_before, _, data_before) = gonvex_runtime::replica::fanout_stats();
+    let paths_before = gonvex_runtime::replica::fanout_path_counts();
+    // Connections of sets with inherited collections (0 and 3) served by the
+    // fan-out with decided rows, per event.
+    let mut inherited_data = 0usize;
     let mut frames = 0usize;
     let mut data_frames = 0usize;
     {
-        for (name, event) in &events {
+        for (event_index, (name, event)) in events.iter().enumerate() {
             let revision = match event {
                 FeedEvent::Transaction { revision, .. } => *revision,
                 FeedEvent::Reset { .. } => 0,
             };
-            for (index, (a, b)) in shared.iter_mut().zip(alone.iter_mut()).enumerate() {
-                // Half the connections use native row encoding.
-                let native = index % 2 == 1;
-                feed_share::set_sharing(Some(true));
-                let rest = fixture
+            // Shared side first. Every other event delivers to all its
+            // connections concurrently, as the connection loops do: the first
+            // connection of a shape claims its outcome while the others wait
+            // for it (`replica_fanout::Claim`).
+            feed_share::set_sharing(Some(true));
+            let concurrent = event_index % 2 == 1;
+            async fn deliver(
+                fixture: &Fixture,
+                hub: &gonvex_runtime::delivery::DeliveryHub,
+                event: &FeedEvent,
+                index: usize,
+                a: &mut Side,
+                private: bool,
+            ) -> Vec<gonvex_protocol::ServerMessage> {
+                let session = a.connection.session.clone();
+                // A private copy (new change list `Arc`) of the same range.
+                let event = if private {
+                    gonvex_runtime::change_feed::merge_transactions(std::slice::from_ref(event))
+                        .unwrap()
+                } else {
+                    event.clone()
+                };
+                let event = &event;
+                fixture
                     .runtime
                     .deliver_feed_event(
-                        &a.connection.session.clone(),
+                        &session,
                         &mut a.connection.subscriptions,
                         event.clone(),
                         &mut a.batcher,
                         &mut a.batch,
-                        &hub_shared,
-                        native,
+                        hub,
+                        index % 2 == 1,
                     )
                     .await
-                    .unwrap();
-                let rest_a: Vec<Value> = rest
-                    .iter()
-                    .map(|m| serde_json::to_value(m).unwrap())
-                    .collect();
+                    .unwrap()
+            }
+            let mut rests = Vec::new();
+            if concurrent {
+                rests = futures_util::future::join_all(
+                    shared
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(index, a)| {
+                            deliver(&fixture, &hub_shared, event, index, a, event_index == merged_index)
+                        }),
+                )
+                .await;
+            } else {
+                for (index, a) in shared.iter_mut().enumerate() {
+                    let data_before = gonvex_runtime::replica::fanout_stats().2;
+                    rests.push(
+                        deliver(&fixture, &hub_shared, event, index, a, event_index == merged_index)
+                            .await,
+                    );
+                    let set = index / members;
+                    if (set == 0 || set == 3)
+                        && gonvex_runtime::replica::fanout_stats().2 > data_before
+                    {
+                        inherited_data += 1;
+                    }
+                }
+            }
+            for a in shared.iter_mut() {
                 a.batcher.watermark(
                     &mut a.batch,
                     &tenant_id,
                     &a.connection.subscriptions,
                     revision,
                 );
-                feed_share::set_sharing(Some(false));
+            }
+            feed_share::set_sharing(Some(false));
+            for (index, (a, b)) in shared.iter_mut().zip(alone.iter_mut()).enumerate() {
+                // Half the connections use native row encoding.
+                let native = index % 2 == 1;
+                let rest_a: Vec<Value> = rests[index]
+                    .iter()
+                    .map(|m| serde_json::to_value(m).unwrap())
+                    .collect();
                 let messages = fixture
                     .runtime
                     .apply_feed_event(
@@ -367,6 +588,29 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let hits = hits_after - hits_before;
     let data_hits = data_after - data_before;
     eprintln!("{} events, {frames} frames ({data_frames} with data), {hits} fan-out hits ({data_hits} with decided rows), {recorded} outcomes recorded", events.len());
+    let paths_after = gonvex_runtime::replica::fanout_path_counts();
+    for (index, (path, _)) in gonvex_runtime::replica::FANOUT_PATHS.iter().enumerate() {
+        eprintln!("  {path}: {}", paths_after[index] - paths_before[index]);
+    }
+    eprintln!("  inherited connections served with decided rows: {inherited_data}");
+    let waits = gonvex_runtime::replica::fanout_coverage()["waits"].as_u64().unwrap();
+    eprintln!("  waits for another connection's outcome: {waits}");
+    assert!(waits > 0, "concurrent deliveries never waited on a claimed shape");
+    let coverage = gonvex_runtime::replica::fanout_coverage();
+    let by_range = feed_share::metrics()["foundByRange"].as_u64().unwrap() - shares_before;
+    eprintln!(
+        "  merged deliveries {} (shared {}), shares found by range {by_range}",
+        coverage["merged"], coverage["mergedShared"]
+    );
+    assert!(by_range > 0, "private merged copies never found the range's share");
+    assert!(
+        coverage["mergedShared"].as_u64().unwrap() > 0,
+        "no merged delivery was served by the fan-out"
+    );
+    assert!(
+        inherited_data > 0,
+        "no connection holding inherited collections was served rows by the fan-out"
+    );
     assert!(data_hits > 0, "no shared outcome with rows was used");
     assert!(data_frames > 0);
     assert!(

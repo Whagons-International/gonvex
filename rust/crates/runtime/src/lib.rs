@@ -1998,15 +1998,23 @@ async fn websocket(
                             }
                             // Delivery v4: a connection whose shape already has a
                             // shared outcome for this event only appends it.
+                            let items_before = batcher.data_items();
                             let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
-                                runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
-                            } else { replica::fanout::FanOut::Miss { record: false } };
+                                runtime.fan_out_waiting(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native()).await
+                            } else {
+                                replica::fanout::count(replica::fanout::Path::NotBatch);
+                                replica::fanout::FanOut::Miss { record: false, claim: None }
+                            };
                             let applied = match shared {
                                 replica::fanout::FanOut::Served(Ok(())) => Ok(Vec::new()),
                                 replica::fanout::FanOut::Served(Err(_)) => return,
-                                replica::fanout::FanOut::Miss { record } => {
+                                replica::fanout::FanOut::Wait(_) => unreachable!("fan_out_waiting waits"),
+                                replica::fanout::FanOut::Miss { record, claim } => {
                                     let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
-                                    runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await
+                                    let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await;
+                                    // Wakes this shape's waiting connections.
+                                    drop(claim);
+                                    applied
                                 }
                             };
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
@@ -2028,6 +2036,9 @@ async fn websocket(
                                             Err(_) => return,
                                         }
                                     }
+                                    // Delivery coverage: a wakeup that adds no data item
+                                    // (data only grows until the flush below).
+                                    let noop = transaction_watermark.is_some() && batcher.data_items() <= items_before;
                                     if let Some(ServerMessage::ReplicaWatermark { revision }) = transaction_watermark {
                                         batcher.watermark(socket.batch_mut(), tenant_id, &replicas, revision);
                                         sent_replica_revision = sent_replica_revision.max(revision);
@@ -2035,6 +2046,12 @@ async fn websocket(
                                     // A call result waiting for this watermark completes
                                     // now, not at the next tick or idle deadline.
                                     if (batcher.full(socket.batch()) || batcher.call_waiting()) && batcher.flush(&mut socket).await.is_err() { return; }
+                                    if transaction_watermark.is_some() {
+                                        replica::fanout::count_wakeup(noop);
+                                        if noop {
+                                            gonvex_profiler::record(gonvex_profiler::Stage::DeliveryNoop, gonvex_profiler::Label::None, feed_apply_started.elapsed().as_nanos() as u64);
+                                        }
+                                    }
                                     if reset {
                                         replicas.clear();
                                         replica_opens.clear();

@@ -106,13 +106,36 @@ fn concern_tables(
     }
 }
 
+/// The subscription's concern tables (`concern_tables` plus its source and
+/// `members`), cached on it. Shared by the mask step and the fan-out shape.
+pub(super) fn subscription_concern_tables(
+    subscription: &mut ReplicaSubscription,
+) -> Arc<crate::fast_hash::FastSet<String>> {
+    Arc::clone(subscription.concern_tables.get_or_insert_with(|| {
+        let mut tables = crate::fast_hash::FastSet::default();
+        tables.insert(subscription.definition.table.clone());
+        tables.insert("members".to_owned());
+        concern_tables(&subscription.visibility, &subscription.resolved, &mut tables);
+        Arc::new(tables)
+    }))
+}
+
+/// `parent_acl_columns` of the subscription, cached on it.
+pub(super) fn subscription_parent_acl_columns(
+    subscription: &mut ReplicaSubscription,
+) -> Arc<BTreeMap<String, BTreeSet<String>>> {
+    Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
+        Arc::new(parent_acl_columns(&subscription.visibility, &subscription.resolved))
+    }))
+}
+
 fn grant_delta(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
     change: &LogChange,
 ) -> GrantDelta {
     let mut added = Vec::new();
-    for (name, set) in plan.active_grant_sets(resolved) {
+    for (name, set) in plan.active_grant_sets_iter(resolved) {
         if set.table != change.table {
             continue;
         }
@@ -162,6 +185,69 @@ fn set_tested_as_a_whole(expression: &VisibilityExpression, set: &str) -> bool {
             .is_some_and(|fallback| set_tested_as_a_whole(fallback, set))
 }
 
+/// Which of the mask step's per-change checks can fire for a change of one
+/// table (`replica_fanout` precomputes them per combination of plans).
+#[derive(Clone, Copy, Default)]
+pub(super) struct MovingChecks {
+    /// `principal_change_concerns`: `members`, or a table of a principal set
+    /// or of any non-derived set's joins.
+    pub principal: bool,
+    /// `derived_change_concerns` / `ancestor_derived_change_concerns`: the
+    /// table of a derived set.
+    pub derived: bool,
+    /// `grant_delta`: the table of a grant set.
+    pub grant: bool,
+}
+
+/// Whether `change` (of a table the subscription's visibility reads) leaves
+/// this member's principal, grants and derived sets as they are: every
+/// per-change check of [`Runtime::mask_step`] that would re-resolve the
+/// member, patch its sets or re-decide affected rows is false, so the step
+/// only decides source rows (and parent flips). `checks` names the checks
+/// that can fire for the change's table; the others are false by
+/// construction. Only for plans whose parents do not inherit again and
+/// without `inheritsAny` (the fan-out's shareable plans), where the
+/// ancestor and association checks of the loop are false. Keep in step with
+/// the loop in `mask_step`.
+pub(super) fn member_unmoved(
+    subscription: &ReplicaSubscription,
+    change: &LogChange,
+    checks: MovingChecks,
+) -> bool {
+    let plan = &subscription.visibility;
+    let resolved = &subscription.resolved;
+    let (table, old, new) = (change.table.as_str(), &change.old_value, &change.new_value);
+    if checks.principal
+        && plan.principal_change_concerns(
+            resolved,
+            table,
+            &change.operation,
+            &change.changed_columns,
+            old,
+            new,
+        )
+    {
+        return false;
+    }
+    if checks.derived
+        && (visibility::derived_change_concerns(plan, resolved, table, &change.row_id, old, new)
+            || visibility::ancestor_derived_change_concerns(
+                resolved,
+                table,
+                &change.row_id,
+                old,
+                new,
+            ))
+    {
+        return false;
+    }
+    !checks.grant
+        || (matches!(grant_delta(plan, resolved, change), GrantDelta::None)
+            && resolved.inherited.values().all(|parent| {
+                matches!(grant_delta(&parent.plan, &parent.resolved, change), GrantDelta::None)
+            }))
+}
+
 impl Runtime {
     pub(super) async fn mask_step(
         &self,
@@ -173,18 +259,13 @@ impl Runtime {
         share: Option<&crate::feed_share::EventShare>,
     ) -> Result<Step, ReplicaError> {
         let metrics = &self.inner.visibility_metrics;
-        let parents = subscription.visibility.inherited_columns();
+        let plan = Arc::clone(&subscription.visibility);
+        let parents = plan.inherited_columns();
         let any_parents = visibility::inherits_any(&subscription.visibility)
             .into_iter()
             .filter_map(|expression| Some((expression.via.clone()?, expression.table.clone())))
             .collect::<Vec<_>>();
-        let tables = Arc::clone(subscription.concern_tables.get_or_insert_with(|| {
-            let mut tables = crate::fast_hash::FastSet::default();
-            tables.insert(subscription.definition.table.clone());
-            tables.insert("members".to_owned());
-            concern_tables(&subscription.visibility, &subscription.resolved, &mut tables);
-            Arc::new(tables)
-        }));
+        let tables = subscription_concern_tables(subscription);
         let mut source = false;
         let mut parent_changes = Vec::new();
         // (scope table, set name, token): own plan or a directly inherited parent.
@@ -357,6 +438,7 @@ impl Runtime {
         }
         if !parent_changes.is_empty() {
             let mut overlay = Vec::new();
+            let acl_columns = subscription_parent_acl_columns(subscription);
             let before = context.before.as_ref().unwrap_or(&subscription.resolved);
             for change in &parent_changes {
                 let image = collapsed
@@ -390,9 +472,7 @@ impl Runtime {
                 // the parent admits its children (parent visibility reads
                 // only those columns).
                 if context.before.is_none() && !image.is_null() && !last.is_null() {
-                    let columns = Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
-                        Arc::new(parent_acl_columns(&subscription.visibility, &subscription.resolved))
-                    }));
+                    let columns = &acl_columns;
                     let unchanged = net.is_some_and(|net| {
                         net.changed_columns().next().is_some()
                             && columns.get(&change.table).is_some_and(|acl| {

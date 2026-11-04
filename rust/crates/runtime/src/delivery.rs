@@ -474,6 +474,12 @@ impl ReplicaBatcher {
         self.open && self.data > 0
     }
 
+    /// Data items (transaction / delta) in the open batch (delivery
+    /// coverage: did a feed event add any).
+    pub fn data_items(&self) -> usize {
+        self.data
+    }
+
     /// Negotiated at authentication (client `replicaBatchFrames: 1`).
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;

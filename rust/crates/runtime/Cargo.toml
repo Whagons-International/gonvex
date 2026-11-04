@@ -172,6 +172,11 @@ harness = false
 required-features = ["perf-fixture"]
 
 [[bench]]
+name = "delivery_coverage"
+harness = false
+required-features = ["perf-fixture"]
+
+[[bench]]
 name = "burst_control"
 harness = false
 required-features = ["perf-fixture"]

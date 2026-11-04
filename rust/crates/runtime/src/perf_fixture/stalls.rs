@@ -285,24 +285,40 @@ pub async fn connection_loop(
     while let Ok((committed, event)) = events.recv().await {
         if batched {
             let tenant_id = connection.session.route.tenant_id.clone();
-            let inline = Instant::now();
-            let served = runtime.fan_out(
-                &connection.session,
-                &mut connection.subscriptions,
-                &event,
-                &mut batcher,
-                &mut batch,
-                false,
-            );
-            counters
-                .fanout_max_us
-                .fetch_max(inline.elapsed().as_micros() as u64, Relaxed);
+            crate::replica::fanout::await_indexes(&connection.subscriptions, &event).await;
+            let served = loop {
+                // Only the synchronous fan-out call is timed (not waits for
+                // another connection's outcome).
+                let inline = Instant::now();
+                let served = runtime.fan_out(
+                    &connection.session,
+                    &mut connection.subscriptions,
+                    &event,
+                    &mut batcher,
+                    &mut batch,
+                    false,
+                );
+                counters
+                    .fanout_max_us
+                    .fetch_max(inline.elapsed().as_micros() as u64, Relaxed);
+                match served {
+                    crate::replica::fanout::FanOut::Wait(receiver) => {
+                        crate::replica::fanout::wait_claim(receiver).await
+                    }
+                    other => break other,
+                }
+            };
             let applied = match served {
                 crate::replica::fanout::FanOut::Served(result) => result.map(|_| Vec::new()).map_err(|_| ()),
-                crate::replica::fanout::FanOut::Miss { record } => runtime
-                    .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event.clone(), Some((false, None)), record)
-                    .await
-                    .map_err(|_| ()),
+                crate::replica::fanout::FanOut::Wait(_) => unreachable!(),
+                crate::replica::fanout::FanOut::Miss { record, claim } => {
+                    let applied = runtime
+                        .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event.clone(), Some((false, None)), record)
+                        .await
+                        .map_err(|_| ());
+                    drop(claim);
+                    applied
+                }
             };
             let Ok(messages) = applied else {
                 counters.errors.fetch_add(1, Relaxed);

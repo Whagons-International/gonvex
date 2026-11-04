@@ -519,6 +519,27 @@ impl Fixture {
         self.feed_since(tenant, before).await
     }
 
+    /// [`Self::commit`] of several statements in one transaction (one
+    /// revision, as a reducer that writes several tables).
+    pub async fn commit_all(
+        &self,
+        tenant: usize,
+        statements: Vec<(String, Vec<SqlValue>)>,
+    ) -> FixtureResult<FeedEvent> {
+        let route = &self.tenants[tenant].route;
+        let pools = self.pools();
+        let before = change_feed::read_clock(pools, route).await?.revision;
+        let mut transaction =
+            gonvex_store::begin_transaction(pools, &route.database_url, false).await?;
+        for (statement, binds) in &statements {
+            bind_all(sqlx::query(statement), binds)
+                .execute(&mut **transaction.transaction())
+                .await?;
+        }
+        transaction.commit().await?;
+        self.feed_since(tenant, before).await
+    }
+
     /// Delivery v4 raw-row hash check: every row of every table of `tenant`,
     /// read as `json_object` over all its declared columns (the snapshot
     /// encoding), hashed by the raw path (`canonical_row`) and by the `Value`
