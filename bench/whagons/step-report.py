@@ -132,6 +132,22 @@ for name in ('before', 'after'):
             pass
 if offsets:
     w('- clock offset Mac − arch3: ' + ', '.join(offsets))
+# Sockets vs authenticated accounts at the peak (a transport retry storm shows as
+# far more sockets than users).
+dm = case / 'dev-metrics.jsonl'
+if dm.exists():
+    peak = None
+    for line in dm.read_text().splitlines():
+        try:
+            ws = json.loads(line)['metrics'].get('websocket') or {}
+        except ValueError:
+            continue
+        if peak is None or (ws.get('connections') or 0) > (peak.get('connections') or 0):
+            peak = ws
+    if peak:
+        ratio = (peak.get('connections') or 0) / max(1, peak.get('accounts') or 0)
+        w(f"- runtime sockets at peak: {peak.get('connections')} for {peak.get('accounts')} accounts, {peak.get('subscriptions')} subscriptions"
+          + (f" (**{ratio:.2f} sockets per account: transport retries; results not comparable**)" if ratio > 1.1 else ''))
 # Profile delta over the plateau.
 dumps = sorted((case / 'profile').glob('*.json'), key=lambda p: int(p.stem)) if (case / 'profile').exists() else []
 if dumps and start:

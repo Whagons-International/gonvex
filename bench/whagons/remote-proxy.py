@@ -41,7 +41,9 @@ def handler(port):
     return handle
 
 async def worker(listeners):
-    servers = [await asyncio.start_unix_server(handler(port), sock=sock) for sock, port in listeners]
+    # asyncio re-listens with its own backlog (default 100), which overflowed
+    # (EAGAIN on connect) when eight tunnels opened sockets at once.
+    servers = [await asyncio.start_unix_server(handler(port), sock=sock, backlog=4096) for sock, port in listeners]
     await asyncio.gather(*(s.serve_forever() for s in servers))
 
 def main():
