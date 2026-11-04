@@ -510,7 +510,7 @@ Every run: all sockets connected, 0 auth errors, the same transition rate
   mostly the socket write (`sendto`, see conn-idle.md). The window
   (`GONVEX_PRESENCE_TICK_MS`) trades this directly: 500 ms halves the frames of
   a busy tenant and gives p95 ≈ 500 ms.
-* Not measured here: compression on (the driver uses the runtime's default
-  compression settings with small frames below the threshold), the full
+* Not measured here: compression cost per frame separately (the driver runs
+  the runtime's default compression settings as configured), the full
   Whagons mix (replica traffic in the same batches would let some presence
   items ride along instead of costing their own frame), and network RTT.
