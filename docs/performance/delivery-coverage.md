@@ -59,7 +59,8 @@ What the next layers of exclusion were, found one lab run at a time:
 | inherited plans + per-member principal checks (after1) | 14.8 % | `full.representative` 71.5 % (every shape distinct), `full.parent_and_source` 12.5 % |
 | claims + unmoved parents (after2) | 14.8 % | `full.representative` 83.5 %, 0 waits: shapes really were unique |
 | outcome key without skipped subscriptions (after3) | 89.1 % | `full.representative` 9.2 % |
-| filters-only skip for detail windows (after6) | see §4 | |
+| filters-only skip for detail windows (after6) | 97.1 % | `full.representative` 1.6 %, `full.parent_acl` 0.7 % |
+| + burst-control merge, shares by revision range (after7) | 96.7 % | merged events: 89 % shared |
 
 ## 3. What changed
 
@@ -120,7 +121,57 @@ full path would).
 
 ### Lab (500 users, production mix, 1 vCPU / 2 GiB, same lab copy, back to back)
 
-LAB_TABLE
+Same lab copy (`lab-dc`, containers `gvdc-*`), 500 users, production mix, thin
+clients, 180 s plateau, `LOAD_PERF=0` (no perf capture in the window), generator
+on the Mac. `before5` = counters only (727063ff on 165b5a2f); `after6c` = 0517eaad
+(this design, before the burst-control merge); `after7` = 76afa9e4 (merged with
+perf/integrate-5k 9bdaf828, burst control in).
+
+| | before5 | after6c | after7 (+ burst control) |
+|---|---:|---:|---:|
+| deliveries decided per transaction | 141.3 | 141.3 | 133.9 |
+| shared | 0.0 % | 97.1 % | 96.7 % |
+| full-path runs (`delivery.individual`) | 835/s | 24/s | 26/s |
+| full path per transaction (wall, offloaded) | 57.3 ms | 12.6 ms | 22.5 ms |
+| shared path per transaction (inline) | 0 | 2.24 ms (16 µs per connection) | 2.06 ms |
+| offload pool busy (feed applies + snapshot jobs) | 0.077 cores (854 jobs/s) | 0.053 cores (109 jobs/s) | 0.043 cores (102 jobs/s) |
+| runtime cgroup CPU | 0.30 cores | 0.29 cores | 0.28 cores |
+| errors | 0.08 % | 0.08 % | 0.16 % |
+| save p50 / p95 / p99 ms | 33 / 100 / 238 | 31 / 124 / 293 | 35 / 233 / 852 |
+| taskDelivery p50 / p95 / p99 ms | 91 / 181 / 364 | 91 / 197 / 365 | 95 / 292 / 799 |
+
+What this shows and what it does not:
+
+- The full path now runs for ~3 % of connection deliveries (24/s instead of 835/s,
+  about 35× fewer), and the offload pool's jobs fell 854/s → ~105/s.
+- **Total runtime CPU at 500 users did not fall measurably** (0.30 → 0.28–0.29
+  cores, within run-to-run spread; the earlier perf-instrumented pairs show the
+  same, 0.39 vs 0.35). In this lab the offloaded feed applies were a smaller
+  share than the step-13 cost model's 29 % (its attribution came from a
+  frame-pointer build; these binaries resolve self time only, so the
+  remaining delivery CPU could not be split from snapshot jobs and the network
+  thread). The ≥5× target for delivery CPU per change is therefore **not
+  demonstrated**; what remains per change is ~141 connection wakeups on the
+  network thread (16 µs shared call each, plus watermark and poll), 61 % of them
+  sending nothing (§5).
+- `after7`'s p99s were taken during a Tailscale blip (RTT max 4.3 s, p95 31 ms vs
+  ~10 ms); one earlier run of the same binary as after6c (`dc-after6b`) showed
+  p95s of 22–24 s for every kind, saves included, while the runtime's own stages
+  stayed normal (queue wait ~3 ms, reducers 15–40 ms) and the RTT had a 1.5 s
+  spike; its rerun (`after6c`) was normal. Treat single-run tails as noisy.
+
+Burst control (merged catch-up events, `after7`): 6,983 connection deliveries of
+merged events over the plateau, 6,229 served shared (89 %), 754 individual. Shares
+are now also found by revision range (`EventShares::share`: epoch, first and last
+revision, change count), so two lagging connections that merged the same range
+share one outcome although each built its own change list; the full path then
+decides on the share's change list (row memos are keyed by image address). Merges
+of different ranges still do not share (that needs a canonical merged event per
+range, owned by burst control).
+
+Progression (perf-instrumented runs, same lab): shared 0 % (before2) → 14.8 %
+(after1) → 89.1 % (after3) → 97 % (after6). Full-path wall per transaction 44 ms
+→ 33 ms → 21 ms → 11–13 ms.
 
 ### Fixture micro-driver (`delivery_coverage`)
 
@@ -155,17 +206,20 @@ item** (only the watermark): 512/s of 832/s. Their cost on the network thread is
 the shared-path call (`delivery.shared` ≈ 15 µs wall per connection, inline,
 including the shape over ~10–18 subscriptions) plus the watermark and the task
 poll; `delivery.noop` (1.07 ms mean) is wall time and mostly waiting for the
-shape's claim, not CPU. A no-op wakeup also writes a batch frame eventually
+shape's claim, not CPU. With burst control merged (`after7`): 133.9 wakeups per transaction, 60.3 %
+no-op, `delivery.noop` 547 µs mean wall. A no-op wakeup also writes a batch frame eventually
 (watermark-only batches wait for the idle delay; `ws.write` stays ≈ 840/s). A
 token → class index (candidate classes and subscriptions per change) could skip
 those connections entirely; the counters here are the baseline for it.
 
 ## 6. Tests
 
-- `cargo test --workspace`: 658 passed, 0 failed, 8 ignored.
+- On 76afa9e4 (with burst control): `cargo test --workspace`: 661 passed, 0 failed,
+  8 ignored; fixture set below: 564 passed, 0 failed, 9 ignored. Before the merge:
+  658 / 0 / 8 and 560 / 0 / 9.
 - `cargo test -p gonvex-runtime -p gonvex-store -p gonvex-protocol -p gonvex-websocket
   -p gonvex-profiler --features gonvex-runtime/perf-fixture,gonvex-websocket/perf-fixture`:
-  560 passed, 0 failed, 9 ignored (includes `class_sharing_oracle`,
+  (includes `class_sharing_oracle`,
   `delivery_oracle`, `replica_state`, `visibility_fanout`, `offload_equivalence`,
   `raw_rows_oracle`, `feed_backlog`, `resume_log_only`).
 - Fan-out oracle (`class_sharing_oracle::fan_out_frames_equal_each_connections_own_frames`)
@@ -175,7 +229,9 @@ those connections entirely; the counters here are the baseline for it.
   views, notifications, edit + log, spot move + log, task created with a tag, a
   tag of a missing task (onMissing), tag + task touch, tag + task move, workspace
   move of a tagged task, deletion of a tagged task, member availability and
-  see-all-spots changes. Every other event is delivered to all connections
+  see-all-spots changes, and a merged range of three transactions delivered to
+  every connection as its own private copy (asserts shares found by range and
+  merged deliveries served shared). Every other event is delivered to all connections
   concurrently (claims and waits exercised: 453 waits). Asserts inherited
   connections are served decided rows and that waits happened.
 - `cargo clippy -p gonvex-runtime -p gonvex-profiler --features gonvex-runtime/perf-fixture
@@ -196,9 +252,10 @@ those connections entirely; the counters here are the baseline for it.
 
 ## 8. Not done / not measured
 
-- 1k users, the default mix, and the quadratic projection were not run.
-- The ≥5× target is not reached in the fixture (1.8× on the mix); see §4 for
-  the lab. What remains per connection is the shape walk over all of a
+- 1k users, the default mix, and the quadratic projection were not run (the
+  generator host was shared with the integration and burst-control series).
+- The ≥5× target is not reached: 1.8× on the fixture mix, and no measurable
+  change in total runtime CPU in the lab at 500 users (§4). What remains per connection is the shape walk over all of a
   connection's subscriptions and the wakeup itself: the next lever is not waking
   connections an event cannot concern (§5).
 - `full.parent_acl` (parents whose visibility flips: spot/workspace moves) and
