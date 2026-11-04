@@ -106,7 +106,10 @@ async fn assert_log_only(
 ) -> (ReplicaCursor, String) {
     let resumed = open(fixture, session, Some(token)).await;
     assert!(!resumed.need_hashes, "{context}: needHashes");
-    assert_eq!(resumed.snapshot_rows, None, "{context}: resumed with a snapshot");
+    assert_eq!(
+        resumed.snapshot_rows, None,
+        "{context}: resumed with a snapshot"
+    );
     assert_eq!(
         resumed.read,
         (0, 0),
@@ -135,7 +138,10 @@ async fn valid_cursor_resumes_read_no_full_set_even_on_a_sparse_key() {
     // A cold open builds the shared entry once.
     let first = open(&fixture, &admin, None).await;
     assert_eq!(first.snapshot_rows, Some(2_500));
-    assert_eq!(first.read.0, 0, "a cold open through the cache scans no member rows");
+    assert_eq!(
+        first.read.0, 0,
+        "a cold open through the cache scans no member rows"
+    );
     assert_eq!(first.read.1, 2_500, "the shared entry is filled once");
 
     // Resume, nothing changed: log only.
@@ -184,7 +190,10 @@ async fn valid_cursor_resumes_read_no_full_set_even_on_a_sparse_key() {
     // entry once (a shared read, no member scan); the next one reads only
     // the log.
     let unknown = open(&fixture, &broad, None).await;
-    assert!(unknown.read.0 > 0, "an unknown member on a sparse key reads SQL");
+    assert!(
+        unknown.read.0 > 0,
+        "an unknown member on a sparse key reads SQL"
+    );
     let refill = open(&fixture, &broad, Some(&unknown.ready)).await;
     assert!(!refill.need_hashes);
     assert_eq!(refill.snapshot_rows, None);
@@ -193,5 +202,11 @@ async fn valid_cursor_resumes_read_no_full_set_even_on_a_sparse_key() {
     // The admin (forgotten by the clear) behaves the same way.
     let admin_open = open(&fixture, &admin, Some(&token)).await;
     assert!(!admin_open.need_hashes);
-    assert_log_only(&fixture, &admin, &admin_open.ready, "admin on the revived key").await;
+    assert_log_only(
+        &fixture,
+        &admin,
+        &admin_open.ready,
+        "admin on the revived key",
+    )
+    .await;
 }
