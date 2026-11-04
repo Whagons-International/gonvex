@@ -962,8 +962,8 @@ impl ReplicaBatcher {
 
     /// Appends a non-replica item (delivery v3: the connection's drained
     /// `presence.patch`) to the open batch, opening one when needed. It counts
-    /// as data: the batch goes at the next tick, so presence keeps its own
-    /// cadence (one drain per presence tick) without a frame of its own.
+    /// as data. The connection loop flushes it at once unless the batch
+    /// already held row changes (presence leading edge, `presence-v2.md`).
     pub fn push_item(
         &mut self,
         socket: &mut OutboundBatch,

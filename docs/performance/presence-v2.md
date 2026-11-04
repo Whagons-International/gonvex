@@ -147,15 +147,18 @@ client's whole map.
 
 * `state` is `active`, `idle` or `offline`. `offline` means remove the Member.
 * `since` is the server time (Unix ms) at which the Member entered `state`
-  (the tick that published it). It is the value the app exposes as
+  (the publication that carried it). It is the value the app exposes as
   `lastSeenAt`.
-* A patch never repeats an unchanged state. Within one tick a Member appears
-  at most once (last state wins); a flap that returns to the published state
-  within one tick is not sent at all.
+* A patch never repeats a state the scope had already published. Within one
+  publication a Member appears at most once (last state wins); a flap that
+  returns to the published state inside one coalescing window is not sent
+  at all. (A connection that fell behind and gets several publications merged
+  into one patch may see a Member's current state again; apply it as is.)
 * The snapshot reflects state published up to the subscribe; transitions not
-  yet ticked arrive in the next patch. Patches are applied in order.
-* A connection that falls more than 32 ticks behind gets a fresh
+  yet published arrive in the next patch. Patches are applied in order.
+* A connection that falls more than 32 publications behind gets a fresh
   `presence.snapshot` (same subscribe `id`) instead of the missed patches.
+* Timing (3.4): leading edge, then at most one patch per 250 ms window.
 
 **`presence.error`**
 
@@ -167,11 +170,39 @@ client's whole map.
 
 | parameter | default | env |
 |---|---|---|
-| coalescing tick | 1000 ms | `GONVEX_PRESENCE_TICK_MS` |
+| coalescing window | 250 ms | `GONVEX_PRESENCE_TICK_MS` |
+| leading edge | on | `GONVEX_PRESENCE_LEADING_EDGE` (off = old fixed tick) |
 | offline grace after the last connection closes | 10 s | `GONVEX_PRESENCE_OFFLINE_GRACE_MS` (0 allowed) |
 | server Ping interval (connections that advertised `presence:1`) | 20 s | `GONVEX_PRESENCE_PING_SECONDS` |
 | liveness timeout (no inbound frame) | 60 s, never < 2 × Ping | `GONVEX_PRESENCE_LIVENESS_SECONDS` |
-| max pending ticks per connection before resync | 32 | — |
+| max pending publications per connection before resync | 32 | — |
+
+**Publication timing (leading edge + trailing window).** Publication is per
+`(project, tenant)` scope, and every subscribed connection of the scope gets
+every publication, so the rule holds per connection too:
+
+* **Leading edge.** If the scope published nothing in the last 250 ms, a
+  change is published at once: the server publishes it as soon as it
+  processed the `presence.set` (or the close / liveness failure), and the
+  subscriber's socket sends it immediately. In a `replica.batch` connection
+  the patch is an item of a batch flushed at once, unless that connection's
+  open batch already holds row changes (then it rides in that batch, which
+  leaves within the 50 ms batch tick).
+* **Trailing window.** Changes arriving within 250 ms of the last publication
+  are coalesced (latest state per Member wins; flaps back to the published
+  state vanish) and published together when the window ends. That publication
+  opens the next window. A scope therefore publishes at most one patch per
+  250 ms, and each connection receives at most one presence emission per
+  250 ms.
+* **Offline after grace** is published when the grace ends (or at the end of
+  the window then open), not on a polling tick.
+* Expected delivery latency: ~0 ms + socket write for a change in a quiet
+  scope, at most 250 ms + socket write for a change inside a busy window.
+  Measured (conn_idle driver, section 9): p95 214–258 ms, p99 238–274 ms
+  from 500 to 1,950 users in one tenant.
+* There is no timer per connection. One process-wide scheduler sleeps until
+  the earliest due scope (window end or grace end) and does nothing while no
+  change is pending.
 
 * **Liveness is the WebSocket.** A connection is present from its first
   `presence.set` until (a) it sends `presence.set offline`, (b) the socket
@@ -192,9 +223,9 @@ client's whole map.
   the Member stays published for 10 s. A reconnect (new socket, `auth`,
   `presence.set`) inside the grace window produces no patch at all. After the
   grace the Member is published `offline` at the next tick, so offline lands
-  10–11 s after the close. Explicit `offline` (a) skips the grace.
-* **Latency:** a transition is published at the next tick: 0–1 s after the
-  server receives `presence.set` (plus the socket write).
+  10–10.25 s after the close. Explicit `offline` (a) skips the grace.
+* **Latency:** see the publication timing above: immediately in a quiet scope,
+  at most 250 ms (the window) plus the socket write otherwise.
 
 ### 3.5 Sessions, reconnects and tenant switches
 
@@ -328,7 +359,8 @@ Coolify Dockerfile Application gets unless configured otherwise, and the 30 s
 | env | default | meaning |
 |---|---|---|
 | `GONVEX_PRESENCE_V2` | `on` | capability, `presence.*` frames, Ping liveness, heartbeat de-duplication |
-| `GONVEX_PRESENCE_TICK_MS` | `1000` | coalescing window |
+| `GONVEX_PRESENCE_TICK_MS` | `250` | coalescing window (at most one patch per scope per window) |
+| `GONVEX_PRESENCE_LEADING_EDGE` | `on` | publish the first change after a quiet window at once; `off` restores the fixed process-wide tick (rollback; use with `TICK_MS=1000` for the old behavior) |
 | `GONVEX_PRESENCE_OFFLINE_GRACE_MS` | `10000` | grace after the last connection closes |
 | `GONVEX_PRESENCE_PING_SECONDS` | `20` | Ping interval |
 | `GONVEX_PRESENCE_LIVENESS_SECONDS` | `60` | liveness timeout (≥ 2 × Ping) |
@@ -366,7 +398,11 @@ connection.
 7. After a reconnect or re-auth, repeat 3 and 6.
 8. Delivery latency of a transition = receipt time of the `presence.patch`
    containing the Member minus the sender's `presence.set` time; expect
-   ≤ tick (1 s) + network.
+   ≈ network alone when the tenant's presence was quiet for 250 ms, and
+   ≤ 250 ms + network otherwise (section 3.4). A simulator that models the
+   server should publish per tenant: immediately if the tenant published
+   nothing in the last 250 ms, else at last publication + 250 ms with the
+   latest state per Member.
 
 ## 8. Implementation map
 
@@ -376,10 +412,14 @@ connection.
   (`call_reducer_with_presence`, `presence_member_scope`), error heartbeat in
   `telemetry.rs`, support session list/get/prune in `control.rs`, config in
   `config.rs`. Frames in `rust/crates/protocol/src/lib.rs`.
-* Per-connection output is a `PresenceSlot` filled by the tick (one encoded
-  frame per scope per tick, shared by all subscribers) and drained by the
-  socket task. A per-connection frame batcher can drain the same slot on its
-  own tick instead of the slot's notify.
+* Per-connection output is a `PresenceSlot` filled by a publication (one
+  encoded frame per scope per publication, shared by all subscribers) and
+  drained by the socket task on the slot's notify into its `replica.batch`.
+  Scheduling: `Scope::schedule`/`reschedule` keep each scope's due time;
+  `PresenceHub::run_due` publishes due scopes and returns the next due time
+  for the `presence_scheduler` task in `lib.rs`; `PresenceHub::tick`
+  force-publishes everything (tests, benchmarks, and the
+  `GONVEX_PRESENCE_LEADING_EDGE=0` fixed tick).
 * SDK: `packages/client/src/presence.ts` (`PresenceFeed`), wiring in
   `packages/client/src/index.ts`, `usePresence` in `packages/react/src/index.tsx`,
   types in `packages/protocol/src/index.ts`.
@@ -431,3 +471,46 @@ Not measured: V8 time, socket writes and compression, visibility evaluation
 on the old fan-out, the Control Plane side of the old support heartbeat
 (`notify_control_changed` re-runs every project connection's live Control
 queries), and end-to-end latency under the full Whagons load.
+
+### 9.1 Leading edge + 250 ms window (perf/presence-edge, 2026-11-04)
+
+Driver: `benches/conn_idle.rs` (real WebSockets; runtime pinned to one CPU
+with `taskset -c 13`, production config defaults; clients in a child process
+on the other CPUs). Each socket authenticates with presence v2 and
+`replicaBatchFrames` (`CONN_IDLE_BATCH_FRAMES=1`, as the SDK and thin client
+do), subscribes, and toggles `presence.set` with 101 s mean gaps (production
+rate). Latency is measured per viewer: receipt time of the patch carrying the
+Member's state minus the time the Member's socket sent that `presence.set` (one
+client process, one clock), over every subscriber of the tenant, in a 60 s
+window after a 10 s warm-up. Before = the same binary with
+`GONVEX_PRESENCE_LEADING_EDGE=0 GONVEX_PRESENCE_TICK_MS=1000` (the old fixed
+1 s tick, presence items waiting for the batch tick); A/B runs interleaved. arch3
+was shared with other agents' builds; CPU numbers move ±15% between runs (the
+1k pair was repeated: second run in parentheses).
+
+| sockets (tenants) | mode | latency p50 / p95 / p99 / max (ms) | presence frames/s (all sockets) | server CPU µs/s per socket | server cores |
+|---|---|---|---|---|---|
+| 500 (production skew) | 1 s tick | 541 / 1,003 / 1,045 / 1,055 | 372 | 21.0 | 0.011 |
+| 500 (production skew) | leading edge | **3.8 / 214 / 238 / 254** | 712 | 29.5 | 0.015 |
+| 1,000 (production skew) | 1 s tick | 572 / 1,023 / 1,049 / 1,067 (539 / 1,011 / 1,052) | 886 (880) | 20.5 (17.8) | 0.021 (0.018) |
+| 1,000 (production skew) | leading edge | **68 / 236 / 252 / 261** (78 / 235 / 251) | 2,439 (2,457) | 37.4 (32.8) | 0.037 (0.033) |
+| 1,950 in one tenant | 1 s tick | 552 / 1,027 / 1,072 / 1,113 | 1,950 | 20.9 | 0.041 |
+| 1,950 in one tenant | leading edge | **150 / 258 / 274 / 298** | 7,767 | 50.8 | 0.099 |
+
+Every run: all sockets connected, 0 auth errors, the same transition rate
+(4.9 / 9.9 / 19.7 per second) and the same number of measured deliveries.
+
+* p95 is now bounded by the window (250 ms) instead of the 1 s tick; p50 is
+  near zero where tenants are quiet (500 users) and rises toward half a window
+  as a tenant's transition rate approaches one per window (1,950 users:
+  ~20 transitions/s, so almost every change lands inside a window).
+* Cost: more frames, since a busy tenant now publishes up to 4 times per
+  second instead of once. At 1k that is +0.012–0.016 cores; for the 1,950-user
+  tenant +0.06 cores (7,767 vs 1,950 frames/s). The remaining cost per frame is
+  mostly the socket write (`sendto`, see conn-idle.md). The window
+  (`GONVEX_PRESENCE_TICK_MS`) trades this directly: 500 ms halves the frames of
+  a busy tenant and gives p95 ≈ 500 ms.
+* Not measured here: compression cost per frame separately (the driver runs
+  the runtime's default compression settings as configured), the full
+  Whagons mix (replica traffic in the same batches would let some presence
+  items ride along instead of costing their own frame), and network RTT.

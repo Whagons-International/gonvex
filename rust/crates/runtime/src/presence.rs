@@ -13,11 +13,18 @@
 //!   `(project, tenant)` scope: `active` if any connection is active, `idle`
 //!   if all are idle, `offline` once the last connection is gone (after a
 //!   short grace that absorbs reconnects; an explicit `offline` skips it).
-//! * Only aggregate transitions are published. A tick coalesces every change
-//!   in a scope into one `presence.patch`, encoded once and shared by every
-//!   subscribed connection of that scope. Each connection owns a pending slot
-//!   that its socket task drains; a future per-connection frame batcher can
-//!   drain the same slot on its own tick.
+//! * Only aggregate transitions are published, leading edge first: a change
+//!   in a scope that has published nothing for one window (`tick`, 250 ms)
+//!   is published at once; later changes inside the window are coalesced
+//!   (latest state per Member wins) into one trailing publication when the
+//!   window ends. Every publication is one `presence.patch`, encoded once and
+//!   shared by every subscribed connection of that scope, so each connection
+//!   gets at most one presence emission per window. Each connection owns a
+//!   pending slot that its socket task drains (into its `replica.batch`).
+//! * Timing runs on one process-wide scheduler task ([`PresenceHub::run_due`])
+//!   that sleeps until the earliest due scope (a trailing window end or an
+//!   offline grace) and otherwise waits for a change: no timer and no wakeup
+//!   per connection, none at all while nothing is pending.
 //! * Audience: subscribed connections of the same `(project, tenant)` only.
 //!   Scopes never share state, so presence cannot cross tenants or projects.
 //!
@@ -41,8 +48,15 @@ pub struct PresenceConfig {
     /// `GONVEX_PRESENCE_V2` (default on). Off: no capability is advertised,
     /// `presence.*` frames are rejected and heartbeats keep their old writes.
     pub enabled: bool,
-    /// `GONVEX_PRESENCE_TICK_MS` (default 1000): coalescing window.
+    /// `GONVEX_PRESENCE_TICK_MS` (default 250): coalescing window. A scope
+    /// that published nothing for this long publishes the next change at
+    /// once (leading edge); otherwise changes wait for the window's end
+    /// (trailing edge), so a scope publishes at most once per window.
     pub tick: Duration,
+    /// `GONVEX_PRESENCE_LEADING_EDGE` (default on). Off: the pre-edge
+    /// behavior (rollback and A/B): every scope publishes on one fixed
+    /// process-wide `tick` and presence items wait for the batch tick.
+    pub leading_edge: bool,
     /// `GONVEX_PRESENCE_OFFLINE_GRACE_MS` (default 10000): how long a Member
     /// whose last connection closed stays published before `offline`.
     pub offline_grace: Duration,
@@ -74,7 +88,8 @@ impl Default for PresenceConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            tick: Duration::from_millis(1_000),
+            tick: Duration::from_millis(250),
+            leading_edge: true,
             offline_grace: Duration::from_secs(10),
             ping_interval: Duration::from_secs(20),
             liveness_timeout: Duration::from_secs(60),
@@ -194,6 +209,60 @@ struct Scope {
     members: HashMap<Arc<str>, Member>,
     subscribers: HashMap<Arc<str>, Arc<PresenceSlot>>,
     dirty: HashSet<Arc<str>>,
+    /// When this scope last published a patch (the window's start).
+    last_published: Option<Instant>,
+    /// When the scheduler must publish this scope next (`None`: nothing
+    /// pending).
+    due: Option<Instant>,
+}
+
+impl Scope {
+    /// A Member became dirty: the scope is due when that Member can be
+    /// published (now, or when its grace ends) but never inside the window
+    /// after the last publication. Returns whether `due` moved earlier.
+    fn schedule(&mut self, member: &Arc<str>, now: Instant, window: Duration) -> bool {
+        let ready = self
+            .members
+            .get(member)
+            .filter(|member| member.connections.is_empty())
+            .and_then(|member| member.grace_until)
+            .map_or(now, |until| until.max(now));
+        let at = match self.last_published {
+            Some(last) => ready.max(last + window),
+            None => ready,
+        };
+        if self.due.is_none_or(|due| at < due) {
+            self.due = Some(at);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// After a publication: the earliest time a still-dirty (graced) Member
+    /// becomes publishable, not inside the new window.
+    fn reschedule(&mut self, now: Instant, window: Duration) {
+        let earliest = self
+            .dirty
+            .iter()
+            .filter_map(|id| self.members.get(id))
+            .map(|member| {
+                if member.connections.is_empty() {
+                    member.grace_until.unwrap_or(now)
+                } else {
+                    now
+                }
+            })
+            .min();
+        self.due = earliest.map(|at| match self.last_published {
+            Some(last) => at.max(last + window),
+            None => at,
+        });
+    }
+
+    fn removable(&self) -> bool {
+        self.members.is_empty() && self.subscribers.is_empty()
+    }
 }
 
 struct Registration {
@@ -246,6 +315,10 @@ pub struct TickStats {
 pub struct PresenceHub {
     config: Arc<PresenceConfig>,
     state: Arc<Mutex<HubState>>,
+    /// Wakes the scheduler task when a scope became due earlier than it
+    /// knew.
+    wake: Arc<Notify>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -272,6 +345,8 @@ impl PresenceHub {
         Self {
             config: Arc::new(config),
             state: Arc::new(Mutex::new(HubState::default())),
+            wake: Arc::new(Notify::new()),
+            closed: Arc::default(),
         }
     }
 
@@ -300,6 +375,40 @@ impl PresenceHub {
         lock(&self.state)
     }
 
+    /// Resolves when a scope may have become due earlier than the
+    /// scheduler's current sleep (see [`PresenceHub::run_due`]).
+    pub async fn changed(&self) {
+        self.wake.notified().await;
+    }
+
+    /// Stops the scheduler task (the runtime is gone).
+    pub fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.wake.notify_one();
+    }
+
+    pub fn closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn mark(&self, hub: &mut HubState, scope: &ScopeKey, member: Arc<str>, now: Instant) {
+        let Some(tenant) = hub.scopes.get_mut(scope) else {
+            return;
+        };
+        let earlier = tenant.schedule(&member, now, self.config.tick);
+        tenant.dirty.insert(member);
+        if earlier {
+            self.wake.notify_one();
+        }
+    }
+
+    fn detach(&self, hub: &mut HubState, connection: &Arc<str>, now: Instant, grace: bool) {
+        if let Some((scope, member)) = detach(hub, connection, now, &self.config, grace, true) {
+            self.mark(hub, &scope, member, now);
+        }
+    }
+
     /// Sets this connection's own state for `member` in `scope`. `Offline`
     /// removes the connection immediately (no grace).
     pub fn set_state(
@@ -324,7 +433,7 @@ impl PresenceHub {
                         .is_some_and(|current| current != member)
             });
         if moved {
-            detach(&mut hub, &connection, now, &self.config, false, true);
+            self.detach(&mut hub, &connection, now, false);
         }
         let member: Arc<str> = {
             let registration = hub
@@ -360,11 +469,7 @@ impl PresenceHub {
             entry.connections.insert(connection, state);
             entry.grace_until = None;
         }
-        hub.scopes
-            .get_mut(scope)
-            .expect("scope inserted above")
-            .dirty
-            .insert(member);
+        self.mark(&mut hub, scope, member, now);
     }
 
     /// An old client's keepalive Reducer: registers the connection as active
@@ -397,7 +502,7 @@ impl PresenceHub {
             .get(&connection)
             .is_some_and(|registration| registration.scope != *scope)
         {
-            detach(&mut hub, &connection, now, &self.config, false, true);
+            self.detach(&mut hub, &connection, now, false);
         }
         let registration = hub
             .connections
@@ -436,7 +541,7 @@ impl PresenceHub {
     pub fn disconnect(&self, connection: &str, now: Instant) {
         let mut hub = self.lock();
         let connection: Arc<str> = connection.into();
-        detach(&mut hub, &connection, now, &self.config, true, true);
+        self.detach(&mut hub, &connection, now, true);
         if let Some(sessions) = hub.support_by_connection.remove(&connection) {
             let last_seen_ms = now_ms();
             for session_id in sessions {
@@ -457,7 +562,7 @@ impl PresenceHub {
     pub fn reset(&self, connection: &str, now: Instant) {
         let mut hub = self.lock();
         let connection: Arc<str> = connection.into();
-        detach(&mut hub, &connection, now, &self.config, true, true);
+        self.detach(&mut hub, &connection, now, true);
     }
 
     /// Drains the connection's slot into at most one frame.
@@ -496,66 +601,39 @@ impl PresenceHub {
         }
     }
 
-    /// Publishes every pending aggregate transition. Called once per tick.
+    /// Publishes every pending aggregate transition now, ignoring the
+    /// window (benchmarks and tests; the runtime uses [`PresenceHub::run_due`]).
     pub fn tick(&self, now: Instant, wall_ms: i64) -> TickStats {
         let mut stats = TickStats::default();
         let mut hub = self.lock();
         let max = self.config.max_pending_batches;
+        let window = self.config.tick;
         hub.scopes.retain(|_, tenant| {
-            if tenant.dirty.is_empty() {
-                return !(tenant.members.is_empty() && tenant.subscribers.is_empty());
-            }
-            stats.scopes += 1;
-            let mut changes = Vec::new();
-            let dirty: Vec<Arc<str>> = tenant.dirty.iter().cloned().collect();
-            for member_id in dirty {
-                let Some(member) = tenant.members.get_mut(&member_id) else {
-                    tenant.dirty.remove(&member_id);
-                    continue;
-                };
-                let next = match member.aggregate() {
-                    Some(state) => state,
-                    None if member.grace_until.is_some_and(|until| until > now) => continue,
-                    None => PresenceState::Offline,
-                };
-                tenant.dirty.remove(&member_id);
-                let previous = member
-                    .published
-                    .map(|(state, _)| state)
-                    .unwrap_or(PresenceState::Offline);
-                if next != previous {
-                    changes.push(PresenceMember {
-                        member_id: member_id.to_string(),
-                        state: next,
-                        since: wall_ms,
-                    });
-                    member.published = Some((next, wall_ms));
-                }
-                if next == PresenceState::Offline {
-                    tenant.members.remove(&member_id);
-                }
-            }
-            if !changes.is_empty() {
-                changes.sort_by(|a, b| a.member_id.cmp(&b.member_id));
-                stats.changes += changes.len();
-                let encoded = serde_json::to_string(&ServerMessage::PresencePatch {
-                    server_time: wall_ms,
-                    changes: changes.clone(),
-                })
-                .unwrap_or_default();
-                let batch = Arc::new(PresenceBatch {
-                    server_time: wall_ms,
-                    changes,
-                    encoded: encoded.into(),
-                });
-                for slot in tenant.subscribers.values() {
-                    slot.push(batch.clone(), max);
-                    stats.frames += 1;
-                }
-            }
-            !(tenant.members.is_empty() && tenant.subscribers.is_empty())
+            publish_scope(tenant, now, wall_ms, max, window, &mut stats);
+            !tenant.removable()
         });
         stats
+    }
+
+    /// Publishes every scope that is due (leading edge or the end of its
+    /// window) and returns when the next one is due (`None`: nothing pending;
+    /// wait for [`PresenceHub::changed`]). Called by one scheduler task.
+    pub fn run_due(&self, now: Instant, wall_ms: i64) -> (TickStats, Option<Instant>) {
+        let mut stats = TickStats::default();
+        let mut next: Option<Instant> = None;
+        let mut hub = self.lock();
+        let max = self.config.max_pending_batches;
+        let window = self.config.tick;
+        hub.scopes.retain(|_, tenant| {
+            if tenant.due.is_some_and(|due| due <= now) {
+                publish_scope(tenant, now, wall_ms, max, window, &mut stats);
+            }
+            if let Some(due) = tenant.due {
+                next = Some(next.map_or(due, |next| next.min(due)));
+            }
+            !tenant.removable()
+        });
+        (stats, next)
     }
 
     /// Online Members of a scope (for tests and diagnostics).
@@ -722,7 +800,74 @@ fn encode_snapshot(tenant: &Scope, id: &str) -> String {
     .unwrap_or_default()
 }
 
+/// Publishes a scope's publishable dirty Members as one shared patch and
+/// schedules what is left (graced Members).
+fn publish_scope(
+    tenant: &mut Scope,
+    now: Instant,
+    wall_ms: i64,
+    max: usize,
+    window: Duration,
+    stats: &mut TickStats,
+) {
+    if tenant.dirty.is_empty() {
+        tenant.due = None;
+        return;
+    }
+    stats.scopes += 1;
+    let mut changes = Vec::new();
+    let dirty: Vec<Arc<str>> = tenant.dirty.iter().cloned().collect();
+    for member_id in dirty {
+        let Some(member) = tenant.members.get_mut(&member_id) else {
+            tenant.dirty.remove(&member_id);
+            continue;
+        };
+        let next = match member.aggregate() {
+            Some(state) => state,
+            None if member.grace_until.is_some_and(|until| until > now) => continue,
+            None => PresenceState::Offline,
+        };
+        tenant.dirty.remove(&member_id);
+        let previous = member
+            .published
+            .map(|(state, _)| state)
+            .unwrap_or(PresenceState::Offline);
+        if next != previous {
+            changes.push(PresenceMember {
+                member_id: member_id.to_string(),
+                state: next,
+                since: wall_ms,
+            });
+            member.published = Some((next, wall_ms));
+        }
+        if next == PresenceState::Offline {
+            tenant.members.remove(&member_id);
+        }
+    }
+    if !changes.is_empty() {
+        tenant.last_published = Some(now);
+        changes.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+        stats.changes += changes.len();
+        let encoded = serde_json::to_string(&ServerMessage::PresencePatch {
+            server_time: wall_ms,
+            changes: changes.clone(),
+        })
+        .unwrap_or_default();
+        let batch = Arc::new(PresenceBatch {
+            server_time: wall_ms,
+            changes,
+            encoded: encoded.into(),
+        });
+        for slot in tenant.subscribers.values() {
+            slot.push(batch.clone(), max);
+            stats.frames += 1;
+        }
+    }
+    tenant.reschedule(now, window);
+}
+
 /// Removes the connection's member state and (optionally) its subscription.
+/// Returns the scope and Member that became dirty.
 fn detach(
     hub: &mut HubState,
     connection: &Arc<str>,
@@ -730,24 +875,18 @@ fn detach(
     config: &PresenceConfig,
     grace: bool,
     unsubscribe: bool,
-) {
-    let Some(registration) = hub.connections.remove(connection) else {
-        return;
-    };
-    let Some(tenant) = hub.scopes.get_mut(&registration.scope) else {
-        return;
-    };
+) -> Option<(ScopeKey, Arc<str>)> {
+    let registration = hub.connections.remove(connection)?;
+    let tenant = hub.scopes.get_mut(&registration.scope)?;
     if unsubscribe {
         tenant.subscribers.remove(connection);
     }
-    if let Some(member_id) = registration.member {
-        if let Some(member) = tenant.members.get_mut(&member_id) {
-            if member.connections.remove(connection).is_some() && member.connections.is_empty() {
-                member.grace_until = grace.then(|| now + config.offline_grace);
-            }
-            tenant.dirty.insert(member_id);
-        }
+    let member_id = registration.member?;
+    let member = tenant.members.get_mut(&member_id)?;
+    if member.connections.remove(connection).is_some() && member.connections.is_empty() {
+        member.grace_until = grace.then(|| now + config.offline_grace);
     }
+    Some((registration.scope, member_id))
 }
 
 #[cfg(test)]
@@ -824,6 +963,112 @@ mod tests {
         hub.set_state("c1", &scope("a"), "m1", PresenceState::Idle, false, t0);
         hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0);
         assert_eq!(hub.tick(t0, 3_000).changes, 0);
+    }
+
+    fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    #[test]
+    fn leading_edge_publishes_the_first_change_at_once() {
+        let hub = hub();
+        let t0 = Instant::now();
+        let (slot, _) = hub.subscribe("viewer", &scope("a"), "p", t0);
+        // Nothing pending: the scheduler has nothing to wake for.
+        assert_eq!(hub.run_due(t0, 1).1, None);
+        hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0);
+        let (stats, next) = hub.run_due(t0, 1);
+        assert_eq!(stats.changes, 1);
+        assert_eq!(next, None, "no timer once everything is published");
+        assert_eq!(
+            changes(&frames(&hub, "viewer", &slot)[0]),
+            vec![("m1".into(), "active".into())]
+        );
+        // After a quiet window the next change is a leading edge again.
+        hub.set_state("c1", &scope("a"), "m1", PresenceState::Idle, false, t0 + ms(400));
+        let (stats, next) = hub.run_due(t0 + ms(400), 2);
+        assert_eq!((stats.changes, next), (1, None));
+        assert_eq!(
+            changes(&frames(&hub, "viewer", &slot)[0]),
+            vec![("m1".into(), "idle".into())]
+        );
+    }
+
+    #[test]
+    fn changes_inside_the_window_coalesce_into_one_trailing_patch() {
+        let hub = hub();
+        let t0 = Instant::now();
+        let (slot, _) = hub.subscribe("viewer", &scope("a"), "p", t0);
+        hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0);
+        hub.run_due(t0, 1);
+        frames(&hub, "viewer", &slot);
+        // Inside the 250 ms window: m1 idle -> active -> idle (latest wins),
+        // m2 arrives, m3 flaps back to unpublished (invisible).
+        let set = |c: &str, m: &str, state, at: u64| {
+            hub.set_state(c, &scope("a"), m, state, false, t0 + ms(at));
+        };
+        set("c1", "m1", PresenceState::Idle, 20);
+        set("c1", "m1", PresenceState::Active, 60);
+        set("c2", "m2", PresenceState::Active, 80);
+        set("c1", "m1", PresenceState::Idle, 120);
+        set("c3", "m3", PresenceState::Active, 130);
+        set("c3", "m3", PresenceState::Offline, 140);
+        let (stats, next) = hub.run_due(t0 + ms(140), 2);
+        assert_eq!(stats.changes, 0, "nothing inside the window");
+        assert_eq!(next, Some(t0 + ms(250)), "one trailing edge, at the window end");
+        assert_eq!(slot.pending(), 0);
+        let (stats, next) = hub.run_due(t0 + ms(250), 3);
+        assert_eq!((stats.changes, stats.frames, next), (2, 1, None));
+        let got = frames(&hub, "viewer", &slot);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            changes(&got[0]),
+            vec![("m1".into(), "idle".into()), ("m2".into(), "active".into())]
+        );
+        assert_eq!(got[0]["serverTime"], 3);
+        // A trailing publication opens a new window.
+        set("c2", "m2", PresenceState::Idle, 300);
+        assert_eq!(hub.run_due(t0 + ms(300), 4).1, Some(t0 + ms(500)));
+    }
+
+    #[test]
+    fn grace_and_window_schedule_without_polling() {
+        let hub = hub();
+        let t0 = Instant::now();
+        hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0);
+        hub.run_due(t0, 1);
+        hub.disconnect("c1", t0 + ms(1_000));
+        // Due exactly when the grace ends, not before.
+        let (stats, next) = hub.run_due(t0 + ms(1_000), 2);
+        assert_eq!((stats.changes, next), (0, Some(t0 + ms(11_000))));
+        let (stats, next) = hub.run_due(t0 + ms(11_000), 3);
+        assert_eq!((stats.changes, next), (1, None));
+        assert!(hub.published(&scope("a")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_is_woken_only_when_a_scope_becomes_due_earlier() {
+        let hub = hub();
+        let t0 = Instant::now();
+        let woken = |hub: &PresenceHub| {
+            let hub = hub.clone();
+            async move {
+                tokio::time::timeout(Duration::ZERO, hub.changed())
+                    .await
+                    .is_ok()
+            }
+        };
+        assert!(!woken(&hub).await, "idle hub: no wakeup");
+        hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0);
+        assert!(woken(&hub).await, "leading edge wakes the scheduler");
+        hub.run_due(t0, 1);
+        hub.set_state("c1", &scope("a"), "m1", PresenceState::Idle, false, t0 + ms(10));
+        assert!(woken(&hub).await, "first change in the window schedules its end");
+        hub.set_state("c1", &scope("a"), "m1", PresenceState::Active, false, t0 + ms(20));
+        hub.set_state("c2", &scope("a"), "m2", PresenceState::Active, false, t0 + ms(30));
+        assert!(!woken(&hub).await, "already due at the window end");
+        hub.close();
+        assert!(hub.closed());
     }
 
     #[test]

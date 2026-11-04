@@ -22,7 +22,15 @@
 //!                           (0 = none; the lab uses 101)
 //!   CONN_IDLE_RECONNECT_PER_S  total reconnects per second across sockets
 //!                           (0 = none; the lab's 500-user runs ~1.35/s)
+//!   CONN_IDLE_BATCH_FRAMES  1 = advertise `replicaBatchFrames` (as the SDK
+//!                           does): presence arrives as `replica.batch` items
 //!   CONN_IDLE_LABEL         free-form label copied into the JSON
+//!
+//! Presence delivery latency (`client.latencyMs`): for every Member change a
+//! socket receives inside the measured window, receipt time minus the time
+//! the Member's socket sent that `presence.set` (same client process, one
+//! clock), over every subscriber of the tenant. Changes that are not the
+//! Member's latest sent state (superseded inside one window) are skipped.
 //!   BENCH_JSON_OUT          append the result as one JSON line
 
 use std::collections::BTreeMap;
@@ -328,6 +336,10 @@ async fn server_main() {
     );
 
     let config = config(data.path(), control_url);
+    let runtime_presence = (
+        config.presence.tick.as_millis() as u64,
+        config.presence.leading_edge,
+    );
     let tuning = config.connection.socket;
     let runtime = Runtime::new(config);
     runtime.start().await.unwrap();
@@ -388,6 +400,7 @@ async fn server_main() {
     }
     tokio::time::sleep(Duration::from_secs(warmup)).await;
 
+    unsafe { libc::kill(child.id() as i32, libc::SIGUSR2) };
     let polls_before = poll_counts();
     let threads_before = thread_cpu();
     let usage_before = usage();
@@ -450,6 +463,9 @@ async fn server_main() {
         "seconds": (elapsed * 10.0).round() / 10.0,
         "transitionMeanS": env::<f64>("CONN_IDLE_TRANSITION_S", 0.0),
         "reconnectPerS": env::<f64>("CONN_IDLE_RECONNECT_PER_S", 0.0),
+        "batchFrames": env::<u8>("CONN_IDLE_BATCH_FRAMES", 0),
+        "presenceTickMs": runtime_presence.0,
+        "presenceLeadingEdge": runtime_presence.1,
         "cores": (cpu_us as f64 / elapsed / 1e6 * 10000.0).round() / 10000.0,
         "usPerConnPerS": (per_conn_us_s * 100.0).round() / 100.0,
         "voluntaryCsPerS": ((usage_after.voluntary - usage_before.voluntary) as f64 / elapsed).round(),
@@ -478,6 +494,16 @@ type Socket =
 
 #[derive(Default)]
 struct ClientStats {
+    /// Set by SIGUSR2 at the start of the measured window.
+    measuring: std::sync::atomic::AtomicBool,
+    window_frames: AtomicU64,
+    window_presence_frames: AtomicU64,
+    window_presence_changes: AtomicU64,
+    window_transitions: AtomicU64,
+    /// Per Member index: the latest state it sent (true = idle) and when.
+    sent: std::sync::Mutex<Vec<Option<(bool, Instant)>>>,
+    /// Delivery latencies in µs, recorded while measuring.
+    latencies: std::sync::Mutex<Vec<u32>>,
     frames: AtomicU64,
     presence_frames: AtomicU64,
     pings: AtomicU64,
@@ -527,8 +553,12 @@ async fn connect(address: &str, token: &str, tenant: &str, stats: &ClientStats) 
         let value: Value = serde_json::from_str(&text).ok()?;
         match value["type"].as_str() {
             Some("session.ready") => {
+                let mut capabilities = json!({"preserveSubscriptions":1,"presence":1});
+                if env::<u8>("CONN_IDLE_BATCH_FRAMES", 0) == 1 {
+                    capabilities["replicaBatchFrames"] = json!(1);
+                }
                 let auth = json!({"type":"auth","id":"auth","token":token,"project":"project","tenant":tenant,
-                    "capabilities":{"preserveSubscriptions":1,"presence":1}});
+                    "capabilities":capabilities});
                 socket
                     .send(Message::Text(auth.to_string().into()))
                     .await
@@ -560,6 +590,69 @@ async fn connect(address: &str, token: &str, tenant: &str, stats: &ClientStats) 
     Some(socket)
 }
 
+/// Records the delivery latency of every presence change in a received
+/// frame (bare `presence.patch` or `replica.batch` items).
+fn record_presence(text: &str, stats: &ClientStats) {
+    let received = Instant::now();
+    let Ok(frame) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    let patches: Vec<&Value> = match frame["type"].as_str() {
+        Some("presence.patch") => vec![&frame],
+        Some("replica.batch") => frame["items"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item["type"] == "presence.patch")
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    if patches.is_empty() {
+        return;
+    }
+    stats.window_presence_frames.fetch_add(1, Relaxed);
+    let mut latencies = Vec::new();
+    {
+        let sent = stats.sent.lock().unwrap();
+        for change in patches
+            .iter()
+            .filter_map(|patch| patch["changes"].as_array())
+            .flatten()
+        {
+            stats.window_presence_changes.fetch_add(1, Relaxed);
+            let Some(index) = change["memberId"]
+                .as_str()
+                .and_then(|id| id.strip_prefix("member_"))
+                .and_then(|id| id.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let idle = match change["state"].as_str() {
+                Some("idle") => true,
+                Some("active") => false,
+                _ => continue,
+            };
+            if let Some(Some((sent_idle, at))) = sent.get(index) {
+                if *sent_idle == idle {
+                    latencies.push(received.saturating_duration_since(*at).as_micros() as u32);
+                }
+            }
+        }
+    }
+    stats.latencies.lock().unwrap().extend(latencies);
+}
+
+fn percentile_ms(sorted: &[u32], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let index = ((sorted.len() as f64 * p).ceil() as usize).clamp(1, sorted.len()) - 1;
+    (sorted[index] as f64 / 100.0).round() / 10.0
+}
+
 /// Exponential delay with the given mean (seconds), from a per-task LCG.
 fn exp_delay(state: &mut u64, mean: f64) -> Duration {
     *state = state
@@ -582,6 +675,7 @@ async fn client_run() {
     let reconnect_total: f64 = env("CONN_IDLE_RECONNECT_PER_S", 0.0);
     let reconnect_mean = (reconnect_total > 0.0).then(|| tokens.len() as f64 / reconnect_total);
     let stats = Arc::new(ClientStats::default());
+    *stats.sent.lock().unwrap() = vec![None; tokens.len()];
     let ready = Arc::new(tokio::sync::Semaphore::new(64));
     let (up_tx, mut up_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
     for (index, (token, tenant)) in tokens.iter().cloned().enumerate() {
@@ -596,7 +690,13 @@ async fn client_run() {
             loop {
                 let socket = {
                     let _permit = ready.acquire().await.unwrap();
-                    connect(&address, &token, &tenant, &stats).await
+                    let connecting = Instant::now();
+                    let socket = connect(&address, &token, &tenant, &stats).await;
+                    if socket.is_some() {
+                        // `connect` announced `active`.
+                        stats.sent.lock().unwrap()[index] = Some((false, connecting));
+                    }
+                    socket
                 };
                 if first {
                     let _ = up_tx.send(socket.is_some());
@@ -626,6 +726,12 @@ async fn client_run() {
                                 if text.contains("\"presence.") {
                                     stats.presence_frames.fetch_add(1, Relaxed);
                                 }
+                                if stats.measuring.load(Relaxed) {
+                                    stats.window_frames.fetch_add(1, Relaxed);
+                                    if text.contains("\"presence.patch\"") {
+                                        record_presence(&text, &stats);
+                                    }
+                                }
                             }
                             Some(Ok(Message::Ping(_))) => { stats.pings.fetch_add(1, Relaxed); }
                             Some(Ok(_)) => {}
@@ -634,7 +740,11 @@ async fn client_run() {
                         _ = tokio::time::sleep_until(transition_at) => {
                             state_idle = !state_idle;
                             let frame = json!({"type":"presence.set","state": if state_idle { "idle" } else { "active" }});
+                            stats.sent.lock().unwrap()[index] = Some((state_idle, Instant::now()));
                             if socket.send(Message::Text(frame.to_string().into())).await.is_err() { break; }
+                            if stats.measuring.load(Relaxed) {
+                                stats.window_transitions.fetch_add(1, Relaxed);
+                            }
                             stats.transitions.fetch_add(1, Relaxed);
                             transition_at = tokio::time::Instant::now() + exp_delay(&mut rng, transition_mean);
                         }
@@ -660,12 +770,38 @@ async fn client_run() {
     let _ = std::io::stdout().flush();
     let mut signal =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()).unwrap();
+    let mut start =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2()).unwrap();
     let seconds: u64 = env("CONN_IDLE_CLIENT_SECONDS", 3600);
-    tokio::select! {
-        _ = signal.recv() => {}
-        _ = tokio::time::sleep(Duration::from_secs(seconds)) => {}
+    let deadline = tokio::time::sleep(Duration::from_secs(seconds));
+    tokio::pin!(deadline);
+    let mut window_started = None;
+    loop {
+        tokio::select! {
+            _ = start.recv() => {
+                stats.measuring.store(true, Relaxed);
+                window_started = Some(Instant::now());
+            }
+            _ = signal.recv() => break,
+            _ = &mut deadline => break,
+        }
     }
+    stats.measuring.store(false, Relaxed);
+    let window_s = window_started.map_or(0.0, |at| at.elapsed().as_secs_f64()).max(1e-9);
+    let mut latencies = std::mem::take(&mut *stats.latencies.lock().unwrap());
+    latencies.sort_unstable();
     let load = |counter: &AtomicU64| counter.load(Relaxed);
+    let per_s = |counter: &AtomicU64| (load(counter) as f64 / window_s * 10.0).round() / 10.0;
+    let latency = json!({
+        "count": latencies.len(),
+        "p50": percentile_ms(&latencies, 0.50),
+        "p95": percentile_ms(&latencies, 0.95),
+        "p99": percentile_ms(&latencies, 0.99),
+        "max": percentile_ms(&latencies, 1.0),
+        "mean": if latencies.is_empty() { 0.0 } else {
+            (latencies.iter().map(|v| *v as f64).sum::<f64>() / latencies.len() as f64 / 100.0).round() / 10.0
+        },
+    });
     println!(
         "{}",
         json!({
@@ -674,6 +810,12 @@ async fn client_run() {
             "pings": load(&stats.pings), "transitions": load(&stats.transitions),
             "reconnects": load(&stats.reconnects), "authErrors": load(&stats.auth_errors),
             "closed": load(&stats.closed),
+            "windowS": (window_s * 10.0).round() / 10.0,
+            "framesPerS": per_s(&stats.window_frames),
+            "presenceFramesPerS": per_s(&stats.window_presence_frames),
+            "presenceChangesPerS": per_s(&stats.window_presence_changes),
+            "transitionsPerS": per_s(&stats.window_transitions),
+            "latencyMs": latency,
         })
     );
     let _ = std::io::stdout().flush();

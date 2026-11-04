@@ -697,6 +697,11 @@ fn presence_config(
             lookup("GONVEX_PRESENCE_TICK_MS"),
             defaults.tick.as_millis() as usize,
         )?,
+        leading_edge: boolean(
+            "GONVEX_PRESENCE_LEADING_EDGE",
+            lookup("GONVEX_PRESENCE_LEADING_EDGE"),
+            defaults.leading_edge,
+        )?,
         offline_grace: Duration::from_millis(integer_allow_zero(
             "GONVEX_PRESENCE_OFFLINE_GRACE_MS",
             lookup("GONVEX_PRESENCE_OFFLINE_GRACE_MS"),
@@ -931,7 +936,8 @@ mod tests {
     fn presence_v2_config() {
         let defaults = config(&[]).unwrap().presence;
         assert!(defaults.enabled);
-        assert_eq!(defaults.tick, Duration::from_millis(1_000));
+        assert_eq!(defaults.tick, Duration::from_millis(250));
+        assert!(defaults.leading_edge);
         assert_eq!(defaults.offline_grace, Duration::from_secs(10));
         assert!(defaults.legacy_beat_paths.is_empty());
         assert_eq!(defaults.support_refresh, Duration::from_secs(300));
@@ -944,7 +950,8 @@ mod tests {
         );
         let custom = config(&[
             ("GONVEX_PRESENCE_V2", "off"),
-            ("GONVEX_PRESENCE_TICK_MS", "250"),
+            ("GONVEX_PRESENCE_TICK_MS", "1000"),
+            ("GONVEX_PRESENCE_LEADING_EDGE", "off"),
             ("GONVEX_PRESENCE_OFFLINE_GRACE_MS", "0"),
             ("GONVEX_PRESENCE_PING_SECONDS", "40"),
             ("GONVEX_PRESENCE_LIVENESS_SECONDS", "30"),
@@ -960,7 +967,8 @@ mod tests {
         .unwrap()
         .presence;
         assert!(!custom.enabled);
-        assert_eq!(custom.tick, Duration::from_millis(250));
+        assert_eq!(custom.tick, Duration::from_millis(1000));
+        assert!(!custom.leading_edge);
         assert_eq!(custom.offline_grace, Duration::ZERO);
         // Liveness never drops below two Ping intervals.
         assert_eq!(custom.liveness_timeout, Duration::from_secs(80));
