@@ -457,8 +457,8 @@ bc1f0a06 (incl. f482033c, f3ef8ae1), perf/delivery-v3 adb6bcd9 (delivery 12d4ba0
 replica-state ccdc4e8b, visibility-masks 2d031e4f, sqlite-direct 6e08c242, offload b4edd647,
 ws-buffers websocket crate a0a33ff4 rebuild + review fixes, profiler, fixture), perf/action-depth
 3f5a2ed2 (scheduled-load edffa51a, ported onto sqlite-direct, see Step 6), check_restart.py
-`gonvex_capture` control fix, bench changes. All four upstream heads are ancestors (checked
-18:xx, no newer commits). Runtime code is identical to the measured `bin-action-depth`
+`gonvex_capture` control fix, bench changes. All four upstream heads are ancestors (checked 17:40,
+no newer commits). Runtime code is identical to the measured `bin-action-depth`
 (sha256 `b075a23e6f1b…`; `git diff 6a934356 f23a2194 -- rust ':!rust/crates/admin-cli'` is
 empty).
 
