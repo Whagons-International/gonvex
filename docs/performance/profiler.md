@@ -87,7 +87,9 @@ bench/profiler/top.py --delta before.json after.json
 
 Labels: reducer-path stages carry a function class: `heartbeat` (`presence.beat`,
 `*heartbeat`), `presence` (other `presence.*`), `reducer` (everything else), `query`,
-`action`. It is assigned by `Label::classify` with a few byte comparisons on the path.
+`action`, and `cron` for everything the scheduler runs (crons and `runAt`/`wakeAt`
+jobs, including Reducers an Action awaits inline; set from a task-local in
+runtime/src/cron_profile.rs, not by `classify`). It is assigned by `Label::classify` with a few byte comparisons on the path.
 The other stages are unlabelled (`-`).
 
 ### Reducer path (labelled)
@@ -180,6 +182,28 @@ commit. `fn.prepare` and `fn.finish` come from its own timer. `invoke.*` comes f
 `db.sql` are accumulated on `DatabaseHostCalls`. When the call is fast, assembling the
 trace costs one comparison.
 
+## Per-cron table
+
+`/dev/profile` has a `crons` section: `fields` plus one row per cron that ran, with
+totals since start. Slot numbers are assigned once per cron name at module install
+(`gonvex_profiler::cron::register`); a finished run adds its totals to a fixed
+64-slot table of relaxed atomics (no allocation, lock or map on the run path).
+Slot 0 is `(one-shot)` (runAt/runAfter/wakeAt work).
+
+| Field | Meaning |
+| --- | --- |
+| `invocations`, `errors`, `skipped` | Runs, failed runs, runs answered by a `dueWhen` pre-check without V8 |
+| `totalNs`, `maxNs` | Run time from start (after the lane admitted it) to finish |
+| `invokeNs` | Outermost module-host (V8) request time, including isolate wait |
+| `writerHoldNs`, `maxWriterHoldNs` | Tenant writer held: write transaction open → commit/rollback |
+| `hostCalls`, `rowsRead` | Host calls; rows returned by `ctx.db` queries |
+| `rowsWritten`, `revisions` | Change-feed rows and revisions published |
+| `fanout` | Change-feed subscribers (connections) at publish time, summed |
+| `startDelayNs`, `maxStartDelayNs` | Due time → start (claim latency, lane queue, user-first yield) |
+
+`bench/profiler/crontable.py PROFILE [EARLIER]` prints the table (or the delta
+of two dumps); see docs/performance/scheduled-load.md.
+
 ## Gauges
 
 | Gauge | Meaning |
@@ -240,7 +264,7 @@ cost is well under 1% of one vCPU. Fixed costs:
 
 - the probe wakes every 10 ms;
 - the watchdog thread wakes every 10 ms;
-- static tables (45 stages × 6 labels × 8 shards × 896 B ≈ 1.9 MB of zero-initialised
+- static tables (45 stages × 7 labels × 8 shards × 896 B ≈ 2.3 MB of zero-initialised
   `.bss`). Only (stage, label, shard) combinations that are used get touched, so the
   resident set is about 7 KB per active stage/label.
 

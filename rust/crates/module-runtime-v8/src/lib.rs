@@ -48,7 +48,7 @@ use gonvex_module_runtime::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::budget::CallBudget;
-pub use crate::isolate::trim_native_heap;
+pub use crate::isolate::{live_isolates, trim_native_heap};
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
 use gonvex_module_runtime::effective_capabilities;
@@ -103,6 +103,12 @@ pub struct V8Config {
     /// then release that isolate, so a bundle that throws at evaluation still
     /// fails the load instead of the first Action.
     pub validate_on_demand_bundle: bool,
+    /// Unsplit artifacts: run Actions in their own isolates of the complete
+    /// bundle, started on demand and released after `on_demand_idle_ttl`,
+    /// like a split artifact's Action isolates. Queries and Reducers keep the
+    /// warm isolates, so an Action that awaits `fetch` never holds the
+    /// isolate user Reducers need. Off: Actions share the warm pools.
+    pub on_demand_actions: bool,
 }
 
 impl Default for V8Config {
@@ -117,6 +123,7 @@ impl Default for V8Config {
             isolate_pool_size: 1,
             on_demand_idle_ttl: Duration::from_secs(60),
             validate_on_demand_bundle: true,
+            on_demand_actions: true,
         }
     }
 }
@@ -153,6 +160,10 @@ struct EngineInner {
     /// isolates start on demand and are released after `on_demand_idle_ttl`.
     pools: Vec<IsolatePool>,
     reducer: Option<ReducerPools>,
+    /// Unsplit engines with `on_demand_actions`: complete-bundle pools for
+    /// Actions (one per nesting depth), started on demand and released when
+    /// idle. Empty otherwise.
+    actions: Vec<IsolatePool>,
 }
 
 struct ReducerPools {
@@ -276,14 +287,22 @@ impl V8ModuleEngine {
                 })
             }
         };
+        let actions = if reducer.is_none() && config.on_demand_actions {
+            (0..=gonvex_module_runtime::MAX_INVOCATION_DEPTH)
+                .map(|_| IsolatePool::new(Arc::clone(&source), config.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let inner = Arc::new(EngineInner {
             manifest: artifact.manifest,
             functions,
             config,
             pools,
             reducer,
+            actions,
         });
-        if inner.reducer.is_some() {
+        if inner.has_on_demand_pools() {
             spawn_on_demand_reaper(Arc::downgrade(&inner));
         }
         Ok(Self { inner })
@@ -329,6 +348,23 @@ impl V8ModuleEngine {
     pub fn release_idle_on_demand(&self, ttl: Duration) -> usize {
         self.inner.release_idle_on_demand(ttl)
     }
+
+    /// Idle isolates per pool family, `(warm, on demand)`, for diagnostics.
+    pub fn idle_isolates(&self) -> (usize, usize) {
+        let warm = match &self.inner.reducer {
+            Some(reducer) => &reducer.pools,
+            None => &self.inner.pools,
+        };
+        let on_demand = match (&self.inner.reducer, self.inner.actions.is_empty()) {
+            (Some(_), _) => &self.inner.pools,
+            (None, false) => &self.inner.actions,
+            (None, true) => return (warm.iter().map(IsolatePool::idle).sum(), 0),
+        };
+        (
+            warm.iter().map(IsolatePool::idle).sum(),
+            on_demand.iter().map(IsolatePool::idle).sum(),
+        )
+    }
 }
 
 impl ModuleEngine for V8ModuleEngine {
@@ -365,11 +401,49 @@ fn spawn_on_demand_reaper(engine: std::sync::Weak<EngineInner>) {
 }
 
 impl EngineInner {
+    fn has_on_demand_pools(&self) -> bool {
+        self.reducer.is_some() || !self.actions.is_empty()
+    }
+
     fn release_idle_on_demand(&self, ttl: Duration) -> usize {
-        if self.reducer.is_none() {
-            return 0;
+        let on_demand = if self.reducer.is_some() {
+            &self.pools
+        } else {
+            &self.actions
+        };
+        on_demand.iter().map(|pool| pool.evict_idle(ttl)).sum()
+    }
+
+    /// The pool family and slot for one call.
+    ///
+    /// Only Actions start nested calls (tools, `ctx.functions`), and a nested
+    /// call must not wait for an isolate its own ancestors hold, so a family
+    /// that serves Actions is indexed by nesting depth. A Query or Reducer in
+    /// a family that never serves Actions has no ancestor there, so it always
+    /// uses slot 0: an Action's tool Reducers share the warm isolate with
+    /// user calls instead of starting one more warm isolate per depth.
+    fn pool_for(
+        &self,
+        function: &str,
+        kind: &gonvex_module_runtime::FunctionKind,
+        depth: u8,
+    ) -> Option<&IsolatePool> {
+        let data = matches!(
+            kind,
+            gonvex_module_runtime::FunctionKind::Query
+                | gonvex_module_runtime::FunctionKind::Reducer
+        );
+        let (pools, slot) = match &self.reducer {
+            Some(reducer) if data && reducer.functions.contains(function) => (&reducer.pools, 0),
+            Some(_) => (&self.pools, depth),
+            None if self.actions.is_empty() => (&self.pools, depth),
+            None if data => (&self.pools, 0),
+            None => (&self.actions, depth),
+        };
+        if depth > gonvex_module_runtime::MAX_INVOCATION_DEPTH {
+            return None;
         }
-        self.pools.iter().map(|pool| pool.evict_idle(ttl)).sum()
+        pools.get(usize::from(slot))
     }
 
     async fn execute(
@@ -409,12 +483,12 @@ impl EngineInner {
             stamped => stamped,
         };
 
-        let pools = match &self.reducer {
-            Some(reducer) if reducer.functions.contains(&invocation.function) => &reducer.pools,
-            _ => &self.pools,
-        };
-        let pool = pools
-            .get(usize::from(invocation.context.nesting_depth))
+        let pool = self
+            .pool_for(
+                &invocation.function,
+                &contract.kind,
+                invocation.context.nesting_depth,
+            )
             .ok_or_else(|| {
                 ModuleError::Execution(
                     "nested function invocation exceeded the maximum depth".to_owned(),

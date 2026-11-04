@@ -524,6 +524,34 @@ export const tenantSchedule = tenantCron({ name: "tenant-heartbeat", function: "
   ]);
 });
 
+test("TypeScript artifacts carry a cron's literal dueWhen pre-check", async (t) => {
+  const project = await moduleProject(t, `
+const schema = { object: (fields) => ({ kind: "object", fields }), boolean: () => ({ kind: "boolean" }) };
+const internalReducer = (definition) => definition;
+const tenantCron = (definition) => definition;
+export const tick = internalReducer({ args: schema.object({}), result: schema.object({ ok: schema.boolean() }), run: async () => ({ ok: true }) });
+export const tickEveryMinute = tenantCron({
+  name: "tick-every-minute",
+  function: "tick",
+  intervalMs: 60_000,
+  dueWhen: \`SELECT EXISTS (SELECT 1 FROM jobs WHERE dueAt <= $1)\`,
+  args: {},
+});
+`);
+  const artifact = await buildModuleArtifact({ root: project.root, backendDir: project.backendDir, files: [project.entrypoint], migrations: [] });
+  assert.deepEqual(artifact.crons, [
+    { name: "tick-every-minute", function: "tick", scope: "tenant", args: {}, intervalMs: 60000, dueWhen: "SELECT EXISTS (SELECT 1 FROM jobs WHERE dueAt <= $1)" },
+  ]);
+  const bad = await moduleProject(t, `
+const tenantCron = (definition) => definition;
+export const broken = tenantCron({ name: "broken", function: "tick", intervalMs: 60000, dueWhen: "DELETE FROM jobs" });
+`);
+  await assert.rejects(
+    buildModuleArtifact({ root: bad.root, backendDir: bad.backendDir, files: [bad.entrypoint], migrations: [] }),
+    /dueWhen must be a literal read-only SELECT/,
+  );
+});
+
 test("TypeScript artifacts declare one internal invitation acceptance Reducer", async (t) => {
   const project = await moduleProject(t, `
 const schema = { object: (fields) => ({ kind: "object", fields }), string: () => ({ kind: "string" }) };
