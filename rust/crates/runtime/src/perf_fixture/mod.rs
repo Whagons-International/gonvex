@@ -59,6 +59,9 @@ pub const FIXTURE_VERSION: u32 = 1;
 pub const PROJECT_ID: &str = "whagons";
 const SCHEMA_SQL: &str = include_str!("whagons_schema.sql");
 const MODULE_JSON: &str = include_str!("whagons_module.json");
+/// The same tables' legacy (unversioned) plans, as Whagons staging deployed
+/// them before the mask migration (`FixtureVisibility::Legacy`).
+const LEGACY_VISIBILITY_JSON: &str = include_str!("whagons_visibility_legacy.json");
 const MIGRATION_NAME: &str = "0000_whagons_fixture.sql";
 
 /// The replica collections one Whagons user opens (`bench/whagons/run.ts`),
@@ -75,6 +78,17 @@ pub const WHAGONS_SUBSCRIPTIONS: [&str; 10] = [
     "workspacePreferences.workspacePreferences",
     "tasks.recentWorkspaceTasks",
 ];
+
+/// Which visibility plans the fixture module declares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FixtureVisibility {
+    /// The version 2 masks (`whagons_module.json`).
+    #[default]
+    V2,
+    /// The legacy plans of the same tables (`whagons_visibility_legacy.json`):
+    /// sets over data tables, re-resolved in SQL on dependency writes.
+    Legacy,
+}
 
 pub type FixtureResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -110,6 +124,8 @@ pub struct FixtureOptions {
     /// `GONVEX_DB_MAX_OPEN_CONNS`). `GONVEX_*` variables from the process
     /// environment apply too; these win.
     pub config: BTreeMap<String, String>,
+    /// Visibility plans of the module (default: version 2 masks).
+    pub visibility: FixtureVisibility,
 }
 
 impl FixtureOptions {
@@ -126,6 +142,7 @@ impl FixtureOptions {
             seed: 0x5eed_2026,
             cache_dir: None,
             config: BTreeMap::new(),
+            visibility: FixtureVisibility::V2,
         }
     }
 
@@ -157,6 +174,9 @@ impl FixtureOptions {
         hasher.update(self.seed.to_le_bytes());
         hasher.update(SCHEMA_SQL.as_bytes());
         hasher.update(MODULE_JSON.as_bytes());
+        if self.visibility == FixtureVisibility::Legacy {
+            hasher.update(LEGACY_VISIBILITY_JSON.as_bytes());
+        }
         for tenant in &self.tenants {
             hasher.update(format!("{tenant:?}").as_bytes());
         }
@@ -413,7 +433,8 @@ impl Fixture {
     /// Opens a member's full [`WHAGONS_SUBSCRIPTIONS`] set, one after another
     /// (the websocket queue runs up to 8 concurrently).
     pub async fn connect(&self, tenant: usize, member: usize) -> FixtureResult<MemberConnection> {
-        self.connect_paths(tenant, member, &WHAGONS_SUBSCRIPTIONS).await
+        self.connect_paths(tenant, member, &WHAGONS_SUBSCRIPTIONS)
+            .await
     }
 
     /// [`Fixture::connect`] opening only `paths`.
@@ -485,6 +506,56 @@ impl Fixture {
             revision: clock.revision,
             changes: std::sync::Arc::new(changes),
         })
+    }
+
+    /// Inserts a copy of the `table` row whose `key` column equals `source`,
+    /// with `overrides` (column, value) replacing its columns (include the
+    /// new key), as one committed transaction.
+    pub async fn insert_like(
+        &self,
+        tenant: usize,
+        table: &str,
+        key: &str,
+        source: &str,
+        overrides: &[(&str, SqlValue)],
+    ) -> FixtureResult<FeedEvent> {
+        let reader = self
+            .pools()
+            .reader(&self.tenants[tenant].route.database_url)
+            .await?;
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info($1) ORDER BY cid")
+                .bind(table)
+                .fetch_all(&reader)
+                .await?;
+        let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+        let mut binds = Vec::new();
+        let select: Vec<String> = columns
+            .iter()
+            .map(
+                |column| match overrides.iter().find(|(name, _)| *name == column.as_str()) {
+                    Some((_, value)) => {
+                        binds.push(value.clone());
+                        format!("${}", binds.len())
+                    }
+                    None => quote(column),
+                },
+            )
+            .collect();
+        binds.push(source.to_owned().into());
+        let statement = format!(
+            "INSERT INTO {table_q} ({cols}) SELECT {select} FROM {table_q} WHERE {key_q}=${n}",
+            table_q = quote(table),
+            cols = columns
+                .iter()
+                .map(|c| quote(c))
+                .collect::<Vec<_>>()
+                .join(","),
+            select = select.join(","),
+            key_q = quote(key),
+            n = binds.len(),
+        );
+        self.commit(tenant, &statement, binds).await
     }
 
     /// The tenant's current change-feed revision.
@@ -883,7 +954,16 @@ fn migration_sql() -> String {
 /// functions and visibility plans, the schema as its tenant migration, and a
 /// placeholder bundle the fake host never evaluates.
 pub fn module_manifest() -> FixtureResult<(Value, String)> {
-    let source: Value = serde_json::from_str(MODULE_JSON)?;
+    module_manifest_with(FixtureVisibility::V2)
+}
+
+/// [`module_manifest`] with the chosen visibility plans.
+pub fn module_manifest_with(visibility: FixtureVisibility) -> FixtureResult<(Value, String)> {
+    let mut source: Value = serde_json::from_str(MODULE_JSON)?;
+    if visibility == FixtureVisibility::Legacy {
+        let legacy: Value = serde_json::from_str(LEGACY_VISIBILITY_JSON)?;
+        source["visibility"] = legacy["visibility"].clone();
+    }
     let code = "export {};\n";
     let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
     let mut module = json!({
@@ -945,7 +1025,7 @@ async fn build_template(options: &FixtureOptions, dir: &Path) -> FixtureResult<(
         )
         .await?;
     }
-    let (manifest, hash) = module_manifest()?;
+    let (manifest, hash) = module_manifest_with(options.visibility)?;
     control
         .save_runtime_manifest(&RuntimeManifestRecord {
             project_id: PROJECT_ID.into(),

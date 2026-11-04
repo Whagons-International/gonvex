@@ -86,5 +86,25 @@ except Exception:
 (here / "whagons_module.json").write_text(json.dumps(
     {"source": f"whagons {commit} gonvex/_generated/manifest.json", "functions": functions,
      "visibility": visibility}, indent=1, sort_keys=True) + "\n")
+# Optional second argument: a manifest with the legacy (unversioned) plans of
+# the same tables (e.g. Whagons staging before the mask migration), written to
+# whagons_visibility_legacy.json for FixtureVisibility::Legacy.
+if len(sys.argv) > 2:
+    legacy_path = Path(sys.argv[2])
+    legacy = json.loads(legacy_path.read_text())
+    legacy = legacy.get("module", legacy)["visibility"]
+    missing = [table for table in visibility if table not in legacy]
+    if missing:
+        sys.exit(f"legacy manifest has no plan for {missing}")
+    written = set(referenced)
+    for table in visibility:
+        collect(legacy[table].get("sets", {}))
+    unknown = sorted(referenced - written - {"members"})
+    if unknown:
+        sys.exit(f"legacy plans read tables outside the fixture schema: {unknown}")
+    (here / "whagons_visibility_legacy.json").write_text(json.dumps(
+        {"source": f"{legacy_path} (legacy plans)",
+         "visibility": {table: legacy[table] for table in visibility}},
+        indent=1, sort_keys=True) + "\n")
 print("tables:", sorted(referenced))
 print("visibility:", sorted(visibility))

@@ -123,3 +123,12 @@ required-features = ["perf-fixture"]
 name = "class_sharing_oracle"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "visibility_v2_parity"
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "visibility_v2"
+harness = false
+required-features = ["perf-fixture"]
+

@@ -59,6 +59,12 @@ mimalloc, the production allocator.
   (`src/perf_fixture/whagons_module.json`). Regenerate both files with
   `python3 src/perf_fixture/extract_whagons.py <whagons checkout>` and bump
   `FIXTURE_VERSION`.
+- **Legacy visibility** (`FixtureOptions::visibility = FixtureVisibility::Legacy`):
+  the same tables' legacy (unversioned) plans as Whagons staging deployed them
+  before the mask migration (`src/perf_fixture/whagons_visibility_legacy.json`,
+  written by `extract_whagons.py <v2 checkout> <legacy manifest>`). Used by the
+  v1-vs-v2 parity test and the `visibility_v2` bench
+  (`docs/performance/visibility-v2-migration.md`).
 - **Subscriptions per member** (`WHAGONS_SUBSCRIPTIONS`): `presence.list`,
   `workspaces.list`, `statuses.statuses`, `tags.tags`, `members.listMembers`,
   `members.listMemberTeams`, `taskResources.taskUsers`,

@@ -55,6 +55,8 @@ pub mod permission_bits;
 pub mod visibility_class;
 #[cfg(test)]
 mod visibility_corpus;
+#[cfg(all(test, feature = "perf-fixture"))]
+mod visibility_whagons_parity_tests;
 pub mod visibility_index;
 mod visibility_mask;
 pub mod visibility_metrics;

@@ -1,0 +1,4119 @@
+{
+ "source": "whagons ea04e91ce gonvex/_generated/manifest.json (legacy, unversioned plans; staging feat/sqlite-staging-deploy)",
+ "visibility": {
+  "memberTeams": {
+   "key": "_id",
+   "sets": {},
+   "table": "memberTeams",
+   "where": {
+    "children": [
+     {
+      "operator": "permission",
+      "value": "view-users"
+     },
+     {
+      "operator": "permission",
+      "value": "manage-broadcasts"
+     },
+     {
+      "column": "memberId",
+      "context": "member.id",
+      "operator": "eqContext"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "members": {
+   "key": "id",
+   "sets": {},
+   "table": "members",
+   "where": {
+    "children": [
+     {
+      "operator": "role",
+      "value": "admin"
+     },
+     {
+      "operator": "role",
+      "value": "owner"
+     },
+     {
+      "operator": "role",
+      "value": "tenant_owner"
+     },
+     {
+      "operator": "role",
+      "value": "system_admin"
+     },
+     {
+      "operator": "permission",
+      "value": "view-users"
+     },
+     {
+      "operator": "permission",
+      "value": "manage-broadcasts"
+     },
+     {
+      "column": "id",
+      "context": "member.id",
+      "operator": "eqContext"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "statuses": {
+   "key": "_id",
+   "sets": {},
+   "table": "statuses",
+   "where": {
+    "operator": "public"
+   }
+  },
+  "tags": {
+   "key": "_id",
+   "sets": {},
+   "table": "tags",
+   "where": {
+    "operator": "public"
+   }
+  },
+  "taskTags": {
+   "key": "_id",
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksAtMemberSpots": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots1": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots2": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots3": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot3",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots4": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot3",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot4",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksForAllSpotsMember": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftColumn": "memberId",
+       "rightColumn": "id",
+       "table": "members"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "see_all_spots",
+       "table": "members",
+       "value": {
+        "literal": true
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksForAllSpotsTenant": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftColumn": "memberId",
+       "rightColumn": "id",
+       "table": "members"
+      },
+      {
+       "leftColumn": "status",
+       "rightColumn": "allSpotsMemberStatus",
+       "table": "globalSettings"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksWithBlankSpot": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "spotId",
+       "table": "tasks",
+       "value": {
+        "literal": ""
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksWithoutSpot": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "spotId",
+       "table": "tasks",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "ownedFindingTasks": {
+     "joins": [],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "tasks"
+      },
+      {
+       "column": "createdVia",
+       "table": "tasks",
+       "value": {
+        "literal": "finding"
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "personalMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "personalWorkspacesByWorkspaceId": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      }
+     ]
+    },
+    "reportedFindingTasks": {
+     "joins": [],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "reportedByUserId",
+       "context": "member.id",
+       "table": "tasks"
+      },
+      {
+       "column": "createdVia",
+       "table": "tasks",
+       "value": {
+        "literal": "finding"
+       }
+      }
+     ]
+    },
+    "reportedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "reportedByTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskTags",
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalContextOwnerTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalContextMemberTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalContextTeamTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalOwnerTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalMemberTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalTeamTasks"
+     },
+     {
+      "children": [
+       {
+        "children": [
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "personalWorkspacesByWorkspaceId"
+         }
+        ],
+        "operator": "not"
+       },
+       {
+        "children": [
+         {
+          "operator": "permission",
+          "value": "tasks.viewAll"
+         },
+         {
+          "operator": "role",
+          "value": "system_admin"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksWithoutSpot"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksWithBlankSpot"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksAtMemberSpots"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots1"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots2"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots3"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots4"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksForAllSpotsMember"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksForAllSpotsTenant"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "ownedFindingTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "reportedFindingTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "reportedTeamTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "assignedTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "approvalTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "contextUserTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "contextTeamTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "sharedUserTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "sharedTeamTasks"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "taskUsers": {
+   "key": "_id",
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksAtMemberSpots": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots1": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots2": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots3": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot3",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots4": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot3",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot4",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksForAllSpotsMember": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftColumn": "memberId",
+       "rightColumn": "id",
+       "table": "members"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "see_all_spots",
+       "table": "members",
+       "value": {
+        "literal": true
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksForAllSpotsTenant": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftColumn": "memberId",
+       "rightColumn": "id",
+       "table": "members"
+      },
+      {
+       "leftColumn": "status",
+       "rightColumn": "allSpotsMemberStatus",
+       "table": "globalSettings"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksWithBlankSpot": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "spotId",
+       "table": "tasks",
+       "value": {
+        "literal": ""
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksWithoutSpot": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "spotId",
+       "table": "tasks",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "ownedFindingTasks": {
+     "joins": [],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "tasks"
+      },
+      {
+       "column": "createdVia",
+       "table": "tasks",
+       "value": {
+        "literal": "finding"
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "personalMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "personalWorkspacesByWorkspaceId": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      }
+     ]
+    },
+    "reportedFindingTasks": {
+     "joins": [],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "reportedByUserId",
+       "context": "member.id",
+       "table": "tasks"
+      },
+      {
+       "column": "createdVia",
+       "table": "tasks",
+       "value": {
+        "literal": "finding"
+       }
+      }
+     ]
+    },
+    "reportedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "reportedByTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "taskUsers",
+   "where": {
+    "children": [
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalContextOwnerTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalContextMemberTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalContextTeamTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalOwnerTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalMemberTasks"
+     },
+     {
+      "column": "taskId",
+      "operator": "inSet",
+      "set": "personalTeamTasks"
+     },
+     {
+      "children": [
+       {
+        "children": [
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "personalWorkspacesByWorkspaceId"
+         }
+        ],
+        "operator": "not"
+       },
+       {
+        "children": [
+         {
+          "operator": "permission",
+          "value": "tasks.viewAll"
+         },
+         {
+          "operator": "role",
+          "value": "system_admin"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksWithoutSpot"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksWithBlankSpot"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksAtMemberSpots"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots1"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots2"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots3"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots4"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksForAllSpotsMember"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksForAllSpotsTenant"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "ownedFindingTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "reportedFindingTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "reportedTeamTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "assignedTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "approvalTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "contextUserTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "contextTeamTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "sharedUserTasks"
+         },
+         {
+          "column": "taskId",
+          "operator": "inSet",
+          "set": "sharedTeamTasks"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "tasks": {
+   "key": "_id",
+   "sets": {
+    "approvalTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskApprovalInstances",
+     "where": [
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "assignedTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskUsers",
+     "where": [
+      {
+       "column": "userId",
+       "context": "member.id",
+       "table": "taskUsers"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskUsers",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "contextUserTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberTeams": {
+     "joins": [],
+     "select": "teamId",
+     "table": "memberTeams",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksAtMemberSpots": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots1": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots2": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots3": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot3",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksBelowMemberSpots4": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "alias": "spot1",
+       "leftAlias": "tasks",
+       "leftColumn": "spotId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot2",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot3",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "alias": "spot4",
+       "leftColumn": "parentId",
+       "rightColumn": "_id",
+       "table": "spots"
+      },
+      {
+       "leftColumn": "parentId",
+       "rightColumn": "spotId",
+       "table": "memberSpots"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberSpots"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberSpots",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksForAllSpotsMember": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftColumn": "memberId",
+       "rightColumn": "id",
+       "table": "members"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "see_all_spots",
+       "table": "members",
+       "value": {
+        "literal": true
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksForAllSpotsTenant": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      },
+      {
+       "leftColumn": "memberId",
+       "rightColumn": "id",
+       "table": "members"
+      },
+      {
+       "leftColumn": "status",
+       "rightColumn": "allSpotsMemberStatus",
+       "table": "globalSettings"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksWithBlankSpot": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "spotId",
+       "table": "tasks",
+       "value": {
+        "literal": ""
+       }
+      }
+     ]
+    },
+    "memberWorkspaceTasksWithoutSpot": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "spotId",
+       "table": "tasks",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "ownedFindingTasks": {
+     "joins": [],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "tasks"
+      },
+      {
+       "column": "createdVia",
+       "table": "tasks",
+       "value": {
+        "literal": "finding"
+       }
+      }
+     ]
+    },
+    "personalContextMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalContextOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalContextTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "personal"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "personalMemberTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "personalWorkspaceMembers"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalOwnerTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "createdBy",
+       "context": "member.id",
+       "table": "workspaces"
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "workspaceId",
+       "rightColumn": "_id",
+       "table": "workspaces"
+      },
+      {
+       "leftAlias": "tasks",
+       "leftColumn": "workspaceId",
+       "rightColumn": "workspaceId",
+       "table": "workspaceTeams"
+      },
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      }
+     ]
+    },
+    "personalWorkspaces": {
+     "joins": [],
+     "select": "_id",
+     "table": "workspaces",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      }
+     ]
+    },
+    "reportedFindingTasks": {
+     "joins": [],
+     "select": "_id",
+     "table": "tasks",
+     "where": [
+      {
+       "column": "reportedByUserId",
+       "context": "member.id",
+       "table": "tasks"
+      },
+      {
+       "column": "createdVia",
+       "table": "tasks",
+       "value": {
+        "literal": "finding"
+       }
+      }
+     ]
+    },
+    "sharedTeamTasks": {
+     "joins": [
+      {
+       "leftColumn": "sharedToTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "sharedUserTasks": {
+     "joins": [],
+     "select": "taskId",
+     "table": "taskShares",
+     "where": [
+      {
+       "column": "sharedToUserId",
+       "context": "member.id",
+       "table": "taskShares"
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskShares",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    }
+   },
+   "table": "tasks",
+   "where": {
+    "children": [
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "personalContextOwnerTasks"
+     },
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "personalContextMemberTasks"
+     },
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "personalContextTeamTasks"
+     },
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "personalOwnerTasks"
+     },
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "personalMemberTasks"
+     },
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "personalTeamTasks"
+     },
+     {
+      "children": [
+       {
+        "children": [
+         {
+          "column": "workspaceId",
+          "operator": "inSet",
+          "set": "personalWorkspaces"
+         }
+        ],
+        "operator": "not"
+       },
+       {
+        "children": [
+         {
+          "operator": "permission",
+          "value": "tasks.viewAll"
+         },
+         {
+          "operator": "role",
+          "value": "system_admin"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksWithoutSpot"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksWithBlankSpot"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksAtMemberSpots"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots1"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots2"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots3"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksBelowMemberSpots4"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksForAllSpotsMember"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaceTasksForAllSpotsTenant"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "ownedFindingTasks"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "reportedFindingTasks"
+         },
+         {
+          "column": "reportedByTeamId",
+          "operator": "inSet",
+          "set": "memberTeams"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "assignedTasks"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "approvalTasks"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "contextUserTasks"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "contextTeamTasks"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "sharedUserTasks"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "sharedTeamTasks"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  },
+  "userPresence": {
+   "key": "_id",
+   "sets": {},
+   "table": "userPresence",
+   "where": {
+    "operator": "public"
+   }
+  },
+  "workspacePreferences": {
+   "key": "_id",
+   "sets": {},
+   "table": "workspacePreferences",
+   "where": {
+    "column": "userId",
+    "context": "member.id",
+    "operator": "eqContext"
+   }
+  },
+  "workspaces": {
+   "key": "_id",
+   "sets": {
+    "approvalTeamWorkspaces": {
+     "joins": [
+      {
+       "leftColumn": "taskId",
+       "rightColumn": "taskId",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "taskId",
+       "rightColumn": "_id",
+       "table": "tasks"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "targetTeamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "workspaceId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "approval"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "status",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": "pending"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "tasks",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "approvalUserWorkspaces": {
+     "joins": [
+      {
+       "leftColumn": "taskId",
+       "rightColumn": "taskId",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "leftAlias": "taskWorkspaceContexts",
+       "leftColumn": "taskId",
+       "rightColumn": "_id",
+       "table": "tasks"
+      }
+     ],
+     "select": "workspaceId",
+     "table": "taskWorkspaceContexts",
+     "where": [
+      {
+       "column": "kind",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": "approval"
+       }
+      },
+      {
+       "column": "revokedAt",
+       "table": "taskWorkspaceContexts",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "targetUserId",
+       "context": "member.id",
+       "table": "taskWorkspaceContexts"
+      },
+      {
+       "column": "approverUserId",
+       "context": "member.id",
+       "table": "taskApprovalInstances"
+      },
+      {
+       "column": "deletedAt",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "status",
+       "table": "taskApprovalInstances",
+       "value": {
+        "literal": "pending"
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "tasks",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberCategories": {
+     "joins": [
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "_id",
+     "table": "categories",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "categories",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberCategoryWorkspaces": {
+     "joins": [
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "workspaceId",
+     "table": "categories",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "categories",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "memberWorkspaces": {
+     "joins": [
+      {
+       "leftColumn": "teamId",
+       "rightColumn": "teamId",
+       "table": "memberTeams"
+      }
+     ],
+     "select": "workspaceId",
+     "table": "workspaceTeams",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "memberTeams"
+      },
+      {
+       "column": "deletedAt",
+       "table": "memberTeams",
+       "value": {
+        "literal": null
+       }
+      },
+      {
+       "column": "deletedAt",
+       "table": "workspaceTeams",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "personalMemberWorkspaces": {
+     "joins": [],
+     "select": "workspaceId",
+     "table": "personalWorkspaceMembers",
+     "where": [
+      {
+       "column": "memberId",
+       "context": "member.id",
+       "table": "personalWorkspaceMembers"
+      }
+     ]
+    },
+    "personalWorkspaces": {
+     "joins": [],
+     "select": "_id",
+     "table": "workspaces",
+     "where": [
+      {
+       "column": "type",
+       "table": "workspaces",
+       "value": {
+        "literal": "PERSONAL"
+       }
+      }
+     ]
+    },
+    "workspacesWithoutTeamField": {
+     "joins": [],
+     "select": "_id",
+     "table": "workspaces",
+     "where": [
+      {
+       "column": "teams",
+       "table": "workspaces",
+       "value": {
+        "literal": null
+       }
+      }
+     ]
+    },
+    "workspacesWithoutTeams": {
+     "joins": [],
+     "select": "_id",
+     "table": "workspaces",
+     "where": [
+      {
+       "column": "teams",
+       "table": "workspaces",
+       "value": {
+        "literal": []
+       }
+      }
+     ]
+    }
+   },
+   "table": "workspaces",
+   "where": {
+    "children": [
+     {
+      "children": [
+       {
+        "column": "_id",
+        "operator": "inSet",
+        "set": "personalWorkspaces"
+       },
+       {
+        "column": "createdBy",
+        "context": "member.id",
+        "operator": "eqContext"
+       }
+      ],
+      "operator": "and"
+     },
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "personalMemberWorkspaces"
+     },
+     {
+      "column": "_id",
+      "operator": "inSet",
+      "set": "memberWorkspaces"
+     },
+     {
+      "children": [
+       {
+        "children": [
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "personalWorkspaces"
+         }
+        ],
+        "operator": "not"
+       },
+       {
+        "children": [
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "memberWorkspaces"
+         },
+         {
+          "children": [
+           {
+            "children": [
+             {
+              "column": "_id",
+              "operator": "inSet",
+              "set": "workspacesWithoutTeamField"
+             },
+             {
+              "column": "_id",
+              "operator": "inSet",
+              "set": "workspacesWithoutTeams"
+             }
+            ],
+            "operator": "or"
+           },
+           {
+            "children": [
+             {
+              "column": "_id",
+              "operator": "inSet",
+              "set": "memberCategoryWorkspaces"
+             },
+             {
+              "column": "categoryId",
+              "operator": "inSet",
+              "set": "memberCategories"
+             }
+            ],
+            "operator": "or"
+           }
+          ],
+          "operator": "and"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "approvalUserWorkspaces"
+         },
+         {
+          "column": "_id",
+          "operator": "inSet",
+          "set": "approvalTeamWorkspaces"
+         }
+        ],
+        "operator": "or"
+       }
+      ],
+      "operator": "and"
+     }
+    ],
+    "operator": "or"
+   }
+  }
+ }
+}

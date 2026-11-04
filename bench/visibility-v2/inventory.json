@@ -1,0 +1,7390 @@
+{
+ "permissionTables": [
+  "boardMembers",
+  "categories",
+  "conversationParticipants",
+  "formPublicLinks",
+  "globalSettings",
+  "marketMembers",
+  "memberSpots",
+  "memberTeams",
+  "members",
+  "permissions",
+  "personalWorkspaceMembers",
+  "plugins",
+  "rolePermissions",
+  "roles",
+  "spots",
+  "templates",
+  "workbenchShares",
+  "workspaceTeams",
+  "workspaceViewShares",
+  "workspaces"
+ ],
+ "plans": [
+  {
+   "table": "advancedVoiceContextSummaries",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "assistantThreads"
+   ],
+   "dataTableDependencies": [
+    "assistantThreads"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.advancedVoiceContextSummaries",
+    "advancedVoice.listContextSummaries"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "advancedVoiceSessions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.advancedVoiceSessions",
+    "advancedVoice.getSession",
+    "advancedVoice.listRecentSessions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "advancedVoiceTurns",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "advancedVoiceSessions"
+   ],
+   "dataTableDependencies": [
+    "advancedVoiceSessions"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.advancedVoiceTurns",
+    "advancedVoice.listSessionTurns"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "advancedVoiceUserOverrides",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.advancedVoiceUserOverrides",
+    "advancedVoice.listAccessOverrides"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "agentRuns",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.agentRuns",
+    "agents.runs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "agents",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.agents",
+    "agents.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "aiUsageDaily",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.aiUsageDaily",
+    "aiUsage.daily"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "apiKeys",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.apiKeys",
+    "apiKeys.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "approvalApprovers",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.approvalApprovers",
+    "approvals.approvalApprovers"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "approvals",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.approvals",
+    "approvals.approvals",
+    "assistant.referenceApprovals"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetCustomFieldValues",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetCustomFieldValues",
+    "assets.assetCustomFieldValues"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetCustomFields",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetCustomFields",
+    "assets.assetCustomFields"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetHistoryEvents",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetHistoryEvents",
+    "assets.assetHistoryEvents"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetItems",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetItems",
+    "assets.assetItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetMaintenanceLogs",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetMaintenanceLogs",
+    "assets.assetMaintenanceLogs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetMaintenanceOccurrences",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetMaintenanceOccurrences",
+    "assets.assetMaintenanceOccurrences"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetMaintenanceSchedules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetMaintenanceSchedules",
+    "assets.assetMaintenanceSchedules"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetMeterReadings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetMeterReadings",
+    "assets.assetMeterReadings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assetTypes",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assetTypes",
+    "assets.assetTypes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assistantApiPermissionGrants",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assistantApiPermissionGrants",
+    "assistant.listApiPermissionGrants"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assistantDataFiles",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assistantDataFiles",
+    "assistantData.listFiles"
+   ],
+   "liveQueries": [
+    "assistant.dataFileForAnalysis"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "assistantMessages",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "assistantThreads"
+   ],
+   "dataTableDependencies": [
+    "assistantThreads"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.assistantMessages",
+    "assistant.listMessages",
+    "assistantFeedback.reports"
+   ],
+   "liveQueries": [
+    "assistant.loadConversationMessages"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "assistantPendingActions",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "assistantThreads"
+   ],
+   "dataTableDependencies": [
+    "assistantThreads"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.assistantPendingActions",
+    "assistant.listConversationActions",
+    "assistant.listPendingActions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "assistantThreads",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.assistantThreads",
+    "assistant.listThreads"
+   ],
+   "liveQueries": [
+    "assistant.workerStatus"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "audiencePresets",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.audiencePresets",
+    "assistant.referenceAudiences",
+    "audiences.get",
+    "audiences.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "auditFormSubmissions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.auditFormSubmissions",
+    "audits.auditFormSubmissions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "badges",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.badges",
+    "gamification.badges",
+    "gamificationReplicas.badges"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "boardAttachments",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "boardMembers",
+    "boardMessages",
+    "boards",
+    "memberTeams"
+   ],
+   "dataTableDependencies": [
+    "boardMessages",
+    "boards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.boardAttachments",
+    "workspaceResources.listBoardAttachments",
+    "workspaceResources.listBoardAttachmentsByBoard"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "boardMessages"
+   ]
+  },
+  {
+   "table": "boardBirthdayImages",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "boardMembers",
+    "boards",
+    "memberTeams"
+   ],
+   "dataTableDependencies": [
+    "boards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.boardBirthdayImages",
+    "workspaceResources.listBoardBirthdayImages"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "boardComments",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "boardMembers",
+    "boards",
+    "memberTeams"
+   ],
+   "dataTableDependencies": [
+    "boards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.boardComments",
+    "boards.listComments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "boardMembers",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "boardMembers",
+    "boards",
+    "memberTeams"
+   ],
+   "dataTableDependencies": [
+    "boards"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.boardMembers",
+    "boards.listAllMembers",
+    "boards.listMembers"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "boardMessages",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "boardMembers",
+    "boards",
+    "memberTeams"
+   ],
+   "dataTableDependencies": [
+    "boards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.boardMessages",
+    "boards.listAllMessages",
+    "boards.listMessages"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "boards",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "boardMembers",
+    "memberTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.boards",
+    "boards.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "breakRoomMessages",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.breakRoomMessages",
+    "breakRoom.listMessages",
+    "floatingChat.listActiveMessages"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "breakRoomPresence",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.breakRoomPresence",
+    "breakRoom.listPresence"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "broadcastAcknowledgments",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.broadcastAcknowledgments",
+    "broadcasts.listAcknowledgments",
+    "broadcasts.listAllAcknowledgments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "broadcasts",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.broadcasts",
+    "broadcasts.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "bugReports",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.bugReports",
+    "bugReports.listForSupport"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "callSignals",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.callSignals",
+    "calls.listForUser"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "callingForwardingSettings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.callingForwardingSettings",
+    "calling.forwardingState"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "callingSettings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.callingSettings",
+    "calling.settings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "categories",
+   "version": 1,
+   "sets": 8,
+   "setTables": [
+    "categories",
+    "memberTeams",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.categories",
+    "assistant.referenceCategories",
+    "categories.categories"
+   ],
+   "liveQueries": [
+    "voiceTaskDrafts.inferenceCategories"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "derived",
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "categoryCustomFields",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.categoryCustomFields",
+    "assistant.referenceCategoryCustomFields",
+    "customFields.categoryCustomFields"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "categoryPriorities",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.categoryPriorities",
+    "categories.categoryPriorities"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "centerClassifications",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.centerClassifications",
+    "centers.classifications"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "centerWorkspaces",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.centerWorkspaces",
+    "centers.centerWorkspaces"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "centers",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "centers"
+   ],
+   "dataTableDependencies": [
+    "centers"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.centers",
+    "centers.centers"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "chatTyping",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "conversationParticipants"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.chatTyping",
+    "chat.chatTyping"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "cleaningHistory",
+   "version": 1,
+   "sets": 29,
+   "setTables": [
+    "cleaningHistory",
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "cleaningHistory",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.cleaningHistory",
+    "cleaning.history"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "cleaningReportDeliveries",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.cleaningReportDeliveries",
+    "cleaningReports.deliveries"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "cleaningReportSchedules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.cleaningReportSchedules",
+    "cleaningReports.schedules"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "cleaningResetRules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.cleaningResetRules",
+    "cleaningAutomation.resetRules"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "cleaningStatuses",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.cleaningStatuses",
+    "cleaningStatuses.cleaningStatuses"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "clockInCodes",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.clockInCodes",
+    "clockin.listClockinCodes",
+    "clockin.resolveClockinCode"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "clockInEvents",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "clockInSessions"
+   ],
+   "dataTableDependencies": [
+    "clockInSessions"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.clockInEvents",
+    "clockin.listClockinEvents"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "clockInSessions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.clockInSessions",
+    "clockin.getClockinAppState"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceAuditActions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceAuditActions",
+    "audits.complianceAuditActions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceAuditEvents",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceAuditEvents",
+    "audits.complianceAuditEvents"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceAuditFindings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceAuditFindings",
+    "audits.complianceAuditFindings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceAuditItems",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceAuditItems",
+    "audits.complianceAuditItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceAudits",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceAudits",
+    "complianceReplicas.complianceAudits"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceMappings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceMappings",
+    "complianceReplicas.complianceMappings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceRequirements",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceRequirements",
+    "complianceReplicas.complianceRequirements"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "complianceStandards",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.complianceStandards",
+    "complianceReplicas.complianceStandards"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "confidentialFiles",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.confidentialFiles",
+    "confidentialFiles.list"
+   ],
+   "liveQueries": [
+    "confidentialFiles.fileReference"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "configLogs",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.configLogs",
+    "activityTimeline.listConfigLogsForTimeline",
+    "analytics.listConfigLogs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "conversationParticipants",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "conversationParticipants"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": true,
+   "collections": [
+    "__local.conversationParticipants",
+    "chat.conversationParticipants"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "conversations",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "conversationParticipants"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.conversations",
+    "chat.conversations"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "costBudgets",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.costBudgets",
+    "costReplicas.costBudgets",
+    "costs.costBudgets"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "costCategories",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.costCategories",
+    "costReplicas.costCategories",
+    "costs.costCategories"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "costItems",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.costItems",
+    "costReplicas.costItems",
+    "costs.costItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "crmAccounts",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.crmAccounts",
+    "crm.accounts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "crmActivities",
+   "version": 1,
+   "sets": 27,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "plugins",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.crmActivities",
+    "crm.activities"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "crmBrokers",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.crmBrokers",
+    "crm.brokers"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "crmContacts",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.crmContacts",
+    "crm.contacts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "crmDeals",
+   "version": 1,
+   "sets": 27,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "plugins",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.crmDeals",
+    "crm.deals"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "crmFollowUps",
+   "version": 1,
+   "sets": 27,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "plugins",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.crmFollowUps",
+    "crmAssistant.followUps"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "customFields",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.customFields",
+    "assistant.referenceCustomFields",
+    "customFields.customFields"
+   ],
+   "liveQueries": [
+    "assistant.customFieldsForAnalysis"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "customPowerups",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.customPowerups",
+    "customPowerups.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "deepResearchAssignments",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.deepResearchAssignments",
+    "deepResearch.assignments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "deepResearchCharges",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.deepResearchCharges",
+    "deepResearch.charges"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "deepResearchEvents",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.deepResearchEvents",
+    "deepResearch.events"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "deepResearchFindings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.deepResearchFindings",
+    "deepResearch.assignmentFindings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "deepResearchSettings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.deepResearchSettings",
+    "deepResearch.settings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "deepResearchWork",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.deepResearchWork",
+    "deepResearch.work"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "directMessages",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "conversationParticipants"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.directMessages",
+    "chat.directMessages"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "documentAcknowledgments",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.documentAcknowledgments",
+    "documents.listAcknowledgments",
+    "documents.listAcknowledgmentsForCurrentUser"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "documentAssociations",
+   "version": 1,
+   "sets": 27,
+   "setTables": [
+    "documentAssociations",
+    "documents",
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "documentAssociations",
+    "documents",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.documentAssociations",
+    "documents.listAssociations",
+    "documents.listAssociationsByEntity",
+    "documents.listAssociationsByEntityIds",
+    "documents.listEntityIdsWithDocuments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "documentCategories",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.documentCategories",
+    "documents.listCategories"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "documents",
+   "version": 1,
+   "sets": 26,
+   "setTables": [
+    "documentAssociations",
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "documentAssociations",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.documents",
+    "documents.get",
+    "documents.list"
+   ],
+   "liveQueries": [
+    "documents.storageReference"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "derived",
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "emailDeliveries",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.emailDeliveries",
+    "workflowRuntime.emailDeliveries"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "emailTemplates",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.emailTemplates",
+    "emailTemplates.emailTemplates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "fcmTokens",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.fcmTokens",
+    "pushNotifications.listTokens"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "fieldOptions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.fieldOptions",
+    "forms.listFieldOptions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "fieldUpdatePermissions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.fieldUpdatePermissions",
+    "fieldPermissions.fieldUpdatePermissions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "findingNotes",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskFindings",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskFindings",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.findingNotes",
+    "taskFindings.listNotes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "taskFindings"
+   ]
+  },
+  {
+   "table": "formFieldFeedback",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.formFieldFeedback",
+    "forms.listFeedback"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "formPublicLinks",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "formPublicLinks"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": true,
+   "collections": [
+    "__local.formPublicLinks",
+    "publicForms.listForForm",
+    "spaceForms.links"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "formReviews",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.formReviews",
+    "forms.listReviews"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "formSubmissions",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "formPublicLinks",
+    "formSubmissions",
+    "tasks"
+   ],
+   "dataTableDependencies": [
+    "formSubmissions",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.formSubmissions",
+    "forms.listSubmissions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "formTaskLinks",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.formTaskLinks",
+    "formTasks.linksForSubmission",
+    "formTasks.sourceForTask"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "formVersions",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "templates"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.formVersions",
+    "forms.listVersions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "forms",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "templates"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.forms",
+    "assistant.referenceForms",
+    "forms.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "gamificationLevels",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.gamificationLevels",
+    "gamification.levels",
+    "gamificationReplicas.levels"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "gamificationPointActionSettings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.gamificationPointActionSettings",
+    "gamification.pointActionSettings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "gamificationPointTransactions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.gamificationPointTransactions",
+    "gamification.myPointTransactions",
+    "gamification.pointTransactions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "gamificationUserActionStats",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.gamificationUserActionStats",
+    "gamification.userActionStats"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "gamificationUserBadges",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.gamificationUserBadges",
+    "gamification.userBadges"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "gamificationUserPoints",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.gamificationUserPoints",
+    "gamification.userPoints"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "githubConnections",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.githubConnections",
+    "github.connection"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "globalSettings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.globalSettings",
+    "settingsReplicas.globalSettings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "goalMilestones",
+   "version": 1,
+   "sets": 18,
+   "setTables": [
+    "goals",
+    "memberTeams",
+    "permissions",
+    "plugins",
+    "rolePermissions",
+    "roles",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "goals"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.goalMilestones",
+    "goals.goalMilestones"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "goals"
+   ]
+  },
+  {
+   "table": "goalParticipants",
+   "version": 1,
+   "sets": 18,
+   "setTables": [
+    "goals",
+    "memberTeams",
+    "permissions",
+    "plugins",
+    "rolePermissions",
+    "roles",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "goals"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.goalParticipants",
+    "goals.goalParticipants"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "goals"
+   ]
+  },
+  {
+   "table": "goalPeriods",
+   "version": 1,
+   "sets": 18,
+   "setTables": [
+    "goals",
+    "memberTeams",
+    "permissions",
+    "plugins",
+    "rolePermissions",
+    "roles",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "goals"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.goalPeriods",
+    "goals.periods"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "goals"
+   ]
+  },
+  {
+   "table": "goalTemplates",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.goalTemplates",
+    "goals.goalTemplates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "goalUpdates",
+   "version": 1,
+   "sets": 18,
+   "setTables": [
+    "goals",
+    "memberTeams",
+    "permissions",
+    "plugins",
+    "rolePermissions",
+    "roles",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "goals"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.goalUpdates",
+    "goals.goalUpdates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "goals"
+   ]
+  },
+  {
+   "table": "goals",
+   "version": 1,
+   "sets": 18,
+   "setTables": [
+    "goals",
+    "memberTeams",
+    "permissions",
+    "plugins",
+    "rolePermissions",
+    "roles",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "goals"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.goals",
+    "goals.goals",
+    "goals.records"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "goodsReceiptItems",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "goodsReceipts"
+   ],
+   "dataTableDependencies": [
+    "goodsReceipts"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.goodsReceiptItems",
+    "purchasing.listGoodsReceiptItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "goodsReceipts",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "purchaseOrders"
+   ],
+   "dataTableDependencies": [
+    "purchaseOrders"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.goodsReceipts",
+    "purchasing.getGoodsReceipt",
+    "purchasing.listGoodsReceipts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "guestDirectory",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.guestDirectory",
+    "guestProfiles.directory"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "guestProfiles",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.guestProfiles",
+    "guestProfiles.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "hotelCenterPreferences",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.hotelCenterPreferences",
+    "centers.preferences"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "inventoryBalances",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.inventoryBalances",
+    "inventory.inventoryBalances"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "inventoryItems",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.inventoryItems",
+    "inventory.inventoryItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "inventoryLocations",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.inventoryLocations",
+    "inventory.inventoryLocations"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "inventoryMovements",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.inventoryMovements",
+    "inventory.inventoryMovements"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "invitations",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.invitations",
+    "tenants.listInvitations"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "jobPositionCenters",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.jobPositionCenters",
+    "centers.jobPositionCenters"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "jobPositions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.jobPositions",
+    "assistant.referenceJobPositions",
+    "jobPositions.jobPositions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "journeySyncConfigurations",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.journeySyncConfigurations",
+    "journeySync.configuration"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "journeySyncLinks",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.journeySyncLinks",
+    "journeySync.links"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "kpiCards",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.kpiCards",
+    "analytics.listKpiCards"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "learnPositionFits",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.learnPositionFits",
+    "learn.positionFits"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "learnProgress",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.learnProgress",
+    "learn.progress"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "linkPreviews",
+   "version": 1,
+   "sets": 4,
+   "setTables": [
+    "conversationParticipants",
+    "directMessages",
+    "memberTeams",
+    "workspaceChat",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "directMessages",
+    "workspaceChat"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.linkPreviews",
+    "chat.linkPreviews",
+    "workspaceResources.listLinkPreviews"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "directMessages",
+    "workspaceChat"
+   ]
+  },
+  {
+   "table": "locations",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.locations",
+    "locations.listByWorkspace"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "marketMembers",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "marketMembers",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": true,
+   "collections": [
+    "__local.marketMembers",
+    "marketResearch.memberships"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "marketProjects",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "marketMembers",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.marketProjects",
+    "marketResearch.projects"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "marketRecords",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "marketMembers",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.marketRecords",
+    "marketResearch.records"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "marketTemplates",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "marketMembers",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.marketTemplates",
+    "marketResearch.templates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "memberAuthStates",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.memberAuthStates",
+    "memberAuthStates.mine"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "memberSpots",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.memberSpots",
+    "members.listMemberSpots"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "memberTeams",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.memberTeams",
+    "assistant.referenceMemberTeams",
+    "gamification.memberTeams",
+    "members.listMemberTeams",
+    "roles.memberTeams"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "members",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.members",
+    "assistant.referenceMembers",
+    "gamification.members",
+    "members.listMembers"
+   ],
+   "liveQueries": [
+    "voiceTaskDrafts.inferenceMembers"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "messageReactions",
+   "version": 1,
+   "sets": 34,
+   "setTables": [
+    "boardMembers",
+    "boardMessages",
+    "boards",
+    "conversationParticipants",
+    "directMessages",
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskNotes",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceChat",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "boardMessages",
+    "boards",
+    "directMessages",
+    "taskApprovalInstances",
+    "taskNotes",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceChat"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.messageReactions",
+    "boards.listReactions",
+    "chat.messageReactions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "derived",
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": [
+    "boardMessages",
+    "tasks",
+    "workspaceChat"
+   ]
+  },
+  {
+   "table": "messages",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.messages",
+    "workspaceResources.listMessages"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "nfcTags",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.nfcTags",
+    "nfc.listTags",
+    "nfc.tags"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "nfcTapLogs",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.nfcTapLogs",
+    "nfc.listTapLogs",
+    "nfc.tapLogs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "notificationSoundRules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.notificationSoundRules",
+    "notificationSoundRules.notificationSoundRules"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "notifications",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.notifications",
+    "notifications.listNotifications"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "opsManagerActions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.opsManagerActions",
+    "opsManager.actions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "opsManagerConfigs",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.opsManagerConfigs",
+    "opsManager.configs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "opsManagerInsights",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.opsManagerInsights",
+    "opsManager.insights"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "opsManagerReports",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.opsManagerReports",
+    "opsManager.reports"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleDirectory",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleDirectory",
+    "peopleDirectory.directory"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleEvents",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "members",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleEvents",
+    "people.events"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleFlowTasks",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "members",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleFlowTasks",
+    "people.flowTasks"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleFlowTemplates",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleFlowTemplates",
+    "people.templates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleFlows",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "members",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleFlows",
+    "people.flows"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleInterests",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleInterests",
+    "peopleFeed.interests"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleLinks",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleLinks",
+    "peopleFeed.links"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peoplePersonal",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peoplePersonal",
+    "people.personal"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peoplePollVotes",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peoplePollVotes",
+    "peopleFeed.myVotes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peoplePostComments",
+   "version": 1,
+   "sets": 5,
+   "setTables": [
+    "globalSettings",
+    "members",
+    "peoplePosts",
+    "plugins"
+   ],
+   "dataTableDependencies": [
+    "peoplePosts"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.peoplePostComments",
+    "peopleFeed.comments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "peoplePosts"
+   ]
+  },
+  {
+   "table": "peoplePostReactions",
+   "version": 1,
+   "sets": 5,
+   "setTables": [
+    "globalSettings",
+    "members",
+    "peoplePosts",
+    "plugins"
+   ],
+   "dataTableDependencies": [
+    "peoplePosts"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.peoplePostReactions",
+    "peopleFeed.reactions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": [
+    "peoplePosts"
+   ]
+  },
+  {
+   "table": "peoplePosts",
+   "version": 1,
+   "sets": 4,
+   "setTables": [
+    "globalSettings",
+    "members",
+    "peoplePosts",
+    "plugins"
+   ],
+   "dataTableDependencies": [
+    "peoplePosts"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.peoplePosts",
+    "peopleFeed.posts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "peopleStatuses",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.peopleStatuses",
+    "peopleStatus.statuses"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "permissions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.permissions",
+    "roles.listPermissions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "personalWorkspaceMembers",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.personalWorkspaceMembers",
+    "workspaces.personalWorkspaceMembers"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "phoneCallEvents",
+   "version": 1,
+   "sets": 26,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.phoneCallEvents",
+    "calling.events"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "phoneCalls",
+   "version": 1,
+   "sets": 26,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.phoneCalls",
+    "calling.calls"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "phoneContacts",
+   "version": 1,
+   "sets": 26,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.phoneContacts",
+    "calling.contacts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "phoneScripts",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.phoneScripts",
+    "calling.script",
+    "calling.scripts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "pluginRoutes",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.pluginRoutes",
+    "workspaceResources.listPluginRoutes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "plugins",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.plugins",
+    "advancedVoice.listAccessPlugins",
+    "settings.plugins",
+    "techSupport.listTenantPowerups",
+    "workplans.getWorkplanContext"
+   ],
+   "liveQueries": [
+    "documents.documentPluginAccess",
+    "pmsOperaCloud.probePowerup"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "pmsConnections",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.pmsConnections",
+    "pms.pmsConnections"
+   ],
+   "liveQueries": [
+    "pmsOperaCloud.probeConnection"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "pmsReservations",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.pmsReservations",
+    "pms.pmsReservations"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "pmsRoomBlocks",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.pmsRoomBlocks",
+    "pms.pmsRoomBlocks"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "pmsRooms",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.pmsRooms",
+    "pms.pmsRooms"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "priorities",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.priorities",
+    "assistant.referencePriorities",
+    "priorities.list"
+   ],
+   "liveQueries": [
+    "assistant.prioritiesForAnalysis",
+    "voiceTaskDrafts.inferencePriorities"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "properties",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.properties",
+    "properties.properties"
+   ],
+   "liveQueries": [
+    "pmsOperaCloud.probeProperty"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "publicHolidays",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.publicHolidays",
+    "timeOffPolicies.holidays"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "purchaseApprovalInstances",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "purchaseOrders",
+    "purchaseRequests"
+   ],
+   "dataTableDependencies": [
+    "purchaseOrders",
+    "purchaseRequests"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.purchaseApprovalInstances",
+    "purchasing.listApprovalInstances",
+    "purchasing.listMyPendingApprovals"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "purchaseOrderItems",
+   "version": 1,
+   "sets": 4,
+   "setTables": [
+    "purchaseApprovalInstances",
+    "purchaseOrders",
+    "purchaseRequests"
+   ],
+   "dataTableDependencies": [
+    "purchaseApprovalInstances",
+    "purchaseOrders",
+    "purchaseRequests"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.purchaseOrderItems",
+    "purchasing.listPurchaseOrderItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "purchaseOrders"
+   ]
+  },
+  {
+   "table": "purchaseOrders",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "purchaseApprovalInstances",
+    "purchaseOrders",
+    "purchaseRequests"
+   ],
+   "dataTableDependencies": [
+    "purchaseApprovalInstances",
+    "purchaseOrders",
+    "purchaseRequests"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.purchaseOrders",
+    "purchasing.getPurchaseOrder",
+    "purchasing.listPurchaseOrders"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "purchaseRequestItems",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "purchaseApprovalInstances",
+    "purchaseRequests"
+   ],
+   "dataTableDependencies": [
+    "purchaseApprovalInstances",
+    "purchaseRequests"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.purchaseRequestItems",
+    "purchasing.listPurchaseRequestItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "purchaseRequests",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "purchaseApprovalInstances"
+   ],
+   "dataTableDependencies": [
+    "purchaseApprovalInstances"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.purchaseRequests",
+    "purchasing.getPurchaseRequest",
+    "purchasing.listPurchaseRequests"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "purchasingDocumentCounters",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.purchasingDocumentCounters",
+    "purchasing.documentCounters"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "qrCodes",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.qrCodes",
+    "tools.qrCodes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayActionProposals",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "relayCalls"
+   ],
+   "dataTableDependencies": [
+    "relayCalls"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayActionProposals",
+    "relay.actionProposals"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayAiAnalyses",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "relayCalls"
+   ],
+   "dataTableDependencies": [
+    "relayCalls"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayAiAnalyses",
+    "relay.analyses"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayCallEvents",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "relayCalls"
+   ],
+   "dataTableDependencies": [
+    "relayCalls"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayCallEvents",
+    "relay.callEvents"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayCallPolicies",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayCallPolicies",
+    "relay.callPolicies"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayCalls",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayCalls",
+    "relay.calls"
+   ],
+   "liveQueries": [
+    "relay.analysisBundle",
+    "relay.providerCallBundle"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayNumberAssignments",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayNumberAssignments",
+    "relay.numberAssignments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayPhoneNumbers",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayPhoneNumbers",
+    "relay.phoneNumbers"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayPolicyDecisions",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "relayCalls"
+   ],
+   "dataTableDependencies": [
+    "relayCalls"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayPolicyDecisions",
+    "relay.policyDecisions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayProviderConnections",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [],
+   "liveQueries": [
+    "relay.activeProviderConnection"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayTranscriptSegments",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "relayCalls"
+   ],
+   "dataTableDependencies": [
+    "relayCalls"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayTranscriptSegments",
+    "relay.transcriptSegments"
+   ],
+   "liveQueries": [
+    "relay.segmentsForAnalysis"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayTranscripts",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "relayCalls"
+   ],
+   "dataTableDependencies": [
+    "relayCalls"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.relayTranscripts",
+    "relay.transcripts"
+   ],
+   "liveQueries": [
+    "relay.transcriptForAnalysis"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "relayUserCredentials",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [],
+   "liveQueries": [
+    "relay.activeUserCredential"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "reminderRules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reminderRules",
+    "reminderRules.reminderRules"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "reportDeliveries",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reportDeliveries",
+    "analytics.listReportDeliveries"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "reportDocuments",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reportDocuments",
+    "reports.documentContent",
+    "reports.documents"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "reportScheduleSettings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reportScheduleSettings",
+    "analytics.listReportScheduleSettings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "reportSchedules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reportSchedules",
+    "analytics.listReportSchedules"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "reportSnapshots",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reportSnapshots",
+    "analytics.listReportSnapshots"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "reportTemplates",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reportTemplates",
+    "reports.templateContent",
+    "reports.templates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "reports",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.reports",
+    "analytics.listReports"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "researchCompanies",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.researchCompanies",
+    "companyResearch.companies"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "researchLocations",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.researchLocations",
+    "companyResearch.locations"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "researchRequests",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.researchRequests",
+    "companyResearch.requests"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "researchRuns",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.researchRuns",
+    "companyResearch.run",
+    "companyResearch.runs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "researchSettings",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.researchSettings",
+    "companyResearch.settings"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "rolePermissions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.rolePermissions",
+    "roles.listRolePermissions",
+    "roles.rolePermissions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "roles",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.roles",
+    "assistant.referenceRoles",
+    "roles.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "scheduleAssignments",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "members"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.scheduleAssignments",
+    "workingSchedules.assignments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "scheduleAvailabilityItems",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "scheduleAvailabilitySubmissions",
+    "scheduleBoards"
+   ],
+   "dataTableDependencies": [
+    "scheduleAvailabilitySubmissions",
+    "scheduleBoards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.scheduleAvailabilityItems",
+    "scheduling.scheduleAvailabilityItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "scheduleAvailabilitySubmissions"
+   ]
+  },
+  {
+   "table": "scheduleAvailabilitySubmissions",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "scheduleBoards"
+   ],
+   "dataTableDependencies": [
+    "scheduleBoards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.scheduleAvailabilitySubmissions",
+    "scheduling.listSubmissions",
+    "scheduling.scheduleAvailabilitySubmissions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "scheduleBoards",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.scheduleBoards",
+    "scheduling.scheduleBoards",
+    "schedulingReplicas.scheduleBoards"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "scheduleRosterEntries",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "scheduleBoards"
+   ],
+   "dataTableDependencies": [
+    "scheduleBoards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.scheduleRosterEntries",
+    "scheduling.scheduleRosterEntries"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "scheduleShiftTemplates",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "scheduleBoards"
+   ],
+   "dataTableDependencies": [
+    "scheduleBoards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.scheduleShiftTemplates",
+    "scheduling.scheduleShiftTemplates",
+    "schedulingReplicas.scheduleShiftTemplates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "scheduleWeeks",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "scheduleBoards"
+   ],
+   "dataTableDependencies": [
+    "scheduleBoards"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.scheduleWeeks",
+    "scheduling.scheduleWeeks"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "sessionLogs",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sessionLogs",
+    "activityTimeline.listSessionLogsForTimeline",
+    "analytics.listSessionLogs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "slaAlerts",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.slaAlerts",
+    "slaAlerts.slaAlerts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "slaEscalationLevels",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.slaEscalationLevels",
+    "slaEscalationLevels.slaEscalationLevels"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "slaPolicies",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.slaPolicies",
+    "slaPolicies.slaPolicies"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "slas",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.slas",
+    "assistant.referenceSLAs",
+    "sla.slas"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "sopApprovalDecisions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sopApprovalDecisions",
+    "sops.listApprovalDecisions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "sopApprovalInstances",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sopApprovalInstances",
+    "sops.listApprovalInstances"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "sopAssociations",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sopAssociations",
+    "sops.listAssociations",
+    "sops.listAssociationsByEntity",
+    "sops.listAssociationsBySop"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "sopExecutions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sopExecutions",
+    "sops.getExecution",
+    "sops.listExecutions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "sopSteps",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sopSteps",
+    "sops.listSteps"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "sopVersions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sopVersions",
+    "sops.listVersions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "sops",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.sops",
+    "sops.get",
+    "sops.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "spotCustomFieldValues",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.spotCustomFieldValues",
+    "workspaceResources.listSpotCustomFieldValues"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "spotCustomFields",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.spotCustomFields",
+    "workspaceResources.listSpotCustomFields"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "spotTags",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.spotTags",
+    "spotTags.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "spotTypes",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.spotTypes",
+    "assistant.referenceSpotTypes",
+    "spotTypes.spotTypes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "spots",
+   "version": 1,
+   "sets": 22,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.spots",
+    "assistant.referenceSpots",
+    "spots.list",
+    "spots.spotSettingsSpots"
+   ],
+   "liveQueries": [
+    "voiceTaskDrafts.inferenceSpots"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "derived",
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "statusTransitionGroups",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.statusTransitionGroups",
+    "statusTransitions.statusTransitionGroups"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "statusTransitionLogs",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.statusTransitionLogs",
+    "activityTimeline.listStatusTransitionsForTimeline"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "statusTransitions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.statusTransitions",
+    "statusTransitions.statusTransitions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "statuses",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.statuses",
+    "assistant.referenceStatuses",
+    "statuses.statuses"
+   ],
+   "liveQueries": [
+    "assistant.statusesForAnalysis"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "suppliers",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.suppliers",
+    "purchasing.getSupplier",
+    "purchasing.listSuppliers"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "tags",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.tags",
+    "assistant.referenceTags",
+    "tags.tags"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentApplications",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.talentApplications",
+    "talent.applications"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentCandidates",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.talentCandidates",
+    "talent.candidates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentEmailPreferences",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.talentEmailPreferences",
+    "talentEmail.preferences"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentEmailTemplates",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "plugins",
+    "talentEmailTemplates"
+   ],
+   "dataTableDependencies": [
+    "talentEmailTemplates"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.talentEmailTemplates",
+    "talentEmail.templates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentEmails",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.talentEmails",
+    "talentEmail.records"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentJobs",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.talentJobs",
+    "talent.jobs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentNotes",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.talentNotes",
+    "talent.notes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "talentViews",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.talentViews",
+    "talent.views"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "taskAckReads",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskAckReads",
+    "taskResources.listTaskAckReads",
+    "taskResources.recentTaskAcknowledgmentReads"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskAcks",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskAcks",
+    "taskResources.getTaskAcknowledgmentProgressForTask",
+    "taskResources.recentTaskAcknowledgments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskApprovalInstances",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.taskApprovalInstances",
+    "approvals.listTaskApprovals",
+    "approvals.taskApprovalInstances"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskBulkCreateBatches",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskBulkCreateBatches",
+    "tasks.myBulkCreateBatches"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "taskCustomFieldValues",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskCustomFieldValues",
+    "customFields.listTaskValues",
+    "customFields.taskValues"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskFindings",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskFindings",
+    "taskFindings.countsByTenant",
+    "taskFindings.linkedTasksByTenant",
+    "taskFindings.list",
+    "taskFindings.listByLinkedTaskId",
+    "taskFindings.listForTask",
+    "taskFindings.routingLinks"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskForms",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskForms",
+    "forms.listTaskForms"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskLogs",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskLogs",
+    "activityTimeline.listTaskLogsForTimeline",
+    "taskFindings.listHistory",
+    "taskResources.listTaskHistory",
+    "taskResources.listTaskLogs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskNotes",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskNotes",
+    "taskResources.attachmentCountsByTenant",
+    "taskResources.listTaskIdsWithAttachments",
+    "taskResources.listTaskNotes",
+    "taskResources.listWorkspaceAttachments",
+    "taskResources.noteCountsByTenant",
+    "taskResources.noteSummariesByTenant"
+   ],
+   "liveQueries": [
+    "files.taskAttachmentNotes",
+    "taskResources.listTaskNotesPaged"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskNumberCounters",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskNumberCounters",
+    "tasks.numberCounters"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "taskPublicShares",
+   "version": 1,
+   "sets": 27,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskPublicShares",
+    "taskPublicShares.getActiveForTask",
+    "taskPublicShares.listForTask"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskPullRequests",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskPullRequests",
+    "github.taskPullRequests"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskRecurrences",
+   "version": 1,
+   "sets": 5,
+   "setTables": [
+    "memberTeams",
+    "personalWorkspaceMembers",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskRecurrences",
+    "taskRecurrences.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "taskRelations",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskRelations",
+    "taskResources.listTaskRelations",
+    "taskResources.listTaskRelationsByRelatedTask",
+    "taskResources.listTaskRelationsByTaskId"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskReminders",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskReminders",
+    "taskReminders.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskShareAcknowledgments",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskShareAcknowledgments",
+    "taskResources.listTaskShareAcknowledgments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskShares",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.taskShares",
+    "taskResources.listSharedToMe",
+    "taskResources.listTaskShares",
+    "taskResources.noteShareAuthority",
+    "taskResources.sharedWithMeCount"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskSignatures",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskSignatures",
+    "taskResources.listTaskIdsWithSignatures",
+    "taskResources.listTaskSignatures"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskSlaStates",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskSlaStates",
+    "slaExecution.taskSlaState",
+    "slaExecution.taskSlaStates"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskSupplies",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskSupplies",
+    "inventory.taskSupplies"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskTags",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskTags",
+    "analytics.listTaskTagsForAnalytics",
+    "taskResources.listTaskTags",
+    "taskResources.taskTags"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskUsers",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.taskUsers",
+    "analytics.listTaskUsersForAnalytics",
+    "taskResources.listTaskUsers",
+    "taskResources.listTaskUsersByUser",
+    "taskResources.taskUsers",
+    "workplans.workplanTaskUsers"
+   ],
+   "liveQueries": [
+    "reports.taskUsersForReport"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskViews",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskViews",
+    "taskResources.listTaskViewsByTaskId"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "taskVoiceMemoListens",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.taskVoiceMemoListens",
+    "taskResources.myVoiceMemoListens"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "taskWorkspaceContexts",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.taskWorkspaceContexts",
+    "taskFindings.getFindingRoute",
+    "taskFindings.routesByTenant",
+    "taskResources.getTaskSharingConfig",
+    "taskWorkspaceContexts.contexts",
+    "taskWorkspaceContexts.listForTask"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": [
+    "tasks"
+   ]
+  },
+  {
+   "table": "tasks",
+   "version": 1,
+   "sets": 25,
+   "setTables": [
+    "globalSettings",
+    "memberSpots",
+    "memberTeams",
+    "members",
+    "personalWorkspaceMembers",
+    "spots",
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskShares",
+    "taskUsers",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.tasks",
+    "activityTimeline.listTasksForTimeline",
+    "analytics.listTasksForAnalytics",
+    "crm.taskSummaries",
+    "tasks.get",
+    "tasks.getByNumericId",
+    "tasks.list",
+    "tasks.recentWorkspaceTasks",
+    "workplans.workplanReadTasks"
+   ],
+   "liveQueries": [
+    "assistant.taskFactsRows",
+    "assistant.tasksForAnalysis",
+    "priorities.getDeleteImpact",
+    "taskGroups.groupCountRows",
+    "taskGroups.groupCountWorkspaceRows",
+    "tasks.completedGrid",
+    "tasks.deletedTasksPage",
+    "tasks.grid",
+    "tasks.legacyGrid",
+    "tasks.listWindow",
+    "tasks.sharedWindow",
+    "tasks.slaDueWindow",
+    "tasks.stackCompletedGrid",
+    "tasks.stackGrid"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "teams",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.teams",
+    "assistant.referenceTeams",
+    "gamification.teams",
+    "teams.teams",
+    "tenants.listTeams"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "templateCustomFields",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.templateCustomFields",
+    "assistant.referenceTemplateCustomFields",
+    "templates.templateCustomFields",
+    "workspaceResources.listTemplateCustomFields"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "templateSupplies",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.templateSupplies",
+    "inventory.templateSupplies"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "templates",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "categories",
+    "memberTeams",
+    "workspaceTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.templates",
+    "assistant.referenceTemplates",
+    "nfc.checkTemplateCreateAccess",
+    "nfc.listManagerTemplates",
+    "templates.byCategory",
+    "templates.get",
+    "templates.list"
+   ],
+   "liveQueries": [
+    "voiceTaskDrafts.inferenceTemplates"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "tenantBilling",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.tenantBilling",
+    "billing.current"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "tenantBranding",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.tenantBranding",
+    "tenantBranding.getPublic"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffAbsences",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.timeOffAbsences",
+    "timeOffPolicies.absences"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffAdjustments",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "members",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.timeOffAdjustments",
+    "timeOffPolicies.adjustments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffApprovalDecisions",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "timeOffRequests"
+   ],
+   "dataTableDependencies": [
+    "timeOffRequests"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.timeOffApprovalDecisions",
+    "timeOff.listApprovalDecisions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffApprovalInstances",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "members",
+    "timeOffApprovalInstances",
+    "timeOffRequests"
+   ],
+   "dataTableDependencies": [
+    "timeOffApprovalInstances",
+    "timeOffRequests"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.timeOffApprovalInstances",
+    "timeOff.listApprovalInstances"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffPolicies",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.timeOffPolicies",
+    "timeOffPolicies.policies"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffPolicyAssignments",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "members",
+    "plugins"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.timeOffPolicyAssignments",
+    "timeOffPolicies.assignments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffRequests",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "members",
+    "timeOffApprovalInstances"
+   ],
+   "dataTableDependencies": [
+    "timeOffApprovalInstances"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.timeOffRequests",
+    "timeOff.listRequests"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "timeOffTypes",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.timeOffTypes",
+    "timeOffTypesReplicas.timeOffTypes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "toolCategories",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.toolCategories",
+    "tools.listCategories"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "toolCheckouts",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.toolCheckouts",
+    "tools.listCheckouts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "toolItems",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.toolItems",
+    "tools.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingAssignments",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingAssignments",
+    "training.trainingAssignments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingCourses",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingCourses",
+    "training.trainingCourses"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingEnrollments",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingEnrollments",
+    "training.trainingEnrollments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingLessonProgress",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingLessonProgress",
+    "training.trainingLessonProgress"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingLessons",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingLessons",
+    "training.trainingLessons"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingModules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingModules",
+    "training.trainingModules"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingQuizAttempts",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingQuizAttempts",
+    "training.trainingQuizAttempts"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingQuizQuestions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingQuizQuestions",
+    "training.trainingQuizQuestions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "trainingQuizzes",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.trainingQuizzes",
+    "training.trainingQuizzes"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "userLiveLocations",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.userLiveLocations",
+    "userLiveLocations.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "userPlantGrowth",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.userPlantGrowth",
+    "plantGrowth.current"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "userPresence",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.userPresence",
+    "presence.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "voiceTaskDrafts",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.voiceTaskDrafts",
+    "voiceTaskDrafts.get"
+   ],
+   "liveQueries": [
+    "voiceTaskDrafts.getProcessingDraft"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "webhooks",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.webhooks",
+    "webhooks.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workbenchComments",
+   "version": 1,
+   "sets": 8,
+   "setTables": [
+    "memberTeams",
+    "workbenchFiles",
+    "workbenchShares",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViews",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workbenchFiles",
+    "workspaceViews"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workbenchComments",
+    "workbench.listComments"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "workbenchFiles"
+   ]
+  },
+  {
+   "table": "workbenchDocumentSteps",
+   "version": 1,
+   "sets": 8,
+   "setTables": [
+    "memberTeams",
+    "workbenchFiles",
+    "workbenchShares",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViews",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workbenchFiles",
+    "workspaceViews"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workbenchDocumentSteps",
+    "workbench.listDocumentSteps"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "workbenchFiles"
+   ]
+  },
+  {
+   "table": "workbenchFiles",
+   "version": 1,
+   "sets": 8,
+   "setTables": [
+    "memberTeams",
+    "workbenchFiles",
+    "workbenchShares",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViews",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workbenchFiles",
+    "workspaceViews"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.workbenchFiles",
+    "workbench.listFiles"
+   ],
+   "liveQueries": [
+    "workbench.fileForAgent",
+    "workbench.trashFilesForAgent"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workbenchFolders",
+   "version": 1,
+   "sets": 6,
+   "setTables": [
+    "memberTeams",
+    "workbenchFolders",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViews",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workbenchFolders",
+    "workspaceViews"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.workbenchFolders",
+    "workbench.listFolders"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workbenchPresence",
+   "version": 1,
+   "sets": 8,
+   "setTables": [
+    "memberTeams",
+    "workbenchFiles",
+    "workbenchShares",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViews",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workbenchFiles",
+    "workspaceViews"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workbenchPresence",
+    "workbench.listPresence"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "workbenchFiles"
+   ]
+  },
+  {
+   "table": "workbenchRevisions",
+   "version": 1,
+   "sets": 8,
+   "setTables": [
+    "memberTeams",
+    "workbenchFiles",
+    "workbenchShares",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViews",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workbenchFiles",
+    "workspaceViews"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workbenchRevisions",
+    "workbench.listRevisions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "workbenchFiles"
+   ]
+  },
+  {
+   "table": "workbenchShares",
+   "version": 1,
+   "sets": 6,
+   "setTables": [
+    "memberTeams",
+    "workbenchFiles",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViews",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workbenchFiles",
+    "workspaceViews"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workbenchShares",
+    "workbench.listShares"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "derived",
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workflowDelays",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workflowDelays",
+    "workflowRuntime.workflowDelays"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workflowRunLogs",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workflowRunLogs",
+    "workflowRuntime.workflowRunLogs"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workflowRuns",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workflowRuns",
+    "workflowRuntime.workflowRuns"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workflowVersions",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workflowVersions",
+    "workflowRuntime.workflowVersions"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workflows",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workflows",
+    "workflowRuntime.workflows"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workingSchedules",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workingSchedules",
+    "workingSchedules.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workplanInstances",
+   "version": 1,
+   "sets": 4,
+   "setTables": [
+    "categories",
+    "memberTeams",
+    "workplans",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workplans"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workplanInstances",
+    "workplans.getWorkplanInstance",
+    "workplans.listWorkplanInstances",
+    "workplans.workplanInstances"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workplanItems",
+   "version": 1,
+   "sets": 4,
+   "setTables": [
+    "categories",
+    "memberTeams",
+    "workplans",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workplans"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workplanItems",
+    "workplans.listWorkplanItems",
+    "workplans.workplanItems"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workplanOccurrences",
+   "version": 1,
+   "sets": 5,
+   "setTables": [
+    "categories",
+    "memberTeams",
+    "workplanItems",
+    "workplans",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workplanItems",
+    "workplans"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workplanOccurrences",
+    "workplans.workplanOccurrences"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": [
+    "workplanItems"
+   ]
+  },
+  {
+   "table": "workplans",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "categories",
+    "memberTeams",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workplans",
+    "workplans.getWorkplan",
+    "workplans.listWorkplans",
+    "workplans.workplans"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceChat",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceChat",
+    "chat.workspaceChat"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceGroups",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceGroups",
+    "workspaceGroups.workspaceGroups"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspacePreferences",
+   "version": 1,
+   "sets": 0,
+   "setTables": [],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspacePreferences",
+    "workspacePreferences.workspacePreferences"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceResources",
+   "version": 1,
+   "sets": 2,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceResources",
+    "workspaceResources.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceTeams",
+   "version": 1,
+   "sets": 6,
+   "setTables": [
+    "memberTeams",
+    "personalWorkspaceMembers",
+    "taskApprovalInstances",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.workspaceTeams",
+    "workspaces.workspaceTeams"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "derived",
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceViewPublicShares",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "workspaceViews"
+   ],
+   "dataTableDependencies": [
+    "workspaceViews"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceViewPublicShares",
+    "workspaceViews.ownPublicShares"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceViewShares",
+   "version": 1,
+   "sets": 3,
+   "setTables": [
+    "memberTeams",
+    "workspaceViewShares",
+    "workspaceViews"
+   ],
+   "dataTableDependencies": [
+    "workspaceViews"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.workspaceViewShares",
+    "workspaceViews.listShares"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceViewWorkspaces",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "workspaceViews"
+   ],
+   "dataTableDependencies": [
+    "workspaceViews"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceViewWorkspaces",
+    "workspaceViews.ownViewWorkspaces"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceViews",
+   "version": 1,
+   "sets": 4,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams",
+    "workspaceViewShares",
+    "workspaceViewWorkspaces",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "workspaceViewWorkspaces"
+   ],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceViews",
+    "workspaceViews.docViews",
+    "workspaceViews.listAvailable"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceWhiteboardPresence",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceWhiteboardPresence",
+    "workspaceWhiteboardPresence.list"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaceWhiteboards",
+   "version": 1,
+   "sets": 1,
+   "setTables": [
+    "memberTeams",
+    "workspaceTeams"
+   ],
+   "dataTableDependencies": [],
+   "selfDependency": false,
+   "collections": [
+    "__local.workspaceWhiteboards",
+    "workspaceWhiteboards.get"
+   ],
+   "liveQueries": [],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "principal"
+   ],
+   "v2Inherits": []
+  },
+  {
+   "table": "workspaces",
+   "version": 1,
+   "sets": 9,
+   "setTables": [
+    "categories",
+    "memberTeams",
+    "personalWorkspaceMembers",
+    "taskApprovalInstances",
+    "taskWorkspaceContexts",
+    "tasks",
+    "workspaceTeams",
+    "workspaces"
+   ],
+   "dataTableDependencies": [
+    "taskApprovalInstances",
+    "taskWorkspaceContexts",
+    "tasks"
+   ],
+   "selfDependency": true,
+   "collections": [
+    "__local.workspaces",
+    "assistant.listVisibleWorkspaces",
+    "workspaces.get",
+    "workspaces.list",
+    "workspaces.teamSettingsWorkspaces"
+   ],
+   "liveQueries": [
+    "assistant.workspacesForAnalysis",
+    "voiceTaskDrafts.inferenceWorkspaces"
+   ],
+   "v2Version": 2,
+   "v2SetKinds": [
+    "derived",
+    "grant",
+    "principal"
+   ],
+   "v2Inherits": []
+  }
+ ]
+}
