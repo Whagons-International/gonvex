@@ -7,7 +7,10 @@
 //! burst control the socket deferred every feed event until its opens were
 //! installed). After the slot is freed the open's snapshot already contains
 //! the save (the event the socket applied before the open's clock), and a
-//! later save reaches the new subscription: nothing is missed.
+//! later save reaches the new subscription: nothing is missed. Then a burst of
+//! saves from a second socket: the first connection falls behind in applying
+//! and takes queued events as by-reference batches (`take_waiting_feed`); it
+//! still ends at the newest state, covering every revision, without a reset.
 //!
 //! `cargo test -p gonvex-runtime --features perf-fixture --test burst_control`
 use std::time::Duration;
@@ -310,6 +313,119 @@ async fn a_socket_whose_open_waits_for_admission_still_gets_its_deliveries() {
         after.iter().any(|text| text.contains("saved-after-ready")),
         "the later save is delivered to the opened collection: {after:?}"
     );
+
+    // A burst of saves from a second socket: the first one falls behind in
+    // applying (events queue in its receiver) and takes them as by-reference
+    // batches when it does. It must still end at the newest state, with
+    // every revision covered, no reset and no error.
+    let (mut writer, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+        .await
+        .unwrap();
+    next_frames(&mut writer, Duration::from_secs(10))
+        .await
+        .unwrap();
+    send(
+        &mut writer,
+        json!({"type":"auth","id":"auth","token":token,"project":route.project_id,"tenant":route.tenant_id,
+               "capabilities":{"preserveSubscriptions":1,"replicaBatchFrames":1,"replicaWatermark":1}}),
+    )
+    .await;
+    'writer: loop {
+        let (_, frames) = next_frames(&mut writer, Duration::from_secs(10))
+            .await
+            .unwrap();
+        for frame in frames {
+            match frame["type"].as_str() {
+                Some("auth.result") => break 'writer,
+                Some("auth.error") => panic!("auth failed: {frame}"),
+                _ => {}
+            }
+        }
+    }
+    const BURST: usize = 120;
+    let batches_before = gonvex_runtime::delivery::lag_batches();
+    // The observer keeps its own loop busy: its calls run inline, so the
+    // writer's commits queue in its receiver meanwhile and it is behind
+    // whenever it next takes one.
+    const OWN: usize = 40;
+    let other = fixture.tenants[0].tasks[1].id.clone();
+    for n in 0..OWN {
+        let id = format!("own-{n}");
+        send(
+            &mut socket,
+            json!({"type":"reducer.call","id":id,"path":"tasks.updateDescription",
+                   "args":{"taskId":other,"description":format!("own-{n}")},
+                   "scope":"tenant","idempotencyKey":id}),
+        )
+        .await;
+    }
+    for n in 0..BURST {
+        let id = format!("burst-{n}");
+        send(
+            &mut writer,
+            json!({"type":"reducer.call","id":id,"path":"tasks.updateDescription",
+                   "args":{"taskId":task,"description":format!("burst-description-{n:03}")},
+                   "scope":"tenant","idempotencyKey":id}),
+        )
+        .await;
+    }
+    let mut last_committed = 0u64;
+    let mut results = 0;
+    while results < BURST {
+        let (_, frames) = next_frames(&mut writer, Duration::from_secs(30))
+            .await
+            .expect("writer results");
+        for frame in frames {
+            match frame["type"].as_str() {
+                Some("reducer.result") => {
+                    results += 1;
+                    last_committed =
+                        last_committed.max(frame["committedRevision"].as_u64().unwrap_or(0));
+                }
+                Some("reducer.error") => panic!("burst save failed: {frame}"),
+                _ => {}
+            }
+        }
+    }
+    let last = format!("burst-description-{:03}", BURST - 1);
+    let mut seen_last = false;
+    let mut own = 0;
+    while !(seen_last && own == OWN && watermark >= last_committed) {
+        let (text, frames) = next_frames(&mut socket, Duration::from_secs(30))
+            .await
+            .expect("the observer catches up");
+        seen_last |= text.contains(&last);
+        for frame in &frames {
+            match frame["type"].as_str() {
+                Some("replica.watermark") => {
+                    watermark = watermark.max(frame["revision"].as_u64().unwrap())
+                }
+                Some("reducer.result") => {
+                    own += 1;
+                    last_committed =
+                        last_committed.max(frame["committedRevision"].as_u64().unwrap_or(0));
+                }
+                Some("reducer.error") => panic!("observer save failed: {frame}"),
+                Some("replica.reset") | Some("replica.error") => {
+                    panic!("observer lost its subscription: {frame}")
+                }
+                _ => {}
+            }
+        }
+    }
+    let batches_after = gonvex_runtime::delivery::lag_batches();
+    let (batches, batched) = (
+        batches_after.0 - batches_before.0,
+        batches_after.1 - batches_before.1,
+    );
+    eprintln!("burst of {BURST} saves: {batches} by-reference batches, {batched} events in them");
+    // The path under test ran (the observer was behind at least once),
+    // unless lag merging is off.
+    if std::env::var("GONVEX_FEED_MERGE_LAG").map_or(true, |value| value.trim() != "0")
+        && std::env::var("GONVEX_FEED_LAG_MERGE").map_or(true, |value| value.trim() != "copy")
+    {
+        assert!(batches > 0, "the observer never took a by-reference batch");
+    }
     server.abort();
     fixture.shutdown().await;
 }

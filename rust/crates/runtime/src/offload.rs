@@ -552,6 +552,89 @@ impl Runtime {
     }
 }
 
+impl Runtime {
+    /// Burst control, by reference: applies `events` (consecutive feed
+    /// events, each with its broadcast's own change list) one after another
+    /// to `subscriptions`, as separate applications would, in one pool job
+    /// instead of one per event. Each event finds the shared decisions other
+    /// connections built for it (`feed_share`). `record` applies to the first
+    /// event (its fan-out miss); the later ones record nothing.
+    pub(crate) async fn apply_feed_events_offloaded(
+        &self,
+        session: &TenantSession,
+        subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+        mut events: Vec<FeedEvent>,
+        prewarm: Option<(bool, Option<u8>)>,
+        record: bool,
+    ) -> Result<Vec<ServerMessage>, ReplicaError> {
+        if events.len() <= 1 {
+            let Some(event) = events.pop() else {
+                return Ok(Vec::new());
+            };
+            return self
+                .apply_feed_event_offloaded(session, subscriptions, event, prewarm, record)
+                .await;
+        }
+        let pool = offload();
+        let tables: Vec<String> = events.iter().map(feed_tables).collect();
+        let inline = pool.is_inline()
+            || subscriptions.is_empty()
+            || tables.iter().all(|tables| !pool.offload_apply(tables));
+        let runtime = self.clone();
+        let apply = |runtime: Runtime,
+                     session: TenantSession,
+                     mut owned: BTreeMap<String, ReplicaSubscription>,
+                     events: Vec<FeedEvent>| async move {
+            let mut messages = Vec::new();
+            let mut elapsed = Vec::with_capacity(events.len());
+            let mut result = Ok(());
+            for (index, event) in events.into_iter().enumerate() {
+                let started = Instant::now();
+                match runtime
+                    .apply_feed_event_with(&session, &mut owned, event, record && index == 0)
+                    .await
+                {
+                    Ok(more) => messages.extend(more),
+                    Err(error) => {
+                        result = Err(error);
+                        break;
+                    }
+                }
+                elapsed.push(started.elapsed());
+            }
+            let result = result.map(|()| messages);
+            if let (Ok(messages), Some((native, window))) = (&result, prewarm) {
+                crate::delivery::prewarm(
+                    &runtime.inner.delivery,
+                    &session.route.tenant_id,
+                    native,
+                    window,
+                    &owned,
+                    messages,
+                );
+            }
+            (owned, result, elapsed)
+        };
+        let owned = std::mem::take(subscriptions);
+        let (owned, result, elapsed) = if inline {
+            apply(runtime, session.clone(), owned, events).await
+        } else {
+            pool.spawn(gonvex_profiler::instrument(
+                gonvex_profiler::TaskKind::Feed,
+                apply(runtime, session.clone(), owned, events),
+            ))
+            .await
+        };
+        if !pool.is_inline() {
+            for (tables, elapsed) in tables.iter().zip(elapsed) {
+                pool.record_apply(tables, elapsed);
+            }
+        }
+        *subscriptions = owned;
+        result
+    }
+}
+
 /// Frees `value` on the pool. Dropping a replica subscription frees its row
 /// maps and, for its last holder, the interned rows: up to ~100 ms of CPU for
 /// a 9,000-row collection, which must not run on the network thread.

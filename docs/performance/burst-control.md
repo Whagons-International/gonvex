@@ -20,6 +20,17 @@ they wait about as long as before, but now they are the only thing that waits. A
 nothing changes (slightly better). Short-first snapshot lanes are implemented but opt-in, because
 they tripled heavy-reconnect p99.
 
+**Round 2 (after integration step 14): merge by reference.** In the lab the first round's merge cost
+~22 % CPU at 500 users (default mix 0.65 → 0.79 cores). Each lagging connection built its own
+merged copy of the change lists, so it found none of the shared per-event work: decision shares
+and the encoded-item memo (share reuse fell from ~307 to ~2.5 per share). Lagging connections now
+take the waiting events **by reference**: the broadcast's own `Arc` change lists, unmerged, in
+commit order. They apply them one after another through each event's existing share, in one
+offload job, and the batcher still sends one frame per tick. On the driver: share reuse 2.7–6.1
+(copy) → **440–470** found per created, shared decisions ×1.4–2.5, CPU per save −4 % (mid load)
+and −7 % (heavy), save p95 at the heavy point 345–376 → **178–185 ms**, with 6–7 % more saves
+completed. See "Round 2" below.
+
 ## What was happening (the coupling)
 
 `websocket()` in `lib.rs`: `defer_feed = preparing_replicas || …`. While
@@ -58,14 +69,25 @@ users' delivery p99 is 4.3–4.8 s and save p95 3.3 s on the same runtime at the
    transaction and is rolled forward to the open's own clock; waiting on another task's cache
    build counts as reading (conservative). Toggle: `GONVEX_FEED_DURING_ADMISSION=0` (previous
    behaviour).
-2. **Lagging connections coalesce** (`delivery::feed_lagging`, connection loop). A connection
-   that takes a feed event while `GONVEX_FEED_MERGE_LAG` (default 1) more events already wait in
-   its receiver is behind. It merges them with the current one (`merge_waiting_feed`, the delivery
-   v3 merge previously used only while the socket's writes were backlogged): one apply, each
-   row's newest state, the newest watermark. Then the feed-first scheduler gives the socket's
-   inbound frames (the user's own calls) the next turn (`FeedFirstScheduler::merged`); before,
-   it drained every queued event first, one offload round trip each (`ws.inbound_wait` p99
-   1.35 s on the driver with change 1 alone and no merge, in one noisy run). `0` disables it.
+2. **Lagging connections batch by reference** (`delivery::feed_lagging`, `take_waiting_feed`,
+   `Runtime::apply_feed_events_offloaded`, connection loop). A connection that takes a feed event
+   while `GONVEX_FEED_MERGE_LAG` (default 1) more events already wait in its receiver is behind.
+   It takes up to 64 of them as they are (the broadcast's `Arc` change lists, no copy) and applies
+   them in commit order: the delivery v4 fan-out serves each event it can inline, and from the
+   first miss on, the rest go through `apply_feed_event_with` one after another in **one** offload
+   job. Every event finds the decision share and the encoded items that other connections built for
+   the same transaction (`feed_share` keys shares by the change list's address; the tenant frame
+   memo keys items by revision). Then the feed-first scheduler gives the socket's inbound frames
+   (the user's own calls) the next turn (`FeedFirstScheduler::merged`). Before, it drained every
+   queued event first, one offload round trip each. Clients see every intermediate state, in one
+   batch frame per tick, as with a non-lagging connection that receives several commits per tick.
+   `0` disables it. `GONVEX_FEED_LAG_MERGE=copy` restores round 1 (a merged copy per connection;
+   for A/B only). A socket whose *writes* are backlogged still merges by copy (delivery v3,
+   unchanged: fewer bytes for a slow reader). Its mergeability check now reads the headers (same
+   epoch, later revision) instead of building and dropping a merged copy for every pair, so the
+   check is no longer O(n²) in clones. Both take loops re-check, before every take, whether one of
+   the socket's preparations started reading (`OpenProgress`), so no event after a new clock is
+   taken early. Round 1 had left this race open for the merge path.
 3. **Bounded snapshot admission with fast fail** (`offload.rs` `SnapshotAdmission`). The count
    semaphore is replaced by a cancel-safe slot queue. At most `GONVEX_SNAPSHOT_MAX_WAITING`
    (4,096) builds wait, and a build waits at most `GONVEX_SNAPSHOT_ADMISSION_TIMEOUT_MS`
@@ -153,10 +175,12 @@ remaining tail was the socket draining queued feed one event at a time (`ws.inbo
 
 ## Risks and contract
 
-* No protocol change. Clients see the same frames. With the merge, a lagging connection gets
-  fewer, newer updates (each row's newest state, the newest watermark) more often than before
-  (delivery v3 already did this for backlogged sockets; the SDK applies merged transactions the
-  same way). The merge stays limited to batch connections without live queries.
+* No protocol change. Clients see the same frames. A lagging connection gets its queued
+  transactions in one batch frame (every revision, in order). A write-backlogged socket gets
+  merged transactions as before (delivery v3). Batching stays limited to batch connections
+  without live queries.
+* Offload work per job is bounded by 64 events. One job applying 64 events holds the
+  connection's subscriptions for its duration, as 64 separate jobs would in sequence.
 * New error: a snapshot open (or replica collection query) that waits > 30 s or finds 4,096
   builds waiting gets `replica.error` and the SDK retries. This never triggered on the driver
   (shed 0). In a spiral it bounds the queue instead of growing it.
@@ -167,6 +191,39 @@ remaining tail was the socket draining queued feed one event at a time (`ws.inbo
 * Opens are not faster: under overload, window opens still wait 1.4–2.1 s p50 and reconnects
   5–6 s p50 on the driver. CPU, not admission, is the limit there.
 
+## Round 2: merge by reference (burst driver)
+
+Same driver, the same binary with toggles, variants interleaved, 2 repetitions each. "off" =
+`GONVEX_FEED_DURING_ADMISSION=0 GONVEX_FEED_MERGE_LAG=0`, "copy" = `GONVEX_FEED_LAG_MERGE=copy`
+(5ca42585), "ref" = the defaults. CPU = the runtime threads' user + system time over the measured
+window (threads pinned to the server CPU), per completed save. Shares = `feed_share` shares
+created / found over the window (`burst-control-results/v2-*.jsonl`).
+
+Mid load (150 + 100 users, think 2 s, 30 s; ≈ 0.65 of the CPU: the unsaturated, 500-like point):
+
+| variant | saves | save p50 / p95 / p99 | `delivery.queue_wait` p99 | CPU s (ms per save) | shares created / found (found per created) | shared decisions |
+|---|---:|---|---:|---|---|---:|
+| off | 1,608 / 1,578 | 40–43 / 1,467–1,719 / 1,953–2,227 | 1,413 / 1,794 | 21.8 / 21.9 (13.6 / 13.9) | 10.8k / 792k (74); 12.1k / 777k (64) | 387k / 378k |
+| copy | 1,569 / 1,589 | 22–24 / 75–78 / 110–119 | 16 / 15 | 20.9 / 20.8 (13.3 / 13.1) | 94.2k / 557k (5.9); 93.1k / 571k (6.1) | 272k / 280k |
+| **ref** | 1,603 / 1,599 | **19–20 / 68–70 / 98–100** | 14 / 13 | **20.6 / 20.4 (12.9 / 12.7)** | **1.7k / 734k (440); 1.7k / 734k (444)** | **391k / 390k** |
+
+Heavy (220 + 150 users, think 0.8 s, 40 s; CPU-bound):
+
+| variant | saves | save p50 / p95 / p99 | delivery to active p99 | `delivery.queue_wait` p99 | CPU s (ms per save) | shares created / found (per) | shared decisions |
+|---|---:|---|---:|---:|---|---|---:|
+| off | 1,943 / 2,043 | 1,956–2,063 / 6,478–6,996 / 7,582–9,024 | 11.8 s / 9.7 s | 9.7 s / 8.5 s | 36.1 / 41.3 (18.6 / 20.2) | 301k / 1.13M (3.8); 312k / 1.19M (3.8) | 403k / 430k |
+| copy | 2,184 / 2,236 | 50 / 345–376 / 508–534 | 346 / 372 | 34 / 36 | 39.0 / 39.0 (17.9 / 17.5) | 266k / 707k (2.7); 270k / 722k (2.7) | 330k / 338k |
+| **ref** | **2,348 / 2,374** | **44–45 / 178–185 / 231–299** | **203 / 199** | 50 / 51 | 38.8 / 38.7 (**16.5 / 16.3**) | **3.0k / 1.40M (468); 3.1k / 1.42M (457)** | **818k / 829k** |
+
+By reference restores sharing to beyond the pre-burst-control level ("off" also loses it here, to
+write-backlog merges and log refills). It also does the most work per CPU second. The CPU
+difference on this driver is smaller than the lab's 22 %: the driver's e2e members see no task
+rows, so a private decision is cheap here, while the Whagons default mix decides team and
+personal visibility per row. The share and decision counts are the transferable signal. The
+regression test (`tests/burst_control.rs`) now also bursts 120 saves while the observer is busy
+with 40 calls of its own: the observer takes by-reference batches (79 batches of 159 events in
+the runs here; asserted > 0), ends at the newest state, covers every revision, and has no reset.
+
 ## Not measured
 
 * The Mac-generator lab at 1k (only the integration agent runs e2e steps). Expected effect there:
@@ -174,5 +231,7 @@ remaining tail was the socket draining queued feed one event at a time (`ws.inbo
   tails will remain.
 * The production-mix resume path (cheap log-only resumes) under lanes; resumes are not in the
   driver.
-* Memory under the merge at 1k (the merge holds up to 256 waiting events at once, as delivery
-  v3 does).
+* Memory at 1k (a batch holds ≤ 64 references to broadcast change lists the ring holds anyway; a
+  write-backlogged merge still holds ≤ 256 copies, as delivery v3 does).
+* Round 2 in the lab (default mix 500, production 1k): expected to remove the +0.14 cores at 500
+  that came from lost sharing. Not run here.

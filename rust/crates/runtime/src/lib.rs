@@ -1945,22 +1945,31 @@ async fn websocket(
                         continue;
                     }
                     Ok(event) => {
-                        // A connection that fell behind takes every feed event
-                        // waiting for it as one: each row's newest state once.
-                        // Burst control: behind also means events already
-                        // queued in its receiver (it applies slower than the
-                        // tenant commits), not only a backlogged socket.
-                        let lagging = catching_up || feed.as_ref().is_some_and(|receiver| delivery::feed_lagging(receiver.len()));
-                        let event = if lagging {
-                            let merged = delivery::merge_waiting_feed(event, &mut feed, &mut pending_feed, &replicas, live_queries.is_empty() && batcher.enabled());
+                        // A connection whose socket fell behind takes every feed
+                        // event waiting for it as one: each row's newest state
+                        // once (delivery v3, a merged copy: fewer bytes).
+                        // Burst control: a connection that is behind in applying
+                        // (events already queued in its receiver) takes them by
+                        // reference, unmerged, and applies them one after another
+                        // through their shared decisions in one offload job;
+                        // then its inbound frames (the user's own calls) go next.
+                        // Either way no event is taken once a preparation reads.
+                        let lagging = !catching_up && feed.as_ref().is_some_and(|receiver| delivery::feed_lagging(receiver.len()));
+                        let allowed = live_queries.is_empty() && batcher.enabled();
+                        let mut events = if catching_up || (lagging && delivery::lag_merge_by_copy()) {
+                            let merged = delivery::merge_waiting_feed_until(event, &mut feed, &mut pending_feed, &replicas, allowed, &|| replica_opens.reading());
                             if feed.as_ref().is_none_or(|receiver| receiver.is_empty()) {
                                 catching_up = false;
-                                // What was queued is merged: the socket's
-                                // inbound frames (the user's own calls) go next.
-                                feed_scheduler.merged();
+                                if lagging { feed_scheduler.merged(); }
                             }
-                            merged
-                        } else { event };
+                            vec![merged]
+                        } else if lagging && allowed {
+                            let events = delivery::take_waiting_feed(event, &mut feed, &mut pending_feed, 64, &|| replica_opens.reading());
+                            if events.len() > 1 { feed_scheduler.merged(); }
+                            events
+                        } else { vec![event] };
+                        let event = events.pop().expect("one feed event");
+                        // `events`: the earlier ones of a by-reference batch.
                         let (feed_revision, feed_key) = match &event {
                             change_feed::FeedEvent::Transaction { revision, database_epoch, .. } => (
                                 Some(*revision),
@@ -1968,8 +1977,14 @@ async fn websocket(
                             ),
                             change_feed::FeedEvent::Reset { .. } => (None, None),
                         };
-                        if let Some(wait) = feed_key.and_then(gonvex_profiler::since_stamp) {
-                            gonvex_profiler::record(gonvex_profiler::Stage::DeliveryQueueWait, gonvex_profiler::Label::None, wait);
+                        let batch_keys: Vec<u64> = events.iter().filter_map(|event| match event {
+                            change_feed::FeedEvent::Transaction { revision, database_epoch, .. } => Some(change_feed::broadcast_key(database_epoch, *revision)),
+                            change_feed::FeedEvent::Reset { .. } => None,
+                        }).collect();
+                        for key in batch_keys.iter().copied().chain(feed_key) {
+                            if let Some(wait) = gonvex_profiler::since_stamp(key) {
+                                gonvex_profiler::record(gonvex_profiler::Stage::DeliveryQueueWait, gonvex_profiler::Label::None, wait);
+                            }
                         }
                         let mut delivery_timer = gonvex_profiler::Timer::start();
                         let feed_apply_started = std::time::Instant::now();
@@ -1983,13 +1998,14 @@ async fn websocket(
                         let reset = matches!(event, change_feed::FeedEvent::Reset { .. });
                         let transaction_watermark = replica_watermark(&event);
                         if let Some(session) = tenant_session.as_ref() {
-                            if membership_affects(session, &event) {
+                            if membership_affects(session, &event) || events.iter().any(|earlier| membership_affects(session, earlier)) {
                                 discard_tenant_session!();
                                 for message in membership_changed_frames(transaction_watermark) {
                                     if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                                 }
                                 continue;
                             }
+                            // (A by-reference batch only forms without live queries.)
                             for message in runtime
                                 .apply_live_query_feed_event(session, &mut live_queries, &event)
                                 .await
@@ -1997,26 +2013,34 @@ async fn websocket(
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
                             // Delivery v4: a connection whose shape already has a
-                            // shared outcome for this event only appends it.
+                            // shared outcome for an event only appends it. In a
+                            // by-reference batch, events are served in order until the
+                            // first miss; it and every later one apply in one job.
                             let items_before = batcher.data_items();
-                            let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
-                                runtime.fan_out_waiting(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native()).await
-                            } else {
-                                replica::fanout::count(replica::fanout::Path::NotBatch);
-                                replica::fanout::FanOut::Miss { record: false, claim: None }
-                            };
-                            let applied = match shared {
-                                replica::fanout::FanOut::Served(Ok(())) => Ok(Vec::new()),
-                                replica::fanout::FanOut::Served(Err(_)) => return,
-                                replica::fanout::FanOut::Wait(_) => unreachable!("fan_out_waiting waits"),
-                                replica::fanout::FanOut::Miss { record, claim } => {
-                                    let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
-                                    let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await;
-                                    // Wakes this shape's waiting connections.
-                                    drop(claim);
-                                    applied
+                            events.push(event);
+                            let mut events = events.into_iter();
+                            let mut applied = Ok(Vec::new());
+                            while let Some(event) = events.next() {
+                                let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
+                                    runtime.fan_out_waiting(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native()).await
+                                } else {
+                                    replica::fanout::count(replica::fanout::Path::NotBatch);
+                                    replica::fanout::FanOut::Miss { record: false, claim: None }
+                                };
+                                match shared {
+                                    replica::fanout::FanOut::Served(Ok(())) => continue,
+                                    replica::fanout::FanOut::Served(Err(_)) => return,
+                                    replica::fanout::FanOut::Wait(_) => unreachable!("fan_out_waiting waits"),
+                                    replica::fanout::FanOut::Miss { record, claim } => {
+                                        let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
+                                        let remaining: Vec<_> = std::iter::once(event).chain(events.by_ref()).collect();
+                                        applied = runtime.apply_feed_events_offloaded(session, &mut replicas, remaining, prewarm, record).await;
+                                        // Wakes this shape's waiting connections.
+                                        drop(claim);
+                                        break;
+                                    }
                                 }
-                            };
+                            }
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
                             match applied {
                                 Ok(messages) if batcher.enabled() => {
@@ -2139,8 +2163,10 @@ async fn websocket(
                             }
                         }
                         delivery_timer.lap(gonvex_profiler::Stage::DeliverySend, gonvex_profiler::Label::None);
-                        if let Some(total) = feed_key.and_then(gonvex_profiler::since_stamp) {
-                            gonvex_profiler::record(gonvex_profiler::Stage::DeliveryTotal, gonvex_profiler::Label::None, total);
+                        for key in batch_keys.iter().copied().chain(feed_key) {
+                            if let Some(total) = gonvex_profiler::since_stamp(key) {
+                                gonvex_profiler::record(gonvex_profiler::Stage::DeliveryTotal, gonvex_profiler::Label::None, total);
+                            }
                         }
                         tracing::debug!(
                             target: "gonvex_runtime::ws_trace",
