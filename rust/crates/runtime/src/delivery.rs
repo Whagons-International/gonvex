@@ -116,7 +116,7 @@ struct Variant {
 
 #[derive(Default)]
 struct Memo {
-    entries: HashMap<ItemKey, Vec<Variant>>,
+    entries: crate::fast_hash::FastMap<ItemKey, Vec<Variant>>,
     order: VecDeque<ItemKey>,
     bytes: usize,
 }

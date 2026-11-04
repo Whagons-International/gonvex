@@ -1602,12 +1602,56 @@ async fn metrics(
 fn memory_json(runtime: &Runtime) -> Value {
     let cache = runtime.snapshot_cache_stats();
     let (isolates, v8) = gonvex_module_runtime_v8::heap_tally();
+    let report = runtime.snapshot_cache_report();
+    let sparse = runtime.snapshot_cache_sparse_counts();
+    // Per collection path: entries, bytes, rows, hits, builds of live entries.
+    let mut by_path = std::collections::BTreeMap::<&str, [u64; 5]>::new();
+    for entry in &report {
+        let totals = by_path.entry(entry.path.as_str()).or_default();
+        totals[0] += 1;
+        totals[1] += entry.heap_bytes as u64;
+        totals[2] += entry.rows as u64;
+        totals[3] += entry.hits;
+        totals[4] += entry.builds;
+    }
+    let by_path = by_path
+        .into_iter()
+        .map(|(path, [entries, bytes, rows, hits, builds])| {
+            (path.to_owned(), json!({"entries": entries, "bytes": bytes, "rows": rows, "hits": hits, "builds": builds}))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let top = report
+        .iter()
+        .take(40)
+        .map(|entry| {
+            json!({"db": entry.database, "path": entry.path, "args": entry.args, "rows": entry.rows,
+                "bytes": entry.heap_bytes, "hits": entry.hits, "builds": entry.builds,
+                "revision": entry.revision, "ageSecs": entry.age_secs,
+                "observed": entry.observed, "admitted": entry.admitted, "scanned": entry.scanned})
+        })
+        .collect::<Vec<_>>();
+    let statements = if gonvex_store::statement_profile::enabled() {
+        gonvex_store::statement_profile::snapshot()
+            .into_iter()
+            .take(40)
+            .map(|(sql, stats)| {
+                json!({"sql": sql, "count": stats.count, "totalNs": stats.total_ns, "maxNs": stats.max_ns,
+                    "vmSteps": stats.vm_steps, "fullscanSteps": stats.fullscan_steps})
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     json!({
         "sqliteUsedBytes": gonvex_store::sqlite_memory_used(),
         "sqliteBudgetMiB": gonvex_store::sqlite_cache_budget_mib(),
+        "sqliteReaderOpens": gonvex_store::sqlite_reader_opens(),
+        "sqliteStatements": statements,
         "snapshotCache": {"entries": cache.entries, "bytes": cache.bytes, "hits": cache.hits,
             "builds": cache.builds, "rollForwards": cache.roll_forwards, "fallbacks": cache.fallbacks,
-            "evictions": cache.evictions},
+            "evictions": cache.evictions, "keysSeen": runtime.snapshot_cache_keys_seen(),
+            "sparseDrops": sparse.0, "sparseSkips": sparse.1,
+            "byPath": by_path, "top": top},
         "v8": {"isolates": isolates, "totalHeapBytes": v8[0], "usedHeapBytes": v8[1],
             "physicalBytes": v8[2], "externalBytes": v8[3], "mallocedBytes": v8[4]},
     })

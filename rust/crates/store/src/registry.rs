@@ -133,6 +133,27 @@ fn apply_cache_budget() {
     });
 }
 
+/// Run on each writer connection when it opens: `0x10002` re-analyzes every
+/// table whose row count moved ~10x since its statistics (or that has none
+/// while it has indexes), bounded by `analysis_limit` rows per index.
+const OPTIMIZE_AT_OPEN: &str = "PRAGMA analysis_limit=400; PRAGMA optimize=0x10002;";
+/// Periodic form (tables used since the connection opened).
+const OPTIMIZE_PERIODIC: &str = "PRAGMA analysis_limit=400; PRAGMA optimize;";
+
+async fn optimize_at_open(connection: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
+    for statement in OPTIMIZE_AT_OPEN.split_inclusive(';') {
+        sqlx::query(statement.trim()).execute(&mut *connection).await?;
+    }
+    Ok(())
+}
+
+static READER_OPENS: AtomicU64 = AtomicU64::new(0);
+
+/// Reader connections opened since start (each parses the file's schema).
+pub fn sqlite_reader_opens() -> u64 {
+    READER_OPENS.load(Ordering::Relaxed)
+}
+
 /// SQLite heap in use by this process, in bytes.
 pub fn sqlite_memory_used() -> i64 {
     unsafe { libsqlite3_sys::sqlite3_memory_used() }
@@ -463,6 +484,8 @@ impl PoolRegistry {
     pub fn with_durability(limits: PoolLimits, durability: Durability) -> Self {
         let limits = limits.bounded();
         apply_cache_budget();
+        crate::statement_profile::install();
+        crate::reader_priority::install();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
             admission_count: Arc::default(),
@@ -553,6 +576,10 @@ impl PoolRegistry {
             .after_connect(move |connection, _| {
                 let wal = writer_wal.clone();
                 Box::pin(async move {
+                    // Planner statistics: ANALYZE the tables whose size
+                    // changed a lot since their last statistics (stale
+                    // `sqlite_stat1` rows made indexed lookups full scans).
+                    optimize_at_open(connection).await?;
                     crate::capture::install(connection)
                         .await
                         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -583,6 +610,10 @@ impl PoolRegistry {
                 released.store(now_ms(), Ordering::Relaxed);
                 Box::pin(async { Ok(true) })
             })
+            .after_connect(|_, _| {
+                READER_OPENS.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(()) })
+            })
             .connect_lazy_with(self.options(&path, true)?);
         self.start_sweeper();
         let (notify, _) = broadcast::channel(NOTIFY_CAPACITY);
@@ -608,6 +639,12 @@ impl PoolRegistry {
         let limits = self.limits.clone();
         tokio::spawn(async move {
             let interval = sweep_interval(&limits);
+            let optimize_every = Duration::from_secs(env_u64("GONVEX_SQLITE_OPTIMIZE_SECS", 3600).max(60));
+            // First pass about a minute after start (indexes provisioning
+            // created have no statistics yet), then every `optimize_every`.
+            let mut last_optimize = std::time::Instant::now()
+                .checked_sub(optimize_every.saturating_sub(Duration::from_secs(60)))
+                .unwrap_or_else(std::time::Instant::now);
             loop {
                 tokio::time::sleep(interval).await;
                 let Some(map) = databases.upgrade() else {
@@ -621,6 +658,18 @@ impl PoolRegistry {
                     .collect();
                 drop(map);
                 sweep_readers(&open, &limits).await;
+                if last_optimize.elapsed() >= optimize_every {
+                    last_optimize = std::time::Instant::now();
+                    for database in &open {
+                        // Cheap when nothing changed (it only compares row
+                        // counts with the recorded statistics).
+                        for statement in OPTIMIZE_PERIODIC.split_inclusive(';') {
+                            let _ = sqlx::query(statement.trim())
+                                .execute(&database.writer)
+                                .await;
+                        }
+                    }
+                }
             }
         });
     }

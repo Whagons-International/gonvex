@@ -10,6 +10,10 @@ default = []
 test-firebase-auth-emulator = []
 # Heap profiling builds: use the system allocator instead of mimalloc.
 system-alloc = []
+# Heap attribution builds: jemalloc with sampled heap profiling
+# (`_RJEM_MALLOC_CONF=prof:true,...`, dumps via GONVEX_HEAP_DUMP_PREFIX; read
+# them with jeprof). Never in release builds.
+jemalloc-prof = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 duckdb = ["dep:duckdb", "dep:calamine"]
 # Benchmark fixture (`gonvex_runtime::perf_fixture`): a Whagons-shaped
 # Runtime with a fake in-process module host. Never enabled in release builds.
@@ -20,6 +24,10 @@ gonvex-profiler = { path = "../profiler" }
 # Process allocator: lower fragmentation under bursty multi-threaded snapshot
 # work, and freed memory is returned to the OS promptly.
 mimalloc = { version = "=0.1.48", default-features = false }
+# Fast seeded hasher for per-event/per-row maps (see `fast_hash`).
+foldhash = { version = "=0.1.5" }
+tikv-jemallocator = { version = "=0.7.0", features = ["profiling"], optional = true }
+tikv-jemalloc-ctl = { version = "=0.7.0", optional = true }
 axum.workspace = true
 async-trait.workspace = true
 aes-gcm.workspace = true

@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS _gonvex_sync_changes (
 );
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_revision
   ON _gonvex_sync_changes (revision, ordinal) WHERE revision IS NOT NULL;
+-- Per-table replays (resume, cache deltas) of a range: skips other tables' rows.
+CREATE INDEX IF NOT EXISTS gonvex_sync_changes_table
+  ON _gonvex_sync_changes (table_name, revision, ordinal) WHERE revision IS NOT NULL;
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_pending
   ON _gonvex_sync_changes (event_id) WHERE revision IS NULL;
 CREATE INDEX IF NOT EXISTS gonvex_sync_changes_created_at
@@ -77,6 +80,10 @@ CREATE TABLE IF NOT EXISTS _gonvex_action_outbox (
 );
 CREATE INDEX IF NOT EXISTS _gonvex_action_outbox_pending
   ON _gonvex_action_outbox (available_at, created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS _gonvex_action_outbox_pending_path
+  ON _gonvex_action_outbox (action_path, available_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS _gonvex_action_outbox_processing
+  ON _gonvex_action_outbox (locked_at) WHERE status = 'processing';
 "#;
 
 /// Provenance recorded with a revision (replaces the `gonvex.*` GUCs).
@@ -201,7 +208,7 @@ pub async fn finalize_known(
     .await?
     .rows_affected();
     let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT table_name FROM _gonvex_sync_changes WHERE revision = $1 ORDER BY table_name",
+        "SELECT DISTINCT table_name FROM _gonvex_sync_changes INDEXED BY gonvex_sync_changes_revision WHERE revision = $1 ORDER BY table_name",
     )
     .bind(revision)
     .fetch_all(&mut *connection)
@@ -330,7 +337,7 @@ pub(crate) fn finalize_direct(
     let tables = {
         let mut tables = Vec::new();
         let mut statement = connection.prepare(
-            "SELECT DISTINCT table_name FROM _gonvex_sync_changes WHERE revision = $1 ORDER BY table_name",
+            "SELECT DISTINCT table_name FROM _gonvex_sync_changes INDEXED BY gonvex_sync_changes_revision WHERE revision = $1 ORDER BY table_name",
         )?;
         statement.bind(&[Bind::Integer(revision)])?;
         while statement.step()? {

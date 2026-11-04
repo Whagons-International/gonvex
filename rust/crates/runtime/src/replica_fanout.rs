@@ -160,7 +160,7 @@ pub(crate) struct Layout {
 }
 
 fn layout(changes: &[LogChange]) -> Layout {
-    let mut index = std::collections::HashMap::<(&str, &str), usize>::new();
+    let mut index = crate::fast_hash::FastMap::<(&str, &str), usize>::default();
     let mut rows: Vec<(String, usize, usize)> = Vec::new();
     for (position, change) in changes.iter().enumerate() {
         match index.get(&(change.table.as_str(), change.row_id.as_str())) {

@@ -240,23 +240,36 @@ pub async fn result_column_kinds(
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
     type Kinds = Arc<Vec<Option<JsonKind>>>;
-    type KindCache = Mutex<HashMap<(usize, u64, String), Kinds>>;
+    // Per (connection, epoch): statement text -> kinds. Looked up by `&str`
+    // (no copy of the text per call) with a fast seeded hasher; the texts are
+    // the runtime's and modules' own SQL.
+    type Fast<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
+    type KindCache = Mutex<Fast<(usize, u64), Fast<String, Kinds>>>;
     static CACHE: OnceLock<KindCache> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let mut handle = connection.lock_handle().await?;
     let raw = handle.as_raw_handle();
     let epoch = RESULT_KINDS_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
-    let key = (raw.as_ptr() as usize, epoch, sql.to_owned());
-    if let Some(kinds) = cache.lock().unwrap().get(&key).cloned() {
+    let key = (raw.as_ptr() as usize, epoch);
+    if let Some(kinds) = cache
+        .lock()
+        .unwrap()
+        .get(&key)
+        .and_then(|statements| statements.get(sql))
+        .cloned()
+    {
         return Ok(kinds);
     }
     let kinds = unsafe { declared_kinds(raw.as_ptr(), sql) }?;
     let kinds = Arc::new(kinds);
     let mut cache = cache.lock().unwrap();
-    if cache.len() > 4096 {
+    if cache.values().map(|statements| statements.len()).sum::<usize>() > 4096 {
         cache.clear();
     }
-    cache.insert(key, kinds.clone());
+    cache
+        .entry(key)
+        .or_default()
+        .insert(sql.to_owned(), kinds.clone());
     Ok(kinds)
 }
 
