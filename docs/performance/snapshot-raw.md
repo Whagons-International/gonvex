@@ -166,6 +166,8 @@ reproduce. Not measured: a lab run (integration thread).
   shared fan-out path in production anyway.
 * Aggregate resume still parses the source-table images it decides (interpreted
   visibility); a compiled `RowView::Json` check would remove that.
-* Observed, not investigated: in the `snapshot_cache` bench the resume scenarios cost about
-  the same as a full SQL scan on both binaries (Admin 140–155 ms vs 8 ms for a cache hit),
-  while `snapshot_raw`'s resume scenarios use the cache (6 ms).
+* In the `snapshot_cache` bench the resume scenarios cost about the same as a full SQL
+  scan on both binaries (Admin 140–155 ms vs 8 ms for a cache hit). Cause: the per-key
+  sparse bypass of perf/cache-heap (see `cache-heap.md`, "Per-member sparse decisions").
+  The bench's GrantOnly opens made the tasks key sparse, so every later resume skipped the
+  cache. Fixed on perf/resume-fix.
