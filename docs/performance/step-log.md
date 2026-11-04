@@ -400,3 +400,50 @@ this line. bc1f0a06 is admin-cli/export only (runtime binary unchanged); its Pos
 uses `capture::install`, our `check_restart.py` registers a no-op `gonvex_capture` for the
 same root cause. Tests on 6a934356: 497 passed, 0 failed, 6 ignored (admin-cli's Postgres
 export test not run: needs Postgres).
+
+### Cron :00 window at 200 users after action-depth (ad-cron-200)
+
+Binary: action-depth step (6a934356, sha256 `b075a23e6f1b…`), old-app lab, 200 users (thin + 8 SDK),
+plateau 16:46:18–17:06:20 (20 min; run.ts token refresh in place: all 200 sessions held past
+the 15-min mark), on- and off-CPU perf 16:59–17:04. Plateau overall: users 200/200, errors
+0.24 %, oracle 61 checks / 0 mismatched; heartbeat p50/p95/p99 9 / 138 / 1,534 ms, save
+100 / 194 / 984, delivery 88 / 184 / 2,443, taskDelivery 103 / 202 / 1,863 (p99s include the
+16:52 reconnect wave and a 17:03 link hiccup, see below). Runtime: 0.12 cores, 225 of 11,511
+periods throttled, peak 1,467 MiB, RSS 0.91 → 1.11 GiB over 20 min, `memory.events max` 0.
+
+Before/after for the :00 herd (heartbeat n / p95 / p99, ms):
+
+| minute | base @150 (base-cron-150) | action-depth @200 (ad-cron-200) |
+|---|---|---|
+| :55 | 16,144 / 27,586 (*/5 jobs) | 935 / 100 / 164 |
+| :58 | 1,370 / 2,099 | 916 / 113 / 152 |
+| :59 | 4,708 / 5,849 | 907 / 117 / 174 |
+| :00 | 31,804 / 36,592 | 914 / 115 / 185 |
+| :01 | 25,985 / 29,439 | 923 / 121 / 175 |
+| :02 | 52,023 / 58,778 | 940 / 123 / 195 |
+| :03 | 651 / 1,310 | 954 / 184 / 1,572 (link: ping timeout ~17:03:10, RTT to 1.5 s) |
+
+`window-report.py` (minute before vs two minutes after 17:00): heartbeat p95/p99 117/174 →
+118/181, save 199/316 → 184/194, delivery 162/296 → 174/197, taskDelivery 213/318 → 192/210.
+Runtime between 17:02:50 and 17:04:00 (the client blip): `delivery.queue_wait` p99 3.8 ms,
+`tokio.sched_lag` p99 2 ms, no long poll, so the 17:03 tail is the Mac↔arch3 link.
+
+| | base @150 | action-depth @200 |
+|---|---|---|
+| runtime memory at :00 → +2 min | anon 1,399 → 1,816 MiB, cgroup at 2 GiB, `memory.events max` 344 → 6,324 | anon 808 → 823 MiB, `max` 0 |
+| process RSS at :00 → +2 min | runtime 1.29 → 1.15 GiB + module host 395 → 788 MiB | one process (V8 in process) 1.08 → 1.10 GiB |
+| top-level Actions | — | `action.running` peak 1, `action.waiting` peak 0 |
+| longest poll | `outbox` 33.7 s (14:02:40) | 454 ms (`other`, 16:45:18, sign-in ramp); none > 30 ms after 16:50 |
+| `tokio.sched_lag` max, :00–:02 | 17.2 s | p99 2 ms, max 462 ms (whole plateau) |
+| `fn.total cron` p99 / max | — | 60 ms / 1.06 s |
+| scheduler | — | 2,755 completed, 0 failed, lag 0 |
+
+Isolate count is not exported by this build (no gauge). The `action.running` gauge shows the
+one-root-Action cap holding.
+
+**Idle RSS across :00 (new-app lab, Whagons split module, no users, action-depth binary,
+started 16:24:47):** process RSS 546 MB (16:25) → 640 MB (17:00) → 615–618 MB (17:02–17:06),
+HWM 672 MB, 84 threads; cgroup anon 408 → 522 MB. For comparison, Coordinator's staging data
+point for the same shape before action-depth: 528 MB → ~990 MB by :00 → ~1.07 GB after :13 (HWM
+1.11 GB). Idle RSS stays roughly flat across :00 with action-depth (+~95 MB in the first 35 min,
+no step at :00). Sampler log: `lab-5k-new/idle-rss-action-depth.log` (to 17:20).
