@@ -171,6 +171,9 @@ impl Config {
     }
 }
 
+/// A database's schema version and its tables with change capture.
+type Captured = (i64, Arc<BTreeSet<String>>);
+
 type Flights = HashMap<Key, Weak<tokio::sync::Mutex<()>>>;
 
 pub struct PrincipalCache {
@@ -182,7 +185,7 @@ pub struct PrincipalCache {
     flights: Mutex<Flights>,
     /// Per database: the schema version the capture check ran at and the
     /// tables with change capture.
-    captured: Mutex<HashMap<Box<str>, (i64, Arc<BTreeSet<String>>)>>,
+    captured: Mutex<HashMap<Box<str>, Captured>>,
     bytes: AtomicUsize,
     hits: AtomicU64,
     probed_hits: AtomicU64,
@@ -415,7 +418,7 @@ impl PrincipalCache {
         self.remove(&mut entries, &key);
         self.bytes.fetch_add(bytes, Relaxed);
         entries.insert(key, entry);
-        if self.inserts.fetch_add(1, Relaxed) % 256 == 0 || entries.len() > self.config.max_entries
+        if self.inserts.fetch_add(1, Relaxed).is_multiple_of(256) || entries.len() > self.config.max_entries
         {
             self.sweep(&mut entries);
         }

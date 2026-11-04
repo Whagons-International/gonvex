@@ -1707,6 +1707,7 @@ async fn resolve_member(
 /// Resolve a version 2 plan and, recursively, every plan it inherits from for
 /// the same member, attaching the tenant-shared parent ACL indexes. Legacy
 /// plans resolve exactly as before.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_with_parents<'a>(
     transaction: &'a mut TenantTransaction,
     session: &'a TenantSession,
