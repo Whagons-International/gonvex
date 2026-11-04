@@ -254,8 +254,13 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                 FeedEvent::Reset { .. } => 0,
             };
             for (index, (a, b)) in shared.iter_mut().zip(alone.iter_mut()).enumerate() {
-                // Half the connections use native row encoding.
-                let native = index % 2 == 1;
+                // A third of the connections each: JSON rows, native rows,
+                // JSON rows without null columns (`replicaOmitNulls`).
+                let native = [
+                    gonvex_runtime::delivery::RowEncoding::Json,
+                    gonvex_runtime::delivery::RowEncoding::Native,
+                    gonvex_runtime::delivery::RowEncoding::OmitNulls,
+                ][index % 3];
                 feed_share::set_sharing(Some(true));
                 let rest = fixture
                     .runtime
@@ -334,7 +339,7 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                 assert_eq!(
                     with.as_deref().map(String::from_utf8_lossy),
                     without.as_deref().map(String::from_utf8_lossy),
-                    "connection {index}, event {name}, native {native}"
+                    "connection {index}, event {name}, encoding {native:?}"
                 );
                 for (x, y) in a
                     .connection

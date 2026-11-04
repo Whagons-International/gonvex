@@ -88,7 +88,17 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
     let tasks = fixture.tenants[0].tasks.clone();
     let members = fixture.tenants[0].members.len();
     let mut connections = fixture.connect_all(0).await.unwrap();
-    for native in [false, true] {
+    use gonvex_runtime::delivery::RowEncoding;
+    for encoding in [RowEncoding::Json, RowEncoding::Native, RowEncoding::OmitNulls] {
+        let native = encoding == RowEncoding::Native;
+        // `replicaOmitNulls`: the old path's frame without null columns, as
+        // the connection loop sends it to such a client.
+        let legacy_encode = |message: &mut ServerMessage| {
+            if encoding == RowEncoding::OmitNulls {
+                gonvex_protocol::omit_nulls::omit_nulls(message);
+            }
+            perf_legacy_encode(message, native, None).unwrap()
+        };
         let hub = DeliveryHub::default();
         let mut batchers: Vec<_> = (0..members)
             .map(|_| {
@@ -153,14 +163,14 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
                                 change.old_value = None;
                             }
                         }
-                        let text = perf_legacy_encode(&mut legacy, native, None).unwrap();
+                        let text = legacy_encode(&mut legacy);
                         expected[index].push(serde_json::from_str(&text).unwrap());
                         let rest = batcher
                             .push(
                                 batch,
                                 &hub,
                                 &tenant_id,
-                                native,
+                                encoding,
                                 &connection.subscriptions,
                                 message,
                             )
@@ -173,7 +183,7 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
                                 let value: Value = serde_json::from_slice(&frame.bytes).unwrap();
                                 received[index].extend(expand(&value, bindings).0);
                             }
-                            let text = perf_legacy_encode(&mut other, native, None).unwrap();
+                            let text = legacy_encode(&mut other);
                             received[index].push(serde_json::from_str(&text).unwrap());
                         }
                     }
@@ -204,7 +214,7 @@ async fn batched_shared_frames_equal_each_connections_own_frames() {
                 assert_eq!(watermark, Some(last));
                 assert_eq!(
                     items, expected[index],
-                    "member {index} round {round} native={native}: batch differs from its own frames"
+                    "member {index} round {round} {encoding:?}: batch differs from its own frames"
                 );
                 shared_items += items.len() as u64;
             }
