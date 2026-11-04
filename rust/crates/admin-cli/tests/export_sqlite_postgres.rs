@@ -120,7 +120,30 @@ async fn export_sqlite_moves_a_postgres_deployment() {
            INSERT INTO accounts (id, email, name, disabled_at, created_at)
              VALUES ('acct-1', 'ada@example.com', 'Ada', NULL, '2024-01-02T03:04:05.678901Z');
            INSERT INTO account_identities (account_id, provider, subject, email, verified_email)
-             VALUES ('acct-1', 'google', 'sub-1', 'ada@example.com', true);"#,
+             VALUES ('acct-1', 'google', 'sub-1', 'ada@example.com', true);
+           -- Pending durable work and its actors (export rewrites only unresolvable ones).
+           INSERT INTO accounts (id, auth_realm_id, email, name, disabled_at)
+             VALUES ('acct-2', 'proj', 'bo@example.com', 'Bo', NULL),
+                    ('acct-off', 'proj', 'off@example.com', 'Off', '2024-01-01T00:00:00Z');
+           CREATE TABLE legacy_account_map (
+             source text NOT NULL, legacy_user_id text NOT NULL, account_id text NOT NULL,
+             resolution text NOT NULL, PRIMARY KEY (source, legacy_user_id));
+           INSERT INTO legacy_account_map VALUES
+             ('firebase', 'legacy-bo', 'acct-2', 'email'),
+             ('firebase', 'legacy-off', 'acct-off', 'email'),
+             ('firebase', 'legacy-dup', 'acct-2', 'email'),
+             ('laravel', 'legacy-dup', 'acct-1', 'email');
+           INSERT INTO gonvex_scheduled_jobs (id, project_id, tenant_id, function_path, run_at, scheduled_for, provenance, status)
+             VALUES
+             ('job-system', 'proj', 'acme', 'plans:generate', now(), now(),
+              '{"actorAccountId": "_gonvex_system", "actorMemberId": "_gonvex_system", "rootChannel": "system"}', 'pending'),
+             ('job-owner', 'proj', 'acme', 'plans:generate', now(), now(), '{"actorAccountId": "acct-2"}', 'pending'),
+             ('job-legacy', 'proj', 'acme', 'plans:generate', now(), now(),
+              '{"actorAccountId": "legacy-bo", "actorMemberId": "legacy-member"}', 'pending'),
+             ('job-ghost', 'proj', 'acme', 'plans:generate', now(), now(), '{"actorAccountId": "ghost"}', 'pending'),
+             ('job-off', 'proj', 'acme', 'plans:generate', now(), now(), '{"actorAccountId": "legacy-off"}', 'pending'),
+             ('job-dup', 'proj', 'acme', 'plans:generate', now(), now(), '{"actorAccountId": "legacy-dup"}', 'pending'),
+             ('job-done', 'proj', 'acme', 'plans:generate', now(), now(), '{"actorAccountId": "_gonvex_system"}', 'completed');"#,
     )
     .execute(&control)
     .await
@@ -195,6 +218,10 @@ async fn export_sqlite_moves_a_postgres_deployment() {
              VALUES ('mem-1', 'acct-1', 'active', 'Ada', '{"admin": true}');
            INSERT INTO _gonvex_action_outbox (id, action_path, args, status)
              VALUES ('act-1', 'mail:send', '{"to": "ada"}', 'pending');
+           INSERT INTO _gonvex_action_outbox (id, action_path, args, status, actor_user_id)
+             VALUES ('act-legacy', 'mail:send', '{}', 'processing', 'legacy-bo'),
+                    ('act-system', 'mail:send', '{}', 'processing', '_gonvex_system'),
+                    ('act-ghost', 'mail:send', '{}', 'processing', 'ghost');
            INSERT INTO _gonvex_reducer_idempotency (subject, idempotency_key, path, result)
              VALUES ('acct-1', 'k-1', 'tasks:create', '{"ok": true}');
            INSERT INTO _gonvex_sync_changes (transaction_id, revision, ordinal, table_name, row_id, operation, new_value)
@@ -210,6 +237,64 @@ async fn export_sqlite_moves_a_postgres_deployment() {
     let text = serde_json::to_string_pretty(&report).unwrap();
     assert!(report.ok, "{text}");
     assert!(!text.contains("secret"), "report leaks a password: {text}");
+
+    // Pending durable work: only actors the SQLite runtime cannot resolve change.
+    let control_report = report.control_plane.as_ref().unwrap();
+    let rewrites = control_report
+        .actor_rewrites
+        .iter()
+        .map(|rewrite| (rewrite.id.as_str(), rewrite.to.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rewrites,
+        vec![("job-legacy", "acct-2"), ("job-system", "system")],
+        "{text}"
+    );
+    for (job, reason) in [
+        ("job-ghost", "no enabled account and no legacy mapping"),
+        ("job-off", "missing or disabled"),
+        ("job-dup", "several accounts"),
+    ] {
+        assert!(
+            control_report
+                .findings
+                .iter()
+                .any(|finding| finding.starts_with("warning:")
+                    && finding.contains(job)
+                    && finding.contains(reason)),
+            "{job}: {text}"
+        );
+    }
+    let mut control_db = open(&directory.join("control.db")).await;
+    let actors: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        r#"SELECT id, json_extract(provenance, '$.actorAccountId'), json_extract(provenance, '$.actorMemberId')
+           FROM gonvex_scheduled_jobs ORDER BY id"#,
+    )
+    .fetch_all(&mut control_db)
+    .await
+    .unwrap();
+    let actor = |id: &str| actors.iter().find(|row| row.0 == id).unwrap().clone();
+    assert_eq!(actor("job-system"), ("job-system".into(), None, None));
+    assert_eq!(
+        actor("job-legacy"),
+        ("job-legacy".into(), Some("acct-2".into()), None)
+    );
+    assert_eq!(actor("job-owner").1.as_deref(), Some("acct-2"));
+    assert_eq!(actor("job-ghost").1.as_deref(), Some("ghost"));
+    assert_eq!(
+        actor("job-done").1.as_deref(),
+        Some("_gonvex_system"),
+        "completed jobs are history"
+    );
+    control_db.close().await.unwrap();
+    let tenant_rewrites = report
+        .databases
+        .iter()
+        .flat_map(|database| &database.actor_rewrites)
+        .map(|rewrite| (rewrite.id.as_str(), rewrite.to.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(tenant_rewrites, vec![("act-legacy", "acct-2")], "{text}");
+    assert!(text.contains("pending outbox Action act-ghost"), "{text}");
     let tenant_report = report
         .databases
         .iter()
