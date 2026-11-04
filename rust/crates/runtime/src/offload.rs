@@ -119,10 +119,11 @@ pub fn offload() -> &'static Offload {
 
 impl Offload {
     pub fn new(strategy: Strategy, threads: usize, nice: i32, inline_below: Duration) -> Self {
+        let name = "gonvex-offload";
         let runtime = (strategy == Strategy::Runtime).then(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(threads)
-                .thread_name("gonvex-offload")
+                .thread_name(name)
                 .enable_all()
                 .on_thread_start(move || lower_priority(nice))
                 .build()
@@ -134,7 +135,7 @@ impl Offload {
             for index in 0..threads {
                 let receiver = receiver.clone();
                 std::thread::Builder::new()
-                    .name(format!("gonvex-offload-{index}"))
+                    .name(format!("{name}-{index}"))
                     .spawn(move || {
                         lower_priority(nice);
                         loop {
@@ -794,10 +795,27 @@ pub struct SnapshotAdmission {
 struct Lanes {
     free: usize,
     long_active: usize,
-    short: std::collections::VecDeque<(Instant, tokio::sync::oneshot::Sender<()>)>,
-    long: std::collections::VecDeque<(Instant, tokio::sync::oneshot::Sender<()>)>,
+    short: std::collections::VecDeque<Waiter>,
+    long: std::collections::VecDeque<Waiter>,
+    next_id: u64,
 }
 
+/// A build waiting for a count slot. Slots are never handed to a waiter:
+/// `offer` marks the next few waiters (in lane order) and wakes them, and an
+/// offered waiter *claims* a free slot when its task actually runs. A waiter
+/// whose task is late (its executor busy, or the task aborted but not yet
+/// dropped) therefore never holds a slot idle: another offered waiter that
+/// runs first takes it (docs/performance/admission-fix.md).
+struct Waiter {
+    id: u64,
+    since: Instant,
+    offered: Option<Instant>,
+    waker: Option<std::task::Waker>,
+}
+
+/// Waiters offered a slot beyond the free count, so one late waiter does
+/// not leave the slot unused.
+const OFFER_EXTRA: usize = 2;
 /// A large build at the head of its lane may take the slot reserved for
 /// short builds once it waited this many times longer than the short head
 /// (aging: large builds are delayed under a burst of short ones, never
@@ -845,39 +863,107 @@ pub struct SnapshotPermit {
 struct Slot {
     admission: &'static SnapshotAdmission,
     long: bool,
+    /// When the slot was taken from the lanes (granted to this build, or
+    /// free on arrival).
+    taken: Instant,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
+        gonvex_profiler::record_duration(
+            gonvex_profiler::Stage::SnapshotSlotHold,
+            gonvex_profiler::Label::None,
+            self.taken.elapsed(),
+        );
         self.admission.release(self.long);
     }
 }
 
-/// A queued waiter; a slot handed to it after it was dropped is passed on.
-struct LaneWait {
+/// A queued waiter's future. Dropped unclaimed (deadline, cancellation), it
+/// leaves the lane and, if it had been offered a slot, offers it on.
+struct SlotWait {
     admission: &'static SnapshotAdmission,
     long: bool,
-    receiver: Option<tokio::sync::oneshot::Receiver<()>>,
+    id: Option<u64>,
 }
 
-impl Drop for LaneWait {
-    fn drop(&mut self) {
-        if let Some(mut receiver) = self.receiver.take() {
-            receiver.close();
-            if receiver.try_recv().is_ok() {
-                self.admission.release(self.long);
-            } else {
-                // Not handed a slot: forget the sender now, so the waiting
-                // count (and the waiter cap) exclude it.
-                let mut lanes = self.admission.lanes.lock().unwrap();
-                let lane = if self.long {
-                    &mut lanes.long
-                } else {
-                    &mut lanes.short
-                };
-                lane.retain(|(_, sender)| !sender.is_closed());
+impl Future for SlotWait {
+    type Output = Slot;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Slot> {
+        let admission = self.admission;
+        let long = self.long;
+        let Some(id) = self.id else {
+            panic!("SlotWait polled after completion");
+        };
+        let mut lanes = admission.lanes.lock().unwrap();
+        let lanes = &mut *lanes;
+        let long_active = lanes.long_active;
+        let free = lanes.free;
+        let lane = if long {
+            &mut lanes.long
+        } else {
+            &mut lanes.short
+        };
+        let index = lane
+            .iter()
+            .position(|waiter| waiter.id == id)
+            .expect("a waiting build stays in its lane until claimed or dropped");
+        let waiter = &mut lane[index];
+        let may_claim = waiter.offered.is_some()
+            && free > 0
+            && (!long
+                || long_active < admission.long_capacity
+                || waiter.since.elapsed() >= LONG_AGED);
+        if !may_claim {
+            if !waiter
+                .waker
+                .as_ref()
+                .is_some_and(|waker| waker.will_wake(context.waker()))
+            {
+                waiter.waker = Some(context.waker().clone());
             }
+            return Poll::Pending;
         }
+        let waiter = lane.remove(index).expect("index in lane");
+        lanes.free -= 1;
+        lanes.long_active += usize::from(long);
+        self.id = None;
+        let offered = waiter.offered.expect("claimed only when offered");
+        gonvex_profiler::record_duration(
+            gonvex_profiler::Stage::SnapshotGrantLag,
+            gonvex_profiler::Label::None,
+            offered.elapsed(),
+        );
+        Poll::Ready(Slot {
+            admission,
+            long,
+            taken: Instant::now(),
+        })
+    }
+}
+
+impl Drop for SlotWait {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else { return };
+        let wake = {
+            let mut lanes = self.admission.lanes.lock().unwrap();
+            let lane = if self.long {
+                &mut lanes.long
+            } else {
+                &mut lanes.short
+            };
+            let offered = lane
+                .iter()
+                .position(|waiter| waiter.id == id)
+                .and_then(|index| lane.remove(index))
+                .is_some_and(|waiter| waiter.offered.is_some());
+            if offered {
+                self.admission.offer(&mut lanes)
+            } else {
+                Vec::new()
+            }
+        };
+        wake.into_iter().for_each(std::task::Waker::wake);
     }
 }
 
@@ -907,6 +993,7 @@ impl SnapshotAdmission {
                 long_active: 0,
                 short: Default::default(),
                 long: Default::default(),
+                next_id: 0,
             }),
             capacity,
             long_capacity: if capacity >= 2 { capacity - 1 } else { 1 },
@@ -994,11 +1081,17 @@ impl SnapshotAdmission {
         };
         let estimate = self.estimate(&key, table);
         let reserved_kib = estimate.div_ceil(1024).clamp(1, self.budget_kib);
+        let budget_wait = Instant::now();
         let bytes = self
             .budget
             .acquire_many(reserved_kib as u32)
             .await
             .expect("snapshot budget is never closed");
+        gonvex_profiler::record_duration(
+            gonvex_profiler::Stage::SnapshotBudgetWait,
+            gonvex_profiler::Label::None,
+            budget_wait.elapsed(),
+        );
         let reserved = self.reserved_kib.fetch_add(reserved_kib, Relaxed) + reserved_kib;
         self.peak_reserved_kib.fetch_max(reserved, Relaxed);
         Ok(SnapshotPermit {
@@ -1014,7 +1107,7 @@ impl SnapshotAdmission {
 
     /// A count slot in the short or long lane. Cancel-safe.
     async fn slot(&'static self, long: bool) -> Result<Slot, SnapshotAdmissionError> {
-        let receiver = {
+        let (wait, wake) = {
             let mut lanes = self.lanes.lock().unwrap();
             let lane_open = if long {
                 lanes.long.is_empty()
@@ -1029,6 +1122,7 @@ impl SnapshotAdmission {
                 return Ok(Slot {
                     admission: self,
                     long,
+                    taken: Instant::now(),
                 });
             }
             if lanes.waiting() >= self.max_waiting {
@@ -1036,69 +1130,90 @@ impl SnapshotAdmission {
                 self.shed.fetch_add(1, Relaxed);
                 return Err(SnapshotAdmissionError("too many waiting builds"));
             }
-            let (sender, receiver) = tokio::sync::oneshot::channel();
+            lanes.next_id += 1;
+            let id = lanes.next_id;
+            let waiter = Waiter {
+                id,
+                since: Instant::now(),
+                offered: None,
+                waker: None,
+            };
             if long {
-                lanes.long.push_back((Instant::now(), sender));
+                lanes.long.push_back(waiter);
             } else {
-                lanes.short.push_back((Instant::now(), sender));
+                lanes.short.push_back(waiter);
             }
-            receiver
+            // A slot may be free while earlier offered waiters have not run
+            // yet: this one may be among the next to offer to.
+            let wake = if lanes.free > 0 {
+                self.offer(&mut lanes)
+            } else {
+                Vec::new()
+            };
+            (
+                SlotWait {
+                    admission: self,
+                    long,
+                    id: Some(id),
+                },
+                wake,
+            )
         };
-        let mut wait = LaneWait {
-            admission: self,
-            long,
-            receiver: Some(receiver),
-        };
-        // A sender is dropped only after a send or when `release` skips a
-        // closed receiver, so this cannot fail while the waiter lives.
-        let _ = wait
-            .receiver
-            .as_mut()
-            .expect("receiver until handed over")
-            .await;
-        wait.receiver = None;
-        Ok(Slot {
-            admission: self,
-            long,
-        })
+        wake.into_iter().for_each(std::task::Waker::wake);
+        Ok(wait.await)
     }
 
-    /// Returns a slot and hands free slots to waiters: short lane first,
-    /// then the long lane while it holds fewer than `long_capacity`; a long
-    /// head that aged ([`LONG_AGING`] and [`LONG_AGED`]) goes before short
-    /// ones and may use the reserved slot.
+    /// Returns a slot and offers the free slots to the next waiters.
     fn release(&self, long: bool) {
-        let mut lanes = self.lanes.lock().unwrap();
-        lanes.free += 1;
-        lanes.long_active -= usize::from(long);
+        let wake = {
+            let mut lanes = self.lanes.lock().unwrap();
+            lanes.free += 1;
+            lanes.long_active -= usize::from(long);
+            self.offer(&mut lanes)
+        };
+        wake.into_iter().for_each(std::task::Waker::wake);
+    }
+
+    /// Marks the next `free + OFFER_EXTRA` waiters in dispatch order as
+    /// offered (short lane first; the long lane while it holds fewer than
+    /// `long_capacity`, or once its head aged: [`LONG_AGING`], [`LONG_AGED`])
+    /// and returns their wakers. Waiters offered earlier keep their offer.
+    fn offer(&self, lanes: &mut Lanes) -> Vec<std::task::Waker> {
+        let mut wake = Vec::new();
+        if lanes.free == 0 {
+            return wake;
+        }
         let now = Instant::now();
-        while lanes.free > 0 {
-            let short_wait = lanes.short.front().map(|(at, _)| now - *at);
-            let long_wait = lanes.long.front().map(|(at, _)| now - *at);
-            let below_cap = lanes.long_active < self.long_capacity;
+        let picks = lanes.free + OFFER_EXTRA;
+        let (mut short, mut long, mut long_active) = (0usize, 0usize, lanes.long_active);
+        for _ in 0..picks {
+            let short_wait = lanes.short.get(short).map(|waiter| now - waiter.since);
+            let long_wait = lanes.long.get(long).map(|waiter| now - waiter.since);
+            let below_cap = long_active < self.long_capacity;
             let long_turn = match (long_wait, short_wait) {
                 (None, _) => false,
                 (Some(waited), None) => below_cap || waited >= LONG_AGED,
-                // Behind short builds only once aged (both bounds: a ratio
-                // alone is met by microsecond waits).
                 (Some(waited), Some(short)) => waited > short * LONG_AGING && waited >= LONG_AGED,
             };
-            if long_turn {
-                let (_, waiter) = lanes.long.pop_front().unwrap();
-                if waiter.send(()).is_ok() {
-                    lanes.free -= 1;
-                    lanes.long_active += 1;
-                }
-                continue;
+            let waiter = if long_turn {
+                long += 1;
+                long_active += 1;
+                &mut lanes.long[long - 1]
+            } else if short_wait.is_some() {
+                short += 1;
+                &mut lanes.short[short - 1]
+            } else {
+                break;
+            };
+            // Every picked waiter is woken, also one offered earlier that
+            // lost a claim race and went back to sleep; `snapshot.grant_lag`
+            // runs from its latest offer.
+            waiter.offered = Some(now);
+            if let Some(waker) = waiter.waker.take() {
+                wake.push(waker);
             }
-            if let Some((_, waiter)) = lanes.short.pop_front() {
-                if waiter.send(()).is_ok() {
-                    lanes.free -= 1;
-                }
-                continue;
-            }
-            break;
         }
+        wake
     }
 
     /// Highest reserved bytes since the last call (and reset to current).
@@ -1395,6 +1510,75 @@ mod tests {
         drop(cancelled);
         let _next = poll_now(next.as_mut()).expect("the handed-over slot moved on");
         assert_eq!(admission.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_waiter_that_does_not_run_never_holds_a_freed_slot() {
+        // The head waiter is never polled again (its executor is busy or its
+        // task was aborted but not yet dropped). The freed slot goes to the
+        // next waiter that runs, not to the stalled head.
+        let admission = leak(SnapshotAdmission::with_limits(
+            1,
+            1 << 30,
+            usize::MAX,
+            64,
+            Duration::from_secs(30),
+        ));
+        let held = admission.admit("a".into(), "t").await.unwrap();
+        let mut stalled = Box::pin(admission.admit("b".into(), "t"));
+        assert!(pending(stalled.as_mut()));
+        let next = admission.admit("c".into(), "t");
+        tokio::pin!(next);
+        assert!(pending(next.as_mut()));
+        drop(held);
+        let _next = poll_now(next.as_mut()).expect("the running waiter claims the slot");
+        assert_eq!(admission.available_permits(), 0);
+        // The stalled head still waits, in place, for the next slot.
+        assert!(pending(stalled.as_mut()));
+        assert_eq!(admission.waiting(), (1, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiter_that_lost_a_claim_race_is_woken_again() {
+        let admission = leak(SnapshotAdmission::with_limits(
+            1,
+            1 << 30,
+            usize::MAX,
+            64,
+            Duration::from_secs(30),
+        ));
+        let held = admission.admit("a".into(), "t").await.unwrap();
+        // Two waiting tasks; both are offered the slot when it frees.
+        let first = tokio::spawn(async move { admission.admit("b".into(), "t").await.unwrap() });
+        let second = tokio::spawn(async move { admission.admit("c".into(), "t").await.unwrap() });
+        while admission.waiting().0 < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        drop(held);
+        // One claims, the other goes back to sleep; when the winner
+        // releases, the loser is woken and claims.
+        let winner = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if first.is_finished() || second.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(winner.is_ok(), "one waiter claimed the freed slot");
+        let (done, other) = if first.is_finished() {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        drop(done.await.unwrap());
+        let last = tokio::time::timeout(Duration::from_secs(5), other)
+            .await
+            .expect("the waiter that lost the race was woken again");
+        drop(last.unwrap());
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(admission.waiting(), (0, 0));
     }
 
     #[tokio::test]

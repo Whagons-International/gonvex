@@ -775,7 +775,8 @@ fn main() {
             buckets.sort();
             let count = now.count - before.as_ref().map_or(0, |row| row.count);
             let q = |q: f64| (gonvex_profiler::quantile(&buckets, count, now.max, q) as f64 / 1e6 * 10.0).round() / 10.0;
-            json!({"n":count,"p50":q(0.5),"p90":q(0.9),"p99":q(0.99)})
+            let sum_s = now.sum.wrapping_sub(before.as_ref().map_or(0, |row| row.sum)) as f64 / 1e9;
+            json!({"n":count,"p50":q(0.5),"p90":q(0.9),"p99":q(0.99),"sum_s":(sum_s * 100.0).round() / 100.0})
         };
         let report = json!({
             "label": label,
@@ -799,6 +800,9 @@ fn main() {
             "server": {
                 "snapshot.permit_wait": stage("snapshot.permit_wait"),
                 "snapshot.permit_hold": stage("snapshot.permit_hold"),
+                "snapshot.grant_lag": stage("snapshot.grant_lag"),
+                "snapshot.slot_hold": stage("snapshot.slot_hold"),
+                "snapshot.budget_wait": stage("snapshot.budget_wait"),
                 "snapshot.build": stage("snapshot.build"),
                 "delivery.queue_wait": stage("delivery.queue_wait"),
                 "delivery.total": stage("delivery.total"),

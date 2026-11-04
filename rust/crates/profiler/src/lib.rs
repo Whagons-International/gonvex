@@ -216,6 +216,9 @@ stages! {
     // Snapshot path.
     SnapshotPermitWait => "snapshot.permit_wait", "snapshot", "Wait for the process-wide snapshot semaphore";
     SnapshotPermitHold => "snapshot.permit_hold", "snapshot", "Snapshot permit held (admitted .. released): the build's service time under admission";
+    SnapshotGrantLag => "snapshot.grant_lag", "snapshot", "Snapshot slot offered to a waiting build -> that build claimed it (the slot stays free meanwhile; another offered build may claim it first)";
+    SnapshotSlotHold => "snapshot.slot_hold", "snapshot", "Snapshot count slot taken (granted or free) .. released: grant lag + byte-budget wait + permit hold";
+    SnapshotBudgetWait => "snapshot.budget_wait", "snapshot", "Snapshot count slot held while waiting for the build's estimated bytes (byte budget)";
     SnapshotAcl => "snapshot.acl", "snapshot", "Parent ACL index preparation";
     SnapshotBegin => "snapshot.begin", "snapshot", "Read transaction open + clock read";
     SnapshotVisibility => "snapshot.visibility", "snapshot", "Visibility resolution for the subscriber";
