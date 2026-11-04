@@ -148,6 +148,7 @@ impl CachedRow {
 
     /// `eval_text` parsed (interpreted visibility only).
     pub(crate) fn eval_value(&self) -> Value {
+        let _site = crate::raw_sites::raw_site!(LegacyEvalRow);
         serde_json::from_str(self.eval_text()).unwrap_or(Value::Null)
     }
 
@@ -157,6 +158,7 @@ impl CachedRow {
         definition: &ReplicaCollectionDefinition,
         extra: &[String],
     ) -> Result<Self, ReplicaError> {
+        let _site = crate::raw_sites::raw_site!(LogImageRow);
         let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
         let projection = replica::project_row(image, definition)?;
         let key = replica::row_key(&projection, &definition.key)?;
@@ -208,6 +210,7 @@ impl CachedRow {
         extra: &[String],
         scratch: &mut String,
     ) -> Result<Self, ReplicaError> {
+        let mut _site = crate::raw_sites::raw_site!(CacheRowRaw);
         let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
         let checked = if extra.is_empty() {
             crate::canonical_row::check(&text)
@@ -215,6 +218,7 @@ impl CachedRow {
             None
         };
         let Some(checked) = checked else {
+            _site.set(crate::raw_sites::Site::CacheRowParsed);
             let image: Value = serde_json::from_str(&text).map_err(invalid)?;
             let mut row = Self::from_image(&image, definition, extra)?;
             if extra.is_empty() {
@@ -293,6 +297,8 @@ impl CacheEntry {
                     }
                 }
                 _ => {
+                    let _site = crate::raw_sites::raw_site!(AclDecode);
+                    crate::raw_sites::rows(crate::raw_sites::Site::AclDecode, self.rows.len());
                     *acl = Some(DecodedAcl {
                         scope: scope.clone(),
                         rows: self
@@ -969,6 +975,7 @@ pub(crate) fn view(
     args: &Value,
     visible: &mut dyn FnMut(&CachedRow, Option<usize>) -> bool,
 ) -> Result<Option<View>, ReplicaError> {
+    let _site = crate::raw_sites::raw_site!(CacheView);
     let extra = extra_columns(definition, plan);
     // Keys whose rows the log replaces, and their rows at `revision`.
     let mut replaced = crate::fast_hash::FastSet::<Arc<str>>::default();
@@ -1080,6 +1087,7 @@ pub(crate) fn view(
                 * std::mem::size_of::<CachedRow>();
         CacheEntry::with_heap(entry.epoch.clone(), revision, entry.built, all, heap)
     });
+    crate::raw_sites::rows(crate::raw_sites::Site::CacheView, rows.len());
     Ok(Some(View {
         rows,
         window,

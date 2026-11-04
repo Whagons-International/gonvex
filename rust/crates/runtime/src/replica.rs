@@ -679,6 +679,7 @@ impl Runtime {
                             continue;
                         }
                         let image = |row: &Value| -> Result<Option<(Value, String)>, ReplicaError> {
+                            let _site = crate::raw_sites::raw_site!(ResumeImage);
                             if !row_in_collection(
                                 row,
                                 &request.args,
@@ -776,6 +777,7 @@ impl Runtime {
                                 if request.hashes.get(&*row.key).map(String::as_str)
                                     != Some(&*row.hash)
                                 {
+                                    let _site = crate::raw_sites::raw_site!(ReconcileRow);
                                     upserts.push(row.row.to_value());
                                 }
                                 seen.insert(row.key);
@@ -1413,6 +1415,8 @@ pub(crate) struct CollapsedChange<'a> {
 pub(crate) type CollapsedChanges<'a> = BTreeMap<(&'a str, &'a str), CollapsedChange<'a>>;
 
 pub(crate) fn collapse_changes(changes: &[LogChange]) -> CollapsedChanges<'_> {
+    let _site = crate::raw_sites::raw_site!(Collapse);
+    crate::raw_sites::rows(crate::raw_sites::Site::Collapse, changes.len());
     let mut collapsed = CollapsedChanges::new();
     for change in changes {
         let entry = collapsed
@@ -1543,6 +1547,7 @@ fn apply_rows_with(
     mut compiled: Option<(&mut crate::visibility_class::EvalMemo, &str)>,
     share: Option<&crate::feed_share::EventShare>,
 ) -> Result<Option<SubscriptionDelta>, ReplicaError> {
+    let _site = crate::raw_sites::raw_site!(FeedApplyRows);
     if context.before.is_some() {
         // The event changed this principal in memory: rebind.
         subscription.mask.clear();
@@ -2026,6 +2031,7 @@ pub(crate) async fn resume_changes(
     let rows = query.fetch_all(&mut **transaction.transaction()).await?;
     rows.iter()
         .map(|row| {
+            let _site = crate::raw_sites::raw_site!(LogRowDecode);
             Ok(LogChange {
                 revision: row.try_get::<i64, _>("revision")?.max(0) as u64,
                 ordinal: row.try_get::<Option<i64>, _>("ordinal")?.unwrap_or(0) as i32,
@@ -2223,10 +2229,14 @@ async fn collect_window(
             tokio::task::yield_now().await;
         }
         let text = row?;
+        let mut _site = crate::raw_sites::raw_site!(ScanRowRaw);
         // Canonical bytes without a `Value` when the row is provably
         // canonical up to column order (the common case); otherwise the
         // row is parsed once and written by `stable_json`, exactly as before.
         let checked = crate::canonical_row::check(&text);
+        if checked.is_none() {
+            _site.set(crate::raw_sites::Site::ScanRowParsed);
+        }
         let parsed;
         // (key, (order value, key value) when ordered, canonical text)
         let (key, boundary, canonical) = match &checked {
