@@ -4,6 +4,7 @@
 pub mod accept;
 pub mod action_calls;
 mod auth_revalidation;
+mod open_reasons;
 mod action_gate;
 #[cfg(test)]
 mod bridge_bench;
@@ -1736,6 +1737,7 @@ async fn websocket(
     let mut sent_zero_bootstrap_watermark = false;
     // Removed and dropped subscriptions are freed on the offload pool.
     let mut replicas = offload::RetiringMap::default();
+    let mut socket_opens = open_reasons::SocketOpens::default();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     let open_progress = replica_opens.progress();
     // Retain at most one decoded, transport-size-bounded frame. While it waits
@@ -1913,6 +1915,7 @@ async fn websocket(
             }
             _ = std::future::ready(()), if admit_replica => {
                 let request = pending_replica_opens.pop_front().unwrap();
+                socket_opens.record(&request);
                 snapshot_delivery.remove(&request.id);
                 legacy_snapshot_delivery.remove(&request.id);
                 replicas.remove(&request.id);
@@ -2287,6 +2290,7 @@ async fn websocket(
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         wake_dirty = true;
+                        open_reasons::add(open_reasons::Reason::ResetFeedLagged, replicas.len() as u64);
                         for subscription in replicas.values() {
                             let response = ServerMessage::ReplicaReset {
                                 id: subscription.id.clone(),
@@ -3575,6 +3579,7 @@ async fn websocket(
                     }
                 }
                 Ok(ClientMessage::ReplicaClose { id }) => {
+                    open_reasons::add(open_reasons::Reason::Close, 1);
                     replica_opens.remove(&id);
                     legacy_snapshot_delivery.remove(&id);
                     replicas.remove(&id);
