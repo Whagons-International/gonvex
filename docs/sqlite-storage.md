@@ -76,6 +76,10 @@ of every file) has one process-wide soft limit,
 `GONVEX_SQLITE_CACHE_BUDGET_MB` (default 128; 0 disables): past it page
 caches recycle instead of growing. Idle readers close after
 `database_idle_timeout` (runtime default 15 s).
+While connection heap (schemas, statements) exceeds three quarters of that budget,
+the reader sweep closes warm readers of quiet databases first, then busy databases' idle
+extra readers, the latter at most once per `GONVEX_DB_BUSY_BUDGET_CLOSE_MS` (default 60 s;
+0 = every sweep) per database, since a busy database reopens them at once.
 
 Read-only connections' worker threads run at nice 10 (`GONVEX_SQLITE_READER_NICE`, default 10,
 0 = unchanged), as do the offload/snapshot pool threads (`GONVEX_OFFLOAD_NICE`, default 10), so
