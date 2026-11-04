@@ -499,13 +499,9 @@ fn indexes_ready_now(resolved: &ResolvedVisibility, revision: u64, epoch: &str) 
 }
 
 /// The union of the changed columns of a collapsed row's changes
-/// (`changes[first..=last]` of that table and row): empty when some change
+/// (`changes[first..=last]` of that table and row): None when some change
 /// names none (unknown).
-fn changed_columns<'a>(
-    changes: &'a [LogChange],
-    first: usize,
-    last: usize,
-) -> Option<Vec<&'a str>> {
+fn changed_columns(changes: &[LogChange], first: usize, last: usize) -> Option<Vec<&str>> {
     let (table, row) = (&changes[first].table, &changes[first].row_id);
     let mut columns = Vec::new();
     for change in &changes[first..=last] {
@@ -554,6 +550,22 @@ pub(crate) fn shape(
             return Err(Path::DuplicateStream);
         }
         let touched = layout.tables.contains(&subscription.definition.table);
+        // A collection whose own filters (argument equalities, exclusions)
+        // admit neither image of any changed row of its table decides no row
+        // and holds none of them (a task detail window on another task): it
+        // only advances, so it stays out of the outcome key.
+        let filtered_out = touched
+            && layout
+                .rows
+                .iter()
+                .filter(|(table, _, _)| *table == subscription.definition.table)
+                .all(|(_, first, last)| {
+                    let admits = |row: &serde_json::Value| {
+                        !row.is_null()
+                            && collection_filters_admit(row, &subscription.args, &subscription.definition)
+                    };
+                    !admits(&changes[*first].old_value) && !admits(&changes[*last].new_value)
+                });
         let state = if revision <= subscription.cursor.revision {
             State::Ahead
         } else {
@@ -667,7 +679,7 @@ pub(crate) fn shape(
                         None => return Err(Path::Hit),
                     }
                 }
-                if parent_changed && touched && !parents_unmoved {
+                if parent_changed && touched && !parents_unmoved && !filtered_out {
                     // The mask step decides the source rows against the
                     // parents' before-images (overlay), which differ from the
                     // index on what visibility reads.
@@ -689,12 +701,27 @@ pub(crate) fn shape(
                 {
                     return Err(Path::CursorEpoch);
                 }
+                if filtered_out {
+                    // Applied with no row by the full path, which binds the
+                    // mask; the cursor advances.
+                    subscription
+                        .mask
+                        .get(&subscription.visibility, &subscription.resolved, scope);
+                    shape.push(ShapeEntry {
+                        state: State::Skip,
+                        visible: 0,
+                        definition: ByAddress(None),
+                        args: ByAddress(None),
+                        identity: keys.identity,
+                    });
+                    continue;
+                }
                 State::Apply
             } else {
                 State::Skip
             }
         };
-        if !touched {
+        if !touched || filtered_out {
             shape.push(ShapeEntry {
                 state,
                 visible: 0,
