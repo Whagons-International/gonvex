@@ -133,7 +133,9 @@ services:
     container_name: ${LOAD_PREFIX:-gvsq}-remote-proxy
     network_mode: service:namespace
     user: '${LOAD_UID:-1000}:${LOAD_GID:-1000}'
-    cpus: ${LOAD_PROXY_CPUS:-2}
+    cpus: ${LOAD_PROXY_CPUS:-4}
+    environment:
+      PROXY_WORKERS: ${LOAD_PROXY_WORKERS:-4}
     mem_limit: 256m
     entrypoint: [python3, /harness/remote-proxy.py, /proxy]
     volumes:
