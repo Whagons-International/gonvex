@@ -958,3 +958,30 @@ cores, throttled periods 360 vs 57, presence `fn.total` p99 4.72 s vs 50 ms, red
 bursts in the cgroup (more syscalls for unbatched frames plus the new reader/offload nice
 settings changing scheduling inside the 1-vCPU cgroup), not delivery. One run each; not
 pursued further.
+
+## Step 12: perf/open-visibility e0f44750 + perf/fast-hash ee06c759 (f42ecfc0)
+
+Both merged clean on 0b3d595a (feed-backlog not yet pushed; runs below are without it). The
+vendored `rust/vendor/serde_json` is patched in through `[patch.crates-io]` in `rust/Cargo.toml`;
+the lab builds host binaries from the step worktree, so `Dockerfile.runtime` is not involved.
+Tests on f42ecfc0: `cargo test --workspace --no-fail-fast` 657 passed / 0 failed / 8 ignored;
+`cargo test -p gonvex-runtime --features perf-fixture --no-fail-fast` 407 passed / 0 failed / 9
+ignored (all oracles, perf fixture v2 rebuilt). Binary `lab-5k/bin-open-vis`.
+
+### Do snapshot builds continue after their open is cancelled? (1k, ch-1k-prod-b)
+
+- `snapshot.build` is a scope timer (it records when the build future is dropped, cancelled or
+  not): 66.3/s at 1k; the stages after the global permit (`snapshot.acl`, `.begin`,
+  `.visibility`) run 39.5/s. So **~26.8/s builds ended before they got a permit**: dropped while
+  waiting (p50 permit wait 36 s), before any SQL or visibility work. This matches the "builds
+  that produced no entry"; those opens cost a queue slot and a later re-open, not build CPU.
+- Code path: `replica.close` calls `ReplicaOpenQueue::remove` (aborts the `Abortable` around a
+  waiting or running preparation), socket teardown `clear()`s the queue (drops the offloaded
+  tasks), and the shared cache build runs inline in the opener's future (no detached spawn):
+  a cancelled build stops at its next `.await`.
+- Not measurable from the current profile: CPU spent after cancellation inside synchronous
+  sections (row decode/visibility between awaits), and a shared build discarded when the opener
+  holding the per-key build lock is aborted (the next opener rebuilds). `snapshot.send` is not a
+  completion proxy (5.4/s vs 40/s builds even at 500 production-mix, where nothing times out).
+  To settle it, count preparations aborted after permit acquisition (in `ReplicaOpenQueue::remove`
+  for an active entry) and cache builds whose holder was dropped.
