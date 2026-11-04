@@ -1158,3 +1158,88 @@ per-connection socket work ≈ 4×. The default mix additionally needs the notif
 (push-notification actions, unassigned-task fan-out) cut ≈ 7× or moved off the 1 vCPU.
 Not measured: a 2.5k run (1k does not pass yet), the quadratic case past 1k (only two points),
 a frame-pointer run at 1k, and the per-class vs per-connection split of delivery (no counter).
+
+## Step 14: burst-control 5ca42585 (fast-forward of 165b5a2f)
+
+Merge: fast-forward to 5ca42585 (no conflicts). Tests (`targets/integrate-burst-control`): workspace
+**661 passed / 0 failed / 8 ignored**, perf-fixture **414 / 0 / 9** (incl. `tests/burst_control.rs`).
+Lab: `compose.new.yaml` now passes `GONVEX_FEED_DURING_ADMISSION` / `GONVEX_FEED_MERGE_LAG` from
+`LOAD_FEED_DURING_ADMISSION` / `LOAD_FEED_MERGE_LAG` (defaults 1/1 = code defaults); each case's
+`runtime-env` records the values used.
+
+Oracle gate (old app, 100 users): bc-oracle-100 23 checks / 0 mismatched / `unsupported` {} / 0.08 %
+errors, heartbeat p95/p99 49/68, save 89/121, delivery 94/119, taskDelivery 119/172 ms; nobatch 23 / 0
+/ {} / 0.08 %, heartbeat 43/59, save 109/205, delivery 49/72 ms. Runtime 0.08 cores.
+
+**Contamination.** The first series (bc-1k-prod-1..3, bc-500, bc-1k-prod-fp) overlapped another thread's
+CPU-heavy arch3 work (delivery-coverage: `cargo test` full suites 05:29–05:45, clippy and benches
+05:45–05:55, a lab build 05:55–05:57): run 1↔tfull1, run 2↔tfull2, run 3 (the collapse: 0.91 cores,
+3.7 % errors, 1 visibility check "0 leaked, 236 missing after 15 s" while opens waited 21–25 s)↔tfull3,
+bc-500↔bench8, fp run↔lab build. They are kept below but not used for medians. The repeat series
+(`qb-*`) waits before each case until no other thread's coach-resources unit is active and the 1-min
+load is < 2, and logs host `/proc/stat` (host busy 2.2–2.6 of 14 cores on every qb case: runtime,
+proxy, monitor and perf only). Toggles on and off interleaved.
+
+Production mix, 1,000 users (180 s plateau; all 1,000/1,000 connected, 1.00 sockets per account, 0
+mismatched). Columns: save, taskDelivery, presence delivery, query = window open, reconnect, p50/p95/p99 ms;
+snapshot permit-wait p90; delivery queue-wait p99.
+
+| case | burst control | errors | save | taskDelivery | presence | query | reconnect | cores (throttled) | permit p90 | queue p99 |
+|---|---|---:|---|---|---|---|---|---|---:|---:|
+| qb-1k-on-1 | on | 0.04 % | 60 / 1,228 / 4,713 | 121 / 1,118 / 1,761 | 620 / 1,174 / 1,615 | 59 / 8,172 / 10,266 | 57 / 187 / 525 | 0.69 (708/1,764) | 9.7 s | 183 ms |
+| qb-1k-on-2 | on | 0.04 % | 58 / 1,267 / 4,406 | 122 / 1,206 / 2,283 | 615 / 1,228 / 1,704 | 57 / 9,778 / 12,807 | 54 / 146 / 307 | 0.70 (732/1,772) | 9.3 s | 272 ms |
+| qb-1k-on-3 | on | 0.09 % | 71 / 1,458 / 7,854 | 131 / 1,271 / 1,967 | 639 / 1,345 / 1,849 | 105 / 10,521 / 15,268 | 60 / 157 / 363 | 0.72 (775/1,765) | 10.0 s | 247 ms |
+| **on, median (spread)** | | 0.04 % | 60 / **1,267** (1,228–1,458) / **4,713** (4,406–7,854) | 122 / 1,206 / 1,967 | 620 / 1,228 / 1,704 | 59 / **9,778** (8,172–10,521) / 12,807 | 57 / 157 / 363 | 0.70 | 9.7 s | 247 ms |
+| qb-1k-off-1 | off (both 0) | 0.13 % | 69 / 12,963 / 19,600 | 130 / 6,168 / 11,879 | 567 / 1,025 / 1,148 | 106 / 13,876 / 18,046 | 53 / 132 / 192 | 0.70 (744/1,763) | 10.6 s | 17.2 s |
+| qb-1k-off-2 | off (both 0) | 0.13 % | 65 / 8,888 / 14,301 | 125 / 2,188 / 7,503 | 553 / 1,028 / 1,118 | 100 / 9,388 / 14,274 | 54 / 143 / 211 | 0.69 (698/1,766) | 9.2 s | 13.9 s |
+| bc-1k-prod-nomerge | admission on, merge 0 | 0.22 % | 111 / 6,492 / 18,010 | 154 / 914 / 1,473 | 577 / 1,053 / 1,277 | 3,075 / 14,744 / 25,472 | 55 / 119 / 190 | 0.75 (866/1,772) | 10.1 s | 381 ms |
+| bc-1k-prod-off (quiet, before the qb gate) | off | 1.98 % | 10,686 / 48,747 / 70,648 | 3,710 / 25,937 / 40,240 | 610 / 1,086 / 1,434 | 14,430 / 27,356 / 29,475 | 73 / 282 / 689 | 0.93 (1,448/1,759) | 15.3 s | 38.9 s |
+| bc-1k-prod-1 (contaminated) | on | 0.17 % | 123 / 1,740 / 9,413 | 166 / 1,378 / 1,897 | 642 / 1,320 / 1,704 | 255 / 12,037 / 17,131 | 56 / 140 / 326 | 0.79 | 14.0 s | 386 ms |
+| bc-1k-prod-2 (contaminated) | on | 0.04 % | 82 / 2,333 / 11,721 | 137 / 1,323 / 2,672 | 604 / 1,157 / 1,597 | 102 / 12,418 / 16,938 | 56 / 138 / 207 | 0.76 | 9.5 s | 202 ms |
+| bc-1k-prod-3 (contaminated) | on | 3.68 % | 650 / 29,058 / 57,516 | 428 / 2,322 / 2,993 | 673 / 1,610 / 2,399 | 18,949 / 24,555 / 28,021 | 63 / 268 / 519 | 0.91 | 21.0 s | 497 ms |
+| rf-1k-prod median (step 13) | – | 0.04 % | 48 / 4,225 / 9,510 | 111 / 1,023 / 4,536 | 591 / 1,023 / 1,197 | 53 / 5,438 / 8,435 | 56 / 184 / 494 | 0.64 | 5.1 s | 7.4 s |
+
+**Burst control does what it says at 1k:** delivery queue-wait p99 14–17 s → 0.18–0.27 s, save p95
+9–13 s (off, same binary) → 1.2–1.5 s, p99 14–20 s → 4.4–7.9 s, 0 mismatches, errors ≤ 0.09 %. **1k
+still fails:** save p95 1.27 s, window opens p95 8–10 s (snapshot permit wait p90 ≈ 9.7 s, CPU-bound
+as expected: 0.70 cores, 40–44 % of periods throttled), and presence delivery p95 rises from ≈ 1.02 s
+to 1.17–1.35 s (no longer just the 1 s tick). Not a Coach milestone; 2.5k not attempted.
+
+**Burst control costs CPU: merged feed events lose cross-connection sharing.** Default mix 500, clean
+A/B on the same binary (bc-500-off 06:00, bc-500-b 06:04, no other thread's work running):
+
+| case | errors | save | taskDelivery | query | cores (throttled) |
+|---|---:|---|---|---|---|
+| bc-500-off (both 0) | 0.17 % | 155 / 772 / 1,192 | 195 / 851 / 1,168 | 53 / 317 / 1,390 | **0.65** (770/1,782) |
+| bc-500-b (defaults) | 0.17 % | 394 / 1,268 / 1,738 | 494 / 1,316 / 1,910 | 109 / 830 / 1,458 | **0.79** (1,055/1,772) |
+| bc-500 (defaults, contaminated) | 0.17 % | 674 / 2,220 / 2,932 | 747 / 1,998 / 2,734 | 206 / 1,341 / 2,118 | 0.90 (1,414/1,771) |
+| rf-500 (step 13) | 0.17 % | 142 / 965 / 1,929 | 214 / 875 / 1,799 | 53 / 617 / 3,613 | 0.67 (815/1,775) |
+
+With the toggles on, the runtime spends +0.14 cores (+22 %) on the same load (network threads 0.09
+→ 0.21–0.24 cores, offload 0.11 → 0.17–0.23), and every latency is worse at 500. Mechanism (code and
+counters):
+- `feed_share::EventShares` keys a shared decision set on epoch, revision **and the address of the
+  broadcast's change list** (`feed_share.rs:218`). `merge_waiting_feed` builds a new
+  `Arc<Vec<change>>` per connection (`change_feed::merge_transactions`), so a merged event never
+  finds the shares the other connections built for the same transactions and evaluates visibility
+  alone. Shares created / found: bc-500-off 850 / 260,605 (307 hits per share), bc-500-b ≈ 55k / 138k
+  (2.5); at 1k quiet: off 22–41k / 1.11–1.13 M (27–50), on 118–135k / 0.78–0.83 M (5.7–7.0).
+- The encoded-item memo (`TenantFrames::item`, key revision + kind, variants compared by full
+  `ServerMessage` equality, `MAX_VARIANTS` 16) gets one variant per distinct merged range, so lookups
+  compare several large messages and then encode privately anyway.
+- `merge_waiting_feed` checks mergeability by calling `merge_transactions` on each new pair, which
+  clones both change lists and drops the result, then merges the whole set again (O(n²) clones per
+  lagging connection).
+Frame-pointer profile at 1k (bc-1k-prod-fp; partly overlapped another thread's lab build, so shares
+are indicative): feed apply per connection 43 % of 0.80 cores vs 28.9 % at 500 before; inside it
+`merge_waiting_feed` 7.4 %, `merge_transactions` 6.6 %, Arc drop / drop glue 4.2 %, clones 4.4 %,
+row projection / stable encoding 2.7 % (0.5 % before).
+Suggested fix (for burst-control's owner): merge by reference, not by copy. Keep the original
+`Arc` change lists of the merged events and apply them through their existing shares (one share per
+source event); check mergeability from (epoch, revision) without building a merged event; or key
+shares by (epoch, revision range) and publish one canonical merged event per range. The feed during
+admission alone (merge 0, `bc-1k-prod-nomerge`) gives a delivery queue p99 of 0.38 s but save p95 6.5 s,
+so the merge is what fixes saves at 1k; it needs to stop costing sharing.
+
+Resume: fallbacks per reconnect stay low (`snapshotCache.fallbacks` 64 per 1,237 reconnects in
+bc-500-off); reconnect p50 47–60 ms, p99 ≤ 525 ms in every quiet run.
