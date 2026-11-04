@@ -523,6 +523,71 @@ impl Fixture {
         Ok((rows, fast, mismatched, first))
     }
 
+    /// `replicaOmitNulls` proof over every row of every table of `tenant`
+    /// (snapshot encoding, all declared columns): the row without its null
+    /// members, restored with the column list as the SDK does, has the same
+    /// text (key order included) and the same canonical hash as the row.
+    /// Returns (rows, rows with a null member, mismatches, full bytes,
+    /// stripped bytes, first mismatch).
+    pub async fn omit_nulls_check(
+        &self,
+        tenant: usize,
+    ) -> FixtureResult<(usize, usize, usize, usize, usize, Option<String>)> {
+        let route = &self.tenants[tenant].route;
+        let mut transaction =
+            gonvex_store::begin_transaction(self.pools(), &route.database_url, true).await?;
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_all(&mut **transaction.transaction())
+        .await?;
+        let (mut rows, mut with_nulls, mut mismatched, mut full, mut stripped) = (0, 0, 0, 0, 0);
+        let mut first = None;
+        for table in tables {
+            let columns = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &table)
+                .await?
+                .into_iter()
+                .map(|column| (column.name.clone(), column.kind()))
+                .collect::<Vec<_>>();
+            if columns.is_empty() {
+                continue;
+            }
+            let names = columns.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+            let statement = format!(
+                "SELECT {} FROM \"{}\" AS r",
+                gonvex_store::rows::json_object_expr("r", &columns),
+                table.replace('"', "\"\"")
+            );
+            let texts: Vec<Option<String>> = sqlx::query_scalar(&statement)
+                .fetch_all(&mut **transaction.transaction())
+                .await?;
+            for text in texts.into_iter().flatten() {
+                rows += 1;
+                full += text.len();
+                let wire = gonvex_protocol::omit_nulls::strip_null_members(&text);
+                with_nulls += usize::from(wire.is_some());
+                let wire = wire.unwrap_or_else(|| text.clone());
+                stripped += wire.len();
+                let original: serde_json::Value = serde_json::from_str(&text)?;
+                let restored = gonvex_protocol::omit_nulls::restore(
+                    &serde_json::from_str(&wire)?,
+                    &names,
+                );
+                let (raw_hash, value_hash, _) = crate::canonical_row::hashes(&text)?;
+                let restored_hash = crate::canonical_row::hashes(&serde_json::to_string(&restored)?)?.1;
+                if serde_json::to_string(&restored)? != serde_json::to_string(&original)?
+                    || restored_hash != value_hash
+                    || restored_hash != raw_hash
+                {
+                    mismatched += 1;
+                    first.get_or_insert_with(|| format!("{table}: {text} / {wire}"));
+                }
+            }
+        }
+        transaction.commit().await?;
+        Ok((rows, with_nulls, mismatched, full, stripped, first))
+    }
+
     /// Everything committed to `tenant` after `revision`, as one event.
     pub async fn feed_since(&self, tenant: usize, revision: u64) -> FixtureResult<FeedEvent> {
         let route = &self.tenants[tenant].route;

@@ -3,6 +3,11 @@
 //! (the oracle) after every transaction, resume and principal change, on the
 //! shared Whagons fixture (small shape).
 //!
+//! The same scenario runs for a `replicaOmitNulls` client: every message it
+//! receives is encoded as the runtime sends it to such a client (no null
+//! columns, `columns` on open answers), round-tripped through its wire text
+//! and restored as the SDK does; its digests and rows must equal the oracle's.
+//!
 //!   cargo test -p gonvex-runtime --features perf-fixture --test replica_state
 
 #[path = "support/replica_client.rs"]
@@ -27,19 +32,24 @@ struct Client {
     /// Old clients never apply the connection watermark: their windows only
     /// advance with a delta or ready.
     watermarks: bool,
+    /// `replicaOmitNulls` encoding and restoration.
+    omit_nulls: bool,
     session: TenantSession,
     subscriptions: BTreeMap<String, ReplicaSubscription>,
     model: ClientModel,
 }
 
 impl Client {
-    async fn connect(fixture: &Fixture, member: usize) -> Self {
+    async fn connect(fixture: &Fixture, member: usize, omit_nulls: bool) -> Self {
+        let mut model = ClientModel::new(Some(DigestKind::Xor));
+        model.omit_nulls = omit_nulls;
         let mut client = Self {
             member,
             watermarks: true,
+            omit_nulls,
             session: fixture.session(0, member),
             subscriptions: BTreeMap::new(),
-            model: ClientModel::new(Some(DigestKind::Xor)),
+            model,
         };
         for path in WHAGONS_SUBSCRIPTIONS {
             client.model.register(path, path, "", json!({}));
@@ -51,11 +61,14 @@ impl Client {
     async fn reopen(&mut self, fixture: &Fixture, id: &str) -> Vec<ServerMessage> {
         let path = self.model.windows[id].path.clone();
         let request = self.model.open_request(id, &path, &json!({}));
-        let opened = fixture
+        let mut opened = fixture
             .runtime
             .open_replica(&self.session, request)
             .await
             .unwrap();
+        if self.omit_nulls {
+            gonvex_runtime::replica::omit_open_nulls(&mut opened);
+        }
         match opened.subscription {
             Some(subscription) => {
                 self.model.windows.get_mut(id).unwrap().entity =
@@ -76,6 +89,12 @@ impl Client {
             .apply_feed_event(&self.session, &mut self.subscriptions, event.clone())
             .await
             .unwrap();
+        if self.omit_nulls {
+            // As the connection loop sends feed frames to such a client.
+            messages
+                .iter_mut()
+                .for_each(gonvex_protocol::omit_nulls::omit_nulls);
+        }
         self.model.apply_all(&messages);
         if let FeedEvent::Transaction { revision, .. } = event {
             if self.watermarks {
@@ -172,6 +191,18 @@ fn text(value: &str) -> SqlValue {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_principal_changes() {
+    scenario(false).await;
+}
+
+/// `replicaOmitNulls`: identical rows and digests although every null column
+/// is left out on the wire (rows with null columns, columns becoming null,
+/// null becoming a value, inserts with mostly null columns).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn omit_nulls_clients_hold_exactly_the_visible_rows() {
+    scenario(true).await;
+}
+
+async fn scenario(omit_nulls: bool) {
     let fixture = Fixture::build(FixtureOptions::small()).await.unwrap();
     let tenant = fixture.tenant(0);
     let kinds = [
@@ -184,7 +215,7 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
     let mut clients = Vec::new();
     for kind in kinds {
         for member in fixture.members_of_kind(0, kind).into_iter().take(2) {
-            clients.push(Client::connect(&fixture, member).await);
+            clients.push(Client::connect(&fixture, member, omit_nulls).await);
         }
     }
     for client in &clients {
@@ -232,6 +263,16 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
             "move spotted task out of its spot",
             r#"UPDATE "tasks" SET "spotId"=NULL WHERE "_id"=$1"#.into(),
             vec![text(&spotted.id)],
+        ),
+        (
+            "column becomes null",
+            r#"UPDATE "tasks" SET "description"=NULL, "flagColor"=NULL, "name"='nulled' WHERE "_id"=$1"#.into(),
+            vec![text(&tasks[1].id)],
+        ),
+        (
+            "null becomes a value",
+            r#"UPDATE "tasks" SET "description"='restored', "flagColor"='red', "completedAt"=COALESCE("completedAt", 0) + 1 WHERE "_id"=$1"#.into(),
+            vec![text(&tasks[1].id)],
         ),
         (
             "insert task",
@@ -448,5 +489,14 @@ async fn clients_hold_exactly_the_visible_rows_through_changes_resumes_and_princ
     assert!(resumed
         .iter()
         .any(|message| matches!(message, ServerMessage::ReplicaSnapshot { .. })));
+    if omit_nulls {
+        let restored: usize = [&offline, &offline_two, &quiet, &unaffected]
+            .into_iter()
+            .chain(clients.iter())
+            .map(|client| client.model.restored_members)
+            .sum();
+        eprintln!("omit-nulls: {restored} null members restored");
+        assert!(restored > 0, "the fixture has null columns to omit");
+    }
     fixture.shutdown().await;
 }

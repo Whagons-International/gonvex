@@ -210,6 +210,8 @@ export type ServerCapabilities = {
   replicaBatchFrames?: 1;
   /** Presence v2: in-memory, transition-only presence (`presence.*` frames). The runtime also answers support/error heartbeats from memory, so clients stop periodic heartbeats. */
   presence?: 1;
+  /** Replica Collection rows may omit null-valued columns when the client also advertises version 1 (JSON rows only). See `restoreOmittedNulls`. */
+  replicaOmitNulls?: 1;
 };
 
 /** Reserved tenant Query for reconciling an already accepted durable intent. */
@@ -256,6 +258,8 @@ export type ReplicaReady = {
   mode?: "eager" | "progressive";
   digest: string;
   truncated?: boolean;
+  /** `replicaOmitNulls`: present when the ready answers a `replica.open`. */
+  columns?: string[];
 };
 
 export type ClientCapabilities = {
@@ -288,6 +292,8 @@ export type ClientCapabilities = {
   replicaBatchFrames?: 1;
   /** Presence v2: reports state with `presence.set` transitions; liveness is the socket. */
   presence?: 1;
+  /** Restores omitted null-valued Replica Collection columns (`restoreOmittedNulls`) before hashing or storing rows. */
+  replicaOmitNulls?: 1;
 };
 
 export type KeyedCollectionPatch = {
@@ -528,6 +534,8 @@ export type ServerMessage =
     hashes?: Record<string, string>;
     digest?: string;
     truncated?: boolean;
+    /** `replicaOmitNulls`: the collection's projected columns, in row order. */
+    columns?: string[];
   }
   | {
     type: "replica.snapshotPage";
@@ -548,6 +556,8 @@ export type ServerMessage =
     maxBytes?: number;
     digest?: string;
     truncated?: boolean;
+    /** `replicaOmitNulls`: on the first page (sequence 0) only. */
+    columns?: string[];
   }
   | {
     type: "replica.delta";
@@ -559,6 +569,8 @@ export type ServerMessage =
     originCommandIds?: string[];
     hashes?: Record<string, string>;
     digest?: string;
+    /** `replicaOmitNulls`: present when the delta answers a `replica.open`. */
+    columns?: string[];
   }
   | ({ type: "replica.ready" } & ReplicaReady)
   | { type: "replica.readyMany"; ready: ReplicaReady[] }
@@ -670,4 +682,58 @@ export function expandReplicaBatch(
   }
   if (typeof batch.watermark === "number") messages.push({ type: "replica.watermark", revision: batch.watermark });
   return messages;
+}
+
+/**
+ * `replicaOmitNulls` (version 1). Replica Collection rows on the wire may leave
+ * out top-level columns whose value is `null`: snapshot and snapshot page
+ * `result` rows and delta `upserts`. Row hashes are still computed over the
+ * full row, so a client restores every omitted column as `null`, in the
+ * collection's column order, before it hashes, stores or publishes a row.
+ * The server names a subscription's `columns` on every message answering its
+ * `replica.open` (snapshot, first snapshot page, delta and ready); later
+ * frames rely on them. `replica.transaction` updates may omit null members of
+ * `newValue` that are not in `changedColumns`: the client merges `newValue`
+ * into the entity it holds, where they already are `null`; they need no
+ * restoration.
+ *
+ * Returns `row` itself when nothing is missing (the common case for rows of
+ * clients that did not negotiate it), else a new object in column order;
+ * members not in `columns` follow in their order.
+ */
+export function restoreOmittedNulls<T extends JsonValue>(row: T, columns: readonly string[]): T {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return row;
+  const object = row as Record<string, JsonValue>;
+  let missing = false;
+  for (const column of columns) if (!Object.prototype.hasOwnProperty.call(object, column)) { missing = true; break; }
+  if (!missing) return row;
+  const restored: Record<string, JsonValue> = {};
+  for (const column of columns) restored[column] = Object.prototype.hasOwnProperty.call(object, column) ? object[column] : null;
+  for (const key of Object.keys(object)) if (!Object.prototype.hasOwnProperty.call(restored, key)) restored[key] = object[key];
+  return restored as T;
+}
+
+/**
+ * Applies `restoreOmittedNulls` to one received frame, after `replica.batch`
+ * expansion and `replica.rowPatch` decoding, in place. `columns` maps this
+ * socket's subscription ids to their columns; it learns them from (and
+ * removes) the frame's `columns`. Frames without row images are unchanged.
+ */
+export function restoreReplicaFrameNulls(message: ServerMessage, columns: Map<string, readonly string[]>): void {
+  if (message.type === "replica.readyMany") {
+    for (const ready of message.ready) if (Array.isArray(ready.columns)) { columns.set(ready.id, ready.columns); delete ready.columns; }
+    return;
+  }
+  if (message.type !== "replica.snapshot" && message.type !== "replica.snapshotPage"
+    && message.type !== "replica.delta" && message.type !== "replica.ready") return;
+  const frame = message as { id: string; columns?: string[]; result?: JsonValue[]; upserts?: JsonValue[] };
+  if (Array.isArray(frame.columns)) {
+    columns.set(frame.id, frame.columns);
+    delete frame.columns;
+  }
+  const known = columns.get(frame.id);
+  if (!known) return;
+  const rows = message.type === "replica.delta" ? frame.upserts : frame.result;
+  if (!Array.isArray(rows)) return;
+  for (let index = 0; index < rows.length; index++) rows[index] = restoreOmittedNulls(rows[index], known);
 }

@@ -214,7 +214,7 @@ pub async fn socket_open_request(
 ) -> FixtureResult<SocketOpen> {
     let mut queue = crate::replica_open_queue::ReplicaOpenQueue::default();
     if let Some(error) =
-        crate::enqueue_replica_open(runtime, Some(session), request, false, &mut queue).await
+        crate::enqueue_replica_open(runtime, Some(session), request, false, false, &mut queue).await
     {
         return Err(serde_json::to_string(&error)?.into());
     }
@@ -300,7 +300,7 @@ pub async fn connection_loop(
             let applied = match served {
                 crate::replica::fanout::FanOut::Served(result) => result.map(|_| Vec::new()).map_err(|_| ()),
                 crate::replica::fanout::FanOut::Miss { record } => runtime
-                    .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event.clone(), Some((false, None)), record)
+                    .apply_feed_event_offloaded(&connection.session, &mut connection.subscriptions, event.clone(), Some((false.into(), None)), record)
                     .await
                     .map_err(|_| ()),
             };

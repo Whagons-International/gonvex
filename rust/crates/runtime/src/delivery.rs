@@ -101,10 +101,43 @@ enum ItemKind {
     Delta(Arc<str>),
 }
 
+/// How a connection's replica rows are encoded: JSON as is, JSON without
+/// null-valued columns (`replicaOmitNulls`), or native canonical strings.
+/// Each encoding has its own shared items.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum RowEncoding {
+    #[default]
+    Json,
+    OmitNulls,
+    Native,
+}
+
+impl RowEncoding {
+    pub(crate) fn native(self) -> bool {
+        self == Self::Native
+    }
+
+    pub(crate) fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// `false`: JSON rows, `true`: native rows (the encodings before
+/// `replicaOmitNulls`).
+impl From<bool> for RowEncoding {
+    fn from(native: bool) -> Self {
+        if native {
+            Self::Native
+        } else {
+            Self::Json
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct ItemKey {
     revision: u64,
-    native: bool,
+    native: RowEncoding,
     kind: ItemKind,
 }
 
@@ -235,7 +268,7 @@ pub fn perf_legacy_encode(
 /// (a delta without its closing brace).
 pub(crate) fn encode_shared(
     message: &ServerMessage,
-    native: bool,
+    native: RowEncoding,
     delta: bool,
 ) -> Result<SharedText, DeliveryError> {
     let mut text = encode_item(message, native)?;
@@ -245,8 +278,14 @@ pub(crate) fn encode_shared(
     Ok(SharedText::new(text))
 }
 
-fn encode_item(message: &ServerMessage, native: bool) -> Result<String, DeliveryError> {
-    if native {
+fn encode_item(message: &ServerMessage, encoding: RowEncoding) -> Result<String, DeliveryError> {
+    if encoding == RowEncoding::OmitNulls && gonvex_protocol::omit_nulls::carries_rows(message) {
+        // Once per shared item (tenant, revision, content), not per connection.
+        let mut message = message.clone();
+        gonvex_protocol::omit_nulls::omit_nulls(&mut message);
+        return serde_json::to_string(&message).map_err(|_| DeliveryError);
+    }
+    if encoding.native() {
         if let Some(encoded) = crate::replica::native_control_message(message).map_err(|_| DeliveryError)? {
             return serde_json::to_string(&encoded).map_err(|_| DeliveryError);
         }
@@ -262,11 +301,12 @@ fn encode_item(message: &ServerMessage, native: bool) -> Result<String, Delivery
 pub fn prewarm(
     hub: &DeliveryHub,
     tenant_id: &str,
-    native: bool,
+    native: impl Into<RowEncoding>,
     window: Option<u8>,
     replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
     messages: &[ServerMessage],
 ) {
+    let native = native.into();
     let frames = hub.tenant(tenant_id);
     for message in messages {
         let item = match message {
@@ -638,10 +678,11 @@ impl ReplicaBatcher {
         socket: &mut OutboundBatch,
         hub: &DeliveryHub,
         tenant_id: &str,
-        native: bool,
+        native: impl Into<RowEncoding>,
         replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
         message: ServerMessage,
     ) -> Result<Option<ServerMessage>, DeliveryError> {
+        let native = native.into();
         let (revision, kind, message) = match message {
             ServerMessage::ReplicaTransaction {
                 cursor,

@@ -1,5 +1,5 @@
 import { isReplicaRevision } from "./revision-policy.js";
-import { REDUCER_RECEIPT_QUERY, expandReplicaBatch } from "@gonvex/protocol";
+import { REDUCER_RECEIPT_QUERY, expandReplicaBatch, restoreReplicaFrameNulls } from "@gonvex/protocol";
 import { ownsCurrentScope } from "./ownership-policy.js";
 import { RowPatchDecoder } from "./row-patch.js";
 import { readIsCovered, primaryReadKeys } from "@gonvex/local-runtime/read-view";
@@ -541,6 +541,12 @@ export type GonvexClientOptions = GonvexClientAuth & {
   replicaSnapshotPages?: boolean;
   /** Opt into bounded connection-local field patches. Defaults to false. */
   replicaFieldPatches?: boolean;
+  /**
+   * Negotiate `replicaOmitNulls`: Replica Collection rows arrive without their
+   * null-valued columns and are restored (as `null`) before hashing, storage
+   * and publication. Applications see identical rows. Defaults to true.
+   */
+  replicaOmitNulls?: boolean;
   /** Control Plane only, including tenant-scoped control calls. Disables local data and outbox. */
   role?: "control";
   /** Anonymous, online-only connection scoped to one tenant ID or routing domain. */
@@ -660,6 +666,7 @@ export class GonvexClient {
   });
   private readonly replicaSnapshotPagesEnabled: boolean;
   private replicaFieldPatchesEnabled: boolean;
+  private readonly replicaOmitNullsEnabled: boolean;
   private activeArtifactHashValue = "";
   private readonly publicTenant?: string;
   private auth: GonvexClientAuth = {};
@@ -810,6 +817,7 @@ export class GonvexClient {
     );
     this.replicaSnapshotPagesEnabled = options.replicaSnapshotPages !== false;
     this.replicaFieldPatchesEnabled = options.replicaFieldPatches === true;
+    this.replicaOmitNullsEnabled = options.replicaOmitNulls !== false;
     this.replicaSubscriptionRetentionMs = normalizeQuerySubscriptionRetentionMs(
       options.replicaSubscriptionRetentionMs,
     );
@@ -2029,6 +2037,9 @@ export class GonvexClient {
     const rowPatches = new RowPatchDecoder();
     // Delivery v2 stream token -> subscription ids, scoped to this socket.
     const replicaStreams = new Map<string, string[]>();
+    // `replicaOmitNulls`: subscription id -> projected columns, learned from
+    // the frames answering each open on this socket.
+    const replicaColumns = new Map<string, readonly string[]>();
     this.socket = socket;
     this.serverCapabilities = {};
     socket.addEventListener("open", () => {
@@ -2116,6 +2127,9 @@ export class GonvexClient {
           message = frame as ServerMessage;
         }
         if (message.type === "auth.result") rowPatches.clear();
+        // Before any other handling: from here on rows are complete, as a
+        // runtime without `replicaOmitNulls` sends them (hashes cover nulls).
+        restoreReplicaFrameNulls(message, replicaColumns);
       } catch {
         return;
       }
@@ -5518,7 +5532,7 @@ export class GonvexClient {
       controlOnly: this.controlOnly || !this.auth.tenant,
       ...(this.publicTenant ? { public: true } : {}),
       device: this.telemetryDevice,
-		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
+		capabilities: { replicaFieldPatches: this.replicaFieldPatchesEnabled ? 1 : undefined, replicaOmitNulls: this.replicaOmitNullsEnabled ? 1 : undefined, replicaNoOldValues: 1, replicaSnapshotPages: this.replicaSnapshotPagesEnabled ? 1 : undefined, tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1, queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 },
     });
   }
 

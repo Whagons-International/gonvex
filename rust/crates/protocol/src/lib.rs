@@ -60,6 +60,7 @@ impl<'de> Deserialize<'de> for JsonRow {
     }
 }
 
+pub mod omit_nulls;
 pub mod replica_digest;
 mod replica_wire;
 pub mod row_patch;
@@ -259,6 +260,10 @@ pub struct ClientCapabilities {
     /// Its liveness is the WebSocket itself (server Ping, any inbound frame).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence: Option<u8>,
+    /// Restores omitted null-valued columns of Replica Collection rows
+    /// (`omit_nulls`); version 1. Ignored with `replicaNativeRows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_omit_nulls: Option<u8>,
 }
 
 /// Presence v2 state of one tenant Member, as reported by the server.
@@ -596,6 +601,10 @@ pub struct ServerCapabilities {
     /// should stop sending periodic heartbeats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence: Option<u8>,
+    /// Replica Collection rows omit null-valued columns when the client also
+    /// advertises version 1 (and not native rows). See `omit_nulls`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_omit_nulls: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

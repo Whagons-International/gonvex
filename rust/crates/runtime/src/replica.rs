@@ -73,6 +73,29 @@ pub struct ReplicaOpenResult {
     pub subscription: Option<ReplicaSubscription>,
 }
 
+/// `replicaOmitNulls`: the messages answering one open, as a client that
+/// negotiated it receives them: null-valued columns left out of the rows and
+/// the subscription's `columns` on the snapshot, delta and ready (see
+/// `gonvex_protocol::omit_nulls`). Hashes and digests are unchanged.
+pub fn omit_open_nulls(opened: &mut ReplicaOpenResult) {
+    let Some(subscription) = &opened.subscription else {
+        return;
+    };
+    let columns = &subscription.definition.columns;
+    for message in &mut opened.messages {
+        gonvex_protocol::omit_nulls::omit_nulls(message);
+        let id = match message {
+            ServerMessage::ReplicaSnapshot { id, .. }
+            | ServerMessage::ReplicaDelta { id, .. }
+            | ServerMessage::ReplicaReady { id, .. } => id,
+            _ => continue,
+        };
+        if *id == subscription.id {
+            gonvex_protocol::omit_nulls::add_columns(message, columns);
+        }
+    }
+}
+
 /// One open Replica Collection of one connection. Holds no rows: the client's
 /// membership is defined by `resolved` (and `window` for a bounded
 /// collection), and `digest` is the integrity aggregate of the rows the
@@ -2664,6 +2687,10 @@ impl SnapshotPages {
 
     fn page(&self, result: Vec<gonvex_protocol::JsonRow>, last: bool) -> ServerMessage {
         let mut metadata = self.metadata.clone();
+        if self.sequence > 0 {
+            // `replicaOmitNulls`: the first page names the columns.
+            metadata.remove(gonvex_protocol::omit_nulls::COLUMNS);
+        }
         if last {
             metadata.insert("digest".to_owned(), self.digest.clone());
         }

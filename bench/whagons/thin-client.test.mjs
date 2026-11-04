@@ -183,3 +183,38 @@ test('presence v2: nothing is sent to a runtime without the capability', () => {
   assert.equal(c.presenceSupported(), false);
   assert.equal(sent.filter((m) => String(m.type).startsWith('presence.')).length, 0);
 });
+
+test('JSON rows with replicaOmitNulls: columns learned from the open, rows restored like the SDK', async () => {
+  const sent = [];
+  const c = new ThinClient('ws://unused', { project: 'p', clientContract: { version: 1 }, pool: new RowPool(), nativeRows: false });
+  c.socket = { readyState: 1, send: (s) => sent.push(JSON.parse(s)), close() {} };
+  c.auth = { token: 't', tenant: 'x' }; c.authReady = true;
+  c.serverCapabilities = { replicaWatermark: 1, replicaOmitNulls: 1 };
+  c.sendAuth();
+  const auth = sent.find((m) => m.type === 'auth');
+  assert.equal(auth.capabilities.replicaOmitNulls, 1);
+  assert.equal(auth.capabilities.replicaNativeRows, undefined);
+  const w = c.watchReplica(ref, {}); w.onUpdate(() => {}); await tick();
+  const id = sent.find((m) => m.type === 'replica.openMany').opens[0].id;
+  const columns = ['_id', 'name', 'note', 'doneAt'];
+  const page = { type: 'replica.snapshotPage', id, snapshotId: 's', cursor: { epoch: 'e', revision: 10 }, key: '_id' };
+  c.dispatch({ ...page, sequence: 0, last: false, result: [{ _id: 'a', name: 'A' }], columns });
+  c.dispatch({ ...page, sequence: 1, last: true, result: [{ _id: 'b', name: 'B', note: 'n' }], digest: 'd' });
+  c.dispatch({ type: 'replica.ready', id, cursor: { epoch: 'e', revision: 10 }, digest: 'd', truncated: false, columns });
+  assert.deepEqual(w.localReplicaResult(), [
+    { _id: 'a', name: 'A', note: null, doneAt: null },
+    { _id: 'b', name: 'B', note: 'n', doneAt: null },
+  ]);
+  assert.deepEqual(Object.keys(w.localReplicaResult()[0]), columns);
+  // Compact update: `note` became null (explicit), `doneAt` stayed null (omitted, merged).
+  c.dispatch({ type: 'replica.transaction', cursor: { epoch: 'e', revision: 11 }, changes: [
+    { entity: 'tasks', id: 'b', operation: 'update', newValue: { _id: 'b', name: 'B2', note: null }, changedColumns: ['name', 'note'] }] });
+  c.dispatch({ type: 'replica.delta', id, cursor: { epoch: 'e', revision: 11 }, upserts: [{ _id: 'b', name: 'B2' }, { _id: 'c' }], deleted: [] });
+  await tick();
+  assert.deepEqual(w.localReplicaResult(), [
+    { _id: 'a', name: 'A', note: null, doneAt: null },
+    { _id: 'b', name: 'B2', note: null, doneAt: null },
+    { _id: 'c', name: null, note: null, doneAt: null },
+  ]);
+  assert.deepEqual(ThinClient.stats.unsupported, {});
+});

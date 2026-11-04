@@ -259,8 +259,8 @@ pub(crate) struct DeltaOutcome {
 pub(crate) struct Outcome {
     transaction: Option<ServerMessage>,
     subs: Vec<SubOutcome>,
-    /// Encoded items, per row encoding (`[json, native]`), built once.
-    texts: [OnceLock<Option<Texts>>; 2],
+    /// Encoded items, per row encoding (`RowEncoding::index`), built once.
+    texts: [OnceLock<Option<Texts>>; 3],
 }
 
 struct Texts {
@@ -270,8 +270,8 @@ struct Texts {
 }
 
 impl Outcome {
-    fn texts(&self, native: bool) -> Option<&Texts> {
-        self.texts[usize::from(native)]
+    fn texts(&self, native: crate::delivery::RowEncoding) -> Option<&Texts> {
+        self.texts[native.index()]
             .get_or_init(|| {
                 let transaction = match &self.transaction {
                     Some(message) => Some(Arc::new(
@@ -543,8 +543,9 @@ impl Runtime {
         event: &FeedEvent,
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
-        native: bool,
+        native: impl Into<crate::delivery::RowEncoding>,
     ) -> FanOut {
+        let native = native.into();
         let mut eligible = false;
         match self.fan_out_inner(
             session,
@@ -567,8 +568,9 @@ impl Runtime {
         event: &FeedEvent,
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
-        native: bool,
+        native: impl Into<crate::delivery::RowEncoding>,
     ) -> Option<Result<(), DeliveryError>> {
+        let native = native.into();
         let mut eligible = false;
         self.fan_out_inner(
             session,
@@ -589,7 +591,7 @@ impl Runtime {
         event: &FeedEvent,
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
-        native: bool,
+        native: crate::delivery::RowEncoding,
         eligible: &mut bool,
     ) -> Option<Result<(), DeliveryError>> {
         let FeedEvent::Transaction {
@@ -761,8 +763,9 @@ impl Runtime {
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
         hub: &crate::delivery::DeliveryHub,
-        native: bool,
+        native: impl Into<crate::delivery::RowEncoding>,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
+        let native = native.into();
         let delivery =
             |_| ReplicaError::InvalidIdentifier("replica batch delivery failed".to_owned());
         let record = match self.fan_out(session, subscriptions, &event, batcher, batch, native) {

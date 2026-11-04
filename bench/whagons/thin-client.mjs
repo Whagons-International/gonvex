@@ -25,6 +25,12 @@
  * Callers check `presenceSupported()` and then send no presence/support
  * heartbeat Reducers (see docs/performance/presence-v2.md).
  *
+ * Rows: native canonical strings by default (`nativeRows`), or JSON rows like
+ * the browser SDK (`nativeRows: false`, unpaged or `replica.snapshotPage`
+ * snapshots). JSON rows negotiate `replicaOmitNulls` as the SDK does and
+ * restore omitted null columns with the same rule (`restoreOmittedNulls` in
+ * @gonvex/protocol), so pooled rows equal what the SDK stores.
+ *
  * Unsupported server frames are counted in `ThinClient.stats.unsupported` and
  * reported by the harness, so a protocol drift cannot pass silently.
  */
@@ -35,7 +41,8 @@ const MAX_BATCH_OPENS = 256;
 const RETENTION_MS = 250;
 const now = () => performance.timeOrigin + performance.now();
 
-const CAPABILITIES = { replicaNoOldValues: 1, replicaSnapshotPages: 1, replicaNativeRows: 1, replicaSetDigest: 1,
+// Key order as the SDK's auth frame (`replicaOmitNulls` before `replicaNoOldValues`).
+const CAPABILITIES = { replicaOmitNulls: 1, replicaNoOldValues: 1, replicaSnapshotPages: 1, replicaNativeRows: 1, replicaSetDigest: 1,
   tenantControl: 1, telemetryBatch: 1, replicaReadyMany: 1, replicaWatermark: 1, replicaBatchFrames: 1, queryPagePatch: 1,
   queryObjectPatch: 1, queryOrderDelta: 1, queryFanout: 1, queryResultBatch: 1, preserveSubscriptions: 1, presence: 1 };
 const CAPABILITIES_LEGACY_ROWS = { ...CAPABILITIES, replicaNativeRows: undefined };
@@ -84,6 +91,18 @@ export const defaultPool = new RowPool();
 const changeCache = new ChangeCache();
 const keyOf = (path, args) => path + '\u0000' + JSON.stringify(args ?? {});
 
+/** `replicaOmitNulls`: same rule as `restoreOmittedNulls` in @gonvex/protocol. */
+export function restoreOmittedNulls(row, columns) {
+  if (row === null || typeof row !== 'object' || Array.isArray(row) || !columns) return row;
+  let missing = false;
+  for (const column of columns) if (!Object.prototype.hasOwnProperty.call(row, column)) { missing = true; break; }
+  if (!missing) return row;
+  const restored = {};
+  for (const column of columns) restored[column] = Object.prototype.hasOwnProperty.call(row, column) ? row[column] : null;
+  for (const key of Object.keys(row)) if (!Object.prototype.hasOwnProperty.call(restored, key)) restored[key] = row[key];
+  return restored;
+}
+
 class Subscription {
   constructor(client, ref, args) {
     this.client = client; this.ref = ref; this.path = ref.path; this.args = args ?? {};
@@ -121,6 +140,8 @@ export class ThinClient {
     this.nativeRows = nativeRows; this.ackDelayMs = ackDelayMs; this.batchFrames = batchFrames;
     // Delivery v2: stream token -> subscription ids, scoped to one socket.
     this.streams = new Map();
+    // `replicaOmitNulls`: subscription id -> columns, scoped to one socket.
+    this.columns = new Map();
     this.auth = { token: undefined, tenant: undefined };
     this.socket = undefined; this.manuallyClosed = false; this.reconnectAttempt = 0; this.reconnectTimer = undefined;
     this.serverCapabilities = {}; this.authReady = false; this.authInFlight = undefined; this.outbox = [];
@@ -138,7 +159,7 @@ export class ThinClient {
     if (this.manuallyClosed) return;
     const socket = new globalThis.WebSocket(this.url);
     socket.binaryType = 'arraybuffer';
-    this.socket = socket; this.authReady = false; this.serverCapabilities = {}; this.streams = new Map();
+    this.socket = socket; this.authReady = false; this.serverCapabilities = {}; this.streams = new Map(); this.columns = new Map();
     socket.addEventListener('open', () => {
       if (this.socket !== socket) return;
       this.reconnectAttempt = 0;
@@ -391,7 +412,19 @@ export class ThinClient {
 
   unsupported(kind) { ThinClient.stats.unsupported[kind] = (ThinClient.stats.unsupported[kind] || 0) + 1; }
 
+  /** `replicaOmitNulls`: learn a subscription's columns and restore its rows, before any other handling. */
+  restoreNulls(m) {
+    if (m.type === 'replica.readyMany') { for (const r of m.ready ?? []) if (Array.isArray(r.columns)) { this.columns.set(r.id, r.columns); delete r.columns; } return; }
+    if (m.type !== 'replica.snapshot' && m.type !== 'replica.snapshotPage' && m.type !== 'replica.delta' && m.type !== 'replica.ready') return;
+    if (Array.isArray(m.columns)) { this.columns.set(m.id, m.columns); delete m.columns; }
+    const columns = this.columns.get(m.id);
+    const rows = m.type === 'replica.delta' ? m.upserts : m.result;
+    if (!columns || !Array.isArray(rows)) return;
+    for (let i = 0; i < rows.length; i++) rows[i] = restoreOmittedNulls(rows[i], columns);
+  }
+
   dispatch(m) {
+    this.restoreNulls(m);
     switch (m.type) {
       case 'session.ready': this.serverCapabilities = m.capabilities ?? {}; return;
       case 'auth.result': return this.onAuthResult(m);
@@ -403,6 +436,9 @@ export class ThinClient {
       case 'replica.batch': return this.onBatch(m);
       case 'replica.snapshotStart': return this.onSnapshotStart(m);
       case 'replica.snapshotEncodedPage': return this.onSnapshotPage(m);
+      case 'replica.snapshot': return this.onJsonSnapshot(m, true);
+      case 'replica.snapshotPage': return this.onJsonSnapshot(m, m.last === true);
+      case 'replica.transaction': return this.onJsonTransaction(m);
       case 'replica.ready': return this.onReady(m);
       case 'replica.readyMany': for (const r of m.ready) this.onReady(r); return;
       case 'replica.delta': return this.onDelta(m);
@@ -554,6 +590,39 @@ export class ThinClient {
     if (this.ackDelayMs > 0) setTimeout(() => { if (this.socket?.readyState === 1) this.rawSend(ack); }, this.ackDelayMs);
     else this.rawSend(ack);
   }
+  /** JSON rows (`nativeRows: false`): an unpaged snapshot, or one `replica.snapshotPage` (no ACK, like the SDK). */
+  onJsonSnapshot(m, last) {
+    if (m.type === 'replica.snapshotPage') ThinClient.stats.snapshotPages++;
+    const sub = this.byId.get(m.id);
+    if (!sub) return;
+    const snapshotId = m.snapshotId ?? 'unpaged';
+    if (!sub.staging || sub.staging.snapshotId !== snapshotId || m.sequence === 0 || m.type === 'replica.snapshot') {
+      sub.dropStaging();
+      sub.staging = { snapshotId, rows: new Map(), truncated: false, key: m.key || sub.keyField, revision: m.cursor?.revision ?? 0, deferred: [] };
+    }
+    const key = sub.staging.key;
+    for (const value of m.result ?? []) {
+      const entry = this.pool.acquireValue(value);
+      const id = String(entry.value[key]);
+      const old = sub.staging.rows.get(id);
+      sub.staging.rows.set(id, entry); this.pool.release(old);
+    }
+    if (m.truncated) sub.staging.truncated = true;
+    if (last && m.digest) sub.staging.digest = m.digest;
+  }
+  /** JSON rows: `replica.transaction`, merged into held rows like the SDK's entity merge. */
+  onJsonTransaction(m) {
+    const revision = m.cursor?.revision ?? Infinity;
+    for (const c of m.changes ?? []) {
+      const change = { entity: c.entity, id: String(c.id), operation: c.operation, newValue: c.newValue };
+      for (const sub of this.subscriptions.values()) {
+        if (sub.entity !== change.entity) continue;
+        if (sub.staging) sub.staging.deferred.push({ revision, change });
+        if (revision <= (sub.readyCursor?.revision ?? 0)) continue;
+        this.applyChange(sub, change);
+      }
+    }
+  }
   onReady(m) {
     const sub = this.byId.get(m.id);
     if (!sub) return;
@@ -608,8 +677,11 @@ export class ThinClient {
   }
   applyChange(sub, change) {
     if (!sub.rows.has(change.id)) return;
-    if (change.operation === 'delete' || change.newCanonical === undefined) sub.deleteRow(change.id);
-    else sub.setRow(change.id, this.pool.acquire(change.newCanonical));
+    if (change.operation === 'delete' || (change.newCanonical === undefined && change.newValue === undefined)) sub.deleteRow(change.id);
+    else if (change.newCanonical !== undefined) sub.setRow(change.id, this.pool.acquire(change.newCanonical));
+    // JSON transactions merge into the held row (SDK entity merge): a
+    // `replicaOmitNulls` update leaves out unchanged nulls, already held.
+    else sub.setRow(change.id, this.pool.acquireValue({ ...sub.rows.get(change.id).value, ...change.newValue }));
     sub.notify();
   }
 }

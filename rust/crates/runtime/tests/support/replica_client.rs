@@ -48,6 +48,16 @@ pub struct ClientModel {
     pub mismatches: Vec<String>,
     pub need_hashes: usize,
     pub resets: usize,
+    /// `replicaOmitNulls`: `receive` round-trips every message through its
+    /// wire text and restores omitted null columns as the SDK does
+    /// (`restoreReplicaFrameNulls`) before applying it.
+    pub omit_nulls: bool,
+    /// Columns learned from the frames answering each open.
+    pub columns: BTreeMap<String, Vec<String>>,
+    /// Null members restored (omitted on the wire).
+    pub restored_members: usize,
+    /// Rows that arrived without some column.
+    pub restored_rows: usize,
 }
 
 pub fn stable_json(value: &Value) -> String {
@@ -243,8 +253,62 @@ impl ClientModel {
 
     pub fn apply_all<'a>(&mut self, messages: impl IntoIterator<Item = &'a ServerMessage>) {
         for message in messages {
-            self.apply(message);
+            if self.omit_nulls {
+                self.receive(message);
+            } else {
+                self.apply(message);
+            }
         }
+    }
+
+    /// `replicaOmitNulls`: the message as the client parses it from the wire,
+    /// with omitted nulls restored, then applied.
+    pub fn receive(&mut self, message: &ServerMessage) {
+        let text = serde_json::to_string(message).unwrap();
+        let mut message: ServerMessage = serde_json::from_str(&text).unwrap();
+        let columns_key = gonvex_protocol::omit_nulls::COLUMNS;
+        let learn = |columns: &mut BTreeMap<String, Vec<String>>, id: &str, value: Option<Value>| {
+            if let Some(Value::Array(names)) = value {
+                columns.insert(
+                    id.to_owned(),
+                    names.iter().map(|name| name.as_str().unwrap().to_owned()).collect(),
+                );
+            }
+        };
+        let (restored_members, restored_rows) = (&mut self.restored_members, &mut self.restored_rows);
+        let mut restore = |row: &Value, columns: Option<&Vec<String>>| -> Value {
+            let Some(columns) = columns else { return row.clone() };
+            let restored = gonvex_protocol::omit_nulls::restore(row, columns);
+            let missing = columns.len().saturating_sub(row.as_object().map_or(0, |o| o.len()));
+            if missing > 0 {
+                *restored_members += missing;
+                *restored_rows += 1;
+            }
+            restored
+        };
+        match &mut message {
+            ServerMessage::ReplicaSnapshot { id, result, metadata, .. } => {
+                learn(&mut self.columns, id, metadata.remove(columns_key));
+                let columns = self.columns.get(id.as_str());
+                for row in result.iter_mut() {
+                    *row = gonvex_protocol::JsonRow::from_value(&restore(&row.to_value(), columns));
+                }
+            }
+            ServerMessage::ReplicaDelta { id, payload, .. } => {
+                learn(&mut self.columns, id, payload.remove(columns_key));
+                let columns = self.columns.get(id.as_str());
+                if let Some(Value::Array(rows)) = payload.get_mut("upserts") {
+                    for row in rows.iter_mut() {
+                        *row = restore(row, columns);
+                    }
+                }
+            }
+            ServerMessage::ReplicaReady { id, metadata, .. } => {
+                learn(&mut self.columns, id, metadata.remove(columns_key));
+            }
+            _ => {}
+        }
+        self.apply(&message);
     }
 
     pub fn apply(&mut self, message: &ServerMessage) {

@@ -375,7 +375,7 @@ impl Runtime {
         session: &TenantSession,
         subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
         event: FeedEvent,
-        prewarm: Option<(bool, Option<u8>)>,
+        prewarm: Option<(crate::delivery::RowEncoding, Option<u8>)>,
         record: bool,
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let pool = offload();

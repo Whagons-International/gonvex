@@ -1594,6 +1594,8 @@ async fn websocket(
     let mut replica_native_rows_enabled = false;
     let mut replica_no_old_values_enabled = false;
     let mut replica_field_patches_enabled = false;
+    // `replicaOmitNulls`: JSON-row clients only (native rows stay canonical).
+    let mut replica_omit_nulls_enabled = false;
     let mut row_patches = gonvex_protocol::row_patch::RowPatchEncoder::default();
     let mut batcher = delivery::ReplicaBatcher::default();
     let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
@@ -1665,6 +1667,7 @@ async fn websocket(
             control_watermark: Some(1),
             replica_batch_frames: Some(1),
             presence: presence_hub.enabled().then_some(1),
+            replica_omit_nulls: Some(1),
         }),
     };
     if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
@@ -1746,7 +1749,7 @@ async fn websocket(
                 );
                 if let Some(response) = enqueue_replica_open(
                     &runtime, tenant_session.as_ref(), request,
-                    replica_sum_digest_enabled, &mut replica_opens,
+                    replica_sum_digest_enabled, replica_omit_nulls_enabled, &mut replica_opens,
                 ).await {
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response).await.is_err() { return; }
                 }
@@ -1881,13 +1884,13 @@ async fn websocket(
                             // Delivery v4: a connection whose shape already has a
                             // shared outcome for this event only appends it.
                             let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
-                                runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
+                                runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), row_encoding(snapshot_delivery.native(), replica_omit_nulls_enabled))
                             } else { replica::fanout::FanOut::Miss { record: false } };
                             let applied = match shared {
                                 replica::fanout::FanOut::Served(Ok(())) => Ok(Vec::new()),
                                 replica::fanout::FanOut::Served(Err(_)) => return,
                                 replica::fanout::FanOut::Miss { record } => {
-                                    let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
+                                    let prewarm = batcher.enabled().then(|| (row_encoding(snapshot_delivery.native(), replica_omit_nulls_enabled), socket.deflate_window()));
                                     runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await
                                 }
                             };
@@ -1902,7 +1905,7 @@ async fn websocket(
                                         let message = if matches!(message, ServerMessage::ReplicaReady { .. }) {
                                             match snapshot_delivery.gate(&message) { Some(message) => message, None => continue }
                                         } else { message };
-                                        match batcher.push(socket.batch_mut(), &runtime.inner.delivery, tenant_id, snapshot_delivery.native(), &replicas, message) {
+                                        match batcher.push(socket.batch_mut(), &runtime.inner.delivery, tenant_id, row_encoding(snapshot_delivery.native(), replica_omit_nulls_enabled), &replicas, message) {
                                             Ok(None) => {}
                                             Ok(Some(message)) => {
                                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
@@ -1930,6 +1933,9 @@ async fn websocket(
                                     let mut backlog = gonvex_profiler::Backlog::new(messages.len());
                                     for mut message in messages {
                                         backlog.sent();
+                                        if replica_omit_nulls_enabled {
+                                            gonvex_protocol::omit_nulls::omit_nulls(&mut message);
+                                        }
                                         if replica_field_patches_enabled && !replica_native_rows_enabled {
                                             let mut encode_timer = gonvex_profiler::Timer::start();
                                             let prepared = row_patches.prepare(&message);
@@ -2536,6 +2542,12 @@ async fn websocket(
                     replica_native_rows_enabled =
                         snapshot_delivery::negotiated(capabilities.as_ref());
                     snapshot_delivery.set_native(replica_native_rows_enabled);
+                    let omit_nulls = !replica_native_rows_enabled
+                        && capabilities.as_ref().and_then(|c| c.replica_omit_nulls) == Some(1);
+                    // Subscriptions opened under the other row encoding are
+                    // not preserved: their client learned no columns for them.
+                    let omit_nulls_unchanged = omit_nulls == replica_omit_nulls_enabled;
+                    replica_omit_nulls_enabled = omit_nulls;
                     replica_sum_digest_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_set_digest) == Some(1);
                     if !replica_sum_digest_enabled {
@@ -2552,6 +2564,7 @@ async fn websocket(
                         && pending_replica_opens.is_empty()
                         && legacy_snapshot_delivery.is_empty()
                         && (replica_native_rows_enabled || snapshot_delivery.is_empty())
+                        && omit_nulls_unchanged
                         && !control_only
                         && tenant_session.is_some()
                         && preserve_subscription_scope(
@@ -4716,11 +4729,23 @@ fn replica_open_request_bytes(request: &ReplicaOpenRequest) -> usize {
     })
 }
 
+/// The row encoding of a connection's shared replica items.
+fn row_encoding(native: bool, omit_nulls: bool) -> delivery::RowEncoding {
+    if native {
+        delivery::RowEncoding::Native
+    } else if omit_nulls {
+        delivery::RowEncoding::OmitNulls
+    } else {
+        delivery::RowEncoding::Json
+    }
+}
+
 async fn enqueue_replica_open(
     runtime: &Runtime,
     session: Option<&TenantSession>,
     request: ReplicaOpenRequest,
     sum_enabled: bool,
+    omit_nulls: bool,
     queue: &mut replica_open_queue::ReplicaOpenQueue<
         ReplicaOpenOutcome<replica::ReplicaSubscription, replica::ReplicaError>,
     >,
@@ -4757,7 +4782,11 @@ async fn enqueue_replica_open(
         let opened = owned_runtime
             .open_replica_negotiated(&owned_session, owned_request.clone(), sum_enabled)
             .await
-            .map(|opened| {
+            .map(|mut opened| {
+                // On the offload pool, like the open itself.
+                if omit_nulls {
+                    replica::omit_open_nulls(&mut opened);
+                }
                 let subscription = opened
                     .subscription
                     .map(|subscription| (subscription.id.clone(), subscription));
@@ -6797,7 +6826,7 @@ mod connection_future_sizes {
         println!("future_size {:>6} call_reducer", size4(call_reducer));
         println!(
             "future_size {:>6} enqueue_replica_open",
-            size5(enqueue_replica_open)
+            size6(enqueue_replica_open)
         );
         println!(
             "future_size {:>6} send_replica_open",
