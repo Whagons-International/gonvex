@@ -75,7 +75,7 @@ paths! {
     DuplicateStream => "full.duplicate_stream", "Two subscriptions share one stream identity";
     PrincipalMoved => "full.principal_moved", "A changed row moves this member's principal, grants, derived sets or ancestors (the mask step's per-change checks): it re-resolves or re-decides affected rows";
     ParentAcl => "full.parent_acl", "A parent row of an inherited plan changed visibility columns or was deleted (children may flip)";
-    ParentAndSource => "full.parent_and_source", "An inherited plan's parent and source rows changed in one transaction";
+    ParentAndSource => "full.parent_and_source", "An inherited plan's source rows and a parent row that was created or changed visibility columns in one transaction (decided against the parents' before-images)";
     IndexWaiting => "full.index_waiting", "A bound shared index is not at the event's revision yet";
     CursorEpoch => "full.cursor_epoch", "Cursor of another epoch, or a bound index already ahead of the event";
     Truncated => "full.truncated", "A reached collection of a changed table has a truncated window";
@@ -83,12 +83,15 @@ paths! {
     Hit => "full.hit", "A changed row hits a member atom (personal grant, assignment, own row): decided individually";
     ManyRows => "full.many_rows", "More than 32 changed rows of one collection's table";
     Empty => "empty", "No replica subscriptions (nothing to decide)";
+    Unclean => "full.unclean", "Its shape's first connection could not record an outcome (resync, principal change): decided alone";
 }
 
 const PATH_COUNT: usize = PATHS.len();
 #[allow(clippy::declare_interior_mutable_const)]
 const ZERO: AtomicU64 = AtomicU64::new(0);
 static PATH_COUNTS: [AtomicU64; PATH_COUNT] = [ZERO; PATH_COUNT];
+
+static WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// Counts one connection's feed step (`Path`).
 pub fn count(path: Path) {
@@ -110,6 +113,7 @@ pub fn coverage_json() -> serde_json::Value {
         "total": total,
         "shared": shared,
         "sharedFraction": if total == 0 { 0.0 } else { shared as f64 / total as f64 },
+        "waits": WAITS.load(Ordering::Relaxed),
         "paths": PATHS.iter().zip(counts).map(|((name, doc), count)| serde_json::json!({
             "path": name, "count": count, "doc": doc,
         })).collect::<Vec<_>>(),
@@ -561,6 +565,10 @@ pub(crate) fn shape(
                 // Parent rows: the mask step re-decides a parent's children
                 // only when the parent's admission flips for this member.
                 let mut parent_changed = false;
+                // Every changed parent is an update of columns its ACL index
+                // does not read: its before-image (the mask step's overlay)
+                // and the shared index agree on everything visibility reads.
+                let mut parents_unmoved = true;
                 for (table, first, last) in &layout.rows {
                     let Some(acl) = inherited.acl.get(table) else {
                         continue;
@@ -571,6 +579,7 @@ pub(crate) fn shape(
                     if old.is_null() {
                         // A parent created by this transaction has no
                         // children beyond the transaction's own rows.
+                        parents_unmoved = false;
                         continue;
                     }
                     if !new.is_null()
@@ -581,6 +590,7 @@ pub(crate) fn shape(
                         // `member_unmoved` above).
                         continue;
                     }
+                    parents_unmoved = false;
                     let crate::visibility_class::MemberHandle::Compiled(member) = subscription
                         .mask
                         .get(&subscription.visibility, &subscription.resolved, scope)
@@ -594,9 +604,10 @@ pub(crate) fn shape(
                         None => return Err(Path::Hit),
                     }
                 }
-                if parent_changed && touched {
+                if parent_changed && touched && !parents_unmoved {
                     // The mask step decides the source rows against the
-                    // parents' before-images (overlay).
+                    // parents' before-images (overlay), which differ from the
+                    // index on what visibility reads.
                     return Err(Path::ParentAndSource);
                 }
                 if parent_changed {
@@ -818,17 +829,28 @@ impl Runtime {
                 count(path);
                 FanOut::Served(result)
             }
-            Err(path) => {
+            Err(Missed::Claimed(claim)) => {
+                count(Path::Representative);
+                FanOut::Miss {
+                    record: true,
+                    claim: Some(claim),
+                }
+            }
+            Err(Missed::Wait(receiver)) => FanOut::Wait(receiver),
+            Err(Missed::Path(path)) => {
                 count(path);
                 FanOut::Miss {
-                    record: path == Path::Representative,
+                    record: false,
+                    claim: None,
                 }
             }
         }
     }
 
-    /// [`Self::fan_out`] without counting; None on a miss.
-    pub fn fan_out_hit(
+    /// [`Self::fan_out`], waiting for another connection of the same shape
+    /// when it is computing the outcome (never returns `Wait`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fan_out_waiting(
         &self,
         session: &TenantSession,
         subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
@@ -836,13 +858,23 @@ impl Runtime {
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
         native: bool,
-    ) -> Option<Result<(), DeliveryError>> {
-        self.fan_out_inner(session, subscriptions, event, batcher, batch, native)
-            .ok()
-            .map(|(_, result)| result)
+    ) -> FanOut {
+        await_indexes(subscriptions, event).await;
+        for _ in 0..4 {
+            match self.fan_out(session, subscriptions, event, batcher, batch, native) {
+                FanOut::Wait(receiver) => wait_claim(receiver).await,
+                other => return other,
+            }
+        }
+        count(Path::Unclean);
+        FanOut::Miss {
+            record: false,
+            claim: None,
+        }
     }
 
-    /// Served: (`SharedAdvance` / `SharedData`, result); else why not.
+    /// Served: (`SharedAdvance` / `SharedData`, result); else why not, or the
+    /// claim on the shape's outcome, or a claim to wait for.
     #[allow(clippy::too_many_arguments)]
     fn fan_out_inner(
         &self,
@@ -852,43 +884,63 @@ impl Runtime {
         batcher: &mut ReplicaBatcher,
         batch: &mut OutboundBatch,
         native: bool,
-    ) -> Result<(Path, Result<(), DeliveryError>), Path> {
+    ) -> Result<(Path, Result<(), DeliveryError>), Missed> {
         let FeedEvent::Transaction {
             database_epoch,
             revision,
             changes,
         } = event
         else {
-            return Err(Path::NotBatch);
+            return Err(Missed::Path(Path::NotBatch));
         };
         if subscriptions.is_empty() {
-            return Err(Path::Empty);
+            return Err(Missed::Path(Path::Empty));
         }
         if !enabled() || !batcher.enabled() {
-            return Err(Path::NotBatch);
+            return Err(Missed::Path(Path::NotBatch));
         }
         let tenant = self.inner.delivery.tenant(&session.route.tenant_id);
         let share = tenant
             .events
             .share(database_epoch, *revision, changes)
-            .ok_or(Path::NoShare)?;
+            .ok_or(Missed::Path(Path::NoShare))?;
         let shape = shape(
             subscriptions,
             &share,
             database_epoch,
             *revision,
             &session.route.database_url,
-        )?;
+        )
+        .map_err(Missed::Path)?;
         let outcome = if shape.iter().any(|entry| entry.state == State::Apply) {
-            Some(
-                share
-                    .outcomes
-                    .lock()
-                    .unwrap()
-                    .get(&shape)
-                    .cloned()
-                    .ok_or(Path::Representative)?,
-            )
+            let found = share.outcomes.lock().unwrap().get(&shape).cloned();
+            match found {
+                Some(outcome) => Some(outcome),
+                None => {
+                    let mut claims = share.claims.lock().unwrap();
+                    // Re-check under the claims lock: a claim is released
+                    // after its outcome is recorded.
+                    if let Some(outcome) = share.outcomes.lock().unwrap().get(&shape).cloned() {
+                        drop(claims);
+                        Some(outcome)
+                    } else {
+                        return Err(match claims.get(&shape) {
+                            Some(ClaimState::Pending(receiver)) => Missed::Wait(receiver.clone()),
+                            Some(ClaimState::Failed) => Missed::Path(Path::Unclean),
+                            None => {
+                                let (done, receiver) = tokio::sync::watch::channel(false);
+                                claims.insert(shape.clone(), ClaimState::Pending(receiver));
+                                drop(claims);
+                                Missed::Claimed(Claim {
+                                    share: Arc::clone(&share),
+                                    shape: Some(shape),
+                                    done,
+                                })
+                            }
+                        });
+                    }
+                }
+            }
         } else {
             // Nothing decides a row: cursors advance, no frame (the full path
             // would produce none either).
@@ -901,7 +953,7 @@ impl Runtime {
                 if let SubOutcome::Delta(delta) = sub {
                     if !batcher.default_binding(id, crate::delivery::stream_identity(subscription))
                     {
-                        return Err(Path::ServeRejected);
+                        return Err(Missed::Path(Path::ServeRejected));
                     }
                     if subscription.bounded() {
                         let rows = subscription.window.rows as isize + delta.rows;
@@ -911,7 +963,7 @@ impl Runtime {
                             || (subscription.definition.max_bytes > 0
                                 && bytes > subscription.definition.max_bytes)
                         {
-                            return Err(Path::ServeRejected);
+                            return Err(Missed::Path(Path::ServeRejected));
                         }
                     }
                 }
@@ -1047,12 +1099,64 @@ pub(crate) async fn await_indexes(
     }
 }
 
+/// Why [`Runtime::fan_out_inner`] did not serve a connection.
+pub(crate) enum Missed {
+    Path(Path),
+    Claimed(Claim),
+    Wait(tokio::sync::watch::Receiver<bool>),
+}
+
 /// Result of [`Runtime::fan_out`].
 pub(crate) enum FanOut {
     /// The connection's frames are in its batch.
     Served(Result<(), DeliveryError>),
-    /// Not served; `record`: the full path should record the outcome.
-    Miss { record: bool },
+    /// Not served; `record`: the full path should record the outcome. Hold
+    /// `claim` until the full path has finished (it wakes the connections
+    /// waiting for this shape's outcome).
+    Miss {
+        record: bool,
+        claim: Option<Claim>,
+    },
+    /// Another connection of this shape is computing its outcome: wait for
+    /// it (`wait_claim`), then call `fan_out` again.
+    Wait(tokio::sync::watch::Receiver<bool>),
+}
+
+/// A shape's claim in its event share (`EventShare::claims`).
+pub(crate) enum ClaimState {
+    Pending(tokio::sync::watch::Receiver<bool>),
+    Failed,
+}
+
+/// Held by the connection computing a shape's outcome. Dropping it (the full
+/// path finished, failed or was cancelled) wakes the waiters; when no outcome
+/// was recorded the shape is marked failed, so later connections of it take
+/// their own path without waiting.
+pub(crate) struct Claim {
+    share: Arc<EventShare>,
+    shape: Option<Shape>,
+    done: tokio::sync::watch::Sender<bool>,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Some(shape) = self.shape.take() {
+            let recorded = self.share.outcomes.lock().unwrap().contains_key(&shape);
+            let mut claims = self.share.claims.lock().unwrap();
+            if recorded {
+                claims.remove(&shape);
+            } else {
+                claims.insert(shape, ClaimState::Failed);
+            }
+        }
+        let _ = self.done.send(true);
+    }
+}
+
+/// Waits until the claim behind `receiver` is released.
+pub(crate) async fn wait_claim(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    WAITS.fetch_add(1, Ordering::Relaxed);
+    let _ = receiver.wait_for(|done| *done).await;
 }
 
 /// Records `outcome` for `shape` (first writer wins).
@@ -1092,14 +1196,23 @@ impl Runtime {
     ) -> Result<Vec<ServerMessage>, ReplicaError> {
         let delivery =
             |_| ReplicaError::InvalidIdentifier("replica batch delivery failed".to_owned());
-        await_indexes(subscriptions, &event).await;
-        let record = match self.fan_out(session, subscriptions, &event, batcher, batch, native) {
+        let (record, claim) = match self
+            .fan_out_waiting(session, subscriptions, &event, batcher, batch, native)
+            .await
+        {
             FanOut::Served(result) => return result.map(|_| Vec::new()).map_err(delivery),
-            FanOut::Miss { record } => record,
+            FanOut::Miss { record, claim } => (record, claim),
+            FanOut::Wait(_) => unreachable!("fan_out_waiting waits"),
         };
+        if claim.is_some() {
+            // As the offloaded full path of the connection loop does: other
+            // connections run (and wait for this claim) meanwhile.
+            tokio::task::yield_now().await;
+        }
         let messages = self
             .apply_feed_event_with(session, subscriptions, event, record)
             .await?;
+        drop(claim);
         let mut rest = Vec::new();
         for message in messages {
             if let Some(message) = batcher

@@ -199,6 +199,26 @@ async fn events(fixture: &Fixture) -> Vec<(String, FeedEvent)> {
         ),
         ("tag a missing task", vec![tag("cov-tag-5", "no-such-task")]),
         (
+            "tag and touch the task",
+            vec![
+                tag("cov-tag-6", &tasks[14].id),
+                (
+                    r#"UPDATE "tasks" SET "updatedAt"=77 WHERE "_id"=$1"#.into(),
+                    vec![text(&tasks[14].id)],
+                ),
+            ],
+        ),
+        (
+            "tag and move the task",
+            vec![
+                tag("cov-tag-7", &tasks[15].id),
+                (
+                    r#"UPDATE "tasks" SET "workspaceId"=$1 WHERE "_id"=$2"#.into(),
+                    vec![text(&tasks[16].workspace_id), text(&tasks[15].id)],
+                ),
+            ],
+        ),
+        (
             "workspace move of a tagged task",
             vec![(
                 r#"UPDATE "tasks" SET "workspaceId"=$1 WHERE "_id"=$2"#.into(),
@@ -344,46 +364,76 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     let mut frames = 0usize;
     let mut data_frames = 0usize;
     {
-        for (name, event) in &events {
+        for (event_index, (name, event)) in events.iter().enumerate() {
             let revision = match event {
                 FeedEvent::Transaction { revision, .. } => *revision,
                 FeedEvent::Reset { .. } => 0,
             };
-            for (index, (a, b)) in shared.iter_mut().zip(alone.iter_mut()).enumerate() {
-                // Half the connections use native row encoding.
-                let native = index % 2 == 1;
-                feed_share::set_sharing(Some(true));
-                let data_before = gonvex_runtime::replica::fanout_stats().2;
-                let rest = fixture
+            // Shared side first. Every other event delivers to all its
+            // connections concurrently, as the connection loops do: the first
+            // connection of a shape claims its outcome while the others wait
+            // for it (`replica_fanout::Claim`).
+            feed_share::set_sharing(Some(true));
+            let concurrent = event_index % 2 == 1;
+            async fn deliver(
+                fixture: &Fixture,
+                hub: &gonvex_runtime::delivery::DeliveryHub,
+                event: &FeedEvent,
+                index: usize,
+                a: &mut Side,
+            ) -> Vec<gonvex_protocol::ServerMessage> {
+                let session = a.connection.session.clone();
+                fixture
                     .runtime
                     .deliver_feed_event(
-                        &a.connection.session.clone(),
+                        &session,
                         &mut a.connection.subscriptions,
                         event.clone(),
                         &mut a.batcher,
                         &mut a.batch,
-                        &hub_shared,
-                        native,
+                        hub,
+                        index % 2 == 1,
                     )
                     .await
-                    .unwrap();
-                let set = index / members;
-                if (set == 0 || set == 3)
-                    && gonvex_runtime::replica::fanout_stats().2 > data_before
-                {
-                    inherited_data += 1;
+                    .unwrap()
+            }
+            let mut rests = Vec::new();
+            if concurrent {
+                rests = futures_util::future::join_all(
+                    shared
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(index, a)| deliver(&fixture, &hub_shared, event, index, a)),
+                )
+                .await;
+            } else {
+                for (index, a) in shared.iter_mut().enumerate() {
+                    let data_before = gonvex_runtime::replica::fanout_stats().2;
+                    rests.push(deliver(&fixture, &hub_shared, event, index, a).await);
+                    let set = index / members;
+                    if (set == 0 || set == 3)
+                        && gonvex_runtime::replica::fanout_stats().2 > data_before
+                    {
+                        inherited_data += 1;
+                    }
                 }
-                let rest_a: Vec<Value> = rest
-                    .iter()
-                    .map(|m| serde_json::to_value(m).unwrap())
-                    .collect();
+            }
+            for a in shared.iter_mut() {
                 a.batcher.watermark(
                     &mut a.batch,
                     &tenant_id,
                     &a.connection.subscriptions,
                     revision,
                 );
-                feed_share::set_sharing(Some(false));
+            }
+            feed_share::set_sharing(Some(false));
+            for (index, (a, b)) in shared.iter_mut().zip(alone.iter_mut()).enumerate() {
+                // Half the connections use native row encoding.
+                let native = index % 2 == 1;
+                let rest_a: Vec<Value> = rests[index]
+                    .iter()
+                    .map(|m| serde_json::to_value(m).unwrap())
+                    .collect();
                 let messages = fixture
                     .runtime
                     .apply_feed_event(
@@ -475,6 +525,9 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
         eprintln!("  {path}: {}", paths_after[index] - paths_before[index]);
     }
     eprintln!("  inherited connections served with decided rows: {inherited_data}");
+    let waits = gonvex_runtime::replica::fanout_coverage()["waits"].as_u64().unwrap();
+    eprintln!("  waits for another connection's outcome: {waits}");
+    assert!(waits > 0, "concurrent deliveries never waited on a claimed shape");
     assert!(
         inherited_data > 0,
         "no connection holding inherited collections was served rows by the fan-out"

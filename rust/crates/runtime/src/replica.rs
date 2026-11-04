@@ -1323,14 +1323,11 @@ impl Runtime {
                 continue;
             };
             if let Some((_, recorder)) = &mut recording {
-                // A parent overlay that decided no row (an inherited
-                // collection whose parents changed without flipping: the
-                // shape's `Skip`) leaves the outcome a function of the shape.
-                let decided = !delta.upserts.is_empty() || !delta.deleted.is_empty() || !delta.ops.is_empty();
-                if context.before.is_some()
-                    || !context.affected.is_empty()
-                    || (context.overlay.is_some() && decided)
-                {
+                // A parent overlay leaves the outcome a function of the shape:
+                // a shape exists only when no parent's admission flipped and,
+                // with source rows, only for parent updates of columns
+                // visibility does not read (overlay and index agree).
+                if context.before.is_some() || !context.affected.is_empty() {
                     recorder.clean = false;
                 }
             }

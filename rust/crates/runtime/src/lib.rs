@@ -1907,18 +1907,21 @@ async fn websocket(
                             // Delivery v4: a connection whose shape already has a
                             // shared outcome for this event only appends it.
                             let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
-                                replica::fanout::await_indexes(&replicas, &event).await;
-                                runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
+                                runtime.fan_out_waiting(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native()).await
                             } else {
                                 replica::fanout::count(replica::fanout::Path::NotBatch);
-                                replica::fanout::FanOut::Miss { record: false }
+                                replica::fanout::FanOut::Miss { record: false, claim: None }
                             };
                             let applied = match shared {
                                 replica::fanout::FanOut::Served(Ok(())) => Ok(Vec::new()),
                                 replica::fanout::FanOut::Served(Err(_)) => return,
-                                replica::fanout::FanOut::Miss { record } => {
+                                replica::fanout::FanOut::Wait(_) => unreachable!("fan_out_waiting waits"),
+                                replica::fanout::FanOut::Miss { record, claim } => {
                                     let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
-                                    runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await
+                                    let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await;
+                                    // Wakes this shape's waiting connections.
+                                    drop(claim);
+                                    applied
                                 }
                             };
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
