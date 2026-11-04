@@ -248,6 +248,23 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<Value, ExecutionError> {
+        // Per-function counters (/dev/metrics, /dev/profile `functions`).
+        let mut call = gonvex_profiler::function::Call::start();
+        let result = self
+            .execute_tenant_query_with_access_counted(session, path, args, access, &mut call)
+            .await;
+        call.finish(result.is_ok());
+        result
+    }
+
+    async fn execute_tenant_query_with_access_counted(
+        &self,
+        session: &TenantSession,
+        path: &str,
+        args: Value,
+        access: ExecutionAccess,
+        call: &mut gonvex_profiler::function::Call,
+    ) -> Result<Value, ExecutionError> {
         let _user_call = crate::scheduled_lane::UserCall::enter(crate::cron_profile::active());
         let _profile = gonvex_profiler::ScopeTimer::new(
             gonvex_profiler::Stage::FnTotal,
@@ -265,6 +282,7 @@ impl Runtime {
                 })?,
         };
         let definition = require_function(&module, path, "query", access.allow_internal)?;
+        call.set_slot(definition.profile_slot);
         require_public_access(session, definition, access.allow_internal)?;
         validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
             ExecutionError::InvalidArguments {
@@ -418,6 +436,26 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ReducerExecution, ExecutionError> {
+        // Per-function counters (/dev/metrics, /dev/profile `functions`).
+        let mut call = gonvex_profiler::function::Call::start();
+        let result = self
+            .execute_tenant_reducer_with_access_counted(session, command_id, idempotency_key, path, args, access, &mut call)
+            .await;
+        call.finish(result.is_ok());
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_tenant_reducer_with_access_counted(
+        &self,
+        session: &TenantSession,
+        command_id: &str,
+        idempotency_key: Option<&str>,
+        path: &str,
+        args: Value,
+        access: ExecutionAccess,
+        call: &mut gonvex_profiler::function::Call,
+    ) -> Result<ReducerExecution, ExecutionError> {
         let scheduled = crate::cron_profile::active();
         let _user_call = crate::scheduled_lane::UserCall::enter(scheduled);
         let profile_label = if scheduled {
@@ -442,6 +480,7 @@ impl Runtime {
                 })?,
         };
         let definition = require_function(&module, path, "reducer", access.allow_internal)?;
+        call.set_slot(definition.profile_slot);
         require_public_access(session, definition, access.allow_internal)?;
         let control = self
             .inner
@@ -622,6 +661,7 @@ impl Runtime {
                 if gonvex_profiler::is_slow(profile_total) {
                     gonvex_profiler::record_slow_trace(
                         profile_label,
+                        call.slot(),
                         &[
                             profile_total,
                             profile_prepare,
@@ -633,6 +673,7 @@ impl Runtime {
                             sql,
                             profile_finish,
                             invoke_times.host_call_count,
+                            invoke_times.isolate_wait,
                         ],
                     );
                 }
@@ -743,6 +784,23 @@ impl Runtime {
         args: Value,
         access: ExecutionAccess,
     ) -> Result<ActionExecution, ExecutionError> {
+        // Per-function counters (/dev/metrics, /dev/profile `functions`).
+        let mut call = gonvex_profiler::function::Call::start();
+        let result = self
+            .execute_tenant_action_with_access_counted(session, path, args, access, &mut call)
+            .await;
+        call.finish(result.is_ok());
+        result
+    }
+
+    async fn execute_tenant_action_with_access_counted(
+        &self,
+        session: &TenantSession,
+        path: &str,
+        args: Value,
+        access: ExecutionAccess,
+        call: &mut gonvex_profiler::function::Call,
+    ) -> Result<ActionExecution, ExecutionError> {
         let _user_call = crate::scheduled_lane::UserCall::enter(crate::cron_profile::active());
         let _profile = gonvex_profiler::ScopeTimer::new(
             gonvex_profiler::Stage::FnTotal,
@@ -766,6 +824,7 @@ impl Runtime {
                 })?,
         };
         let definition = require_function(&module, path, "action", access.allow_internal)?;
+        call.set_slot(definition.profile_slot);
         require_public_access(session, definition, access.allow_internal)?;
         validate_portable_schema(&definition.args_schema, &args).map_err(|message| {
             ExecutionError::InvalidArguments {
@@ -1678,6 +1737,7 @@ mod tests {
             confirmation: "none".to_owned(),
             args_schema: json!({"kind":"object","fields":{}}),
             result_schema: json!({"kind":"null"}),
+            profile_slot: gonvex_profiler::function::NONE,
         }
     }
 

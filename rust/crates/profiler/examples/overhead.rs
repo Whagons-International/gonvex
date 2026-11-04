@@ -73,11 +73,20 @@ fn main() {
             black_box(future.as_mut().poll(&mut context));
         }
     });
+    let slot = gonvex_profiler::function::register("bench", "presence.beat");
+    let function_call = per_op(N, || {
+        for _ in 0..N {
+            let mut call = gonvex_profiler::function::Call::start();
+            call.set_slot(black_box(slot));
+            call.finish(true);
+        }
+    });
     println!("clock read (now_ns)              {clock:>7.1} ns/op");
     println!("record, profiler disabled        {disabled:>7.1} ns/op");
     println!("Timer::lap, profiler disabled    {disabled_lap:>7.1} ns/op");
     println!("record (value given)             {enabled:>7.1} ns/op");
     println!("Timer::lap (clock + record)      {lap:>7.1} ns/op");
+    println!("function::Call start+finish      {function_call:>7.1} ns/op  (2 clock reads + slot counters)");
     println!(
         "instrumented poll overhead       {:>7.1} ns/op  (bare {bare_poll:.1}, wrapped {instrumented_poll:.1})",
         instrumented_poll - bare_poll

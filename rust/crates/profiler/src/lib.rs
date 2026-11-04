@@ -20,6 +20,7 @@
 //! `GONVEX_PROFILER=0` turns every recording site into a single relaxed load.
 
 pub mod cron;
+pub mod function;
 
 use std::cell::Cell;
 use std::future::Future;
@@ -98,6 +99,12 @@ pub fn init_from_env() -> Config {
     config
 }
 
+/// Sets the slow-trace threshold (tests, benchmarks). Production uses
+/// [`init_from_env`] (`GONVEX_PROFILER_SLOW_MS`).
+pub fn set_slow_trace(threshold: Duration) {
+    SLOW_NS.store(threshold.as_nanos() as u64, Relaxed);
+}
+
 /// The current configuration.
 pub fn config() -> Config {
     Config {
@@ -109,9 +116,20 @@ pub fn config() -> Config {
     }
 }
 
+static EPOCH_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+
 fn epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
+    *EPOCH.get_or_init(|| {
+        EPOCH_UNIX_MS.store(unix_ms(), Relaxed);
+        Instant::now()
+    })
+}
+
+/// Unix milliseconds of a [`now_ns`] value.
+pub fn unix_ms_of(at_ns: u64) -> u64 {
+    epoch();
+    EPOCH_UNIX_MS.load(Relaxed) + at_ns / 1_000_000
 }
 
 /// Monotonic nanoseconds since the profiler epoch (first use). Never 0 after
@@ -159,8 +177,9 @@ stages! {
     // Function path (labelled by function class).
     FnTotal => "fn.total", "reducer", "Whole Reducer/Query/Action execution in the runtime (execution.rs)";
     FnPrepare => "fn.prepare", "reducer", "Admission: module lookup, control-plane read, idempotency check, argument validation";
-    InvokeConnect => "invoke.connect", "reducer", "Module-host status check, socket connect and request write";
-    InvokeFirstFrame => "invoke.first_frame", "reducer", "Request written -> first frame back: module-host isolate wait + JS up to the first host call + IPC";
+    InvokeConnect => "invoke.connect", "reducer", "Module-host status check, socket connect and request write (in-process: status check only)";
+    InvokeFirstFrame => "invoke.first_frame", "reducer", "Request written -> first host call (or result): isolate wait + JS up to the first host call (+ IPC on the socket bridge)";
+    InvokeIsolateWait => "invoke.isolate_wait", "reducer", "In-process V8: request -> an isolate leased (root admission + isolate pool queue + cold isolate start); part of invoke.first_frame";
     InvokeJs => "invoke.js", "reducer", "JS time after the first frame (sum of gaps between host-call replies and the next frame)";
     InvokeHostCalls => "invoke.host_calls", "reducer", "Sum of host-call handling time per invocation (host-call round trips seen by the runtime)";
     InvokeTotal => "invoke.total", "reducer", "Whole module-host request (connect .. response)";
@@ -207,6 +226,20 @@ stages! {
     PollFeed => "poll.feed", "scheduler", "Single poll of a change-feed reader task";
     PollOutbox => "poll.outbox", "scheduler", "Single poll of an action-outbox drain task";
     PollOther => "poll.other", "scheduler", "Single poll of another instrumented task";
+    // Background work (no request attached).
+    SqliteCheckpoint => "sqlite.checkpoint", "background", "Background WAL checkpoint (PASSIVE) on the checkpoint thread";
+    SqliteCheckpointPages => "sqlite.checkpoint_pages", "background", "WAL frames copied back per background checkpoint (value is a count, not ns)";
+    SqliteCheckpointInline => "sqlite.checkpoint_inline", "background", "Writer's inline WAL checkpoint inside COMMIT (WAL reached its cap)";
+    V8GcMinor => "v8.gc_minor", "background", "V8 young-generation GC pause (scavenge / minor mark-compact), any isolate";
+    V8GcMajor => "v8.gc_major", "background", "V8 full GC pause (mark-sweep-compact), any isolate";
+    V8IsolateStart => "v8.isolate_start", "background", "V8 isolate start: create + bundle parse + top-level evaluation";
+    V8IsolateStop => "v8.isolate_stop", "background", "V8 isolate teardown (runtime dispose)";
+    MallocTrim => "mem.malloc_trim", "background", "malloc_trim(0) after isolate start/stop and module load";
+    SnapshotCacheBuild => "snapshot_cache.build", "background", "Shared snapshot-cache entry (re)build on a miss or expiry";
+    SnapshotCacheEvict => "snapshot_cache.evict", "background", "Snapshot-cache entry evicted over budget (value is the entry's bytes, not ns)";
+    OffloadQueueWait => "offload.queue_wait", "background", "Offload pool: job submitted -> started on a pool thread";
+    OffloadBusy => "offload.busy", "background", "Offload pool: time a job spent running (sum of its polls)";
+    OffloadRun => "offload.run", "background", "Offload pool: job started -> finished (wall, includes awaits)";
 }
 
 pub const STAGE_COUNT: usize = STAGES.len();
@@ -511,6 +544,9 @@ gauges! {
     OutboundBatch => "ws.outbound_batch", "Largest per-connection delivery batch (peak only; current is always 0)";
     ActionRunning => "action.running", "Root Actions holding the process-wide Action permit";
     ActionWaiting => "action.waiting", "Root Actions waiting for the Action permit (outbox drains wait before claiming)";
+    IsolateWaiting => "module_host.isolate_waiting", "In-process invocations waiting for root admission or a V8 isolate";
+    OffloadQueued => "offload.queued", "Offload pool jobs submitted but not started";
+    OffloadRunning => "offload.running", "Offload pool jobs running";
 }
 
 pub const GAUGE_COUNT: usize = GAUGES_INFO.len();
@@ -972,7 +1008,7 @@ pub fn start_watchdog() {
 /// Per-call stage breakdown kept for reducers slower than
 /// `GONVEX_PROFILER_SLOW_MS`. Index `i` of [`TraceValues`] is `TRACE_FIELDS[i]`
 /// (ns, except `invoke.host_call_count`).
-pub const TRACE_FIELDS: [&str; 10] = [
+pub const TRACE_FIELDS: [&str; 11] = [
     "fn.total",
     "fn.prepare",
     "invoke.connect",
@@ -983,6 +1019,7 @@ pub const TRACE_FIELDS: [&str; 10] = [
     "db.sql",
     "fn.finish",
     "invoke.host_call_count",
+    "invoke.isolate_wait",
 ];
 pub type TraceValues = [u64; TRACE_FIELDS.len()];
 
@@ -990,6 +1027,7 @@ const TRACE_RING: usize = 128;
 struct TraceSlot {
     seq: AtomicU64,
     at_unix_ms: AtomicU64,
+    /// `label | function slot << 8`.
     label: AtomicU64,
     values: [AtomicU64; TRACE_FIELDS.len()],
 }
@@ -1011,8 +1049,9 @@ pub fn is_slow(total_ns: u64) -> bool {
 }
 
 /// Keeps the breakdown of one slow call (`values[0]` is the total) in a
-/// 128-slot lock-free ring.
-pub fn record_slow_trace(label: Label, values: &TraceValues) {
+/// 128-slot lock-free ring. `function` is the call's [`function`] table slot
+/// ([`function::NONE`] when unknown); its name is looked up at dump time.
+pub fn record_slow_trace(label: Label, function: u16, values: &TraceValues) {
     if !is_slow(values[0]) {
         return;
     }
@@ -1020,7 +1059,7 @@ pub fn record_slow_trace(label: Label, values: &TraceValues) {
     let slot = &TRACES[(seq as usize) % TRACE_RING];
     slot.seq.store(0, std::sync::atomic::Ordering::Release);
     slot.at_unix_ms.store(unix_ms(), Relaxed);
-    slot.label.store(label as u64, Relaxed);
+    slot.label.store(label as u64 | u64::from(function) << 8, Relaxed);
     for (target, value) in slot.values.iter().zip(values) {
         target.store(*value, Relaxed);
     }
@@ -1033,6 +1072,8 @@ pub struct SlowTrace {
     pub seq: u64,
     pub at_unix_ms: u64,
     pub label: Label,
+    /// [`function`] table slot of the call ([`function::NONE`]: unknown).
+    pub function: u16,
     pub values: TraceValues,
 }
 
@@ -1045,7 +1086,9 @@ pub fn slow_traces() -> (Vec<SlowTrace>, u64) {
             continue;
         }
         let at_unix_ms = slot.at_unix_ms.load(Relaxed);
-        let label = Label::from_u8(slot.label.load(Relaxed) as u8);
+        let packed = slot.label.load(Relaxed);
+        let label = Label::from_u8(packed as u8);
+        let function = (packed >> 8) as u16;
         let mut values = [0u64; TRACE_FIELDS.len()];
         for (value, source) in values.iter_mut().zip(&slot.values) {
             *value = source.load(Relaxed);
@@ -1055,6 +1098,7 @@ pub fn slow_traces() -> (Vec<SlowTrace>, u64) {
                 seq,
                 at_unix_ms,
                 label,
+                function,
                 values,
             });
         }
@@ -1305,15 +1349,22 @@ mod tests {
         set_enabled(true);
         let mut values = [0u64; TRACE_FIELDS.len()];
         values[0] = 1_000;
-        record_slow_trace(Label::Heartbeat, &values);
+        record_slow_trace(Label::Heartbeat, function::NONE, &values);
         values[0] = 500_000_000;
         values[6] = 400_000_000;
-        record_slow_trace(Label::Heartbeat, &values);
+        let slot = function::register("test-project", "presence.slowTraced");
+        record_slow_trace(Label::Heartbeat, slot, &values);
         let (traces, _) = slow_traces();
         assert!(traces.iter().all(|trace| trace.values[0] >= 100_000_000));
-        assert!(traces
+        let trace = traces
             .iter()
-            .any(|trace| trace.values[6] == 400_000_000 && trace.label == Label::Heartbeat));
+            .find(|trace| trace.values[6] == 400_000_000 && trace.label == Label::Heartbeat)
+            .unwrap();
+        assert_eq!(trace.function, slot);
+        assert_eq!(
+            function::name(trace.function).unwrap().1,
+            "presence.slowTraced"
+        );
     }
 
     #[test]

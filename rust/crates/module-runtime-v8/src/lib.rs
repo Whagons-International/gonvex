@@ -48,7 +48,9 @@ use gonvex_module_runtime::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::budget::CallBudget;
-pub use crate::isolate::{heap_tally, live_isolates, trim_native_heap};
+pub use crate::isolate::{
+    heap_tally, isolate_stats, live_isolates, trim_native_heap, ISOLATE_STAT_FIELDS,
+};
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
 use gonvex_module_runtime::effective_capabilities;
@@ -504,6 +506,7 @@ impl EngineInner {
                 })??,
             None => pool.acquire().await?,
         };
+        host.isolate_acquired();
         let timeout = match budget.execution_timeout() {
             Ok(timeout) => timeout,
             Err(error) => {

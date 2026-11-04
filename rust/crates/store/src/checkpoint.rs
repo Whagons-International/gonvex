@@ -223,7 +223,18 @@ fn run(receiver: mpsc::Receiver<Message>) {
                         &mut copied,
                     )
                 };
-                let micros = started.elapsed().as_micros() as u64;
+                let elapsed = started.elapsed();
+                gonvex_profiler::record_duration(
+                    gonvex_profiler::Stage::SqliteCheckpoint,
+                    gonvex_profiler::Label::None,
+                    elapsed,
+                );
+                gonvex_profiler::record(
+                    gonvex_profiler::Stage::SqliteCheckpointPages,
+                    gonvex_profiler::Label::None,
+                    copied.max(0) as u64,
+                );
+                let micros = elapsed.as_micros() as u64;
                 BACKGROUND_CHECKPOINTS.fetch_add(1, Ordering::Relaxed);
                 BACKGROUND_CHECKPOINT_US.fetch_add(micros, Ordering::Relaxed);
                 BACKGROUND_CHECKPOINT_MAX_US.fetch_max(micros, Ordering::Relaxed);
@@ -248,6 +259,10 @@ unsafe extern "C" fn wal_hook(
     let frames = frames.max(0) as u64;
     if state.committed(frames) {
         INLINE_CHECKPOINTS.fetch_add(1, Ordering::Relaxed);
+        let _timed = gonvex_profiler::ScopeTimer::new(
+            gonvex_profiler::Stage::SqliteCheckpointInline,
+            gonvex_profiler::Label::None,
+        );
         let rc = ffi::sqlite3_wal_checkpoint_v2(
             db,
             std::ptr::null(),

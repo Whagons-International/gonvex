@@ -37,6 +37,9 @@ pub struct FunctionDefinition {
     pub confirmation: String,
     pub args_schema: Value,
     pub result_schema: Value,
+    /// Per-function profiler slot (`gonvex_profiler::function`), assigned
+    /// once per (project, path) at module install.
+    pub profile_slot: u16,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -817,6 +820,7 @@ fn artifact_from_manifest(
                     .get("result")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({"kind":"any"})),
+                profile_slot: gonvex_profiler::function::register(&record.project_id, path),
             },
         );
     }
@@ -1094,6 +1098,15 @@ mod tests {
             Value::Null
         );
         assert_eq!(functions["tasks.find"].kind, "query");
+        // The per-function profiler slot is assigned at install, per project.
+        let slot = functions["tasks.find"].profile_slot;
+        assert_ne!(slot, gonvex_profiler::function::NONE);
+        assert_eq!(
+            gonvex_profiler::function::name(slot).unwrap(),
+            ("project-a".to_owned(), "tasks.find".to_owned())
+        );
+        let (_, again, _) = artifact_from_manifest(&record).unwrap();
+        assert_eq!(again["tasks.find"].profile_slot, slot);
     }
 
     #[test]

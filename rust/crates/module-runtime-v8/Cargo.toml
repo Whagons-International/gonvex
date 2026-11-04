@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 gonvex-module-runtime = { path = "../module-runtime" }
+gonvex-profiler = { path = "../profiler" }
 deno_core.workspace = true
 futures-util.workspace = true
 serde.workspace = true

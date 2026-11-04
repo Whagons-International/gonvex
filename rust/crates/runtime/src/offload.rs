@@ -195,9 +195,10 @@ impl Offload {
                 Offloaded::Join(tokio::spawn(future))
             }
             Strategy::Runtime => {
-                Offloaded::Join(self.runtime.as_ref().unwrap().spawn(future))
+                Offloaded::Join(self.runtime.as_ref().unwrap().spawn(Tracked::new(future)))
             }
             Strategy::Blocking | Strategy::Threads => {
+                let future = Tracked::new(future);
                 let (abort, registration) = AbortHandle::new_pair();
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let handle = tokio::runtime::Handle::current();
@@ -240,12 +241,16 @@ impl Offload {
             Strategy::Inline => {
                 Offloaded::Ready(Some(std::panic::catch_unwind(AssertUnwindSafe(work))))
             }
-            Strategy::Runtime => Offloaded::Join(self.runtime.as_ref().unwrap().spawn(
-                gonvex_profiler::instrument(gonvex_profiler::TaskKind::Other, async move {
-                    work()
-                }),
-            )),
+            Strategy::Runtime => {
+                let work = tracked_work(work);
+                Offloaded::Join(self.runtime.as_ref().unwrap().spawn(
+                    gonvex_profiler::instrument(gonvex_profiler::TaskKind::Other, async move {
+                        work()
+                    }),
+                ))
+            }
             Strategy::Blocking | Strategy::Threads => {
+                let work = tracked_work(work);
                 let (sender, receiver) = tokio::sync::oneshot::channel();
                 let (abort, _registration) = AbortHandle::new_pair();
                 let job = move || {
@@ -267,6 +272,10 @@ impl Offload {
 
     /// Runs `work` on the pool without waiting for it (never cancelled).
     pub fn detach<W: FnOnce() + Send + 'static>(&self, work: W) {
+        if self.strategy == Strategy::Inline {
+            return work();
+        }
+        let work = tracked_work(work);
         match self.strategy {
             Strategy::Inline => work(),
             Strategy::Runtime => {
@@ -320,6 +329,122 @@ impl Drop for Offload {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
+    }
+}
+
+/// Profiler accounting of one pool job: `offload.queue_wait` (submitted ->
+/// first run), `offload.busy` (time spent running), `offload.run` (first run
+/// -> done) and the `offload.queued` / `offload.running` gauges. Inert (no
+/// clock reads) with the profiler off.
+struct JobTrack {
+    submitted: u64,
+    started: u64,
+    busy: u64,
+}
+
+impl JobTrack {
+    fn submit() -> Self {
+        let submitted = if gonvex_profiler::enabled() {
+            gonvex_profiler::gauge(gonvex_profiler::GaugeId::OffloadQueued).add(1);
+            gonvex_profiler::now_ns()
+        } else {
+            0
+        };
+        Self {
+            submitted,
+            started: 0,
+            busy: 0,
+        }
+    }
+
+    /// Start of a run slice; returns its clock (0: not tracking).
+    #[inline]
+    fn begin(&mut self) -> u64 {
+        if self.submitted == 0 {
+            return 0;
+        }
+        let now = gonvex_profiler::now_ns();
+        if self.started == 0 {
+            self.started = now;
+            gonvex_profiler::record(
+                gonvex_profiler::Stage::OffloadQueueWait,
+                gonvex_profiler::Label::None,
+                now.saturating_sub(self.submitted),
+            );
+            gonvex_profiler::gauge(gonvex_profiler::GaugeId::OffloadQueued).add(-1);
+            gonvex_profiler::gauge(gonvex_profiler::GaugeId::OffloadRunning).add(1);
+        }
+        now
+    }
+
+    #[inline]
+    fn end(&mut self, began: u64) {
+        if began != 0 {
+            self.busy += gonvex_profiler::now_ns().saturating_sub(began);
+        }
+    }
+}
+
+impl Drop for JobTrack {
+    fn drop(&mut self) {
+        if self.submitted == 0 {
+            return;
+        }
+        if self.started == 0 {
+            // Cancelled before it ran.
+            gonvex_profiler::gauge(gonvex_profiler::GaugeId::OffloadQueued).add(-1);
+            return;
+        }
+        gonvex_profiler::gauge(gonvex_profiler::GaugeId::OffloadRunning).add(-1);
+        gonvex_profiler::record(
+            gonvex_profiler::Stage::OffloadBusy,
+            gonvex_profiler::Label::None,
+            self.busy,
+        );
+        gonvex_profiler::record(
+            gonvex_profiler::Stage::OffloadRun,
+            gonvex_profiler::Label::None,
+            gonvex_profiler::now_ns().saturating_sub(self.started),
+        );
+    }
+}
+
+/// A pool future with its [`JobTrack`].
+struct Tracked<F> {
+    inner: F,
+    track: JobTrack,
+}
+
+impl<F> Tracked<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            track: JobTrack::submit(),
+        }
+    }
+}
+
+impl<F: Future> Future for Tracked<F> {
+    type Output = F::Output;
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
+        // SAFETY: `inner` is structurally pinned: it is never moved out of
+        // `self`, and `Tracked` has no Drop impl or `Unpin` override.
+        let this = unsafe { self.get_unchecked_mut() };
+        let began = this.track.begin();
+        let result = unsafe { Pin::new_unchecked(&mut this.inner) }.poll(context);
+        this.track.end(began);
+        result
+    }
+}
+
+/// A synchronous pool job with its [`JobTrack`] (run time is busy time).
+fn tracked_work<T>(work: impl FnOnce() -> T + Send) -> impl FnOnce() -> T + Send {
+    let mut track = JobTrack::submit();
+    move || {
+        let began = track.begin();
+        let value = work();
+        track.end(began);
+        value
     }
 }
 
@@ -715,6 +840,41 @@ mod tests {
 
     fn leak(admission: SnapshotAdmission) -> &'static SnapshotAdmission {
         Box::leak(Box::new(admission))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pool_jobs_record_queue_wait_busy_and_run() {
+        use gonvex_profiler::{Label, Stage};
+        gonvex_profiler::set_enabled(true);
+        let count = |stage: Stage| -> u64 {
+            gonvex_profiler::snapshot()
+                .into_iter()
+                .filter(|row| row.stage == stage && row.label == Label::None)
+                .map(|row| row.count)
+                .sum()
+        };
+        let before = [Stage::OffloadQueueWait, Stage::OffloadBusy, Stage::OffloadRun].map(count);
+        for strategy in [Strategy::Runtime, Strategy::Blocking, Strategy::Threads] {
+            let pool = Offload::new(strategy, 1, 0, Duration::ZERO);
+            assert_eq!(pool.run(|| 7).await, 7);
+            let value = pool
+                .spawn(async {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    8
+                })
+                .await;
+            assert_eq!(value, 8);
+            std::mem::forget(pool);
+        }
+        let after = [Stage::OffloadQueueWait, Stage::OffloadBusy, Stage::OffloadRun].map(count);
+        for (before, after) in before.iter().zip(after) {
+            assert!(after >= before + 6, "{before} -> {after}");
+        }
+        let run = gonvex_profiler::snapshot()
+            .into_iter()
+            .find(|row| row.stage == Stage::OffloadRun)
+            .unwrap();
+        assert!(run.max >= 2_000_000, "{}", run.max);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

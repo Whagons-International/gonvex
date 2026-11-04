@@ -500,6 +500,11 @@ pub trait ModuleHost: Send + Sync {
     fn inline(&self) -> Option<std::sync::Arc<dyn InlineHost>> {
         None
     }
+
+    /// Called by the engine once the invocation holds an isolate (or other
+    /// execution slot), right before it is dispatched. Hosts use it to time
+    /// the queue wait for an isolate (profiler); the default does nothing.
+    fn isolate_acquired(&self) {}
 }
 
 /// The synchronous part of a host: calls it can answer on the engine's own
