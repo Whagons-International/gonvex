@@ -205,6 +205,7 @@ stages! {
     DeliveryTotal => "delivery.total", "delivery", "Broadcast -> all frames for the transaction written, per connection";
     DeliveryFrames => "delivery.frames", "delivery", "Frames per connection per transaction (value is a count, not ns)";
     DeliveryShared => "delivery.shared", "delivery", "Delivery v4 shared fan-out: one connection served from its shape (shape + append), per connection";
+    DeliveryNoop => "delivery.noop", "delivery", "Whole feed arm of a batch connection for a transaction that added no data item to its batch (only its watermark): a wakeup with nothing to send, per connection";
     DeliveryIndividual => "delivery.individual", "delivery", "Full feed path of one connection (apply_feed_event: mask steps, row decisions, frames; on the offload pool when offloaded), per connection";
     // WebSocket transport.
     WsInboundWait => "ws.inbound_wait", "transport", "Inbound frame read by the socket reader -> taken by the connection task";

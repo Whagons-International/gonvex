@@ -45,7 +45,7 @@ def delta(name):
 print(f'# {label}: plateau {a.stem} -> {b.stem} ({seconds:.0f} s)')
 reads, _ = delta('feed.read')
 print(f'- transactions read (feed.read): {reads} ({reads / seconds:.2f}/s)')
-for name in ('delivery.visibility', 'delivery.send', 'delivery.shared', 'delivery.individual', 'offload.busy', 'ws.compress', 'ws.write'):
+for name in ('delivery.visibility', 'delivery.send', 'delivery.shared', 'delivery.individual', 'delivery.noop', 'offload.busy', 'ws.compress', 'ws.write'):
     count, ns = delta(name)
     if count:
         print(f'- {name}: {count} ({count / seconds:.0f}/s), {ns / 1e9 / seconds:.3f} cores, {ns / count / 1e3:.1f} us each'
@@ -58,6 +58,12 @@ if cov_a and cov_b:
     shared = sum(c for p, c in paths if p.startswith('shared.'))
     print(f'- connection deliveries decided: {total} ({total / seconds:.0f}/s'
           + (f', {total / reads:.1f} per transaction' if reads else '') + f'); shared {shared} ({shared / max(total, 1):.1%})')
+    if 'wakeups' in cov_b:
+        wakeups = cov_b['wakeups'] - cov_a.get('wakeups', 0)
+        noop = cov_b['noopWakeups'] - cov_a.get('noopWakeups', 0)
+        print(f'- batch connection wakeups for transactions: {wakeups} ({wakeups / seconds:.0f}/s'
+              + (f', {wakeups / reads:.1f} per transaction' if reads else '')
+              + f'); with nothing but a watermark to send (no-op): {noop} ({noop / max(wakeups, 1):.1%})')
     print()
     print('| path | count | share |')
     print('|---|---:|---:|')

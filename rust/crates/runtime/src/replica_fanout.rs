@@ -92,6 +92,17 @@ const ZERO: AtomicU64 = AtomicU64::new(0);
 static PATH_COUNTS: [AtomicU64; PATH_COUNT] = [ZERO; PATH_COUNT];
 
 static WAITS: AtomicU64 = AtomicU64::new(0);
+static WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static NOOP_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts one batch connection's feed arm for one transaction; `noop`: it
+/// added no data item (nothing but its watermark to send).
+pub fn count_wakeup(noop: bool) {
+    WAKEUPS.fetch_add(1, Ordering::Relaxed);
+    if noop {
+        NOOP_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// Counts one connection's feed step (`Path`).
 pub fn count(path: Path) {
@@ -114,6 +125,8 @@ pub fn coverage_json() -> serde_json::Value {
         "shared": shared,
         "sharedFraction": if total == 0 { 0.0 } else { shared as f64 / total as f64 },
         "waits": WAITS.load(Ordering::Relaxed),
+        "wakeups": WAKEUPS.load(Ordering::Relaxed),
+        "noopWakeups": NOOP_WAKEUPS.load(Ordering::Relaxed),
         "paths": PATHS.iter().zip(counts).map(|((name, doc), count)| serde_json::json!({
             "path": name, "count": count, "doc": doc,
         })).collect::<Vec<_>>(),
@@ -551,12 +564,18 @@ pub(crate) fn shape(
             // table its visibility reads that moves its principal, grants,
             // derived sets or ancestors needs its own decisions.
             let concern = mask::subscription_concern_tables(subscription);
-            let mut concerned = false;
+            // Per distinct changed table first (an event has few), per
+            // change only for tables that can move a principal.
+            let concerned = layout.tables.iter().any(|table| concern.contains(table.as_str()));
+            let moving = concerned
+                && layout
+                    .tables
+                    .iter()
+                    .any(|table| concern.contains(table.as_str()) && keys.moving.contains_key(table.as_str()));
             for (position, change) in changes.iter().enumerate() {
-                if !concern.contains(change.table.as_str()) {
+                if !moving || !concern.contains(change.table.as_str()) {
                     continue;
                 }
-                concerned = true;
                 if let Some(checks) = keys.moving.get(change.table.as_str()) {
                     let mut checks = *checks;
                     if checks.principal {
