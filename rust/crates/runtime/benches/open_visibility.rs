@@ -10,16 +10,24 @@
 //!   `writes` commits one task update before every open, so every open reads
 //!   at a newer revision than the one before (the loaded case: ~23 task
 //!   writes/s in the largest tenant).
+//! * `ab`: BENCH_AB_MEMBERS (200) unused members alternate sharing off/on
+//!   in one process: cold login + 2 detail windows each.
 //! * `driver`: BENCH_DRIVER_MEMBERS members (default every member of the
 //!   tenant; build with BENCH_MEMBERS=500) log in over DRIVER_SECONDS (each
 //!   once, as concurrent tasks) while detail windows open at DRIVER_DETAIL_RATE/s
 //!   for already logged-in members and task updates commit at
-//!   DRIVER_WRITE_RATE/s. Reports process CPU per open and latency per login /
+//!   DRIVER_WRITE_RATE/s (DRIVER_GRANT_RATE/s of them `taskUsers`
+//!   assignments instead). With DRIVER_LOGIN_RATE set, steady state instead:
+//!   logins (reconnects) at that rate cycling over every member and detail
+//!   windows for any member (the 1k production-mix plateau: 4.4 logins/s,
+//!   4.3 detail windows/s). Reports process CPU per open and latency per login /
 //!   detail window.
 //!
 //! Env: BENCH_TASKS (9000), BENCH_MEMBERS (78), BENCH_ITERS (4 members per
 //! kind and mode), DRIVER_SECONDS (30), DRIVER_DETAIL_RATE (2), DRIVER_WRITE_RATE (23),
-//! BENCH_JSON_OUT. With GONVEX_SQLITE_STATEMENT_PROFILE=1 it also reports SQL
+//! DRIVER_GRANT_RATE (0.5), DRIVER_LOGIN_RATE (0 = ramp), BENCH_JSON_OUT.
+//! GONVEX_SNAPSHOT_CACHE_KEYED_INLINE=0 restores building per-task detail
+//! entries in a separate admitted read before the open. With GONVEX_SQLITE_STATEMENT_PROFILE=1 it also reports SQL
 //! statements per login / window (the profile hook costs CPU: take CPU
 //! numbers from a run without it). GONVEX_PRINCIPAL_CACHE=0 measures the
 //! SQL resolution per open (the code before `principal_cache`).
@@ -70,11 +78,19 @@ fn record(name: &str, values: Value) {
 
 /// Process CPU (user + system, every thread incl. SQLite workers) in ns.
 fn process_cpu_ns() -> u64 {
+    let (user, system) = process_cpu_split_ns();
+    user + system
+}
+
+/// (user, system) CPU in ns. User time is the steadier comparison on a
+/// shared host: page compaction and migration under host memory pressure
+/// are charged as system time to whichever process faults.
+fn process_cpu_split_ns() -> (u64, u64) {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     // SAFETY: valid out pointer.
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     let ns = |time: libc::timeval| time.tv_sec as u64 * 1_000_000_000 + time.tv_usec as u64 * 1000;
-    ns(usage.ru_utime) + ns(usage.ru_stime)
+    (ns(usage.ru_utime), ns(usage.ru_stime))
 }
 
 fn statements() -> (u64, u64) {
@@ -89,6 +105,7 @@ fn statements() -> (u64, u64) {
 struct Sample {
     wall_ns: u64,
     cpu_ns: u64,
+    user_ns: u64,
     allocations: u64,
     statements: u64,
     vm_steps: u64,
@@ -97,15 +114,18 @@ struct Sample {
 async fn measure<T>(op: impl std::future::Future<Output = T>) -> (T, Sample) {
     let before = AllocSnapshot::now();
     let (statements_before, steps_before) = statements();
-    let cpu = process_cpu_ns();
+    let (user, system) = process_cpu_split_ns();
     let started = Instant::now();
     let value = op.await;
     let wall_ns = started.elapsed().as_nanos() as u64;
-    let cpu_ns = process_cpu_ns() - cpu;
+    let (user_after, system_after) = process_cpu_split_ns();
+    let user_ns = user_after - user;
+    let cpu_ns = user_ns + system_after - system;
     let (statements_after, steps_after) = statements();
     let sample = Sample {
         wall_ns,
         cpu_ns,
+        user_ns,
         allocations: AllocSnapshot::now().since(before).allocations,
         statements: statements_after - statements_before,
         vm_steps: steps_after - steps_before,
@@ -134,6 +154,7 @@ fn summarize(samples: &[Sample]) -> Value {
         "n": samples.len(),
         "wall_ms_median": median(samples.iter().map(|s| s.wall_ns).collect()) as f64 / 1e6,
         "cpu_ms_median": median(samples.iter().map(|s| s.cpu_ns).collect()) as f64 / 1e6,
+        "user_ms_median": median(samples.iter().map(|s| s.user_ns).collect()) as f64 / 1e6,
         "cpu_ms_mean": samples.iter().map(|s| s.cpu_ns).sum::<u64>() as f64 / 1e6 / samples.len().max(1) as f64,
         "allocations_median": median(samples.iter().map(|s| s.allocations).collect()),
         "sql_statements_median": median(samples.iter().map(|s| s.statements).collect()),
@@ -145,6 +166,7 @@ impl Sample {
     fn add(&mut self, other: Sample) {
         self.wall_ns += other.wall_ns;
         self.cpu_ns += other.cpu_ns;
+        self.user_ns += other.user_ns;
         self.allocations += other.allocations;
         self.statements += other.statements;
         self.vm_steps += other.vm_steps;
@@ -286,15 +308,55 @@ async fn run() {
         }
     }
 
+    if enabled("ab") {
+        ab(&fixture, &mut used).await;
+    }
     if enabled("driver") {
         driver(fixture.clone(), &used).await;
     }
+}
+
+/// In-process A/B: unused members alternate between principal sharing off
+/// and on (one member each, interleaved), so host load drifts hit both
+/// modes alike. Per member: a cold login, then 2 detail windows.
+async fn ab(fixture: &Fixture, used: &mut std::collections::BTreeSet<usize>) {
+    let members = (0..fixture.tenant(TENANT).members.len())
+        .filter(|member| !used.contains(member))
+        .take(env("BENCH_AB_MEMBERS", 200))
+        .collect::<Vec<_>>();
+    let mut samples: [(Vec<Sample>, Vec<Sample>); 2] = Default::default();
+    for (n, member) in members.iter().enumerate() {
+        used.insert(*member);
+        let mode = n % 2;
+        fixture.runtime.set_principal_cache_enabled(mode == 1);
+        let session = fixture.session(TENANT, *member);
+        samples[mode].0.push(login(fixture, &session, None).await);
+        for window in 0..2 {
+            let task = 211 + n * 41 + window * 977;
+            samples[mode].1.push(detail_window(fixture, &session, task, None).await);
+        }
+    }
+    fixture.runtime.set_principal_cache_enabled(true);
+    let values = json!({
+        "members": members.len(),
+        "off": {"login_11": summarize(&samples[0].0), "detail_8": summarize(&samples[0].1)},
+        "on": {"login_11": summarize(&samples[1].0), "detail_8": summarize(&samples[1].1)},
+        "principal_cache": cache_stats(fixture),
+    });
+    eprintln!("ab: {values}");
+    record("ab", values);
 }
 
 async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>) {
     let seconds: f64 = env("DRIVER_SECONDS", 30.0);
     let detail_rate: f64 = env("DRIVER_DETAIL_RATE", 2.0);
     let write_rate: f64 = env("DRIVER_WRITE_RATE", 23.0);
+    // Of those, assignments (`taskUsers` inserts: a grant input of every
+    // task-plan resolution in the tenant, so each one invalidates them all).
+    let grant_rate: f64 = env("DRIVER_GRANT_RATE", 0.5);
+    // Steady state instead of a ramp: logins (reconnects) at this rate over
+    // every member, and detail windows for any member.
+    let login_rate: f64 = env("DRIVER_LOGIN_RATE", 0.0);
     let available = (0..fixture.tenant(TENANT).members.len())
         .filter(|member| !used.contains(member))
         .collect::<Vec<_>>();
@@ -311,6 +373,7 @@ async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>)
     let writes_done = Arc::new(AtomicU64::new(0));
     let stats_before = cache_stats(&fixture);
     let cpu_before = process_cpu_ns();
+    let user_before = process_cpu_split_ns().0;
     let started = Instant::now();
 
     let writer = {
@@ -322,17 +385,47 @@ async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>)
             while !stop.load(Relaxed) {
                 ticker.tick().await;
                 let n = done.fetch_add(1, Relaxed) as usize;
-                write_task(&fixture, 50_000 + n).await;
+                let every = (write_rate / grant_rate.max(1e-9)).round().max(1.0) as usize;
+                if grant_rate > 0.0 && n % every == every - 1 {
+                    let tenant = fixture.tenant(TENANT);
+                    let task = &tenant.tasks[(n * 7919) % tenant.tasks.len()];
+                    let member = &tenant.members[(n * 31) % tenant.members.len()];
+                    fixture
+                        .commit(
+                            TENANT,
+                            r#"INSERT INTO "taskUsers"("_id","taskId","userId","workspaceId","createdAt","updatedAt") VALUES($1,$2,$3,$4,1,1)"#,
+                            vec![
+                                format!("driver-assign-{n}").into(),
+                                task.id.clone().into(),
+                                member.id.clone().into(),
+                                task.workspace_id.clone().into(),
+                            ],
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    write_task(&fixture, 50_000 + n).await;
+                }
             }
         })
     };
     let mut tasks = Vec::new();
     // Logins: evenly over the window, each as its own task (connections).
-    let login_period = Duration::from_secs_f64(seconds / members.len() as f64);
+    let login_period = if login_rate > 0.0 {
+        Duration::from_secs_f64(1.0 / login_rate)
+    } else {
+        Duration::from_secs_f64(seconds / members.len() as f64)
+    };
+    let all_members = members.clone();
     let detail_period = Duration::from_secs_f64(1.0 / detail_rate.max(0.001));
     let mut next_login = Instant::now();
     let mut next_detail = Instant::now() + detail_period;
-    let mut pending = members.into_iter();
+    let mut pending: Box<dyn Iterator<Item = usize> + Send> = if login_rate > 0.0 {
+        let order = all_members.clone();
+        Box::new((0..).map(move |n: usize| order[(n * 7) % order.len()]))
+    } else {
+        Box::new(members.into_iter())
+    };
     let mut detail_n = 0usize;
     let deadline = Instant::now() + Duration::from_secs_f64(seconds);
     while Instant::now() < deadline {
@@ -355,7 +448,9 @@ async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>)
             next_login += login_period;
         }
         if now >= next_detail {
-            let member = {
+            let member = if login_rate > 0.0 {
+                Some(all_members[(detail_n * 31 + 3) % all_members.len()])
+            } else {
                 let logged_in = logged_in.lock().unwrap();
                 (!logged_in.is_empty()).then(|| logged_in[(detail_n * 31) % logged_in.len()])
             };
@@ -385,6 +480,7 @@ async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>)
     writer.await.unwrap();
     let elapsed = started.elapsed().as_secs_f64();
     let cpu_ms = (process_cpu_ns() - cpu_before) as f64 / 1e6;
+    let user_ms = (process_cpu_split_ns().0 - user_before) as f64 / 1e6;
     let logins = login_ns.lock().unwrap().clone();
     let details = detail_ns.lock().unwrap().clone();
     let opens = logins.len() * WHAGONS_COLD_LOGIN.len() + details.len() * WHAGONS_DETAIL_WINDOW.len();
@@ -395,6 +491,7 @@ async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>)
         "detail_windows": details.len(),
         "writes": writes_done.load(Relaxed),
         "cpu_ms_total": cpu_ms,
+        "user_ms_total": user_ms,
         "cpu_cores": cpu_ms / 1e3 / elapsed,
         "cpu_ms_per_open_incl_writes": cpu_ms / opens.max(1) as f64,
         "login_ms_p50": ms(&logins, 0.5),
@@ -403,6 +500,11 @@ async fn driver(fixture: Arc<Fixture>, used: &std::collections::BTreeSet<usize>)
         "detail_ms_p99": ms(&details, 0.99),
         "principal_cache_before": stats_before,
         "principal_cache_after": cache_stats(&fixture),
+        "snapshot_cache": {
+            "builds": fixture.runtime.snapshot_cache_stats().builds,
+            "hits": fixture.runtime.snapshot_cache_stats().hits,
+            "keyed_inline_builds": fixture.runtime.snapshot_cache_stats().keyed_inline_builds,
+        },
     });
     eprintln!("driver: {values}");
     record("driver", values);

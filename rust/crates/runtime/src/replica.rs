@@ -465,9 +465,24 @@ impl Runtime {
             path: &request.path,
             args: &cache_args,
         };
+        // Keyed entries (one task's detail collections) are looked up here
+        // and, when missing, built inside this open's read below.
+        let keyed = use_cache
+            && crate::snapshot_cache::config().keyed_inline
+            && cache_args.as_object().is_some_and(|args| !args.is_empty());
+        let mut build_inline = false;
         // The shared base is taken before this open's read transaction, so
         // its revision is never ahead of the open's clock.
-        let entry = if use_cache && request.args.is_object() {
+        let mut entry = if keyed {
+            match self.inner.snapshot_cache.lookup(&cache_key) {
+                crate::snapshot_cache::Lookup::Hit(entry) => Some(entry),
+                crate::snapshot_cache::Lookup::Missing => {
+                    build_inline = true;
+                    None
+                }
+                crate::snapshot_cache::Lookup::Skip => None,
+            }
+        } else if use_cache && request.args.is_object() {
             self.inner
                 .snapshot_cache
                 .entry(&cache_key, || {
@@ -481,7 +496,6 @@ impl Runtime {
         } else {
             None
         };
-        let cached = entry.as_ref().map(|entry| (&cache_key, entry));
         let requested = match request.digest.as_deref() {
             Some(digest)
                 if !digest.is_empty() && !request.full_integrity && request.hashes.is_empty() =>
@@ -538,6 +552,31 @@ impl Runtime {
                     .await?;
             }
         }
+        if build_inline {
+            // At the read's own clock: a few rows through the equality
+            // filters' index, no visibility SQL; the view below evaluates the
+            // member's visibility in memory as for any cached entry.
+            let _build = gonvex_profiler::ScopeTimer::new(
+                gonvex_profiler::Stage::SnapshotCacheInline,
+                gonvex_profiler::Label::None,
+            );
+            match crate::snapshot_cache::build_entry(
+                &mut read.transaction,
+                &definition,
+                &visibility,
+                &cache_args,
+            )
+            .await
+            {
+                Ok(built) => {
+                    entry = Some(self.inner.snapshot_cache.insert_built(&cache_key, built));
+                }
+                Err(error) => {
+                    tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, %error, "inline snapshot cache build failed; fresh scan");
+                }
+            }
+        }
+        let cached = entry.as_ref().map(|entry| (&cache_key, entry));
         let cursor = cursor_for(&read.clock, &definition, &directive.visibility_scope);
         let resumable = cursor_resumable(
             request.cursor.as_ref(),

@@ -199,6 +199,7 @@ stages! {
     SnapshotIntern => "snapshot.intern", "snapshot", "Row key/hash + interning into the shared row table";
     SnapshotBuild => "snapshot.build", "snapshot", "Whole snapshot build (permit wait .. interned rows)";
     SnapshotSend => "snapshot.send", "snapshot", "Encode + write the snapshot frames/pages";
+    SnapshotCacheInline => "snapshot.cache_inline", "snapshot", "Keyed snapshot cache entry built inside the opening read";
     // Scheduler.
     SchedLag => "tokio.sched_lag", "scheduler", "Lateness of the scheduler-lag probe timer wake-up";
     PollWsConnection => "poll.ws_connection", "scheduler", "Single poll of a WebSocket connection task";

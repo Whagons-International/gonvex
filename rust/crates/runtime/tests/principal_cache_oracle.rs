@@ -133,6 +133,48 @@ async fn compare(
     true
 }
 
+/// Detail-window opens through the snapshot cache (keyed entries: built
+/// inside the first open's read, then hit, then rolled forward after
+/// writes) vs a fresh SQL open, row for row. Returns the comparisons made at equal clocks.
+async fn compare_cached_detail(
+    fixture: &Fixture,
+    session: &TenantSession,
+    task: &str,
+    context: &str,
+) -> usize {
+    let runtime = &fixture.runtime;
+    let mut compared = 0;
+    for (path, argument) in WHAGONS_DETAIL_WINDOW {
+        let args = json!({ argument: task });
+        for attempt in 0..3 {
+            let cached = opened(
+                runtime
+                    .open_replica(session, request(path, args.clone()))
+                    .await
+                    .unwrap(),
+            );
+            let fresh = opened(
+                runtime
+                    .open_replica_fresh(session, request(path, args.clone()))
+                    .await
+                    .unwrap(),
+            );
+            if cached.cursor != fresh.cursor {
+                continue;
+            }
+            let who = &session.member.id;
+            assert_eq!(cached.rows, fresh.rows, "{context} {who} {path} #{attempt}: rows");
+            assert_eq!(cached.keys, fresh.keys, "{context} {who} {path} #{attempt}: order");
+            assert_eq!(
+                cached.metadata, fresh.metadata,
+                "{context} {who} {path} #{attempt}: metadata"
+            );
+            compared += 1;
+        }
+    }
+    compared
+}
+
 async fn compare_all(
     fixture: &Fixture,
     sessions: &[TenantSession],
@@ -274,6 +316,11 @@ async fn shared_principals_match_sql_resolution() {
         fixture.commit(0, &statement, binds).await.unwrap();
         let compared = compare_all(&fixture, &sessions, &detail_task, name).await;
         let after = fixture.runtime.principal_cache_stats();
+        let mut cached = 0;
+        for session in &sessions {
+            cached += compare_cached_detail(&fixture, session, &detail_task, name).await;
+        }
+        assert_eq!(cached, sessions.len() * WHAGONS_DETAIL_WINDOW.len() * 3, "{name}");
         eprintln!("{name}: {compared} comparisons, {after:?}");
         assert_eq!(
             compared,
@@ -294,6 +341,10 @@ async fn shared_principals_match_sql_resolution() {
             assert!(invalidated > 0, "{name}: {after:?}");
         }
     }
+
+    let snapshot = fixture.runtime.snapshot_cache_stats();
+    eprintln!("snapshot cache after steps: {snapshot:?}");
+    assert!(snapshot.keyed_inline_builds > 0 && snapshot.hits > 0, "{snapshot:?}");
 
     // Writes landing during opens.
     let writer = {
