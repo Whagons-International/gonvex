@@ -3,6 +3,7 @@
 
 pub mod accept;
 pub mod action_calls;
+mod auth_revalidation;
 mod action_gate;
 #[cfg(test)]
 mod bridge_bench;
@@ -110,6 +111,13 @@ struct RuntimeInner {
     telemetry: telemetry::TelemetryLimiter,
     scheduler: scheduler::Scheduler,
     runtime_events: broadcast::Sender<RuntimeEvent>,
+    /// `PresenceChanged` only (connection count changes). Separate from
+    /// `runtime_events` so that a connect/disconnect wakes only the
+    /// connections that watch it (a `control.support.listTenants` query, the
+    /// dashboard), not every connection of the project (conn-idle).
+    presence_events: broadcast::Sender<RuntimeEvent>,
+    /// Batched session revalidation of plain session connections.
+    auth_revalidation: auth_revalidation::AuthRevalidator,
     dashboard_changes: broadcast::Sender<()>,
     sandboxes: sandbox::SandboxManager,
     storage: storage::StorageManager,
@@ -282,7 +290,8 @@ impl Runtime {
         });
         let change_feeds = change_feed::ChangeFeedHub::new(pools.clone());
         let (runtime_events, _) = broadcast::channel(1_024);
-        let metrics = metrics::RuntimeMetrics::with_changes(runtime_events.clone());
+        let (presence_events, _) = broadcast::channel(1_024);
+        let metrics = metrics::RuntimeMetrics::with_changes(presence_events.clone());
         let sandboxes = sandbox::SandboxManager::new(config.sandbox.clone());
         let storage = storage::StorageManager::new(config.storage.clone());
         let presence = presence::PresenceHub::new(config.presence.clone());
@@ -299,6 +308,8 @@ impl Runtime {
                 telemetry: telemetry::TelemetryLimiter::default(),
                 scheduler: scheduler::Scheduler::new(),
                 runtime_events,
+                presence_events,
+                auth_revalidation: auth_revalidation::AuthRevalidator::default(),
                 dashboard_changes: broadcast::channel(256).0,
                 sandboxes,
                 storage,
@@ -320,6 +331,41 @@ impl Runtime {
 
     /// Presence v2 tick (coalesced transition publishing) and the batched
     /// support-session `last_seen_at` flusher. Both stop with the runtime.
+    /// One task revalidates every plain session connection per interval
+    /// (`auth_revalidation.rs`), instead of a timer and six SQL statements per
+    /// connection.
+    fn start_auth_revalidation(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        let every = auth_revalidation::INTERVAL;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else { return };
+                let revalidator = inner.auth_revalidation.clone();
+                let control = inner.control_plane.read().await.clone();
+                drop(inner);
+                revalidator.round(control.as_ref()).await;
+            }
+        });
+    }
+
+    /// Runs one batched session revalidation round now (tests, diagnostics).
+    #[doc(hidden)]
+    pub async fn revalidate_sessions_now(&self) {
+        let control = self.inner.control_plane.read().await.clone();
+        self.inner.auth_revalidation.round(control.as_ref()).await;
+    }
+
+    /// (registered connections, rounds run, connections revoked) of the
+    /// batched session revalidation (tests, diagnostics).
+    #[doc(hidden)]
+    pub fn session_revalidation_counters(&self) -> (usize, u64, u64) {
+        let (rounds, revoked) = self.inner.auth_revalidation.counters();
+        (self.inner.auth_revalidation.registered(), rounds, revoked)
+    }
+
     fn start_presence_tasks(&self) {
         if !self.inner.presence.enabled() {
             return;
@@ -408,6 +454,7 @@ impl Runtime {
     pub async fn start(&self) -> Result<(), RuntimeStartError> {
         profiling::start();
         self.start_presence_tasks();
+        self.start_auth_revalidation();
         if self.inner.config.sandbox.enabled {
             let binary = self
                 .inner
@@ -1663,9 +1710,15 @@ async fn websocket(
     let mut live_queries = BTreeMap::new();
     let mut control_queries = BTreeMap::new();
     let mut runtime_events = runtime.inner.runtime_events.subscribe();
-    let mut auth_revalidation = tokio::time::interval(std::time::Duration::from_secs(30));
-    auth_revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    auth_revalidation.tick().await;
+    // Plain session connections are revalidated by the process-wide batched
+    // round (`auth_watch`); others keep this per-connection timer.
+    let mut revalidation_timer = tokio::time::interval(auth_revalidation::INTERVAL);
+    revalidation_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    revalidation_timer.tick().await;
+    let mut auth_watch: Option<auth_revalidation::AuthWatch> = None;
+    // Connection count changes, subscribed only while a live
+    // `control.support.listTenants` query needs them.
+    let mut presence_events: Option<broadcast::Receiver<RuntimeEvent>> = None;
     let ready = ServerMessage::SessionReady {
         project: None,
         tenant: None,
@@ -1737,6 +1790,14 @@ async fn websocket(
     }
 
     loop {
+        runtime.inner.auth_revalidation.sync(&mut auth_watch, &control_connection);
+        let wants_presence_events = !control_queries.is_empty()
+            && control_queries.values().any(|query: &control::ControlSubscription| {
+                query.path == "control.support.listTenants"
+            });
+        if wants_presence_events != presence_events.is_some() {
+            presence_events = wants_presence_events.then(|| runtime.inner.presence_events.subscribe());
+        }
         let preparing_replicas = !replica_opens.is_empty();
         let admit_replica = pending_replica_opens.front().is_some_and(|request| {
             let bytes = replica_open_request_bytes(request);
@@ -1816,8 +1877,15 @@ async fn websocket(
                 let _ = send_connection_json(&mut snapshot_delivery, &mut socket, &ServerMessage::AuthError { code: Some("transient".into()), id: "session-expired".into(), error: "public tenant session is unavailable".into() }).await;
                 break;
             }
-            _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
-                if !Box::pin(revalidate_connection(&runtime, &control_connection)).await {
+            batched = async {
+                match auth_watch.as_ref() {
+                    Some(watch) => { watch.revoked().await; true }
+                    None => { revalidation_timer.tick().await; false }
+                }
+            }, if !control_connection.auth_token.is_empty() => {
+                // A batched round already found the session invalid.
+                if batched || !Box::pin(revalidate_connection(&runtime, &control_connection)).await {
+                    auth_watch = None;
                     replicas.clear();
                     replica_opens.clear();
                     pending_replica_opens.clear();
@@ -2134,6 +2202,28 @@ async fn websocket(
                 if socket.send(Message::Ping(Default::default())).await.is_err() { break; }
                 continue;
             }
+            event = async {
+                match presence_events.as_mut() {
+                    Some(events) => events.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let refresh = match event {
+                    Ok(RuntimeEvent::PresenceChanged { project_id }) => project_id == control_connection.project_id,
+                    Ok(_) => false,
+                    // Missed changes: refresh once.
+                    Err(broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(broadcast::error::RecvError::Closed) => { presence_events = None; false }
+                };
+                if refresh {
+                    for message in Box::pin(runtime.refresh_control_queries(
+                        &control_connection, &mut control_queries, "presence-change",
+                    )).await {
+                        if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
+                    }
+                }
+                continue;
+            }
             event = runtime_events.recv() => {
                 match event {
                     Ok(RuntimeEvent::ControlChanged { project_id })
@@ -2147,15 +2237,6 @@ async fn websocket(
                             ))
                             .await
                         {
-                            if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
-                        }
-                    }
-                    Ok(RuntimeEvent::PresenceChanged { project_id })
-                        if project_id == control_connection.project_id =>
-                    {
-                        for message in Box::pin(runtime.refresh_control_queries(
-                            &control_connection, &mut control_queries, "presence-change",
-                        )).await {
                             if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                         }
                     }

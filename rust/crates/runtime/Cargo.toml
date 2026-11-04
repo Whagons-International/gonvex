@@ -176,6 +176,11 @@ name = "burst_control"
 harness = false
 required-features = ["perf-fixture"]
 
+[[bench]]
+name = "conn_idle"
+harness = false
+required-features = ["perf-fixture"]
+
 [[test]]
 name = "feed_backlog"
 required-features = ["perf-fixture"]

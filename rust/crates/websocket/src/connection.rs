@@ -329,7 +329,10 @@ async fn watched_write(shared: &Shared, writer: &mut Writer, outbound: Outbound)
     let mut written = shared.written.load(Relaxed);
     let mut progress = Instant::now();
     loop {
+        // Write first: a write that completes on its first poll (the common
+        // case) never registers the stall-check timer (conn-idle).
         tokio::select! {
+            biased;
             result = &mut write => return WriteEnd::Done(result),
             _ = tokio::time::sleep(check) => {
                 let now = shared.written.load(Relaxed);
