@@ -50,6 +50,7 @@ mod provision;
 pub mod reference_integrity;
 pub mod sql_lexer;
 pub mod statement_profile;
+pub mod reader_priority;
 pub use provision::{MigrationScope, SqlMigration};
 
 #[derive(Debug, Error)]
@@ -1137,16 +1138,27 @@ impl ControlPlane {
     ) -> Result<(bool, bool), DatabaseError> {
         let pool = self.pools.pool(&route.database_url).await?;
         let _admission = self.pools.admit(&route.database_url).await?;
+        // Two EXISTS per kind instead of one MAX over every due row: each
+        // branch is one partial-index probe (pending by path or by due time,
+        // processing by lease), so a backlog of due rows is not walked.
         let row = sqlx::query(concat!(
-            r#"SELECT COALESCE(MAX(action_path = $1), 0) AS matching,
-                      COALESCE(MAX(action_path <> $1), 0) AS other
-               FROM _gonvex_action_outbox
-               WHERE (status = 'pending' AND available_at <= "#,
+            r#"SELECT
+                 EXISTS (SELECT 1 FROM _gonvex_action_outbox
+                         WHERE status = 'pending' AND action_path = $1 AND available_at <= "#,
             now_ms!(),
             r#")
-                  OR (status = 'processing' AND locked_at < "#,
+                 OR EXISTS (SELECT 1 FROM _gonvex_action_outbox
+                         WHERE status = 'processing' AND locked_at < "#,
             now_ms!(),
-            r#" - 300000)"#
+            r#" - 300000 AND action_path = $1) AS matching,
+                 EXISTS (SELECT 1 FROM _gonvex_action_outbox
+                         WHERE status = 'pending' AND available_at <= "#,
+            now_ms!(),
+            r#" AND action_path <> $1)
+                 OR EXISTS (SELECT 1 FROM _gonvex_action_outbox
+                         WHERE status = 'processing' AND locked_at < "#,
+            now_ms!(),
+            r#" - 300000 AND action_path <> $1) AS other"#
         ))
         .bind(path)
         .fetch_one(&pool)
@@ -1176,14 +1188,22 @@ impl ControlPlane {
             now_ms!(),
             r#", attempts = attempts + 1
                WHERE id = (
-                 SELECT id FROM _gonvex_action_outbox
-                 WHERE ((status = 'pending' AND available_at <= "#,
+                 SELECT id FROM (
+                   SELECT * FROM (
+                     SELECT id, available_at, created_at FROM _gonvex_action_outbox
+                     WHERE status = 'pending' AND available_at <= "#,
             now_ms!(),
-            r#")
-                    OR (status = 'processing' AND locked_at < "#,
+            r#"
+                       AND ($1 IS NULL OR (action_path = $1) = $2)
+                     ORDER BY available_at, created_at LIMIT 1)
+                   UNION ALL
+                   SELECT * FROM (
+                     SELECT id, available_at, created_at FROM _gonvex_action_outbox
+                     WHERE status = 'processing' AND locked_at < "#,
             now_ms!(),
-            r#" - 300000))
-                   AND ($1 IS NULL OR (action_path = $1) = $2)
+            r#" - 300000
+                       AND ($1 IS NULL OR (action_path = $1) = $2)
+                     ORDER BY available_at, created_at LIMIT 1))
                  ORDER BY available_at, created_at LIMIT 1)
                RETURNING id, action_path, args,
                          COALESCE(actor_user_id, '') AS actor_account_id,

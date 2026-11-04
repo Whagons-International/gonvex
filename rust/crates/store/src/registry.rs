@@ -485,6 +485,7 @@ impl PoolRegistry {
         let limits = limits.bounded();
         apply_cache_budget();
         crate::statement_profile::install();
+        crate::reader_priority::install();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
             admission_count: Arc::default(),
@@ -639,7 +640,11 @@ impl PoolRegistry {
         tokio::spawn(async move {
             let interval = sweep_interval(&limits);
             let optimize_every = Duration::from_secs(env_u64("GONVEX_SQLITE_OPTIMIZE_SECS", 3600).max(60));
-            let mut last_optimize = std::time::Instant::now();
+            // First pass about a minute after start (indexes provisioning
+            // created have no statistics yet), then every `optimize_every`.
+            let mut last_optimize = std::time::Instant::now()
+                .checked_sub(optimize_every.saturating_sub(Duration::from_secs(60)))
+                .unwrap_or_else(std::time::Instant::now);
             loop {
                 tokio::time::sleep(interval).await;
                 let Some(map) = databases.upgrade() else {
