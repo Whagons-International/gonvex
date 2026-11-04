@@ -41,12 +41,25 @@ pub fn shared_decisions() -> u64 {
     SHARED_DECISIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Shares kept per tenant at most. A share lives while its event's images
-/// are held elsewhere too (the change-feed backlog, its refill cache or a
-/// connection still applying it), so connections that are behind reuse the
-/// shares of the connections ahead of them instead of recomputing each
-/// event's memo, decisions, layout and outcomes. The 4 newest always stay.
-const MAX_EVENTS: usize = 1024;
+/// Shares kept per tenant at most (`GONVEX_EVENT_SHARES_MAX`, default 64;
+/// the previous fixed window was 4). Within it, a share lives while its
+/// event's images are held elsewhere too (the change-feed backlog, its refill
+/// cache or a connection still applying it), so connections a few seconds
+/// behind reuse the shares of the connections ahead of them instead of
+/// recomputing each event's memo, decisions, layout and outcomes. At 1,000
+/// users a 1,024 window held ~100 MiB more (decisions and outcomes) with no
+/// reproducible latency gain (docs/performance/feed-backlog.md). The 4 newest
+/// always stay.
+fn max_events() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("GONVEX_EVENT_SHARES_MAX")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(64)
+            .max(KEEP_EVENTS)
+    })
+}
 const KEEP_EVENTS: usize = 4;
 
 static SHARES_CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -265,7 +278,7 @@ impl EventShares {
         while recent.order.len() > KEEP_EVENTS {
             let front = &recent.order[0];
             let unused = Arc::strong_count(&front.changes) <= 1;
-            if !(unused || recent.order.len() > MAX_EVENTS) {
+            if !(unused || recent.order.len() > max_events()) {
                 break;
             }
             let dropped = recent.order.pop_front().expect("front");
