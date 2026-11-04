@@ -33,7 +33,7 @@ jobs:
           node-version: "24"
       - name: Check isolated-load destination, privacy and qualification guards
         run: |
-          node --test bench/whagons/safety.test.mjs
+          node --test bench/whagons/safety.test.mjs bench/whagons/task-expectations.test.mjs
           python3 bench/whagons/summary.test.py
       - uses: dtolnay/rust-toolchain@1.94.0
         with:

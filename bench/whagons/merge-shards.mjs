@@ -62,6 +62,14 @@ if (first.client?.thin) {
   const sumObj = (get) => parts.reduce((a, p) => { for (const [k, v] of Object.entries(get(p) || {})) if (typeof v === 'number') a[k] = (a[k] || 0) + v; return a; }, {});
   result.client = { ...first.client, sdkUsers: parts.reduce((n, p) => n + (p.client?.sdkUsers || 0), 0), thin: { ...sumObj(p => p.client?.thin), unsupported: sumObj(p => p.client?.thin?.unsupported) } };
 }
+// Task-update expectations (run.ts teardown): sum the counters, concatenate the diagnostics.
+if (parts.some(p => p.taskExpectations)) {
+  const t = { undelivered: [] };
+  for (const p of parts) for (const [k, v] of Object.entries(p.taskExpectations || {})) {
+    if (k === 'undelivered') t.undelivered.push(...v); else t[k] = (t[k] || 0) + v;
+  }
+  result.taskExpectations = t;
+}
 const rule = passRule({ ...result, latencyMs: steadyLatencyMs });
 Object.assign(result, { clientSloPassed: rule.passed && !(result.visibilityChecks.mismatched > 0), errorRate: rule.errorRate, failingKinds: rule.failingKinds });
 writeFileSync(partial ? out + '.partial.json' : out, JSON.stringify(result, null, 2));
