@@ -216,7 +216,17 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
     let only: Option<BTreeSet<String>> = std::env::var("WHAGONS_PARITY_TABLES")
         .ok()
         .map(|tables| tables.split(',').map(str::to_owned).collect());
-    let seeds = env("WHAGONS_PARITY_SEEDS", 3) as u64;
+    // Real-tenant mode: a local copy of a tenant database (never committed).
+    // The test works on its own copy of that file and keeps every derived
+    // file next to it.
+    let real = std::env::var("WHAGONS_PARITY_DB")
+        .ok()
+        .map(std::path::PathBuf::from);
+    let seeds = if real.is_some() {
+        1
+    } else {
+        env("WHAGONS_PARITY_SEEDS", 3) as u64
+    };
     let rows_per_table = env("WHAGONS_PARITY_ROWS", 24);
     let pool = rows_per_table.max(MEMBERS + 2);
     let roles: Vec<String> = ["member", "admin"]
@@ -230,6 +240,10 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
 
     let mut mismatches: BTreeMap<String, Vec<Mismatch>> = BTreeMap::new();
     let mut fallback_tables = BTreeSet::new();
+    let mut missing_tables = BTreeSet::new();
+    let mut members_checked = 0usize;
+    // v1 SQL vs v2 SQL: rows v2 adds (leaked) and drops (missing).
+    let (mut leaked, mut missing) = (0usize, 0usize);
     let mut checked = 0usize;
     let mut visible = [0usize; 2];
     // Per table: (rows seen, rows visible) over every member and seed, and
@@ -246,13 +260,23 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
         .collect();
     let mut control_caught = vec![0usize; mutations.len()];
     for seed in 0..seeds {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = match &real {
+            Some(path) => tempfile::tempdir_in(path.parent().unwrap()).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
         let url = gonvex_store::database_url(&directory.path().join("tenant.db"));
+        let control_url = match &real {
+            Some(path) => {
+                std::fs::copy(path, directory.path().join("tenant.db")).unwrap();
+                gonvex_store::database_url(&directory.path().join("control.db"))
+            }
+            None => url.clone(),
+        };
         let pools = PoolRegistry::new(PoolLimits {
             acquire_timeout: Duration::from_secs(30),
             ..PoolLimits::default()
         });
-        let control = ControlPlane::connect(&url, pools.clone(), BTreeMap::new())
+        let control = ControlPlane::connect(&control_url, pools.clone(), BTreeMap::new())
             .await
             .unwrap();
         let route = TenantRoute {
@@ -260,95 +284,125 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
             tenant_id: format!("parity-{seed}"),
             database_url: url.clone(),
         };
-        control
-            .clone()
-            .provision_tenant_database(
-                route.clone(),
-                vec![SqlMigration::new(
-                    "0000_whagons_visibility.sql".into(),
-                    MigrationScope::Tenant,
-                    false,
-                    format!("-- gonvex:scope tenant\n{SCHEMA}"),
-                )],
+        let mut principals: Vec<(String, String, String)> = Vec::new();
+        if real.is_some() {
+            use sqlx::Row as _;
+            principals = sqlx::query(
+                "SELECT id, account_id, role FROM members WHERE status = 'active' ORDER BY id",
             )
+            .fetch_all(&pools.reader(&url).await.unwrap())
             .await
-            .unwrap();
-
-        // Seed every table plus the members.
-        let mut rng = Rng::new(0x7157_2026 ^ (seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)));
-        let mut tables: BTreeSet<String> = SCHEMA
-            .lines()
-            .filter_map(|line| line.strip_prefix("CREATE TABLE IF NOT EXISTS \""))
-            .filter_map(|rest| rest.split('"').next())
-            .map(str::to_owned)
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2)))
             .collect();
-        tables.insert("members".into());
-        let mut transaction = gonvex_store::begin_transaction(&pools, &url, false)
-            .await
-            .unwrap();
-        let mut member_roles = Vec::new();
-        for table in &tables {
-            let columns = columns(&pools, &url, table).await;
-            let count = if table == "members" {
-                MEMBERS
-            } else {
-                rows_per_table
-            };
-            for index in 0..count {
-                let mut row = BTreeMap::new();
-                for column in &columns {
-                    row.insert(
-                        column.name.clone(),
-                        value(column, &literals, pool, &mut rng),
-                    );
-                }
-                // Keys: k0.. shared by every table (members are k0..k9).
-                for key in ["_id", "id"] {
-                    if row.contains_key(key) {
-                        row.insert(key.to_owned(), json!(format!("k{index}")));
+        }
+        if real.is_none() {
+            control
+                .clone()
+                .provision_tenant_database(
+                    route.clone(),
+                    vec![SqlMigration::new(
+                        "0000_whagons_visibility.sql".into(),
+                        MigrationScope::Tenant,
+                        false,
+                        format!("-- gonvex:scope tenant\n{SCHEMA}"),
+                    )],
+                )
+                .await
+                .unwrap();
+
+            // Seed every table plus the members.
+            let mut rng = Rng::new(0x7157_2026 ^ (seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+            let mut tables: BTreeSet<String> = SCHEMA
+                .lines()
+                .filter_map(|line| line.strip_prefix("CREATE TABLE IF NOT EXISTS \""))
+                .filter_map(|rest| rest.split('"').next())
+                .map(str::to_owned)
+                .collect();
+            tables.insert("members".into());
+            let mut transaction = gonvex_store::begin_transaction(&pools, &url, false)
+                .await
+                .unwrap();
+            let mut member_roles = Vec::new();
+            for table in &tables {
+                let columns = columns(&pools, &url, table).await;
+                let count = if table == "members" {
+                    MEMBERS
+                } else {
+                    rows_per_table
+                };
+                for index in 0..count {
+                    let mut row = BTreeMap::new();
+                    for column in &columns {
+                        row.insert(
+                            column.name.clone(),
+                            value(column, &literals, pool, &mut rng),
+                        );
                     }
-                }
-                if table == "members" {
-                    let role = rng.pick(&roles).clone();
-                    let mut granted = serde_json::Map::new();
-                    for permission in &permissions {
-                        if rng.chance(0.3) {
-                            granted.insert(permission.clone(), json!(true));
+                    // Keys: k0.. shared by every table (members are k0..k9).
+                    for key in ["_id", "id"] {
+                        if row.contains_key(key) {
+                            row.insert(key.to_owned(), json!(format!("k{index}")));
                         }
                     }
-                    row.insert("account_id".into(), json!(format!("acct-{index}")));
-                    row.insert("status".into(), json!("active"));
-                    row.insert("role".into(), json!(role));
-                    row.insert(
-                        "permissions".into(),
-                        json!(Value::Object(granted).to_string()),
+                    if table == "members" {
+                        let role = rng.pick(&roles).clone();
+                        let mut granted = serde_json::Map::new();
+                        for permission in &permissions {
+                            if rng.chance(0.3) {
+                                granted.insert(permission.clone(), json!(true));
+                            }
+                        }
+                        row.insert("account_id".into(), json!(format!("acct-{index}")));
+                        row.insert("status".into(), json!("active"));
+                        row.insert("role".into(), json!(role));
+                        row.insert(
+                            "permissions".into(),
+                            json!(Value::Object(granted).to_string()),
+                        );
+                        principals.push((
+                            format!("k{index}"),
+                            format!("acct-{index}"),
+                            role.clone(),
+                        ));
+                        member_roles.push(role);
+                    }
+                    let names: Vec<&String> = row.keys().collect();
+                    let statement = format!(
+                        "INSERT OR IGNORE INTO \"{table}\" ({}) VALUES ({})",
+                        names
+                            .iter()
+                            .map(|name| format!("\"{name}\""))
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        (1..=names.len())
+                            .map(|i| format!("${i}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
                     );
-                    member_roles.push(role);
+                    let mut query = sqlx::query(&statement);
+                    for value in row.values() {
+                        query = bind(query, value);
+                    }
+                    query
+                        .execute(&mut **transaction.transaction())
+                        .await
+                        .unwrap_or_else(|error| panic!("seed {table}: {error}"));
                 }
-                let names: Vec<&String> = row.keys().collect();
-                let statement = format!(
-                    "INSERT OR IGNORE INTO \"{table}\" ({}) VALUES ({})",
-                    names
-                        .iter()
-                        .map(|name| format!("\"{name}\""))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    (1..=names.len())
-                        .map(|i| format!("${i}"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-                let mut query = sqlx::query(&statement);
-                for value in row.values() {
-                    query = bind(query, value);
-                }
-                query
-                    .execute(&mut **transaction.transaction())
-                    .await
-                    .unwrap_or_else(|error| panic!("seed {table}: {error}"));
             }
+            transaction.commit().await.unwrap();
         }
-        transaction.commit().await.unwrap();
+        let member_roles: Vec<String> = principals.iter().map(|p| p.2.clone()).collect();
+        members_checked += principals.len();
+        let existing: BTreeSet<String> = {
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(&pools.reader(&url).await.unwrap())
+                .await
+                .unwrap()
+                .into_iter()
+                .collect()
+        };
 
         let feeds = crate::change_feed::ChangeFeedHub::new(pools.clone());
         let registry = ParentAclRegistry::default();
@@ -358,6 +412,10 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
             .unwrap();
         for (table, legacy_plan) in &legacy {
             if only.as_ref().is_some_and(|only| !only.contains(table)) {
+                continue;
+            }
+            if !existing.contains(table) {
+                missing_tables.insert(table.clone());
                 continue;
             }
             let v2_plan = &v2[table];
@@ -371,11 +429,11 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
                 "table": table, "key": v2_plan.key, "sets": {}, "where": {"operator": "public"}
             }))
             .unwrap();
-            for member in 0..MEMBERS {
+            for (member, (member_id, account_id, _)) in principals.iter().enumerate() {
                 let mut session = TenantSession::anonymous(route.clone());
-                session.identity.account.id = format!("acct-{member}");
-                session.member.id = format!("k{member}");
-                session.member.account_id = format!("acct-{member}");
+                session.identity.account.id = account_id.clone();
+                session.member.id = member_id.clone();
+                session.member.account_id = account_id.clone();
                 session.member.status = "active".into();
                 session.member.role = member_roles[member].clone();
                 let key_of = |row: &Value| -> String {
@@ -503,6 +561,8 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
                 checked += all.len();
                 visible[0] += v1_sql.len();
                 visible[1] += v2_sql.len();
+                leaked += v2_sql.difference(&v1_sql).count();
+                missing += v1_sql.difference(&v2_sql).count();
                 for (what, left, right) in [
                     ("v1 SQL vs v2 SQL", &v1_sql, &v2_sql),
                     ("v1 SQL vs v1 interpreted", &v1_sql, &v1_rows),
@@ -526,8 +586,12 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
         pools.close().await;
     }
     eprintln!(
-        "whagons parity: {} plans x {MEMBERS} members x {seeds} seeds, {checked} row checks, {} v1 / {} v2 visible; compiled fallback on {:?}",
+        "whagons parity ({}): {} plans ({} compared, missing tables {:?}) x {} members x {seeds} seeds, {checked} row checks, {} v1 / {} v2 visible, v1-vs-v2 SQL leaked {leaked} missing {missing}; compiled fallback on {:?}",
+        if real.is_some() { "real tenant copy" } else { "random data" },
         legacy.len(),
+        legacy.len() - missing_tables.len() - only.as_ref().map_or(0, |only| legacy.len() - only.len()),
+        missing_tables,
+        members_checked / seeds.max(1) as usize,
         visible[0],
         visible[1],
         fallback_tables
@@ -547,7 +611,7 @@ async fn whagons_legacy_and_v2_plans_admit_identical_rows() {
         "coverage: {partial}/{} tables had a member seeing a strict non-empty subset; never visible: {never:?}; always all visible: {always:?}; negative controls (tasks mask minus top-level branch i) caught in {control_caught:?} cases",
         coverage.len()
     );
-    if only.as_ref().is_none_or(|only| only.contains("tasks")) {
+    if real.is_none() && only.as_ref().is_none_or(|only| only.contains("tasks")) {
         let missed: Vec<usize> = (0..control_caught.len())
             .filter(|&i| control_caught[i] == 0)
             .collect();
