@@ -408,7 +408,9 @@ the reverse. Nor does the lane reduce isolate count, which comes from depth.
    takes down the runtime itself rather than only the module host. Apply (1) and (2)
    before that bridge ships.
 
-Not implemented on this branch; (1) and (2) are small runtime changes (the permit
+**Implemented on `perf/action-depth`** (recommendations 1–3, plus a single
+outbox drainer on the lane thread): see `action-depth.md`. The original note:
+not implemented on this branch; (1) and (2) are small runtime changes (the permit
 and lane plumbing exist in `scheduled_lane.rs`). Next measurement: a perf capture at
 14:01–14:03 on the next :00 run, plus isolate-thread counts of the module host
 (`/proc/<pid>/task/*/comm` = `gonvex-module-is…`) across the window.
