@@ -552,3 +552,31 @@ the network worker is ~17 % (JSON + deflate), V8 proper ~3.5 % (the isolate thre
 mostly syscalls and inline SQL). Targets: cached snapshots / log-only resume
 (perf/resume-lazy) and raw rows (perf/delivery-v4) address the offload-pool share; v1→v2
 visibility does not move CPU here.
+
+### new-200 (reference, candidate, new app)
+
+users 200/200, oracle 9 / 0 mismatched; save p50/p95/p99 168 / 8,019 / 11,266 ms, taskDelivery
+159 / 6,002 / 11,302, presence delivery 613 / 1,140 / 2,769, query 104 / 4,802 / 11,256;
+0.39 cores, peak 1,723 MiB (RSS 1.27 GiB). Error rate 53 %: 443 × "Task update was not
+delivered before teardown" (old app at 200: 17 in 20 min) plus 28 × `budget_exceeded` in the
+new app's `taskResources.recordTaskViewByTaskId`. The teardown check counts every user of the
+tenant per undelivered edit, so a few edits whose row never matches the expected value in the
+new app's `tasks.recentWorkspaceTasks` inflate it; not yet resolved (generator/app
+compatibility vs real delivery loss is open). `snapshot.permit_wait` p50 616 ms, `fn.total cron`
+p99 940 ms (max 18 s), `fn.total reducer` p50 92 ms / p99 9.9 s.
+
+### Step 7: perf/reader-warm 33975410 (c4b20666) at the failing step (500, new app)
+
+Clean merge on 92cd0a9a. Compose passes `GONVEX_SQLITE_CACHE_BUDGET_MB` (new-lab override).
+
+| case | budget | save p50/p95/p99 | taskDelivery p50/p95/p99 | presence delivery p99 | errors | RSS max | cgroup peak | snapshot.build p50 | delivery.queue_wait p50 | db.reader_begin p99 | oracle (leaked) |
+|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| new-500 (candidate) | – | 35.7 / 106.3 / 122.1 s | 12.9 / 63.4 / 89.2 s | 2,497 ms | 29.6 % | 1,711 MiB | 2,048 | 28.7 s | 15.9 s | 169 ms | 1 mism. (0) |
+| rw-500-b256 | 256 MB | 40.0 / 99.9 / 127.5 s | 17.7 / 61.4 / 88.4 s | 1,888 ms | 35.6 % | 1,884 MiB | 2,048 | 31.3 s | 19.1 s | 112 ms | 2 mism. (0) |
+| rw-500-b128 | 128 MB | 29.2 / 99.3 / 118.4 s | 9.5 / 57.7 / 81.2 s | 2,360 ms | 19.3 % | 1,764 MiB | 2,049 | 28.9 s | 13.1 s | 127 ms | 2 mism. (0) |
+
+All three are CPU-bound (1.00 core, every period throttled), so p99 is set by the snapshot
+backlog and the budget does not move it beyond run-to-run noise. 256 MB costs ~120 MB more
+RSS than 128 MB with no latency gain at this load. **Recommendation: keep the default at 128.**
+Not measured: the cold-tenant benefit (warm readers at low load, startup), which is what
+reader-warm targets; this step cannot show it.
