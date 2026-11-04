@@ -180,7 +180,10 @@ async function main() {
  const presenceStates=new Map<string,string>();const users:any[]=[];const snapshots:any[]=[];const pending=new Map<string,number>();const pendingTasks=new Map<string,{at:number,matches:(row:any,at:number)=>boolean}>();
  const started=Date.now();let stopping=false;let aborted=false;let deadline=Infinity;let remaining=myTarget;
  process.on('SIGTERM',()=>{const plateauEnd=deadline;aborted=true;stopping=true;deadline=Date.now();const partial=(process.env.LOAD_RESULT||state+'.result')+'.partial.json';writeFileSync(partial+'.tmp',JSON.stringify({aborted:true,profileHash,targetUsers:myTarget,connectedUsers:users.length,errors,latencyMs:Object.fromEntries(Object.entries(measurements).map(([k,v]:any)=>[k,{samples:v.length,...quantiles(v)}])),steadyStartMs:plateauEnd-seconds*1000,rawSamples:samples,rawPaths:perPath}));renameSync(partial+'.tmp',partial);});
- const ready=()=>{if(--remaining===0)deadline=Date.now()+seconds*1000;};
+ const ready=()=>{if(--remaining===0&&deadline===Infinity)deadline=Date.now()+seconds*1000;};
+ // A user that never finishes connecting must not hold the plateau forever: start it
+ // ramp + 120 s after launch anyway and count the users still missing.
+ setTimeout(()=>{if(deadline===Infinity&&!stopping){for(let k=0;k<remaining;k++)error(new Error('User not connected by ramp + 120 s'));deadline=Date.now()+seconds*1000;}},(ramp+120)*1000).unref?.();
  // Preserve the seven observed tenant weights. An optional stress profile
  // activates the other nineteen tenants too; it is not the observed mix.
  // Default: production write skew (two tenants carry 78%). LOAD_ALL_TENANTS_ACTIVE

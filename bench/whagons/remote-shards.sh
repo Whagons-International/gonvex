@@ -25,8 +25,16 @@ cleanup() { kill -TERM $pids ${monitor:-} ${pinger:-} $tunnels 2>/dev/null || tr
 tunnel() {
  [ -n "${LOAD_TUNNEL_HOST:-}" ] || return 0
  tp=$(( ${LOAD_TUNNEL_PORT:-18200} + 2*$1 )); ta=$((tp+1))
- ( ulimit -n 65536 2>/dev/null || ulimit -n 10240; exec ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 \
-   -L "127.0.0.1:$tp:${LOAD_TUNNEL_RUNTIME_SOCK:?}" -L "127.0.0.1:$ta:${LOAD_TUNNEL_AUTH_SOCK:?}" "$LOAD_TUNNEL_HOST" ) > "$LOAD_RESULT.tunnel-$1.log" 2>&1 &
+ # Tailscale drops for seconds at a time: tolerate ~5 min of silence and restart
+ # the tunnel if ssh still exits (sockets through it are lost; clients reconnect).
+ ( ulimit -n 65536 2>/dev/null || ulimit -n 10240
+   sp=; trap 'kill $sp 2>/dev/null; exit 0' TERM INT
+   while :; do
+    ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=30 \
+     -L "127.0.0.1:$tp:${LOAD_TUNNEL_RUNTIME_SOCK:?}" -L "127.0.0.1:$ta:${LOAD_TUNNEL_AUTH_SOCK:?}" "$LOAD_TUNNEL_HOST" &
+    sp=$!; wait "$sp"
+    echo "tunnel exited $(date +%T), restarting"; sleep 1
+   done ) > "$LOAD_RESULT.tunnel-$1.log" 2>&1 &
  tunnels="$tunnels $!"
  n=0
  until curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$tp/healthz"; do
