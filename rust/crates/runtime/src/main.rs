@@ -2,9 +2,98 @@ use std::process::ExitCode;
 
 // `system-alloc` keeps the system allocator so heap profilers that hook
 // malloc (heaptrack) see every allocation. Production uses mimalloc.
+//
+// Every allocator is wrapped in `heap_stats::Counting` (live Rust heap bytes
+// for `/dev/metrics` `memory.allocator`).
 #[cfg(not(any(feature = "system-alloc", feature = "jemalloc-prof")))]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: gonvex_runtime::heap_stats::Counting<mimalloc::MiMalloc> =
+    gonvex_runtime::heap_stats::Counting(mimalloc::MiMalloc);
+
+#[cfg(all(feature = "system-alloc", not(feature = "jemalloc-prof")))]
+#[global_allocator]
+static GLOBAL: gonvex_runtime::heap_stats::Counting<std::alloc::System> =
+    gonvex_runtime::heap_stats::Counting(std::alloc::System);
+
+#[cfg(not(any(feature = "system-alloc", feature = "jemalloc-prof")))]
+mod mimalloc_state {
+    // Exported by the statically linked mimalloc (libmimalloc-sys); declared
+    // here because the crate's `extended` bindings are not enabled.
+    extern "C" {
+        fn mi_process_info(
+            elapsed_msecs: *mut usize,
+            user_msecs: *mut usize,
+            system_msecs: *mut usize,
+            current_rss: *mut usize,
+            peak_rss: *mut usize,
+            current_commit: *mut usize,
+            peak_commit: *mut usize,
+            page_faults: *mut usize,
+        );
+        fn mi_collect(force: bool);
+    }
+
+    /// mimalloc's committed and resident bytes (`memory.allocator.state`).
+    pub fn info() -> serde_json::Value {
+        let mut values = [0usize; 8];
+        let [a, b, c, d, e, f, g, h] = &mut values;
+        // SAFETY: eight valid out-pointers.
+        unsafe { mi_process_info(a, b, c, d, e, f, g, h) };
+        serde_json::json!({
+            "rssBytes": values[3], "peakRssBytes": values[4],
+            "commitBytes": values[5], "peakCommitBytes": values[6],
+        })
+    }
+
+    /// Forced collection of this thread's heap, abandoned segments and
+    /// delayed arena purges.
+    pub fn collect() {
+        // SAFETY: no arguments besides the flag.
+        unsafe { mi_collect(true) };
+    }
+}
+
+/// `GONVEX_ALLOC_TRIM_SECS=N`: every N seconds, a forced mimalloc collect
+/// (from this thread: delayed arena purges and abandoned segments) and glibc
+/// `malloc_trim(0)` (SQLite and V8 allocate through glibc). Off by default.
+fn start_allocator_trim() {
+    let Some(seconds) = std::env::var("GONVEX_ALLOC_TRIM_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+    else {
+        return;
+    };
+    std::thread::Builder::new()
+        .name("gonvex-alloc-trim".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            #[cfg(not(any(feature = "system-alloc", feature = "jemalloc-prof")))]
+            mimalloc_state::collect();
+            // SAFETY: malloc_trim takes no pointers.
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::malloc_trim(0);
+            }
+        })
+        .ok();
+}
+
+fn register_allocator_info() {
+    #[cfg(not(any(feature = "system-alloc", feature = "jemalloc-prof")))]
+    gonvex_runtime::heap_stats::set_allocator_info("mimalloc", mimalloc_state::info);
+    #[cfg(feature = "jemalloc-prof")]
+    gonvex_runtime::heap_stats::set_allocator_info("jemalloc", || {
+        let _ = tikv_jemalloc_ctl::epoch::advance();
+        serde_json::json!({
+            "allocatedBytes": tikv_jemalloc_ctl::stats::allocated::read().unwrap_or(0),
+            "residentBytes": tikv_jemalloc_ctl::stats::resident::read().unwrap_or(0),
+            "retainedBytes": tikv_jemalloc_ctl::stats::retained::read().unwrap_or(0),
+        })
+    });
+    #[cfg(all(feature = "system-alloc", not(feature = "jemalloc-prof")))]
+    gonvex_runtime::heap_stats::set_allocator_info("system", || serde_json::Value::Null);
+}
 
 // `jemalloc-prof`: sampled heap profiles for attributing live heap by call
 // site. Run with `_RJEM_MALLOC_CONF=prof:true,lg_prof_sample:17` and
@@ -12,7 +101,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // a dump every interval, read with `jeprof --text <binary> <dump>`.
 #[cfg(feature = "jemalloc-prof")]
 #[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+static GLOBAL: gonvex_runtime::heap_stats::Counting<tikv_jemallocator::Jemalloc> =
+    gonvex_runtime::heap_stats::Counting(tikv_jemallocator::Jemalloc);
 
 #[cfg(feature = "jemalloc-prof")]
 fn start_heap_dumps() {
@@ -55,6 +145,8 @@ use tracing_subscriber::EnvFilter;
 fn main() -> ExitCode {
     #[cfg(feature = "jemalloc-prof")]
     start_heap_dumps();
+    register_allocator_info();
+    start_allocator_trim();
     // In-process module isolates need the V8 platform initialized on this
     // thread before Tokio starts its workers (see gonvex-module-host main).
     gonvex_module_runtime_v8::initialize_v8_platform();

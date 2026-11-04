@@ -16,6 +16,7 @@ mod cron_profile;
 mod dashboard;
 pub mod delivery;
 pub mod feed_share;
+pub mod heap_stats;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
 #[cfg(not(feature = "duckdb"))]

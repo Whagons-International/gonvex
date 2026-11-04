@@ -590,6 +590,9 @@ pub struct CacheStats {
     pub bytes: u64,
     /// Keyed entries built inside the opening read (`keyed_inline`).
     pub keyed_inline_builds: u64,
+    /// Entries dropped because their last SQL build passed `max_age` (no
+    /// open can use them any more).
+    pub expired: u64,
 }
 
 #[derive(Default)]
@@ -607,6 +610,7 @@ pub struct SnapshotCache {
     sparse_drops: AtomicU64,
     sparse_skips: AtomicU64,
     keyed_inline_builds: AtomicU64,
+    expired: AtomicU64,
     disabled: std::sync::atomic::AtomicBool,
 }
 
@@ -666,6 +670,7 @@ impl SnapshotCache {
             entries: count,
             bytes,
             keyed_inline_builds: self.keyed_inline_builds.load(Relaxed),
+            expired: self.expired.load(Relaxed),
         }
     }
 
@@ -972,6 +977,21 @@ impl SnapshotCache {
         let slot = slots.entry(key.clone()).or_insert_with(Slot::empty);
         slot.entry = Some(entry);
         slot.last_used = tick;
+        // Entries past `max_age` since their SQL build are never served
+        // again (every open rebuilds them), yet LRU eviction only starts at
+        // the budget: on staging (2026-11-04) over half of the largest
+        // entries' bytes were such dead entries of keys nobody reopened.
+        let max_age = config().max_age;
+        for slot in slots.values_mut() {
+            if slot
+                .entry
+                .as_ref()
+                .is_some_and(|entry| entry.built.elapsed() > max_age)
+            {
+                slot.entry = None;
+                self.expired.fetch_add(1, Relaxed);
+            }
+        }
         let mut total = slots
             .values()
             .filter_map(|slot| slot.entry.as_ref())
@@ -1503,6 +1523,30 @@ mod tests {
         definition.equal_filters.clear();
         assert_eq!(cache_arguments(&definition, &args), serde_json::json!({}));
         assert_eq!(cache_arguments(&definition, &Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn drops_entries_past_max_age_when_another_entry_is_installed() {
+        let cache = SnapshotCache::default();
+        let max_age = config().max_age;
+        let Some(built) = Instant::now().checked_sub(max_age + Duration::from_secs(1)) else {
+            return;
+        };
+        let old = Arc::new(CacheEntry {
+            epoch: "e".into(),
+            revision: 1,
+            built,
+            rows: Vec::new(),
+            heap_bytes: 40,
+            acl: Default::default(),
+        });
+        cache.install_within(key("old"), entry(40), 1000);
+        cache.slots.lock().unwrap().get_mut(&key("old")).unwrap().entry = Some(old);
+        cache.install_within(key("new"), entry(40), 1000);
+        assert!(cache.current(&key("old")).is_none());
+        assert!(cache.current(&key("new")).is_some());
+        let stats = cache.stats();
+        assert_eq!((stats.entries, stats.bytes, stats.expired), (1, 40, 1));
     }
 
     #[test]

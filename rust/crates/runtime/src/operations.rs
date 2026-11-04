@@ -1653,9 +1653,11 @@ fn memory_json(runtime: &Runtime) -> Value {
             "builds": cache.builds, "rollForwards": cache.roll_forwards, "fallbacks": cache.fallbacks,
             "evictions": cache.evictions, "keysSeen": runtime.snapshot_cache_keys_seen(),
             "sparseDrops": sparse.0, "sparseSkips": sparse.1, "keyedInlineBuilds": cache.keyed_inline_builds,
+            "expired": cache.expired,
             "byPath": by_path, "top": top},
         "replicaOpens": crate::open_reasons::json(),
         "principalCache": runtime.principal_cache_stats(),
+        "allocator": crate::heap_stats::json(),
         "v8": {"isolates": isolates, "totalHeapBytes": v8[0], "usedHeapBytes": v8[1],
             "physicalBytes": v8[2], "externalBytes": v8[3], "mallocedBytes": v8[4]},
     })
