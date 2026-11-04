@@ -35,7 +35,7 @@ def main(result, data):
         want_value = want.get(field) if field not in ('dueDate',) else (want.get('dueDate') or want.get('updates', {}).get('dueDate'))
         committed = row[field] if row is not None and field else None
         if field == 'firstViewedAt':
-            server_has = committed is not None and committed >= at
+            server_has = committed is not None and committed > 0
         else:
             server_has = committed == want_value
         replica = {o['row'].get(field) if field != 'description' else o['row'].get('description') for o in obs}
