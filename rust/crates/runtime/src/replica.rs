@@ -16,6 +16,8 @@ mod mask;
 #[path = "replica_fanout.rs"]
 pub(crate) mod fanout;
 pub use fanout::stats as fanout_stats;
+pub(crate) use mask::MovingChecks as MovingChecksPub;
+pub use fanout::wake_skips;
 pub use fanout::{coverage_json as fanout_coverage, path_counts as fanout_path_counts, PATHS as FANOUT_PATHS};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -103,6 +105,11 @@ pub struct ReplicaSubscription {
     /// Per inherited parent table: the parent ACL index columns (the only
     /// parent columns its visibility reads), computed on first use.
     pub(crate) parent_acl_columns: Option<Arc<BTreeMap<String, BTreeSet<String>>>>,
+    /// Targeted wakeups (`crate::wake`): the compiled binding the wake
+    /// interest uses when `mask` is not bound yet (kept apart from `mask` so
+    /// the batch header's class id is what the full path leaves). Cleared
+    /// with `mask`.
+    pub(crate) wake_member: Option<crate::visibility_class::MemberHandle>,
     /// Delivery v4 shape keys (`replica_fanout`), computed on first use.
     pub(crate) fanout: Option<Arc<fanout::FanoutKeys>>,
 }
@@ -855,6 +862,7 @@ impl Runtime {
                 mask: Default::default(),
                 concern_tables: None,
                 parent_acl_columns: None,
+                wake_member: None,
                 fanout: None,
             }),
         })
@@ -1718,6 +1726,7 @@ fn apply_rows_with(
     if context.before.is_some() {
         // The event changed this principal in memory: rebind.
         subscription.mask.clear();
+        subscription.wake_member = None;
     }
     let handle = compiled.as_ref().map(|(_, scope)| {
         subscription
@@ -3880,6 +3889,7 @@ mod tests {
             mask: Default::default(),
             concern_tables: None,
             parent_acl_columns: None,
+            wake_member: None,
             fanout: None,
         }
     }

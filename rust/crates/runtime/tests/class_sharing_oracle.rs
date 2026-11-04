@@ -408,6 +408,10 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
         gonvex_runtime::change_feed::merge_transactions(&tail).unwrap(),
     ));
     let shares_before = feed_share::metrics()["foundByRange"].as_u64().unwrap();
+    // Targeted wakeups: connections the tenant feed would skip for an event
+    // (checked against each connection deciding alone below).
+    let mut wake_skipped = 0usize;
+    let mut wake_resyncs = 0usize;
     let hub_shared = DeliveryHub::default();
     let hub_alone = DeliveryHub::default();
     let (hits_before, _, data_before) = gonvex_runtime::replica::fanout_stats();
@@ -502,6 +506,13 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                     .iter()
                     .map(|m| serde_json::to_value(m).unwrap())
                     .collect();
+                // Decided before the connection takes the event, as the
+                // tenant feed decides before broadcasting it.
+                let skips = gonvex_runtime::replica::wake_skips(
+                    &mut b.connection.subscriptions,
+                    &b.connection.session,
+                    event,
+                );
                 let messages = fixture
                     .runtime
                     .apply_feed_event(
@@ -511,6 +522,23 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
                     )
                     .await
                     .unwrap();
+                if skips {
+                    // A skipped connection must have had nothing to deliver:
+                    // no row, ready or transaction frame. The only frame
+                    // tolerated is a consistency resync the full path asks
+                    // for because a shared index is already ahead of the
+                    // event (this oracle commits every event first): a
+                    // skipped connection decides no row against that index,
+                    // so its digest stays exact without one.
+                    for message in &messages {
+                        assert!(
+                            matches!(message, gonvex_protocol::ServerMessage::ReplicaNeedHashes { .. }),
+                            "targeted wakeups skipped connection {index} for event {name}, which sends {message:?}"
+                        );
+                        wake_resyncs += 1;
+                    }
+                    wake_skipped += 1;
+                }
                 let mut rest_b = Vec::new();
                 for message in messages {
                     if let Some(rest) = b
@@ -603,6 +631,8 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
         coverage["merged"], coverage["mergedShared"]
     );
     assert!(by_range > 0, "private merged copies never found the range's share");
+    eprintln!("  connections the tenant feed would skip (verified idle): {wake_skipped} of {frames} ({wake_resyncs} index-ahead resyncs not needed)");
+    assert!(wake_skipped > 0, "targeted wakeups never skipped a connection: the check proved nothing");
     assert!(
         coverage["mergedShared"].as_u64().unwrap() > 0,
         "no merged delivery was served by the fan-out"

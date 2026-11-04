@@ -127,6 +127,7 @@ pub fn coverage_json() -> serde_json::Value {
         "shared": shared,
         "sharedFraction": if total == 0 { 0.0 } else { shared as f64 / total as f64 },
         "waits": WAITS.load(Ordering::Relaxed),
+        "wake": crate::wake::metrics(),
         "merged": MERGED.load(Ordering::Relaxed),
         "mergedShared": MERGED_SHARED.load(Ordering::Relaxed),
         "wakeups": WAKEUPS.load(Ordering::Relaxed),
@@ -1185,6 +1186,143 @@ impl Runtime {
         }
         Ok((Path::SharedData, Ok(())))
     }
+}
+
+/// Targeted wakeups (`crate::wake`): what this connection's replica
+/// subscriptions could be affected by, from the same per-subscription state
+/// the shape reads (concern tables, moving tables, parent ACL columns, the
+/// compiled binding), as an immutable snapshot for the tenant dispatcher.
+pub(crate) fn wake_interest(
+    subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+    session: &TenantSession,
+) -> crate::wake::Interest {
+    let scope = session.route.database_url.as_str();
+    let mut subs = Vec::with_capacity(subscriptions.len());
+    for subscription in subscriptions.values_mut() {
+        let keys = keys(subscription);
+        let concern = mask::subscription_concern_tables(subscription);
+        let plans: Vec<Arc<VisibilityPlan>> = std::iter::once(Arc::clone(&subscription.visibility))
+            .chain(
+                subscription
+                    .resolved
+                    .inherited
+                    .values()
+                    .map(|parent| Arc::clone(&parent.plan)),
+            )
+            .collect();
+        // `derived_change_concerns` (own plan) and its ancestor form
+        // (parents): derived sets bound to an index, with their source
+        // tokens.
+        let mut derived = Vec::new();
+        let levels = std::iter::once((subscription.visibility.as_ref(), &subscription.resolved)).chain(
+            subscription
+                .resolved
+                .inherited
+                .values()
+                .map(|parent| (parent.plan.as_ref(), parent.resolved.as_ref())),
+        );
+        for (plan, resolved) in levels {
+            for (name, set) in &plan.sets {
+                if set.kind == "derived" && resolved.indexes.contains_key(name) {
+                    if let Some(source) = resolved.sets.get(&set.from) {
+                        derived.push((set.table.clone(), set.key.clone(), Arc::new(source.clone())));
+                    }
+                }
+            }
+        }
+        let (always, parents) = match &keys.shareable {
+            Shareable::Plain => (false, None),
+            Shareable::Inherited(inherited) => (false, Some(Arc::clone(&inherited.acl))),
+            Shareable::No(_) => (true, None),
+        };
+        // Source rows by class alone: plain plans without shared indexes.
+        let member = if matches!(keys.shareable, Shareable::Plain)
+            && subscription.resolved.indexes.is_empty()
+            && subscription.resolved.inherited.is_empty()
+        {
+            let handle = match subscription.mask.peek() {
+                Some(handle) => handle.clone(),
+                None => subscription
+                    .wake_member
+                    .get_or_insert_with(|| {
+                        crate::visibility_class::member_visibility(
+                            &subscription.visibility,
+                            &subscription.resolved,
+                            scope,
+                        )
+                    })
+                    .clone(),
+            };
+            match handle {
+                crate::visibility_class::MemberHandle::Compiled(member) => Some(member),
+                crate::visibility_class::MemberHandle::Fallback => None,
+            }
+        } else {
+            None
+        };
+        subs.push(crate::wake::SubInterest {
+            table: subscription.definition.table.clone(),
+            concern,
+            moving: Arc::clone(&keys.moving),
+            plans,
+            derived,
+            parents,
+            member,
+            args: subscription.args.clone(),
+            definition: Arc::clone(&subscription.definition),
+            always,
+        });
+    }
+    crate::wake::Interest {
+        account_id: session.identity.account.id.clone(),
+        member_id: session.member.id.clone(),
+        admission_revision: session.admission_revision,
+        subs,
+    }
+}
+
+/// Targeted wakeups: a cheap key of everything [`wake_interest`] reads that
+/// can change while subscribed (the subscription set, definitions, fan-out
+/// keys and the compiled bindings; a principal, grant or derived change
+/// clears the binding, so it changes the key). Equal keys: the interest is
+/// unchanged and need not be rebuilt.
+pub(crate) fn wake_key(subscriptions: &BTreeMap<String, ReplicaSubscription>) -> u64 {
+    let mut hasher = crate::visibility_class::FxHasher::default();
+    let handle = |handle: Option<&crate::visibility_class::MemberHandle>| match handle {
+        Some(crate::visibility_class::MemberHandle::Compiled(member)) => Arc::as_ptr(member) as usize,
+        Some(crate::visibility_class::MemberHandle::Fallback) => 1,
+        None => 0,
+    };
+    for (id, subscription) in subscriptions {
+        id.hash(&mut hasher);
+        (Arc::as_ptr(&subscription.definition) as usize).hash(&mut hasher);
+        subscription
+            .fanout
+            .as_ref()
+            .map_or(0, |keys| Arc::as_ptr(keys) as usize)
+            .hash(&mut hasher);
+        handle(subscription.mask.peek()).hash(&mut hasher);
+        handle(subscription.wake_member.as_ref()).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Targeted wakeups (tests and benches): whether the tenant feed would skip
+/// this connection for `event` (decide nothing, send nothing).
+pub fn wake_skips(
+    subscriptions: &mut BTreeMap<String, ReplicaSubscription>,
+    session: &TenantSession,
+    event: &FeedEvent,
+) -> bool {
+    let FeedEvent::Transaction {
+        revision, changes, ..
+    } = event
+    else {
+        return false;
+    };
+    let interest = wake_interest(subscriptions, session);
+    let mut memo = crate::visibility_class::EvalMemo::default();
+    !interest.affected(*revision, changes, &mut memo)
 }
 
 /// Waits until every shared index bound into a subscription that `event`

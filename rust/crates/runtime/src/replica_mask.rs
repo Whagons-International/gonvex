@@ -188,7 +188,7 @@ fn set_tested_as_a_whole(expression: &VisibilityExpression, set: &str) -> bool {
 /// Which of the mask step's per-change checks can fire for a change of one
 /// table (`replica_fanout` precomputes them per combination of plans).
 #[derive(Clone, Copy, Default)]
-pub(super) struct MovingChecks {
+pub(crate) struct MovingChecks {
     /// `principal_change_concerns`: `members`, or a table of a principal set
     /// or of any non-derived set's joins.
     pub principal: bool,

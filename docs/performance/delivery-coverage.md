@@ -261,3 +261,65 @@ those connections entirely; the counters here are the baseline for it.
 - `full.parent_acl` (parents whose visibility flips: spot/workspace moves) and
   `full.hit` (assigned members) still decide alone, by design.
 - Lab perf captures without frame pointers resolve self time only.
+
+## 9. Targeted wakeups (skip no-op wakeups)
+
+Code: `rust/crates/runtime/src/wake.rs`, `FeedStore::publish` (`change_feed/backlog.rs`),
+`replica_fanout::{wake_interest, wake_key, wake_skips}`, the feed branch of the
+connection loop (`lib.rs`). Off with `GONVEX_FEED_TARGETED_WAKE=0`; tenant flush
+`GONVEX_FEED_WAKE_FLUSH_MS` (default 5,000).
+
+- The tenant feed decides once per transaction, **before** broadcasting its signal,
+  which idle connections it could affect (`Interest::affected`), marks their slots
+  and wakes only those. An idle connection (batch delivery, replica subscriptions
+  only, no call result waiting for its watermark, no open, snapshot or catch-up in
+  flight) waits on its slot instead of the ring, runs the feed arm for marked
+  revisions and takes the others without deciding anything (cursors stay older,
+  which a resume tolerates). Entering the mode or changing the interest treats every
+  revision dispatched so far as marked.
+- Conservative decision: a transaction is skipped only when every changed row is
+  provably irrelevant to every subscription (table not read; the mask step's
+  principal / grant / derived checks cannot fire: member-independent, or from the
+  member's derived source tokens; parent update of no visibility column; source row
+  rejected by the collection's own filters, or by the member's compiled class in both
+  images). Inherited source rows, plans with shared indexes, uncompiled members,
+  legacy plans, grant rows and membership changes wake.
+- Watermarks of skipped revisions are lazy: sent with the connection's next frame,
+  or at the tenant flush (one timer per tenant, not per connection). A connection
+  whose call waits for its watermark is not in the mode (call completion unchanged:
+  `call_watermark_latency` median gap 0.5 ms).
+
+Tests: `class_sharing_oracle` checks, before each event, whether every connection
+would be skipped and that a skipped connection's own full path sends nothing
+(1,202 of 2,304 connection-events skipped; the only frames tolerated are 4
+consistency resyncs the full path issues because the oracle's shared index is
+ahead of the event: a skipped connection decides no row against it). New
+`tests/targeted_wake.rs` (real socket): an unrelated commit is skipped and its
+watermark arrives within one flush; an own-collection change arrives in ~70 ms; a
+heartbeat-like call completes with its watermark within 250 ms.
+
+Lab (same lab copy, frame-pointer builds at 500, `LOAD_PERF=0` at 1k):
+
+| | 500 before | 500 after (5 s flush) | 1k before | 1k after |
+|---|---:|---:|---:|---:|
+| feed-arm wakeups per transaction | 125.2 | 77.7 | 257.9 | 150.1 |
+| of them no-op | 58.4 % | 32.8 % | 59.3 % | 30.2 % |
+| tenant flush wakeups | – | 15,832 / plateau | – | (not recorded) |
+| network thread CPU (fp attribution) | 0.119 cores (20.2 ms/txn) | 0.114 cores (19.4 ms/txn) | – | – |
+| runtime cgroup CPU | 0.29 | 0.29 | 0.56 (400/1,776 throttled) | 0.52 (304/1,778) |
+| full path per transaction (wall) | 10.6 ms | 13.7 ms | 85.4 ms | 26.7 ms |
+| save p95 / p99 ms | 170 / 269 | 128 / 274 | 1,430 / 6,488 | 711 / 1,021 |
+| taskDelivery p95 / p99 ms | 208 / 391 | 197 / 429 | 945 / 3,866 | 708 / 979 |
+| query p95 / p99 ms | 102 / 256 | 107 / 236 | 5,939 / 8,413 | 1,334 / 2,332 |
+| delivery p99 ms | 1,050 | 1,070 | 3,601 | 1,160 |
+| errors | 0.08 % | 0.08 % | 0.05 % | 0.05 % |
+
+At 500 the network thread is dominated by socket encode/compress/write (~0.055
+cores), not by decisions; skipping saves little CPU there. At 1k the single pair
+shows lower CPU (−7 %), fewer throttled periods and much shorter tails, but 1k
+tails vary 3–6× run to run and the 1k before run had a 3.6 s RTT blip: one pair,
+not yet conclusive. One 500 run of an intermediate build (`dc-wake-after3-500`)
+spiralled (11.8 % errors, snapshot admission overload, watchdog stalls, a visibility
+check timing out with rows missing); the counters-only build failed the same way
+once this morning (`dc-before-500`), before any wake code, so it reads as the known
+overload instability, not a skip: still, worth watching in integration.

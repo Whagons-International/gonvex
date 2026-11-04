@@ -624,6 +624,12 @@ impl ReplicaBatcher {
         }
     }
 
+    /// Whether some call result still waits for its watermark (targeted
+    /// wakeups: such a connection takes every feed event).
+    pub fn call_pending(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
     /// Whether the open batch's watermark covers a revision a call result
     /// waits for: send it now.
     pub fn call_waiting(&self) -> bool {
