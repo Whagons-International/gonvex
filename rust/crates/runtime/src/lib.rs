@@ -1650,6 +1650,9 @@ async fn websocket(
     // socket message, processed feed event or installed open may change it).
     let mut wake_dirty = true;
     let mut wake_key = 0u64;
+    // The interest last built (reused on re-entering targeted mode while
+    // its key is unchanged: a call or an open briefly leaves the mode).
+    let mut wake_interest: Option<std::sync::Arc<wake::Interest>> = None;
     // The newest transaction skipped without the feed arm (not yet in a
     // watermark).
     let mut wake_skipped = 0u64;
@@ -1794,11 +1797,16 @@ async fn websocket(
         let wake_wait = match feed.as_mut().and_then(change_feed::FeedReceiver::wake) {
             Some((registry, slot)) if targeted => {
                 let key = if wake_dirty { replica::fanout::wake_key(&replicas) } else { wake_key };
-                if key != wake_key || !slot.active() {
-                    let interest = replica::fanout::wake_interest(&mut replicas, tenant_session.as_ref().expect("tenant session"));
-                    registry.enter(slot, std::sync::Arc::new(interest));
+                if key != wake_key || wake_interest.is_none() {
+                    wake_interest = Some(std::sync::Arc::new(replica::fanout::wake_interest(
+                        &mut replicas,
+                        tenant_session.as_ref().expect("tenant session"),
+                    )));
                     // Building it may bind `wake_member`: key it as built.
                     wake_key = replica::fanout::wake_key(&replicas);
+                    registry.enter(slot, std::sync::Arc::clone(wake_interest.as_ref().unwrap()));
+                } else if !slot.active() {
+                    registry.enter(slot, std::sync::Arc::clone(wake_interest.as_ref().unwrap()));
                 }
                 wake_dirty = false;
                 Some(std::sync::Arc::clone(slot))
@@ -2734,6 +2742,8 @@ async fn websocket(
                         sent_zero_bootstrap_watermark = false;
                     }
                     tenant_session = next_tenant_session;
+                    // The wake interest names the session's member.
+                    wake_interest = None;
                     control_connection = authenticated_control;
                     runtime.inner.metrics.authenticated(
                         &connection_id,
