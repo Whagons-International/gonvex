@@ -22,6 +22,7 @@
 //! invocation's capabilities, and by the handler (`DatabaseHostCalls`
 //! refuses writes from a Query).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use gonvex_module_runtime::{BoxFuture, HostCall, HostError, HostResponse, Invoca
 use gonvex_module_runtime_v8::V8Config;
 
 use crate::config::ModuleHostConfig;
-use crate::module_host::HostCallHandler;
+use crate::module_host::{HostCallHandler, InvokeTimes};
 
 pub(crate) fn host_state(config: &ModuleHostConfig) -> Arc<HostState> {
     let defaults = V8Config::default();
@@ -65,18 +66,35 @@ pub(crate) async fn request(
     state: &Arc<HostState>,
     operation: RequestOp,
     handler: Option<&mut dyn HostCallHandler>,
+    label: Option<gonvex_profiler::Label>,
+    connect_ns: u64,
 ) -> Result<ResponsePayload, WireError> {
     let deadline_unix_ms = match &operation {
         RequestOp::Invoke(request) => request.context.deadline_unix_ms,
         _ => None,
     };
+    let profile = DirectProfile::new(label);
     match handler {
         Some(handler) => {
+            let inline_before = handler.inline_profile();
             let host = DirectHost {
                 inline: handler.inline_host(),
                 handler: tokio::sync::Mutex::new(handler),
+                profile,
             };
-            handle_local(state, deadline_unix_ms, operation, Some(&host)).await
+            let result = handle_local(state, deadline_unix_ms, operation, Some(&host)).await;
+            let handler = host.handler.into_inner();
+            let inline_after = handler.inline_profile();
+            let inline = (
+                inline_after.0.saturating_sub(inline_before.0),
+                inline_after.1.saturating_sub(inline_before.1),
+            );
+            if let Some(times) = host.profile.finish(connect_ns, inline, &result) {
+                if result.is_ok() {
+                    handler.invoke_profiled(times);
+                }
+            }
+            result
         }
         None => match operation {
             // The socket transport answers an invocation without a dispatcher
@@ -86,11 +104,143 @@ pub(crate) async fn request(
                 let host = DirectHost {
                     inline: None,
                     handler: tokio::sync::Mutex::new(&mut none),
+                    profile,
                 };
-                handle_local(state, deadline_unix_ms, operation, Some(&host)).await
+                let result = handle_local(state, deadline_unix_ms, operation, Some(&host)).await;
+                host.profile.finish(connect_ns, (0, 0), &result);
+                result
             }
             other => handle_local(state, deadline_unix_ms, other, None).await,
         },
+    }
+}
+
+/// Timing of one in-process invocation, the in-process counterpart of the
+/// socket bridge's `InvokeProfile` (module_host.rs). The engine reports when
+/// the call leased an isolate (`ModuleHost::isolate_acquired`); host calls
+/// are timed where the invoking task answers them (`DirectHost::call`) and,
+/// for SQL answered on the isolate thread, by the handler itself
+/// (`HostCallHandler::inline_profile`). Relaxed atomics on the request's own
+/// stack: no allocation, no lock.
+struct DirectProfile {
+    label: Option<gonvex_profiler::Label>,
+    /// Profiler clock at the start of the request (0: not profiling).
+    start: u64,
+    acquired: AtomicU64,
+    first_call: AtomicU64,
+    host_ns: AtomicU64,
+    calls: AtomicU64,
+    /// Holds `module_host.isolate_waiting` until an isolate is leased.
+    waiting: AtomicBool,
+}
+
+impl DirectProfile {
+    fn new(label: Option<gonvex_profiler::Label>) -> Self {
+        let label = label.filter(|_| gonvex_profiler::enabled());
+        let waiting = label.is_some();
+        if waiting {
+            gonvex_profiler::gauge(gonvex_profiler::GaugeId::IsolateWaiting).add(1);
+        }
+        Self {
+            label,
+            start: if waiting { gonvex_profiler::now_ns() } else { 0 },
+            acquired: AtomicU64::new(0),
+            first_call: AtomicU64::new(0),
+            host_ns: AtomicU64::new(0),
+            calls: AtomicU64::new(0),
+            waiting: AtomicBool::new(waiting),
+        }
+    }
+
+    fn stop_waiting(&self) {
+        if self.waiting.swap(false, Relaxed) {
+            gonvex_profiler::gauge(gonvex_profiler::GaugeId::IsolateWaiting).add(-1);
+        }
+    }
+
+    fn isolate_acquired(&self) {
+        if self.start != 0 {
+            let _ = self
+                .acquired
+                .compare_exchange(0, gonvex_profiler::now_ns(), Relaxed, Relaxed);
+            self.stop_waiting();
+        }
+    }
+
+    /// Start of one serial host call (the invoking task picked it up).
+    fn call_started(&self) -> u64 {
+        if self.start == 0 {
+            return 0;
+        }
+        let now = gonvex_profiler::now_ns();
+        let _ = self.first_call.compare_exchange(0, now, Relaxed, Relaxed);
+        now
+    }
+
+    fn call_answered(&self, started: u64) {
+        if started != 0 {
+            self.host_ns
+                .fetch_add(gonvex_profiler::now_ns().saturating_sub(started), Relaxed);
+            self.calls.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Records the invocation's stages and returns them for the handler.
+    /// `inline` is `(calls, ns)` answered on the isolate thread.
+    fn finish(
+        &self,
+        connect: u64,
+        inline: (u64, u64),
+        result: &Result<ResponsePayload, WireError>,
+    ) -> Option<InvokeTimes> {
+        use gonvex_profiler::{record, Stage};
+        self.stop_waiting();
+        let label = self.label?;
+        let end = gonvex_profiler::now_ns();
+        let acquired = self.acquired.load(Relaxed);
+        let isolate_wait = if acquired != 0 {
+            acquired.saturating_sub(self.start)
+        } else if result
+            .as_ref()
+            .is_err_and(|error| error.code == codes::BUDGET_EXCEEDED)
+        {
+            // The deadline passed in root admission or the isolate queue:
+            // the whole request was a wait (the 500-user failure mode).
+            end.saturating_sub(self.start)
+        } else {
+            // Failed before reaching the isolate pool (unknown function,
+            // invalid arguments, shutting down): not a wait.
+            record(Stage::InvokeConnect, label, connect);
+            return None;
+        };
+        record(Stage::InvokeConnect, label, connect);
+        record(Stage::InvokeIsolateWait, label, isolate_wait);
+        if acquired == 0 {
+            return None;
+        }
+        let first_call = match self.first_call.load(Relaxed) {
+            0 => end,
+            at => at,
+        };
+        let first_frame = first_call.saturating_sub(self.start);
+        let host_calls = self.host_ns.load(Relaxed) + inline.1;
+        let host_call_count = self.calls.load(Relaxed) + inline.0;
+        let js = end
+            .saturating_sub(self.start)
+            .saturating_sub(first_frame)
+            .saturating_sub(host_calls);
+        record(Stage::InvokeFirstFrame, label, first_frame);
+        record(Stage::InvokeJs, label, js);
+        record(Stage::InvokeHostCalls, label, host_calls);
+        record(Stage::HostCallCount, label, host_call_count);
+        Some(InvokeTimes {
+            connect,
+            first_frame,
+            js,
+            host_calls,
+            host_call_count,
+            isolate_wait,
+        })
     }
 }
 
@@ -124,11 +274,16 @@ struct DirectHost<'a> {
     /// Database calls the isolate thread answers itself, on the connection
     /// the invocation's transaction lends it (`host_calls::SqlInline`).
     inline: Option<std::sync::Arc<dyn gonvex_module_runtime::InlineHost>>,
+    profile: DirectProfile,
 }
 
 impl gonvex_module_runtime::ModuleHost for DirectHost<'_> {
     fn inline(&self) -> Option<std::sync::Arc<dyn gonvex_module_runtime::InlineHost>> {
         self.inline.clone()
+    }
+
+    fn isolate_acquired(&self) {
+        self.profile.isolate_acquired();
     }
 
     fn call<'b>(
@@ -141,11 +296,18 @@ impl gonvex_module_runtime::ModuleHost for DirectHost<'_> {
             let frame = HostCallFrame::from_host_call(call).map_err(HostError::Failed)?;
             let concurrent = self.handler.lock().await.concurrent(&frame);
             let outcome = match concurrent {
+                // Overlapping network calls are neither timed nor counted,
+                // as on the socket bridge: they run alongside JS.
                 Some(work) => work.await.and_then(|value| {
                     serde_json::to_vec(&value)
                         .map_err(|err| format!("host response could not be re-encoded: {err}"))
                 }),
-                None => self.handler.lock().await.handle_bytes(frame).await,
+                None => {
+                    let started = self.profile.call_started();
+                    let outcome = self.handler.lock().await.handle_bytes(frame).await;
+                    self.profile.call_answered(started);
+                    outcome
+                }
             };
             match outcome {
                 Ok(value) => Ok(HostResponse { value }),
@@ -479,6 +641,10 @@ export const swallow = async (ctx) => {
             let mut inline = calls().await;
             let direct = host.invoke(request("crud", json!({"id": "a"})), &mut inline).await.unwrap();
             assert!(inline.inline_calls() >= 5, "{}", inline.inline_calls());
+            // Host calls answered on the isolate thread count as host calls.
+            let (times, _, _) = inline.profile_times();
+            assert_eq!(times.host_call_count, 6, "{times:?}");
+            assert!(times.host_calls > 0 && times.js > 0, "{times:?}");
             inline.finish(false).await.unwrap();
             let mut asynchronous = AsyncOnly(calls().await);
             let routed = host.invoke(request("crud", json!({"id": "a"})), &mut asynchronous).await.unwrap();
@@ -522,6 +688,110 @@ export const swallow = async (ctx) => {
                 .unwrap();
             assert_eq!(count, 0);
             host.shutdown().await;
+        });
+    }
+
+    /// Keeps the invocation timing the transport hands back.
+    struct Timed {
+        inner: Recorder,
+        times: Option<crate::module_host::InvokeTimes>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostCallHandler for Timed {
+        async fn handle(&mut self, call: HostCallFrame) -> Result<Value, String> {
+            self.inner.handle(call).await
+        }
+        fn invoke_profiled(&mut self, times: crate::module_host::InvokeTimes) {
+            self.times = Some(times);
+        }
+    }
+
+    fn stage_count(stage: gonvex_profiler::Stage, label: gonvex_profiler::Label) -> u64 {
+        gonvex_profiler::snapshot()
+            .into_iter()
+            .filter(|row| row.stage == stage && row.label == label)
+            .map(|row| row.count)
+            .sum()
+    }
+
+    #[test]
+    fn in_process_invocations_fill_the_invoke_stages_and_isolate_wait() {
+        use gonvex_profiler::{Label, Stage};
+        run(async {
+            gonvex_profiler::set_enabled(true);
+            let starts = stage_count(Stage::V8IsolateStart, Label::None);
+            let host = host().await;
+            assert!(stage_count(Stage::V8IsolateStart, Label::None) > starts);
+            let before: Vec<u64> = [
+                Stage::InvokeConnect,
+                Stage::InvokeIsolateWait,
+                Stage::InvokeFirstFrame,
+                Stage::InvokeJs,
+                Stage::InvokeHostCalls,
+                Stage::HostCallCount,
+                Stage::InvokeTotal,
+            ]
+            .iter()
+            .map(|stage| stage_count(*stage, Label::Reducer))
+            .collect();
+            let mut handler = Timed { inner: Recorder { calls: Vec::new() }, times: None };
+            host.invoke(request("read", json!({"v": 7})), &mut handler).await.unwrap();
+            let times = handler.times.expect("in-process timing reaches the handler");
+            assert_eq!(times.host_call_count, 1, "{times:?}");
+            assert!(times.first_frame >= times.isolate_wait, "{times:?}");
+            assert!(times.host_calls > 0, "{times:?}");
+            for (index, stage) in [
+                Stage::InvokeConnect,
+                Stage::InvokeIsolateWait,
+                Stage::InvokeFirstFrame,
+                Stage::InvokeJs,
+                Stage::InvokeHostCalls,
+                Stage::HostCallCount,
+                Stage::InvokeTotal,
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert!(
+                    stage_count(*stage, Label::Reducer) > before[index],
+                    "{} not recorded",
+                    stage.info().name
+                );
+            }
+
+            // One isolate: a call queued behind a runaway one waits for the
+            // runaway's deadline (300 ms) plus a replacement isolate's start.
+            let mut spinner = Recorder { calls: Vec::new() };
+            let mut queued = Timed { inner: Recorder { calls: Vec::new() }, times: None };
+            let spin = host.invoke(request("spin", json!(null)), &mut spinner);
+            let read = async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                host.invoke(request("read", json!({"v": 1})), &mut queued).await
+            };
+            let (spun, read) = tokio::join!(spin, read);
+            assert!(spun.is_err());
+            read.unwrap();
+            let times = queued.times.unwrap();
+            assert!(times.isolate_wait >= 150_000_000, "{times:?}");
+            assert!(times.first_frame >= times.isolate_wait, "{times:?}");
+
+            // GC pauses are seen through the prologue/epilogue callbacks.
+            let gcs = stage_count(Stage::V8GcMinor, Label::None)
+                + stage_count(Stage::V8GcMajor, Label::None);
+            let _ = host
+                .invoke(request("hog", json!(null)), &mut Recorder { calls: Vec::new() })
+                .await;
+            let after = stage_count(Stage::V8GcMinor, Label::None)
+                + stage_count(Stage::V8GcMajor, Label::None);
+            assert!(after > gcs, "no GC pause recorded ({gcs} -> {after})");
+            host.shutdown().await;
+            // Retired isolates tear down on their own threads.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while stage_count(Stage::V8IsolateStop, Label::None) == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(stage_count(Stage::V8IsolateStop, Label::None) > 0);
         });
     }
 

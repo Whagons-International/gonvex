@@ -202,6 +202,8 @@ pub fn profile_json(runtime: &crate::Runtime) -> Value {
         "longPolls": {"total": gonvex_profiler::long_poll_total(), "recent": long_polls},
         "slowTraces": slow_traces_json(),
         "crons": crons_json(),
+        "functions": functions_json(None),
+        "v8Isolates": v8_isolates_json(),
         "actions": actions_json(runtime),
     })
 }
@@ -237,6 +239,29 @@ fn crons_json() -> Value {
     })
 }
 
+/// Per-function totals since start (`gonvex_profiler::function`), one row
+/// per function that ran, optionally only one project's.
+pub(crate) fn functions_json(project: Option<&str>) -> Value {
+    json!({
+        "fields": gonvex_profiler::function::FUNCTION_FIELDS,
+        "rows": gonvex_profiler::function::snapshot(project).into_iter().map(|row| json!({
+            "slot": row.slot,
+            "project": row.project,
+            "path": row.path,
+            "values": row.values,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Live V8 isolates of this process (in-process bridge): heap figures, calls
+/// served and GC pauses (count and time), each as of the isolate's last call.
+fn v8_isolates_json() -> Value {
+    json!({
+        "fields": gonvex_module_runtime_v8::ISOLATE_STAT_FIELDS,
+        "rows": gonvex_module_runtime_v8::isolate_stats(),
+    })
+}
+
 /// Reducers slower than `GONVEX_PROFILER_SLOW_MS`, each with its own
 /// per-stage breakdown (newest first, at most 128).
 fn slow_traces_json() -> Value {
@@ -248,9 +273,22 @@ fn slow_traces_json() -> Value {
             "seq": trace.seq,
             "atUnixMs": trace.at_unix_ms,
             "label": trace.label.name(),
+            "function": function_name(trace.function),
             "values": trace.values,
         })).collect::<Vec<_>>(),
     })
+}
+
+/// `project/path` of a function slot (dump time only), or null.
+fn function_name(slot: u16) -> Value {
+    if slot == gonvex_profiler::function::NONE {
+        return Value::Null;
+    }
+    match gonvex_profiler::function::name(slot) {
+        Some((project, path)) if project.is_empty() => Value::String(path),
+        Some((project, path)) => Value::String(format!("{project}/{path}")),
+        None => Value::Null,
+    }
 }
 
 /// Compact summary embedded in `/dev/metrics` (no buckets, no ring).

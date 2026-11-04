@@ -239,6 +239,10 @@ pub fn trim_native_heap() {
                 .unwrap_or(true)
         });
         if enabled {
+            let _timed = gonvex_profiler::ScopeTimer::new(
+                gonvex_profiler::Stage::MallocTrim,
+                gonvex_profiler::Label::None,
+            );
             // SAFETY: malloc_trim has no preconditions; it only releases
             // free memory held by the allocator.
             unsafe {
@@ -376,7 +380,13 @@ async fn worker_loop(
     let initialized = tokio::select! {
         biased;
         _ = control.canceled() => Err(ModuleError::Execution("module isolate startup was canceled".into())),
-        result = ModuleIsolate::create(&source, config, control) => result,
+        result = async {
+            let _timed = gonvex_profiler::ScopeTimer::new(
+                gonvex_profiler::Stage::V8IsolateStart,
+                gonvex_profiler::Label::None,
+            );
+            ModuleIsolate::create(&source, config, control).await
+        } => result,
     };
     // Parsing and top-level evaluation are done; release their scratch memory.
     trim_native_heap();
@@ -385,7 +395,7 @@ async fn worker_loop(
             if ready.send(Ok(())).is_err() {
                 return;
             }
-            isolate
+            TimedTeardown(Some(isolate))
         }
         Err(err) => {
             let _ = ready.send(Err(err));
@@ -407,7 +417,8 @@ async fn worker_loop(
         };
         let healthy = reply.healthy;
         served += 1;
-        tally.update(&mut isolate.runtime);
+        let gc = isolate.gc.values();
+        tally.update(&mut isolate.runtime, gc, served);
         if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
             log_heap_statistics(
                 &mut isolate.runtime,
@@ -419,6 +430,144 @@ async fn worker_loop(
         if !healthy {
             break;
         }
+    }
+}
+
+/// Times the isolate's teardown (`v8.isolate_stop`) whichever way the worker
+/// loop ends.
+struct TimedTeardown(Option<ModuleIsolate>);
+
+impl std::ops::Deref for TimedTeardown {
+    type Target = ModuleIsolate;
+    fn deref(&self) -> &ModuleIsolate {
+        self.0.as_ref().expect("isolate present until teardown")
+    }
+}
+
+impl std::ops::DerefMut for TimedTeardown {
+    fn deref_mut(&mut self) -> &mut ModuleIsolate {
+        self.0.as_mut().expect("isolate present until teardown")
+    }
+}
+
+impl Drop for TimedTeardown {
+    fn drop(&mut self) {
+        if let Some(isolate) = self.0.take() {
+            let _timed = gonvex_profiler::ScopeTimer::new(
+                gonvex_profiler::Stage::V8IsolateStop,
+                gonvex_profiler::Label::None,
+            );
+            drop(isolate);
+        }
+    }
+}
+
+/// Per-isolate GC counters, fed by V8 GC prologue/epilogue callbacks on the
+/// isolate's own thread (relaxed atomics, no allocation). Each pause is also
+/// recorded in the process-wide `v8.gc_minor` / `v8.gc_major` histograms.
+/// Boxed so the callbacks' data pointer stays put; it must outlive the
+/// isolate (see `ModuleIsolate` field order).
+#[derive(Default)]
+pub(crate) struct GcStats {
+    started_ns: std::sync::atomic::AtomicU64,
+    minor: std::sync::atomic::AtomicU64,
+    minor_ns: std::sync::atomic::AtomicU64,
+    major: std::sync::atomic::AtomicU64,
+    major_ns: std::sync::atomic::AtomicU64,
+}
+
+// `v8::Isolate::AddGCEpilogueCallback(GCCallbackWithData, void*, GCType)`:
+// rusty_v8 130 binds only the prologue, but V8 itself (linked statically
+// from the same archive) exports both. Itanium C++ ABI (Linux, macOS): a
+// non-virtual member function is a plain function taking `this` first.
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "_ZN2v87Isolate21AddGCEpilogueCallbackEPFvPS0_NS_6GCTypeENS_15GCCallbackFlagsEPvES4_S2_"]
+    fn v8_isolate_add_gc_epilogue_callback(
+        isolate: *mut v8::Isolate,
+        callback: GcCallback,
+        data: *mut std::ffi::c_void,
+        gc_type_filter: v8::GCType,
+    );
+}
+
+type GcCallback =
+    extern "C" fn(*mut v8::Isolate, v8::GCType, v8::GCCallbackFlags, *mut std::ffi::c_void);
+
+/// Pauses only: incremental marking steps and weak-callback processing are
+/// not stop-the-world pauses of their own.
+fn gc_pause_types() -> v8::GCType {
+    v8::GCType::SCAVENGE | v8::GCType::MINOR_MARK_COMPACT | v8::GCType::MARK_SWEEP_COMPACT
+}
+
+extern "C" fn gc_prologue(
+    _isolate: *mut v8::Isolate,
+    _gc_type: v8::GCType,
+    _flags: v8::GCCallbackFlags,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: `data` is the isolate's boxed `GcStats`, which outlives it.
+    let stats = unsafe { &*(data as *const GcStats) };
+    stats
+        .started_ns
+        .store(gonvex_profiler::now_ns(), Ordering::Relaxed);
+}
+
+extern "C" fn gc_epilogue(
+    _isolate: *mut v8::Isolate,
+    gc_type: v8::GCType,
+    _flags: v8::GCCallbackFlags,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as in `gc_prologue`.
+    let stats = unsafe { &*(data as *const GcStats) };
+    let started = stats.started_ns.swap(0, Ordering::Relaxed);
+    if started == 0 {
+        return;
+    }
+    let elapsed = gonvex_profiler::now_ns().saturating_sub(started);
+    let (stage, count, total) = if gc_type == v8::GCType::MARK_SWEEP_COMPACT {
+        (gonvex_profiler::Stage::V8GcMajor, &stats.major, &stats.major_ns)
+    } else {
+        (gonvex_profiler::Stage::V8GcMinor, &stats.minor, &stats.minor_ns)
+    };
+    count.fetch_add(1, Ordering::Relaxed);
+    total.fetch_add(elapsed, Ordering::Relaxed);
+    gonvex_profiler::record(stage, gonvex_profiler::Label::None, elapsed);
+}
+
+impl GcStats {
+    /// Installs the GC callbacks on `isolate` (when the profiler is on).
+    fn install(&self, isolate: &mut v8::Isolate) {
+        if !gonvex_profiler::enabled() {
+            return;
+        }
+        let data = (self as *const GcStats).cast_mut().cast::<std::ffi::c_void>();
+        #[cfg(unix)]
+        {
+            isolate.add_gc_prologue_callback(gc_prologue, data, gc_pause_types());
+            // SAFETY: `isolate` is a live V8 isolate on this thread; the
+            // callback and its data outlive it.
+            unsafe {
+                v8_isolate_add_gc_epilogue_callback(
+                    isolate as *mut v8::Isolate,
+                    gc_epilogue,
+                    data,
+                    gc_pause_types(),
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (isolate, data);
+    }
+
+    fn values(&self) -> [u64; 4] {
+        [
+            self.minor.load(Ordering::Relaxed),
+            self.minor_ns.load(Ordering::Relaxed),
+            self.major.load(Ordering::Relaxed),
+            self.major_ns.load(Ordering::Relaxed),
+        ]
     }
 }
 
@@ -680,8 +829,23 @@ fn heap_stats_enabled() -> bool {
 /// statistics, so memory studies can attribute RSS to isolate heaps.
 /// Process-wide V8 heap tally (perf: /dev/metrics `memory.v8`): one slot per
 /// live isolate worker, refreshed after each call, removed when the worker ends.
-static HEAP_TALLY: std::sync::Mutex<std::collections::BTreeMap<u64, [u64; 5]>> =
+static HEAP_TALLY: std::sync::Mutex<std::collections::BTreeMap<u64, [u64; ISOLATE_STAT_FIELDS.len()]>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Per-isolate values reported by [`isolate_stats`]: the five heap figures
+/// of [`heap_tally`], then calls served and GC pause counts and time.
+pub const ISOLATE_STAT_FIELDS: [&str; 10] = [
+    "totalHeapBytes",
+    "usedHeapBytes",
+    "physicalBytes",
+    "externalBytes",
+    "mallocedBytes",
+    "calls",
+    "gcMinor",
+    "gcMinorNs",
+    "gcMajor",
+    "gcMajorNs",
+];
 static HEAP_TALLY_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct HeapTallySlot(u64);
@@ -691,7 +855,7 @@ impl HeapTallySlot {
         Self(HEAP_TALLY_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
 
-    fn update(&self, runtime: &mut JsRuntime) {
+    fn update(&self, runtime: &mut JsRuntime, gc: [u64; 4], calls: u64) {
         let mut stats = v8::HeapStatistics::default();
         runtime.v8_isolate().get_heap_statistics(&mut stats);
         let values = [
@@ -700,6 +864,11 @@ impl HeapTallySlot {
             stats.total_physical_size() as u64,
             stats.external_memory() as u64,
             stats.malloced_memory() as u64,
+            calls,
+            gc[0],
+            gc[1],
+            gc[2],
+            gc[3],
         ];
         HEAP_TALLY
             .lock()
@@ -728,6 +897,17 @@ pub fn heap_tally() -> (usize, [u64; 5]) {
         }
     }
     (tally.len(), sum)
+}
+
+/// One row per live isolate worker ([`ISOLATE_STAT_FIELDS`]), as of its last
+/// call.
+pub fn isolate_stats() -> Vec<[u64; ISOLATE_STAT_FIELDS.len()]> {
+    HEAP_TALLY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .copied()
+        .collect()
 }
 
 fn log_heap_statistics(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, moment: &str) {
@@ -778,6 +958,8 @@ struct ModuleIsolate {
     dispatch: v8::Global<v8::Function>,
     namespace: v8::Global<v8::Object>,
     runtime: JsRuntime,
+    /// After `runtime`: the GC callbacks' data outlives the isolate.
+    gc: Box<GcStats>,
     terminated: Arc<AtomicBool>,
     heap_exhausted: Arc<AtomicBool>,
     config: V8Config,
@@ -802,6 +984,9 @@ impl ModuleIsolate {
                     "module initialization timeout exceeds the monotonic clock range".into(),
                 )
             })?;
+        // Declared before `runtime` so that, on an early return, the isolate
+        // is disposed before its GC callbacks' data.
+        let gc = Box::<GcStats>::default();
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![gonvex_host::init_ops()],
             // No module loader is installed: the artifact must be one
@@ -814,6 +999,7 @@ impl ModuleIsolate {
             .op_state()
             .borrow_mut()
             .put(InvocationSlot::default());
+        gc.install(runtime.v8_isolate());
 
         let terminated = Arc::new(AtomicBool::new(false));
         let heap_exhausted = Arc::new(AtomicBool::new(false));
@@ -865,6 +1051,7 @@ impl ModuleIsolate {
             dispatch,
             namespace,
             runtime,
+            gc,
             terminated,
             heap_exhausted,
             config,

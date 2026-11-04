@@ -609,6 +609,11 @@ impl HostCallHandler for DatabaseHostCalls {
             sql: self.sql.clone(),
         }))
     }
+
+    fn inline_profile(&self) -> (u64, u64) {
+        let sql = self.sql();
+        (sql.inline_calls, sql.inline_sql_ns)
+    }
 }
 
 /// Answers module SQL on the isolate thread, on the connection the

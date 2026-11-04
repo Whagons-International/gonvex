@@ -26,6 +26,7 @@ REDUCER_PATH = [
     ("fn.prepare", 0),
     ("invoke.connect", 0),
     ("invoke.first_frame", 0),
+    ("invoke.isolate_wait", 1),
     ("invoke.js", 0),
     ("invoke.host_calls", 0),
     ("db.writer_wait", 1),
@@ -38,8 +39,23 @@ REDUCER_PATH = [
     ("commit.publish", 1),
 ]
 TOP_LEVEL = {"fn.prepare", "invoke.connect", "invoke.first_frame", "invoke.js", "invoke.host_calls", "fn.finish"}
-COUNT_STAGES = {"invoke.host_call_count", "delivery.frames"}
-GROUP_ORDER = ["reducer", "store", "delivery", "transport", "snapshot", "scheduler"]
+COUNT_STAGES = {"invoke.host_call_count", "delivery.frames", "sqlite.checkpoint_pages"}
+BYTE_STAGES = {"snapshot_cache.evict"}
+GROUP_ORDER = ["reducer", "store", "delivery", "transport", "snapshot", "scheduler", "background"]
+# Background work that costs CPU (or a thread) without a request attached:
+# (stage, short name). Their time per second of wall clock is printed as a
+# rough "where did idle CPU go" line.
+BACKGROUND = [
+    ("sqlite.checkpoint", "checkpoint"),
+    ("sqlite.checkpoint_inline", "inline ckpt"),
+    ("v8.gc_minor", "gc minor"),
+    ("v8.gc_major", "gc major"),
+    ("v8.isolate_start", "isolate start"),
+    ("v8.isolate_stop", "isolate stop"),
+    ("mem.malloc_trim", "malloc_trim"),
+    ("snapshot_cache.build", "cache build"),
+    ("offload.busy", "offload busy"),
+]
 
 
 def fetch(url, token):
@@ -101,7 +117,17 @@ def stage_rows(current, previous=None):
     return rows
 
 
-def fmt_ns(ns, count_stage=False):
+def fmt_bytes(value):
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:5.1f}{unit}" if unit != "B" else f"{value:5.0f}B "
+        value /= 1024
+    return f"{value:5.1f}GB"
+
+
+def fmt_ns(ns, count_stage=False, byte_stage=False):
+    if byte_stage:
+        return fmt_bytes(ns)
     if count_stage:
         return f"{ns:7.1f}"
     if ns < 1e3:
@@ -149,10 +175,14 @@ def render(current, previous=None, seconds=None, stream=sys.stdout):
         for key in sorted(keys, key=lambda k: (order.index(k[0]) if k[0] in order else 999, k[1])):
             row = rows[key]
             counted = key[0] in COUNT_STAGES
+            sized = key[0] in BYTE_STAGES
             rate = row["count"] / seconds if seconds else row["count"] / (current["uptimeNs"] / 1e9)
             out.append(
                 f"{key[0]:<24} {key[1]:<10} {rate:9.1f} " + " ".join(
-                    fmt_ns(row[name], counted).rjust(8) for name in ("mean", "p50", "p90", "p99", "p999", "max")))
+                    fmt_ns(row[name], counted, sized).rjust(8) for name in ("mean", "p50", "p90", "p99", "p999", "max")))
+    span = seconds or current["uptimeNs"] / 1e9
+    render_isolate_wait(out, rows, gauges)
+    render_background(out, current, rows, span)
     for label in ("heartbeat", "presence", "reducer"):
         total = rows.get(("fn.total", label))
         if not total:
@@ -186,25 +216,38 @@ def render(current, previous=None, seconds=None, stream=sys.stdout):
         out.append("")
         out.append(f"slowest calls: {len(traces)} reducers over {current['config'].get('slowTraceMs', 100):.0f} ms "
                    f"in this window (ring keeps 128; {slow.get('total', 0)} since start)")
-        top_fields = ["fn.prepare", "invoke.connect", "invoke.first_frame", "invoke.js",
-                      "db.writer_wait", "db.sql", "fn.finish"]
+        top_fields = ["fn.prepare", "invoke.connect", "invoke.first_frame", "invoke.isolate_wait",
+                      "invoke.js", "db.writer_wait", "db.sql", "fn.finish"]
         out.append("  mean share of each slow call's own total (per label):")
         out.append(f"  {'label':<10} {'n':>4} {'total':>8} " + " ".join(f"{f.split('.')[-1][:11]:>11}" for f in top_fields))
         by_label = {}
+        by_function = {}
         for trace in traces:
-            by_label.setdefault(trace["label"], []).append(dict(zip(fields, trace["values"])))
-        for label, items in sorted(by_label.items()):
-            mean_total = sum(i["fn.total"] for i in items) / len(items)
-            shares = []
-            for field in top_fields:
-                shares.append(sum(i[field] / i["fn.total"] for i in items if i["fn.total"]) / len(items) * 100)
-            out.append(f"  {label:<10} {len(items):>4} {fmt_ns(mean_total):>8} " + " ".join(f"{v:10.1f}%" for v in shares))
-        out.append("  (writer_wait and sql are inside host_calls; the remainder of host_calls is IPC + other host calls)")
+            item = dict(zip(fields, trace["values"]))
+            by_label.setdefault(trace["label"], []).append(item)
+            by_function.setdefault(trace.get("function") or "?", []).append(item)
+
+        def share_rows(groups, width):
+            for name, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+                mean_total = sum(i["fn.total"] for i in items) / len(items)
+                shares = []
+                for field in top_fields:
+                    shares.append(sum(i.get(field, 0) / i["fn.total"] for i in items if i["fn.total"]) / len(items) * 100)
+                out.append(f"  {name[-width:]:<{width}} {len(items):>4} {fmt_ns(mean_total):>8} "
+                           + " ".join(f"{v:10.1f}%" for v in shares))
+
+        share_rows(by_label, 10)
+        out.append("  (isolate_wait is inside first_frame; writer_wait and sql are inside host_calls)")
+        out.append("  per function (top 8 by count):")
+        out.append(f"  {'function':<34} {'n':>4} {'total':>8} " + " ".join(f"{f.split('.')[-1][:11]:>11}" for f in top_fields))
+        share_rows(dict(sorted(by_function.items(), key=lambda kv: -len(kv[1]))[:8]), 34)
         out.append("  newest slow calls:")
         for trace in traces[:5]:
             item = dict(zip(fields, trace["values"]))
-            parts = " ".join(f"{f.split('.')[-1]}={fmt_ns(item[f]).strip()}" for f in top_fields if item[f])
-            out.append(f"    {trace['label']:<10} {fmt_ns(item['fn.total']).strip():>8}  {parts}  calls={item['invoke.host_call_count']}")
+            parts = " ".join(f"{f.split('.')[-1]}={fmt_ns(item[f]).strip()}" for f in top_fields if item.get(f))
+            out.append(f"    {trace['label']:<10} {(trace.get('function') or '?')[-40:]:<40} "
+                       f"{fmt_ns(item['fn.total']).strip():>8}  {parts}  calls={item['invoke.host_call_count']}")
+    render_functions(out, current, previous, seconds)
     recent = polls.get("recent", [])[:10]
     if recent:
         out.append("")
@@ -214,6 +257,86 @@ def render(current, previous=None, seconds=None, stream=sys.stdout):
             age = (now_ms - poll["atUnixMs"]) / 1000 if now_ms else 0
             out.append(f"  {age:7.1f}s ago  {poll['durationMs']:9.1f} ms  {poll['task']:<14} ({poll['source']})")
     stream.write("\n".join(out) + "\n")
+
+
+def render_isolate_wait(out, rows, gauges):
+    """The in-process V8 isolate queue: the 500-user failure mode."""
+    waits = sorted((key[1], row) for key, row in rows.items() if key[0] == "invoke.isolate_wait")
+    if not waits:
+        return
+    gauge = gauges.get("module_host.isolate_waiting", {})
+    out.append("")
+    out.append(f"isolate queue: waiting now {gauge.get('current', 0)} (10 s peak {gauge.get('peak') or 0}); "
+               f"wait per call (request -> isolate leased; deadline-expired waits included):")
+    for label, row in waits:
+        total = rows.get(("invoke.total", label))
+        share = row["mean"] / total["mean"] * 100 if total and total["mean"] else 0
+        out.append(f"  {label:<10} n={row['count']:<7} mean {fmt_ns(row['mean']).strip():>8}  p99 {fmt_ns(row['p99']).strip():>8}  "
+                   f"max {fmt_ns(row['max']).strip():>8}  ({share:4.1f}% of invoke.total)")
+
+
+def render_background(out, current, rows, span):
+    """Background work: CPU/thread time per second with no request attached."""
+    parts = []
+    for stage, name in BACKGROUND:
+        row = rows.get((stage, "-"))
+        if row:
+            parts.append(f"{name} {row['sum'] / span / 1e6:.1f} ms/s ({row['count'] / span:.2f}/s)")
+    pages = rows.get(("sqlite.checkpoint_pages", "-"))
+    evicted = rows.get(("snapshot_cache.evict", "-"))
+    if pages:
+        parts.append(f"ckpt pages {pages['sum'] / span:.0f}/s")
+    if evicted:
+        parts.append(f"cache evictions {evicted['count']} ({fmt_bytes(evicted['sum']).strip()})")
+    if parts:
+        out.append("")
+        out.append("background work (time per second of wall clock): " + ";  ".join(parts))
+    isolates = current.get("v8Isolates") or {}
+    fields = isolates.get("fields") or []
+    table = [dict(zip(fields, row)) for row in isolates.get("rows", [])]
+    if table:
+        out.append(f"v8 isolates ({len(table)} live, cumulative per isolate as of its last call):")
+        out.append(f"  {'used heap':>10} {'total heap':>10} {'calls':>8} {'gc minor':>9} {'minor ms':>9} {'gc major':>9} {'major ms':>9}")
+        for row in sorted(table, key=lambda r: -r.get("usedHeapBytes", 0))[:8]:
+            out.append(f"  {fmt_bytes(row.get('usedHeapBytes', 0)):>10} {fmt_bytes(row.get('totalHeapBytes', 0)):>10} "
+                       f"{row.get('calls', 0):>8} {row.get('gcMinor', 0):>9} {row.get('gcMinorNs', 0) / 1e6:9.1f} "
+                       f"{row.get('gcMajor', 0):>9} {row.get('gcMajorNs', 0) / 1e6:9.1f}")
+
+
+def render_functions(out, current, previous, seconds, limit=15):
+    """Per-function table (server-side counters), by total time."""
+    section = current.get("functions") or {}
+    fields = section.get("fields") or []
+    if not fields:
+        return
+    before = {}
+    if previous:
+        for row in (previous.get("functions") or {}).get("rows", []):
+            before[row["slot"]] = dict(zip(fields, row["values"]))
+    rows = []
+    for row in section.get("rows", []):
+        values = dict(zip(fields, row["values"]))
+        old = before.get(row["slot"])
+        if old:
+            for name in ("invocations", "errors", "cancelled", "totalNs"):
+                values[name] -= old.get(name, 0)
+        if values["invocations"] <= 0:
+            continue
+        rows.append((row, values))
+    if not rows:
+        return
+    span = seconds or current["uptimeNs"] / 1e9
+    grand = sum(values["totalNs"] for _, values in rows) or 1
+    rows.sort(key=lambda item: -item[1]["totalNs"])
+    out.append("")
+    out.append(f"functions by total time ({len(rows)} called; max is cumulative since start):")
+    out.append(f"  {'function':<40} {'calls/s':>8} {'calls':>8} {'errors':>6} {'cancel':>6} {'mean':>8} {'max':>8} {'time%':>6}")
+    for row, values in rows[:limit]:
+        name = row["path"] if not row.get("project") else f"{row['project']}/{row['path']}"
+        out.append(f"  {name[-40:]:<40} {values['invocations'] / span:8.1f} {values['invocations']:>8} "
+                   f"{values['errors']:>6} {values['cancelled']:>6} "
+                   f"{fmt_ns(values['totalNs'] / values['invocations']):>8} {fmt_ns(values['maxNs']):>8} "
+                   f"{values['totalNs'] / grand * 100:5.1f}%")
 
 
 def main():

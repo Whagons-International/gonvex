@@ -5298,6 +5298,163 @@ mod tests {
         }
     }
 
+    /// In-process V8 end to end: a module installed through the registry,
+    /// Reducers and a Query executed through the real execution path, then
+    /// the per-function counters in `/dev/metrics` and the profile dump.
+    /// `GONVEX_PROFILE_DUMP=<file>` keeps the dump (bench/profiler/top.py).
+    #[test]
+    fn in_process_profile_fills_function_counters_and_invoke_stages() {
+        crate::in_process::tests::run(async {
+            use base64::Engine as _;
+            use gonvex_store::{RuntimeManifestRecord, TenantRoute};
+            use sha2::Digest as _;
+
+            gonvex_profiler::set_enabled(true);
+            let data = test_data_dir();
+            let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+            let url = gonvex_store::database_url(&data.path().join("tenant.db"));
+            let mut cfg = config(true);
+            cfg.module_host.in_process = true;
+            cfg.module_host.isolate_pool_size = 1;
+            let runtime = Runtime::new(cfg);
+            let control =
+                ControlPlane::connect(&control_url, runtime.inner.pools.clone(), BTreeMap::new())
+                    .await
+                    .unwrap();
+            let control_fixture = runtime.inner.pools.pool(&control_url).await.unwrap();
+            let fixture = runtime.inner.pools.pool(&url).await.unwrap();
+            sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('profiled','Profiled','multiTenant','active')").execute(&control_fixture).await.unwrap();
+            sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('route','profiled','tenant-id','Tenant','profiled',$1,'active')").bind(&url).execute(&control_fixture).await.unwrap();
+            let route = TenantRoute {
+                project_id: "profiled".into(),
+                tenant_id: "tenant-id".into(),
+                database_url: url.clone(),
+            };
+            sqlx::query("CREATE TABLE notes(id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+                .execute(&fixture)
+                .await
+                .unwrap();
+            control
+                .clone()
+                .provision_tenant_database(route.clone(), Vec::new())
+                .await
+                .unwrap();
+            *runtime.inner.control_plane.write().await = Some(control);
+            runtime.inner.module_host.start().await.unwrap();
+            let code = r#"
+export async function save(ctx, args) { await ctx.db.insert("notes", { id: args.id, body: "x".repeat(64) }); const rows = await ctx.db.query("SELECT count(*) AS n FROM notes", []); return rows[0].n; }
+export async function count(ctx) { return (await ctx.db.query("SELECT count(*) AS n FROM notes", []))[0].n; }
+export async function fail(ctx) { throw new Error("refused"); }
+"#;
+            let mut functions = serde_json::json!({});
+            for (path, kind) in [("save", "reducer"), ("count", "query"), ("fail", "reducer")] {
+                functions[path] = serde_json::json!({"kind":kind,"public":true,"internal":false,
+                    "interactive":false,"classification":"system","handler":path,"file":"test.js",
+                    "delivery":"oneShot","args":{"kind":"any"},"result":{"kind":"any"}});
+            }
+            let mut module = serde_json::json!({"generation":1,"language":"typescript","entrypoint":"test.js",
+                "files":{},"visibility":{},"crons":[],"functions":functions,
+                "javascript":{"path":"test.js","hash":format!("{:x}", Sha256::digest(code.as_bytes())),"code":base64::engine::general_purpose::STANDARD.encode(code)}});
+            let hash = crate::modules::canonical_artifact_hash(module.as_object().unwrap()).unwrap();
+            module["hash"] = serde_json::json!(hash);
+            runtime
+                .inner
+                .modules
+                .install(
+                    &runtime.inner.module_host,
+                    RuntimeManifestRecord {
+                        project_id: "profiled".into(),
+                        module_hash: hash,
+                        manifest: serde_json::json!({"module":module}),
+                    },
+                )
+                .await
+                .unwrap();
+            let session = TenantSession::anonymous(route);
+            // Every save is slow enough to keep a trace (it fsyncs).
+            gonvex_profiler::set_slow_trace(Duration::from_micros(1));
+            for index in 0..3 {
+                runtime
+                    .execute_tenant_reducer(
+                        &session,
+                        &format!("save-{index}"),
+                        None,
+                        "save",
+                        serde_json::json!({"id": format!("note-{index}")}),
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                runtime
+                    .execute_tenant_query(&session, "count", serde_json::json!({}))
+                    .await
+                    .unwrap(),
+                serde_json::json!(3)
+            );
+            assert!(runtime
+                .execute_tenant_reducer(&session, "fail-1", None, "fail", serde_json::json!({}))
+                .await
+                .is_err());
+            gonvex_profiler::set_slow_trace(Duration::from_millis(100));
+
+            let metrics = crate::operations::metrics_snapshot(&runtime, "profiled")
+                .await
+                .unwrap();
+            let functions = &metrics["functions"];
+            assert_eq!(functions["save"]["calls"], 3, "{functions}");
+            assert_eq!(functions["save"]["errors"], 0, "{functions}");
+            assert!(functions["save"]["averageDurationMs"].as_f64().unwrap() > 0.0);
+            assert!(functions["save"]["lastCalledAt"].is_string(), "{functions}");
+            assert_eq!(functions["count"]["calls"], 1, "{functions}");
+            assert_eq!(functions["fail"]["calls"], 1, "{functions}");
+            assert_eq!(functions["fail"]["errors"], 1, "{functions}");
+
+            let profile = crate::profiling::profile_json(&runtime);
+            let rows = profile["functions"]["rows"].as_array().unwrap();
+            assert!(rows
+                .iter()
+                .any(|row| row["project"] == "profiled" && row["path"] == "save"));
+            let stage = |name: &str, label: &str| {
+                profile["stages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["stage"] == name && row["label"] == label)
+                    .map_or(0, |row| row["count"].as_u64().unwrap())
+            };
+            for name in [
+                "invoke.isolate_wait",
+                "invoke.first_frame",
+                "invoke.js",
+                "invoke.host_calls",
+                "invoke.host_call_count",
+                "invoke.total",
+            ] {
+                assert!(stage(name, "reducer") >= 4, "{name}: {}", stage(name, "reducer"));
+            }
+            assert!(stage("v8.isolate_start", "-") >= 1);
+            let traces = profile["slowTraces"]["recent"].as_array().unwrap();
+            let trace = traces
+                .iter()
+                .find(|trace| trace["function"] == "profiled/save")
+                .expect("slow trace names its function");
+            let fields = profile["slowTraces"]["fields"].as_array().unwrap();
+            let value = |name: &str| {
+                let index = fields.iter().position(|field| field == name).unwrap();
+                trace["values"][index].as_u64().unwrap()
+            };
+            assert!(value("invoke.host_call_count") >= 2);
+            assert!(value("invoke.first_frame") >= value("invoke.isolate_wait"));
+            assert!(value("invoke.js") > 0 && value("invoke.host_calls") > 0);
+            assert!(!profile["v8Isolates"]["rows"].as_array().unwrap().is_empty());
+            if let Ok(path) = std::env::var("GONVEX_PROFILE_DUMP") {
+                std::fs::write(path, serde_json::to_vec(&profile).unwrap()).unwrap();
+            }
+            runtime.inner.module_host.shutdown().await;
+        });
+    }
+
     #[tokio::test]
     async fn public_tenant_auth_and_execution_contract() {
         use base64::Engine as _;

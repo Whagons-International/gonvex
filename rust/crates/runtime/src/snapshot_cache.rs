@@ -502,9 +502,15 @@ impl SnapshotCache {
             self.hits.fetch_add(1, Relaxed);
             return Ok(Some(entry));
         }
+        let timer = gonvex_profiler::Timer::start();
         let Some(entry) = build().await? else {
             return Ok(None);
         };
+        let mut timer = timer;
+        timer.lap(
+            gonvex_profiler::Stage::SnapshotCacheBuild,
+            gonvex_profiler::Label::None,
+        );
         self.builds.fetch_add(1, Relaxed);
         let entry = Arc::new(entry);
         self.install(owned, entry.clone());
@@ -567,8 +573,14 @@ impl SnapshotCache {
                 break;
             };
             let slot = slots.get_mut(&victim).unwrap();
-            total -= slot.entry.take().map_or(0, |entry| entry.heap_bytes);
+            let bytes = slot.entry.take().map_or(0, |entry| entry.heap_bytes);
+            total -= bytes;
             self.evictions.fetch_add(1, Relaxed);
+            gonvex_profiler::record(
+                gonvex_profiler::Stage::SnapshotCacheEvict,
+                gonvex_profiler::Label::None,
+                bytes as u64,
+            );
         }
         slots.retain(|_, slot| slot.entry.is_some() || Arc::strong_count(&slot.build) > 1);
     }

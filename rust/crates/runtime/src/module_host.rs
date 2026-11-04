@@ -99,6 +99,8 @@ pub struct InvokeTimes {
     pub js: u64,
     pub host_calls: u64,
     pub host_call_count: u64,
+    /// In-process only: request -> isolate leased (part of `first_frame`).
+    pub isolate_wait: u64,
 }
 
 #[async_trait]
@@ -127,6 +129,13 @@ pub trait HostCallHandler: Send {
     /// (see `gonvex_module_runtime::InlineHost`). Socket transport ignores it.
     fn inline_host(&self) -> Option<std::sync::Arc<dyn gonvex_module_runtime::InlineHost>> {
         None
+    }
+
+    /// `(calls, ns)` answered so far on the isolate thread through
+    /// [`HostCallHandler::inline_host`] (profiler; read before and after an
+    /// in-process invocation).
+    fn inline_profile(&self) -> (u64, u64) {
+        (0, 0)
     }
 }
 
@@ -271,14 +280,6 @@ impl ModuleHost {
         operation: RequestOp,
         mut handler: Option<&mut dyn HostCallHandler>,
     ) -> Result<ResponsePayload, ModuleHostError> {
-        if let Some(state) = &self.local {
-            if !self.status.read().await.ready {
-                return Err(ModuleHostError::NotReady);
-            }
-            return crate::in_process::request(state, operation, handler.take())
-                .await
-                .map_err(remote_error);
-        }
         let label = match &operation {
             RequestOp::Invoke(_) if crate::cron_profile::active() => {
                 Some(gonvex_profiler::Label::Cron)
@@ -294,6 +295,16 @@ impl ModuleHost {
             gonvex_profiler::ScopeTimer::new(gonvex_profiler::Stage::InvokeTotal, label)
         });
         let mut timer = gonvex_profiler::Timer::start();
+        if let Some(state) = &self.local {
+            if !self.status.read().await.ready {
+                return Err(ModuleHostError::NotReady);
+            }
+            // Recorded with the other in-process stages (in_process.rs).
+            let connect_ns = timer.elapsed_ns();
+            return crate::in_process::request(state, operation, handler.take(), label, connect_ns)
+                .await
+                .map_err(remote_error);
+        }
         let mut connect_ns = 0;
         let mut stream = self.connect().await?;
         // Invocation provenance carries the per-kind deadline. In particular,
@@ -540,6 +551,7 @@ impl InvokeProfile {
             js: self.js,
             host_calls: self.host,
             host_call_count: self.calls,
+            isolate_wait: 0,
         })
     }
 
