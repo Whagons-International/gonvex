@@ -580,3 +580,20 @@ backlog and the budget does not move it beyond run-to-run noise. 256 MB costs ~1
 RSS than 128 MB with no latency gain at this load. **Recommendation: keep the default at 128.**
 Not measured: the cold-tenant benefit (warm readers at low load, startup), which is what
 reader-warm targets; this step cannot show it.
+
+## Step 8: perf/delivery-v4 d7254de0 (a5c1928d, on reader-warm c4b20666) and perf/resume-lazy d93290ec (5a796ad1)
+
+Both merged clean. `cargo test --workspace --no-fail-fast`: a5c1928d 642 passed / 0 failed / 7
+ignored; resume-lazy line (fba5b411) 643 / 0 / 7. fba5b411 adds `/dev/metrics` → `memory`:
+`sqliteUsedBytes` (`sqlite3_memory_used`), `sqliteBudgetMiB`, `snapshotCache` (entries, bytes,
+hits, builds, roll-forwards, fallbacks, evictions), `v8` (isolates, total/used/physical heap,
+external, malloced; summed over live isolate workers as of each one's last call).
+
+Oracle gate, delivery-v4 binary (old-app lab, 100 users, 16 SDK, 600 s, permission changes):
+
+| case | checks | conv. | no change | mismatched | batches | frames in | unsupported | errors | heartbeat p95/p99 | save p95/p99 | delivery p95/p99 |
+|---|---:|---:|---:|---|---:|---:|---|---:|---|---|---|
+| v4-oracle-100 (batch on) | 23 | 18 | 5 | 0 (0/0) | 26,188 | 42,127 | {} | 0.22 % | 54 / 104 | 103 / 1,232 | 136 / 1,638 |
+| v4-oracle-100-nobatch | 23 | 18 | 5 | 0 (0/0) | 0 | 118,009 | {} | 0.06 % | 51 / 165 | 171 / 2,500 | 81 / 1,894 |
+
+With delivery-v4's call-completion flush, batch-on heartbeat p99 is 104 ms (delivery-v3 alone: 1,398 ms).
