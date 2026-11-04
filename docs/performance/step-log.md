@@ -769,3 +769,20 @@ on the new-app baseline (no generator): `invoke.isolate_wait`, `module_host.isol
 background stages (`sqlite.checkpoint`, `v8.gc_minor/major`, `v8.isolate_start/stop`,
 `mem.malloc_trim`), the v8 isolate table, function names in slow traces and the "functions by
 total time" table all appear in `top.py --file`. The next 500-user run reports them.
+
+## Step 10: perf/cron-writer ce9294bf (890ae2ad) + Whagons perf/grant-projection-incremental 605f5ca6 (artifact 1118d6c7)
+
+gonvex merge clean; `cargo test --workspace --no-fail-fast` on 890ae2ad: 653 passed, 0 failed, 8
+ignored; binary `lab-5k/bin-cron-writer`. SDK packages rebuilt from 890ae2ad (module-sdk
+`updateDataRows` now updates by primary key: `UPDATE … WHERE <key> IN (SELECT key FROM
+json_each($1))`, present in the built `module.reducers.js` and `module.js`). Isolate guard
+defaults: priority user > outbox/system > scheduled (scheduled moves up after 5 s), scheduled
+Reducer slice 3 s (`GONVEX_MODULE_HOST_SCHEDULED_SLICE_MS`), separate scheduled isolate off.
+
+Whagons (local `whagons-integrate-5k`, lab-only commits): previous regenerated artifact committed,
+605f5ca69 merged (chunked `grantProjection.reconcile`, 100 members/step, rescheduled; cheaper
+`notifyIfUnassigned`), only generated files conflicted and were regenerated with codegen from
+the 890ae2ad packages: artifact **1118d6c7e970** (340 v2 plans, 1,982 functions, no deprecation
+log). Synced into the new-lab baseline (`gonvex_runtime_manifests` = 1118d6c7…; previous
+baseline kept as `baseline-data-83669147`), Mac `app-new` refreshed. Next 500-user run: after
+cache-heap (+ omit-nulls).
