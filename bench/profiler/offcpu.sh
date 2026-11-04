@@ -15,7 +15,7 @@ out=${3:-offcpu-$pid.svg}
 folded="${out%.svg}.folded"
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 perf record -q -e cs --call-graph "${PERF_CALLGRAPH:-dwarf,16384}" --switch-events -p "$pid" -o "$work/perf.data" -- sleep "$seconds"
-perf script -i "$work/perf.data" --show-switch-events -F comm,tid,time,event,ip,sym 2>/dev/null > "$work/out.txt"
+perf script -i "$work/perf.data" ${PERF_SYMFS:+--symfs=$PERF_SYMFS --kallsyms=/proc/kallsyms} --show-switch-events -F comm,tid,time,event,ip,sym 2>/dev/null > "$work/out.txt"
 # PERF_KEEP_SWITCHES=1 keeps the per-switch text (timeline of each block) next to the svg.
 [ -z "${PERF_KEEP_SWITCHES:-}" ] || cp "$work/out.txt" "${out%.svg}.switches.txt"
 python3 - "$work/out.txt" > "$folded" <<'PY'

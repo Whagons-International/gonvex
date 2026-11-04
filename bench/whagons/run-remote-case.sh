@@ -101,6 +101,12 @@ if [ "${LOAD_PERF:-1}" != 0 ] && command -v perf >/dev/null; then
  perf buildid-cache -a "$LOAD_BIN_DIR/gonvex-runtime" 2>/dev/null || true
  ( sleep "${LOAD_PERF_AT:-$(( ${LOAD_RAMP_SECONDS:-60} + 45 ))}"
    ps=${LOAD_PERF_SECONDS:-30}; export TMPDIR="$out"  # perf.data on disk, not tmpfs
+   # The runtime sees its binary as /binhost/* and host libs under /usr: mirror
+   # that for perf script (perf cannot open files in the container namespace).
+   mkdir -p "$out/symfs/binhost" "$out/symfs/usr"
+   ln -sfn "$LOAD_BIN_DIR/gonvex-runtime" "$out/symfs/binhost/gonvex-runtime"
+   ln -sfn /usr/lib "$out/symfs/usr/lib"; ln -sfn /usr/lib64 "$out/symfs/usr/lib64"
+   export PERF_SYMFS="$out/symfs" PERF_CALLGRAPH=${PERF_CALLGRAPH:-dwarf,32768}
    # LOAD_PERF_PARALLEL=1: on- and off-CPU over the same window (e.g. across a :00
    # boundary), off-CPU keeps its per-switch timeline.
    if [ "${LOAD_PERF_PARALLEL:-0}" = 1 ]; then

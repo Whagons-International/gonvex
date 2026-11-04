@@ -24,6 +24,10 @@ else
 fi
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 perf record -q -F "${PERF_FREQ:-199}" --call-graph "${PERF_CALLGRAPH:-dwarf,16384}" -p "$pid" -o "$work/perf.data" -- sleep "$seconds"
-perf script -i "$work/perf.data" | $collapse > "${out%.svg}.folded"
+# PERF_SYMFS: a directory mirroring the target's mount namespace (container
+# paths such as /binhost/gonvex-runtime), so user frames resolve and unwind.
+symfs=${PERF_SYMFS:+--symfs=$PERF_SYMFS --kallsyms=/proc/kallsyms}
+perf script -i "$work/perf.data" $symfs | $collapse > "${out%.svg}.folded"
+[ -z "${PERF_KEEP_DATA:-}" ] || cp "$work/perf.data" "${out%.svg}.perf.data"
 $graph --title "on-CPU pid $pid (${seconds}s)" < "${out%.svg}.folded" > "$out"
 echo "wrote $out and ${out%.svg}.folded"
