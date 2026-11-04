@@ -59,10 +59,28 @@ pub fn enabled() -> bool {
     })
 }
 
+/// How long after a skipped transaction the tenant wakes the connections
+/// that skipped to take their signals and push a watermark
+/// (`GONVEX_FEED_WAKE_FLUSH_MS`, default 5,000). Skipped revisions also go
+/// out with the connection's next frame; a call waiting for its watermark
+/// never waits for this (the connection leaves targeted mode).
+pub fn flush_delay() -> std::time::Duration {
+    static DELAY: OnceLock<std::time::Duration> = OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::time::Duration::from_millis(
+            std::env::var("GONVEX_FEED_WAKE_FLUSH_MS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(5000),
+        )
+    })
+}
+
 /// `/dev/profile` `deliveryCoverage.wake`.
 pub fn metrics() -> Value {
     serde_json::json!({
         "enabled": enabled(),
+        "flushMs": flush_delay().as_millis() as u64,
         "dispatched": DISPATCHED.load(Ordering::Relaxed),
         "targeted": TARGETED.load(Ordering::Relaxed),
         "notTargeted": SKIPPED_MARKS.load(Ordering::Relaxed),
@@ -371,9 +389,9 @@ impl WakeRegistry {
         }
     }
 
-    /// One timer per tenant: after the batch idle delay (the delay a
-    /// watermark-only batch waits anyway), wake the connections that skipped
-    /// transactions so they take the signals and push their watermark.
+    /// One timer per tenant: after [`flush_delay`], wake the connections that
+    /// skipped transactions so they take the signals and push their
+    /// watermark.
     fn schedule_flush(self: &Arc<Self>) {
         if self.flush_scheduled.swap(true, Ordering::AcqRel) {
             return;
@@ -385,7 +403,7 @@ impl WakeRegistry {
         };
         let registry = Arc::downgrade(self);
         handle.spawn(async move {
-            tokio::time::sleep(crate::delivery::BatchConfig::from_env().idle).await;
+            tokio::time::sleep(flush_delay()).await;
             if let Some(registry) = registry.upgrade() {
                 registry.flush_scheduled.store(false, Ordering::Release);
                 registry.flush();

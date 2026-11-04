@@ -56,6 +56,11 @@ async fn next_frames(socket: &mut Socket) -> Vec<Value> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_connection_skips_unrelated_commits_but_gets_their_watermark_and_its_own_changes() {
+    // A 1 s tenant flush (default 5 s), before the runtime reads it.
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("GONVEX_FEED_WAKE_FLUSH_MS", "1000");
+    }
     let cache = tempfile::tempdir().unwrap();
     let mut options = FixtureOptions::small();
     options.cache_dir = Some(cache.path().to_path_buf());
@@ -198,7 +203,7 @@ async fn an_idle_connection_skips_unrelated_commits_but_gets_their_watermark_and
     let covered = started.elapsed();
     eprintln!("unrelated commit {unrelated}: watermark after {covered:?}, skips {}", skipped() - before);
     assert!(skipped() > before, "the unrelated commit woke the connection's feed arm");
-    // One flush delay (the idle delay a watermark-only batch waited before).
+    // One flush delay (set to 1 s above).
     assert!(covered < Duration::from_millis(1800), "watermark for a skipped commit after {covered:?}");
 
     // 2. A commit to its own collection: delivered at once.

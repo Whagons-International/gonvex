@@ -1281,6 +1281,32 @@ pub(crate) fn wake_interest(
     }
 }
 
+/// Targeted wakeups: a cheap key of everything [`wake_interest`] reads that
+/// can change while subscribed (the subscription set, definitions, fan-out
+/// keys and the compiled bindings; a principal, grant or derived change
+/// clears the binding, so it changes the key). Equal keys: the interest is
+/// unchanged and need not be rebuilt.
+pub(crate) fn wake_key(subscriptions: &BTreeMap<String, ReplicaSubscription>) -> u64 {
+    let mut hasher = crate::visibility_class::FxHasher::default();
+    let handle = |handle: Option<&crate::visibility_class::MemberHandle>| match handle {
+        Some(crate::visibility_class::MemberHandle::Compiled(member)) => Arc::as_ptr(member) as usize,
+        Some(crate::visibility_class::MemberHandle::Fallback) => 1,
+        None => 0,
+    };
+    for (id, subscription) in subscriptions {
+        id.hash(&mut hasher);
+        (Arc::as_ptr(&subscription.definition) as usize).hash(&mut hasher);
+        subscription
+            .fanout
+            .as_ref()
+            .map_or(0, |keys| Arc::as_ptr(keys) as usize)
+            .hash(&mut hasher);
+        handle(subscription.mask.peek()).hash(&mut hasher);
+        handle(subscription.wake_member.as_ref()).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// Targeted wakeups (tests and benches): whether the tenant feed would skip
 /// this connection for `event` (decide nothing, send nothing).
 pub fn wake_skips(

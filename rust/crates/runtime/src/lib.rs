@@ -1649,6 +1649,7 @@ async fn websocket(
     // Targeted wakeups (`wake`): the wake interest needs rebuilding (any
     // socket message, processed feed event or installed open may change it).
     let mut wake_dirty = true;
+    let mut wake_key = 0u64;
     // The newest transaction skipped without the feed arm (not yet in a
     // watermark).
     let mut wake_skipped = 0u64;
@@ -1792,11 +1793,14 @@ async fn websocket(
             && tenant_session.as_ref().is_some_and(|session| !session.is_anonymous());
         let wake_wait = match feed.as_mut().and_then(change_feed::FeedReceiver::wake) {
             Some((registry, slot)) if targeted => {
-                if wake_dirty || !slot.active() {
+                let key = if wake_dirty { replica::fanout::wake_key(&replicas) } else { wake_key };
+                if key != wake_key || !slot.active() {
                     let interest = replica::fanout::wake_interest(&mut replicas, tenant_session.as_ref().expect("tenant session"));
                     registry.enter(slot, std::sync::Arc::new(interest));
-                    wake_dirty = false;
+                    // Building it may bind `wake_member`: key it as built.
+                    wake_key = replica::fanout::wake_key(&replicas);
                 }
+                wake_dirty = false;
                 Some(std::sync::Arc::clone(slot))
             }
             Some((registry, slot)) => {
