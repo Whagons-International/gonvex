@@ -41,9 +41,27 @@ pub fn shared_decisions() -> u64 {
     SHARED_DECISIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Events kept per tenant (connections lag each other by a few events at most;
-/// a miss only means deciding alone).
+/// Shares kept per tenant at most. A share lives while its event's images
+/// are held elsewhere too (the change-feed backlog, its refill cache or a
+/// connection still applying it), so connections that are behind reuse the
+/// shares of the connections ahead of them instead of recomputing each
+/// event's memo, decisions, layout and outcomes. The 4 newest always stay.
+const MAX_EVENTS: usize = 1024;
 const KEEP_EVENTS: usize = 4;
+
+static SHARES_CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SHARES_FOUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SHARES_LIVE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Event shares created, found, and alive (`/dev/metrics` → `memory.eventShares`).
+pub fn metrics() -> serde_json::Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    serde_json::json!({
+        "created": SHARES_CREATED.load(Relaxed),
+        "found": SHARES_FOUND.load(Relaxed),
+        "live": SHARES_LIVE.load(Relaxed),
+    })
+}
 
 static OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -139,8 +157,35 @@ impl EventShare {
 /// Recent event shares of one tenant.
 #[derive(Default)]
 pub struct EventShares {
-    recent: Mutex<VecDeque<Arc<EventShare>>>,
+    recent: Mutex<Recent>,
     hits: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+struct Recent {
+    /// Creation order.
+    order: VecDeque<Arc<EventShare>>,
+    /// The same shares by revision (a revision may have several: the
+    /// broadcast images and copies re-read from the log).
+    by_revision: crate::fast_hash::FastMap<u64, Vec<Arc<EventShare>>>,
+}
+
+impl Recent {
+    fn forget(&mut self, share: &Arc<EventShare>) {
+        if let Some(shares) = self.by_revision.get_mut(&share.revision) {
+            shares.retain(|other| !Arc::ptr_eq(other, share));
+            if shares.is_empty() {
+                self.by_revision.remove(&share.revision);
+            }
+        }
+    }
+}
+
+impl Drop for EventShares {
+    fn drop(&mut self) {
+        let live = self.recent.get_mut().map_or(0, |recent| recent.order.len());
+        SHARES_LIVE.fetch_sub(live as i64, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl EventShares {
@@ -156,12 +201,13 @@ impl EventShares {
             return None;
         }
         let mut recent = self.recent.lock().unwrap();
-        if let Some(share) = recent.iter().find(|share| {
-            share.revision == revision
-                && share.epoch == epoch
-                && Arc::ptr_eq(&share.changes, changes)
+        if let Some(share) = recent.by_revision.get(&revision).and_then(|shares| {
+            shares
+                .iter()
+                .find(|share| share.epoch == epoch && Arc::ptr_eq(&share.changes, changes))
         }) {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            SHARES_FOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(Arc::clone(share));
         }
         let share = Arc::new(EventShare {
@@ -174,10 +220,32 @@ impl EventShares {
             layout: Default::default(),
             outcomes: Mutex::default(),
         });
-        recent.push_back(Arc::clone(&share));
-        while recent.len() > KEEP_EVENTS {
-            recent.pop_front();
+        let recent = &mut *recent;
+        recent.order.push_back(Arc::clone(&share));
+        recent
+            .by_revision
+            .entry(revision)
+            .or_default()
+            .push(Arc::clone(&share));
+        SHARES_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Beyond the newest few, drop shares whose images nobody else holds
+        // (only this share and the index hold them: no connection can still
+        // receive that `Arc`), and the oldest past the cap. Swept from the
+        // front, so the cost per event is the number dropped (+1).
+        let before = recent.order.len();
+        while recent.order.len() > KEEP_EVENTS {
+            let front = &recent.order[0];
+            let unused = Arc::strong_count(&front.changes) <= 1;
+            if !(unused || recent.order.len() > MAX_EVENTS) {
+                break;
+            }
+            let dropped = recent.order.pop_front().expect("front");
+            recent.forget(&dropped);
         }
+        SHARES_LIVE.fetch_add(
+            recent.order.len() as i64 - before as i64 + 1,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Some(share)
     }
 
