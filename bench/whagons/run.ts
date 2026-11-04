@@ -327,6 +327,14 @@ async function main() {
   // Workspaces this user may create in (team-linked), from its workspace replica.
   const myWorkspaces=()=>new Set(extras.rows(0).map((w:any)=>w._id));
   // Weighted foreground actions for every user (weights in percent).
+  // LOAD_MIX=production: task creates at the production telemetry rate (0.014 vs the
+  // default mix's ~0.097 creates per person-minute, notification-fanout doc) and no
+  // workspace chat sends (none in the sample). LOAD_CREATE_ASSIGN_FRACTION: share of
+  // creates that carry the creator as assignee (the sample does not record it; default 0).
+  const productionMix=process.env.LOAD_MIX==='production';
+  const createWeight=6*(productionMix?Number(process.env.LOAD_CREATE_SCALE||0.014/0.097):1),chatWeight=productionMix?0:4;
+  const assignFraction=Number(process.env.LOAD_CREATE_ASSIGN_FRACTION||0);
+  const assignees=()=>random()<assignFraction&&member?{assigneeUserIds:[member]}:{};
   const actions:[number,()=>Promise<unknown>][]=[
    // Reads (25): task detail dwell, workspace switch, notifications, chat.
    [15,async()=>{const t=pick(rows(),random);if(!t)return;const win=watchAll(c,[[api.tasks.get,{id:t._id}],[api.taskResources.listTaskNotes,{taskId:t._id}],[api.taskResources.listTaskLogs,{taskId:t._id}],[api.taskResources.listTaskViewsByTaskId,{taskId:t._id}],[api.approvals.listTaskApprovals,{taskId:t._id}],[api.taskFindings.listForTask,{taskId:t._id}],[api.taskResources.listTaskUsers,{taskId:t._id}],[api.customFields.listTaskValues,{taskId:t._id}]]);const q=startTime();if(await until(win.ready,30000))sample('query',performance.now()-q);else error(new Error('Task detail queries never became current'));dwell(win);const cur=rows().find(r=>r._id===t._id)||t;if(viewSetsFirstViewedAt(cur,member))await saveFor(expectTask(t._id,row=>firstViewed(row)),api.taskResources.recordTaskViewByTaskId,{taskId:t._id});else{if(!firstViewed(cur))expectationStats.ownTaskViews++;await save(api.taskResources.recordTaskViewByTaskId,{taskId:t._id});}}],
@@ -346,12 +354,12 @@ async function main() {
    // Assignments (5): assigning another member makes the task visible to them.
    [5,async()=>{const t=pick(open(),random),h=pick(others(),random);if(!t||!h)return;await save(api.taskResources.assignUser,{taskId:t._id,userId:h.member});}],
    // Creates (20): tasks, comments, relations, workspace chat.
-   [6,async()=>{const entityId=randomUUID();const allowed=(f.workspaceIds||[f.workspaceId]).map((w:string,k:number)=>[w,k] as [string,number]).filter(([w])=>myWorkspaces().has(w));if(!allowed.length)return;const workspace=pick(allowed,random)[1];await saveFor(expectTask(entityId,()=>true),api.tasks.create,{entityId,name:'E2E load '+randomUUID(),workspaceId:(f.workspaceIds||[f.workspaceId])[workspace],categoryId:(f.categoryIds||[f.categoryId])[workspace],priorityId:f.priorityId,spotId:random()<.8&&f.spotChildren?pick(f.spotChildren as string[],random):undefined});}],
+   [createWeight,async()=>{const entityId=randomUUID();const allowed=(f.workspaceIds||[f.workspaceId]).map((w:string,k:number)=>[w,k] as [string,number]).filter(([w])=>myWorkspaces().has(w));if(!allowed.length)return;const workspace=pick(allowed,random)[1];await saveFor(expectTask(entityId,()=>true),api.tasks.create,{entityId,name:'E2E load '+randomUUID(),workspaceId:(f.workspaceIds||[f.workspaceId])[workspace],categoryId:(f.categoryIds||[f.categoryId])[workspace],priorityId:f.priorityId,spotId:random()<.8&&f.spotChildren?pick(f.spotChildren as string[],random):undefined,...assignees()});}],
    [8,async()=>{const t=pick(rows(),random);if(!t)return;await save(api.taskResources.createNote,{entity:{_id:randomUUID(),_creationTime:Date.now(),taskId:t._id,userId:member,source:'web',note:'Synthetic local comment '+randomUUID()}});}],
    [2,async()=>{const t=pick(open(),random),u=pick(open(),random);if(!t||!u||t._id===u._id)return;await save(api.taskResources.createTaskRelation,{relationId:randomUUID(),taskId:t._id,relatedTaskId:u._id,relationType:random()<.5?'blocks':'related'});}],
-   [4,async()=>{const t=pick(rows(),random);if(!t)return;await save(api.chat.sendWorkspaceChat,{entity:{_id:randomUUID(),_creationTime:Date.now(),userId:member,workspaceId:t.workspaceId,message:'Synthetic chat '+randomUUID()}});}],
+   [chatWeight,async()=>{const t=pick(rows(),random);if(!t)return;await save(api.chat.sendWorkspaceChat,{entity:{_id:randomUUID(),_creationTime:Date.now(),userId:member,workspaceId:t.workspaceId,message:'Synthetic chat '+randomUUID()}});}],
    // Approvals (10): tasks that enter approval, and approver decisions.
-   [6,async()=>{if(!f.approvalCategoryId||!myWorkspaces().has(f.workspaceId))return;const entityId=randomUUID();const v=await saveFor(expectTask(entityId,()=>true),api.tasks.create,{entityId,name:'Needs approval '+randomUUID().slice(0,8),workspaceId:f.workspaceId,categoryId:f.approvalCategoryId,priorityId:f.priorityId});if(v!==undefined)(approvalQueue.get(f.tenant)??approvalQueue.set(f.tenant,[]).get(f.tenant)!).push(entityId);}],
+   [createWeight,async()=>{if(!f.approvalCategoryId||!myWorkspaces().has(f.workspaceId))return;const entityId=randomUUID();const v=await saveFor(expectTask(entityId,()=>true),api.tasks.create,{entityId,name:'Needs approval '+randomUUID().slice(0,8),workspaceId:f.workspaceId,categoryId:f.approvalCategoryId,priorityId:f.priorityId,...assignees()});if(v!==undefined)(approvalQueue.get(f.tenant)??approvalQueue.set(f.tenant,[]).get(f.tenant)!).push(entityId);}],
    [4,async()=>{if(!approver)return;const queue=approvalQueue.get(f.tenant)||[];const taskId=queue.find(id=>rows().some(r=>r._id===id));if(!taskId)return;queue.splice(queue.indexOf(taskId),1);await save(api.approvals.decideByTask,{taskId,decision:random()<.85?'approved':'rejected',comment:'Synthetic decision'});}],
   ];
   const totalWeight=actions.reduce((a,[w])=>a+w,0);

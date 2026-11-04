@@ -786,3 +786,32 @@ the 890ae2ad packages: artifact **1118d6c7e970** (340 v2 plans, 1,982 functions,
 log). Synced into the new-lab baseline (`gonvex_runtime_manifests` = 1118d6c7…; previous
 baseline kept as `baseline-data-83669147`), Mac `app-new` refreshed. Next 500-user run: after
 cache-heap (+ omit-nulls).
+
+## Step 11: perf/cache-heap 36c440d6 (19803c3e) + Whagons perf/notification-fanout c67531834 (artifact da98a666)
+
+gonvex merge clean; `cargo test --workspace --no-fail-fast` on 19803c3e: 656 passed, 0 failed, 8
+ignored; binary `lab-5k/bin-cache-heap`. Lab runtime env (both labs' compose overrides):
+`GONVEX_OFFLOAD_NICE=10`, `GONVEX_SQLITE_READER_NICE=10` (code defaults stay 0). omit-nulls not
+merged. Whagons: c67531834 merged into the local app (one source conflict in
+`tasks/bulkCommands.ts`, both sides narrowed `memberTeams` to the workspace's teams; took the
+branch's `readDataValues` form; generated files regenerated), artifact **da98a6665b3b**
+(`insertNotificationRows` in the reducer bundle), synced into the new-lab baseline (previous kept
+as `baseline-data-1118d6c7`), Mac `app-new` refreshed.
+
+### Load-model realism (notification-fanout finding)
+
+The default generator mix is heavier than the production telemetry sample (3,783 traces, 13
+accounts, 349 heartbeat person-minutes; Whagons docs/performance/notification-fanout.md):
+
+- **task creates ~7× production**: ~0.097 creates per person-minute in the lab vs 0.014 in the sample;
+- **never assigns at create**, so every create schedules `tasks.notifyIfUnassigned` to every member of
+  the workspace's teams (~1,364 rows per create in the largest tenant);
+- **workspace chat sends** (4 % of actions; the sample has none), each notifying the same audience;
+- notifications were 81–91 % of change-log bytes in the large tenants.
+
+The default mix stays as is for comparability (Gabriel asked for the heavier mix). run.ts now has
+`LOAD_MIX=production`: both create actions weighted at 0.014/0.097 of the default
+(`LOAD_CREATE_SCALE` overrides), chat sends off, `LOAD_CREATE_ASSIGN_FRACTION` (default 0: the
+sample does not record assignees at create) gives that share of creates the creator as assignee.
+Each step with the default mix gets one companion run with `LOAD_MIX=production` at the same user
+count.
