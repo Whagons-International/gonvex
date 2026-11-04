@@ -381,7 +381,26 @@ pub(crate) struct ShapeEntry {
     identity: u64,
 }
 
+/// The outcome key: the entries of the subscriptions the event decides or
+/// asks (collections of changed tables: `Apply`, or `Ahead` for
+/// normalization), in subscription id order. Subscriptions it only advances
+/// (`Skip`) or leaves (`Ahead` of untouched tables) are not part of it:
+/// connections that differ only in those (a task detail window open on
+/// another task) share one outcome.
 pub(crate) type Shape = Vec<ShapeEntry>;
+
+/// A connection's shape for one event: the outcome key and, per
+/// subscription in id order, its state and whether its entry is in the key.
+pub(crate) struct Shaped {
+    pub(crate) key: Shape,
+    states: Vec<(State, bool)>,
+}
+
+impl Shaped {
+    fn decides(&self) -> bool {
+        self.key.iter().any(|entry| entry.state == State::Apply)
+    }
+}
 
 /// What one subscription of a shape does with the event.
 pub(crate) enum SubOutcome {
@@ -501,7 +520,7 @@ pub(crate) fn shape(
     epoch: &str,
     revision: u64,
     scope: &str,
-) -> Result<Shape, Path> {
+) -> Result<Shaped, Path> {
     let layout = share.layout.get_or_init(|| layout(share.changes()));
     let changes = share.changes();
     // Cheap static checks first: a connection with a collection the fan-out
@@ -514,7 +533,7 @@ pub(crate) fn shape(
             }
         }
     }
-    let mut shape: Shape = Vec::with_capacity(subscriptions.len());
+    let mut shape: Vec<ShapeEntry> = Vec::with_capacity(subscriptions.len());
     let mut memo = None;
     for subscription in subscriptions.values_mut() {
         let keys = keys(subscription);
@@ -686,7 +705,17 @@ pub(crate) fn shape(
             identity: keys.identity,
         });
     }
-    Ok(shape)
+    // Entries of touched tables name their definition; the others are
+    // `Skip` or `Ahead` of untouched tables.
+    let states = shape
+        .iter()
+        .map(|entry| (entry.state, entry.definition.0.is_some()))
+        .collect();
+    let key = shape
+        .into_iter()
+        .filter(|entry| entry.definition.0.is_some())
+        .collect();
+    Ok(Shaped { key, states })
 }
 
 /// Records what the full path did for one subscription of a shape.
@@ -757,20 +786,21 @@ impl Recorder {
         );
     }
 
-    /// The shared outcome, aligned with `subscriptions` (the representative's,
-    /// after the event).
+    /// The shared outcome, aligned with the shape's key (the
+    /// representative's subscriptions, after the event).
     pub(crate) fn finish(
         mut self,
         subscriptions: &BTreeMap<String, ReplicaSubscription>,
-        shape: &Shape,
+        shape: &Shaped,
     ) -> Option<Outcome> {
-        if !self.clean || subscriptions.len() != shape.len() {
+        if !self.clean || subscriptions.len() != shape.states.len() {
             return None;
         }
         let subs = subscriptions
             .keys()
-            .zip(shape)
-            .map(|(id, entry)| match entry.state {
+            .zip(&shape.states)
+            .filter(|(_, (_, keyed))| *keyed)
+            .map(|(id, (state, _))| match state {
                 State::Ahead => SubOutcome::None,
                 State::Skip => SubOutcome::Advance,
                 State::Apply => self.subs.remove(id).unwrap_or(SubOutcome::Advance),
@@ -904,7 +934,7 @@ impl Runtime {
             .events
             .share(database_epoch, *revision, changes)
             .ok_or(Missed::Path(Path::NoShare))?;
-        let shape = shape(
+        let shaped = shape(
             subscriptions,
             &share,
             database_epoch,
@@ -912,19 +942,21 @@ impl Runtime {
             &session.route.database_url,
         )
         .map_err(Missed::Path)?;
-        let outcome = if shape.iter().any(|entry| entry.state == State::Apply) {
-            let found = share.outcomes.lock().unwrap().get(&shape).cloned();
+        let states = &shaped.states;
+        let shape = &shaped.key;
+        let outcome = if shaped.decides() {
+            let found = share.outcomes.lock().unwrap().get(shape).cloned();
             match found {
                 Some(outcome) => Some(outcome),
                 None => {
                     let mut claims = share.claims.lock().unwrap();
                     // Re-check under the claims lock: a claim is released
                     // after its outcome is recorded.
-                    if let Some(outcome) = share.outcomes.lock().unwrap().get(&shape).cloned() {
+                    if let Some(outcome) = share.outcomes.lock().unwrap().get(shape).cloned() {
                         drop(claims);
                         Some(outcome)
                     } else {
-                        return Err(match claims.get(&shape) {
+                        return Err(match claims.get(shape) {
                             Some(ClaimState::Pending(receiver)) => Missed::Wait(receiver.clone()),
                             Some(ClaimState::Failed) => Missed::Path(Path::Unclean),
                             None => {
@@ -933,7 +965,7 @@ impl Runtime {
                                 drop(claims);
                                 Missed::Claimed(Claim {
                                     share: Arc::clone(&share),
-                                    shape: Some(shape),
+                                    shape: Some(shape.clone()),
                                     done,
                                 })
                             }
@@ -949,7 +981,13 @@ impl Runtime {
         if let Some(outcome) = &outcome {
             // Checks before any change: bounded windows stay in budget and
             // the socket's stream tokens are the default ones.
-            for ((id, subscription), sub) in subscriptions.iter().zip(&outcome.subs) {
+            let mut position = 0;
+            for (index, (id, subscription)) in subscriptions.iter().enumerate() {
+                if !states[index].1 {
+                    continue;
+                }
+                let sub = &outcome.subs[position];
+                position += 1;
                 if let SubOutcome::Delta(delta) = sub {
                     if !batcher.default_binding(id, crate::delivery::stream_identity(subscription))
                     {
@@ -971,8 +1009,8 @@ impl Runtime {
         }
         HITS.fetch_add(1, Ordering::Relaxed);
         let Some(outcome) = outcome else {
-            for (subscription, entry) in subscriptions.values_mut().zip(&shape) {
-                if entry.state == State::Skip {
+            for (subscription, (state, _)) in subscriptions.values_mut().zip(states) {
+                if *state == State::Skip {
                     subscription.cursor.revision = *revision;
                 }
             }
@@ -988,9 +1026,19 @@ impl Runtime {
         }
         // Window state first (mutable), then the frames (the batcher reads
         // the subscriptions).
-        let mut digests: Vec<(usize, String)> = Vec::new();
+        // (outcome position, subscription position, digest)
+        let mut digests: Vec<(usize, usize, String)> = Vec::new();
+        let mut at = 0;
         for (index, subscription) in subscriptions.values_mut().enumerate() {
-            match &outcome.subs[index] {
+            if !states[index].1 {
+                if states[index].0 == State::Skip {
+                    subscription.cursor.revision = *revision;
+                }
+                continue;
+            }
+            let position = at;
+            at += 1;
+            match &outcome.subs[position] {
                 SubOutcome::None => {}
                 SubOutcome::Advance => subscription.cursor.revision = *revision,
                 SubOutcome::Delta(delta) => {
@@ -1005,11 +1053,11 @@ impl Runtime {
                         (subscription.window.rows as isize + delta.rows).max(0) as usize;
                     subscription.window.bytes += delta.bytes;
                     subscription.cursor.revision = *revision;
-                    digests.push((index, subscription.digest.digest()));
+                    digests.push((position, index, subscription.digest.digest()));
                 }
             }
         }
-        for (index, digest) in digests {
+        for (position, index, digest) in digests {
             let id = subscriptions
                 .keys()
                 .nth(index)
@@ -1017,10 +1065,11 @@ impl Runtime {
                 .as_str();
             {
                 {
-                    let SubOutcome::Delta(delta) = &outcome.subs[index] else {
+                    let SubOutcome::Delta(delta) = &outcome.subs[position] else {
                         unreachable!()
                     };
-                    let (item, prefix, suffix) = texts.subs[index].as_ref().expect("delta text");
+                    let (item, prefix, suffix) =
+                        texts.subs[position].as_ref().expect("delta text");
                     let mut tail = String::with_capacity(digest.len() + 32);
                     tail.push_str(",\"digest\":\"");
                     tail.push_str(&digest);

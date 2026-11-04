@@ -1244,7 +1244,7 @@ impl Runtime {
                 &session.route.database_url,
             )
             .ok()
-                .filter(|shape| !share.outcomes.lock().unwrap().contains_key(shape))
+                .filter(|shape| !share.outcomes.lock().unwrap().contains_key(&shape.key))
                 .map(|shape| (shape, fanout::Recorder::new())),
             _ => None,
         };
@@ -1416,7 +1416,7 @@ impl Runtime {
                 .filter(|message| matches!(message, ServerMessage::ReplicaTransaction { .. }))
                 .cloned();
             if let Some(outcome) = recorder.finish(subscriptions, &shape) {
-                fanout::record(share, shape, outcome);
+                fanout::record(share, shape.key, outcome);
             }
         }
         Ok(messages)

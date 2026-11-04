@@ -10,7 +10,8 @@
 //!
 //! Env: BENCH_FILTER, BENCH_ITERS (default 20), BENCH_JSON_OUT (see
 //! perf-fixture.md); DC_MEMBERS / DC_TASKS: use one tenant of that size
-//! instead of the Whagons fixture's large tenant.
+//! instead of the Whagons fixture's large tenant; DC_DETAIL=0: no task detail
+//! window per connection (default: each has one open, 8 more collections).
 //!
 //! Kinds (one transaction each, written as the Whagons reducers write them):
 //! - `task_edit`: a task field edit (description) plus its `taskLogs` row;
@@ -259,6 +260,25 @@ async fn run() {
     spots.sort();
     spots.dedup();
     let mut connections = fixture.connect_all(BIG).await.unwrap();
+    // DC_DETAIL (default 1): every connection also has a task detail window
+    // open (`WHAGONS_DETAIL_WINDOW`, 8 collections) on one of 20 tasks, as
+    // lab users dwell on task details.
+    if env_usize("DC_DETAIL", 1) == 1 {
+        let tasks = fixture.tenants[BIG].tasks.clone();
+        for (member, connection) in connections.iter_mut().enumerate() {
+            let task = &tasks[(member % 20) * 7].id;
+            for (path, argument) in gonvex_runtime::perf_fixture::WHAGONS_DETAIL_WINDOW {
+                let id = format!("~detail {path}");
+                let opened = fixture
+                    .open_replica_args(&connection.session, &id, path, json!({ argument: task }))
+                    .await
+                    .unwrap();
+                if let Some(subscription) = opened.subscription {
+                    connection.subscriptions.insert(id, subscription);
+                }
+            }
+        }
+    }
     let hub = DeliveryHub::default();
     let mut conns: Vec<Conn> = (0..members)
         .map(|_| {

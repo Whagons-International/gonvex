@@ -347,10 +347,29 @@ async fn fan_out_frames_equal_each_connections_own_frames() {
     };
     let mut shared = Vec::new();
     let mut alone = Vec::new();
-    for paths in sets {
+    // Set 0 also has a task detail window open, on one of 5 tasks: such
+    // connections differ only in collections most events skip, and still
+    // share outcomes (the shape's key leaves skipped subscriptions out).
+    let tasks = fixture.tenants[0].tasks.clone();
+    for (set, paths) in sets.iter().enumerate() {
         for member in 0..members {
-            shared.push(side(fixture.connect_paths(0, member, paths).await.unwrap()));
-            alone.push(side(fixture.connect_paths(0, member, paths).await.unwrap()));
+            for side_list in [&mut shared, &mut alone] {
+                let mut connection = fixture.connect_paths(0, member, paths).await.unwrap();
+                if set == 0 {
+                    let task = &tasks[(member % 5) * 3].id;
+                    for (path, argument) in gonvex_runtime::perf_fixture::WHAGONS_DETAIL_WINDOW {
+                        let id = format!("~detail {path}");
+                        let opened = fixture
+                            .open_replica_args(&connection.session, &id, path, json!({ argument: task }))
+                            .await
+                            .unwrap();
+                        if let Some(subscription) = opened.subscription {
+                            connection.subscriptions.insert(id, subscription);
+                        }
+                    }
+                }
+                side_list.push(side(connection));
+            }
         }
     }
     let events = events(&fixture).await;
