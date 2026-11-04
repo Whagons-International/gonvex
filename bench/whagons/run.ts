@@ -255,12 +255,17 @@ async function main() {
   const f=chooseTenant(i),email=`load-user-${i}@example.invalid`;
   // A session: client, presence watch, metadata watches and the task replica.
   // The reconnect wave replaces it mid-run.
-  let c:any,member='',tw:any,stopPresence=()=>{},stopTasks=()=>{},extras:any;
+  let c:any,member='',tw:any,stopPresence=()=>{},stopTasks=()=>{},extras:any,refreshTimer:any;
+  // Runtime access tokens live 15 min (control.rs session_result): refresh 2 min
+  // before expiry and re-authenticate the socket, as the SDK's session does.
+  // Without it every session drops 15 min after sign-in.
+  const scheduleRefresh=(grant:any)=>{clearTimeout(refreshTimer);if(!grant?.refreshToken)return;const at=Number(grant.expiresAt)||Date.now()+900000;
+   refreshTimer=setTimeout(async()=>{if(stopping)return;try{const g=await c.action(control.auth.refreshSession,{refreshToken:grant.refreshToken});await c.authenticate({project:projectId,token:g.accessToken,tenant:f.tenant});scheduleRefresh(g);}catch(e){error(e);}},Math.max(5000,at-Date.now()-120000));};
   let initial=true,presenceReadyAt=Infinity,actionAt=Infinity,subscribedAt=Infinity;
   const seen=new Map<string,number>(),seenTasks=new Map<string,number>(),firstSeen=new Map<string,number>();
   const connect=async(kind:string)=>{
    const session=await timed(kind,()=>login(email,f.tenant,userKind(i,target)));if(!session)return false;
-   c=session.c;member=session.grant.tenants.find((t:any)=>t.id===f.tenant)?.memberId;
+   c=session.c;member=session.grant.tenants.find((t:any)=>t.id===f.tenant)?.memberId;scheduleRefresh(session.grant);
    presenceReadyAt=Infinity;
    if(presenceV2&&c.presenceSupported?.()){stopPresence=c.subscribePresence(()=>{try{const snap=c.presenceSnapshot();if(!snap.ready)return;if(presenceReadyAt===Infinity)presenceReadyAt=Date.now();
     for(const [id,m] of snap.members as Map<string,any>){const ts=pending.get(id);if(ts&&ts>=presenceReadyAt&&m.state===presenceStates.get(id)&&seen.get(id)!==ts){seen.set(id,ts);sample('delivery',Date.now()-ts,ts);}}
@@ -278,7 +283,7 @@ async function main() {
    }catch(e){error(e);}});
    tw=w;return true;
   };
-  const disconnect=()=>{stopPresence();stopTasks();extras?.close();c?.close();};
+  const disconnect=()=>{clearTimeout(refreshTimer);stopPresence();stopTasks();extras?.close();c?.close();};
   if(!await connect('login')){ready();return;}
   if(stopping){disconnect();ready();return;}users.push({close:()=>c.close()});
   const admin=(f.adminMemberIds||[]).includes(member),approver=(f.approverMemberIds||[]).includes(member);
