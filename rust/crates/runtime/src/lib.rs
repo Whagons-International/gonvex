@@ -35,6 +35,7 @@ pub mod perf_fixture;
 pub mod presence;
 pub mod profiling;
 pub mod public_functions;
+pub(crate) mod canonical_row;
 pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
@@ -1877,8 +1878,19 @@ async fn websocket(
                             {
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
-                            let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
-                            let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm).await;
+                            // Delivery v4: a connection whose shape already has a
+                            // shared outcome for this event only appends it.
+                            let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
+                                runtime.fan_out(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
+                            } else { replica::fanout::FanOut::Miss { record: false } };
+                            let applied = match shared {
+                                replica::fanout::FanOut::Served(Ok(())) => Ok(Vec::new()),
+                                replica::fanout::FanOut::Served(Err(_)) => return,
+                                replica::fanout::FanOut::Miss { record } => {
+                                    let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
+                                    runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm, record).await
+                                }
+                            };
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
                             match applied {
                                 Ok(messages) if batcher.enabled() => {
@@ -1902,7 +1914,9 @@ async fn websocket(
                                         batcher.watermark(socket.batch_mut(), tenant_id, &replicas, revision);
                                         sent_replica_revision = sent_replica_revision.max(revision);
                                     }
-                                    if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
+                                    // A call result waiting for this watermark completes
+                                    // now, not at the next tick or idle deadline.
+                                    if (batcher.full(socket.batch()) || batcher.call_waiting()) && batcher.flush(&mut socket).await.is_err() { return; }
                                     if reset {
                                         replicas.clear();
                                         replica_opens.clear();
@@ -3764,7 +3778,8 @@ fn bootstrap_watermark_after_sent_snapshots(
         .then_some(ServerMessage::ReplicaWatermark { revision })
 }
 
-/// The revision a durable call result waits for before it settles.
+/// The revision a durable call result waits for before it settles (a
+/// reducer/action commit, or a found reducer receipt's cursor).
 fn committed_revision(response: &ServerMessage) -> Option<u64> {
     match response {
         ServerMessage::ReducerResult {
@@ -3773,6 +3788,19 @@ fn committed_revision(response: &ServerMessage) -> Option<u64> {
         | ServerMessage::ActionResult {
             committed_revision, ..
         } => *committed_revision,
+        ServerMessage::QueryResult { payload, .. }
+            if payload.get("path").and_then(serde_json::Value::as_str)
+                == Some(execution::REDUCER_RECEIPT_QUERY) =>
+        {
+            payload
+                .get("result")
+                .filter(|result| {
+                    result.get("found").and_then(serde_json::Value::as_bool) == Some(true)
+                })
+                .and_then(|result| result.get("cursor"))
+                .and_then(|cursor| cursor.get("revision"))
+                .and_then(serde_json::Value::as_u64)
+        }
         _ => None,
     }
 }
@@ -3801,28 +3829,7 @@ fn call_watermark_after_sent_replica_work(
     if !is_authenticated_tenant_call {
         return None;
     }
-    let committed_revision = match response {
-        ServerMessage::ReducerResult {
-            committed_revision, ..
-        }
-        | ServerMessage::ActionResult {
-            committed_revision, ..
-        } => *committed_revision,
-        ServerMessage::QueryResult { payload, .. }
-            if payload.get("path").and_then(serde_json::Value::as_str)
-                == Some(execution::REDUCER_RECEIPT_QUERY) =>
-        {
-            payload
-                .get("result")
-                .filter(|result| {
-                    result.get("found").and_then(serde_json::Value::as_bool) == Some(true)
-                })
-                .and_then(|result| result.get("cursor"))
-                .and_then(|cursor| cursor.get("revision"))
-                .and_then(serde_json::Value::as_u64)
-        }
-        _ => None,
-    }?;
+    let committed_revision = committed_revision(response)?;
     if lowest_sent_revision.is_some_and(|sent| sent < committed_revision) {
         return None;
     }
@@ -5008,8 +5015,8 @@ mod tests {
                         cursor: cursor.clone(),
                         result: (0..1000)
                             .map(|id| {
-                                std::sync::Arc::new(
-                                    serde_json::json!({"id":id,"body":"x".repeat(1000)}),
+                                gonvex_protocol::JsonRow::from_value(
+                                    &serde_json::json!({"id":id,"body":"x".repeat(1000)}),
                                 )
                             })
                             .collect(),

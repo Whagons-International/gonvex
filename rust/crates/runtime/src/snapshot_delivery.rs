@@ -375,7 +375,7 @@ mod tests {
                 revision: 1,
             },
             result: (0..n)
-                .map(|id| std::sync::Arc::new(json!({"_id":id,"body":"a".repeat(1000)})))
+                .map(|id| gonvex_protocol::JsonRow::from_value(&json!({"_id":id,"body":"a".repeat(1000)})))
                 .collect(),
             metadata: BTreeMap::from([(
                 "digest".into(),
@@ -601,7 +601,9 @@ mod tests {
         let mut input = snapshot("large", 8);
         if let ServerMessage::ReplicaSnapshot { result, .. } = &mut input {
             for row in result {
-                std::sync::Arc::make_mut(row)["body"] = json!("x".repeat(100_000));
+                let mut value = row.to_value();
+                value["body"] = json!("x".repeat(100_000));
+                *row = gonvex_protocol::JsonRow::from_value(&value);
             }
         }
         delivery.begin(input).unwrap();
@@ -693,7 +695,9 @@ mod tests {
         delivery.begin(snapshot("a-valid", 1)).unwrap();
         let mut oversized = snapshot("z-oversized", 1);
         if let ServerMessage::ReplicaSnapshot { result, .. } = &mut oversized {
-            std::sync::Arc::make_mut(&mut result[0])["body"] = json!("x".repeat(FRAME_LIMIT));
+            let mut value = result[0].to_value();
+            value["body"] = json!("x".repeat(FRAME_LIMIT));
+            result[0] = gonvex_protocol::JsonRow::from_value(&value);
         }
         delivery.begin(oversized).unwrap();
         let batch = delivery.pump();

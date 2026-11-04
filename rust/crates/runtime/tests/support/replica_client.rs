@@ -260,7 +260,7 @@ impl ClientModel {
                 window.key = key.clone();
                 window.rows = result
                     .iter()
-                    .map(|row| (key_of(row, key), Value::clone(row)))
+                    .map(|row| { let row = row.to_value(); (key_of(&row, key), row) })
                     .collect();
                 window.cursor = Some(cursor.clone());
                 window.truncated = metadata.get("truncated") == Some(&Value::Bool(true));

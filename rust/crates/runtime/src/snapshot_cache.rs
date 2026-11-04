@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use gonvex_protocol::JsonRow;
 use gonvex_store::TenantTransaction;
 use serde_json::Value;
 
@@ -82,42 +83,59 @@ impl CacheConfig {
     }
 }
 
-/// One cached row. Clones are reference-count increments.
+/// One cached row: JSON text, never a `Value` tree (delivery v4 raw rows).
+/// Clones are reference-count increments.
 #[derive(Clone, Debug)]
 pub struct CachedRow {
     pub key: Arc<str>,
-    /// The collection's projection: what a snapshot sends.
-    pub row: Arc<Value>,
+    /// The collection's projection as JSON text (SQLite's `json_object`
+    /// output, or the canonical text of a change-log image): what a
+    /// snapshot sends.
+    pub row: JsonRow,
     /// Projection plus the visibility/filter/order columns it lacks, when it
     /// lacks any.
-    pub eval: Option<Arc<Value>>,
+    eval: Option<JsonRow>,
     /// Hex SHA-256 of the projection's canonical JSON.
     pub hash: Arc<str>,
     /// Canonical JSON bytes of the projection (budget accounting).
     pub bytes: u32,
+    /// (order value, key value) of an ordered collection: snapshot order and
+    /// the window boundary.
+    sort: Option<Arc<(Value, Value)>>,
 }
 
 impl CachedRow {
-    pub(crate) fn eval(&self) -> &Value {
-        self.eval.as_deref().unwrap_or(&self.row)
+    /// A row of a SQL scan (the fallback path; only its key, row and hash
+    /// are used).
+    pub(crate) fn scanned(key: String, row: JsonRow, hash: String) -> Self {
+        Self {
+            key: key.into(),
+            row,
+            eval: None,
+            hash: hash.into(),
+            bytes: 0,
+            sort: None,
+        }
     }
 
-    /// A row from a full row image (SQL or change log).
+    /// The JSON text visibility and filters evaluate.
+    pub(crate) fn eval_text(&self) -> &str {
+        self.eval.as_ref().unwrap_or(&self.row).get()
+    }
+
+    /// `eval_text` parsed (interpreted visibility only).
+    pub(crate) fn eval_value(&self) -> Value {
+        serde_json::from_str(self.eval_text()).unwrap_or(Value::Null)
+    }
+
+    /// A row from a full row image (change log).
     pub(crate) fn from_image(
         image: &Value,
         definition: &ReplicaCollectionDefinition,
         extra: &[String],
     ) -> Result<Self, ReplicaError> {
+        let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
         let projection = replica::project_row(image, definition)?;
-        Self::from_projection(projection, image, definition, extra)
-    }
-
-    fn from_projection(
-        projection: Value,
-        image: &Value,
-        definition: &ReplicaCollectionDefinition,
-        extra: &[String],
-    ) -> Result<Self, ReplicaError> {
         let key = replica::row_key(&projection, &definition.key)?;
         let canonical = replica::stable_json(&projection);
         let eval = if extra.is_empty() {
@@ -131,14 +149,78 @@ impl CachedRow {
                     }
                 }
             }
-            Some(Arc::new(Value::Object(eval)))
+            Some(JsonRow::from_value(&Value::Object(eval)))
         };
+        let sort = (!definition.order_by.is_empty()).then(|| {
+            Arc::new((
+                image
+                    .get(&definition.order_by)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                image.get(&definition.key).cloned().unwrap_or(Value::Null),
+            ))
+        });
         Ok(Self {
             key: key.into(),
             hash: replica::hex_digest(canonical.as_bytes()).into(),
             bytes: canonical.len() as u32,
-            row: Arc::new(projection),
+            // The canonical text is valid JSON of the same projection.
+            row: JsonRow::from_json(canonical).map_err(invalid)?,
             eval,
+            sort,
+        })
+    }
+
+    /// A row of the cache's SQL read (`json_object` over the projection and
+    /// `extra`). Without extra columns the text is kept as it is and only
+    /// the key and order columns are decoded (`canonical_row`).
+    fn from_sql(
+        text: String,
+        definition: &ReplicaCollectionDefinition,
+        extra: &[String],
+        scratch: &mut String,
+    ) -> Result<Self, ReplicaError> {
+        let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
+        let checked = if extra.is_empty() {
+            crate::canonical_row::check(&text)
+        } else {
+            None
+        };
+        let Some(checked) = checked else {
+            let image: Value = serde_json::from_str(&text).map_err(invalid)?;
+            let mut row = Self::from_image(&image, definition, extra)?;
+            if extra.is_empty() {
+                // Same projection; keep SQLite's text like the fresh path.
+                row.row = JsonRow::from_json(text).map_err(invalid)?;
+            }
+            return Ok(row);
+        };
+        let member = |name: &str| crate::canonical_row::member_value(&text, &checked, name);
+        let key_value = member(&definition.key)
+            .ok_or_else(|| ReplicaError::MissingKey(definition.key.clone()))?;
+        let key = match &key_value {
+            Value::String(value) => value.clone(),
+            Value::Number(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            _ => return Err(ReplicaError::MissingKey(definition.key.clone())),
+        };
+        let sort = (!definition.order_by.is_empty()).then(|| {
+            Arc::new((
+                member(&definition.order_by).unwrap_or(Value::Null),
+                key_value,
+            ))
+        });
+        let canonical =
+            crate::canonical_row::canonical(&text, Some(&checked), scratch).map_err(invalid)?;
+        let (hash, bytes) = (replica::hex_digest(canonical.as_bytes()), canonical.len());
+        drop(canonical);
+        Ok(Self {
+            key: key.into(),
+            row: JsonRow::from_json(text).map_err(invalid)?,
+            eval: None,
+            hash: hash.into(),
+            bytes: bytes as u32,
+            sort,
         })
     }
 }
@@ -188,7 +270,7 @@ impl CacheEntry {
                         rows: self
                             .rows
                             .iter()
-                            .map(|row| Arc::new(scope.decode_owned(row.eval())))
+                            .map(|row| Arc::new(scope.decode_owned(row.eval_text())))
                             .collect(),
                     });
                 }
@@ -211,7 +293,7 @@ impl CacheEntry {
             .zip(sources)
             .map(|(row, source)| match source {
                 Some(index) => decoded.rows[*index].clone(),
-                None => Arc::new(decoded.scope.decode_owned(row.eval())),
+                None => Arc::new(decoded.scope.decode_owned(row.eval_text())),
             })
             .collect();
         *self.acl.write().unwrap_or_else(|error| error.into_inner()) = Some(DecodedAcl {
@@ -246,27 +328,29 @@ impl CacheEntry {
     }
 }
 
-/// Estimated heap of one row: serde_json objects are a BTreeMap of owned
-/// keys and values (node and allocator overhead included). Calibrated
-/// against the counting allocator in `benches/snapshot_cache.rs` (el-rey
-/// tasks: 8.2 KB per 1.8 KB JSON row, including the decoded ACL columns).
+/// Estimated heap of one row: its JSON texts, key, hash and order values,
+/// plus its decoded ACL columns (`ACL_ROW_BYTES`, allocated by the first
+/// compiled open). Calibrated against the counting allocator in
+/// `benches/snapshot_cache.rs`.
 fn row_heap_bytes(row: &CachedRow) -> usize {
-    fn heap(json: &Value) -> usize {
-        match json {
-            Value::String(text) => text.len(),
-            Value::Array(values) => values.len() * 32 + values.iter().map(heap).sum::<usize>(),
-            Value::Object(map) => map
-                .iter()
-                .map(|(key, item)| key.len() + 126 + heap(item))
-                .sum::<usize>(),
-            _ => 0,
-        }
-    }
-    let mut bytes = 16 + row.key.len() + 16 + 64 + 16 + 32 + heap(&row.row);
-    if let Some(eval) = &row.eval {
-        bytes += 48 + heap(eval);
-    }
-    bytes
+    const ACL_ROW_BYTES: usize = 320;
+    let sort = row.sort.as_ref().map_or(0, |sort| {
+        64 + [&sort.0, &sort.1]
+            .iter()
+            .map(|value| value.as_str().map_or(0, str::len))
+            .sum::<usize>()
+    });
+    let eval = row.eval.as_ref().map_or(0, |eval| 32 + eval.get().len());
+    std::mem::size_of::<CachedRow>()
+        + 32
+        + row.row.get().len()
+        + 32
+        + row.key.len()
+        + 32
+        + 64
+        + eval
+        + sort
+        + ACL_ROW_BYTES
 }
 
 type Key = (String, String, u64, String, String);
@@ -570,17 +654,14 @@ pub(crate) async fn build_entry(
         .await?;
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
+    let mut scratch = String::new();
     while let Some(batch) = stream.next_batch().await {
         let batch = batch?;
         for bytes in batch.rows() {
-            let image = serde_json::from_slice::<Value>(bytes)
-                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?;
-            let row = if extra.is_empty() {
-                // The image is the projection: move it, no second copy.
-                CachedRow::from_projection(image, &Value::Null, definition, &extra)?
-            } else {
-                CachedRow::from_image(&image, definition, &extra)?
-            };
+            let text = std::str::from_utf8(bytes)
+                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?
+                .to_owned();
+            let row = CachedRow::from_sql(text, definition, &extra, &mut scratch)?;
             if !seen.insert(row.key.clone()) {
                 return Err(ReplicaError::DuplicateKey(row.key.to_string()));
             }
@@ -643,7 +724,7 @@ pub(crate) fn view(
     }
     let ordered = !definition.order_by.is_empty();
     if ordered {
-        inserted.sort_by(|left, right| order(definition, left.eval(), right.eval()));
+        inserted.sort_by(|left, right| order(left, right, definition));
     }
     let source_rows = changes
         .iter()
@@ -674,7 +755,7 @@ pub(crate) fn view(
         // rows when unordered: the order of an unbounded set is free).
         let (row, index) = match (kept.peek(), added.peek()) {
             (Some((_, left)), Some(right)) => {
-                if ordered && order(definition, right.eval(), left.eval()).is_lt() {
+                if ordered && order(right, left, definition).is_lt() {
                     (added.next().unwrap(), None)
                 } else {
                     let (index, row) = kept.next().unwrap();
@@ -714,15 +795,9 @@ pub(crate) fn view(
         if !ordered {
             return Ok(None);
         }
-        window.boundary = last.map(|row| {
-            let eval = row.eval();
-            Box::new((
-                eval.get(&definition.order_by)
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                eval.get(&definition.key).cloned().unwrap_or(Value::Null),
-            ))
-        });
+        window.boundary = last
+            .and_then(|row| row.sort.as_deref())
+            .map(|sort| Box::new(sort.clone()));
     }
     let rolled = all.map(|all| {
         // Heap of the rolled entry, without walking every row again.
@@ -748,21 +823,17 @@ pub(crate) fn view(
 }
 
 fn order(
+    left: &CachedRow,
+    right: &CachedRow,
     definition: &ReplicaCollectionDefinition,
-    left: &Value,
-    right: &Value,
 ) -> std::cmp::Ordering {
-    let null = Value::Null;
-    let ordering = replica::sql_order(
-        left.get(&definition.order_by).unwrap_or(&null),
-        right.get(&definition.order_by).unwrap_or(&null),
-    )
-    .then_with(|| {
-        replica::sql_order(
-            left.get(&definition.key).unwrap_or(&null),
-            right.get(&definition.key).unwrap_or(&null),
-        )
-    });
+    let null = (Value::Null, Value::Null);
+    let (left, right) = (
+        left.sort.as_deref().unwrap_or(&null),
+        right.sort.as_deref().unwrap_or(&null),
+    );
+    let ordering =
+        replica::sql_order(&left.0, &right.0).then_with(|| replica::sql_order(&left.1, &right.1));
     if definition.order_direction == "asc" {
         ordering
     } else {

@@ -20,16 +20,14 @@ fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.to_owned())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn class_shared_decisions_equal_each_connections_own_decisions() {
-    let cache = tempfile::tempdir().unwrap();
-    let mut options = FixtureOptions::small();
-    options.cache_dir = Some(cache.path().to_path_buf());
-    let fixture = Fixture::build(options).await.unwrap();
+/// Both tests flip the process-wide sharing switch: run them one at a time.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Edits, spot/workspace moves, presence beats, an insert, a grant assigned
+/// and removed, a team gained and lost, and a delete, committed in order.
+async fn events(fixture: &Fixture) -> Vec<(String, FeedEvent)> {
     let tenant_members = fixture.tenants[0].members.clone();
     let members = tenant_members.len();
-    let mut shared = fixture.connect_all(0).await.unwrap();
-    let mut alone = fixture.connect_all(0).await.unwrap();
     let tasks = fixture.tenants[0].tasks.clone();
     let grant_member = tenant_members[fixture.members_of_kind(0, MemberKind::GrantOnly)[0]].clone();
     let spot_member = tenant_members[fixture.members_of_kind(0, MemberKind::TeamSpots)[0]].clone();
@@ -127,6 +125,21 @@ async fn class_shared_decisions_equal_each_connections_own_decisions() {
             fixture.commit(0, &statement, binds).await.unwrap(),
         ));
     }
+    events
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn class_shared_decisions_equal_each_connections_own_decisions() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = tempfile::tempdir().unwrap();
+    let mut options = FixtureOptions::small();
+    options.cache_dir = Some(cache.path().to_path_buf());
+    let fixture = Fixture::build(options).await.unwrap();
+    let tenant_members = fixture.tenants[0].members.clone();
+    let members = tenant_members.len();
+    let mut shared = fixture.connect_all(0).await.unwrap();
+    let mut alone = fixture.connect_all(0).await.unwrap();
+    let events = events(&fixture).await;
     let before = feed_share::shared_decisions();
     let mut frames = 0usize;
     for (name, event) in &events {
@@ -177,5 +190,187 @@ async fn class_shared_decisions_equal_each_connections_own_decisions() {
     assert!(
         reused > 0,
         "no decision was shared: the oracle exercised nothing"
+    );
+}
+
+/// Delivery v4 oracle: connections served by the per-tenant fan-out
+/// (`Runtime::deliver_feed_event`: the shared outcome of their shape, or the
+/// full path that records it) send exactly the batch frames each connection
+/// computes alone (class sharing and fan-out off, `apply_feed_event` +
+/// `ReplicaBatcher::push`), for several subscription sets per member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fan_out_frames_equal_each_connections_own_frames() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    use gonvex_runtime::delivery::{BatchConfig, DeliveryHub, ReplicaBatcher};
+    use gonvex_websocket::OutboundBatch;
+    let cache = tempfile::tempdir().unwrap();
+    let mut options = FixtureOptions::small();
+    options.cache_dir = Some(cache.path().to_path_buf());
+    let fixture = Fixture::build(options).await.unwrap();
+    let members = fixture.tenants[0].members.len();
+    let tenant_id = fixture.tenants[0].route.tenant_id.clone();
+    let sets: [&[&str]; 3] = [
+        &gonvex_runtime::perf_fixture::WHAGONS_SUBSCRIPTIONS,
+        &["tasks.recentWorkspaceTasks"],
+        &[
+            "presence.list",
+            "statuses.statuses",
+            "tags.tags",
+            "tasks.recentWorkspaceTasks",
+        ],
+    ];
+    struct Side {
+        connection: gonvex_runtime::perf_fixture::MemberConnection,
+        batcher: ReplicaBatcher,
+        batch: OutboundBatch,
+    }
+    let side = |connection| {
+        let mut batcher = ReplicaBatcher::with_config(BatchConfig::from_env());
+        batcher.set_enabled(true);
+        Side {
+            connection,
+            batcher,
+            batch: OutboundBatch::default(),
+        }
+    };
+    let mut shared = Vec::new();
+    let mut alone = Vec::new();
+    for paths in sets {
+        for member in 0..members {
+            shared.push(side(fixture.connect_paths(0, member, paths).await.unwrap()));
+            alone.push(side(fixture.connect_paths(0, member, paths).await.unwrap()));
+        }
+    }
+    let events = events(&fixture).await;
+    let hub_shared = DeliveryHub::default();
+    let hub_alone = DeliveryHub::default();
+    let (hits_before, _, data_before) = gonvex_runtime::replica::fanout_stats();
+    let mut frames = 0usize;
+    let mut data_frames = 0usize;
+    {
+        for (name, event) in &events {
+            let revision = match event {
+                FeedEvent::Transaction { revision, .. } => *revision,
+                FeedEvent::Reset { .. } => 0,
+            };
+            for (index, (a, b)) in shared.iter_mut().zip(alone.iter_mut()).enumerate() {
+                // Half the connections use native row encoding.
+                let native = index % 2 == 1;
+                feed_share::set_sharing(Some(true));
+                let rest = fixture
+                    .runtime
+                    .deliver_feed_event(
+                        &a.connection.session.clone(),
+                        &mut a.connection.subscriptions,
+                        event.clone(),
+                        &mut a.batcher,
+                        &mut a.batch,
+                        &hub_shared,
+                        native,
+                    )
+                    .await
+                    .unwrap();
+                let rest_a: Vec<Value> = rest
+                    .iter()
+                    .map(|m| serde_json::to_value(m).unwrap())
+                    .collect();
+                a.batcher.watermark(
+                    &mut a.batch,
+                    &tenant_id,
+                    &a.connection.subscriptions,
+                    revision,
+                );
+                feed_share::set_sharing(Some(false));
+                let messages = fixture
+                    .runtime
+                    .apply_feed_event(
+                        &b.connection.session.clone(),
+                        &mut b.connection.subscriptions,
+                        event.clone(),
+                    )
+                    .await
+                    .unwrap();
+                let mut rest_b = Vec::new();
+                for message in messages {
+                    if let Some(rest) = b
+                        .batcher
+                        .push(
+                            &mut b.batch,
+                            &hub_alone,
+                            &tenant_id,
+                            native,
+                            &b.connection.subscriptions,
+                            message,
+                        )
+                        .unwrap()
+                    {
+                        rest_b.push(serde_json::to_value(&rest).unwrap());
+                    }
+                }
+                assert_eq!(
+                    rest_a, rest_b,
+                    "unbatched frames, connection {index}, event {name}"
+                );
+                b.batcher.watermark(
+                    &mut b.batch,
+                    &tenant_id,
+                    &b.connection.subscriptions,
+                    revision,
+                );
+                let data = b.batcher.has_items();
+                assert_eq!(
+                    a.batcher.has_items(),
+                    data,
+                    "connection {index}, event {name}"
+                );
+                let with = a
+                    .batcher
+                    .take_frame(&mut a.batch, None)
+                    .map(|frame| frame.bytes.to_vec());
+                let without = b
+                    .batcher
+                    .take_frame(&mut b.batch, None)
+                    .map(|frame| frame.bytes.to_vec());
+                assert_eq!(
+                    with.as_deref().map(String::from_utf8_lossy),
+                    without.as_deref().map(String::from_utf8_lossy),
+                    "connection {index}, event {name}, native {native}"
+                );
+                for (x, y) in a
+                    .connection
+                    .subscriptions
+                    .values()
+                    .zip(b.connection.subscriptions.values())
+                {
+                    assert_eq!(
+                        x.digest(),
+                        y.digest(),
+                        "digest, connection {index}, event {name}"
+                    );
+                    assert_eq!(
+                        x.cursor, y.cursor,
+                        "cursor, connection {index}, event {name}"
+                    );
+                    assert_eq!(
+                        x.row_count(),
+                        y.row_count(),
+                        "rows, connection {index}, event {name}"
+                    );
+                }
+                frames += 1;
+                data_frames += usize::from(data);
+            }
+        }
+    }
+    feed_share::set_sharing(None);
+    let (hits_after, recorded, data_after) = gonvex_runtime::replica::fanout_stats();
+    let hits = hits_after - hits_before;
+    let data_hits = data_after - data_before;
+    eprintln!("{} events, {frames} frames ({data_frames} with data), {hits} fan-out hits ({data_hits} with decided rows), {recorded} outcomes recorded", events.len());
+    assert!(data_hits > 0, "no shared outcome with rows was used");
+    assert!(data_frames > 0);
+    assert!(
+        hits > 0,
+        "no connection was served by the fan-out: the oracle exercised nothing"
     );
 }

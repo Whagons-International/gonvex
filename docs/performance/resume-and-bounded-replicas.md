@@ -1,9 +1,13 @@
 # Resume without full-set queries, shared snapshot cache, bounded task replicas
 
-Branch `perf/resume-lazy` (from `perf/delivery-v3` adb6bcd9). Code:
+Branch `perf/resume-lazy` (from `perf/delivery-v3` adb6bcd9, with
+`perf/delivery-v4` d7254de0 merged in). Code:
 `rust/crates/runtime/src/snapshot_cache.rs` (new module), the open path in
 `replica.rs` (`open_replica_with`, `collection_rows`, `cached_view`,
-`build_cache_entry`), `visibility_index::exactly_at`. Tests:
+`build_cache_entry`), `visibility_index::{exactly_at, usable_revision}`,
+`visibility_class::{ClassScope::decode_owned, AclRow::refresh, AclRow::stale}`,
+and `gonvex_protocol::JsonRow`, which now holds `Arc<RawValue>` instead of
+`Box<RawValue>`. Clones share the text; the wire format is unchanged. Tests:
 `tests/snapshot_cache_oracle.rs`, unit test in `snapshot_cache.rs`, the
 existing `tests/replica_state.rs` (its SQL oracle now uses
 `open_replica_fresh`). Bench: `benches/snapshot_cache.rs`.
@@ -17,9 +21,10 @@ returning 10,501 rows (1.1–4.4 s). That is `tasks.recentWorkspaceTasks`
 Yes: a resume with a valid cursor ran the full visibility query. In
 `open_replica_negotiated`, the `xor1`/`sum128` branch (`DigestRequest::Aggregate`)
 read the change log since the cursor, and then streamed the *whole* visible
-collection from SQL (`scan_window`). It parsed every row into
-`serde_json::Value`, re-encoded it canonically and SHA-256-hashed it, only to
-compute the current aggregate that verifies the client's digest. The
+collection from SQL (`scan_window`). It canonicalized and SHA-256-hashed
+every row (before delivery v4 it also parsed each one into
+`serde_json::Value`), only to compute the current aggregate that verifies the
+client's digest. The
 `WholeSet` and keys+hashes (`Reconcile`) branches scan too. The web client
 resumes on every reload and every reconnect (see (b)), so each reload of each
 member paid a full snapshot build of every collection on the server, while
@@ -37,8 +42,11 @@ The base is one of two things:
   resume). The entry is keyed by (tenant database, project, module
   generation, collection path, arguments). It holds every row the
   collection's own filters admit at revision `R`, in snapshot order, with
-  each row's projection (`Arc<Value>`, sent as is), canonical hash and byte
-  size. It applies no visibility.
+  each row's projection as SQLite's raw JSON text (delivery v4's `JsonRow`,
+  sent as is, shared by every open), canonical hash, byte size, its
+  (order value, key) and, once the first compiled open needs them, its
+  decoded ACL columns. Building it parses only the key and order columns
+  (`canonical_row`), like delivery v4's scan. It applies no visibility.
 
 An open at clock `C`:
 
@@ -116,129 +124,144 @@ without holding one, so this cannot deadlock.
 
 Compared with the brief's sketch, two choices differ:
 
-- **No pre-encoded, compressed shared pages yet.** Snapshot page frames carry
-  the subscription id, snapshot id and cursor in every page, so page bytes
-  differ per connection. Sharing compressed pages needs a protocol change
-  (content-addressed page bodies). Rows are shared (`Arc<Value>`, nothing is
-  re-decoded or re-hashed), but page encoding is still per connection. When
-  perf/delivery-v4 (raw JSON rows) lands, entries should store canonical row
-  text instead of `Value` (~1.8 KB instead of the measured heap below), and
-  pages can be cut from it.
+- **Shared rows, per-connection page frames.** Every page frame carries the
+  subscription id, snapshot id and cursor, so page bytes differ per
+  connection. Sharing compressed pages would need a protocol change
+  (content-addressed page bodies). Rows are shared raw text (`JsonRow` is
+  `Arc<RawValue>`): nothing is re-read, re-decoded or re-hashed, but page
+  encoding is still per connection.
+- **The collect-before-send step is cheap on a cache hit**, without a
+  precomputed digest. The first frame needs the member's window digest. A
+  per-class digest cannot be precomputed: members of one class differ by
+  member atoms, so windows and digests are per member. On a hit, the window
+  and its digest come from the in-memory filter of the cached rows (~5 ms for
+  10,500 rows). "Collecting" the rows is pushing `Arc` clones, so the start
+  frame goes out without waiting on SQL. Only a miss still streams SQL first,
+  once per collection and tenant.
 - **No per-class invalidation.** The entry holds no visibility decision, so
   there is nothing to invalidate.
 
 ## Results
 
 `taskset -c 3 cargo bench -p gonvex-runtime --features perf-fixture --bench snapshot_cache`
-(one CPU, one tokio worker). Fixture: one el-rey-sized tenant, 10,500 tasks
-with the real Whagons 52-column schema and ~400-byte descriptions, 78
-members, 10 collections each. "Before" is the unchanged SQL path
-(`open_replica_fresh`; the storm switches the cache off), measured in the same
-process. Medians of 5 iterations. Allocations are process-wide. The machine
-is shared with other agents' builds, so wall times vary by about ±30 % between
-runs; allocation counts are stable. Raw JSON:
-`/home/gabriel/work/gonvex-perf/resume-lazy-out/cache5.jsonl`.
+(one CPU, one tokio worker), on the merged base (delivery v4 underneath
+*both* sides). Fixture: one el-rey-sized tenant, 10,500 tasks with the real
+Whagons 52-column schema and ~400-byte descriptions, 78 members, 10
+collections each. "Before" is delivery v4's SQL path (`open_replica_fresh`;
+the storm switches the cache off), measured in the same process. Medians of 5
+iterations. Allocations are process-wide. The machine is shared with other
+agents' builds, so wall times vary by about ±30 % between runs; allocation
+counts are stable. Raw JSON:
+`/home/gabriel/work/gonvex-perf/resume-lazy-out/cache-merged.jsonl`.
 
 ### Resume (a): `tasks.recentWorkspaceTasks`, client cursor + `xor1` digest
 
 | member (rows) | changes since cursor | before: time / allocs | after: time / allocs |
 | --- | --- | --- | --- |
-| Admin (10,500) | 0 | 288 ms / 1,349,617 | 10 ms / 8,936 |
-| Admin | 10 | 250 ms / 1,354,656 | 16 ms / 20,195 |
-| Admin | 200 | 299 ms / 1,436,972 | 47 ms / 124,324 |
-| TeamAllSpots (2,004) | 0 | 60 ms / 266,653 | 6.4 ms / 8,982 |
-| TeamAllSpots | 10 | 63 ms / 269,967 | 16 ms / 18,688 |
-| TeamAllSpots | 200 | 69 ms / 320,405 | 52 ms / 90,085 |
-| GrantOnly (45) | 0 | 19 ms / 15,944 | 4.7 ms / 8,237 |
-| GrantOnly | 10 | 23 ms / 18,812 | 17 ms / 17,340 |
-| GrantOnly | 200 | 38 ms / 60,952 | 27 ms / 80,993 |
+| Admin (10,500) | 0 | 156 ms / 422,453 | 8.0 ms / 8,940 |
+| Admin | 10 | 159 ms / 426,779 | 13.8 ms / 18,898 |
+| Admin | 200 | 186 ms / 496,228 | 26.5 ms / 104,690 |
+| TeamAllSpots (2,004) | 0 | 47.7 ms / 90,066 | 6.6 ms / 8,992 |
+| TeamAllSpots | 10 | 56.0 ms / 93,243 | 11.6 ms / 17,924 |
+| TeamAllSpots | 200 | 57.2 ms / 141,210 | 41.3 ms / 81,618 |
+| GrantOnly (45) | 0 | 15.2 ms / 11,877 | 4.1 ms / 8,233 |
+| GrantOnly | 10 | 18.1 ms / 14,742 | 9.6 ms / 16,715 |
+| GrantOnly | 200 | 45.2 ms / 56,717 | 19.0 ms / 74,892 |
 
 Rows read from SQL per resume: before, every row the member sees (10,500 /
 2,004 / 45) plus the log since the cursor; after, only the log since the
 cursor (0 / 10 / 200 task rows plus dependency-table rows). No `needHashes`
 on either side. With changes, the remaining cost is parsing the log's full
-row images (52 columns each).
+row images (52 columns each, as `Value`).
 
-On the 9k replica_state fixture (`--bench replica_state`, TeamAllSpots,
-whose base is adb6bcd9): 145 / 200 / 216 ms and 2.51M / 3.55M / 3.61M
-allocations at 0 / 10 / 200 changes before. The first after-run, before the
-change-reuse and decoded-ACL fixes, gave 101 / 165 / 202 ms and 2.10M /
-3.15M / 3.29M. That bench also counts its client model and principal
-resolution; the el-rey bench above isolates the open.
+Before the merge (delivery v3 rows as `Value`) the same bench gave, for Admin
+at 0 changes, 288 ms / 1.35M allocations before and 10 ms / 8,936 after
+(`cache5.jsonl`).
+
+The 9k `replica_state` bench (TeamAllSpots, 0 / 10 / 200 changes) moves less:
+128 / 185 / 195 ms (cache off, merged base) to 88 / 143 / 162 ms (cache on),
+with ~2.1–3.2M allocations on both sides. Its timed block also builds the
+client model's request, and `ClientModel::open_request` → `window.digest()`
+re-hashes every row the model holds; that client work dominates the
+measurement. The el-rey bench above times only the server open.
 
 ### Cold open (no client copy), and cache costs
 
-| member | fresh SQL | cache miss (build + view) | cache hit | hit + 1k-change delta | fresh after 1k changes |
+| member | fresh SQL (delivery v4) | cache miss (build + view) | cache hit | hit + 1k-change delta | fresh after 1k changes |
 | --- | --- | --- | --- | --- | --- |
-| Admin: time | 252 ms | 291 ms | 9.7 ms | 152 ms | 396 ms |
-| Admin: allocations | 1,354,342 | 1,414,604 | 13,651 | 328,738 | 1,354,342 |
-| Admin: peak heap | 85.8 MB | 96.2 MB | 1.4 MB | 27.6 MB | 85.8 MB |
-| TeamAllSpots: time / peak | 73 ms / 17.0 MB | 281 ms / 95.6 MB | 8.4 ms / 0.9 MB | 112 ms / 26.8 MB | 86 ms / 17.0 MB |
-| GrantOnly: time / peak | 22 ms / 0.6 MB | 285 ms / 94.9 MB | 4.9 ms / 0.3 MB | 96 ms / 26.7 MB | 34 ms / 0.6 MB |
+| Admin: time | 163 ms | 199 ms | 5.0 ms | 85.5 ms | 192 ms |
+| Admin: allocations | 427,180 | 773,139 | 13,643 | 298,399 | 427,164 |
+| Admin: peak heap | 20.8 MB | 33.6 MB | 1.8 MB | 22.3 MB | 20.8 MB |
+| TeamAllSpots: time / peak | 48 ms / 4.6 MB | 200 ms / 32.6 MB | 6.5 ms / 0.9 MB | 82 ms / 21.2 MB | 72 ms / 4.7 MB |
+| GrantOnly: time / peak | 15.5 ms / 0.4 MB | 199 ms / 31.9 MB | 3.1 ms / 0.3 MB | 66.5 ms / 21.0 MB | 29 ms / 0.4 MB |
 
-- A miss reads the whole table once for everybody, so it costs a narrow
-  member more than its own predicate-filtered scan. It happens once per
-  collection per tenant (single-flight), not per open.
-- The "+1k changes" open replays 1,000 log rows (one revision) and rolls the
-  entry forward. The opens after it are plain hits.
+- A miss reads the whole table once for everybody (and decodes the ACL
+  columns for the compiled program), so it costs a narrow member more than
+  its own predicate-filtered scan. It happens once per collection per tenant
+  (single-flight), not per open.
+- The "+1k changes" open replays 1,000 log rows (one revision, parsed as
+  `Value`) and rolls the entry forward. The opens after it are plain hits.
 - Profiler stages during the resume runs: the read transaction and
-  principal resolution take ~2 ms per open (`snapshot.visibility` p50
-  1.96 ms); the in-memory filter of 10.5k cached rows takes ~3 ms.
+  principal resolution take ~1.9 ms per open (`snapshot.visibility` p50
+  1.79 ms); the in-memory filter of 10.5k cached rows over the decoded ACL
+  columns takes ~3 ms.
 
 ### Reconnect storm: 1,500 opens across 48 visibility classes in 10 s
 
 150 connections (78 members, cycled) start uniformly over 10 s. Each opens all
 10 collections through the socket path (`enqueue_replica_open` on the offload
 pool, install, page encoding). The writer adds 4 task updates/s. One CPU
-(`taskset`).
+(`taskset`). Merged base.
 
 | | cold: before | cold: after | resume (+200 task writes since cursor): before | resume: after |
 | --- | --- | --- | --- | --- |
-| time to complete | 20.3 s | 10.8 s | 21.0 s | 13.0 s |
-| process CPU | 20.1 s | 10.6 s | 20.7 s | 12.7 s |
-| open latency p50 / p99 | 5.3 s / 10.4 s | 0.77 s / 1.85 s | 4.8 s / 10.9 s | 0.99 s / 3.9 s |
-| peak RSS (over start) | 479 MB (+21 MB) | 438 MB (+195 MB) | 377 MB (+142 MB) | 425 MB (+62 MB) |
-| network-thread polls > 5 ms (longest poll) | 1 (7 ms) | 0 (< 1 ms) | 0 (< 1 ms) | 0 (1 ms) |
+| time to complete (arrivals end at 10 s) | 15.5 s | 10.0 s | 17.5 s | 10.3 s |
+| process CPU | 15.2 s | 8.0 s | 17.2 s | 9.5 s |
+| open latency p50 / p99 | 2.9 s / 5.5 s | 7 ms / 251 ms | 3.7 s / 7.3 s | 54 ms / 376 ms |
+| peak RSS (over start) | 400 MB (+36 MB) | 367 MB (+115 MB) | 396 MB (+135 MB) | 422 MB (+116 MB) |
+| network-thread polls > 5 ms (longest poll) | 0 (2 ms) | 0 (3 ms) | 0 (2 ms) | 0 (1 ms) |
 | SQL full-collection reads | 1,500 per-member scans | 10 entry builds | 1,500 per-member scans | 10 entry builds |
-| cache hits / roll-forwards / fallbacks | — | 1,490 / 1 / 0 | — | 1,490 / 1 / 0 |
-| wire bytes | 630 MB | 630 MB | 12.3 MB | 11.7 MB |
+| cache hits / roll-forwards / fallbacks | — | 1,490 / 1 / 1 | — | 1,490 / 1 / 3 |
+| wire bytes | 631 MB | 631 MB | 12.1 MB | 11.5 MB |
 
-- After the change, the cold storm keeps up with arrivals. Most of its
-  remaining CPU is encoding 630 MB of snapshot pages per connection. Shared
-  pre-encoded pages would remove that, but need a protocol change.
+- After the change, both storms keep up with arrivals. The cold storm's
+  remaining CPU is mostly encoding 631 MB of snapshot pages per connection.
 - The resume storm's remaining CPU is the 200-change log replay that every
-  resume parses (the log rows are full 52-column images), plus principal
-  resolution.
-- Peak RSS counts the cache (107 MB for all 10 collections of the tenant)
-  against the before run's transient per-open copies.
-- The first cold "before" run of the same storm (earlier binary) gave
-  21.8 s / 21.5 s CPU.
+  resume parses, plus principal resolution.
+- The fallbacks are opens whose parent/derived-set index was still moving
+  after 3 re-reads during the writes. They were served by the SQL scan.
+- Peak RSS counts the cache entries (43 MB for all 10 collections) against
+  the before runs' transient per-open copies.
+- On the pre-merge base (rows as `Value`): cold 20.3 s → 10.8 s,
+  p50 5.3 s → 0.77 s; resume 21.0 s → 13.0 s (`cache5.jsonl`).
 
 ### Cache memory, eviction
 
-Measured live heap of one entry (counting allocator, el-rey tenant):
+Measured live heap of one entry, including its decoded ACL columns (counting
+allocator, el-rey tenant, merged base):
 
 | collection | rows | entry heap | per row |
 | --- | --- | --- | --- |
-| tasks.recentWorkspaceTasks | 10,500 | 94.8 MB | 9.0 KB |
-| taskResources.taskUsers | 8,809 | 20.6 MB | 2.3 KB |
-| taskResources.taskTags | 6,410 | 9.6 MB | 1.5 KB |
-| members.listMembers | 78 | 0.39 MB | 5.0 KB |
-| the other 6 | ≤ 78 each | 0.9 MB together | |
+| tasks.recentWorkspaceTasks | 10,500 | 31.8 MB | 3.0 KB |
+| taskResources.taskUsers | 8,809 | 8.3 MB | 0.95 KB |
+| taskResources.taskTags | 6,410 | 5.7 MB | 0.88 KB |
+| members.listMembers | 78 | 0.11 MB | 1.5 KB |
+| the other 6 | ≤ 78 each | 0.36 MB together | |
 
-- These figures include the decoded ACL columns. The estimate the budget uses
-  (`row_heap_bytes`, calibrated here) says 86.7 MB for tasks and 107 MB for
-  all 10 collections.
+- All 10 collections of the tenant take 43 MB (estimate). Before the merge,
+  with rows held as `Value`, tasks alone took 94.8 MB (9.0 KB/row).
+- The tasks row text is ~1.8 KB; the rest is the hash, key, order values and
+  decoded ACL columns.
+- The estimate the budget uses (`row_heap_bytes`) is within about ±15 % of the
+  measurement (27.1 MB estimated vs 31.8 MB measured for tasks).
 - The entry is per collection, not per class: 48 classes share it, so the
   per-class cost is 0.
-- The cost is the `serde_json::Value` representation: 9 KB of heap for a
-  1.8 KB JSON row. Storing canonical row text (delivery-v4) would make it
-  ~1.8–2 KB per row, about 20 MB for el-rey tasks.
 - With the default 256 MiB budget, entries are evicted least recently used.
   An entry larger than the budget is used by the open that built it and is
   not kept. Unit test: `snapshot_cache::tests::evicts_least_recently_used_entries_beyond_the_budget`.
-- At 2 GB for 5,000 users, the budget must be set together with the
-  per-connection budget. A smaller budget means more SQL builds. It never
+- At 2 GB for 5,000 users the budget has to be set together with the
+  per-connection budgets: the largest tenant needs ~45 MB and seven tenants
+  roughly their size share. A smaller budget means more SQL builds. It never
   changes results.
 
 ### Correctness
@@ -330,15 +353,15 @@ was read). They decide option 2.
 ### Options
 
 Wire and client storage scale with rows × bytes per row. The server
-snapshot-cache entry scales with rows × heap per row: 8.2 KB per row as
-`serde_json::Value` today, about 1.8 KB per row as canonical text once
-delivery-v4's raw rows land. A cached open or resume scales with the rows it
-filters (≈ 0.5 µs per row in memory, plus the log rows it replays).
+snapshot-cache entry scales with rows × heap per row: 3.0 KB per tasks row
+with delivery v4's raw text (it was 9.0 KB as `Value`). A cached open or
+resume scales with the rows it filters (≈ 0.3–0.5 µs per row in memory, plus
+the log rows it replays).
 Admin = sees all 10,500 tasks.
 
 | option | contract change | bytes/row (lab / fixture) | Admin snapshot (lab / fixture) | server cache entry | runtime risk |
 | --- | --- | --- | --- | --- | --- |
-| 0. today | — | 1,335 / 1,787 | 14.0 / 18.8 MB | 86 MB (Value) | resume scans fixed by this branch |
+| 0. today | — | 1,335 / 1,787 | 14.0 / 18.8 MB | 31.8 MB | resume scans fixed by this branch |
 | 1. omit null-valued columns on the wire (absent = null; hashes still over the full canonical projection, the SDK re-adds nulls before hashing) | protocol + SDK, no app change | 536 / 1,154 (−60 % / −35 %) | 5.6 / 12.1 MB | unchanged (or −45 % if stored without nulls) | low: one encode/decode rule |
 | 2. lazy heavy columns: drop `description`, `audienceRules` from the replica; a per-task live query loads them when a task opens | app (Whagons UI + one query) | 1,299 / 1,323 (−3 % / −26 %) | 13.6 / 13.9 MB | −3 % / −26 % | none; worth it only if real descriptions are large |
 | 3. recent window: `maxRows` N (e.g. 2,000) by `id desc` plus a live query for older tasks | app | unchanged | 2,000 rows: 2.7 / 3.6 MB (−81 %) | unchanged (entry holds all rows) | **high today**: a truncated window reconciles whenever a row enters or leaves it; with `id desc` every task insert moves the boundary, so every member with a truncated window gets `needHashes` and uploads ~200 KB of keys and hashes per insert |

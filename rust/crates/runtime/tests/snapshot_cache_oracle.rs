@@ -57,9 +57,10 @@ fn opened(result: gonvex_runtime::replica::ReplicaOpenResult) -> Opened {
                 ..
             } => {
                 for row in result {
+                    let row = row.to_value();
                     let id = key_of(&row, &key);
                     opened.keys.push(id.clone());
-                    opened.rows.insert(id, Value::clone(&row));
+                    opened.rows.insert(id, row);
                 }
                 opened.cursor = serde_json::to_value(cursor).unwrap();
                 opened.metadata = metadata;

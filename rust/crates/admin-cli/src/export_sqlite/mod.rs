@@ -49,6 +49,7 @@ fn never_copied(table: &str) -> bool {
             | "_gonvex_sync_changes"
             | "_gonvex_sync_transactions"
             | "_gonvex_sync_clock"
+            | "gonvex_runtime_manifests"
     ) || table.starts_with("_gonvex_reference_")
 }
 
@@ -78,6 +79,183 @@ const FRAMEWORK_TRIGGERS: &str = r#"SELECT name, sql FROM sqlite_schema
     OR name LIKE '\_gonvex\_reference\_%' ESCAPE '\'
     OR name LIKE 'gonvex\_queue\_control\_plane\_membership\_%' ESCAPE '\')
   ORDER BY name"#;
+
+/// Application triggers (everything but the framework triggers above).
+const APPLICATION_TRIGGERS: &str = r#"SELECT tbl_name, sql FROM sqlite_schema
+  WHERE type='trigger' AND sql IS NOT NULL
+    AND name NOT LIKE '\_gonvex\_sync\_%' ESCAPE '\'
+    AND name NOT LIKE '\_gonvex\_reference\_%' ESCAPE '\'
+    AND name NOT LIKE 'gonvex\_queue\_control\_plane\_membership\_%' ESCAPE '\'
+  ORDER BY name"#;
+
+/// Tokens of a trigger body: upper-cased bare words and quoted identifiers
+/// (unquoted, case kept). String literals and comments are skipped.
+fn sql_tokens(sql: &str) -> Vec<(bool, String)> {
+    let chars = sql.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\'' && chars.get(i + 1) == Some(&'\'') {
+                    i += 2;
+                } else if chars[i] == '\'' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if c == '-' && chars.get(i + 1) == Some(&'-') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+        } else if c == '"' || c == '`' || c == '[' {
+            let close = if c == '[' { ']' } else { c };
+            let mut ident = String::new();
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == close && chars.get(i + 1) == Some(&close) && close != ']' {
+                    ident.push(close);
+                    i += 2;
+                } else if chars[i] == close {
+                    i += 1;
+                    break;
+                } else {
+                    ident.push(chars[i]);
+                    i += 1;
+                }
+            }
+            tokens.push((true, ident));
+        } else if c.is_alphanumeric() || c == '_' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+            {
+                i += 1;
+            }
+            tokens.push((false, chars[start..i].iter().collect::<String>()));
+        } else {
+            i += 1;
+        }
+    }
+    tokens
+}
+
+/// Tables a trigger body writes: `INSERT [OR x] INTO t`, `REPLACE INTO t`,
+/// `UPDATE [OR x] t`, `DELETE FROM t`. Only the body after `BEGIN` counts, so
+/// the trigger's own `AFTER UPDATE OF … ON t` header is not a write.
+fn trigger_writes(sql: &str) -> Vec<String> {
+    let tokens = sql_tokens(sql);
+    let is = |token: Option<&(bool, String)>, word: &str| matches!(token, Some((false, w)) if w.eq_ignore_ascii_case(word));
+    let Some(begin) = tokens.iter().position(|t| is(Some(t), "BEGIN")) else {
+        return Vec::new();
+    };
+    let mut writes = Vec::new();
+    let mut i = begin + 1;
+    while i < tokens.len() {
+        let mut target = None;
+        if is(tokens.get(i), "INSERT") || is(tokens.get(i), "REPLACE") {
+            let mut j = i + 1;
+            if is(tokens.get(j), "OR") {
+                j += 2;
+            }
+            if is(tokens.get(j), "INTO") {
+                target = Some(j + 1);
+            }
+        } else if is(tokens.get(i), "UPDATE") {
+            let mut j = i + 1;
+            if is(tokens.get(j), "OR") {
+                j += 2;
+            }
+            // `ON CONFLICT … DO UPDATE SET` names no table.
+            if !is(tokens.get(j), "SET") {
+                target = Some(j);
+            }
+        } else if is(tokens.get(i), "DELETE") && is(tokens.get(i + 1), "FROM") {
+            target = Some(i + 2);
+        }
+        // SQLite forbids schema-qualified names inside trigger bodies.
+        if let Some((_, name)) = target.and_then(|j| tokens.get(j)) {
+            if !writes.contains(name) {
+                writes.push(name.clone());
+            }
+        }
+        i += 1;
+    }
+    writes
+}
+
+/// Stable order in which every table that application triggers write into is
+/// copied after the tables whose triggers write it. `copy_rows` deletes before
+/// inserting, so such a table ends with exactly its source rows. Tables in a
+/// trigger cycle keep their original relative order.
+fn trigger_copy_order(
+    names: &[String],
+    triggers: &[(String, String)],
+) -> (Vec<usize>, Vec<String>) {
+    let index = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect::<BTreeMap<_, _>>();
+    // after[b] = tables whose triggers write b (b must follow them).
+    let mut after = vec![BTreeSet::new(); names.len()];
+    for (table, sql) in triggers {
+        let Some(&writer) = index.get(table.as_str()) else {
+            continue;
+        };
+        for written in trigger_writes(sql) {
+            if let Some(&target) = index.get(written.as_str()) {
+                if target != writer {
+                    after[target].insert(writer);
+                }
+            }
+        }
+    }
+    let mut placed = vec![false; names.len()];
+    let mut order = Vec::with_capacity(names.len());
+    loop {
+        let next = (0..names.len()).find(|&i| !placed[i] && after[i].iter().all(|&w| placed[w]));
+        match next {
+            Some(i) => {
+                placed[i] = true;
+                order.push(i);
+            }
+            None => match (0..names.len()).find(|&i| !placed[i]) {
+                // A cycle: place the earliest remaining table as-is.
+                Some(i) => {
+                    placed[i] = true;
+                    order.push(i);
+                }
+                None => break,
+            },
+        }
+    }
+    let adjustments = (0..names.len())
+        .filter(|&i| !after[i].is_empty())
+        .map(|i| {
+            format!(
+                "{} <- [{}]",
+                names[i],
+                after[i]
+                    .iter()
+                    .map(|&w| names[w].as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
+    (order, adjustments)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MigrationDirs {
@@ -109,6 +287,12 @@ pub struct ExportOptions {
     pub sample_rows: usize,
     pub source_url_maps: Vec<(String, String)>,
     pub report_file: Option<PathBuf>,
+    /// Plan every database against a throwaway SQLite schema and report all
+    /// mismatches at once; copies nothing and leaves `--data-dir` untouched.
+    pub preflight: bool,
+    /// Keep database files a previous run copied and verified (they carry a
+    /// `.export-ok` marker); export only the rest.
+    pub resume: bool,
 }
 
 pub fn usage() -> &'static str {
@@ -116,7 +300,8 @@ pub fn usage() -> &'static str {
       --migrations DIR | --migrations PROJECT_ID=DIR ...
       [--project ID ...] [--tenant ID ...] [--force] [--no-control-plane]
       [--allow-drop-columns] [--allow-drop-tables] [--keep-epoch]
-      [--sample-rows N] [--source-url-map FROM=TO ...] [--report FILE]"
+      [--sample-rows N] [--source-url-map FROM=TO ...] [--report FILE]
+      [--preflight] [--resume]"
 }
 
 pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
@@ -134,6 +319,8 @@ pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
         sample_rows: DEFAULT_SAMPLE_ROWS,
         source_url_maps: Vec::new(),
         report_file: None,
+        preflight: false,
+        resume: false,
     };
     let mut index = 0;
     while index < args.len() {
@@ -150,6 +337,8 @@ pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
             "--allow-drop-columns" => options.allow_drop_columns = true,
             "--allow-drop-tables" => options.allow_drop_tables = true,
             "--keep-epoch" => options.keep_epoch = true,
+            "--preflight" => options.preflight = true,
+            "--resume" => options.resume = true,
             "--no-control-plane" => options.no_control_plane = true,
             "--control-plane-url" => options.control_plane_url = value()?,
             "--data-dir" => options.data_dir = PathBuf::from(value()?),
@@ -235,6 +424,9 @@ pub fn parse_options(args: &[String]) -> Result<ExportOptions> {
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub ok: bool,
+    /// `--preflight`: nothing was copied; findings are what would stop an export.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preflight: bool,
     pub data_dir: String,
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -255,11 +447,23 @@ pub struct DatabaseReport {
     pub tenant_ids: Vec<String>,
     pub source: String,
     pub target: String,
+    /// `--resume`: this file was copied and verified by an earlier run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
+    /// Pending scheduled jobs / outbox Actions whose actor was rewritten after
+    /// the copy (see `classify_actor`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actor_rewrites: Vec<ActorRewrite>,
     pub tables: Vec<TableReport>,
     /// Source tables intentionally not copied, with the reason.
     pub skipped_source_tables: BTreeMap<String, String>,
     /// Target tables with no source table (left as provisioning created them).
     pub target_only_tables: Vec<String>,
+    /// Tables moved later in the copy because application triggers on other
+    /// copied tables write into them (`table <- [writers]`); their source rows
+    /// then replace whatever the triggers derived mid-copy.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copy_order_adjustments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clock: Option<ClockReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -808,6 +1012,7 @@ struct DatabaseJob<'a> {
     allow_drop_tables: bool,
     keep_epoch: bool,
     sample_rows: usize,
+    preflight: bool,
     /// Source tables to ignore silently (the Control Plane's own tables when a
     /// tenant shares the Control Plane database).
     ignore_source: BTreeSet<String>,
@@ -883,13 +1088,20 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
                 ))
                 .fetch_one(&mut *source)
                 .await?;
-                let plan = plan_table(
+                let plan = match plan_table(
                     table,
                     source_name,
                     columns,
                     job.allow_drop_columns,
                     source_empty,
-                )?;
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) if job.preflight => {
+                        job.report.findings.push(error.to_string());
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 work.push((table, source_name.to_owned(), plan));
             }
             None => job.report.target_only_tables.push(table.name.clone()),
@@ -908,6 +1120,10 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
             Some("revision carried over; epoch set explicitly")
         } else if name == "gonvex_migrations" {
             Some("Postgres migration ledger; the SQLite ledger records the SQLite migrations")
+        } else if name == "legacy_account_map" {
+            Some("identity-migration mapping; read to rewrite pending job actors, not copied")
+        } else if name == "gonvex_runtime_manifests" {
+            Some("Postgres-era module artifact (its migrations are Postgres SQL); deploy the module again after the export")
         } else if name.starts_with("_gonvex_reference_") {
             Some("reference ledger rebuilt from the catalog")
         } else if name == "_gonvex_mutation_idempotency"
@@ -927,7 +1143,27 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
         }
     }
     if !dropped_tables.is_empty() {
-        if !job.allow_drop_tables {
+        if job.preflight {
+            let mut counted = Vec::new();
+            for name in &dropped_tables {
+                let rows: i64 =
+                    sqlx::query_scalar(&format!("SELECT count(*) FROM {}", quote(name)))
+                        .fetch_one(&mut *source)
+                        .await?;
+                counted.push(format!("{name} ({rows} rows)"));
+                job.report.skipped_source_tables.insert(
+                    name.clone(),
+                    format!("no SQLite table; {rows} rows (--allow-drop-tables skips it)"),
+                );
+            }
+            if !job.allow_drop_tables {
+                job.report.findings.push(format!(
+                    "Postgres tables with no SQLite table: {}; add them to the SQLite migrations or pass --allow-drop-tables",
+                    counted.join(", ")
+                ));
+            }
+            dropped_tables.clear();
+        } else if !job.allow_drop_tables {
             return Err(format!(
                 "{}: Postgres tables with no SQLite table: {}; add them to the SQLite migrations or pass --allow-drop-tables",
                 job.report.target,
@@ -941,6 +1177,44 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
                 .insert(name, "no SQLite table (--allow-drop-tables)".to_owned());
         }
     }
+
+    if job.preflight {
+        for (table, source_name, plan) in &work {
+            let source_rows: i64 =
+                sqlx::query_scalar(&format!("SELECT count(*) FROM {}", quote(source_name)))
+                    .fetch_one(&mut *source)
+                    .await?;
+            job.report.tables.push(TableReport {
+                table: table.name.clone(),
+                source_table: source_name.clone(),
+                source_rows,
+                dropped_columns: plan.dropped.clone(),
+                defaulted_columns: plan.defaulted.clone(),
+                relaxed_for_empty_source: plan.relaxed.clone(),
+                ..TableReport::default()
+            });
+        }
+        job.report.integrity_check = "not run (preflight)".to_owned();
+        source.rollback().await?;
+        target.close().await?;
+        return Ok(());
+    }
+
+    // Copy tables that application triggers write into after their writers.
+    let application_triggers: Vec<(String, String)> = sqlx::query_as(APPLICATION_TRIGGERS)
+        .fetch_all(&mut target)
+        .await?;
+    let names = work
+        .iter()
+        .map(|(table, _, _)| table.name.clone())
+        .collect::<Vec<_>>();
+    let (order, adjustments) = trigger_copy_order(&names, &application_triggers);
+    job.report.copy_order_adjustments = adjustments;
+    let mut slots = work.into_iter().map(Some).collect::<Vec<_>>();
+    let work = order
+        .into_iter()
+        .map(|i| slots[i].take().expect("each table placed once"))
+        .collect::<Vec<_>>();
 
     let mut transaction = target.begin().await?;
     let triggers: Vec<(String, String)> = sqlx::query_as(FRAMEWORK_TRIGGERS)
@@ -1152,8 +1426,42 @@ async fn copy_database(pool: &PgPool, job: &mut DatabaseJob<'_>) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Orchestration
 
+/// Findings that fail the export (`warning:` findings are reported only).
+fn has_errors(findings: &[String]) -> bool {
+    findings
+        .iter()
+        .any(|finding| !finding.starts_with("warning:"))
+}
+
+/// Marker written next to a database file once its copy verified cleanly.
+const EXPORT_OK_SUFFIX: &str = ".export-ok";
+
+fn export_ok_marker(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(EXPORT_OK_SUFFIX);
+    PathBuf::from(name)
+}
+
+fn verified_earlier(path: &Path) -> bool {
+    path.exists() && export_ok_marker(path).exists()
+}
+
+fn mark_verified(path: &Path, report: &DatabaseReport) -> Result<()> {
+    let marker = serde_json::json!({
+        "target": report.target,
+        "tables": report.tables.len(),
+        "sourceRows": report.tables.iter().map(|table| table.source_rows).sum::<i64>(),
+        "exportedAtUnixMs": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or_default(),
+    });
+    std::fs::write(export_ok_marker(path), format!("{marker}\n"))
+        .map_err(|error| format!("write marker for {}: {error}", path.display()).into())
+}
+
 fn remove_database_file(path: &Path) -> Result<()> {
-    for suffix in ["", "-wal", "-shm", "-journal"] {
+    for suffix in ["", "-wal", "-shm", "-journal", EXPORT_OK_SUFFIX] {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
         match std::fs::remove_file(&name) {
@@ -1237,15 +1545,234 @@ fn route_of(database: &DatabasePlan) -> TenantRoute {
     }
 }
 
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActorRewrite {
+    pub table: String,
+    pub id: String,
+    pub function: String,
+    pub from: String,
+    /// The new account id, or `system` when the actor was removed.
+    pub to: String,
+}
+
+/// What the export does with the actor of a pending scheduled job or outbox
+/// Action. Durable work keeps running as whoever queued it; only actors the
+/// SQLite runtime can no longer resolve are touched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ActorFix {
+    /// Resolves to an enabled account in the project's realm (or no actor).
+    Keep,
+    /// A `_gonvex_*` pseudo-actor (`_gonvex_system` from crons): run as the
+    /// system identity, which it already was.
+    System,
+    /// A pre-migration user id with exactly one account in `legacy_account_map`.
+    Account(String),
+    /// Unknown, disabled, or ambiguous: left as is and reported. Rewriting a
+    /// user's job to the system identity would widen its authority, and an
+    /// owner cannot be guessed; the job fails at run time as it did before.
+    Unresolvable(&'static str),
+}
+
+fn classify_actor(
+    actor: &str,
+    resolves: impl Fn(&str) -> bool,
+    legacy: &BTreeMap<String, BTreeSet<String>>,
+) -> ActorFix {
+    let actor = actor.trim();
+    if actor.is_empty() || resolves(actor) {
+        return ActorFix::Keep;
+    }
+    if actor.starts_with("_gonvex_") {
+        return ActorFix::System;
+    }
+    match legacy.get(actor) {
+        Some(accounts) if accounts.len() == 1 => {
+            let account = accounts.iter().next().expect("one account").clone();
+            if resolves(&account) {
+                ActorFix::Account(account)
+            } else {
+                ActorFix::Unresolvable("legacy id maps to an account that is missing or disabled")
+            }
+        }
+        Some(_) => ActorFix::Unresolvable("legacy id maps to several accounts"),
+        None => ActorFix::Unresolvable("no enabled account and no legacy mapping"),
+    }
+}
+
+async fn enabled_accounts(control: &mut SqliteConnection) -> Result<BTreeSet<(String, String)>> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT auth_realm_id, id FROM accounts WHERE disabled_at IS NULL")
+            .fetch_all(&mut *control)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+async fn legacy_account_map(source: &PgPool) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('legacy_account_map') IS NOT NULL")
+        .fetch_one(source)
+        .await?;
+    let mut map = BTreeMap::<String, BTreeSet<String>>::new();
+    if exists {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT legacy_user_id, account_id FROM legacy_account_map")
+                .fetch_all(source)
+                .await?;
+        for (legacy, account) in rows {
+            map.entry(legacy).or_default().insert(account);
+        }
+    }
+    Ok(map)
+}
+
+/// Rewrites the actors of pending durable work that the SQLite runtime could
+/// not resolve (see `ActorFix`). Runs after the copy was verified and before
+/// the installer check, in one transaction per file.
+async fn rewrite_pending_actors(
+    control_url: &str,
+    legacy: &BTreeMap<String, BTreeSet<String>>,
+    control_report: Option<&mut DatabaseReport>,
+    databases: &mut [(String, String, &mut DatabaseReport)],
+) -> Result<()> {
+    let mut control = open_target(control_url).await?;
+    let accounts = enabled_accounts(&mut control).await?;
+    if let Some(report) = control_report {
+        let jobs: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            r#"SELECT id, project_id, function_path, json_extract(provenance, '$.actorAccountId')
+               FROM gonvex_scheduled_jobs WHERE status = 'pending' ORDER BY id"#,
+        )
+        .fetch_all(&mut control)
+        .await?;
+        let mut transaction = control.begin().await?;
+        for (id, project, function, actor) in jobs {
+            let actor = actor.unwrap_or_default();
+            let fix = classify_actor(
+                &actor,
+                |account| accounts.contains(&(project.clone(), account.to_owned())),
+                legacy,
+            );
+            let to = match &fix {
+                ActorFix::Keep => continue,
+                ActorFix::System => {
+                    sqlx::query(
+                        r#"UPDATE gonvex_scheduled_jobs
+                           SET provenance = json_remove(provenance, '$.actorAccountId', '$.actorMemberId')
+                           WHERE id = $1"#,
+                    )
+                    .bind(&id)
+                    .execute(&mut *transaction)
+                    .await?;
+                    "system".to_owned()
+                }
+                ActorFix::Account(account) => {
+                    sqlx::query(
+                        r#"UPDATE gonvex_scheduled_jobs
+                           SET provenance = json_remove(json_set(provenance, '$.actorAccountId', $2), '$.actorMemberId')
+                           WHERE id = $1"#,
+                    )
+                    .bind(&id)
+                    .bind(account)
+                    .execute(&mut *transaction)
+                    .await?;
+                    account.clone()
+                }
+                ActorFix::Unresolvable(reason) => {
+                    report.findings.push(format!(
+                        "warning: pending scheduled job {id} ({function}) keeps actor {actor:?}: {reason}"
+                    ));
+                    continue;
+                }
+            };
+            report.actor_rewrites.push(ActorRewrite {
+                table: "gonvex_scheduled_jobs".to_owned(),
+                id,
+                function,
+                from: actor,
+                to,
+            });
+        }
+        transaction.commit().await?;
+    }
+    control.close().await?;
+
+    for (target_url, project, report) in databases.iter_mut() {
+        let mut tenant = open_target(target_url).await?;
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, action_path, actor_user_id FROM _gonvex_action_outbox ORDER BY id",
+        )
+        .fetch_all(&mut tenant)
+        .await?;
+        let mut transaction = tenant.begin().await?;
+        for (id, function, actor) in rows {
+            let actor = actor.unwrap_or_default();
+            let fix = classify_actor(
+                &actor,
+                |account| accounts.contains(&(project.clone(), account.to_owned())),
+                legacy,
+            );
+            match fix {
+                // The outbox drain already runs `_gonvex_*` actors as the system.
+                ActorFix::Keep | ActorFix::System => {}
+                ActorFix::Account(account) => {
+                    sqlx::query("UPDATE _gonvex_action_outbox SET actor_user_id = $2 WHERE id = $1")
+                        .bind(&id)
+                        .bind(&account)
+                        .execute(&mut *transaction)
+                        .await?;
+                    report.actor_rewrites.push(ActorRewrite {
+                        table: "_gonvex_action_outbox".to_owned(),
+                        id,
+                        function,
+                        from: actor,
+                        to: account,
+                    });
+                }
+                ActorFix::Unresolvable(reason) => report.findings.push(format!(
+                    "warning: pending outbox Action {id} ({function}) keeps actor {actor:?}: {reason}"
+                )),
+            }
+        }
+        transaction.commit().await?;
+        tenant.close().await?;
+    }
+    Ok(())
+}
+
+/// Removes the throwaway `--preflight` data directory however the run ends.
+struct PreflightDir(PathBuf);
+
+impl Drop for PreflightDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 pub async fn export(options: &ExportOptions) -> Result<Report> {
-    let data = DataDir::new(&options.data_dir);
+    // --preflight builds the SQLite schema in a throwaway directory, so the
+    // real data directory is neither locked nor touched.
+    let preflight_dir = options.preflight.then(|| {
+        PreflightDir(
+            std::env::temp_dir().join(format!("gonvex-export-preflight-{}", std::process::id())),
+        )
+    });
+    if let Some(dir) = &preflight_dir {
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir_all(&dir.0)
+            .map_err(|error| format!("create {}: {error}", dir.0.display()))?;
+    }
+    let data = DataDir::new(
+        preflight_dir
+            .as_ref()
+            .map_or(options.data_dir.as_path(), |dir| dir.0.as_path()),
+    );
     let _lock = data.lock().map_err(|error| format!("{error}"))?;
     let control_source = connect_source(&options.control_plane_url).await?;
     let (projects, tenants) = source_routes(&control_source).await?;
     let routes = plan_routes(&data, &projects, &tenants)?;
     let mut report = Report {
-        data_dir: data.root().display().to_string(),
+        data_dir: options.data_dir.display().to_string(),
         source: redact_url(&options.control_plane_url),
+        preflight: options.preflight,
         ..Report::default()
     };
     for filter in &options.projects {
@@ -1273,9 +1800,15 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         .map(|database| database.target_url.clone())
         .collect();
 
-    // Preflight: never overwrite without --force.
+    // Never overwrite without --force (or --resume, which replaces only files
+    // that no earlier run verified).
     let control_path = data.control_path();
-    if options.no_control_plane {
+    let control_resumed = options.resume && verified_earlier(&control_path);
+    let resumed = selected
+        .iter()
+        .map(|database| options.resume && verified_earlier(&database.target_path))
+        .collect::<Vec<_>>();
+    if control_resumed || options.no_control_plane {
         if !control_path.exists() {
             return Err(format!(
                 "--no-control-plane needs an existing {}",
@@ -1284,7 +1817,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             .into());
         }
     } else if control_path.exists() {
-        if !options.force {
+        if !options.force && !options.resume {
             return Err(format!(
                 "{} already exists; pass --force to replace it",
                 control_path.display()
@@ -1293,9 +1826,12 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         }
         remove_database_file(&control_path)?;
     }
-    for database in &selected {
+    for (database, &resumed) in selected.iter().zip(&resumed) {
+        if resumed {
+            continue;
+        }
         if database.target_path.exists() {
-            if !options.force {
+            if !options.force && !options.resume {
                 return Err(format!(
                     "{} already exists; pass --force to replace it",
                     database.target_path.display()
@@ -1315,7 +1851,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
     let control_url = data.control_url();
     {
         let control = ControlPlane::connect(&control_url, registry(), BTreeMap::new()).await?;
-        if !options.no_control_plane {
+        if !options.no_control_plane && !control_resumed {
             let mut seen = BTreeSet::new();
             let control_migrations = cache
                 .values()
@@ -1329,7 +1865,12 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
                 .apply_control_migrations(control_migrations)
                 .await?;
         }
-        for (database, migrations) in selected.iter().zip(&database_migrations) {
+        for ((database, migrations), &resumed) in
+            selected.iter().zip(&database_migrations).zip(&resumed)
+        {
+            if resumed {
+                continue;
+            }
             let route = route_of(database);
             control
                 .clone()
@@ -1342,7 +1883,16 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
     }
 
     // 2. Control Plane rows.
-    if !options.no_control_plane {
+    if control_resumed {
+        report.control_plane = Some(DatabaseReport {
+            kind: "controlPlane".to_owned(),
+            source: redact_url(&options.control_plane_url),
+            target: control_url.clone(),
+            resumed: true,
+            integrity_check: "verified by an earlier run".to_owned(),
+            ..DatabaseReport::default()
+        });
+    } else if !options.no_control_plane {
         let mut job = DatabaseJob {
             report: DatabaseReport {
                 kind: "controlPlane".to_owned(),
@@ -1356,6 +1906,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             allow_drop_tables: options.allow_drop_tables,
             keep_epoch: options.keep_epoch,
             sample_rows: options.sample_rows,
+            preflight: options.preflight,
             ignore_source: BTreeSet::new(),
             rewrites: BTreeMap::from([
                 (
@@ -1392,7 +1943,23 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
     };
 
     // 3. Each project/tenant database.
-    for database in &selected {
+    for (database, &resumed) in selected.iter().zip(&resumed) {
+        let kind = match database.kind {
+            DatabaseKind::Project => "project",
+            DatabaseKind::Tenant => "tenant",
+        };
+        if resumed {
+            report.databases.push(DatabaseReport {
+                kind: kind.to_owned(),
+                project_id: database.project_id.clone(),
+                tenant_ids: database.tenant_ids.clone(),
+                target: database.target_url.clone(),
+                resumed: true,
+                integrity_check: "verified by an earlier run".to_owned(),
+                ..DatabaseReport::default()
+            });
+            continue;
+        }
         let source_url = map_source_url(&database.source_url, &options.source_url_maps);
         let pool = if source_url == options.control_plane_url {
             control_source.clone()
@@ -1401,10 +1968,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         };
         let mut job = DatabaseJob {
             report: DatabaseReport {
-                kind: match database.kind {
-                    DatabaseKind::Project => "project".to_owned(),
-                    DatabaseKind::Tenant => "tenant".to_owned(),
-                },
+                kind: kind.to_owned(),
                 project_id: database.project_id.clone(),
                 tenant_ids: database.tenant_ids.clone(),
                 source: redact_url(&source_url),
@@ -1417,6 +1981,7 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             allow_drop_tables: options.allow_drop_tables,
             keep_epoch: options.keep_epoch,
             sample_rows: options.sample_rows,
+            preflight: options.preflight,
             ignore_source: if source_url == options.control_plane_url {
                 control_tables.clone()
             } else {
@@ -1430,11 +1995,33 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
         }
         report.databases.push(job.report);
     }
+
+    // 3b. Pending durable work whose actor the SQLite runtime cannot resolve.
+    if !options.preflight {
+        let legacy = legacy_account_map(&control_source).await?;
+        let control_report = report
+            .control_plane
+            .as_mut()
+            .filter(|control| !control.resumed);
+        let mut databases = selected
+            .iter()
+            .zip(report.databases.iter_mut())
+            .filter(|(_, database_report)| !database_report.resumed)
+            .map(|(database, database_report)| {
+                (
+                    database.target_url.clone(),
+                    database.project_id.clone(),
+                    database_report,
+                )
+            })
+            .collect::<Vec<_>>();
+        rewrite_pending_actors(&control_url, &legacy, control_report, &mut databases).await?;
+    }
     control_source.close().await;
 
     // 4. The store's installer must accept every file as current (change
     //    capture and membership triggers installed, nothing staged).
-    {
+    if !options.preflight {
         let control = ControlPlane::connect(&control_url, registry(), BTreeMap::new()).await?;
         for ((database, migrations), database_report) in selected
             .iter()
@@ -1472,6 +2059,20 @@ pub async fn export(options: &ExportOptions) -> Result<Report> {
             }
         }
         control.pools().close().await;
+    }
+
+    // 5. --resume markers: every file this run copied and fully verified.
+    if !options.preflight {
+        if let Some(control) = &report.control_plane {
+            if !control.resumed && !has_errors(&control.findings) {
+                mark_verified(&control_path, control)?;
+            }
+        }
+        for (database, database_report) in selected.iter().zip(&report.databases) {
+            if !database_report.resumed && !has_errors(&database_report.findings) {
+                mark_verified(&database.target_path, database_report)?;
+            }
+        }
     }
 
     let mut findings = Vec::new();
@@ -1698,5 +2299,178 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("--allow-drop-columns"), "{error}");
+    }
+
+    #[test]
+    fn pending_actors_are_rewritten_only_when_unresolvable() {
+        let enabled = ["acct-2"];
+        let resolves = |account: &str| enabled.contains(&account);
+        let legacy = BTreeMap::from([
+            (
+                "legacy-bo".to_owned(),
+                BTreeSet::from(["acct-2".to_owned()]),
+            ),
+            (
+                "legacy-off".to_owned(),
+                BTreeSet::from(["acct-off".to_owned()]),
+            ),
+            (
+                "legacy-dup".to_owned(),
+                BTreeSet::from(["acct-1".to_owned(), "acct-2".to_owned()]),
+            ),
+        ]);
+        assert_eq!(classify_actor("", resolves, &legacy), ActorFix::Keep);
+        assert_eq!(classify_actor("acct-2", resolves, &legacy), ActorFix::Keep);
+        assert_eq!(
+            classify_actor("_gonvex_system", resolves, &legacy),
+            ActorFix::System
+        );
+        assert_eq!(
+            classify_actor("legacy-bo", resolves, &legacy),
+            ActorFix::Account("acct-2".to_owned())
+        );
+        // Never widen a user's job to the system identity or guess an owner.
+        for actor in ["ghost", "legacy-off", "legacy-dup"] {
+            assert!(
+                matches!(
+                    classify_actor(actor, resolves, &legacy),
+                    ActorFix::Unresolvable(_)
+                ),
+                "{actor}"
+            );
+        }
+        assert!(!has_errors(&["warning: kept".to_owned()]));
+        assert!(has_errors(&["row count mismatch".to_owned()]));
+    }
+
+    #[test]
+    fn preflight_and_resume_flags_and_markers() {
+        let options = parse_options(&args(&[
+            "--control-plane-url",
+            "postgres://u:p@db/control",
+            "--data-dir",
+            "/srv/data",
+            "--migrations",
+            "./migrations",
+            "--preflight",
+            "--resume",
+        ]))
+        .unwrap();
+        assert!(options.preflight && options.resume && !options.force);
+        // The Postgres-era module artifact is never carried into control.db.
+        assert!(never_copied("gonvex_runtime_manifests"));
+
+        let dir = std::env::temp_dir().join(format!("gonvex-export-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tenant.db");
+        assert!(!verified_earlier(&file));
+        std::fs::write(&file, b"").unwrap();
+        assert!(
+            !verified_earlier(&file),
+            "a file without a marker is not verified"
+        );
+        let report = DatabaseReport {
+            target: "sqlite:///x/tenant.db".to_owned(),
+            ..DatabaseReport::default()
+        };
+        mark_verified(&file, &report).unwrap();
+        assert!(verified_earlier(&file));
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(export_ok_marker(&file)).unwrap())
+                .unwrap();
+        assert_eq!(marker["target"], "sqlite:///x/tenant.db");
+        // Replacing a file (--force) removes its marker with it.
+        remove_database_file(&file).unwrap();
+        assert!(!file.exists() && !export_ok_marker(&file).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn trigger_writes_reads_only_the_body() {
+        let label = r#"CREATE TRIGGER "task_grid_workspace_search_label_update" AFTER UPDATE OF "name" ON "workspaces" BEGIN
+  UPDATE "taskGridRows" SET ("searchText") = (
+    SELECT v."searchText" FROM "whTaskGridProjection" AS v WHERE v."taskId" = "taskGridRows"."taskId")
+  WHERE "workspaceId" = NEW."_id" AND EXISTS (SELECT 1 FROM "tasks" AS t WHERE t."_id" = "taskGridRows"."taskId");
+END"#;
+        assert_eq!(trigger_writes(label), vec!["taskGridRows"]);
+        let upsert = r#"CREATE TRIGGER t AFTER INSERT ON "tasks" BEGIN
+  -- DELETE FROM commented_out
+  INSERT INTO "taskGridRows" ("taskId") SELECT 'UPDATE literal' FROM x
+    ON CONFLICT ("taskId") DO UPDATE SET "taskId" = excluded."taskId";
+  DELETE FROM [taskRelatedSearchDocuments] WHERE 1 = 0;
+  INSERT OR REPLACE INTO peopleDirectory SELECT 1;
+END"#;
+        assert_eq!(
+            trigger_writes(upsert),
+            vec![
+                "taskGridRows",
+                "taskRelatedSearchDocuments",
+                "peopleDirectory"
+            ]
+        );
+    }
+
+    #[test]
+    fn trigger_targets_are_copied_after_their_writers() {
+        let names = [
+            "taskGridRows",
+            "tasks",
+            "members",
+            "workspaces",
+            "peopleDirectory",
+        ]
+        .map(String::from);
+        let triggers = vec![
+            (
+                "tasks".to_owned(),
+                r#"CREATE TRIGGER a AFTER INSERT ON tasks BEGIN INSERT INTO "taskGridRows" SELECT 1; END"#.to_owned(),
+            ),
+            (
+                "workspaces".to_owned(),
+                r#"CREATE TRIGGER b AFTER UPDATE OF name ON workspaces BEGIN UPDATE "taskGridRows" SET x = 1; END"#.to_owned(),
+            ),
+            (
+                "members".to_owned(),
+                r#"CREATE TRIGGER c AFTER INSERT ON members BEGIN INSERT INTO peopleDirectory SELECT 1; END"#.to_owned(),
+            ),
+            // Not copied: ignored.
+            (
+                "elsewhere".to_owned(),
+                r#"CREATE TRIGGER d AFTER INSERT ON elsewhere BEGIN DELETE FROM tasks; END"#.to_owned(),
+            ),
+        ];
+        let (order, adjustments) = trigger_copy_order(&names, &triggers);
+        let ordered = order.iter().map(|&i| names[i].as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                "tasks",
+                "members",
+                "workspaces",
+                "taskGridRows",
+                "peopleDirectory"
+            ]
+        );
+        assert_eq!(
+            adjustments,
+            vec![
+                "taskGridRows <- [tasks, workspaces]".to_owned(),
+                "peopleDirectory <- [members]".to_owned()
+            ]
+        );
+
+        // A cycle keeps the original order instead of failing.
+        let names = ["a", "b"].map(String::from);
+        let triggers = vec![
+            (
+                "a".to_owned(),
+                "CREATE TRIGGER x AFTER INSERT ON a BEGIN INSERT INTO b SELECT 1; END".to_owned(),
+            ),
+            (
+                "b".to_owned(),
+                "CREATE TRIGGER y AFTER INSERT ON b BEGIN INSERT INTO a SELECT 1; END".to_owned(),
+            ),
+        ];
+        assert_eq!(trigger_copy_order(&names, &triggers).0, vec![0, 1]);
     }
 }

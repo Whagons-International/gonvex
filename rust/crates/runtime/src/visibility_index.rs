@@ -277,6 +277,28 @@ impl ParentAclIndex {
 /// it or poisons the index (lag, reset, epoch change, exit; a drop guard covers
 /// panics and cancellation), and both wake this wait. An index that no applier
 /// maintains, or one at another epoch, is never waited on: it is not ready.
+/// `ready_at` without waiting: Some(true) ready, Some(false) never ready at
+/// this revision, None when it would wait for the applier.
+pub fn ready_now(
+    index: &std::sync::RwLock<ParentAclIndex>,
+    revision: u64,
+    epoch: &str,
+) -> Option<bool> {
+    let Ok(index) = index.read() else {
+        return Some(false);
+    };
+    if index.poisoned || (!index.epoch.is_empty() && index.epoch != epoch) {
+        return Some(false);
+    }
+    if index.revision >= revision {
+        return Some(true);
+    }
+    if !index.maintained {
+        return Some(false);
+    }
+    None
+}
+
 pub async fn ready_at(
     index: &std::sync::RwLock<ParentAclIndex>,
     revision: u64,
