@@ -678,7 +678,19 @@ fn bridge_bench_whagons() {
         .fetch_all(&reader)
         .await
         .unwrap();
+        // Unassigned tasks in workspaces with teams: notifyIfUnassigned
+        // notifies every member of those teams.
+        let unassigned: Vec<(String, String)> = sqlx::query_as(
+            "SELECT t._id, t.workspaceId FROM tasks t WHERE t.deletedAt IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM taskUsers u WHERE u.taskId = t._id AND u.deletedAt IS NULL) \
+             AND EXISTS (SELECT 1 FROM workspaceTeams w WHERE w.workspaceId = t.workspaceId AND w.deletedAt IS NULL) \
+             ORDER BY t._id LIMIT 200",
+        )
+        .fetch_all(&reader)
+        .await
+        .unwrap_or_default();
         drop(reader);
+        let warmup: usize = env("BRIDGE_BENCH_WARMUP").and_then(|v| v.parse().ok()).unwrap_or(20);
         let iterations: usize = env("BRIDGE_BENCH_CALLS").and_then(|v| v.parse().ok()).unwrap_or(200);
         type Args = Box<dyn Fn(usize) -> Value + Send + Sync>;
         let workloads: Vec<(&str, Args)> = vec![
@@ -687,6 +699,10 @@ fn bridge_bench_whagons() {
             ("taskResources.createNote", Box::new({ let tasks = tasks.clone(); let member = member["id"].clone(); move |i| json!({"entity": {"_id": uuid::Uuid::new_v4().to_string(), "_creationTime": 1_793_000_000_000i64, "taskId": tasks[i % tasks.len()].0, "userId": member, "source": "web", "note": format!("bench note {i}")}}) })),
             ("tasks.create", Box::new({ let tasks = tasks.clone(); move |i| { let t = &tasks[i % tasks.len()]; json!({"entityId": uuid::Uuid::new_v4().to_string(), "name": format!("bench task {i}"), "workspaceId": t.1, "categoryId": t.2, "priorityId": t.3}) } })),
             ("taskResources.recordTaskViewByTaskId", Box::new({ let tasks = tasks.clone(); move |i| json!({"taskId": tasks[i % tasks.len()].0}) })),
+            // Scheduled work (docs/performance/cron-writer.md): the hourly
+            // grant reconcile and the runAfter job tasks.create schedules.
+            ("grantProjection.reconcile", Box::new(|_| json!({}))),
+            ("tasks.notifyIfUnassigned", Box::new({ let unassigned = unassigned.clone(); move |i| { let t = &unassigned[i % unassigned.len().max(1)]; json!({"taskId": t.0, "workspaceId": t.1, "taskName": "bench"}) } })),
         ];
         // BRIDGE_BENCH_ONLY=a,b: run only these workloads.
         let only = env("BRIDGE_BENCH_ONLY");
@@ -699,11 +715,15 @@ fn bridge_bench_whagons() {
             let mut samples = Samples::default();
             let cpu_started = cpu_time();
             let mut failures = 0;
-            for i in 0..(iterations + 20) {
+            for i in 0..(iterations + warmup) {
                 let command = format!("cmd-{function}-{i}");
                 let mut probe = Probe::new(Some((pools.clone(), url.clone(), schema.clone(), command.clone())));
                 probe.schedulable = schedulable.clone();
-                let request = invoke_request(function, &args(i), &command, &member, &hash);
+                let mut request = invoke_request(function, &args(i), &command, &member, &hash);
+                if matches!(*function, "grantProjection.reconcile" | "tasks.notifyIfUnassigned") {
+                    request.context.invocation.channel = gonvex_module_runtime::InvocationChannel::Scheduler;
+                    request.context.invocation.root_channel = gonvex_module_runtime::InvocationChannel::Scheduler;
+                }
                 let started = Instant::now();
                 let result = host.invoke(request, &mut probe).await;
                 let total = started.elapsed();
@@ -716,7 +736,7 @@ fn bridge_bench_whagons() {
                     }
                     continue;
                 }
-                if i < 20 {
+                if i < warmup {
                     continue;
                 }
                 samples.total.push(total.as_secs_f64() * 1000.0);
@@ -732,7 +752,7 @@ fn bridge_bench_whagons() {
                 continue;
             }
             let mut report = samples.report(function);
-            report["cpuMsPerInvokeRuntimePlusHost"] = json!(cpu.as_secs_f64() * 1000.0 / (iterations + 20) as f64);
+            report["cpuMsPerInvokeRuntimePlusHost"] = json!(cpu.as_secs_f64() * 1000.0 / (iterations + warmup) as f64);
             report["failures"] = json!(failures);
             reports.push(report);
         }
@@ -751,5 +771,171 @@ fn bridge_bench_whagons() {
         }
         host.shutdown().await;
         let _ = Arc::new(());
+    });
+}
+
+/// A long scheduled Reducer against one tenant while user Reducers arrive on
+/// another (docs/performance/cron-writer.md). Measures how long each user call
+/// waits before its first host call (isolate admission plus the JavaScript
+/// before its first `ctx.db` call, which is well under a millisecond here),
+/// with the scheduling knobs from the environment
+/// (`GONVEX_MODULE_HOST_ISOLATE_PRIORITY`, `_SCHEDULED_SLICE_MS`,
+/// `_SCHEDULED_ISOLATE`). Both tenants are copies of `BRIDGE_BENCH_DB`, so the
+/// user calls never wait for the cron's writer, only for the isolate.
+/// `BRIDGE_BENCH_SECONDS` (default 20) of load, user calls every
+/// `BRIDGE_BENCH_USER_MS` (default 50) ms, `BRIDGE_BENCH_CRON` (default
+/// grantProjection.reconcile) back to back.
+#[test]
+#[ignore = "benchmark; see module docs"]
+fn bridge_bench_contention() {
+    runtime().block_on(async {
+        let manifest_path = env("BRIDGE_BENCH_MANIFEST").expect("BRIDGE_BENCH_MANIFEST");
+        let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let hash = manifest["module"]["hash"].as_str().unwrap_or_default().to_owned();
+        let schedulable: Vec<String> = manifest["module"]["functions"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, f)| matches!(f["kind"].as_str(), Some("reducer" | "action")))
+            .map(|(path, _)| path.clone())
+            .collect();
+        let host = ModuleHost::new(host_config());
+        start(&host, whagons_artifact(&manifest)).await;
+        drop(manifest);
+        let cron_db = database().await.expect("BRIDGE_BENCH_DB");
+        let user_db = database().await.expect("BRIDGE_BENCH_DB");
+        let reader = user_db.0.reader(&user_db.1).await.unwrap();
+        let (member_id, account_id, role, permissions): (String, String, String, Option<String>) = sqlx::query_as(
+            "SELECT id, account_id, role, permissions FROM members WHERE status='active' AND role='admin' ORDER BY id LIMIT 1",
+        )
+        .fetch_one(&reader)
+        .await
+        .unwrap();
+        let permissions: Value = permissions
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| json!({}));
+        let member = json!({"id": member_id, "accountId": account_id, "status": "active", "role": role, "permissions": permissions});
+        let tasks: Vec<(String,)> = sqlx::query_as("SELECT _id FROM tasks WHERE deletedAt IS NULL ORDER BY _id LIMIT 200")
+            .fetch_all(&reader)
+            .await
+            .unwrap();
+        drop(reader);
+        let seconds: u64 = env("BRIDGE_BENCH_SECONDS").and_then(|v| v.parse().ok()).unwrap_or(20);
+        let every = Duration::from_millis(env("BRIDGE_BENCH_USER_MS").and_then(|v| v.parse().ok()).unwrap_or(50));
+        let cron = env("BRIDGE_BENCH_CRON").unwrap_or_else(|| "grantProjection.reconcile".to_owned());
+        let deadline = || {
+            Some(gonvex_module_host::protocol::unix_millis(std::time::SystemTime::now()).saturating_add(10_000))
+        };
+        let started = Instant::now();
+        let stop = started + Duration::from_secs(seconds);
+
+        // Warm both paths once.
+        for (function, db, args) in [("tasks.update", &user_db, json!({"taskId": tasks[0].0, "updates": {"dueDate": 1_800_000_000_000i64}}))] {
+            let mut probe = Probe::new(Some((db.0.clone(), db.1.clone(), db.2.clone(), "warm".into())));
+            probe.schedulable = schedulable.clone();
+            let _ = host.invoke(invoke_request(function, &args, "warm", &member, &hash), &mut probe).await;
+            probe.finish().await;
+        }
+
+        // BRIDGE_BENCH_CRONS concurrent scheduled loops (the scheduler runs up
+        // to GONVEX_SCHEDULER_CONCURRENCY = 2 at once), each on its own copy.
+        let lanes: usize = env("BRIDGE_BENCH_CRONS").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let mut cron_dbs = vec![cron_db];
+        for _ in 1..lanes {
+            cron_dbs.push(database().await.expect("BRIDGE_BENCH_DB"));
+        }
+        let cron_tasks: Vec<_> = cron_dbs.into_iter().enumerate().map(|(lane, cron_db)| tokio::spawn({
+            let (host, member, hash, schedulable, cron) = (host.clone(), member.clone(), hash.clone(), schedulable.clone(), cron.clone());
+            async move {
+                let mut runs = Vec::new();
+                let mut i = 0;
+                while Instant::now() < stop {
+                    i += 1;
+                    let command = format!("cron-{lane}-{i}");
+                    let mut probe = Probe::new(Some((cron_db.0.clone(), cron_db.1.clone(), cron_db.2.clone(), command.clone())));
+                    probe.schedulable = schedulable.clone();
+                    let mut request = invoke_request(&cron, &json!({}), &command, &member, &hash);
+                    request.context.invocation.channel = gonvex_module_runtime::InvocationChannel::Scheduler;
+                    request.context.invocation.root_channel = gonvex_module_runtime::InvocationChannel::System;
+                    request.context.deadline_unix_ms = deadline();
+                    let at = Instant::now();
+                    let result = host.invoke(request, &mut probe).await;
+                    let total = at.elapsed();
+                    let hold = probe.finish().await.unwrap_or_default();
+                    runs.push((total.as_secs_f64() * 1e3, hold.as_secs_f64() * 1e3, result.err().map(|e| e.to_string())));
+                }
+                runs
+            }
+        })).collect();
+
+        let mut users = Vec::new();
+        let mut i = 0usize;
+        let mut next = Instant::now();
+        while Instant::now() < stop {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(next)).await;
+            next += every;
+            i += 1;
+            let (host, member, hash, schedulable, user_db) = (host.clone(), member.clone(), hash.clone(), schedulable.clone(), user_db.clone());
+            let task = tasks[i % tasks.len()].0.clone();
+            users.push(tokio::spawn(async move {
+                let command = format!("user-{i}");
+                let mut probe = Probe::new(Some((user_db.0.clone(), user_db.1.clone(), user_db.2.clone(), command.clone())));
+                probe.schedulable = schedulable;
+                let mut request = invoke_request("tasks.update", &json!({"taskId": task, "updates": {"dueDate": 1_800_000_000_000i64 + i as i64}}), &command, &member, &hash);
+                request.context.deadline_unix_ms = deadline();
+                let at = Instant::now();
+                let result = host.invoke(request, &mut probe).await;
+                let total = at.elapsed();
+                let wait = probe.first.map(|first| first.saturating_duration_since(at));
+                probe.finish().await;
+                let budget = matches!(&result, Err(error) if error.to_string().contains("budget_exceeded") || error.to_string().contains("deadline"));
+                (wait.map(|w| w.as_secs_f64() * 1e3), total.as_secs_f64() * 1e3, budget, result.is_ok())
+            }));
+        }
+        let mut waits = Vec::new();
+        let mut totals = Vec::new();
+        let (mut budget, mut ok) = (0, 0);
+        for user in users {
+            let (wait, total, over, success) = user.await.unwrap();
+            if let Some(wait) = wait {
+                waits.push(wait);
+            }
+            totals.push(total);
+            budget += usize::from(over);
+            ok += usize::from(success);
+        }
+        let mut runs = Vec::new();
+        for task in cron_tasks {
+            runs.extend(task.await.unwrap());
+        }
+        let summarize = |values: &mut Vec<f64>| {
+            if values.is_empty() {
+                return Value::Null;
+            }
+            json!({"p50": percentile(values, 0.5), "p95": percentile(values, 0.95), "p99": percentile(values, 0.99), "max": percentile(values, 1.0), "n": values.len()})
+        };
+        let mut cron_totals: Vec<f64> = runs.iter().map(|run| run.0).collect();
+        let mut cron_holds: Vec<f64> = runs.iter().map(|run| run.1).collect();
+        let cron_errors: Vec<String> = runs.iter().filter_map(|run| run.2.clone()).collect();
+        let summary = json!({
+            "config": {
+                "priority": env("GONVEX_MODULE_HOST_ISOLATE_PRIORITY"),
+                "sliceMs": env("GONVEX_MODULE_HOST_SCHEDULED_SLICE_MS"),
+                "scheduledIsolate": env("GONVEX_MODULE_HOST_SCHEDULED_ISOLATE"),
+                "cron": env("BRIDGE_BENCH_CRON").unwrap_or_else(|| "grantProjection.reconcile".into()),
+                "seconds": seconds, "userEveryMs": every.as_millis() as u64, "cronLoops": lanes,
+            },
+            "user": {"calls": totals.len(), "ok": ok, "budgetExceeded": budget,
+                     "waitMs": summarize(&mut waits), "totalMs": summarize(&mut totals)},
+            "cron": {"runs": runs.len(), "errors": cron_errors.len(),
+                     "firstError": cron_errors.first(),
+                     "totalMs": summarize(&mut cron_totals), "writerHoldMs": summarize(&mut cron_holds)},
+            "runtimeRssKb": rss_kb(),
+        });
+        println!("BRIDGE_CONTENTION {summary}");
+        if let Some(path) = env("BRIDGE_BENCH_OUT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&summary).unwrap()).unwrap();
+        }
+        host.shutdown().await;
     });
 }

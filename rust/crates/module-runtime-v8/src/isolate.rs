@@ -24,7 +24,9 @@ use gonvex_module_runtime::{
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit};
+use tokio::sync::{mpsc, oneshot, Notify};
+
+use crate::admission::AdmissionPermit;
 
 use crate::dispatch::{
     decode_result, kind_name, CapabilityFlags, DispatchRequest, HostCallOutcome, HostCallRequest,
@@ -172,7 +174,7 @@ pub(crate) struct IsolateWorker {
 #[derive(Default)]
 struct WorkerState {
     handle: Option<v8::IsolateHandle>,
-    retiring_permit: Option<OwnedSemaphorePermit>,
+    retiring_permit: Option<AdmissionPermit>,
     stopped: bool,
 }
 
@@ -281,7 +283,7 @@ impl IsolateWorker {
 
     /// Transfer admission capacity to the worker until its runtime has been
     /// disposed. Cancellation remains nonblocking for the caller.
-    pub(crate) fn retire(self, permit: OwnedSemaphorePermit) {
+    pub(crate) fn retire(self, permit: AdmissionPermit) {
         let mut state = self.control.state.lock().expect("isolate control lock");
         if !state.stopped {
             assert!(state.retiring_permit.is_none(), "worker retired twice");

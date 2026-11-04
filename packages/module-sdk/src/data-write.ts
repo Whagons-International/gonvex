@@ -33,6 +33,12 @@ const jsonColumn = (table: string, column: string, source: string): string => {
   const path = `'$.${column}'`;
   return `CASE WHEN (SELECT upper(type) FROM pragma_table_info('${table}') WHERE name = '${column}') LIKE '%JSON%' THEN nullif(${source} -> ${path}, 'null') ELSE ${source} ->> ${path} END`;
 };
+/**
+ * Row IDs that SQLite's `json -> label` operator reads as a literal object
+ * key. Others (a leading `$` is a path, quotes and brackets are path syntax)
+ * look their row up with a correlated `json_each` instead.
+ */
+const labelKey = /^[A-Za-z0-9_:.@/-]+$/;
 const groups = <T>(values: readonly T[], columns: (value: T) => string[]) => {
   const result = new Map<string, T[]>();
   for (const value of values) {
@@ -137,15 +143,25 @@ export async function updateDataRows(
   )) {
     const columns = JSON.parse(signature) as string[];
     if (!columns.length) continue;
-    const assignments = columns
-      .map((name) => `${quote(name)} = ${jsonColumn(table, name, "source.value")}`)
-      .join(", ");
+    const target = `${quote(table)}.${quote(key)}`;
     for (let offset = 0; offset < values.length; offset += 500) {
-      const rows = values
-        .slice(offset, offset + 500)
-        .map((update) => ({ ...update.fields, [key]: update.id }));
+      const batch = values.slice(offset, offset + 500);
+      // The batch is a JSON object keyed by row ID. The target rows are found
+      // by primary key (`IN` over the object's keys) and each row reads its
+      // own fields by key. `UPDATE ... FROM json_each(array)` joined on a
+      // JSON expression instead, which SQLite runs as a scan of the whole
+      // table with a scan of the batch per row: ~1M JSON extractions for 500
+      // rows of a 2,000-row table (docs/performance/cron-writer.md).
+      const rows: Record<string, JsonObject> = Object.create(null);
+      for (const update of batch) rows[update.id] = update.fields;
+      const source = batch.every((update) => labelKey.test(update.id))
+        ? `($1 -> CAST(${target} AS TEXT))`
+        : `(SELECT source.value FROM json_each($1) AS source WHERE source.key = ${target})`;
+      const assignments = columns
+        .map((name) => `${quote(name)} = ${jsonColumn(table, name, source)}`)
+        .join(", ");
       await db.query(
-        `UPDATE ${quote(table)} SET ${assignments} FROM json_each($1) AS source WHERE ${quote(table)}.${quote(key)} = source.value ->> '$.${key}'`,
+        `UPDATE ${quote(table)} SET ${assignments} WHERE ${target} IN (SELECT key FROM json_each($1))`,
         [JSON.stringify(rows)],
       );
     }

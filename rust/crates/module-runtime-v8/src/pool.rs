@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gonvex_module_runtime::ModuleError;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::admission::{Admission, AdmissionPermit, Lane};
 
 use crate::isolate::{IsolateWorker, ModuleSource, WorkerCall};
 use crate::V8Config;
@@ -24,7 +25,7 @@ pub(crate) struct IsolatePool {
     source: Arc<ModuleSource>,
     config: V8Config,
     idle: Mutex<Vec<PooledIsolate>>,
-    permits: Arc<Semaphore>,
+    permits: Arc<Admission>,
 }
 
 impl IsolatePool {
@@ -32,15 +33,27 @@ impl IsolatePool {
         let size = config.isolate_pool_size.max(1);
         Self {
             source,
+            permits: Admission::new(size, config.isolate_priority),
             config,
             idle: Mutex::new(Vec::new()),
-            permits: Arc::new(Semaphore::new(size)),
         }
     }
 
+    /// The bundle this pool's isolates evaluate.
+    pub(crate) fn source(&self) -> Arc<ModuleSource> {
+        Arc::clone(&self.source)
+    }
+
     pub(crate) async fn acquire(&self) -> Result<IsolateLease<'_>, ModuleError> {
-        let permit = Arc::clone(&self.permits)
-            .acquire_owned()
+        self.acquire_in(Lane::User).await
+    }
+
+    /// Takes capacity in `lane` (see `admission`), then an idle isolate or a
+    /// new one.
+    pub(crate) async fn acquire_in(&self, lane: Lane) -> Result<IsolateLease<'_>, ModuleError> {
+        let permit = self
+            .permits
+            .acquire(lane)
             .await
             .map_err(|_| ModuleError::Unsupported("module isolate pool is closed".to_owned()))?;
         // The guard is dropped before the await below: an isolate is started
@@ -81,7 +94,7 @@ impl IsolatePool {
     /// Dropping a `PooledIsolate` closes its call channel, which ends the
     /// worker loop and tears the isolate down. `recycle_after_calls` of 0 means
     /// an isolate is never reused.
-    fn release(&self, mut pooled: PooledIsolate, healthy: bool, permit: OwnedSemaphorePermit) {
+    fn release(&self, mut pooled: PooledIsolate, healthy: bool, permit: AdmissionPermit) {
         if !healthy || pooled.calls >= self.config.recycle_after_calls {
             pooled.worker.retire(permit);
             return;
@@ -128,7 +141,7 @@ impl IsolatePool {
 pub(crate) struct IsolateLease<'a> {
     pool: &'a IsolatePool,
     pooled: Option<PooledIsolate>,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Option<AdmissionPermit>,
 }
 
 impl IsolateLease<'_> {

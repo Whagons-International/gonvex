@@ -58,7 +58,8 @@ pub(crate) fn host_state(config: &ModuleHostConfig) -> Arc<HostState> {
                     !matches!(value.trim(), "0" | "false" | "off")
                 }),
             ..defaults
-        },
+        }
+        .with_scheduling_env(),
     })
 }
 
