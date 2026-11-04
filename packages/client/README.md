@@ -121,7 +121,7 @@ so every view of an entity converges together.
 ## Replica Collections
 
 Replica Collections materialize bounded, authorized entity sets in normalized
-IndexedDB storage and resume them from a durable Postgres revision:
+IndexedDB storage and resume them from a durable SQLite revision:
 
 ```ts
 const watch = client.watchReplica<Task>(
@@ -178,7 +178,7 @@ outbox is deliberately session-only rather than risking cross-user replay.
 ## Offline Live Queries
 
 Generated Live Query references include the same structured plan Gonvex
-compiles to PostgreSQL. While offline, the client executes that plan over the
+compiles to SQLite. While offline, the client executes that plan over the
 normalized cached corpus:
 
 ```ts

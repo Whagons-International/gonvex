@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+futures-util.workspace = true
+gonvex-store = { path = "../store" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

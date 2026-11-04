@@ -1,6 +1,6 @@
 //! Rust host-side module generation lifecycle.
 //!
-//! This crate is intentionally independent of HTTP, Postgres, and an engine
+//! This crate is intentionally independent of HTTP, SQLite, and an engine
 //! implementation. The production module host embeds these primitives while
 //! the Rust network/database host retains transaction ownership.
 

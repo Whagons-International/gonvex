@@ -1,40 +1,63 @@
+// Deep clones on hot paths are bugs here (workstream 7, Gabriel 2026-11-03).
+#![warn(clippy::redundant_clone)]
+
+pub mod accept;
 pub mod action_calls;
+mod action_gate;
+#[cfg(test)]
+mod bridge_bench;
 pub mod change_feed;
 pub mod config;
 pub mod control;
+mod cron_profile;
 mod dashboard;
 #[cfg(feature = "duckdb")]
 mod data_ingest;
 #[cfg(not(feature = "duckdb"))]
 #[path = "data_ingest_disabled.rs"]
 mod data_ingest;
+pub mod delivery;
 pub mod error_class;
 pub mod execution;
 pub mod external_auth;
+pub mod feed_share;
 pub mod host_calls;
+mod in_process;
 pub mod live_query;
 pub mod membership_projector;
 mod metrics;
 pub mod module_host;
 pub mod modules;
 mod native_auth;
+pub mod offload;
 mod operations;
 mod operator_data;
+#[cfg(feature = "perf-fixture")]
+pub mod perf_fixture;
+pub mod presence;
+pub mod profiling;
 pub mod public_functions;
 pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
 pub mod sandbox;
+mod scheduled_lane;
 pub mod scheduler;
 mod service_principal;
 mod snapshot_ack;
 mod snapshot_delivery;
 mod sql_admission;
 mod sql_parameters;
+// Kept for the Verus proof and benchmark in verification/; unused by the SQLite store.
+pub mod permission_bits;
+#[allow(dead_code)]
 mod sql_statement_key;
 pub mod storage;
 pub mod telemetry;
 pub mod visibility;
+pub mod visibility_class;
+#[cfg(test)]
+mod visibility_corpus;
 pub mod visibility_index;
 mod visibility_mask;
 pub mod visibility_metrics;
@@ -51,11 +74,11 @@ use axum::routing::{get, post};
 use axum::{body, body::Body, Json, Router};
 use chrono::{SecondsFormat, Utc};
 use futures_util::{Stream, StreamExt};
-use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_protocol::{
     ClientMessage, ExecutionScope, ReducerCallRequest, ReducerErrorClass, ReplicaOpenRequest,
     ServerCapabilities, ServerMessage, PROTOCOL_VERSION,
 };
+use gonvex_store::{ControlPlane, PoolLimits, PoolRegistry, TenantSession};
 use gonvex_websocket::{self as websocket_transport, WebSocket};
 use serde::Serialize;
 use thiserror::Error;
@@ -87,9 +110,19 @@ struct RuntimeInner {
     live_query_cache: live_query::SharedLiveQueryCache,
     membership_projector: membership_projector::MembershipProjector,
     metrics: metrics::RuntimeMetrics,
+    presence: presence::PresenceHub,
+    /// Project-wide Control change notifications sent (each one makes every
+    /// connection of the project refresh its live Control queries).
+    control_notifications: std::sync::atomic::AtomicU64,
     public_limiter: Arc<public_functions::PublicLimiter>,
     visibility_metrics: visibility_metrics::VisibilityMetrics,
     parent_acl: visibility::ParentAclRegistry,
+    delivery: delivery::DeliveryHub,
+    permissions: permission_bits::PermissionRegistry,
+    /// Process-wide root-Action admission (`action_gate.rs`).
+    action_gate: Arc<action_gate::ActionGate>,
+    /// Tenants whose Action outbox the single drainer should visit.
+    outbox_queue: Arc<action_gate::OutboxQueue>,
 }
 
 const REPLICA_OPEN_BATCH_LIMIT: usize = 256;
@@ -127,8 +160,10 @@ pub enum RuntimeStartError {
     #[error(transparent)]
     ModuleHost(#[from] module_host::ModuleHostError),
     #[error(transparent)]
-    Database(#[from] gonvex_postgres::DatabaseError),
-    #[error("GONVEX_CONTROL_PLANE_DATABASE_URL or DATABASE_URL is required when authentication is enabled")]
+    Database(#[from] gonvex_store::DatabaseError),
+    #[error(
+        "a Control Plane database (GONVEX_DATA_DIR) is required when authentication is enabled"
+    )]
     MissingControlPlane,
     #[error(transparent)]
     Module(#[from] ModuleRegistryError),
@@ -142,7 +177,10 @@ struct Health {
     ok: bool,
     version: String,
     time: String,
-    postgres_set: bool,
+    /// The Control Plane SQLite database is configured.
+    database_set: bool,
+    /// Open SQLite databases, connections and SQL admission.
+    database: gonvex_store::PoolRegistrySnapshot,
     valkey_set: bool,
     rows_cache: bool,
     runtime_manifests: RuntimeManifestHealth,
@@ -177,7 +215,7 @@ impl Runtime {
             .config
             .default_database_url
             .as_deref()
-            .ok_or_else(|| "DATABASE_URL is not configured".to_owned())?;
+            .ok_or_else(|| "database provisioning is not configured".to_owned())?;
         let control = self
             .inner
             .control_plane
@@ -228,8 +266,11 @@ impl Runtime {
         let metrics = metrics::RuntimeMetrics::with_changes(runtime_events.clone());
         let sandboxes = sandbox::SandboxManager::new(config.sandbox.clone());
         let storage = storage::StorageManager::new(config.storage.clone());
+        let presence = presence::PresenceHub::new(config.presence.clone());
         Self {
             inner: Arc::new(RuntimeInner {
+                presence,
+                control_notifications: std::sync::atomic::AtomicU64::new(0),
                 config,
                 module_host,
                 pools,
@@ -248,11 +289,104 @@ impl Runtime {
                 public_limiter: Arc::new(public_functions::PublicLimiter::default()),
                 visibility_metrics: visibility_metrics::VisibilityMetrics::default(),
                 parent_acl: visibility::ParentAclRegistry::default(),
+                delivery: delivery::DeliveryHub::default(),
+                permissions: permission_bits::PermissionRegistry::default(),
+                action_gate: action_gate::ActionGate::from_env(),
+                outbox_queue: Arc::default(),
             }),
         }
     }
 
+    /// Presence v2 tick (coalesced transition publishing) and the batched
+    /// support-session `last_seen_at` flusher. Both stop with the runtime.
+    fn start_presence_tasks(&self) {
+        if !self.inner.presence.enabled() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        let tick = self.inner.presence.config().tick;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else { return };
+                inner
+                    .presence
+                    .tick(std::time::Instant::now(), presence::now_ms());
+            }
+        });
+        // Closed sessions: their final `last_seen_at`, batched every 5 s.
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else { return };
+                let pending = inner.presence.take_last_seen_flush();
+                if let Err(error) = write_support_last_seen(&inner, &pending).await {
+                    tracing::debug!(%error, sessions = pending.len(), "support last-seen flush failed");
+                }
+            }
+        });
+        // Open sessions: one batched refresh per interval, so a crash loses at
+        // most one interval. The first run is at a random offset inside the
+        // interval, so it does not coincide with other periodic work.
+        let weak = Arc::downgrade(&self.inner);
+        let every = self.inner.presence.config().support_refresh;
+        let offset = every.mul_f64(rand::random::<f64>());
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + offset, every);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(inner) = weak.upgrade() else { return };
+                let runtime = Runtime { inner };
+                runtime.refresh_support_sessions().await;
+            }
+        });
+    }
+
+    /// Writes `last_seen_at = now` for every open support/error session in one
+    /// batched Control Plane transaction. No idempotency rows, no Control
+    /// change notification, no query refresh. Returns the sessions written.
+    pub async fn refresh_support_sessions(&self) -> usize {
+        let live = self
+            .inner
+            .presence
+            .live_support_sessions(presence::now_ms());
+        match write_support_last_seen(&self.inner, &live).await {
+            Ok(()) => live.len(),
+            Err(error) => {
+                tracing::debug!(%error, sessions = live.len(), "support last-seen refresh failed");
+                0
+            }
+        }
+    }
+
+    /// Shutdown: the final `last_seen_at` of closed sessions not yet flushed
+    /// and `now` for every session still open, in one batched transaction.
+    pub async fn flush_support_sessions(&self) -> usize {
+        let mut sessions = self.inner.presence.take_last_seen_flush();
+        sessions.extend(
+            self.inner
+                .presence
+                .live_support_sessions(presence::now_ms()),
+        );
+        match write_support_last_seen(&self.inner, &sessions).await {
+            Ok(()) => sessions.len(),
+            Err(error) => {
+                tracing::warn!(%error, sessions = sessions.len(), "support last-seen shutdown flush failed");
+                0
+            }
+        }
+    }
+
     pub async fn start(&self) -> Result<(), RuntimeStartError> {
+        profiling::start();
+        self.start_presence_tasks();
         if self.inner.config.sandbox.enabled {
             let binary = self
                 .inner
@@ -381,6 +515,20 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) {
+        // Before any pool closes: record end times of open support sessions.
+        // Bounded so a slow disk cannot eat the container's stop grace.
+        match tokio::time::timeout(
+            SUPPORT_SHUTDOWN_FLUSH_TIMEOUT,
+            self.flush_support_sessions(),
+        )
+        .await
+        {
+            Ok(written) if written > 0 => {
+                tracing::info!(sessions = written, "support session end times recorded")
+            }
+            Ok(_) => {}
+            Err(_) => tracing::warn!("support session end-time flush timed out"),
+        }
         self.inner.scheduler.shutdown();
         self.inner.membership_projector.shutdown();
         self.inner.sandboxes.shutdown().await;
@@ -717,7 +865,7 @@ async fn create_project(
     let Some(base_url) = runtime.inner.config.default_database_url.clone() else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"DATABASE_URL is not configured"})),
+            Json(serde_json::json!({"error":"database provisioning is not configured"})),
         )
             .into_response();
     };
@@ -902,7 +1050,7 @@ async fn delete_tenant_shard(
     let Some(base_url) = runtime.inner.config.default_database_url.as_deref() else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":"DATABASE_URL is not configured"})),
+            Json(serde_json::json!({"error":"database provisioning is not configured"})),
         )
             .into_response();
     };
@@ -987,10 +1135,8 @@ async fn provision_e2e_member(
     };
     let result = async {
         let mut control_tx = control.begin_control_transaction(false).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!("e2e-account:{project_id}:{email}"))
-            .execute(&mut **control_tx.transaction())
-            .await?;
+        // The Control Plane writer is one connection: this transaction already
+        // serializes concurrent creation of the same test account.
         let auth_mode = sqlx::query_scalar::<_, String>(
             "SELECT COALESCE(NULLIF(auth_mode,''),'gonvex-native') FROM gonvex_runtime_projects WHERE id=$1 AND status='active'",
         )
@@ -1028,7 +1174,7 @@ async fn provision_e2e_member(
                 requested_name
             };
             sqlx::query(
-                "INSERT INTO accounts(id,auth_realm_id,email,name,disabled_at,updated_at) VALUES($1,$2,$3,$4,NULL,now())",
+                "INSERT INTO accounts(id,auth_realm_id,email,name,disabled_at,updated_at) VALUES($1,$2,$3,$4,NULL,CAST(unixepoch('subsec')*1000 AS INTEGER))",
             )
             .bind(&account_id)
             .bind(project_id)
@@ -1040,7 +1186,7 @@ async fn provision_e2e_member(
                 sqlx::query(
                     r#"INSERT INTO account_identities
                        (project_id,account_id,provider,issuer,subject,email,verified_email,updated_at)
-                       VALUES($1,$2,'password',$1,$3,$3,TRUE,now())"#,
+                       VALUES($1,$2,'password',$1,$3,$3,1,CAST(unixepoch('subsec')*1000 AS INTEGER))"#,
                 )
                 .bind(project_id)
                 .bind(&account_id)
@@ -1087,10 +1233,11 @@ async fn provision_e2e_member(
         let revision = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO members
                (id,account_id,status,display_name,avatar_url,role,permissions,updated_at)
-               VALUES($1,$2,'active',$3,$4,'admin','{"e2e":true}'::jsonb,now())
+               VALUES($1,$2,'active',$3,$4,'admin','{"e2e":true}',CAST(unixepoch('subsec')*1000 AS INTEGER))
                ON CONFLICT(id) DO UPDATE SET status='active',display_name=EXCLUDED.display_name,
-                 avatar_url=EXCLUDED.avatar_url,role='admin',permissions='{"e2e":true}'::jsonb,
-                 membership_revision=members.membership_revision+1,updated_at=now()
+                 avatar_url=EXCLUDED.avatar_url,role='admin',permissions='{"e2e":true}',
+                 membership_revision=members.membership_revision+1,
+                 updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
                RETURNING membership_revision"#,
         )
         .bind(&member_id)
@@ -1105,10 +1252,12 @@ async fn provision_e2e_member(
         sqlx::query(
             r#"INSERT INTO account_tenant_index
                (account_id,tenant_id,member_id,status,tenant_membership_revision,updated_at)
-               VALUES($1,$2,$3,'active',$4,now()) ON CONFLICT(account_id,tenant_id) DO UPDATE SET
+               VALUES($1,$2,$3,'active',$4,CAST(unixepoch('subsec')*1000 AS INTEGER))
+               ON CONFLICT(account_id,tenant_id) DO UPDATE SET
                  member_id=EXCLUDED.member_id,status='active',
-                 tenant_membership_revision=GREATEST(account_tenant_index.tenant_membership_revision,
-                                                     EXCLUDED.tenant_membership_revision),updated_at=now()"#,
+                 tenant_membership_revision=max(account_tenant_index.tenant_membership_revision,
+                                                EXCLUDED.tenant_membership_revision),
+                 updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
         )
         .bind(&account_id)
         .bind(tenant_id)
@@ -1117,7 +1266,7 @@ async fn provision_e2e_member(
         .execute(&mut **finish.transaction())
         .await?;
         finish.commit().await?;
-        Ok::<_, gonvex_postgres::DatabaseError>(serde_json::json!({
+        Ok::<_, gonvex_store::DatabaseError>(serde_json::json!({
             "projectId":project_id,"tenantId":tenant_id,
             "accountId":account_id,"memberId":member_id,
         }))
@@ -1125,7 +1274,7 @@ async fn provision_e2e_member(
     .await;
     match result {
         Ok(value) => (StatusCode::OK, Json(value)).into_response(),
-        Err(gonvex_postgres::DatabaseError::Sql(sqlx::Error::RowNotFound)) => (
+        Err(gonvex_store::DatabaseError::Sql(sqlx::Error::RowNotFound)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error":"test actor account not found"})),
         )
@@ -1224,7 +1373,7 @@ async fn apply_dev_sync(
         .unwrap_or("")
         .trim()
         .to_owned();
-    let record = gonvex_postgres::RuntimeManifestRecord {
+    let record = gonvex_store::RuntimeManifestRecord {
         project_id: project.clone(),
         module_hash,
         manifest: manifest.clone(),
@@ -1283,7 +1432,7 @@ async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response 
     let mut module_host = runtime.inner.module_host.status().await;
     let (active_projects, failed_projects) = runtime.inner.modules.counts().await;
     module_host.active_projects = active_projects;
-    let postgres_ready = runtime.inner.control_plane.read().await.is_some()
+    let database_ready = runtime.inner.control_plane.read().await.is_some()
         || runtime.inner.config.control_plane_database_url.is_none();
     let sandbox_ready = !runtime.inner.config.sandbox.enabled
         || runtime
@@ -1293,7 +1442,7 @@ async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response 
             .worker_binary
             .as_ref()
             .is_some_and(|path| path.is_file());
-    let ready = module_host.ready && postgres_ready && failed_projects == 0 && sandbox_ready;
+    let ready = module_host.ready && database_ready && failed_projects == 0 && sandbox_ready;
     let status = if ready {
         StatusCode::OK
     } else {
@@ -1320,8 +1469,9 @@ async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response 
             ok: ready,
             version: runtime.inner.config.runtime_version.clone(),
             time: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
-            postgres_set: runtime.inner.config.control_plane_database_url.is_some()
+            database_set: runtime.inner.config.control_plane_database_url.is_some()
                 || runtime.inner.config.default_database_url.is_some(),
+            database: runtime.inner.pools.snapshot().await,
             valkey_set: false,
             rows_cache: false,
             runtime_manifests: RuntimeManifestHealth {
@@ -1346,13 +1496,17 @@ async fn health(State(runtime): State<Runtime>, headers: HeaderMap) -> Response 
 
 async fn websocket_upgrade(
     State(runtime): State<Runtime>,
+    accepted: Option<axum::Extension<axum::extract::ConnectInfo<accept::AcceptedSocket>>>,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Query(params): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
     request: axum::extract::Request,
 ) -> Response {
-    let peer = peer
-        .map(|peer| peer.0 .0.ip())
+    let accepted = accepted.map(|accepted| accepted.0 .0);
+    let socket_fd = accepted.and_then(|accepted| accepted.fd);
+    let peer = accepted
+        .map(|accepted| accepted.peer.ip())
+        .or_else(|| peer.map(|peer| peer.0 .0.ip()))
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let limits = &runtime.inner.config.public_functions;
     let ip = public_functions::client_ip(peer, &headers, limits);
@@ -1394,13 +1548,17 @@ async fn websocket_upgrade(
     } else {
         16 << 20
     };
-    websocket_transport::upgrade(
-        request,
-        runtime.inner.config.websocket_compression,
-        runtime.inner.config.websocket_compression_threshold,
+    let options = websocket_transport::UpgradeOptions {
+        compression: runtime.inner.config.websocket_compression,
+        threshold: runtime.inner.config.websocket_compression_threshold,
         max_message,
         max_frame,
-        move |socket| {
+        outbound: runtime.inner.config.connection.outbound,
+        socket_fd,
+    };
+    websocket_transport::upgrade(request, options, move |socket| {
+        gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::WsConnection,
             websocket(
                 socket,
                 runtime,
@@ -1408,9 +1566,9 @@ async fn websocket_upgrade(
                 public_transport,
                 public_connection,
                 pending,
-            )
-        },
-    )
+            ),
+        )
+    })
     .await
 }
 
@@ -1438,21 +1596,40 @@ async fn websocket(
     let mut replica_no_old_values_enabled = false;
     let mut replica_field_patches_enabled = false;
     let mut row_patches = gonvex_protocol::row_patch::RowPatchEncoder::default();
+    let mut batcher = delivery::ReplicaBatcher::default();
     let mut snapshot_delivery = snapshot_delivery::SnapshotDelivery::default();
     let mut legacy_snapshot_delivery = snapshot_delivery::LegacySnapshotDelivery::default();
     let mut service_grant: Option<service_principal::ServiceGrant> = None;
     let mut connected_client_contract: Option<u64> = None;
     let connection_id = uuid::Uuid::new_v4().to_string();
     let _connection_presence = runtime.inner.metrics.register(&connection_id);
+    // Presence v2: the socket is the liveness signal; dropping the guard (any
+    // exit from this task) removes the connection's presence after grace.
+    let presence_hub = runtime.inner.presence.clone();
+    let _presence_guard = presence::ConnectionGuard::new(presence_hub.clone(), &connection_id);
+    let mut presence_slot: Option<Arc<presence::PresenceSlot>> = None;
+    let mut presence_negotiated = false;
+    let mut last_inbound = tokio::time::Instant::now();
+    let socket_watch = socket.watch();
+    let mut presence_ping = tokio::time::interval(presence_hub.config().ping_interval);
+    presence_ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    presence_ping.tick().await;
     let mut control_connection = control::ControlConnection {
         connection_id: connection_id.clone(),
         ..control::ControlConnection::default()
     };
     let mut feed = None;
     let mut feed_scheduler = FeedFirstScheduler::default();
+    // Delivery v3, slow readers: a feed event taken while merging that could
+    // not be merged (processed next), and whether the socket fell behind
+    // since the feed receiver was last drained.
+    let mut pending_feed: Option<Result<change_feed::FeedEvent, broadcast::error::RecvError>> =
+        None;
+    let mut catching_up = false;
     let mut sent_replica_revision = 0u64;
     let mut sent_zero_bootstrap_watermark = false;
-    let mut replicas = BTreeMap::new();
+    // Removed and dropped subscriptions are freed on the offload pool.
+    let mut replicas = offload::RetiringMap::default();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
     // Retain at most one decoded, transport-size-bounded frame. While it waits
     // for preparation capacity, stop reading further frames (TCP backpressure).
@@ -1488,6 +1665,8 @@ async fn websocket(
             replica_watermark: Some(1),
             reducer_receipt_lookup: Some(1),
             control_watermark: Some(1),
+            replica_batch_frames: Some(1),
+            presence: presence_hub.enabled().then_some(1),
         }),
     };
     if send_connection_json(&mut snapshot_delivery, &mut socket, &ready)
@@ -1503,6 +1682,7 @@ async fn websocket(
         () => {{
             replicas.clear();
             row_patches.clear();
+            batcher.clear_bindings();
             replica_opens.clear();
             pending_replica_opens.clear();
             snapshot_delivery.clear();
@@ -1514,6 +1694,8 @@ async fn websocket(
             feed_scheduler.reset();
             sent_replica_revision = 0;
             sent_zero_bootstrap_watermark = false;
+            presence_hub.reset(&connection_id, std::time::Instant::now());
+            presence_slot = None;
             runtime.inner.metrics.authenticated(
                 &connection_id,
                 &control::ControlConnection {
@@ -1537,8 +1719,29 @@ async fn websocket(
             // forever for capacity that can never exist.
             bytes > replica_open_queue::MAX_BYTES || replica_opens.has_capacity(&request.id, bytes)
         });
-        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty();
+        // While the client is behind, produce nothing new: presence keeps
+        // merging per member in its slot, feed events stay in the shared
+        // broadcast ring (lagging it resets and resyncs the subscription) and
+        // the pending replica batch is not queued, so the client gets fewer,
+        // newer updates once it catches up (feed events that waited are
+        // merged into one, see `next_socket_or_feed`). The transport bounds
+        // queued bytes and resets a connection whose writes stop progressing.
+        let backlogged = socket_watch.is_backlogged();
+        catching_up |= backlogged;
+        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
+        let batch_deadline = if backlogged {
+            None
+        } else {
+            batcher.deadline(socket.batch())
+        };
+        let presence_wait = presence_slot.clone().filter(|_| !backlogged);
         let message = tokio::select! {
+            _ = socket_watch.writable(), if backlogged => continue,
+            // Delivery v2: one frame per connection per tick.
+            _ = async { tokio::time::sleep_until(batch_deadline.unwrap()).await }, if batch_deadline.is_some() => {
+                if batcher.flush(&mut socket).await.is_err() { return; }
+                continue;
+            }
             _ = std::future::ready(()), if admit_replica => {
                 let request = pending_replica_opens.pop_front().unwrap();
                 snapshot_delivery.remove(&request.id);
@@ -1569,7 +1772,8 @@ async fn websocket(
             }
             _ = tokio::task::yield_now(), if !legacy_snapshot_delivery.is_empty() => {
                 for page in legacy_snapshot_delivery.next() {
-                    if send_json(&mut socket,&page).await.is_err() {return;}
+                    let Ok(page) = offload::encode_snapshot_json(page).await else { return; };
+                    if socket.send(gonvex_websocket::text_message(page)).await.is_err() {return;}
                 }
                 continue;
             }
@@ -1584,7 +1788,7 @@ async fn websocket(
                 break;
             }
             _ = auth_revalidation.tick(), if !control_connection.auth_token.is_empty() => {
-                if !revalidate_connection(&runtime, &control_connection).await {
+                if !Box::pin(revalidate_connection(&runtime, &control_connection)).await {
                     replicas.clear();
                     replica_opens.clear();
                     pending_replica_opens.clear();
@@ -1601,6 +1805,8 @@ async fn websocket(
                         connection_id: connection_id.clone(),
                         ..control::ControlConnection::default()
                     };
+                    presence_hub.reset(&connection_id, std::time::Instant::now());
+                    presence_slot = None;
                     runtime.inner.metrics.authenticated(
                         &connection_id,
                         &control_connection,
@@ -1625,19 +1831,35 @@ async fn websocket(
             // the existing reset, never a silently missed transaction.
             transport = async {
                 if defer_feed { ScheduledTransport::Socket(socket.next().await) }
+                else if let Some(event) = pending_feed.take() { ScheduledTransport::Feed(event) }
                 else { next_socket_or_feed(&mut socket, &mut feed, &mut feed_scheduler).await }
             }, if pending_replica_opens.is_empty() => {
                 match transport {
                     ScheduledTransport::Socket(message) => {
                         let Some(message) = message else { break; };
+                        last_inbound = tokio::time::Instant::now();
                         message
                     }
                     ScheduledTransport::Feed(event) => match event {
                     Ok(event) => {
-                        let feed_revision = match &event {
-                            change_feed::FeedEvent::Transaction { revision, .. } => Some(*revision),
-                            change_feed::FeedEvent::Reset { .. } => None,
+                        // A connection that fell behind takes every feed event
+                        // waiting for it as one: each row's newest state once.
+                        let event = if catching_up {
+                            let merged = delivery::merge_waiting_feed(event, &mut feed, &mut pending_feed, &replicas, live_queries.is_empty() && batcher.enabled());
+                            if feed.as_ref().is_none_or(|receiver| receiver.is_empty()) { catching_up = false; }
+                            merged
+                        } else { event };
+                        let (feed_revision, feed_key) = match &event {
+                            change_feed::FeedEvent::Transaction { revision, database_epoch, .. } => (
+                                Some(*revision),
+                                Some(change_feed::broadcast_key(database_epoch, *revision)),
+                            ),
+                            change_feed::FeedEvent::Reset { .. } => (None, None),
                         };
+                        if let Some(wait) = feed_key.and_then(gonvex_profiler::since_stamp) {
+                            gonvex_profiler::record(gonvex_profiler::Stage::DeliveryQueueWait, gonvex_profiler::Label::None, wait);
+                        }
+                        let mut delivery_timer = gonvex_profiler::Timer::start();
                         let feed_apply_started = std::time::Instant::now();
                         tracing::debug!(
                             target: "gonvex_runtime::ws_trace",
@@ -1662,16 +1884,55 @@ async fn websocket(
                             {
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
-                            match runtime.apply_feed_event(session, &mut replicas, event).await {
+                            let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
+                            let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm).await;
+                            delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
+                            match applied {
+                                Ok(messages) if batcher.enabled() => {
+                                    gonvex_profiler::record(gonvex_profiler::Stage::DeliveryFrames, gonvex_profiler::Label::None, messages.len() as u64);
+                                    let tenant_id = session.route.tenant_id.as_str();
+                                    for message in messages {
+                                        // Ready frames of a snapshot still being
+                                        // delivered wait in the gate, as before.
+                                        let message = if matches!(message, ServerMessage::ReplicaReady { .. }) {
+                                            match snapshot_delivery.gate(&message) { Some(message) => message, None => continue }
+                                        } else { message };
+                                        match batcher.push(socket.batch_mut(), &runtime.inner.delivery, tenant_id, snapshot_delivery.native(), &replicas, message) {
+                                            Ok(None) => {}
+                                            Ok(Some(message)) => {
+                                                if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
+                                            }
+                                            Err(_) => return,
+                                        }
+                                    }
+                                    if let Some(ServerMessage::ReplicaWatermark { revision }) = transaction_watermark {
+                                        batcher.watermark(socket.batch_mut(), tenant_id, &replicas, revision);
+                                        sent_replica_revision = sent_replica_revision.max(revision);
+                                    }
+                                    if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
+                                    if reset {
+                                        replicas.clear();
+                                        replica_opens.clear();
+                                        pending_replica_opens.clear();
+                                        snapshot_delivery.clear();
+                                        legacy_snapshot_delivery.clear();
+                                    }
+                                }
                                 Ok(messages) => {
+                                    gonvex_profiler::record(gonvex_profiler::Stage::DeliveryFrames, gonvex_profiler::Label::None, messages.len() as u64);
+                                    let mut backlog = gonvex_profiler::Backlog::new(messages.len());
                                     for mut message in messages {
+                                        backlog.sent();
                                         if replica_field_patches_enabled && !replica_native_rows_enabled {
-                                            match row_patches.prepare(&message) {
+                                            let mut encode_timer = gonvex_profiler::Timer::start();
+                                            let prepared = row_patches.prepare(&message);
+                                            encode_timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
+                                            match prepared {
                                                 Ok(Some((full, patch))) => {
                                                     let result = if let Some(patch) = patch {
                                                         socket.send_best_text(&full, &patch).await
                                                     } else {
-                                                        socket.send(Message::Text(full.into())).await
+                                                        socket.send(gonvex_websocket::text_message(full)).await
                                                     };
                                                     if result.is_err() { return; }
                                                     continue;
@@ -1681,9 +1942,12 @@ async fn websocket(
                                             }
                                         }
                                         if replica_no_old_values_enabled && !replica_native_rows_enabled {
-                                            match gonvex_protocol::encode_compact_replica_transaction(&mut message, socket.compression_threshold()) {
+                                            let mut encode_timer = gonvex_profiler::Timer::start();
+                                            let compact = gonvex_protocol::encode_compact_replica_transaction(&mut message, socket.compression_threshold());
+                                            encode_timer.lap(gonvex_profiler::Stage::WsEncode, gonvex_profiler::Label::None);
+                                            match compact {
                                                 Ok(Some(encoded)) => {
-                                                    if socket.send(Message::Text(encoded.into())).await.is_err() { return; }
+                                                    if socket.send(gonvex_websocket::text_message(encoded)).await.is_err() { return; }
                                                     continue;
                                                 }
                                                 Ok(None) => {}
@@ -1732,6 +1996,10 @@ async fn websocket(
                                 }
                             }
                         }
+                        delivery_timer.lap(gonvex_profiler::Stage::DeliverySend, gonvex_profiler::Label::None);
+                        if let Some(total) = feed_key.and_then(gonvex_profiler::since_stamp) {
+                            gonvex_profiler::record(gonvex_profiler::Stage::DeliveryTotal, gonvex_profiler::Label::None, total);
+                        }
                         tracing::debug!(
                             target: "gonvex_runtime::ws_trace",
                             connection = %connection_id,
@@ -1769,17 +2037,57 @@ async fn websocket(
                     },
                 }
             }
+            _ = async {
+                match presence_wait.as_ref() {
+                    Some(slot) => slot.notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(slot) = presence_slot.as_ref() {
+                    if let Some(frame) = presence_hub.drain(&connection_id, slot) {
+                        match tenant_session.as_ref() {
+                            // Delivery v3: presence rides in the tick's batch
+                            // (one frame per tick per connection).
+                            Some(session) if batcher.enabled() => {
+                                batcher.push_item(socket.batch_mut(), &session.route.tenant_id, &replicas, frame);
+                                if batcher.full(socket.batch()) && batcher.flush(&mut socket).await.is_err() { return; }
+                            }
+                            _ => {
+                                if socket.send(gonvex_websocket::text_message(frame)).await.is_err() { return; }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            _ = presence_ping.tick(), if presence_negotiated => {
+                // Inbound frames, a blocked write resuming (the client is
+                // draining a large send) and the server's own read
+                // backpressure all count; a client that reads nothing does
+                // not. Stuck writes are reset by the transport's stall timeout.
+                let alive = socket_watch
+                    .last_activity()
+                    .map_or(last_inbound, |activity| activity.max(last_inbound));
+                if alive.elapsed() >= presence_hub.config().liveness_timeout {
+                    let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 4000, reason: "presence liveness timeout".into(),
+                    }))).await;
+                    break;
+                }
+                if socket.send(Message::Ping(Default::default())).await.is_err() { break; }
+                continue;
+            }
             event = runtime_events.recv() => {
                 match event {
                     Ok(RuntimeEvent::ControlChanged { project_id })
                         if project_id == control_connection.project_id =>
                     {
-                        for message in runtime
+                        for message in Box::pin(runtime
                             .refresh_control_queries(
                                 &control_connection,
                                 &mut control_queries,
                                 "control-change",
-                            )
+                            ))
                             .await
                         {
                             if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
@@ -1788,9 +2096,9 @@ async fn websocket(
                     Ok(RuntimeEvent::PresenceChanged { project_id })
                         if project_id == control_connection.project_id =>
                     {
-                        for message in runtime.refresh_control_queries(
+                        for message in Box::pin(runtime.refresh_control_queries(
                             &control_connection, &mut control_queries, "presence-change",
-                        ).await {
+                        )).await {
                             if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                         }
                     }
@@ -1873,7 +2181,7 @@ async fn websocket(
         // A service principal socket accepts only its narrow capability set;
         // it never reaches the member, replica or Control Plane handlers below.
         if let (Some(grant), Message::Text(text)) = (service_grant.as_ref(), &message) {
-            match runtime.handle_service_frame(grant, text).await {
+            match Box::pin(runtime.handle_service_frame(grant, text)).await {
                 service_principal::ServiceFrame::PassThrough => {}
                 service_principal::ServiceFrame::Reply(response) => {
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
@@ -2047,6 +2355,9 @@ async fn websocket(
                     let Ok((response, grant)) = service_auth else {
                         break;
                     };
+                    presence_hub.reset(&connection_id, std::time::Instant::now());
+                    presence_slot = None;
+                    presence_negotiated = false;
                     replicas.clear();
                     replica_opens.clear();
                     pending_replica_opens.clear();
@@ -2099,7 +2410,7 @@ async fn websocket(
                             tokio::time::Instant::now()
                                 + runtime.inner.config.public_functions.auth_timeout
                         },
-                        authenticate(
+                        Box::pin(authenticate(
                             &runtime,
                             id,
                             token.as_deref(),
@@ -2110,12 +2421,19 @@ async fn websocket(
                                 public,
                             },
                             &connection_id,
-                        ),
+                        )),
                     )
                     .await;
                     let Ok((mut response, authenticated_control)) = auth_result else {
                         break;
                     };
+                    // A new session scope: the client re-announces its state
+                    // and re-subscribes after `auth.result`. Grace hides the
+                    // gap for a same-tenant token refresh.
+                    presence_hub.reset(&connection_id, std::time::Instant::now());
+                    presence_slot = None;
+                    presence_negotiated = presence_hub.enabled()
+                        && capabilities.as_ref().and_then(|c| c.presence) == Some(1);
                     if let Some(session) = authenticated_control
                         .tenant
                         .as_ref()
@@ -2204,6 +2522,10 @@ async fn websocket(
                     replica_field_patches_enabled =
                         capabilities.as_ref().and_then(|c| c.replica_field_patches) == Some(1);
                     row_patches.clear();
+                    batcher.set_enabled(
+                        capabilities.as_ref().and_then(|c| c.replica_batch_frames) == Some(1),
+                    );
+                    batcher.clear_bindings();
                     replica_native_rows_enabled =
                         snapshot_delivery::negotiated(capabilities.as_ref());
                     snapshot_delivery.set_native(replica_native_rows_enabled);
@@ -2294,9 +2616,12 @@ async fn websocket(
                         .metrics
                         .activity(&connection_id, "Query", Some(&path));
                     let response = if scope == Some(ExecutionScope::Control) {
-                        match runtime
-                            .execute_control_query(&control_connection, &path, &args)
-                            .await
+                        match Box::pin(runtime.execute_control_query(
+                            &control_connection,
+                            &path,
+                            &args,
+                        ))
+                        .await
                         {
                             Ok(result) => query_result(id, path, result),
                             Err(error) => ServerMessage::QueryError {
@@ -2306,7 +2631,7 @@ async fn websocket(
                             },
                         }
                     } else if let Some(session) = tenant_session.as_ref() {
-                        match runtime.execute_tenant_query(session, &path, args).await {
+                        match Box::pin(runtime.execute_tenant_query(session, &path, args)).await {
                             Ok(result) => query_result(id, path, result),
                             Err(error) => ServerMessage::QueryError {
                                 id,
@@ -2336,6 +2661,11 @@ async fn websocket(
                             .min()
                             .map(|revision| revision.max(sent_replica_revision)),
                     );
+                    if terminal_watermark.is_none() {
+                        if let Some(revision) = committed_revision(&response) {
+                            batcher.urgent(revision);
+                        }
+                    }
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                         .await
                         .is_err()
@@ -2364,9 +2694,13 @@ async fn websocket(
                         Some(&path),
                     );
                     let (response, subscription) = if scope == Some(ExecutionScope::Control) {
-                        match runtime
-                            .open_control_query(&control_connection, id.clone(), path.clone(), args)
-                            .await
+                        match Box::pin(runtime.open_control_query(
+                            &control_connection,
+                            id.clone(),
+                            path.clone(),
+                            args,
+                        ))
+                        .await
                         {
                             Ok((message, opened)) => {
                                 control_queries.insert(opened.id.clone(), opened);
@@ -2382,9 +2716,13 @@ async fn websocket(
                             ),
                         }
                     } else if let Some(session) = tenant_session.as_ref() {
-                        match runtime
-                            .open_live_query(session, id.clone(), path.clone(), args)
-                            .await
+                        match Box::pin(runtime.open_live_query(
+                            session,
+                            id.clone(),
+                            path.clone(),
+                            args,
+                        ))
+                        .await
                         {
                             Ok(opened) => (
                                 live_query::resume_message(
@@ -2449,14 +2787,13 @@ async fn websocket(
                         let (response, subscription) = if subscribe.scope
                             == Some(ExecutionScope::Control)
                         {
-                            match runtime
-                                .open_control_query(
-                                    &control_connection,
-                                    subscribe.id.clone(),
-                                    subscribe.path.clone(),
-                                    subscribe.args,
-                                )
-                                .await
+                            match Box::pin(runtime.open_control_query(
+                                &control_connection,
+                                subscribe.id.clone(),
+                                subscribe.path.clone(),
+                                subscribe.args,
+                            ))
+                            .await
                             {
                                 Ok((message, opened)) => {
                                     control_queries.insert(opened.id.clone(), opened);
@@ -2472,14 +2809,13 @@ async fn websocket(
                                 ),
                             }
                         } else if let Some(session) = tenant_session.as_ref() {
-                            match runtime
-                                .open_live_query(
-                                    session,
-                                    subscribe.id.clone(),
-                                    subscribe.path.clone(),
-                                    subscribe.args,
-                                )
-                                .await
+                            match Box::pin(runtime.open_live_query(
+                                session,
+                                subscribe.id.clone(),
+                                subscribe.path.clone(),
+                                subscribe.args,
+                            ))
+                            .await
                             {
                                 Ok(opened) => (
                                     live_query::resume_message(
@@ -2553,9 +2889,15 @@ async fn websocket(
                         .metrics
                         .activity(&connection_id, "Reducer", Some(&call.path));
                     let control_write = call.scope == Some(ExecutionScope::Control);
-                    let response =
-                        call_reducer(&runtime, tenant_session.as_ref(), &control_connection, call)
-                            .await;
+                    let (response, presence_short) = Box::pin(call_reducer_with_presence(
+                        &runtime,
+                        tenant_session.as_ref(),
+                        &control_connection,
+                        call,
+                        sent_replica_revision,
+                        presence_negotiated,
+                    ))
+                    .await;
                     let terminal_watermark = call_watermark_after_sent_replica_work(
                         &response,
                         !control_write && tenant_session.is_some(),
@@ -2566,16 +2908,20 @@ async fn websocket(
                             .min()
                             .map(|revision| revision.max(sent_replica_revision)),
                     );
+                    if terminal_watermark.is_none() {
+                        if let Some(revision) = committed_revision(&response) {
+                            batcher.urgent(revision);
+                        }
+                    }
                     let control_succeeded =
                         control_write && matches!(response, ServerMessage::ReducerResult { .. });
-                    let control_updates = if control_succeeded {
-                        runtime
-                            .refresh_control_queries(
-                                &control_connection,
-                                &mut control_queries,
-                                "control-change",
-                            )
-                            .await
+                    let control_updates = if control_succeeded && !presence_short {
+                        Box::pin(runtime.refresh_control_queries(
+                            &control_connection,
+                            &mut control_queries,
+                            "control-change",
+                        ))
+                        .await
                     } else {
                         Vec::new()
                     };
@@ -2590,13 +2936,15 @@ async fn websocket(
                         }
                     }
                     if let Some(watermark) = terminal_watermark {
-                        let frames =
-                            if own_membership_changed(&runtime, tenant_session.as_ref()).await {
-                                discard_tenant_session!();
-                                membership_changed_frames(Some(watermark))
-                            } else {
-                                vec![watermark]
-                            };
+                        let frames = if !presence_short
+                            && Box::pin(own_membership_changed(&runtime, tenant_session.as_ref()))
+                                .await
+                        {
+                            discard_tenant_session!();
+                            membership_changed_frames(Some(watermark))
+                        } else {
+                            vec![watermark]
+                        };
                         if send_connection_all(&mut snapshot_delivery, &mut socket, &frames)
                             .await
                             .is_err()
@@ -2604,7 +2952,7 @@ async fn websocket(
                             break;
                         }
                     }
-                    if control_succeeded {
+                    if control_succeeded && !presence_short {
                         runtime.notify_control_changed(&control_connection.project_id);
                     }
                     tracing::debug!(
@@ -2659,12 +3007,14 @@ async fn websocket(
                             .metrics
                             .activity(&connection_id, "Reducer", Some(&call.path));
                         let control_write = call.scope == Some(ExecutionScope::Control);
-                        let response = call_reducer(
+                        let (response, presence_short) = Box::pin(call_reducer_with_presence(
                             &runtime,
                             tenant_session.as_ref(),
                             &control_connection,
                             call,
-                        )
+                            sent_replica_revision,
+                            presence_negotiated,
+                        ))
                         .await;
                         let terminal_watermark = call_watermark_after_sent_replica_work(
                             &response,
@@ -2676,16 +3026,20 @@ async fn websocket(
                                 .min()
                                 .map(|revision| revision.max(sent_replica_revision)),
                         );
+                        if terminal_watermark.is_none() {
+                            if let Some(revision) = committed_revision(&response) {
+                                batcher.urgent(revision);
+                            }
+                        }
                         let control_succeeded = control_write
                             && matches!(response, ServerMessage::ReducerResult { .. });
-                        let control_updates = if control_succeeded {
-                            runtime
-                                .refresh_control_queries(
-                                    &control_connection,
-                                    &mut control_queries,
-                                    "control-change",
-                                )
-                                .await
+                        let control_updates = if control_succeeded && !presence_short {
+                            Box::pin(runtime.refresh_control_queries(
+                                &control_connection,
+                                &mut control_queries,
+                                "control-change",
+                            ))
+                            .await
                         } else {
                             Vec::new()
                         };
@@ -2700,11 +3054,12 @@ async fn websocket(
                             }
                         }
                         if let Some(watermark) = terminal_watermark {
-                            let frames = if own_membership_changed(
-                                &runtime,
-                                tenant_session.as_ref(),
-                            )
-                            .await
+                            let frames = if !presence_short
+                                && Box::pin(own_membership_changed(
+                                    &runtime,
+                                    tenant_session.as_ref(),
+                                ))
+                                .await
                             {
                                 discard_tenant_session!();
                                 membership_changed_frames(Some(watermark))
@@ -2718,7 +3073,7 @@ async fn websocket(
                                 return;
                             }
                         }
-                        if control_succeeded {
+                        if control_succeeded && !presence_short {
                             runtime.notify_control_changed(&control_connection.project_id);
                         }
                     }
@@ -2736,14 +3091,13 @@ async fn websocket(
                         .metrics
                         .activity(&connection_id, "Action", Some(&path));
                     let response = if scope == Some(ExecutionScope::Control) {
-                        match runtime
-                            .execute_control_action(
-                                &control_connection,
-                                &path,
-                                &args,
-                                idempotency_key.as_deref().unwrap_or(""),
-                            )
-                            .await
+                        match Box::pin(runtime.execute_control_action(
+                            &control_connection,
+                            &path,
+                            &args,
+                            idempotency_key.as_deref().unwrap_or(""),
+                        ))
+                        .await
                         {
                             Ok(result) => ServerMessage::ActionResult {
                                 id,
@@ -2760,7 +3114,7 @@ async fn websocket(
                             },
                         }
                     } else if let Some(session) = tenant_session.as_ref() {
-                        match runtime.execute_tenant_action(session, &path, args).await {
+                        match Box::pin(runtime.execute_tenant_action(session, &path, args)).await {
                             Ok(result) => ServerMessage::ActionResult {
                                 id,
                                 path: Some(path),
@@ -2794,16 +3148,20 @@ async fn websocket(
                             .min()
                             .map(|revision| revision.max(sent_replica_revision)),
                     );
+                    if terminal_watermark.is_none() {
+                        if let Some(revision) = committed_revision(&response) {
+                            batcher.urgent(revision);
+                        }
+                    }
                     let control_succeeded = scope == Some(ExecutionScope::Control)
                         && matches!(response, ServerMessage::ActionResult { .. });
                     let control_updates = if control_succeeded {
-                        runtime
-                            .refresh_control_queries(
-                                &control_connection,
-                                &mut control_queries,
-                                "control-change",
-                            )
-                            .await
+                        Box::pin(runtime.refresh_control_queries(
+                            &control_connection,
+                            &mut control_queries,
+                            "control-change",
+                        ))
+                        .await
                     } else {
                         Vec::new()
                     };
@@ -2819,7 +3177,9 @@ async fn websocket(
                     }
                     if let Some(watermark) = terminal_watermark {
                         let frames =
-                            if own_membership_changed(&runtime, tenant_session.as_ref()).await {
+                            if Box::pin(own_membership_changed(&runtime, tenant_session.as_ref()))
+                                .await
+                            {
                                 discard_tenant_session!();
                                 membership_changed_frames(Some(watermark))
                             } else {
@@ -2947,14 +3307,13 @@ async fn websocket(
                     release,
                     environment,
                 }) => {
-                    let response = runtime
-                        .register_error_session(
-                            &control_connection,
-                            id,
-                            release.as_deref(),
-                            environment.as_deref(),
-                        )
-                        .await;
+                    let response = Box::pin(runtime.register_error_session(
+                        &control_connection,
+                        id,
+                        release.as_deref(),
+                        environment.as_deref(),
+                    ))
+                    .await;
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                         .await
                         .is_err()
@@ -2962,10 +3321,65 @@ async fn websocket(
                         break;
                     }
                 }
+                Ok(ClientMessage::PresenceSet { state }) => {
+                    if let (Some((scope, member)), Some(state)) = (
+                        presence_member_scope(&presence_hub, tenant_session.as_ref()),
+                        presence::parse_state(&state),
+                    ) {
+                        presence_hub.set_state(
+                            &connection_id,
+                            &scope,
+                            &member,
+                            state,
+                            false,
+                            std::time::Instant::now(),
+                        );
+                    }
+                }
+                Ok(ClientMessage::PresenceSubscribe { id }) => {
+                    let response =
+                        match presence_member_scope(&presence_hub, tenant_session.as_ref()) {
+                            Some((scope, _)) => {
+                                let (slot, snapshot) = presence_hub.subscribe(
+                                    &connection_id,
+                                    &scope,
+                                    &id,
+                                    std::time::Instant::now(),
+                                );
+                                presence_slot = Some(slot);
+                                snapshot
+                            }
+                            None => serde_json::to_string(&ServerMessage::PresenceError {
+                                id,
+                                error: if presence_hub.enabled() {
+                                    "presence requires an authenticated tenant member session"
+                                } else {
+                                    "presence v2 is disabled"
+                                }
+                                .to_owned(),
+                            })
+                            .unwrap_or_default(),
+                        };
+                    if socket
+                        .send(gonvex_websocket::text_message(response))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(ClientMessage::PresenceUnsubscribe {}) => {
+                    presence_hub.unsubscribe(&connection_id);
+                    presence_slot = None;
+                }
                 Ok(ClientMessage::ErrorHeartbeat { id }) => {
-                    let response = runtime
-                        .register_error_session(&control_connection, id, None, None)
-                        .await;
+                    let response = Box::pin(runtime.register_error_session(
+                        &control_connection,
+                        id,
+                        None,
+                        None,
+                    ))
+                    .await;
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                         .await
                         .is_err()
@@ -2974,9 +3388,9 @@ async fn websocket(
                     }
                 }
                 Ok(ClientMessage::ErrorEnvelope { id, events }) => {
-                    let response = runtime
-                        .capture_error_envelope(&control_connection, id, events)
-                        .await;
+                    let response =
+                        Box::pin(runtime.capture_error_envelope(&control_connection, id, events))
+                            .await;
                     if send_connection_json(&mut snapshot_delivery, &mut socket, &response)
                         .await
                         .is_err()
@@ -2987,22 +3401,21 @@ async fn websocket(
                 Ok(ClientMessage::TelemetryBatch { events }) => {
                     if telemetry_batch_enabled && events.len() <= 50 {
                         for event in events {
-                            runtime
-                                .capture_performance_event(
-                                    &control_connection,
-                                    &event.id,
-                                    &event.kind,
-                                    &event.path,
-                                    event.reason.as_deref(),
-                                    &event.outcome,
-                                    event.error.as_deref(),
-                                    event.client_sent_at_ms,
-                                    event.client_received_at_ms,
-                                    event.client_duration_ms,
-                                    event.trace.as_ref(),
-                                    event.device.as_ref().or(telemetry_device.as_ref()),
-                                )
-                                .await;
+                            Box::pin(runtime.capture_performance_event(
+                                &control_connection,
+                                &event.id,
+                                &event.kind,
+                                &event.path,
+                                event.reason.as_deref(),
+                                &event.outcome,
+                                event.error.as_deref(),
+                                event.client_sent_at_ms,
+                                event.client_received_at_ms,
+                                event.client_duration_ms,
+                                event.trace.as_ref(),
+                                event.device.as_ref().or(telemetry_device.as_ref()),
+                            ))
+                            .await;
                         }
                     }
                 }
@@ -3019,22 +3432,21 @@ async fn websocket(
                     trace,
                     device,
                 }) => {
-                    runtime
-                        .capture_performance_event(
-                            &control_connection,
-                            &id,
-                            &kind,
-                            &path,
-                            reason.as_deref(),
-                            &outcome,
-                            error.as_deref(),
-                            client_sent_at_ms,
-                            client_received_at_ms,
-                            client_duration_ms,
-                            trace.as_ref(),
-                            device.as_ref().or(telemetry_device.as_ref()),
-                        )
-                        .await;
+                    Box::pin(runtime.capture_performance_event(
+                        &control_connection,
+                        &id,
+                        &kind,
+                        &path,
+                        reason.as_deref(),
+                        &outcome,
+                        error.as_deref(),
+                        client_sent_at_ms,
+                        client_received_at_ms,
+                        client_duration_ms,
+                        trace.as_ref(),
+                        device.as_ref().or(telemetry_device.as_ref()),
+                    ))
+                    .await;
                 }
                 Err(_) => {
                     let _ = socket
@@ -3171,7 +3583,7 @@ async fn revalidate_connection(runtime: &Runtime, connection: &control::ControlC
 }
 
 impl Runtime {
-    async fn start_control_event_listener(&self) -> Result<(), gonvex_postgres::DatabaseError> {
+    async fn start_control_event_listener(&self) -> Result<(), gonvex_store::DatabaseError> {
         let Some(control) = self.inner.control_plane.read().await.clone() else {
             return Ok(());
         };
@@ -3226,8 +3638,18 @@ impl Runtime {
         Ok(())
     }
 
+    /// Diagnostics: project-wide Control change notifications sent so far.
+    pub fn control_notification_count(&self) -> u64 {
+        self.inner
+            .control_notifications
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn notify_control_changed(&self, project_id: &str) {
         if !project_id.is_empty() {
+            self.inner
+                .control_notifications
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = self
                 .inner
                 .runtime_events
@@ -3351,6 +3773,19 @@ fn bootstrap_watermark_after_sent_snapshots(
     let revision = revisions.min()?;
     (revision > sent_revision || revision == 0 && sent_revision == 0 && !zero_already_sent)
         .then_some(ServerMessage::ReplicaWatermark { revision })
+}
+
+/// The revision a durable call result waits for before it settles.
+fn committed_revision(response: &ServerMessage) -> Option<u64> {
+    match response {
+        ServerMessage::ReducerResult {
+            committed_revision, ..
+        }
+        | ServerMessage::ActionResult {
+            committed_revision, ..
+        } => *committed_revision,
+        _ => None,
+    }
 }
 
 fn replica_watermark(event: &change_feed::FeedEvent) -> Option<ServerMessage> {
@@ -3493,8 +3928,8 @@ async fn own_membership_changed(runtime: &Runtime, session: Option<&TenantSessio
 
 /// The columns `membership_affects` treats as an access change.
 fn member_access_changed(
-    admitted: &gonvex_postgres::Member,
-    current: Option<&gonvex_postgres::Member>,
+    admitted: &gonvex_store::Member,
+    current: Option<&gonvex_store::Member>,
 ) -> bool {
     let Some(current) = current else {
         return true;
@@ -3610,8 +4045,8 @@ struct AuthMode {
     public: bool,
 }
 
-fn database_auth_error_code(error: &gonvex_postgres::DatabaseError) -> &'static str {
-    use gonvex_postgres::DatabaseError;
+fn database_auth_error_code(error: &gonvex_store::DatabaseError) -> &'static str {
+    use gonvex_store::DatabaseError;
     match error {
         DatabaseError::InvalidSession | DatabaseError::SessionProjectMismatch => {
             "credential_rejected"
@@ -3953,6 +4388,206 @@ fn query_result(id: String, path: String, result: serde_json::Value) -> ServerMe
     }
 }
 
+/// The presence scope of a tenant Member session. Anonymous (public) and
+/// service-principal sessions have no presence.
+fn presence_member_scope(
+    hub: &presence::PresenceHub,
+    session: Option<&TenantSession>,
+) -> Option<(presence::ScopeKey, String)> {
+    let session = session?;
+    if !hub.enabled()
+        || session.is_anonymous()
+        || session.delegation.is_some()
+        || session.member.id.is_empty()
+        || session.member.id.starts_with("_gonvex_service:")
+    {
+        return None;
+    }
+    Some((
+        presence::ScopeKey::new(&session.route.project_id, &session.route.tenant_id),
+        session.member.id.clone(),
+    ))
+}
+
+const SUPPORT_HEARTBEAT: &str = "control.support.heartbeat";
+
+/// Upper bound for the shutdown flush of support-session end times.
+pub const SUPPORT_SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One batched update of support-session `last_seen_at` values (never moves
+/// a stored value backwards). Up to 500 sessions per statement, one
+/// transaction per call.
+async fn write_support_last_seen(
+    inner: &RuntimeInner,
+    sessions: &[presence::SupportLastSeen],
+) -> Result<(), gonvex_store::DatabaseError> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let Some(control) = inner.control_plane.read().await.clone() else {
+        return Ok(());
+    };
+    let mut transaction = control.begin_control_transaction(false).await?;
+    for chunk in sessions.chunks(500) {
+        let batch = serde_json::Value::Array(
+            chunk
+                .iter()
+                .map(|s| serde_json::json!({"i": s.session_id, "p": s.project_id, "t": s.last_seen_ms}))
+                .collect(),
+        )
+        .to_string();
+        sqlx::query(
+            r#"UPDATE gonvex_support_sessions
+               SET last_seen_at = MAX(gonvex_support_sessions.last_seen_at, s.t)
+               FROM (SELECT json_extract(value,'$.i') AS id, json_extract(value,'$.p') AS p,
+                            CAST(json_extract(value,'$.t') AS INTEGER) AS t
+                     FROM json_each($1)) AS s
+               WHERE gonvex_support_sessions.id = s.id AND gonvex_support_sessions.project_id = s.p"#,
+        )
+        .bind(batch)
+        .execute(&mut **transaction.transaction())
+        .await?;
+    }
+    transaction.commit().await
+}
+
+fn support_heartbeat_fields(args: &serde_json::Value) -> (String, String) {
+    let field = |name: &str| {
+        args.get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    (field("release"), field("environment"))
+}
+
+/// `call_reducer` plus the presence v2 short-circuits. Returns the response
+/// and whether it was answered in memory (no V8, no write, no fan-out), in
+/// which case the caller skips control refresh/notification and the
+/// membership re-read.
+///
+/// * A repeated `control.support.heartbeat` from the connection that already
+///   registered the same session attribution returns its session id.
+/// * A configured legacy keepalive Reducer (`GONVEX_PRESENCE_LEGACY_BEAT_PATHS`)
+///   marks the caller present and returns the server time. It reports the
+///   connection's last sent replica watermark as `committedRevision` so the
+///   client retires its optimistic local prediction.
+///
+/// After a normal call it records support sessions and, for clients without
+/// presence v2, configured legacy transition Reducers.
+async fn call_reducer_with_presence(
+    runtime: &Runtime,
+    session: Option<&TenantSession>,
+    control_connection: &control::ControlConnection,
+    call: ReducerCallRequest,
+    sent_replica_revision: u64,
+    presence_negotiated: bool,
+) -> (ServerMessage, bool) {
+    let hub = &runtime.inner.presence;
+    if !hub.enabled() {
+        return (
+            call_reducer(runtime, session, control_connection, call).await,
+            false,
+        );
+    }
+    let control_scope = call.scope == Some(ExecutionScope::Control);
+    let support_heartbeat = control_scope && call.path == SUPPORT_HEARTBEAT;
+    let support_attribution = support_heartbeat
+        .then(|| {
+            let identity = control_connection.identity.as_ref()?;
+            let tenant = control_connection
+                .tenant
+                .as_ref()
+                .map(|tenant| tenant.route.tenant_id.clone())
+                .unwrap_or_default();
+            let (release, environment) = support_heartbeat_fields(&call.args);
+            Some((identity.account.id.clone(), tenant, release, environment))
+        })
+        .flatten();
+    let session_id = format!("support_{}", control_connection.connection_id);
+    if let Some((account, tenant, release, environment)) = &support_attribution {
+        if hub.support_is_current(
+            &session_id,
+            &control_connection.project_id,
+            &control_connection.connection_id,
+            tenant,
+            account,
+            Some(release),
+            Some(environment),
+        ) {
+            return (
+                ServerMessage::ReducerResult {
+                    id: call.id.clone(),
+                    path: Some(call.path),
+                    result: serde_json::json!({ "sessionId": session_id }),
+                    origin_command_id: call.id,
+                    committed_revision: None,
+                    trace: call.trace,
+                },
+                true,
+            );
+        }
+    }
+    if !control_scope && sent_replica_revision > 0 && hub.is_legacy_beat(&call.path) {
+        if let Some((scope, member)) = presence_member_scope(hub, session) {
+            hub.legacy_beat(
+                &control_connection.connection_id,
+                &scope,
+                &member,
+                std::time::Instant::now(),
+            );
+            return (
+                ServerMessage::ReducerResult {
+                    id: call.id.clone(),
+                    path: Some(call.path),
+                    result: serde_json::json!(presence::now_ms()),
+                    origin_command_id: call.id,
+                    committed_revision: Some(sent_replica_revision),
+                    trace: call.trace,
+                },
+                true,
+            );
+        }
+    }
+    let legacy_transition =
+        (!control_scope && !presence_negotiated && hub.is_legacy_transition(&call.path))
+            .then(|| {
+                call.args
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(presence::parse_state)
+            })
+            .flatten();
+    let response = call_reducer(runtime, session, control_connection, call).await;
+    if matches!(response, ServerMessage::ReducerResult { .. }) {
+        if let Some((account, tenant, release, environment)) = &support_attribution {
+            hub.support_register(
+                &session_id,
+                &control_connection.project_id,
+                &control_connection.connection_id,
+                tenant,
+                account,
+                Some(release),
+                Some(environment),
+            );
+        }
+        if let (Some(state), Some((scope, member))) =
+            (legacy_transition, presence_member_scope(hub, session))
+        {
+            hub.set_state(
+                &control_connection.connection_id,
+                &scope,
+                &member,
+                state,
+                true,
+                std::time::Instant::now(),
+            );
+        }
+    }
+    (response, false)
+}
+
 async fn call_reducer(
     runtime: &Runtime,
     session: Option<&TenantSession>,
@@ -4227,6 +4862,10 @@ async fn send_replica_open(
     native: bool,
     delivery: &mut snapshot_delivery::SnapshotDelivery,
 ) -> Result<(), ()> {
+    let _profile = gonvex_profiler::ScopeTimer::new(
+        gonvex_profiler::Stage::SnapshotSend,
+        gonvex_profiler::Label::None,
+    );
     if native && matches!(message, ServerMessage::ReplicaSnapshot { .. }) {
         let id = if let ServerMessage::ReplicaSnapshot { id, .. } = &message {
             id.clone()
@@ -4249,12 +4888,28 @@ async fn send_replica_open(
     if paged && matches!(message, ServerMessage::ReplicaSnapshot { .. }) {
         // Feed events stay queued while these pages are sent. The installed
         // subscription resumes from the materialized repeatable-read cursor.
-        for page in replica::SnapshotPages::new(message) {
-            send_json(socket, &page).await?;
+        // Pages are encoded one at a time, on the offload pool when large.
+        let mut pages = offload::PageEncoder::new(replica::SnapshotPages::new(message));
+        while let Some(page) = pages.next().await {
+            let page = page.map_err(|_| ())?;
+            socket
+                .send(gonvex_websocket::text_message(page))
+                .await
+                .map_err(|_| ())?;
         }
         Ok(())
     } else {
-        send_connection_json(delivery, socket, &replica::legacy_snapshot_frame(message)).await
+        let message = replica::legacy_snapshot_frame(message);
+        if matches!(message, ServerMessage::ReplicaSnapshot { .. }) && !delivery.native() {
+            let encoded = offload::encode_snapshot_json(message)
+                .await
+                .map_err(|_| ())?;
+            return socket
+                .send(gonvex_websocket::text_message(encoded))
+                .await
+                .map_err(|_| ());
+        }
+        send_connection_json(delivery, socket, &message).await
     }
 }
 
@@ -4262,7 +4917,20 @@ async fn send_snapshot_frames(
     socket: &mut WebSocket,
     delivery: &mut snapshot_delivery::SnapshotDelivery,
 ) -> Result<(), ()> {
-    let batch = delivery.pump();
+    // `pump` encodes up to eight frames of rows; large ones on the pool.
+    let batch = if offload::offload().is_inline() || !delivery.has_bulk_pending() {
+        delivery.pump()
+    } else {
+        let mut owned = std::mem::take(delivery);
+        let (owned, batch) = offload::offload()
+            .run(move || {
+                let batch = owned.pump();
+                (owned, batch)
+            })
+            .await;
+        *delivery = owned;
+        batch
+    };
     for start in batch.starts {
         send_json(socket, &start).await?;
     }
@@ -4318,15 +4986,21 @@ async fn send_connection_all(
 }
 
 async fn send_json(socket: &mut WebSocket, message: &ServerMessage) -> Result<(), ()> {
+    let mut timer = gonvex_profiler::Timer::start();
     let encoded = serde_json::to_string(message).map_err(|_| ())?;
+    timer.lap(
+        gonvex_profiler::Stage::WsEncode,
+        gonvex_profiler::Label::None,
+    );
     socket
-        .send(Message::Text(encoded.into()))
+        .send(gonvex_websocket::text_message(encoded))
         .await
         .map_err(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
+    mod action_depth;
     mod receipt_guarantee_tests;
     #[tokio::test]
     async fn native_snapshot_socket_backpressures_until_durable_ack() {
@@ -4339,7 +5013,7 @@ mod tests {
             "/proof",
             axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async {
                 upgrade.on_upgrade(|socket| async move {
-                    let mut socket = super::WebSocket::Plain(Box::new(socket));
+                    let mut socket = super::WebSocket::from_axum(socket, Default::default());
                     let mut delivery = super::snapshot_delivery::SnapshotDelivery::default();
                     let cursor = ReplicaCursor {
                         epoch: "e".into(),
@@ -4350,7 +5024,11 @@ mod tests {
                         key: "id".into(),
                         cursor: cursor.clone(),
                         result: (0..1000)
-                            .map(|id| serde_json::json!({"id":id,"body":"x".repeat(1000)}))
+                            .map(|id| {
+                                std::sync::Arc::new(
+                                    serde_json::json!({"id":id,"body":"x".repeat(1000)}),
+                                )
+                            })
                             .collect(),
                         metadata: std::collections::BTreeMap::from([(
                             "pageDigest".into(),
@@ -4400,8 +5078,13 @@ mod tests {
             .unwrap();
         let mut pages = Vec::new();
         let mut start = None;
-        while let Ok(Some(message)) =
-            tokio::time::timeout(std::time::Duration::from_millis(100), socket.next()).await
+        // Frames are encoded on the offload pool: wait generously for the
+        // first one, then 100 ms for the server to stop on its credit window.
+        while let Ok(Some(message)) = tokio::time::timeout(
+            std::time::Duration::from_millis(if pages.is_empty() { 10_000 } else { 100 }),
+            socket.next(),
+        )
+        .await
         {
             let message = message.unwrap();
             if message.is_text() {
@@ -4466,7 +5149,7 @@ mod tests {
 
     #[test]
     fn cached_startup_auth_error_codes() {
-        use gonvex_postgres::DatabaseError;
+        use gonvex_store::DatabaseError;
         assert_eq!(
             super::database_auth_error_code(&DatabaseError::InvalidSession),
             "credential_rejected"
@@ -4494,6 +5177,22 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    /// A fresh data directory under `GONVEX_TEST_DATA_DIR` when set (CI volume),
+    /// otherwise a system tempdir.
+    fn test_data_dir() -> tempfile::TempDir {
+        match std::env::var("GONVEX_TEST_DATA_DIR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(root) => {
+                std::fs::create_dir_all(&root).unwrap();
+                tempfile::tempdir_in(root).unwrap()
+            }
+            None => tempfile::tempdir().unwrap(),
+        }
+    }
+
     use crate::config::ModuleHostConfig;
 
     #[test]
@@ -4532,7 +5231,7 @@ mod tests {
 
     #[test]
     fn control_telemetry_tenant_control_keeps_authority_without_data() {
-        let mut session = TenantSession::anonymous(gonvex_postgres::TenantRoute {
+        let mut session = TenantSession::anonymous(gonvex_store::TenantRoute {
             project_id: "project".into(),
             tenant_id: "tenant".into(),
             database_url: "unused".into(),
@@ -4556,7 +5255,7 @@ mod tests {
         Config {
             addr: "127.0.0.1:0".parse().unwrap(),
             control_plane_database_url: None,
-            default_database_url: Some("postgres://example".to_owned()),
+            default_database_url: Some("sqlite:///nonexistent/gonvex-test-data".to_owned()),
             tenant_database_urls: BTreeMap::new(),
             project_database_urls: BTreeMap::new(),
             require_auth: true,
@@ -4577,6 +5276,8 @@ mod tests {
             database_idle_timeout: std::time::Duration::from_secs(60),
             module_host: ModuleHostConfig {
                 enabled,
+                in_process: false,
+                max_heap_bytes: 64 << 20,
                 binary: None,
                 endpoint: None,
                 start_timeout: Duration::from_secs(1),
@@ -4592,6 +5293,8 @@ mod tests {
             storage: Default::default(),
             service_principals: Vec::new(),
             public_functions: Default::default(),
+            presence: Default::default(),
+            connection: Default::default(),
         }
     }
 
@@ -4599,24 +5302,16 @@ mod tests {
     async fn public_tenant_auth_and_execution_contract() {
         use base64::Engine as _;
         use futures_util::SinkExt;
-        use gonvex_postgres::{RuntimeManifestRecord, TenantRoute};
+        use gonvex_store::{RuntimeManifestRecord, TenantRoute};
         use sha2::{Digest, Sha256};
         use sqlx::Row;
 
-        let Some(base) = std::env::var("GONVEX_TEST_POSTGRES_URL").ok() else {
-            return;
-        };
         let Some(binary) = std::env::var("GONVEX_TEST_MODULE_HOST_BINARY").ok() else {
             return;
         };
-        let schema = format!("public_functions_{}", uuid::Uuid::new_v4().simple());
-        let admin = sqlx::PgPool::connect(&base).await.unwrap();
-        sqlx::query(&format!("CREATE SCHEMA {schema}"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if base.contains('?') { '&' } else { '?' };
-        let url = format!("{base}{separator}options=-csearch_path%3D{schema}");
+        let data = test_data_dir();
+        let control_url = gonvex_store::database_url(&data.path().join("control.db"));
+        let url = gonvex_store::database_url(&data.path().join("tenant.db"));
         let mut cfg = config(true);
         cfg.module_host.binary = Some(binary.into());
         cfg.module_host.execution_timeout = Duration::from_secs(45);
@@ -4631,12 +5326,15 @@ mod tests {
             public_base_url: "https://uploads.example.test".into(),
         };
         let runtime = Runtime::new(cfg);
-        let control = ControlPlane::connect(&url, runtime.inner.pools.clone(), BTreeMap::new())
-            .await
-            .unwrap();
-        let fixture = sqlx::PgPool::connect(&url).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('project','Project','multiTenant','active')").execute(&fixture).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('route','project','tenant-id','Tenant','careers',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        let control =
+            ControlPlane::connect(&control_url, runtime.inner.pools.clone(), BTreeMap::new())
+                .await
+                .unwrap();
+        // Control Plane rows and tenant rows live in separate database files.
+        let control_fixture = runtime.inner.pools.pool(&control_url).await.unwrap();
+        let fixture = runtime.inner.pools.pool(&url).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('project','Project','multiTenant','active')").execute(&control_fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('route','project','tenant-id','Tenant','careers',$1,'active')").bind(&url).execute(&control_fixture).await.unwrap();
         let route = TenantRoute {
             project_id: "project".into(),
             tenant_id: "tenant-id".into(),
@@ -4662,7 +5360,7 @@ export async function tool(ctx) { return ctx.tools.save({}); }
 export async function internal(ctx) { return identity(ctx); }
 export async function upload(ctx) { return ctx.storage.generateUploadUrl({ visibility: "public", ownerId: "spoofed", size: 3, contentType: "application/pdf" }); }
 export async function metadata(ctx, args) { return ctx.storage.getMetadata(args.fileId); }
-export async function slow(ctx, args) { await ctx.db.query("SELECT 1 FROM pg_sleep(31)", []); return apply(ctx, args); }
+export async function slow(ctx, args) { await ctx.db.query("WITH RECURSIVE spin(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM spin WHERE n<20000000) SELECT count(*) FROM spin", []); return apply(ctx, args); }
 export async function slowAction(ctx) { await new Promise(resolve => setTimeout(resolve, 5000)); return identity(ctx); }
 "#;
         let mut functions = serde_json::json!({});
@@ -4914,8 +5612,8 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             .unwrap();
         });
         let socket_url = format!("ws://{address}/ws?public=1");
-        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('other','Other','multiTenant','active')").execute(&fixture).await.unwrap();
-        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('other-route','other','tenant-id','Other','other-careers',$1,'active'),('other-tenant','project','tenant-other','Other','other',$1,'active')").bind(&url).execute(&fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('other','Other','multiTenant','active')").execute(&control_fixture).await.unwrap();
+        sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,domain,database_url,status) VALUES('other-route','other','tenant-id','Other','other-careers',$1,'active'),('other-tenant','project','tenant-other','Other','other',$1,'active')").bind(&url).execute(&control_fixture).await.unwrap();
         for (project, tenant) in [("project", "tenant-other"), ("other", "tenant-id")] {
             let (mut socket, _) = connect_async(&socket_url).await.unwrap();
             read_socket(&mut socket).await;
@@ -4936,15 +5634,19 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         socket.send(WsMessage::Text(serde_json::json!({"type":"auth","id":"batch-auth","public":true,"project":"project","tenant":"careers"}).to_string().into())).await.unwrap();
         assert_eq!(read_socket(&mut socket).await["type"], "auth.result");
         socket.send(WsMessage::Text(serde_json::json!({"type":"reducer.callMany","calls":[{"id":"slow-first","path":"slow","args":{"id":"before-revocation"}},{"id":"after","path":"apply","args":{"id":"after-revocation"}}]}).to_string().into())).await.unwrap();
-        // Wait until the first call is running before revoking its tenant.
+        // Wait until the first call holds its tenant transaction (SQL admission)
+        // before revoking its tenant.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let running: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE state='active' AND query = 'SELECT 1 FROM pg_sleep(31)')").fetch_one(&fixture).await.unwrap();
-                if running { break; }
+                if runtime.inner.pools.snapshot().await.admission_active > 0 {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.unwrap();
-        sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&fixture).await.unwrap();
+        })
+        .await
+        .unwrap();
+        sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled' WHERE project_id='project' AND tenant_id='tenant-id'").execute(&control_fixture).await.unwrap();
         let first = read_socket(&mut socket).await;
         assert_eq!(first["type"], "reducer.result");
         assert_eq!(first["id"], "slow-first");
@@ -4961,7 +5663,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         socket.close(None).await.ok();
         server.abort();
         sqlx::query("UPDATE gonvex_runtime_tenants SET status='disabled'")
-            .execute(&fixture)
+            .execute(&control_fixture)
             .await
             .unwrap();
         let (message, _) = authenticate(
@@ -4979,12 +5681,8 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         .await;
         assert!(matches!(message, ServerMessage::AuthError { .. }));
         runtime.inner.module_host.shutdown().await;
-        fixture.close().await;
-        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
+        drop((fixture, control_fixture));
+        runtime.inner.pools.close().await;
     }
 
     fn upload_signature(secret: &str, key: &str, expires: i64) -> String {
@@ -5003,7 +5701,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision,
-            changes: Vec::new(),
+            changes: Default::default(),
         }
     }
 
@@ -5143,9 +5841,9 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     #[test]
     fn sdk_resume_token_rotation_preserves_only_identical_authorization_scope() {
         let session = TenantSession {
-            identity: gonvex_postgres::SessionIdentity {
+            identity: gonvex_store::SessionIdentity {
                 project_id: "project".to_owned(),
-                account: gonvex_postgres::Account {
+                account: gonvex_store::Account {
                     id: "account".to_owned(),
                     email: "account@example.test".to_owned(),
                     email_verified: true,
@@ -5154,7 +5852,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                     provider: "firebase".to_owned(),
                 },
             },
-            member: gonvex_postgres::Member {
+            member: gonvex_store::Member {
                 id: "member".to_owned(),
                 account_id: "account".to_owned(),
                 status: "active".to_owned(),
@@ -5165,10 +5863,10 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 membership_revision: 1,
             },
             admission_revision: 5,
-            ..TenantSession::anonymous(gonvex_postgres::TenantRoute {
+            ..TenantSession::anonymous(gonvex_store::TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
-                database_url: "postgres://tenant".to_owned(),
+                database_url: "sqlite:///nonexistent/tenant.db".to_owned(),
             })
         };
         let old = control::ControlConnection {
@@ -5703,7 +6401,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let transaction = change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision: 535,
-            changes: Vec::new(),
+            changes: Default::default(),
         };
         assert!(matches!(
             replica_watermark(&transaction),
@@ -5882,9 +6580,9 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
     #[test]
     fn membership_replay_before_the_admission_snapshot_does_not_revoke_a_new_socket() {
         let session = TenantSession {
-            identity: gonvex_postgres::SessionIdentity {
+            identity: gonvex_store::SessionIdentity {
                 project_id: "project".to_owned(),
-                account: gonvex_postgres::Account {
+                account: gonvex_store::Account {
                     id: "account".to_owned(),
                     email: "account@example.test".to_owned(),
                     email_verified: true,
@@ -5893,12 +6591,12 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                     provider: "firebase".to_owned(),
                 },
             },
-            route: gonvex_postgres::TenantRoute {
+            route: gonvex_store::TenantRoute {
                 project_id: "project".to_owned(),
                 tenant_id: "tenant".to_owned(),
-                database_url: "postgres://tenant".to_owned(),
+                database_url: "sqlite:///nonexistent/tenant.db".to_owned(),
             },
-            member: gonvex_postgres::Member {
+            member: gonvex_store::Member {
                 id: "member".to_owned(),
                 account_id: "account".to_owned(),
                 status: "active".to_owned(),
@@ -5915,7 +6613,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let event = |revision, changed_columns: Vec<&str>| change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision,
-            changes: vec![change_feed::LogChange {
+            changes: std::sync::Arc::new(vec![change_feed::LogChange {
                 revision,
                 ordinal: 0,
                 origin_command_id: "command".to_owned(),
@@ -5926,7 +6624,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 old_value: serde_json::json!({"id":"member","account_id":"account","status":"active"}),
                 new_value: serde_json::json!({"id":"member","account_id":"account","status":"revoked"}),
                 provenance: change_feed::TransactionProvenance::default(),
-            }],
+            }]),
         };
 
         assert!(!membership_affects(&session, &event(5, vec!["status"])));
@@ -5943,7 +6641,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
 
     #[test]
     fn member_access_change_detection_matches_the_feed_columns() {
-        let admitted = gonvex_postgres::Member {
+        let admitted = gonvex_store::Member {
             id: "member".to_owned(),
             account_id: "account".to_owned(),
             status: "active".to_owned(),
@@ -5954,7 +6652,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
             membership_revision: 3,
         };
         // Profile edits do not revoke the session.
-        let renamed = gonvex_postgres::Member {
+        let renamed = gonvex_store::Member {
             display_name: "After".to_owned(),
             avatar_url: "https://example.test/a.png".to_owned(),
             ..admitted.clone()
@@ -5964,23 +6662,23 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         // A removed Member or any access column change does.
         assert!(member_access_changed(&admitted, None));
         for changed in [
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 permissions: serde_json::json!({ "view-tasks": true, "create-tasks": true }),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 role: "admin".to_owned(),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 status: "suspended".to_owned(),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 account_id: "other".to_owned(),
                 ..admitted.clone()
             },
-            gonvex_postgres::Member {
+            gonvex_store::Member {
                 membership_revision: 4,
                 ..admitted.clone()
             },
@@ -5998,7 +6696,7 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
         let transaction = change_feed::FeedEvent::Transaction {
             database_epoch: "epoch".to_owned(),
             revision: 7,
-            changes: Vec::new(),
+            changes: Default::default(),
         };
         let frames = membership_changed_frames(replica_watermark(&transaction));
         assert_eq!(frames.len(), 2);
@@ -6022,3 +6720,224 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
 
 #[cfg(test)]
 mod visibility_token_tests;
+
+/// Prints the size of the connection task future, the futures it awaits and
+/// the state it holds (`cargo test -p gonvex-runtime --lib
+/// connection_future_sizes -- --nocapture`).
+#[cfg(test)]
+mod connection_future_sizes {
+    use super::*;
+    fn size1<X0, Fut, F: FnOnce(X0) -> Fut>(_: F) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    fn size2<X0, X1, Fut, F: FnOnce(X0, X1) -> Fut>(_: F) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    fn size3<X0, X1, X2, Fut, F: FnOnce(X0, X1, X2) -> Fut>(_: F) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    fn size4<X0, X1, X2, X3, Fut, F: FnOnce(X0, X1, X2, X3) -> Fut>(_: F) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    fn size5<X0, X1, X2, X3, X4, Fut, F: FnOnce(X0, X1, X2, X3, X4) -> Fut>(_: F) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    fn size6<X0, X1, X2, X3, X4, X5, Fut, F: FnOnce(X0, X1, X2, X3, X4, X5) -> Fut>(_: F) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+    fn size7<X0, X1, X2, X3, X4, X5, X6, Fut, F: FnOnce(X0, X1, X2, X3, X4, X5, X6) -> Fut>(
+        _: F,
+    ) -> usize {
+        std::mem::size_of::<Fut>()
+    }
+
+    #[test]
+    fn connection_future_sizes() {
+        println!(
+            "future_size {:>6} Runtime::open_control_query",
+            size5(Runtime::open_control_query)
+        );
+        println!(
+            "future_size {:>6} Runtime::refresh_control_queries",
+            size4(Runtime::refresh_control_queries)
+        );
+        println!(
+            "future_size {:>6} Runtime::execute_tenant_query",
+            size4(Runtime::execute_tenant_query)
+        );
+        println!(
+            "future_size {:>6} Runtime::execute_tenant_action",
+            size4(Runtime::execute_tenant_action)
+        );
+        let connection = size6(websocket);
+        println!("future_size {:>6} websocket", connection);
+        // Every connection's task holds this future for its whole life. Rarely
+        // run requests (reducers, queries, auth) are boxed at their await so
+        // they do not size it; feed delivery stays inline (hot path).
+        // The budget is for optimized builds (what production runs); debug
+        // builds lay futures out less tightly (~30 KB measured), so CI's debug
+        // test run gets proportionally more room.
+        let budget = if cfg!(debug_assertions) { 34 } else { 28 } * 1024;
+        assert!(
+            connection <= budget,
+            "connection future grew to {connection} bytes (budget {budget})"
+        );
+        println!(
+            "future_size {:>6} next_socket_or_feed",
+            size3(next_socket_or_feed::<WebSocket>)
+        );
+        println!(
+            "future_size {:>6} validate_public_scope",
+            size2(validate_public_scope)
+        );
+        println!(
+            "future_size {:>6} check_public_admission",
+            size3(check_public_admission)
+        );
+        println!(
+            "future_size {:>6} revalidate_connection",
+            size2(revalidate_connection)
+        );
+        println!("future_size {:>6} next_feed_event", size1(next_feed_event));
+        println!(
+            "future_size {:>6} own_membership_changed",
+            size2(own_membership_changed)
+        );
+        println!("future_size {:>6} authenticate", size7(authenticate));
+        println!("future_size {:>6} call_reducer", size4(call_reducer));
+        println!(
+            "future_size {:>6} enqueue_replica_open",
+            size5(enqueue_replica_open)
+        );
+        println!(
+            "future_size {:>6} send_replica_open",
+            size5(send_replica_open)
+        );
+        println!(
+            "future_size {:>6} send_snapshot_frames",
+            size2(send_snapshot_frames)
+        );
+        println!(
+            "future_size {:>6} send_connection_json",
+            size3(send_connection_json)
+        );
+        println!(
+            "future_size {:>6} send_connection_all",
+            size3(send_connection_all)
+        );
+        println!("future_size {:>6} send_json", size2(send_json));
+        println!(
+            "future_size {:>6} Runtime::open_live_query",
+            size5(Runtime::open_live_query)
+        );
+        println!(
+            "future_size {:>6} Runtime::apply_feed_event",
+            size4(Runtime::apply_feed_event)
+        );
+        println!(
+            "future_size {:>6} Runtime::apply_live_query_feed_event",
+            size4(Runtime::apply_live_query_feed_event)
+        );
+        println!(
+            "future_size {:>6} Runtime::authenticate_service_principal",
+            size5(Runtime::authenticate_service_principal)
+        );
+        println!(
+            "future_size {:>6} Runtime::handle_service_frame",
+            size3(Runtime::handle_service_frame)
+        );
+        println!(
+            "future_size {:>6} Runtime::register_error_session",
+            size5(Runtime::register_error_session)
+        );
+        println!(
+            "future_size {:>6} Runtime::capture_error_envelope",
+            size4(Runtime::capture_error_envelope)
+        );
+        println!(
+            "future_size {:>6} Runtime::execute_control_action",
+            size5(Runtime::execute_control_action)
+        );
+        println!(
+            "future_size {:>6} Runtime::execute_control_query",
+            size4(Runtime::execute_control_query)
+        );
+        println!(
+            "future_size {:>6} change_feed::ChangeFeedHub::subscribe",
+            size2(change_feed::ChangeFeedHub::subscribe)
+        );
+        println!(
+            "type_size {:>6} ClientMessage",
+            std::mem::size_of::<ClientMessage>()
+        );
+        println!(
+            "type_size {:>6} ServerMessage",
+            std::mem::size_of::<ServerMessage>()
+        );
+        println!(
+            "type_size {:>6} gonvex_protocol::row_patch::RowPatchEncoder",
+            std::mem::size_of::<gonvex_protocol::row_patch::RowPatchEncoder>()
+        );
+        println!(
+            "type_size {:>6} snapshot_delivery::SnapshotDelivery",
+            std::mem::size_of::<snapshot_delivery::SnapshotDelivery>()
+        );
+        println!(
+            "type_size {:>6} snapshot_delivery::LegacySnapshotDelivery",
+            std::mem::size_of::<snapshot_delivery::LegacySnapshotDelivery>()
+        );
+        println!(
+            "type_size {:>6} FeedFirstScheduler",
+            std::mem::size_of::<FeedFirstScheduler>()
+        );
+        println!(
+            "type_size {:>6} control::ControlConnection",
+            std::mem::size_of::<control::ControlConnection>()
+        );
+        println!(
+            "type_size {:>6} replica_open_queue::ReplicaOpenQueue<ReplicaOpenRequest>",
+            std::mem::size_of::<replica_open_queue::ReplicaOpenQueue<ReplicaOpenRequest>>()
+        );
+        println!(
+            "type_size {:>6} gonvex_store::TenantSession",
+            std::mem::size_of::<gonvex_store::TenantSession>()
+        );
+        println!(
+            "type_size {:>6} WebSocket",
+            std::mem::size_of::<WebSocket>()
+        );
+        println!(
+            "type_size {:>6} axum::extract::ws::Message",
+            std::mem::size_of::<axum::extract::ws::Message>()
+        );
+        println!(
+            "type_size {:>6} ServerCapabilities",
+            std::mem::size_of::<ServerCapabilities>()
+        );
+        println!(
+            "type_size {:>6} tokio::time::Interval",
+            std::mem::size_of::<tokio::time::Interval>()
+        );
+        println!(
+            "type_size {:>6} tokio::sync::broadcast::Receiver<RuntimeEvent>",
+            std::mem::size_of::<tokio::sync::broadcast::Receiver<RuntimeEvent>>()
+        );
+        println!(
+            "type_size {:>6} public_functions::Window",
+            std::mem::size_of::<public_functions::Window>()
+        );
+        println!(
+            "type_size {:>6} Option<service_principal::ServiceGrant>",
+            std::mem::size_of::<Option<service_principal::ServiceGrant>>()
+        );
+        println!("type_size {:>6} Runtime", std::mem::size_of::<Runtime>());
+        println!(
+            "type_size {:>6} tokio::time::Sleep",
+            std::mem::size_of::<tokio::time::Sleep>()
+        );
+        println!(
+            "type_size {:>6} ReplicaOpenRequest",
+            std::mem::size_of::<ReplicaOpenRequest>()
+        );
+    }
+}

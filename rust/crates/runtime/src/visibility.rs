@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use gonvex_postgres::{DatabaseError, TenantSession, TenantTransaction};
+use gonvex_store::{DatabaseError, TenantSession, TenantTransaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -31,6 +31,32 @@ pub struct VisibilityPlan {
     pub sets: BTreeMap<String, VisibilitySet>,
     #[serde(rename = "where")]
     pub predicate: VisibilityExpression,
+    /// Active sets per role (see `active_sets`), shared by clones of the plan.
+    #[serde(skip)]
+    pub(crate) active_sets_cache: ActiveSetsCache,
+}
+
+/// `active_sets` depends only on the plan and the role, but change routing
+/// asked for it per subscription per change, walking the whole predicate
+/// each time (the largest CPU cost at 200 Whagons users).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ActiveSetsCache(pub(crate) Arc<PlanCaches>);
+
+#[derive(Debug, Default)]
+pub(crate) struct PlanCaches {
+    sets: std::sync::Mutex<BTreeMap<String, Arc<BTreeSet<String>>>>,
+    /// `inherited_columns`, fixed per plan; read per subscription per change.
+    inherited: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
+    /// The plan's `inheritsAny` expressions; change routing asks per
+    /// subscription per change, and re-walking the predicate each time was
+    /// 4.9% of runtime CPU at 200 Whagons users.
+    inherits_any: std::sync::OnceLock<Vec<VisibilityExpression>>,
+    /// Tables any non-derived set reads (base or join), for every role:
+    /// `principal_change_concerns` returns early for any other table, which
+    /// is nearly every data write.
+    principal_tables: std::sync::OnceLock<BTreeSet<String>>,
+    /// The compiled program (`visibility_class`), built on first use.
+    pub(crate) compiled: std::sync::OnceLock<Arc<crate::visibility_class::CompiledPlan>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -167,8 +193,79 @@ pub struct InheritedParent {
 impl InheritedParent {
     /// The parent's projected ACL row, or None when the parent does not exist.
     pub fn row(&self, key: &str) -> Option<Arc<Value>> {
+        if let Some(row) = overlaid_parent_row(&self.plan.table, key) {
+            return row;
+        }
         self.index.read().ok()?.get(key)
     }
+}
+
+/// One shared copy of a module's plan for every subscription and inherited
+/// parent that uses it (a plan is tens of KB once parsed; every Replica
+/// subscription used to clone its own). Clones of a module plan share its
+/// `active_sets_cache`, which identifies the plan.
+pub(crate) fn shared_plan(plan: &VisibilityPlan) -> Arc<VisibilityPlan> {
+    type Plans = Vec<(std::sync::Weak<PlanCaches>, std::sync::Weak<VisibilityPlan>)>;
+    static PLANS: std::sync::OnceLock<std::sync::Mutex<Plans>> = std::sync::OnceLock::new();
+    let mut plans = PLANS.get_or_init(Default::default).lock().unwrap();
+    for (caches, shared) in plans.iter() {
+        if caches
+            .upgrade()
+            .is_some_and(|caches| Arc::ptr_eq(&caches, &plan.active_sets_cache.0))
+        {
+            if let Some(shared) = shared.upgrade() {
+                return shared;
+            }
+        }
+    }
+    plans.retain(|(caches, shared)| caches.strong_count() > 0 && shared.strong_count() > 0);
+    let shared = Arc::new(plan.clone());
+    plans.push((
+        Arc::downgrade(&plan.active_sets_cache.0),
+        Arc::downgrade(&shared),
+    ));
+    shared
+}
+
+/// Parent rows as they were before the transaction being applied, keyed by
+/// (parent table, key); `None` = the parent did not exist. Set only while a
+/// replica subscription evaluates the before-images of a transaction, so the
+/// shared (already advanced) parent index answers with the old parent rows.
+type ParentOverlay = Vec<(String, String, Option<Arc<Value>>)>;
+
+thread_local! {
+    static PARENT_OVERLAY: std::cell::RefCell<Option<Arc<ParentOverlay>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn overlaid_parent_row(table: &str, key: &str) -> Option<Option<Arc<Value>>> {
+    PARENT_OVERLAY.with(|overlay| {
+        overlay.borrow().as_ref().and_then(|rows| {
+            rows.iter()
+                .find(|(parent, parent_key, _)| parent == table && parent_key == key)
+                .map(|(_, _, row)| row.clone())
+        })
+    })
+}
+
+/// Runs the synchronous `evaluate` with `rows` overriding parent index rows.
+/// `evaluate` must not await (the override is thread-local).
+pub(crate) fn with_parent_overlay<R>(
+    rows: &Option<Arc<ParentOverlay>>,
+    evaluate: impl FnOnce() -> R,
+) -> R {
+    let Some(rows) = rows else {
+        return evaluate();
+    };
+    struct Restore(Option<Arc<ParentOverlay>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            PARENT_OVERLAY.with(|overlay| *overlay.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(PARENT_OVERLAY.with(|overlay| overlay.replace(Some(rows.clone()))));
+    evaluate()
 }
 
 impl std::fmt::Debug for InheritedParent {
@@ -400,7 +497,7 @@ impl ParentAclRegistry {
     pub async fn ensure(
         &self,
         feeds: &crate::change_feed::ChangeFeedHub,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         session: &TenantSession,
         plans: &BTreeMap<String, VisibilityPlan>,
         roots: &[&VisibilityPlan],
@@ -417,7 +514,7 @@ impl ParentAclRegistry {
     pub(crate) async fn ensure_needed(
         &self,
         feeds: &crate::change_feed::ChangeFeedHub,
-        control: &gonvex_postgres::ControlPlane,
+        control: &gonvex_store::ControlPlane,
         session: &TenantSession,
         plans: &BTreeMap<String, VisibilityPlan>,
         needed: BTreeSet<(String, String)>,
@@ -494,7 +591,10 @@ impl ParentAclRegistry {
                 previous.poison();
             }
         }
-        tokio::spawn(run_applier(receiver, index.clone(), shape));
+        tokio::spawn(gonvex_profiler::instrument(
+            gonvex_profiler::TaskKind::Feed,
+            run_applier(receiver, index.clone(), shape),
+        ));
         Ok(index)
     }
 
@@ -508,35 +608,46 @@ impl ParentAclRegistry {
 }
 
 async fn load_index(
-    control: &gonvex_postgres::ControlPlane,
+    control: &gonvex_store::ControlPlane,
     session: &TenantSession,
     shape: IndexShape,
 ) -> Result<IndexLoad, VisibilityError> {
+    let mut transaction = control
+        .begin_tenant_transaction(&session.route, true)
+        .await?;
+    // Declared types keep JSON and BOOLEAN columns typed in the projection.
+    let kinds = gonvex_store::rows::table_columns(transaction.transaction(), &shape.table)
+        .await?
+        .into_iter()
+        .map(|column| (column.name.clone(), column.kind()))
+        .collect::<BTreeMap<_, _>>();
     let projection = shape
         .columns
         .iter()
         .map(|column| {
             Ok(format!(
-                "{}, r.{}",
+                "{}, {}",
                 sql_text_literal(column),
-                quote(column)?
+                gonvex_store::rows::json_value_expr(
+                    &format!("r.{}", quote(column)?),
+                    kinds
+                        .get(column)
+                        .copied()
+                        .unwrap_or(gonvex_store::rows::JsonKind::Text),
+                )
             ))
         })
         .collect::<Result<Vec<_>, VisibilityError>>()?
         .join(", ");
     let statement = format!(
-        "SELECT r.{}::text, r.{}::text, jsonb_build_object({projection})::text FROM {} AS r",
+        "SELECT CAST(r.{} AS TEXT), CAST(r.{} AS TEXT), json_object({projection}) FROM {} AS r",
         quote(&shape.id_column)?,
         quote(&shape.key)?,
         quote(&shape.table)?
     );
-    let mut transaction = control
-        .begin_tenant_transaction(&session.route, true)
+    let clock = sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = 1")
+        .fetch_one(&mut **transaction.transaction())
         .await?;
-    let clock =
-        sqlx::query("SELECT epoch, revision FROM _gonvex_sync_clock WHERE singleton = true")
-            .fetch_one(&mut **transaction.transaction())
-            .await?;
     let epoch: String = clock.try_get("epoch")?;
     let revision = clock.try_get::<i64, _>("revision")?.max(0) as u64;
     let rows = sqlx::query(&statement)
@@ -689,8 +800,15 @@ pub fn via_index_name(via: &VisibilityVia, column: &str) -> String {
     format!("via\u{0}{}\u{0}{}", via.table, column)
 }
 
-/// Every `inheritsAny` expression of a plan.
-pub fn inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
+/// Every `inheritsAny` expression of a plan (cached on the plan).
+pub fn inherits_any(plan: &VisibilityPlan) -> &[VisibilityExpression] {
+    plan.active_sets_cache
+        .0
+        .inherits_any
+        .get_or_init(|| collect_inherits_any(plan).into_iter().cloned().collect())
+}
+
+fn collect_inherits_any(plan: &VisibilityPlan) -> Vec<&VisibilityExpression> {
     fn visit<'a>(expression: &'a VisibilityExpression, output: &mut Vec<&'a VisibilityExpression>) {
         if expression.operator == "inheritsAny" {
             output.push(expression);
@@ -900,7 +1018,7 @@ impl VisibilityPlan {
         resolved: &ResolvedVisibility,
     ) -> VisibilityDependencies {
         let sets = active_sets(self, &resolved.role);
-        self.dependency_columns_for_sets(Some(&sets))
+        self.dependency_columns_for_sets(Some(sets.as_ref()))
     }
 
     /// Conservative row routing for legacy declarations. A changed occurrence
@@ -927,8 +1045,8 @@ impl VisibilityPlan {
             }
         }
         let active = active_sets(self, &resolved.role);
-        for name in active {
-            let set = &self.sets[&name];
+        for name in active.iter() {
+            let set = &self.sets[name];
             let base = if set.alias.is_empty() {
                 set.table.as_str()
             } else {
@@ -1012,8 +1130,27 @@ impl VisibilityPlan {
                 return true;
             }
         }
-        let active = active_sets(self, &resolved.role);
-        for name in &active {
+        let reads_table = self
+            .active_sets_cache
+            .0
+            .principal_tables
+            .get_or_init(|| {
+                self.sets
+                    .values()
+                    .filter(|set| set.kind != "derived")
+                    .flat_map(|set| {
+                        std::iter::once(set.table.clone())
+                            .chain(set.joins.iter().map(|join| join.table.clone()))
+                    })
+                    .collect()
+            })
+            .contains(table);
+        let active = if reads_table {
+            active_sets(self, &resolved.role)
+        } else {
+            Arc::default()
+        };
+        for name in active.iter() {
             let set = &self.sets[name];
             // Derived inputs are data rows, routed through their source tokens
             // by derived_change_concerns. They never reload every principal.
@@ -1141,7 +1278,14 @@ impl VisibilityPlan {
     }
 
     /// Child columns that reference each directly inherited parent table.
-    pub fn inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
+    pub fn inherited_columns(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        self.active_sets_cache
+            .0
+            .inherited
+            .get_or_init(|| self.compute_inherited_columns())
+    }
+
+    fn compute_inherited_columns(&self) -> BTreeMap<String, BTreeSet<String>> {
         fn visit(
             expression: &VisibilityExpression,
             output: &mut BTreeMap<String, BTreeSet<String>>,
@@ -1359,7 +1503,20 @@ fn role_only_value(expression: &VisibilityExpression, role: &str) -> Option<bool
 
 /// Sets a predicate references for this role, plus every set a `derived`
 /// set maps from, transitively.
-fn active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
+fn active_sets(plan: &VisibilityPlan, role: &str) -> Arc<BTreeSet<String>> {
+    let cache = &plan.active_sets_cache.0.sets;
+    if let Some(sets) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(role) {
+        return sets.clone();
+    }
+    let active = Arc::new(compute_active_sets(plan, role));
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(role.to_owned(), active.clone());
+    active
+}
+
+fn compute_active_sets(plan: &VisibilityPlan, role: &str) -> BTreeSet<String> {
     let mut active = BTreeSet::new();
     active_visibility_sets(&plan.predicate, role, &mut active);
     let mut pending = active.iter().cloned().collect::<Vec<_>>();
@@ -1498,7 +1655,7 @@ async fn resolve_member(
     let mut sets = BTreeMap::new();
     let mut active = BTreeSet::new();
     if materialize || plan.version == Some(2) {
-        active.extend(active_sets(plan, &role));
+        active.extend(active_sets(plan, &role).iter().cloned());
     }
     for (name, set) in &plan.sets {
         if !active.contains(name) || set.kind == "derived" {
@@ -1506,8 +1663,7 @@ async fn resolve_member(
         }
         let (statement, parameters) = compile_set(set, &direct)?;
         let parameters = Parameters::scalars(&parameters).map_err(VisibilityError::Invalid)?;
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+        let query = parameters.bind(sqlx::query(&statement));
         let rows = query.fetch_all(&mut **transaction.transaction()).await?;
         let values = rows
             .into_iter()
@@ -1519,8 +1675,7 @@ async fn resolve_member(
                 let (statement, parameters) = compile_set(&join_set, &direct)?;
                 let parameters =
                     Parameters::scalars(&parameters).map_err(VisibilityError::Invalid)?;
-                let statement_key = parameters.statement(&statement);
-                let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+                let query = parameters.bind(sqlx::query(&statement));
                 let rows = query.fetch_all(&mut **transaction.transaction()).await?;
                 sets.insert(
                     format!("{name}{GRANT_JOIN_SUFFIX}"),
@@ -1575,8 +1730,12 @@ pub fn resolve_with_parents<'a>(
             resolved.inherited.insert(
                 table,
                 InheritedParent {
-                    plan: Arc::new(parent.clone()),
-                    resolved: Arc::new(parent_resolved),
+                    plan: shared_plan(parent),
+                    resolved: shared_parent_resolution(
+                        &session.route.database_url,
+                        &parent.table,
+                        parent_resolved,
+                    ),
                     index,
                 },
             );
@@ -1588,19 +1747,99 @@ pub fn resolve_with_parents<'a>(
                 resolved.indexes.insert(via_index_name(via, column), index);
             }
         }
-        for name in active_sets(plan, &resolved.role) {
-            let set = &plan.sets[&name];
+        for name in active_sets(plan, &resolved.role).iter() {
+            let set = &plan.sets[name];
             if set.kind != "derived" {
                 continue;
             }
             let index = acl.get(&set.table, &set.key)?;
-            resolved.indexes.insert(name, index);
+            resolved.indexes.insert(name.clone(), index);
         }
         for _ in 0..snapshot::resolve_derived(transaction, plan, &mut resolved).await? {
             metrics.record_visibility_sql_statement();
         }
         Ok(resolved)
     })
+}
+
+/// One `Arc` per identical parent resolution of a member: every collection
+/// inheriting from the same parent (Whagons' taskUsers, taskTags, notes...
+/// all inherit `tasks`) held its own deep copy of the member's tasks
+/// principal (~45 KB each). In-memory grant patches use `Arc::make_mut`, so a
+/// shared resolution is copied on write and never changes under another
+/// subscription.
+fn shared_parent_resolution(
+    database: &str,
+    table: &str,
+    resolved: ResolvedVisibility,
+) -> Arc<ResolvedVisibility> {
+    type Key = (String, String, String, u64);
+    static SHARED: std::sync::OnceLock<
+        std::sync::Mutex<(
+            BTreeMap<Key, Vec<std::sync::Weak<ResolvedVisibility>>>,
+            usize,
+        )>,
+    > = std::sync::OnceLock::new();
+    fn same(left: &ResolvedVisibility, right: &ResolvedVisibility) -> bool {
+        left.ephemeral_member == right.ephemeral_member
+            && left.revision == right.revision
+            && left.role == right.role
+            && left.direct == right.direct
+            && left.permissions == right.permissions
+            && left.sets == right.sets
+            && left.fingerprint == right.fingerprint
+            && left.indexes.len() == right.indexes.len()
+            && left
+                .indexes
+                .iter()
+                .zip(&right.indexes)
+                .all(|((a, x), (b, y))| a == b && Arc::ptr_eq(x, y))
+            && left.inherited.len() == right.inherited.len()
+            && left
+                .inherited
+                .iter()
+                .zip(&right.inherited)
+                .all(|((a, x), (b, y))| {
+                    a == b
+                        && Arc::ptr_eq(&x.plan, &y.plan)
+                        && Arc::ptr_eq(&x.resolved, &y.resolved)
+                        && Arc::ptr_eq(&x.index, &y.index)
+                })
+    }
+    let key = (
+        database.to_owned(),
+        table.to_owned(),
+        resolved
+            .direct
+            .get("member.id")
+            .cloned()
+            .unwrap_or_default(),
+        resolved.revision,
+    );
+    let mut shared = SHARED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (map, swept_at) = &mut *shared;
+    let entries = map.entry(key).or_default();
+    entries.retain(|entry| entry.strong_count() > 0);
+    if let Some(existing) = entries
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .find(|existing| same(existing, &resolved))
+    {
+        return existing;
+    }
+    let created = Arc::new(resolved);
+    entries.push(Arc::downgrade(&created));
+    if map.len() > (*swept_at).max(1024) * 2 {
+        map.retain(|_, entries| {
+            entries.retain(|entry| entry.strong_count() > 0);
+            !entries.is_empty()
+        });
+        *swept_at = map.len();
+    }
+    created
 }
 
 /// Recompute every derived set of a version 2 plan in memory from its source
@@ -1754,7 +1993,7 @@ pub fn ancestor_row_change_concerns(
             };
             admitted(old) != admitted(new)
         });
-        let association = inherits_any(&parent.plan).into_iter().any(|expression| {
+        let association = inherits_any(&parent.plan).iter().any(|expression| {
             let (Some(via), Some(ancestor)) =
                 (&expression.via, state.inherited.get(&expression.table))
             else {
@@ -2210,7 +2449,7 @@ fn compile_expression(
                 )?);
             }
             let visible = format!(
-                "EXISTS (SELECT 1 FROM {table} AS {alias} WHERE {alias}.{key}::text = {row_alias}.{column}::text{parent_filters} AND ({parent_predicate}))"
+                "EXISTS (SELECT 1 FROM {table} AS {alias} WHERE {alias}.{key} = {row_alias}.{column}{parent_filters} AND ({parent_predicate}))"
             );
             match &expression.on_missing {
                 None => visible,
@@ -2225,7 +2464,7 @@ fn compile_expression(
                         account_parameter,
                     )?;
                     format!(
-                        "({visible} OR ({row_alias}.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {table} AS {missing} WHERE {missing}.{key}::text = {row_alias}.{column}::text) AND ({fallback})))"
+                        "({visible} OR ({row_alias}.{column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {table} AS {missing} WHERE {missing}.{key} = {row_alias}.{column}) AND ({fallback})))"
                     )
                 }
             }
@@ -2274,7 +2513,7 @@ fn compile_expression(
                 )?);
             }
             format!(
-                "EXISTS (SELECT 1 FROM {} AS {link} JOIN {} AS {alias} ON {alias}.{}::text = {link}.{}::text WHERE {link}.{}::text = {row_alias}.{}::text{parent_filters} AND ({parent_predicate}))",
+                "EXISTS (SELECT 1 FROM {} AS {link} JOIN {} AS {alias} ON {alias}.{} = {link}.{} WHERE {link}.{} = {row_alias}.{}{parent_filters} AND ({parent_predicate}))",
                 quote(&via.table)?,
                 quote(&expression.table)?,
                 quote(&expression.key)?,
@@ -2326,7 +2565,7 @@ fn compile_expression(
                 ),
             );
             format!(
-                "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = {account} AND _gonvex_member.status = 'active' AND lower(COALESCE(_gonvex_member.permissions ->> {permission}::text, '')) IN ('true', '1'))"
+                "EXISTS (SELECT 1 FROM members AS _gonvex_member WHERE _gonvex_member.account_id = {account} AND _gonvex_member.status = 'active' AND lower(COALESCE((SELECT CAST(value AS TEXT) FROM json_each(_gonvex_member.permissions) WHERE key = {permission} LIMIT 1), '')) IN ('true', '1'))"
             )
         }
         "role" => {
@@ -2370,7 +2609,7 @@ fn compile_expression(
             })?;
             let tokens = Value::Array(values.iter().cloned().map(Value::String).collect());
             let parameter = argument(parameters, tokens);
-            format!("{row_alias}.{column}::text = ANY(ARRAY(SELECT jsonb_array_elements_text({parameter}::jsonb)))")
+            format!("{row_alias}.{column} IN (SELECT value FROM json_each({parameter}))")
         }
         "inSet" => {
             let column = quote(&expression.column)?;
@@ -2493,7 +2732,7 @@ fn compile_set_with_parameters(
         .get(select_from)
         .ok_or_else(|| VisibilityError::Invalid(format!("unknown select alias {select_from:?}")))?;
     let mut query = format!(
-        "SELECT DISTINCT {selected_alias}.{}::text FROM {from}",
+        "SELECT DISTINCT CAST({selected_alias}.{} AS TEXT) FROM {from}",
         quote(&set.select)?
     );
     let mut predicates = Vec::new();
@@ -2613,6 +2852,11 @@ fn context_key(value: &str) -> Result<(), VisibilityError> {
     }
 }
 
+/// Whether `value` is a plain SQL identifier the runtime may quote.
+pub(crate) fn identifier_ok(value: &str) -> Result<(), VisibilityError> {
+    identifier(value).map(|_| ())
+}
+
 fn identifier(value: &str) -> Result<&str, VisibilityError> {
     if !value.is_empty()
         && value.len() <= 63
@@ -2662,34 +2906,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nullable_negation_matches_postgres_admission() {
-        use sqlx::postgres::PgPoolOptions;
+    async fn nullable_negation_matches_sql_admission() {
+        use gonvex_store::rows::{row_to_object, JsonKind};
+        use sqlx::Connection;
 
-        let Ok(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping nullable visibility test");
-            return;
-        };
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
+        let mut connection = sqlx::SqliteConnection::connect("sqlite::memory:")
             .await
             .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::raw_sql(
-            "CREATE TEMP TABLE visibility_negation_values ON COMMIT DROP AS \
-             SELECT row_number() OVER ()::text AS id, s.status, e.enabled \
-             FROM (VALUES (NULL::text), ('blocked'), ('allowed')) AS s(status) \
-             CROSS JOIN (VALUES (NULL::boolean), (false), (true)) AS e(enabled)",
-        )
-        .execute(&mut *tx)
+        let mut tx = connection.begin().await.unwrap();
+        gonvex_store::execute_script(&mut tx, "CREATE TEMP TABLE visibility_negation_values (id TEXT, status TEXT, enabled BOOLEAN); \
+             INSERT INTO visibility_negation_values \
+             SELECT CAST(row_number() OVER () AS TEXT), s.column1, e.column1 \
+             FROM (VALUES (NULL), ('blocked'), ('allowed')) AS s \
+             CROSS JOIN (VALUES (NULL), (0), (1)) AS e")
         .await
         .unwrap();
-        let rows: Vec<Json<Value>> = sqlx::query_scalar(
-            "SELECT to_jsonb(r) FROM visibility_negation_values AS r ORDER BY id",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
+        let rows: Vec<Json<Value>> =
+            sqlx::query("SELECT id, status, enabled FROM visibility_negation_values ORDER BY id")
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    Json(Value::Object(
+                        row_to_object(row, |name| (name == "enabled").then_some(JsonKind::Boolean))
+                            .unwrap(),
+                    ))
+                })
+                .collect();
+        assert_eq!(rows.len(), 9);
         let status =
             serde_json::json!({"operator":"eq", "column":"status", "value":{"literal":"blocked"}});
         let enabled =
@@ -2740,9 +2985,8 @@ mod tests {
                 "SELECT r.id FROM visibility_negation_values AS r WHERE {predicate} ORDER BY r.id"
             );
             let parameters = Parameters::scalars(&values).unwrap();
-            let key = parameters.statement(&statement);
             let actual: Vec<String> = parameters
-                .bind(sqlx::query(&key))
+                .bind(sqlx::query(&statement))
                 .fetch_all(&mut *tx)
                 .await
                 .unwrap()
@@ -2755,66 +2999,38 @@ mod tests {
             );
         }
         tx.rollback().await.unwrap();
-        pool.close().await;
     }
 
     #[tokio::test]
     async fn developer_visibility_without_membership_preserves_admission() {
-        use gonvex_postgres::{ControlPlane, PoolLimits, PoolRegistry, TenantRoute};
-        use sqlx::postgres::PgPoolOptions;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use gonvex_store::{begin_transaction, Durability, PoolLimits, PoolRegistry, TenantRoute};
 
-        let Some(database_url) = std::env::var("GONVEX_TEST_POSTGRES_URL").ok() else {
-            eprintln!("GONVEX_TEST_POSTGRES_URL is not set; skipping visibility contract test");
-            return;
-        };
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .unwrap();
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let schema = format!("gonvex_developer_visibility_{nonce}");
-        sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let separator = if database_url.contains('?') { '&' } else { '?' };
-        let scoped_url = format!("{database_url}{separator}options=-csearch_path%3D{schema}");
-        let pools = PoolRegistry::new(PoolLimits::default());
-        let control = ControlPlane::connect(&scoped_url, pools.clone(), BTreeMap::new())
-            .await
-            .unwrap();
-        let fixture = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&scoped_url)
-            .await
-            .unwrap();
-        sqlx::raw_sql(
+        let directory = tempfile::tempdir().unwrap();
+        let database_url = gonvex_store::database_url(&directory.path().join("tenant.db"));
+        let pools = PoolRegistry::with_durability(PoolLimits::default(), Durability::Normal);
+        let fixture = pools.pool(&database_url).await.unwrap();
+        gonvex_store::execute_script(
+            &mut fixture.acquire().await.unwrap(),
             r#"
-            CREATE TABLE members(id text PRIMARY KEY, account_id text, status text,
-                                 role text, permissions jsonb);
+            CREATE TABLE members(id TEXT PRIMARY KEY, account_id TEXT, status TEXT,
+                                 role TEXT, permissions JSON);
             INSERT INTO members VALUES('revoked-member','developer-account','revoked','owner','{}');
         "#,
         )
-        .execute(&fixture)
         .await
         .unwrap();
-        let before: Value =
-            sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM members m")
-                .fetch_one(&fixture)
-                .await
-                .unwrap();
+        const MEMBERS_JSON: &str = "SELECT json_group_array(json_object('id',id,'account_id',account_id,'status',status,'role',role,'permissions',json(permissions))) FROM (SELECT * FROM members ORDER BY id)";
+        let before: String = sqlx::query_scalar(MEMBERS_JSON)
+            .fetch_one(&fixture)
+            .await
+            .unwrap();
 
         // Host-owned result of verified grant admission; token/authority checks
-        // are covered by postgres tenant_isolation and runtime auth_contract.
+        // are covered by the store tenant_isolation and runtime auth_contract tests.
         let route = TenantRoute {
             project_id: "project".to_owned(),
             tenant_id: "tenant".to_owned(),
-            database_url: scoped_url,
+            database_url,
         };
         let mut session = TenantSession::anonymous(route.clone());
         session.identity.account.id = "developer-account".to_owned();
@@ -2830,8 +3046,7 @@ mod tests {
         .unwrap();
 
         for materialize in [true, false] {
-            let mut tx = control
-                .begin_tenant_transaction(&route, true)
+            let mut tx = begin_transaction(&pools, &route.database_url, true)
                 .await
                 .unwrap();
             let resolved = if materialize {
@@ -2885,8 +3100,7 @@ mod tests {
                 1 => denied.member.id = "revoked-member".to_owned(),
                 _ => denied.member.account_id = "other-account".to_owned(),
             }
-            let mut tx = control
-                .begin_tenant_transaction(&route, true)
+            let mut tx = begin_transaction(&pools, &route.database_url, true)
                 .await
                 .unwrap();
             assert!(matches!(
@@ -2895,11 +3109,10 @@ mod tests {
             ));
             tx.rollback().await.unwrap();
         }
-        let after: Value =
-            sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM members m")
-                .fetch_one(&fixture)
-                .await
-                .unwrap();
+        let after: String = sqlx::query_scalar(MEMBERS_JSON)
+            .fetch_one(&fixture)
+            .await
+            .unwrap();
         assert_eq!(
             before, after,
             "visibility must not create or reactivate members"
@@ -2909,8 +3122,7 @@ mod tests {
             .execute(&fixture)
             .await
             .unwrap();
-        let mut tx = control
-            .begin_tenant_transaction(&route, true)
+        let mut tx = begin_transaction(&pools, &route.database_url, true)
             .await
             .unwrap();
         let resolved = resolve(&mut tx, &session, &plan, 8).await.unwrap();
@@ -2936,8 +3148,7 @@ mod tests {
             "table":"members", "key":"id", "where":{"operator":"public"}
         }))
         .unwrap();
-        let mut tx = control
-            .begin_tenant_transaction(&route, false)
+        let mut tx = begin_transaction(&pools, &route.database_url, false)
             .await
             .unwrap();
         let ordinary = resolve(&mut tx, &session, &public, 8).await.unwrap();
@@ -2949,13 +3160,7 @@ mod tests {
             .unwrap();
         assert_read_visibility(&mut tx, &public, &ordinary, false).await;
         tx.rollback().await.unwrap();
-        fixture.close().await;
         pools.close().await;
-        sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-            .execute(&admin)
-            .await
-            .unwrap();
-        admin.close().await;
     }
 
     async fn assert_sql_visibility(
@@ -2968,8 +3173,7 @@ mod tests {
         let predicate = compile_predicate(plan, resolved, "r", &mut parameters).unwrap();
         let statement = format!("SELECT r.id FROM members AS r WHERE {predicate} ORDER BY r.id");
         let parameters = Parameters::scalars(&parameters).unwrap();
-        let statement_key = parameters.statement(&statement);
-        let query = parameters.bind(sqlx::query(statement_key.as_ref()));
+        let query = parameters.bind(sqlx::query(&statement));
         let rows = query.fetch_all(&mut **tx.transaction()).await.unwrap();
         assert_eq!(
             rows.iter()
@@ -3276,6 +3480,7 @@ mod tests {
         assert_eq!(parameters, vec![Value::String("public".to_owned())]);
 
         let plan = VisibilityPlan {
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: "boards".to_owned(),
@@ -3322,6 +3527,7 @@ mod tests {
     #[test]
     fn composite_predicates_are_grouped_before_callers_append_filters() {
         let plan = VisibilityPlan {
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: "tasks".to_owned(),
@@ -3397,6 +3603,7 @@ mod tests {
     #[test]
     fn dependency_columns_resolve_aliases_to_physical_tables() {
         let plan = VisibilityPlan {
+            active_sets_cache: Default::default(),
             version: None,
             permission_tables: Vec::new(),
             table: "tasks".to_owned(),
@@ -3494,7 +3701,7 @@ mod tests {
         assert_eq!(sql.matches("_gonvex_member.account_id = $2").count(), 4);
         assert_eq!(sql.matches("_gonvex_member.status = 'active'").count(), 4);
         assert!(sql.contains("_gonvex_member.role = $3"));
-        assert!(sql.contains("permissions ->> $5::text"));
+        assert!(sql.contains("json_each(_gonvex_member.permissions) WHERE key = $5"));
     }
 }
 
@@ -3706,7 +3913,8 @@ mod mask_tests {
         assert_eq!(join.constraints.len(), 1);
         assert_eq!(join.constraints[0].context, "member.id");
         let (sql, parameters) = compile_set(&join, &member("alice", &[]).direct).unwrap();
-        assert!(sql.starts_with("SELECT DISTINCT v0.\"teamId\"::text FROM \"memberTeams\" AS v0"));
+        assert!(sql
+            .starts_with("SELECT DISTINCT CAST(v0.\"teamId\" AS TEXT) FROM \"memberTeams\" AS v0"));
         assert_eq!(parameters, vec![json!("alice")]);
     }
 
@@ -4229,7 +4437,7 @@ mod mask_tests {
         let mut parameters = Vec::new();
         let sql = compile_predicate(&documents, &alice, "r", &mut parameters).unwrap();
         assert!(sql.contains("FROM \"documentAssociations\" AS _gonvex_via_"));
-        assert!(sql.contains(".\"documentId\"::text = r.\"_id\"::text"));
+        assert!(sql.contains(".\"documentId\" = r.\"_id\""));
     }
 
     #[test]
@@ -4302,10 +4510,10 @@ mod mask_tests {
         let mut parameters = Vec::new();
         let sql = compile_predicate(&child, &alice, "r", &mut parameters).unwrap();
         assert!(sql.contains("EXISTS (SELECT 1 FROM \"tasks\" AS _gonvex_parent_"));
-        assert!(sql.contains("::text = r.\"taskId\"::text"));
+        assert!(sql.contains(" = r.\"taskId\""));
         assert!(sql.contains("r.\"taskId\" IS NOT NULL AND NOT EXISTS"));
         assert!(
-            sql.contains("= ANY(ARRAY(SELECT jsonb_array_elements_text("),
+            sql.contains(" IN (SELECT value FROM json_each("),
             "parent tokens bind as arrays"
         );
         assert!(

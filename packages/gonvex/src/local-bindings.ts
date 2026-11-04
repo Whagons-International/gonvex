@@ -23,7 +23,7 @@ export async function projectLocalSchema(root: string): Promise<LocalSchema> {
   const names = (await readdir(migrationDirectory).catch(() => [] as string[])).filter((name) => name.endsWith(".sql")).sort();
   const migrations = await Promise.all(names.map(async (name) => ({ name, sql: await readFile(join(migrationDirectory, name), "utf8") })));
   const tenantMigrations = migrations.filter(({ sql }) => !/gonvex:scope\s+(control|landlord)/.test(sql));
-  const digest = createHash("sha256").update("local-schema-v1").update(JSON.stringify(tenantMigrations)).digest("hex");
+  const digest = createHash("sha256").update("local-schema-v2-sqlite").update(JSON.stringify(tenantMigrations)).digest("hex");
   const cacheFile = join(root, "gonvex", "_build", `local-schema-${digest}.json`);
   let schema: LocalSchema;
   try { schema = JSON.parse(await readFile(cacheFile, "utf8")) as LocalSchema; }

@@ -1,24 +1,48 @@
 //! Version 2 mask delivery for one Replica subscription.
 //!
-//! A committed transaction never causes visibility SQL on this connection
-//! unless it changes this member's principal (a permission row naming the
-//! member, or a grant removal naming the member), or it newly reveals rows
-//! this connection has to fetch (a grant or parent that became visible to this
-//! member). Every other row is decided in memory against the cached principal.
+//! A committed transaction is decided in memory against the cached
+//! principal: source rows by their before/after images, and rows whose
+//! visibility a grant, derived set or parent flip moved by one targeted read
+//! of those rows (no visibility predicate) evaluated before and after. The
+//! before state is the principal before this transaction's grants plus the
+//! parents' before-images (a thread-local overlay of the shared parent
+//! index). Everything else (this member's principal changed, a grant was
+//! removed, an `inheritsAny` association moved, an ancestor's grant moved, an
+//! index ahead of or behind the event) reconciles the collection with the
+//! client's row hashes.
 
 use super::*;
 use crate::visibility::{grant_contribution, GrantContribution, VisibilityExpression};
 
-pub(super) enum MaskStep {
-    /// Nothing in the transaction concerns this connection.
+pub(super) enum Step {
+    /// Nothing in the transaction concerns this subscription.
     Skip,
-    /// Deltas were applied in memory (plus targeted fetches for this member).
-    Applied,
-    /// The principal and data need a single current snapshot after feed lag.
-    Refresh,
-    /// This member's principal changed, or the window cannot be maintained
-    /// incrementally: re-snapshot this connection only.
-    Rebuild,
+    /// Decide source rows (and `affected` rows) from their images.
+    Apply(ApplyContext),
+    /// Ask the client for its row hashes and reconcile against SQL.
+    Resync(Resync),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Resync {
+    /// This member's principal changed in a way memory cannot follow.
+    Principal,
+    /// A shared index is not at the event's revision.
+    Consistency,
+    /// A bounded window moved beyond what its counters can represent.
+    Window,
+}
+
+/// How to evaluate the before-images of one transaction.
+#[derive(Default)]
+pub(super) struct ApplyContext {
+    /// The principal before this transaction's grants (None: unchanged).
+    pub before: Option<ResolvedVisibility>,
+    /// Parent rows as they were before this transaction.
+    pub overlay: Option<Arc<Vec<(String, String, Option<Arc<Value>>)>>>,
+    /// Rows of the source table whose visibility may have moved without the
+    /// row changing, as they are at the event's revision.
+    pub affected: Vec<(String, Value)>,
 }
 
 enum GrantDelta {
@@ -29,6 +53,59 @@ enum GrantDelta {
 
 /// Grant rows decided in memory. Additions patch the set; a removal may still
 /// be covered by another row of the member, so it re-resolves this member.
+/// Per inherited parent table, the columns of its tenant-shared ACL index
+/// (`visibility::index_columns` for this child and parent plan).
+fn parent_acl_columns(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+) -> BTreeMap<String, BTreeSet<String>> {
+    resolved
+        .inherited
+        .iter()
+        .map(|(table, parent)| {
+            let plans = BTreeMap::from([
+                (table.clone(), parent.plan.as_ref().clone()),
+                (plan.table.clone(), plan.clone()),
+            ]);
+            (
+                table.clone(),
+                visibility::index_columns(&plans, table, &parent.plan.key),
+            )
+        })
+        .collect()
+}
+
+/// Every table the visibility of `plan` (as resolved for one member) reads:
+/// its own table, every set's table and joins, parent and `inheritsAny`
+/// tables, recursively through inherited parents. A change to any other
+/// table cannot move a principal, grant, derived set or parent decision.
+fn concern_tables(
+    plan: &VisibilityPlan,
+    resolved: &ResolvedVisibility,
+    out: &mut std::collections::HashSet<String>,
+) {
+    out.insert(plan.table.clone());
+    for set in plan.sets.values() {
+        out.insert(set.table.clone());
+        for join in &set.joins {
+            out.insert(join.table.clone());
+        }
+    }
+    for table in plan.inherited_columns().keys() {
+        out.insert(table.clone());
+    }
+    for expression in visibility::inherits_any(plan) {
+        out.insert(expression.table.clone());
+        if let Some(via) = &expression.via {
+            out.insert(via.table.clone());
+        }
+    }
+    for (table, parent) in &resolved.inherited {
+        out.insert(table.clone());
+        concern_tables(&parent.plan, &parent.resolved, out);
+    }
+}
+
 fn grant_delta(
     plan: &VisibilityPlan,
     resolved: &ResolvedVisibility,
@@ -58,27 +135,7 @@ fn grant_delta(
     }
 }
 
-/// Child keys linked to one parent through an `inheritsAny` association.
-fn children_of(
-    resolved: &ResolvedVisibility,
-    via: &visibility::VisibilityVia,
-    parent: &str,
-) -> Vec<String> {
-    resolved
-        .indexes
-        .get(&visibility::via_index_name(via, &via.parent_column))
-        .and_then(|index| index.read().ok().map(|index| index.get_all(parent)))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|link| {
-            link.get(&via.child_column)
-                .filter(|value| !value.is_null())
-                .map(|value| crate::visibility_mask::scalar(Some(value)))
-        })
-        .collect()
-}
-
-/// Columns compared to a set by `inSet`, so newly granted tokens can be fetched.
+/// Columns compared to a set by `inSet`, so moved tokens select their rows.
 fn set_columns(expression: &VisibilityExpression, set: &str, output: &mut BTreeSet<String>) {
     if expression.operator == "inSet" && expression.set == set {
         output.insert(expression.column.clone());
@@ -91,37 +148,59 @@ fn set_columns(expression: &VisibilityExpression, set: &str, output: &mut BTreeS
     }
 }
 
+/// Does `set` decide anything other than `inSet` comparisons (a `nonEmpty`
+/// test flips every row at once)?
+fn set_tested_as_a_whole(expression: &VisibilityExpression, set: &str) -> bool {
+    (expression.operator == "nonEmpty" && expression.set == set)
+        || expression
+            .children
+            .iter()
+            .any(|child| set_tested_as_a_whole(child, set))
+        || expression
+            .on_missing
+            .as_ref()
+            .is_some_and(|fallback| set_tested_as_a_whole(fallback, set))
+}
+
 impl Runtime {
-    pub(super) async fn apply_mask_feed(
+    pub(super) async fn mask_step(
         &self,
         session: &TenantSession,
         subscription: &mut ReplicaSubscription,
         revision: u64,
         changes: &[LogChange],
-        entity_changes: &mut BTreeMap<(String, String), ReplicaChange>,
-        messages: &mut Vec<ServerMessage>,
-    ) -> Result<MaskStep, ReplicaError> {
+        collapsed: &CollapsedChanges<'_>,
+        share: Option<&crate::feed_share::EventShare>,
+    ) -> Result<Step, ReplicaError> {
         let metrics = &self.inner.visibility_metrics;
         let parents = subscription.visibility.inherited_columns();
-        // (child key column, association, parent table) per inheritsAny.
         let any_parents = visibility::inherits_any(&subscription.visibility)
             .into_iter()
-            .filter_map(|expression| {
-                Some((
-                    expression.column.clone(),
-                    expression.via.clone()?,
-                    expression.table.clone(),
-                ))
-            })
+            .filter_map(|expression| Some((expression.via.clone()?, expression.table.clone())))
             .collect::<Vec<_>>();
-        let mut any_changes = Vec::new();
-        let mut source = Vec::new();
+        let tables = Arc::clone(subscription.concern_tables.get_or_insert_with(|| {
+            let mut tables = std::collections::HashSet::new();
+            tables.insert(subscription.definition.table.clone());
+            tables.insert("members".to_owned());
+            concern_tables(
+                &subscription.visibility,
+                &subscription.resolved,
+                &mut tables,
+            );
+            Arc::new(tables)
+        }));
+        let mut source = false;
         let mut parent_changes = Vec::new();
         // (scope table, set name, token): own plan or a directly inherited parent.
         let mut granted: Vec<(String, String, String)> = Vec::new();
         let mut derived_touched = false;
         for change in changes {
             metrics.record_in_memory_row_check();
+            if !tables.contains(change.table.as_str()) {
+                // Neither the source nor any table the plan, its sets or its
+                // parents read: none of the checks below can fire.
+                continue;
+            }
             if subscription.visibility.principal_change_concerns(
                 &subscription.resolved,
                 &change.table,
@@ -130,11 +209,9 @@ impl Runtime {
                 &change.old_value,
                 &change.new_value,
             ) {
-                return Ok(MaskStep::Rebuild);
+                return Ok(Step::Resync(Resync::Principal));
             }
-            if change.table == subscription.definition.table {
-                source.push(change);
-            }
+            source |= change.table == subscription.definition.table;
             derived_touched |= visibility::derived_change_concerns(
                 &subscription.visibility,
                 &subscription.resolved,
@@ -166,19 +243,21 @@ impl Runtime {
                 })
             }) {
                 // A parent's derived grant moved for this member only.
-                return Ok(MaskStep::Rebuild);
+                return Ok(Step::Resync(Resync::Principal));
+            }
+            if any_parents
+                .iter()
+                .any(|(via, table)| via.table == change.table || *table == change.table)
+            {
+                // `inheritsAny` memberships move through association rows
+                // whose before-state the shared link index no longer has.
+                return Ok(Step::Resync(Resync::Principal));
             }
             if parents.contains_key(&change.table) {
                 parent_changes.push(change);
             }
-            if any_parents
-                .iter()
-                .any(|(_, via, table)| via.table == change.table || *table == change.table)
-            {
-                any_changes.push(change);
-            }
             match grant_delta(&subscription.visibility, &subscription.resolved, change) {
-                GrantDelta::Rebuild => return Ok(MaskStep::Rebuild),
+                GrantDelta::Rebuild => return Ok(Step::Resync(Resync::Principal)),
                 GrantDelta::Added(tokens) => granted.extend(
                     tokens
                         .into_iter()
@@ -188,7 +267,7 @@ impl Runtime {
             }
             for (table, parent) in &subscription.resolved.inherited {
                 match grant_delta(&parent.plan, &parent.resolved, change) {
-                    GrantDelta::Rebuild => return Ok(MaskStep::Rebuild),
+                    GrantDelta::Rebuild => return Ok(Step::Resync(Resync::Principal)),
                     GrantDelta::Added(tokens) => granted.extend(
                         tokens
                             .into_iter()
@@ -198,21 +277,17 @@ impl Runtime {
                 }
             }
         }
-        if source.is_empty()
-            && parent_changes.is_empty()
-            && any_changes.is_empty()
-            && granted.is_empty()
-            && !derived_touched
-        {
-            return Ok(MaskStep::Skip);
+        if !source && parent_changes.is_empty() && granted.is_empty() && !derived_touched {
+            return Ok(Step::Skip);
         }
 
-        // Rows the member may newly see, to fetch for this connection only:
-        // (child column, values). Own grants select rows by the set's column;
-        // parent grants and parent flips select children by foreign key.
-        let mut fetch: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        // Parents whose visibility to this member flipped to hidden.
-        let mut hidden_parents: Vec<(String, String)> = Vec::new();
+        let mut context = ApplyContext::default();
+        // Source rows a moved token or flipped parent may reveal or hide:
+        // (child column, values).
+        let mut affected: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        if !granted.is_empty() || derived_touched {
+            context.before = Some(subscription.resolved.clone());
+        }
         for (scope, name, token) in &granted {
             if *scope == subscription.visibility.table {
                 subscription
@@ -221,526 +296,317 @@ impl Runtime {
                     .entry(name.clone())
                     .or_default()
                     .insert(token.clone());
+                if set_tested_as_a_whole(&subscription.visibility.predicate, name) {
+                    return Ok(Step::Resync(Resync::Principal));
+                }
                 let mut columns = BTreeSet::new();
                 set_columns(&subscription.visibility.predicate, name, &mut columns);
                 for column in columns {
-                    fetch.entry(column).or_default().insert(token.clone());
+                    affected.entry(column).or_default().insert(token.clone());
                 }
             } else {
-                let any_children = any_parents
-                    .iter()
-                    .filter(|(_, _, table)| table == scope)
-                    .map(|(column, via, _)| {
-                        (
-                            column.clone(),
-                            children_of(&subscription.resolved, via, token),
-                        )
-                    })
-                    .collect::<Vec<_>>();
                 let Some(parent) = subscription.resolved.inherited.get_mut(scope) else {
                     continue;
                 };
-                std::sync::Arc::make_mut(&mut parent.resolved)
+                let parent_resolved = Arc::make_mut(&mut parent.resolved);
+                parent_resolved
                     .sets
                     .entry(name.clone())
                     .or_default()
                     .insert(token.clone());
-                let derived = visibility::recompute_derived(
-                    &parent.plan,
-                    std::sync::Arc::make_mut(&mut parent.resolved),
-                );
-                if !derived.is_empty() && any_parents.iter().any(|(_, _, table)| table == scope) {
-                    return Ok(MaskStep::Rebuild);
-                }
-                for (name, added, removed) in derived {
-                    let mut derived_columns = BTreeSet::new();
-                    set_columns(&parent.plan.predicate, &name, &mut derived_columns);
-                    if derived_columns
-                        .iter()
-                        .any(|column| *column != parent.plan.key)
-                    {
-                        return Ok(MaskStep::Rebuild);
-                    }
-                    for token in added.iter().chain(removed.iter()) {
-                        for column in parents.get(scope).into_iter().flatten() {
-                            fetch
-                                .entry(column.clone())
-                                .or_default()
-                                .insert(token.clone());
-                        }
-                    }
-                }
+                let derived = visibility::recompute_derived(&parent.plan, parent_resolved);
                 let mut columns = BTreeSet::new();
                 set_columns(&parent.plan.predicate, name, &mut columns);
-                for (column, children) in any_children {
-                    fetch.entry(column).or_default().extend(children);
+                for (derived_name, _, _) in &derived {
+                    set_columns(&parent.plan.predicate, derived_name, &mut columns);
                 }
-                if columns.iter().any(|column| *column != parent.plan.key) {
+                if set_tested_as_a_whole(&parent.plan.predicate, name)
+                    || columns.iter().any(|column| *column != parent.plan.key)
+                {
                     // The token does not name parent keys; resolve this member.
-                    return Ok(MaskStep::Rebuild);
+                    return Ok(Step::Resync(Resync::Principal));
                 }
+                let tokens = std::iter::once(token.clone()).chain(
+                    derived
+                        .into_iter()
+                        .flat_map(|(_, added, removed)| added.into_iter().chain(removed)),
+                );
+                let tokens = tokens.collect::<Vec<_>>();
                 for column in parents.get(scope).into_iter().flatten() {
-                    fetch
+                    affected
                         .entry(column.clone())
                         .or_default()
-                        .insert(token.clone());
+                        .extend(tokens.iter().cloned());
                 }
             }
         }
-        if derived_touched
-            || granted
-                .iter()
-                .any(|(scope, _, _)| *scope == subscription.visibility.table)
-        {
+        if derived_touched || !granted.is_empty() {
             // Derived sets follow their source set and the shared index in
-            // memory; only tokens that moved are fetched or re-checked.
+            // memory; rows of every token that moved are re-decided.
             for (name, added, removed) in
                 visibility::recompute_derived(&subscription.visibility, &mut subscription.resolved)
             {
+                if set_tested_as_a_whole(&subscription.visibility.predicate, &name) {
+                    return Ok(Step::Resync(Resync::Principal));
+                }
                 let mut columns = BTreeSet::new();
                 set_columns(&subscription.visibility.predicate, &name, &mut columns);
                 for column in columns {
-                    fetch
+                    affected
                         .entry(column)
                         .or_default()
                         .extend(added.iter().chain(removed.iter()).cloned());
                 }
             }
         }
-        for change in &parent_changes {
-            let Some(parent) = subscription.resolved.inherited.get(&change.table) else {
-                continue;
-            };
-            let visible = |row: &Value| {
-                subscription.visibility.parent_admits(
-                    &subscription.resolved,
-                    &change.table,
-                    parent,
-                    row,
-                )
-            };
-            let (was, now) = (visible(&change.old_value), visible(&change.new_value));
-            if was == now {
-                continue;
-            }
-            for column in parents.get(&change.table).into_iter().flatten() {
-                if now && !change.old_value.is_null() {
-                    // Hidden → visible on an update: its children may already
-                    // exist. A new parent has none yet beyond this transaction.
-                    fetch
-                        .entry(column.clone())
-                        .or_default()
-                        .insert(change.row_id.clone());
-                } else if was {
-                    hidden_parents.push((column.clone(), change.row_id.clone()));
+        if !parent_changes.is_empty() {
+            let mut overlay = Vec::new();
+            let before = context.before.as_ref().unwrap_or(&subscription.resolved);
+            for change in &parent_changes {
+                let image = collapsed
+                    .get(&(change.table.as_str(), change.row_id.as_str()))
+                    .map_or(&change.old_value, |collapsed| collapsed.old);
+                if overlay.iter().any(|(table, key, _): &(String, String, _)| {
+                    *table == change.table && *key == change.row_id
+                }) {
+                    continue;
                 }
-            }
-        }
-
-        for change in &any_changes {
-            for (column, via, table) in &any_parents {
-                let Some(parent) = subscription.resolved.inherited.get(table) else {
+                overlay.push((
+                    change.table.clone(),
+                    change.row_id.clone(),
+                    (!image.is_null()).then(|| match share {
+                        // One copy of the before-image per event, not per
+                        // subscription.
+                        Some(share) => share.image(image),
+                        None => Arc::new(image.clone()),
+                    }),
+                ));
+                let (Some(was_parent), Some(now_parent)) = (
+                    before.inherited.get(&change.table),
+                    subscription.resolved.inherited.get(&change.table),
+                ) else {
                     continue;
                 };
-                if via.table == change.table {
-                    // An association moved: re-check its child for this member
-                    // if the member sees a linked parent or already holds it.
-                    for link in [&change.old_value, &change.new_value] {
-                        let Some(child) = link
-                            .get(&via.child_column)
-                            .filter(|value| !value.is_null())
-                            .map(|value| crate::visibility_mask::scalar(Some(value)))
-                        else {
-                            continue;
-                        };
-                        let parent_seen = link
-                            .get(&via.parent_column)
-                            .filter(|value| !value.is_null())
-                            .and_then(|value| {
-                                parent.row(&crate::visibility_mask::scalar(Some(value)))
+                let net = collapsed.get(&(change.table.as_str(), change.row_id.as_str()));
+                let last = net.map_or(&change.new_value, |collapsed| collapsed.new);
+                // An update that changed none of the parent's ACL index
+                // columns, under an unchanged principal, cannot flip whether
+                // the parent admits its children (parent visibility reads
+                // only those columns).
+                if context.before.is_none() && !image.is_null() && !last.is_null() {
+                    let columns =
+                        Arc::clone(subscription.parent_acl_columns.get_or_insert_with(|| {
+                            Arc::new(parent_acl_columns(
+                                &subscription.visibility,
+                                &subscription.resolved,
+                            ))
+                        }));
+                    let unchanged = net.is_some_and(|net| {
+                        !net.changed_columns.is_empty()
+                            && columns.get(&change.table).is_some_and(|acl| {
+                                net.changed_columns
+                                    .iter()
+                                    .all(|column| !acl.contains(*column))
                             })
-                            .is_some_and(|row| {
-                                subscription.visibility.parent_admits(
-                                    &subscription.resolved,
-                                    table,
-                                    parent,
-                                    &row,
-                                )
-                            });
-                        let held = subscription.rows.values().any(|row| {
-                            row.get(column)
-                                .map(|value| crate::visibility_mask::scalar(Some(value)))
-                                == Some(child.clone())
-                        });
-                        if parent_seen || held {
-                            fetch.entry(column.clone()).or_default().insert(child);
-                        }
+                    });
+                    if unchanged {
+                        continue;
                     }
                 }
-                if *table == change.table {
-                    let was = subscription.visibility.parent_admits(
-                        &subscription.resolved,
-                        table,
-                        parent,
-                        &change.old_value,
-                    );
-                    let now = subscription.visibility.parent_admits(
-                        &subscription.resolved,
-                        table,
-                        parent,
-                        &change.new_value,
-                    );
-                    if was != now {
-                        let children = children_of(&subscription.resolved, via, &change.row_id);
-                        fetch.entry(column.clone()).or_default().extend(children);
-                    }
-                }
-            }
-        }
-        let projection_covers_acl = visibility::acl_columns(&subscription.visibility)
-            .iter()
-            .all(|column| subscription.definition.columns.contains(column));
-        if !projection_covers_acl {
-            for (column, key) in &hidden_parents {
-                fetch.entry(column.clone()).or_default().insert(key.clone());
-            }
-        }
-        let hidden_removals = if projection_covers_acl {
-            subscription
-                .rows
-                .iter()
-                .filter(|(_, row)| {
-                    hidden_parents.iter().any(|(column, key)| {
-                        row.get(column)
-                            .map(|value| crate::visibility_mask::scalar(Some(value)))
-                            == Some(key.clone())
-                    }) && !row_in_collection(
-                        row,
-                        &subscription.args,
-                        &subscription.definition,
-                        &subscription.visibility,
-                        &subscription.resolved,
-                    )
-                })
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        // Freeze row decisions before checking the index revision. An applier
-        // that advanced while making them requires a current SQL snapshot,
-        // never an old payload admitted by a newer parent's ACL.
-        let source = source
-            .into_iter()
-            .map(|change| {
-                let now = row_in_collection(
-                    &change.new_value,
-                    &subscription.args,
-                    &subscription.definition,
-                    &subscription.visibility,
+                let was =
+                    subscription
+                        .visibility
+                        .parent_admits(before, &change.table, was_parent, image);
+                let now = subscription.visibility.parent_admits(
                     &subscription.resolved,
+                    &change.table,
+                    now_parent,
+                    last,
                 );
-                (change, now)
-            })
-            .collect::<Vec<_>>();
-        if visibility::indexes_ahead(&subscription.resolved, revision)
-            && (!fetch.is_empty()
-                || !hidden_removals.is_empty()
-                || source
-                    .iter()
-                    .any(|(change, now)| *now || subscription.rows.contains_key(&change.row_id)))
-        {
-            return Ok(MaskStep::Refresh);
-        }
-        // Do SQL before mutating delivered rows. Its snapshot must agree with
-        // this event's principal. If newer commits exist, rebuild both together.
-        let mut fetched = Vec::new();
-        if !fetch.is_empty() {
-            let control = self
-                .inner
-                .control_plane
-                .read()
-                .await
-                .clone()
-                .ok_or(ReplicaError::ModuleMissing)?;
-            let mut transaction = control
-                .begin_tenant_transaction(&session.route, true)
-                .await?;
-            for (column, values) in fetch {
-                metrics.record_visibility_sql_statement();
-                let rows = query_rows_where(
-                    &mut transaction,
-                    &subscription.definition,
-                    &subscription.visibility,
-                    &subscription.resolved,
-                    &subscription.args,
-                    Some((column.as_str(), &values)),
-                    revision,
-                )
-                .await;
-                let rows = match rows {
-                    Ok(rows) => rows,
-                    Err(ReplicaError::SnapshotAdvanced) => {
-                        transaction.rollback().await?;
-                        return Ok(MaskStep::Refresh);
+                // A parent created by this transaction has no children
+                // beyond the transaction's own source rows.
+                if was != now && !image.is_null() {
+                    for column in parents.get(&change.table).into_iter().flatten() {
+                        affected
+                            .entry(column.clone())
+                            .or_default()
+                            .insert(change.row_id.clone());
                     }
-                    Err(error) => return Err(error),
-                };
-                fetched.push((column, values, rows));
+                }
             }
-            transaction.commit().await?;
+            context.overlay = Some(Arc::new(overlay));
         }
-        let mut upserts = BTreeMap::new();
-        let mut deleted = BTreeSet::new();
-        let mut inserted = false;
-        for id in hidden_removals {
-            metrics.record_in_memory_row_check();
-            self.mask_apply_row(
-                subscription,
-                &id,
-                None,
-                &[],
-                entity_changes,
-                &mut upserts,
-                &mut deleted,
-            )?;
-        }
-        for (change, now) in source {
-            metrics.record_in_memory_row_check();
-            if !now && !subscription.rows.contains_key(&change.row_id) {
-                continue;
-            }
-            let projection = now
-                .then(|| project_row(&change.new_value, &subscription.definition))
-                .transpose()?;
-            inserted |= now && !subscription.rows.contains_key(&change.row_id);
-            self.mask_apply_row(
-                subscription,
-                &change.row_id,
-                projection,
-                &change.changed_columns,
-                entity_changes,
-                &mut upserts,
-                &mut deleted,
-            )?;
-        }
-        for (column, values, rows) in fetched {
-            let mut present = BTreeSet::new();
-            for row in rows {
-                let key = row_key(&row, &subscription.definition.key)?;
-                present.insert(key.clone());
-                inserted |= !subscription.rows.contains_key(&key);
-                self.mask_apply_row(
-                    subscription,
-                    &key,
-                    Some(row),
-                    &[],
-                    entity_changes,
-                    &mut upserts,
-                    &mut deleted,
-                )?;
-            }
-            // A re-check of hidden parents: cached children it no longer returns go.
-            let stale = subscription
-                .rows
-                .iter()
-                .filter(|(id, row)| {
-                    !present.contains(*id)
-                        && row.get(&column).is_some_and(|value| {
-                            values.contains(&crate::visibility_mask::scalar(Some(value)))
-                        })
-                })
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            for id in stale {
-                self.mask_apply_row(
-                    subscription,
-                    &id,
-                    None,
-                    &[],
-                    entity_changes,
-                    &mut upserts,
-                    &mut deleted,
-                )?;
-            }
-        }
-        if inserted
-            && !self.mask_enforce_budget(
-                subscription,
-                entity_changes,
-                &mut upserts,
-                &mut deleted,
-            )?
+        // Row decisions read the shared indexes: one that already holds later
+        // ACL changes could admit an old payload.
+        if visibility::indexes_ahead(&subscription.resolved, revision)
+            && (source || !affected.is_empty())
         {
-            return Ok(MaskStep::Rebuild);
+            return Ok(Step::Resync(Resync::Consistency));
         }
-        subscription.cursor.revision = revision;
-        if !upserts.is_empty() || !deleted.is_empty() {
-            messages.push(replica_delta(
-                &subscription.id,
-                &subscription.path,
-                subscription.cursor.clone(),
-                upserts.into_values().collect(),
-                deleted.into_iter().collect(),
-                subscription_digest(subscription),
-                subscription.truncated,
-            ));
+        if !affected.is_empty() {
+            match self
+                .affected_rows(session, subscription, &affected, revision, collapsed)
+                .await?
+            {
+                Some(rows) => context.affected = rows,
+                None => return Ok(Step::Resync(Resync::Consistency)),
+            }
         }
-        Ok(MaskStep::Applied)
+        Ok(Step::Apply(context))
     }
 
-    /// Insert, update or remove one cached row and record its entity change.
-    #[allow(clippy::too_many_arguments)]
-    fn mask_apply_row(
+    /// Rows of the subscription's source table whose `column` is one of the
+    /// values, as they were at `revision` (rows changed by this event are
+    /// decided from its images instead). No visibility predicate: each row is
+    /// decided in memory before and after. None when the change log no
+    /// longer covers the revisions between `revision` and this read.
+    async fn affected_rows(
         &self,
-        subscription: &mut ReplicaSubscription,
-        id: &str,
-        projection: Option<Value>,
-        changed_columns: &[String],
-        entity_changes: &mut BTreeMap<(String, String), ReplicaChange>,
-        upserts: &mut BTreeMap<String, Value>,
-        deleted: &mut BTreeSet<String>,
-    ) -> Result<(), ReplicaError> {
-        let old = subscription.rows.get(id).cloned();
-        if old.is_none() && projection.is_none() {
-            return Ok(());
-        }
-        if old.is_some() && old == projection {
-            return Ok(());
-        }
-        let new_hash = projection.as_ref().map(row_hash);
-        if let Some(aggregate) = &mut subscription.aggregate {
-            if let Some(previous) = subscription.hashes.get(id) {
-                aggregate.change(previous, true);
-            }
-            if let Some(hash) = &new_hash {
-                aggregate.change(hash, false);
-            }
-        }
-        match (&projection, new_hash) {
-            (Some(row), Some(hash)) => {
-                subscription.rows.insert(id.to_owned(), row.clone());
-                subscription.hashes.insert(id.to_owned(), hash);
-            }
-            _ => {
-                subscription.rows.remove(id);
-                subscription.hashes.remove(id);
-            }
-        }
-        accumulate_projection_delta(upserts, deleted, id, projection.as_ref());
-        let operation = match (&old, &projection) {
-            (Some(_), Some(_)) => "update",
-            (None, Some(_)) => "insert",
-            _ => "delete",
-        };
-        let table = subscription.definition.table.clone();
-        entity_changes.insert(
-            (table.clone(), id.to_owned()),
-            ReplicaChange {
-                entity: table,
-                id: id.to_owned(),
-                operation: operation.to_owned(),
-                old_value: old,
-                new_value: projection,
-                changed_columns: changed_columns.to_vec(),
-            },
+        session: &TenantSession,
+        subscription: &ReplicaSubscription,
+        affected: &BTreeMap<String, BTreeSet<String>>,
+        revision: u64,
+        collapsed: &CollapsedChanges<'_>,
+    ) -> Result<Option<Vec<(String, Value)>>, ReplicaError> {
+        // The read has no visibility predicate, so every subscriber of the
+        // collection that this event touches the same way shares it: one
+        // read per event, not one per connection.
+        type Shared = Option<Arc<Vec<(String, Value)>>>;
+        static RECENT: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::VecDeque<(String, Shared)>>,
+        > = std::sync::OnceLock::new();
+        let key = format!(
+            "{}\u{0}{revision}\u{0}{:p}\u{0}{:p}\u{0}{}",
+            session.route.database_url,
+            Arc::as_ptr(&subscription.definition),
+            Arc::as_ptr(&subscription.visibility),
+            serde_json::to_string(affected).unwrap_or_default()
         );
-        Ok(())
-    }
-
-    /// Keep a budgeted collection within its budgets without SQL. Ordered
-    /// windows keep their first rows and become truncated; a window without an
-    /// order cannot choose which rows to keep, so it re-snapshots (false).
-    fn mask_enforce_budget(
-        &self,
-        subscription: &mut ReplicaSubscription,
-        entity_changes: &mut BTreeMap<(String, String), ReplicaChange>,
-        upserts: &mut BTreeMap<String, Value>,
-        deleted: &mut BTreeSet<String>,
-    ) -> Result<bool, ReplicaError> {
-        let definition = &subscription.definition;
-        let over_rows = definition.max_rows > 0 && subscription.rows.len() > definition.max_rows;
-        let bytes = |rows: &BTreeMap<String, Value>| {
-            rows.values()
-                .map(|row| serde_json::to_vec(row).unwrap_or_default().len() as i64)
-                .sum::<i64>()
-        };
-        let over_bytes =
-            definition.max_bytes > 0 && bytes(&subscription.rows) > definition.max_bytes;
-        if !over_rows && !over_bytes {
-            return Ok(true);
-        }
-        if definition.order_by.is_empty() {
-            return Ok(false);
-        }
-        let order_by = definition.order_by.clone();
-        let descending = definition.order_direction != "asc";
-        let mut ordered = subscription
-            .rows
+        let recent = RECENT.get_or_init(Default::default);
+        let cached = recent
+            .lock()
+            .unwrap()
             .iter()
-            .map(|(id, row)| {
-                (
-                    id.clone(),
-                    row.get(&order_by).cloned().unwrap_or(Value::Null),
-                )
-            })
-            .collect::<Vec<_>>();
-        ordered.sort_by(|(left_id, left), (right_id, right)| {
-            let order = compare_json(left, right).then_with(|| left_id.cmp(right_id));
-            if descending {
-                order.reverse()
-            } else {
-                order
+            .find(|(cached, _)| *cached == key)
+            .map(|(_, rows)| rows.clone());
+        let rows = match cached {
+            Some(rows) => rows,
+            None => {
+                let rows = self
+                    .read_affected_rows(session, subscription, affected, revision)
+                    .await?
+                    .map(Arc::new);
+                let mut recent = recent.lock().unwrap();
+                if recent.len() >= 64 {
+                    recent.pop_front();
+                }
+                recent.push_back((key, rows.clone()));
+                rows
             }
-        });
-        let max_rows = if definition.max_rows > 0 {
-            definition.max_rows
-        } else {
-            usize::MAX
         };
-        let max_bytes = definition.max_bytes;
-        let mut kept_bytes = 0i64;
-        let mut evict = Vec::new();
-        for (index, (id, _)) in ordered.iter().enumerate() {
-            let size = serde_json::to_vec(&subscription.rows[id])
-                .unwrap_or_default()
-                .len() as i64;
-            if index >= max_rows || (max_bytes > 0 && kept_bytes + size > max_bytes) {
-                evict.push(id.clone());
-            } else {
-                kept_bytes += size;
+        let table = subscription.definition.table.as_str();
+        Ok(rows.map(|rows| {
+            rows.iter()
+                .filter(|(id, _)| !collapsed.contains_key(&(table, id.as_str())))
+                .cloned()
+                .collect()
+        }))
+    }
+
+    async fn read_affected_rows(
+        &self,
+        session: &TenantSession,
+        subscription: &ReplicaSubscription,
+        affected: &BTreeMap<String, BTreeSet<String>>,
+        revision: u64,
+    ) -> Result<Option<Vec<(String, Value)>>, ReplicaError> {
+        let definition = &subscription.definition;
+        let control = self
+            .inner
+            .control_plane
+            .read()
+            .await
+            .clone()
+            .ok_or(ReplicaError::ModuleMissing)?;
+        let mut transaction = control
+            .begin_tenant_transaction(&session.route, true)
+            .await?;
+        let clock = clock_in_transaction(&mut transaction).await?;
+        if clock.revision < revision || clock.retained_revision > revision {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let mut wanted = definition
+            .columns
+            .iter()
+            .cloned()
+            .chain(visibility::acl_columns(&subscription.visibility))
+            .chain(definition.equal_filters.keys().cloned())
+            .chain(definition.exclude_when_set.iter().cloned())
+            .chain(affected.keys().cloned())
+            .collect::<BTreeSet<_>>();
+        wanted.insert(definition.key.clone());
+        if !definition.order_by.is_empty() {
+            wanted.insert(definition.order_by.clone());
+        }
+        let columns = declared_columns(&mut transaction, definition, wanted.iter()).await?;
+        let mut rows = BTreeMap::new();
+        for (column, values) in affected {
+            self.inner
+                .visibility_metrics
+                .record_visibility_sql_statement();
+            let statement = format!(
+                "SELECT {} FROM {} AS r WHERE r.{} IN (SELECT value FROM json_each($1))",
+                gonvex_store::rows::json_object_expr("r", &columns),
+                quote(&definition.table)?,
+                quote(column)?,
+            );
+            let values = serde_json::to_string(values)
+                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?;
+            let fetched: Vec<Option<String>> = sqlx::query_scalar(&statement)
+                .bind(values)
+                .fetch_all(&mut **transaction.transaction())
+                .await?;
+            for raw in fetched.into_iter().flatten() {
+                let row: Value = serde_json::from_str(&raw)
+                    .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?;
+                rows.insert(row_key(&row, &definition.key)?, row);
             }
         }
-        for id in evict {
-            self.mask_apply_row(
-                subscription,
-                &id,
-                None,
-                &[],
-                entity_changes,
-                upserts,
-                deleted,
-            )?;
+        if clock.revision > revision {
+            // Rows written after the event: their image at the event is the
+            // before-image of their first later change.
+            let later = sqlx::query(
+                "SELECT row_id, old_value FROM _gonvex_sync_changes
+                 WHERE table_name = $1 AND revision > $2 AND revision <= $3
+                 ORDER BY revision, ordinal",
+            )
+            .bind(&definition.table)
+            .bind(revision as i64)
+            .bind(clock.revision as i64)
+            .fetch_all(&mut **transaction.transaction())
+            .await?;
+            let mut first = BTreeSet::new();
+            for row in &later {
+                let id: String = row.try_get("row_id")?;
+                if !first.insert(id.clone()) {
+                    continue;
+                }
+                let old = log_json(row, "old_value")?;
+                let matches = affected.iter().any(|(column, values)| {
+                    old.get(column).is_some_and(|value| {
+                        !value.is_null()
+                            && values.contains(&crate::visibility_mask::scalar(Some(value)))
+                    })
+                });
+                if matches {
+                    rows.insert(id, old);
+                } else {
+                    rows.remove(&id);
+                }
+            }
         }
-        subscription.truncated = true;
-        Ok(true)
-    }
-}
-
-/// PostgreSQL-like ordering for JSON scalars: nulls last, numbers numerically,
-/// strings lexically; mixed kinds by kind.
-fn compare_json(left: &Value, right: &Value) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    match (left, right) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => Ordering::Greater,
-        (_, Value::Null) => Ordering::Less,
-        (Value::Number(left), Value::Number(right)) => left
-            .as_f64()
-            .partial_cmp(&right.as_f64())
-            .unwrap_or(Ordering::Equal),
-        (Value::String(left), Value::String(right)) => left.cmp(right),
-        (Value::Bool(left), Value::Bool(right)) => left.cmp(right),
-        _ => left.to_string().cmp(&right.to_string()),
+        transaction.commit().await?;
+        Ok(Some(rows.into_iter().collect()))
     }
 }

@@ -1,5 +1,10 @@
 # Verifying Gonvex Rust with Verus
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 Verus is a practical way to keep Rust and add machine-checked specifications to
 small policy modules. The generation and capability checks verify production
 function bodies. No Verus library, macro or proof code enters the normal runtime

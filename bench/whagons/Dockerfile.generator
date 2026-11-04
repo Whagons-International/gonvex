@@ -1,7 +1,0 @@
-FROM node:26-bookworm-slim
-RUN npm install -g pnpm@10.28.2 firebase-tools@15.11.0
-WORKDIR /deps
-COPY gvmac-app/patches/@gonvex__client@0.5.2-staging.31.patch /deps/client.patch
-RUN node -e 'require("fs").writeFileSync("package.json",JSON.stringify({private:true,dependencies:{"@gonvex/client":"0.5.2-staging.31",tsx:"4.20.6","@gonvex/local-runtime":"0.5.2-staging.31","@gonvex/module-sdk":"0.5.2-staging.31"},pnpm:{patchedDependencies:{"@gonvex/client@0.5.2-staging.31":"client.patch"}}}))' && pnpm install
-COPY gvmac-app /app
-RUN ln -s /deps/node_modules /app/node_modules

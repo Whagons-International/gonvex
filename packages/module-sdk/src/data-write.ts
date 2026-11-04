@@ -13,23 +13,26 @@ const quote = (name: string) => {
   return `"${name}"`;
 };
 const allocations = new WeakMap<WriteDB, Map<string, number>>();
-const capturedWrites = new WeakSet<WriteDB>();
+/** `statement` ends in `RETURNING 1`; one tiny row per affected row. */
 async function affectedRows(
   db: WriteDB,
   statement: string,
   parameters: readonly JsonValue[],
-  name: "updated" | "deleted",
 ): Promise<number> {
-  if (capturedWrites.has(db)) {
-    await db.query(statement, parameters);
-    return 0;
-  }
-  const [result] = await db.query<Record<string, number | string>>(
-    `WITH changed AS (${statement}) SELECT count(*)::bigint AS ${name} FROM changed`,
-    parameters,
-  );
-  return Number(result?.[name] ?? 0);
+  return (await db.query(statement, parameters)).length;
 }
+/**
+ * The value of `column` in a JSON object `source`, converted to what the
+ * column stores. JSON columns keep the JSON text of the value (`->`), with a
+ * JSON null stored as SQL NULL; every other column takes the SQL value
+ * (`->>`: text, integer, real, NULL, and 0/1 for booleans). The declared
+ * type comes from pragma_table_info, the same source of truth the runtime
+ * uses to decode rows, so callers never pass column types.
+ */
+const jsonColumn = (table: string, column: string, source: string): string => {
+  const path = `'$.${column}'`;
+  return `CASE WHEN (SELECT upper(type) FROM pragma_table_info('${table}') WHERE name = '${column}') LIKE '%JSON%' THEN nullif(${source} -> ${path}, 'null') ELSE ${source} ->> ${path} END`;
+};
 const groups = <T>(values: readonly T[], columns: (value: T) => string[]) => {
   const result = new Map<string, T[]>();
   for (const value of values) {
@@ -41,7 +44,7 @@ const groups = <T>(values: readonly T[], columns: (value: T) => string[]) => {
   return result;
 };
 
-/** One shared bulk operation. PostgreSQL receives bounded typed row batches;
+/** One shared bulk operation. SQLite receives bounded JSON row batches;
  * local execution stages the same rows in the current intent transaction.
  */
 export async function insertDataRows(
@@ -75,15 +78,20 @@ export async function insertDataRows(
     return result;
   }
   const result: JsonObject[] = [];
-  for (const [signature, values] of groups(prepared, (entry) =>
+  for (const [signature, group] of groups(prepared, (entry) =>
     Object.keys(entry.row),
   )) {
-    const columns = (JSON.parse(signature) as string[]).map(quote).join(", ");
-    for (let offset = 0; offset < values.length; offset += 500) {
-      const rows = values.slice(offset, offset + 500).map((entry) => entry.row);
+    const names = JSON.parse(signature) as string[];
+    const columns = names.map(quote).join(", ");
+    const values = names
+      .map((name) => jsonColumn(table, name, "source.value"))
+      .join(", ");
+    for (let offset = 0; offset < group.length; offset += 500) {
+      const rows = group.slice(offset, offset + 500).map((entry) => entry.row);
+      // ORDER BY keeps input order for rowids.
       result.push(
         ...(await ctx.db.query<JsonObject>(
-          `INSERT INTO ${quote(table)} (${columns}) SELECT ${columns} FROM jsonb_populate_recordset(NULL::${quote(table)}, $1::text::jsonb) RETURNING *`,
+          `INSERT INTO ${quote(table)} (${columns}) SELECT ${values} FROM json_each($1) AS source ORDER BY source.key RETURNING *`,
           [JSON.stringify(rows)],
         )),
       );
@@ -130,14 +138,14 @@ export async function updateDataRows(
     const columns = JSON.parse(signature) as string[];
     if (!columns.length) continue;
     const assignments = columns
-      .map((name) => `${quote(name)} = source.${quote(name)}`)
+      .map((name) => `${quote(name)} = ${jsonColumn(table, name, "source.value")}`)
       .join(", ");
     for (let offset = 0; offset < values.length; offset += 500) {
       const rows = values
         .slice(offset, offset + 500)
         .map((update) => ({ ...update.fields, [key]: update.id }));
       await db.query(
-        `UPDATE ${quote(table)} AS target SET ${assignments} FROM jsonb_populate_recordset(NULL::${quote(table)}, $1::text::jsonb) AS source WHERE target.${quote(key)} = source.${quote(key)}`,
+        `UPDATE ${quote(table)} SET ${assignments} FROM json_each($1) AS source WHERE ${quote(table)}.${quote(key)} = source.value ->> '$.${key}'`,
         [JSON.stringify(rows)],
       );
     }
@@ -161,8 +169,8 @@ export async function deleteDataRows(
   for (let offset = 0; offset < unique.length; offset += 500)
     deleted += (
       await db.query(
-        `DELETE FROM ${quote(table)} WHERE ${quote(key)} = ANY($1) RETURNING ${quote(key)}`,
-        [unique.slice(offset, offset + 500)],
+        `DELETE FROM ${quote(table)} WHERE ${quote(key)} IN (SELECT value FROM json_each($1)) RETURNING 1`,
+        [JSON.stringify(unique.slice(offset, offset + 500))],
       )
     ).length;
   return deleted;
@@ -186,7 +194,6 @@ export async function deleteDataWhere(
     db,
     `DELETE FROM ${quote(read.table)} WHERE ${quote(key)} IN (${sql.statement}) RETURNING 1`,
     sql.parameters,
-    "deleted",
   );
 }
 
@@ -214,9 +221,8 @@ export async function updateDataWhere(
   const parameter = `$${sql.parameters.length + 1}`;
   return affectedRows(
     db,
-    `UPDATE ${quote(read.table)} SET ${names.map((name) => `${quote(name)} = source.${quote(name)}`).join(", ")} FROM jsonb_populate_record(NULL::${quote(read.table)}, ${parameter}::text::jsonb) AS source WHERE ${quote(read.table)}.${quote(key)} IN (${sql.statement}) RETURNING 1`,
+    `UPDATE ${quote(read.table)} SET ${names.map((name) => `${quote(name)} = ${jsonColumn(read.table, name, parameter)}`).join(", ")} WHERE ${quote(key)} IN (${sql.statement}) RETURNING 1`,
     [...sql.parameters, JSON.stringify(fields)],
-    "updated",
   );
 }
 
@@ -243,7 +249,7 @@ export type DataWrite =
     }
   | { kind: "delete"; table: string; ids: readonly string[]; key?: string };
 
-/** One host call for a prepared multi-table fanout. All IDs and calculations
+/** A prepared multi-table fanout. All IDs and calculations
  * come from the shared reducer; no SQL business logic is hidden in this adapter.
  */
 export async function applyDataWrites(
@@ -287,27 +293,30 @@ export async function applyDataWrites(
     allocations.set(ctx.db, allocations.get(db)!);
     return ctx.db.atomic(() => applyDataWrites({ ...ctx, db }, operations));
   }
-  const statements: Array<{ sql: string; parameters: unknown[] }> = [];
-  const captured: WriteDB = {
-    ...ctx.db,
-    query: async (sql, parameters = []) => {
-      statements.push({ sql, parameters: [...parameters] });
-      return [];
-    },
-  };
-  capturedWrites.add(captured);
-  const counters = allocations.get(ctx.db) ?? new Map<string, number>();
-  allocations.set(ctx.db, counters);
-  allocations.set(captured, counters);
-  const db = ctx.db.select ? ctx.db : captured;
+  // SQLite has no data-modifying CTEs, so each operation is its own
+  // statement in the Reducer's transaction, in order. A savepoint keeps the
+  // batch all-or-nothing even when the Reducer catches the error and commits.
+  const db = ctx.db;
+  if (db.select) return writeOperations(ctx, operations);
+  await db.query("SAVEPOINT gonvex_data_writes");
+  try {
+    await writeOperations(ctx, operations);
+  } catch (error) {
+    await db.query("ROLLBACK TO gonvex_data_writes");
+    await db.query("RELEASE gonvex_data_writes");
+    throw error;
+  }
+  await db.query("RELEASE gonvex_data_writes");
+}
+
+async function writeOperations(
+  ctx: ReducerContext,
+  operations: readonly DataWrite[],
+): Promise<void> {
+  const db = ctx.db;
   for (const operation of operations) {
     if (operation.kind === "insert")
-      await insertDataRows(
-        { ...ctx, db },
-        operation.table,
-        operation.rows,
-        operation.key,
-      );
+      await insertDataRows(ctx, operation.table, operation.rows, operation.key);
     else if (operation.kind === "update")
       await updateDataRows(db, operation.table, operation.rows, operation.key);
     else if (operation.kind === "updateWhere")
@@ -326,19 +335,4 @@ export async function applyDataWrites(
     else
       await deleteDataRows(db, operation.table, operation.ids, operation.key);
   }
-  if (!statements.length) return;
-  const parameters: import("./index.js").JsonValue[] = [];
-  const ctes = statements.map(({ sql, parameters: args }, index) => {
-    const offset = parameters.length;
-    parameters.push(...(args as import("./index.js").JsonValue[]));
-    const rebased = sql.replace(
-      /\$(\d+)/g,
-      (_, number) => `$${Number(number) + offset}`,
-    );
-    return `write_${index} AS (${rebased}${/ RETURNING /.test(sql) ? "" : " RETURNING 1 AS applied"})`;
-  });
-  await ctx.db.query(
-    `WITH ${ctes.join(", ")} SELECT ${statements.map((_, index) => `(SELECT count(*) FROM write_${index}) AS write_${index}`).join(", ")}`,
-    parameters,
-  );
 }

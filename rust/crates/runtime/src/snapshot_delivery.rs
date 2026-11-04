@@ -59,6 +59,12 @@ impl SnapshotDelivery {
     pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
+    /// Whether the next `pump` may encode many rows (worth the offload pool).
+    pub(crate) fn has_bulk_pending(&self) -> bool {
+        self.pending
+            .values()
+            .any(|pending| !pending.last_sent && pending.pages.remaining_rows() >= 64)
+    }
     pub(crate) fn remove(&mut self, id: &str) {
         if let Some(pending) = self.pending.remove(id) {
             // Cancellation prevents future frames; it cannot revoke bytes
@@ -369,7 +375,7 @@ mod tests {
                 revision: 1,
             },
             result: (0..n)
-                .map(|id| json!({"_id":id,"body":"a".repeat(1000)}))
+                .map(|id| std::sync::Arc::new(json!({"_id":id,"body":"a".repeat(1000)})))
                 .collect(),
             metadata: BTreeMap::from([(
                 "digest".into(),
@@ -595,7 +601,7 @@ mod tests {
         let mut input = snapshot("large", 8);
         if let ServerMessage::ReplicaSnapshot { result, .. } = &mut input {
             for row in result {
-                row["body"] = json!("x".repeat(100_000));
+                std::sync::Arc::make_mut(row)["body"] = json!("x".repeat(100_000));
             }
         }
         delivery.begin(input).unwrap();
@@ -687,7 +693,7 @@ mod tests {
         delivery.begin(snapshot("a-valid", 1)).unwrap();
         let mut oversized = snapshot("z-oversized", 1);
         if let ServerMessage::ReplicaSnapshot { result, .. } = &mut oversized {
-            result[0]["body"] = json!("x".repeat(FRAME_LIMIT));
+            std::sync::Arc::make_mut(&mut result[0])["body"] = json!("x".repeat(FRAME_LIMIT));
         }
         delivery.begin(oversized).unwrap();
         let batch = delivery.pump();

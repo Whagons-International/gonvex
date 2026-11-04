@@ -4,7 +4,7 @@ The language-neutral Gonvex module contract for Query, Reducer, and Action
 definitions.
 
 This package is deliberately a declaration layer. It does not open sockets,
-load Postgres drivers, read environment variables, or execute handlers. A
+load database drivers, read environment variables, or execute handlers. A
 Gonvex host supplies those capabilities through its module engine. The
 portable `ModuleManifest` produced here is suitable for `module.json`, client
 code generation, deployment validation, and non-TypeScript module adapters.
@@ -50,7 +50,7 @@ export const startTask = reducer({
 });
 ```
 
-`actions.enqueue` records the Action in the Reducer's Postgres transaction. The
+`actions.enqueue` records the Action in the Reducer's SQLite transaction. The
 host delivers it only after the business transaction commits and retries failed
 deliveries from the durable outbox.
 

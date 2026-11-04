@@ -36,7 +36,7 @@ Portable Live Query expressions can run over cached rows. Gonvex reports:
 - `completeness`: `complete` or `partial`
 - `freshness`: `current`, `verifying`, or `offline`
 
-A partial cache must be labeled as partial in product UI. PostgreSQL-specific
+A partial cache must be labeled as partial in product UI. SQLite-specific
 operators return `supported: false` instead of being approximated in JavaScript.
 The generated reference carries the exact expression tree used by the server,
 so Whagons does not implement a second filtering language for offline mode.

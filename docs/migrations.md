@@ -29,17 +29,16 @@ Each migration runs in one transaction by default. A statement failure rolls bac
 
 During sync Gonvex first reconciles the additive declarative schema, then runs SQL migrations, and activates the new function bundle only after both succeed. A tenant database created later receives the deployed tenant schema and all tenant migrations before it is marked ready.
 
-PostgreSQL operations that forbid a transaction block require this header:
+Migrations are SQLite SQL (see the dialect rules in [SQLite storage](sqlite-storage.md)). Operations that cannot run inside a transaction, such as `VACUUM`, require this header:
 
 ```sql
 -- gonvex:scope tenant
 -- gonvex:no-transaction
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_by_created_at
-ON messages (created_at);
+VACUUM;
 ```
 
-In no-transaction mode Gonvex executes top-level statements individually and records the migration only after every statement succeeds. Earlier statements can remain after a later failure, so every statement in such a migration should be safely retryable (`IF EXISTS`/`IF NOT EXISTS` where PostgreSQL supports it). Gonvex's splitter understands quoted strings, quoted identifiers, comments, and dollar-quoted function bodies.
+In no-transaction mode Gonvex executes top-level statements individually and records the migration only after every statement succeeds. Earlier statements can remain after a later failure, so every statement in such a migration should be safely retryable (`IF EXISTS`/`IF NOT EXISTS` where SQLite supports it). Gonvex's splitter understands quoted strings, quoted identifiers, comments, and trigger bodies.
 
 Tenant rollout continues after an individual tenant fails so healthy tenant databases are not blocked. Gonvex collects every failure, identifies its tenant, and fails the overall sync. The runtime manifest is not activated when any migration fails. Control Plane failure stops before tenant rollout.
 

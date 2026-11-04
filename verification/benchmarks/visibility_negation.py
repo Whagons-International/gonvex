@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Compare PostgreSQL execution of old/new visibility negation on equal row sets."""
+"""Compare PostgreSQL execution of old/new visibility negation on equal row sets.
+
+Historical: this benchmark predates the move to SQLite storage
+(docs/sqlite-storage.md) and is kept only to reproduce
+verification/results/visibility-negation-benchmark.json. It is not run in CI.
+"""
 import argparse
 import hashlib
 import json

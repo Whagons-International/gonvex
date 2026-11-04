@@ -126,7 +126,7 @@ impl Runtime {
             // Telemetry has a hard retention bound and never participates in
             // application correctness.
             sqlx::query(
-                "DELETE FROM gonvex_performance_events WHERE project_id=$1 AND created_at<now()-interval '14 days'",
+                "DELETE FROM gonvex_performance_events WHERE project_id=$1 AND created_at<CAST(unixepoch('subsec')*1000 AS INTEGER)-1209600000",
             )
             .bind(&connection.project_id)
             .execute(&mut **transaction.transaction())
@@ -161,6 +161,22 @@ impl Runtime {
                 .as_ref()
                 .map(|tenant| tenant.route.tenant_id.as_str())
                 .unwrap_or("");
+            let release = release.map(|value| bounded_text(value, 200));
+            let environment = environment.map(|value| bounded_text(value, 100));
+            // Presence v2: the open socket is the session's liveness. Only a
+            // new session or changed attribution needs the durable upsert and
+            // the Control Plane change notification.
+            if self.inner.presence.support_is_current(
+                &connection.connection_id,
+                &connection.project_id,
+                &connection.connection_id,
+                tenant_id,
+                &identity.account.id,
+                release.as_deref(),
+                environment.as_deref(),
+            ) {
+                return error_ack(id, None, None, None);
+            }
             let result = async {
                 let mut transaction = control.begin_control_transaction(false).await?;
                 sqlx::query(
@@ -174,14 +190,14 @@ impl Runtime {
                          connection_id=EXCLUDED.connection_id,
                          release=CASE WHEN EXCLUDED.release<>'' THEN EXCLUDED.release ELSE gonvex_support_sessions.release END,
                          environment=CASE WHEN EXCLUDED.environment<>'' THEN EXCLUDED.environment ELSE gonvex_support_sessions.environment END,
-                         last_seen_at=now()"#,
+                         last_seen_at=CAST(unixepoch('subsec')*1000 AS INTEGER)"#,
                 )
                 .bind(&connection.connection_id)
                 .bind(&connection.project_id)
                 .bind(tenant_id)
                 .bind(&identity.account.id)
-                .bind(bounded_text(release.unwrap_or(""), 200))
-                .bind(bounded_text(environment.unwrap_or(""), 100))
+                .bind(release.as_deref().unwrap_or(""))
+                .bind(environment.as_deref().unwrap_or(""))
                 .execute(&mut **transaction.transaction())
                 .await?;
                 transaction.commit().await
@@ -190,6 +206,16 @@ impl Runtime {
             if result.is_err() {
                 return error_ack(id, Some("error store unavailable"), None, None);
             }
+            // An empty value keeps the stored one (see the upsert above).
+            self.inner.presence.support_register(
+                &connection.connection_id,
+                &connection.project_id,
+                &connection.connection_id,
+                tenant_id,
+                &identity.account.id,
+                release.as_deref().filter(|value| !value.is_empty()),
+                environment.as_deref().filter(|value| !value.is_empty()),
+            );
             self.notify_control_changed(&connection.project_id);
         }
         error_ack(id, None, None, None)
@@ -274,12 +300,12 @@ impl Runtime {
 }
 
 async fn persist_event(
-    control: &gonvex_postgres::ControlPlane,
+    control: &gonvex_store::ControlPlane,
     event: &Value,
     event_id: &str,
     fingerprint: &str,
     occurred_at: DateTime<Utc>,
-) -> Result<bool, gonvex_postgres::DatabaseError> {
+) -> Result<bool, gonvex_store::DatabaseError> {
     let project = string_field(event, "project");
     let tenant = string_field(event, "tenant");
     let release = string_field(event, "release");
@@ -308,7 +334,7 @@ async fn persist_event(
     .bind(project)
     .bind(event_id)
     .bind(fingerprint)
-    .bind(occurred_at)
+    .bind(occurred_at.timestamp_millis())
     .bind(tenant)
     .bind(release)
     .bind(level)
@@ -321,10 +347,8 @@ async fn persist_event(
         transaction.rollback().await?;
         return Ok(false);
     }
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-        .bind(format!("{project}:{fingerprint}"))
-        .execute(&mut **transaction.transaction())
-        .await?;
+    // The group read-modify-write below runs on the database's single writer
+    // connection, so no other transaction can interleave with it.
     let existing = sqlx::query(
         r#"SELECT tenants,releases,environments,accounts,devices
            FROM gonvex_error_groups WHERE project_id=$1 AND fingerprint=$2"#,
@@ -376,7 +400,7 @@ async fn persist_event(
     .bind(title)
     .bind(culprit)
     .bind(level)
-    .bind(occurred_at)
+    .bind(occurred_at.timestamp_millis())
     .bind(Json(tenants))
     .bind(Json(releases))
     .bind(Json(environments))
@@ -556,9 +580,9 @@ mod tests {
         let connection = ControlConnection {
             connection_id: "connection-real".to_owned(),
             project_id: "project-real".to_owned(),
-            identity: Some(gonvex_postgres::SessionIdentity {
+            identity: Some(gonvex_store::SessionIdentity {
                 project_id: "project-real".to_owned(),
-                account: gonvex_postgres::Account {
+                account: gonvex_store::Account {
                     id: "account-real".to_owned(),
                     email: String::new(),
                     email_verified: true,

@@ -27,14 +27,15 @@ cd gonvex
 make stack
 ```
 
-The command runs `docker compose up --build --wait` for Postgres, MinIO, the
-runtime, and dashboard, then creates the local object-storage bucket.
+The command runs `docker compose up --build --wait` for MinIO, the runtime, and
+dashboard, then creates the local object-storage bucket. There is no database
+service: the runtime stores every database as a SQLite file in its data
+directory (`GONVEX_DATA_DIR`, mounted at `/data` in the `sqlite-data` volume).
 
 | Service | Address | Container port |
 | --- | --- | --- |
 | Runtime | `http://localhost:8080` | `8080` |
 | Dashboard | `http://localhost:3000` | `80` |
-| Postgres | `localhost:5432` | `5432` |
 | MinIO API | `http://localhost:9000` | `9000` |
 | MinIO console | `http://localhost:9001` | `9001` |
 
@@ -53,7 +54,7 @@ docker compose down
 ```
 
 Do not add `-v` to `docker compose down` unless you intentionally want to delete the
-local Postgres, MinIO, and runtime volumes.
+local SQLite data, MinIO, and runtime volumes.
 
 ## Optional analysis support
 
@@ -83,7 +84,9 @@ docker compose logs --tail=100 runtime
 curl http://localhost:8080/healthz
 ```
 
-This preserves the existing Postgres and runtime volumes. No manual database
+This preserves the existing SQLite data and runtime volumes. Compose stops the
+old runtime container before starting the new one, which SQLite requires: one
+runtime process owns a data directory and holds `/data/.gonvex.lock`. No manual database
 migration is required for project environment variables; the runtime creates or
 updates its control-plane tables during startup. Do not use `docker compose down -v`
 as part of this upgrade.
@@ -93,8 +96,11 @@ as part of this upgrade.
 The `Runtime regression` GitHub workflow validates pull requests and pushes to
 `main`, but it does not call the Coolify deployment API. The Whagons development
 runtime and dashboard track `main` at `HEAD`; the repository's Coolify push webhook
-is their single deployment lane. Coolify starts each replacement, waits for its
-`/healthz` check, moves traffic, and then stops the previous container. Pull requests
+is their single deployment lane. The dashboard Application rolls health-first. The runtime
+Application owns the SQLite data volume, so its old container must stop before
+the replacement opens the files: the runtime refuses to start while another
+process holds `/data/.gonvex.lock`, and an overlapping rolling replacement would
+never become healthy. Pull requests
 run the regression suite but never deploy.
 
 Coolify supplies the resolved `SOURCE_COMMIT` to each running container. The runtime
@@ -102,18 +108,18 @@ prefers a valid full SHA from that value over the legacy manually maintained
 `GONVEX_RUNTIME_VERSION`, so `/healthz.version` identifies the actual webhook
 checkout and the production promotion gate cannot pass on stale version metadata.
 
-Postgres stays in the separate
-`docker-compose.coolify.yml` data-plane service. Runtime releases therefore do
-not restart the database.
-Source manifests live in Postgres and data files can rehydrate from object storage.
-An installation may persist `/var/lib/gonvex` for module artifacts, data files,
-and telemetry. Build caches and temporary runtime state live outside that tree.
+The runtime Application mounts a persistent volume at `/data`
+(`GONVEX_DATA_DIR`), which holds `control.db` and every tenant database file.
+`docker-compose.coolify.yml` runs only the SQLite backup sidecar against that
+volume. Source manifests live in the Control Plane database and data files can
+rehydrate from object storage. An installation may also persist `/var/lib/gonvex`
+for module artifacts and telemetry. Build caches and temporary runtime state live outside that tree.
 
 The runtime does not report healthy until every persisted project manifest has
-hydrated. Scheduled jobs and deterministic cron occurrences live in Postgres and
-use renewable row leases for crash recovery. The Rust runtime does not use Redis
-or Valkey. Realtime correctness is backed by the durable PostgreSQL change log;
-notifications wake listeners so they can read it.
+hydrated. Scheduled jobs and deterministic cron occurrences live in the tenant
+databases and use renewable row leases for crash recovery. The Rust runtime does not use Redis
+or Valkey. Realtime correctness is backed by the durable change log committed in
+each SQLite file; in-process notifications wake listeners so they can read it.
 
 Production is a separate, manually approved promotion lane. Run **Promote Gonvex
 production** with the full SHA that is already healthy in development and a
@@ -126,8 +132,8 @@ and verifies the exact SHA reported by the development runtime. The protected
 is released.
 
 After approval, the workflow rolls the independent production runtime first and
-the dashboard second. Postgres remains in the production data-plane
-service and is not restarted. Before deployment it preserves configured trusted
+the dashboard second. The runtime's SQLite volume is preserved across the
+replacement. Before deployment it preserves configured trusted
 proxy networks, adds `127.0.0.1/32` for the supervisor-to-worker hop, and disables
 push auto-deploy on both production Applications. This prevents the final
 `production` branch update from causing a duplicate Coolify rollout. Public health
@@ -283,8 +289,9 @@ or matches `DASHBOARD_AUTH_ACCOUNT`. App sessions from every other project are r
 Runtime
   Loads TypeScript module artifacts and serves HTTP and WebSocket traffic.
 
-Postgres
-  Stores runtime control data and application data in the reference stack.
+Data directory (SQLite)
+  control.db for the Control Plane and one file per tenant (or per
+  single-database project), owned by the runtime process.
 
 Dashboard
   Inspects and manages the development runtime.
@@ -293,10 +300,12 @@ S3-compatible storage
   Optional for file APIs. The reference stack uses MinIO.
 ```
 
-The Compose stack uses one Postgres instance and development credentials for
-convenience. Gonvex also supports project-specific database routing through
-`GONVEX_PROJECT_DATABASE_URLS`, but operating those databases remains your
-responsibility.
+The Compose stack uses development credentials for convenience. Files live at
+`{data}/control.db`, `{data}/projects/{project}/tenants/{tenant}.db` and
+`{data}/projects/{project}/project.db`; see
+[SQLite storage](https://github.com/Whagons-International/gonvex/blob/main/docs/sqlite-storage.md).
+Run exactly one runtime per data directory. Two runtimes sharing one volume, or
+rolling deploys that overlap old and new containers on it, are not supported.
 
 ### Production Compose profile
 
@@ -304,22 +313,30 @@ responsibility.
 Moneymaker installation. Unlike the reference development stack, it publishes no
 database or object-storage ports; pins third-party images by digest;
 requires dashboard/runtime authentication; persists the
-module-artifact, database, and object-storage state; and writes daily retained PostgreSQL
-dumps to a separate volume. Coolify attaches domains only to the
+module-artifact, SQLite, and object-storage state; and writes daily retained SQLite
+snapshots to a separate volume. Coolify attaches domains only to the
 `gonvex-maker-runtime` and `gonvex-maker-dashboard` services and generates the
 `SERVICE_*` credentials referenced by the file. Runtime and dashboard image builds also bound build parallelism so
-an upgrade cannot consume every CPU on a shared host. The backup sidecar waits for
-the runtime health gate before its first dump, ensuring the initial retained backup
-contains the initialized control-plane schema rather than an empty new database.
-Its own healthcheck requires a valid custom-format dump of at least 20 KB. All
+an upgrade cannot consume every CPU on a shared host. The backup sidecar
+(`infra/sqlite-backup`) waits for the runtime health gate before its first run, so
+the initial retained backup contains the initialized Control Plane. Each run
+copies every `*.db` under `/data` with SQLite's online backup API (a consistent
+snapshot of each file while the runtime keeps writing), requires
+`PRAGMA integrity_check` to pass on every copy, and only then publishes the run
+directory. Files are copied one after another, so a run is consistent per file,
+not one cross-file instant. Its healthcheck requires the newest run to contain a
+`control.db` that passes `PRAGMA quick_check`. Restore by stopping the runtime and
+copying a run directory back into `/data`. Continuous replication with
+[Litestream](https://litestream.io) is the planned follow-up for a lower recovery
+point than one day. All
 service names are stack-specific because Coolify also joins applications to a
-shared network; generic aliases such as `postgres` or `runtime` could otherwise
+shared network; generic aliases such as `minio` or `runtime` could otherwise
 resolve to an unrelated application's container. The two public services also
 declare high-priority HTTPS routers that use the Gabriel server's `lehttp`
 HTTP-challenge resolver; Coolify's generated Compose routers otherwise select
 the server's unrelated default resolver.
 
-The local dump volume protects against an application or database regression, not
+The local snapshot volume protects against an application or database regression, not
 loss of the host. A production operator must additionally copy encrypted database
 and object-storage backups off-host and prove a restore. Keep the bootstrap email
 and password in a secret manager, replace bootstrap access with named dashboard
@@ -353,10 +370,11 @@ a distributed edge/WAF limit as well.
 
 ### Minimum operations checklist
 
-- Replace the Compose database, MinIO, and dashboard development credentials.
-- Use durable Postgres storage and test database restoration.
+- Replace the Compose MinIO and dashboard development credentials.
+- Mount a durable volume at `/data` (`GONVEX_DATA_DIR`) and test database restoration.
+- Run one runtime per data directory; stop the old container before starting a new one.
 - Persist `/var/lib/gonvex` for module artifacts and telemetry data.
-- Back up every application database and object-storage bucket.
+- Back up every SQLite file under `/data` and every object-storage bucket.
 - Restrict access to the dashboard and `/dev/*` management endpoints.
 - Preserve project authentication headers on proxied `/dev/*` requests.
 - Configure TLS and preserve WebSocket upgrades on `/ws`.
@@ -364,7 +382,7 @@ a distributed edge/WAF limit as well.
 - Set `GONVEX_AUTH_URL` and the one Google client ID/secret when native Google login is offered.
 - Set `GONVEX_TRUSTED_PROXY_CIDRS` when honoring a proxy's forwarded client addresses.
 - Run `gonvex auth doctor` and a real Google sign-in for every production origin.
-- Monitor `/healthz`, container restarts, database capacity, and runtime logs.
+- Monitor `/healthz`, container restarts, data-volume free space, and runtime logs.
 - Pin and test image versions before upgrading.
 
 <div className="docs-callout docs-callout--note">

@@ -275,7 +275,7 @@ async fn watch(
                     .get(&format!("{}:{}", read.project, read.tenant))
             };
             let route = if let Some(database_url) = configured {
-                Some(gonvex_postgres::TenantRoute {
+                Some(gonvex_store::TenantRoute {
                     project_id: read.project.clone(),
                     tenant_id: if read.tenant.is_empty() {
                         read.project.clone()

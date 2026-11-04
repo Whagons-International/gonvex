@@ -7,13 +7,26 @@ use std::time::Duration;
 use thiserror::Error;
 
 const DEFAULT_ADDR: &str = "0.0.0.0:8080";
+const DEFAULT_DATA_DIR: &str = "./data";
+/// Postgres-era variables. Setting one now fails startup instead of silently
+/// running against an empty data directory.
+const REMOVED_DATABASE_VARIABLES: [&str; 2] = ["GONVEX_CONTROL_PLANE_DATABASE_URL", "DATABASE_URL"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub addr: SocketAddr,
+    /// `sqlite://{GONVEX_DATA_DIR}/control.db`. `None` runs without a Control
+    /// Plane.
     pub control_plane_database_url: Option<String>,
+    /// `sqlite://{GONVEX_DATA_DIR}` (absolute; default `./data`): the data
+    /// directory that holds every SQLite database and under which
+    /// runtime-created project and tenant files are provisioned. One runtime
+    /// process owns it at a time. `None` disables provisioning.
     pub default_database_url: Option<String>,
+    /// Explicit `sqlite://` overrides (`GONVEX_TENANT_DATABASE_URLS`), keyed by
+    /// tenant or `project:tenant`.
     pub tenant_database_urls: BTreeMap<String, String>,
+    /// Explicit `sqlite://` overrides (`GONVEX_PROJECT_DATABASE_URLS`).
     pub project_database_urls: BTreeMap<String, String>,
     pub require_auth: bool,
     pub websocket_compression: bool,
@@ -39,6 +52,18 @@ pub struct Config {
     /// Parsed from `GONVEX_SERVICE_PRINCIPALS`; empty disables the feature.
     pub service_principals: Vec<ServicePrincipalConfig>,
     pub public_functions: crate::public_functions::PublicLimits,
+    /// Presence v2 (`GONVEX_PRESENCE_*`); see `presence.rs`.
+    pub presence: crate::presence::PresenceConfig,
+    /// Per-connection socket caps and outbound bounds (`GONVEX_TCP_*`,
+    /// `GONVEX_WS_*`): a client that stops reading pins a fixed amount of
+    /// memory and is disconnected.
+    pub connection: ConnectionConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionConfig {
+    pub socket: crate::accept::SocketTuning,
+    pub outbound: gonvex_websocket::OutboundLimits,
 }
 
 /// One trusted backend service credential. Only the SHA-256 digest of the
@@ -135,6 +160,11 @@ impl Default for SandboxConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleHostConfig {
     pub enabled: bool,
+    /// Run the V8 isolates inside the runtime process. Host calls are then
+    /// direct function calls instead of JSON frames on a socket; `binary` and
+    /// `endpoint` are ignored. `GONVEX_MODULE_HOST_IN_PROCESS=false` keeps the
+    /// separate module-host process.
+    pub in_process: bool,
     pub binary: Option<PathBuf>,
     pub endpoint: Option<String>,
     pub start_timeout: Duration,
@@ -144,6 +174,10 @@ pub struct ModuleHostConfig {
     pub isolate_pool_size: usize,
     pub execution_timeout: Duration,
     pub action_execution_timeout: Duration,
+    /// V8 heap ceiling per isolate (in-process mode; the separate host takes
+    /// its own `--max-heap-mb`). Crossing it terminates the call and retires
+    /// the isolate.
+    pub max_heap_bytes: usize,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -156,6 +190,12 @@ pub enum ConfigError {
     Integer { name: &'static str, value: String },
     #[error("{name} must be a JSON object of string values")]
     StringMap { name: &'static str },
+    #[error("{name} values must be sqlite:// database paths, got {value:?}")]
+    DatabaseRoute { name: &'static str, value: String },
+    #[error("{0} is no longer supported; databases are SQLite files under GONVEX_DATA_DIR")]
+    RemovedDatabaseVariable(&'static str),
+    #[error("GONVEX_DATA_DIR {0:?} cannot be resolved to an absolute path")]
+    DataDir(String),
     #[error("GONVEX_SERVICE_PRINCIPALS is invalid: {0}")]
     ServicePrincipals(String),
     #[error("trusted proxy variables must be comma-separated CIDRs or IP addresses")]
@@ -165,8 +205,23 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// The absolute data directory (`GONVEX_DATA_DIR`), when configured.
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        self.default_database_url
+            .as_deref()
+            .map(gonvex_store::database_path)
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|name| env::var(name).ok())
+    }
+
+    /// Production defaults with explicit overrides, for the benchmark fixture.
+    #[cfg(feature = "perf-fixture")]
+    pub(crate) fn perf_from_lookup(
+        lookup: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        Self::from_lookup(lookup)
     }
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
@@ -180,15 +235,24 @@ impl Config {
             .or_else(|| non_empty(lookup("GONVEX_RUNTIME_VERSION")))
             .unwrap_or_else(|| "development".to_owned());
 
+        for name in REMOVED_DATABASE_VARIABLES {
+            if non_empty(lookup(name)).is_some() {
+                return Err(ConfigError::RemovedDatabaseVariable(name));
+            }
+        }
+        let data_dir = data_dir(lookup("GONVEX_DATA_DIR"))?;
+
         Ok(Self {
             addr,
-            control_plane_database_url: non_empty(lookup("GONVEX_CONTROL_PLANE_DATABASE_URL")),
-            default_database_url: non_empty(lookup("DATABASE_URL")),
-            tenant_database_urls: string_map(
+            control_plane_database_url: Some(gonvex_store::database_url(
+                &data_dir.join("control.db"),
+            )),
+            default_database_url: Some(gonvex_store::database_url(&data_dir)),
+            tenant_database_urls: sqlite_routes(
                 "GONVEX_TENANT_DATABASE_URLS",
                 lookup("GONVEX_TENANT_DATABASE_URLS"),
             )?,
-            project_database_urls: string_map(
+            project_database_urls: sqlite_routes(
                 "GONVEX_PROJECT_DATABASE_URLS",
                 lookup("GONVEX_PROJECT_DATABASE_URLS"),
             )?,
@@ -214,25 +278,30 @@ impl Config {
             dashboard_auth_project_id: non_empty(lookup("GONVEX_DASHBOARD_AUTH_PROJECT_ID")),
             google_client_id: non_empty(lookup("GONVEX_GOOGLE_CLIENT_ID")),
             google_client_secret: non_empty(lookup("GONVEX_GOOGLE_CLIENT_SECRET")),
+            // Concurrent SQL jobs across every database file (CPU fairness).
             database_max_total_connections: integer(
                 "GONVEX_DB_MAX_TOTAL_CONNS",
                 lookup("GONVEX_DB_MAX_TOTAL_CONNS"),
-                20,
+                64,
             )?,
+            // Read-only connections per database file; writes always use the
+            // file's single writer connection.
+            // Each SQLite connection holds its own parsed schema (~4 MB for
+            // the Whagons tenant schema), so idle readers are not free.
             database_max_connections: integer(
                 "GONVEX_DB_MAX_OPEN_CONNS",
                 lookup("GONVEX_DB_MAX_OPEN_CONNS"),
-                2,
+                default_readers_per_database(),
             )? as u32,
             database_max_idle_connections: integer_allow_zero(
                 "GONVEX_DB_MAX_IDLE_CONNS",
                 lookup("GONVEX_DB_MAX_IDLE_CONNS"),
-                2,
+                4,
             )? as u32,
             database_idle_timeout: duration_ms(
                 "GONVEX_DB_IDLE_TIMEOUT_MS",
                 lookup("GONVEX_DB_IDLE_TIMEOUT_MS"),
-                60_000,
+                15_000,
             )?,
             module_host: ModuleHostConfig {
                 enabled: boolean(
@@ -240,6 +309,16 @@ impl Config {
                     lookup("GONVEX_MODULE_HOST_ENABLED"),
                     true,
                 )?,
+                in_process: boolean(
+                    "GONVEX_MODULE_HOST_IN_PROCESS",
+                    lookup("GONVEX_MODULE_HOST_IN_PROCESS"),
+                    true,
+                )?,
+                max_heap_bytes: integer(
+                    "GONVEX_MODULE_HOST_MAX_HEAP_MB",
+                    lookup("GONVEX_MODULE_HOST_MAX_HEAP_MB"),
+                    64,
+                )? << 20,
                 binary: non_empty(lookup("GONVEX_MODULE_HOST_BINARY")).map(PathBuf::from),
                 endpoint: non_empty(lookup("GONVEX_MODULE_HOST_ENDPOINT")),
                 start_timeout: duration_ms(
@@ -265,7 +344,7 @@ impl Config {
                 isolate_pool_size: integer(
                     "GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE",
                     lookup("GONVEX_MODULE_HOST_ISOLATE_POOL_SIZE"),
-                    4,
+                    default_isolate_pool_size(),
                 )?,
                 execution_timeout: duration_ms(
                     "GONVEX_MODULE_HOST_EXECUTION_TIMEOUT_MS",
@@ -393,6 +472,8 @@ impl Config {
                 )?,
                 public_base_url: non_empty(lookup("GONVEX_PUBLIC_URL")).unwrap_or_default(),
             },
+            presence: presence_config(&mut lookup)?,
+            connection: connection_config(&mut lookup)?,
             public_functions: crate::public_functions::PublicLimits {
                 pending_per_ip: integer(
                     "GONVEX_PENDING_CONNECTIONS_PER_IP",
@@ -486,6 +567,25 @@ fn boolean(name: &'static str, value: Option<String>, default: bool) -> Result<b
     }
 }
 
+/// One V8 isolate per available CPU (cgroup quota aware), at most 4. Each
+/// isolate holds the whole application bundle (~290 MB for Whagons), and
+/// isolates beyond the CPU count add memory without adding throughput.
+/// Readers per database file: one per CPU, at least 2 (a long snapshot read
+/// must not block other reads) and at most 4.
+fn default_readers_per_database() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(2)
+        .clamp(2, 4)
+}
+
+fn default_isolate_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .clamp(1, 4)
+}
+
 fn integer(
     name: &'static str,
     value: Option<String>,
@@ -507,6 +607,112 @@ fn duration_ms(
     default: usize,
 ) -> Result<Duration, ConfigError> {
     integer(name, value, default).map(|value| Duration::from_millis(value as u64))
+}
+
+fn path_list(value: Option<String>) -> Vec<String> {
+    non_empty(value)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Zero (or unset, for the receive buffer) keeps the platform default.
+fn connection_config(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<ConnectionConfig, ConfigError> {
+    let socket = crate::accept::SocketTuning::default();
+    let outbound = gonvex_websocket::OutboundLimits::default();
+    let optional = |value: usize| (value > 0).then_some(value);
+    let max_bytes = integer(
+        "GONVEX_WS_OUTBOUND_MAX_BYTES",
+        lookup("GONVEX_WS_OUTBOUND_MAX_BYTES"),
+        outbound.max_bytes,
+    )?;
+    Ok(ConnectionConfig {
+        socket: crate::accept::SocketTuning {
+            send_buffer: optional(integer_allow_zero(
+                "GONVEX_TCP_SEND_BUFFER_BYTES",
+                lookup("GONVEX_TCP_SEND_BUFFER_BYTES"),
+                socket.send_buffer.unwrap_or(0),
+            )?),
+            receive_buffer: optional(integer_allow_zero(
+                "GONVEX_TCP_RECEIVE_BUFFER_BYTES",
+                lookup("GONVEX_TCP_RECEIVE_BUFFER_BYTES"),
+                socket.receive_buffer.unwrap_or(0),
+            )?),
+            notsent_lowat: optional(integer_allow_zero(
+                "GONVEX_TCP_NOTSENT_LOWAT_BYTES",
+                lookup("GONVEX_TCP_NOTSENT_LOWAT_BYTES"),
+                socket.notsent_lowat.unwrap_or(0) as usize,
+            )?)
+            .map(|bytes| bytes.min(u32::MAX as usize) as u32),
+        },
+        outbound: gonvex_websocket::OutboundLimits {
+            max_bytes,
+            max_frames: integer(
+                "GONVEX_WS_OUTBOUND_MAX_FRAMES",
+                lookup("GONVEX_WS_OUTBOUND_MAX_FRAMES"),
+                outbound.max_frames,
+            )?,
+            low_water: outbound.low_water.min(max_bytes),
+            stall_timeout: Duration::from_secs(integer(
+                "GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS",
+                lookup("GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS"),
+                outbound.stall_timeout.as_secs() as usize,
+            )? as u64),
+        },
+    })
+}
+
+fn presence_config(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<crate::presence::PresenceConfig, ConfigError> {
+    let defaults = crate::presence::PresenceConfig::default();
+    let ping_interval = Duration::from_secs(integer(
+        "GONVEX_PRESENCE_PING_SECONDS",
+        lookup("GONVEX_PRESENCE_PING_SECONDS"),
+        defaults.ping_interval.as_secs() as usize,
+    )? as u64);
+    let liveness_timeout = Duration::from_secs(integer(
+        "GONVEX_PRESENCE_LIVENESS_SECONDS",
+        lookup("GONVEX_PRESENCE_LIVENESS_SECONDS"),
+        defaults.liveness_timeout.as_secs() as usize,
+    )? as u64)
+    // At least two missed Pings before a connection is declared dead.
+    .max(ping_interval * 2);
+    Ok(crate::presence::PresenceConfig {
+        enabled: boolean(
+            "GONVEX_PRESENCE_V2",
+            lookup("GONVEX_PRESENCE_V2"),
+            defaults.enabled,
+        )?,
+        tick: duration_ms(
+            "GONVEX_PRESENCE_TICK_MS",
+            lookup("GONVEX_PRESENCE_TICK_MS"),
+            defaults.tick.as_millis() as usize,
+        )?,
+        offline_grace: Duration::from_millis(integer_allow_zero(
+            "GONVEX_PRESENCE_OFFLINE_GRACE_MS",
+            lookup("GONVEX_PRESENCE_OFFLINE_GRACE_MS"),
+            defaults.offline_grace.as_millis() as usize,
+        )? as u64),
+        ping_interval,
+        liveness_timeout,
+        legacy_beat_paths: path_list(lookup("GONVEX_PRESENCE_LEGACY_BEAT_PATHS")),
+        legacy_transition_paths: path_list(lookup("GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS")),
+        max_pending_batches: defaults.max_pending_batches,
+        support_refresh: Duration::from_secs(integer(
+            "GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS",
+            lookup("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS"),
+            defaults.support_refresh.as_secs() as usize,
+        )? as u64),
+    })
 }
 
 fn integer_allow_zero(
@@ -539,6 +745,41 @@ fn string_map(
             (!key.is_empty() && !value.is_empty()).then_some((key, value))
         })
         .collect())
+}
+
+/// Resolves `GONVEX_DATA_DIR` (default `./data`) to an absolute path.
+fn data_dir(value: Option<String>) -> Result<PathBuf, ConfigError> {
+    let raw = non_empty(value).unwrap_or_else(|| DEFAULT_DATA_DIR.to_owned());
+    let path = PathBuf::from(&raw);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map_err(|_| ConfigError::DataDir(raw.clone()))?
+            .join(path)
+    };
+    // Normalize `.` components so routes are stable across spellings.
+    Ok(path
+        .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
+        .collect())
+}
+
+/// A JSON object of `sqlite://` routes, normalized to absolute file paths.
+fn sqlite_routes(
+    name: &'static str,
+    value: Option<String>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    string_map(name, value)?
+        .into_iter()
+        .map(|(key, value)| {
+            if !value.starts_with("sqlite:") {
+                return Err(ConfigError::DatabaseRoute { name, value });
+            }
+            let route = gonvex_store::database_url(&gonvex_store::database_path(&value));
+            Ok((key, route))
+        })
+        .collect()
 }
 
 #[derive(serde::Deserialize)]
@@ -659,10 +900,86 @@ mod tests {
     }
 
     #[test]
+    fn connection_limits_config() {
+        let defaults = config(&[]).unwrap().connection;
+        assert_eq!(defaults.socket.send_buffer, Some(256 << 10));
+        assert_eq!(defaults.socket.notsent_lowat, Some(128 << 10));
+        assert_eq!(defaults.socket.receive_buffer, None);
+        assert_eq!(
+            defaults.outbound,
+            gonvex_websocket::OutboundLimits::default()
+        );
+        assert_eq!(defaults.outbound.stall_timeout, Duration::from_secs(30));
+        let custom = config(&[
+            ("GONVEX_TCP_SEND_BUFFER_BYTES", "0"),
+            ("GONVEX_TCP_RECEIVE_BUFFER_BYTES", "65536"),
+            ("GONVEX_TCP_NOTSENT_LOWAT_BYTES", "0"),
+            ("GONVEX_WS_OUTBOUND_MAX_BYTES", "32768"),
+            ("GONVEX_WS_OUTBOUND_MAX_FRAMES", "16"),
+            ("GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS", "5"),
+        ])
+        .unwrap()
+        .connection;
+        assert_eq!(custom.socket.send_buffer, None);
+        assert_eq!(custom.socket.receive_buffer, Some(65536));
+        assert_eq!(custom.socket.notsent_lowat, None);
+        assert_eq!(custom.outbound.max_bytes, 32768);
+        assert_eq!(custom.outbound.low_water, 32768);
+        assert_eq!(custom.outbound.max_frames, 16);
+        assert_eq!(custom.outbound.stall_timeout, Duration::from_secs(5));
+        assert!(config(&[("GONVEX_WS_SEND_STALL_TIMEOUT_SECONDS", "0")]).is_err());
+    }
+
+    #[test]
+    fn presence_v2_config() {
+        let defaults = config(&[]).unwrap().presence;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.tick, Duration::from_millis(1_000));
+        assert_eq!(defaults.offline_grace, Duration::from_secs(10));
+        assert!(defaults.legacy_beat_paths.is_empty());
+        assert_eq!(defaults.support_refresh, Duration::from_secs(300));
+        assert_eq!(
+            config(&[("GONVEX_SUPPORT_LAST_SEEN_REFRESH_SECONDS", "60")])
+                .unwrap()
+                .presence
+                .support_refresh,
+            Duration::from_secs(60)
+        );
+        let custom = config(&[
+            ("GONVEX_PRESENCE_V2", "off"),
+            ("GONVEX_PRESENCE_TICK_MS", "250"),
+            ("GONVEX_PRESENCE_OFFLINE_GRACE_MS", "0"),
+            ("GONVEX_PRESENCE_PING_SECONDS", "40"),
+            ("GONVEX_PRESENCE_LIVENESS_SECONDS", "30"),
+            (
+                "GONVEX_PRESENCE_LEGACY_BEAT_PATHS",
+                "presence.beat, other.beat",
+            ),
+            (
+                "GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS",
+                "presence.transition",
+            ),
+        ])
+        .unwrap()
+        .presence;
+        assert!(!custom.enabled);
+        assert_eq!(custom.tick, Duration::from_millis(250));
+        assert_eq!(custom.offline_grace, Duration::ZERO);
+        // Liveness never drops below two Ping intervals.
+        assert_eq!(custom.liveness_timeout, Duration::from_secs(80));
+        assert_eq!(
+            custom.legacy_beat_paths,
+            vec!["presence.beat", "other.beat"]
+        );
+        assert_eq!(custom.legacy_transition_paths, vec!["presence.transition"]);
+        assert!(config(&[("GONVEX_PRESENCE_TICK_MS", "0")]).is_err());
+    }
+
+    #[test]
     fn database_idle_timeout_is_configurable() {
         assert_eq!(
             config(&[]).unwrap().database_idle_timeout,
-            Duration::from_secs(60)
+            Duration::from_secs(15)
         );
         assert_eq!(
             config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1500")])
@@ -758,7 +1075,7 @@ mod tests {
     #[test]
     fn parses_database_idle_timeout_without_changing_pool_defaults() {
         let defaults = config(&[]).expect("defaults");
-        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(60));
+        assert_eq!(defaults.database_idle_timeout, Duration::from_secs(15));
         let tuned = config(&[("GONVEX_DB_IDLE_TIMEOUT_MS", "1000")]).expect("timeout");
         assert_eq!(tuned.database_idle_timeout, Duration::from_secs(1));
         assert_eq!(
@@ -772,12 +1089,11 @@ mod tests {
     fn reads_the_existing_runtime_environment_contract() {
         let config = config(&[
             ("GONVEX_ADDR", ":9090"),
-            ("GONVEX_CONTROL_PLANE_DATABASE_URL", "postgres://control"),
-            ("DATABASE_URL", "postgres://default"),
+            ("GONVEX_DATA_DIR", "/var/lib/gonvex/data"),
             ("GONVEX_REQUIRE_AUTH", "true"),
             (
                 "GONVEX_TENANT_DATABASE_URLS",
-                r#"{"tenant-a":"postgres://a"}"#,
+                r#"{"tenant-a":"sqlite:///srv/a.db"}"#,
             ),
             ("GONVEX_MODULE_HOST_BINARY", "/bin/gonvex-module-host"),
             ("SOURCE_COMMIT", "0123456789abcdef0123456789abcdef01234567"),
@@ -786,16 +1102,55 @@ mod tests {
 
         assert_eq!(config.addr, "0.0.0.0:9090".parse().unwrap());
         assert_eq!(
-            config.control_plane_database_url.as_deref(),
-            Some("postgres://control")
+            config.data_dir(),
+            Some(PathBuf::from("/var/lib/gonvex/data"))
         );
-        assert_eq!(config.tenant_database_urls["tenant-a"], "postgres://a");
+        assert_eq!(
+            config.control_plane_database_url.as_deref(),
+            Some("sqlite:///var/lib/gonvex/data/control.db")
+        );
+        assert_eq!(
+            config.default_database_url.as_deref(),
+            Some("sqlite:///var/lib/gonvex/data")
+        );
+        assert_eq!(
+            config.tenant_database_urls["tenant-a"],
+            "sqlite:///srv/a.db"
+        );
         assert!(config.require_auth);
-        assert_eq!(config.database_max_total_connections, 20);
+        assert_eq!(config.database_max_total_connections, 64);
         assert_eq!(
             config.runtime_version,
             "0123456789abcdef0123456789abcdef01234567"
         );
+    }
+
+    #[test]
+    fn data_dir_defaults_to_an_absolute_data_directory() {
+        let data_dir = config(&[]).expect("config").data_dir().unwrap();
+        assert!(data_dir.is_absolute());
+        assert!(data_dir.ends_with("data"));
+        assert!(!data_dir.to_string_lossy().contains("/./"));
+        let relative = config(&[("GONVEX_DATA_DIR", "state/db")])
+            .expect("config")
+            .data_dir()
+            .unwrap();
+        assert!(relative.is_absolute());
+        assert!(relative.ends_with("state/db"));
+    }
+
+    #[test]
+    fn postgres_database_variables_fail_startup() {
+        for name in ["DATABASE_URL", "GONVEX_CONTROL_PLANE_DATABASE_URL"] {
+            assert_eq!(
+                config(&[(name, "postgres://example")]).unwrap_err(),
+                ConfigError::RemovedDatabaseVariable(name)
+            );
+        }
+        assert!(matches!(
+            config(&[("GONVEX_PROJECT_DATABASE_URLS", r#"{"p":"postgres://x"}"#)]).unwrap_err(),
+            ConfigError::DatabaseRoute { .. }
+        ));
     }
 
     #[test]

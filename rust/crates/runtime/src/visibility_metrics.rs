@@ -13,6 +13,10 @@ pub struct VisibilityMetrics {
     principal_rebuilds: AtomicU64,
     consistency_rebuilds: AtomicU64,
     in_memory_row_checks: AtomicU64,
+    compiled_row_checks: AtomicU64,
+    class_evaluations: AtomicU64,
+    member_evaluations: AtomicU64,
+    fallback_row_checks: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -23,6 +27,14 @@ pub struct VisibilityMetricsSnapshot {
     pub principal_rebuilds: u64,
     pub consistency_rebuilds: u64,
     pub in_memory_row_checks: u64,
+    /// Row checks answered by a compiled class program (`visibility_class`).
+    pub compiled_row_checks: u64,
+    /// Class default evaluations: one per visibility class per changed row.
+    pub class_evaluations: u64,
+    /// Members evaluated individually because a member atom hit the row.
+    pub member_evaluations: u64,
+    /// Row checks of plans the compiler does not support (interpreted).
+    pub fallback_row_checks: u64,
 }
 
 impl VisibilityMetrics {
@@ -51,6 +63,18 @@ impl VisibilityMetrics {
         self.in_memory_row_checks.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Add one feed event's compiled-evaluator counts.
+    pub fn record_eval_stats(&self, stats: &crate::visibility_class::EvalStats) {
+        self.compiled_row_checks
+            .fetch_add(stats.compiled_checks, Ordering::Relaxed);
+        self.class_evaluations
+            .fetch_add(stats.class_evaluations, Ordering::Relaxed);
+        self.member_evaluations
+            .fetch_add(stats.member_evaluations, Ordering::Relaxed);
+        self.fallback_row_checks
+            .fetch_add(stats.fallback_checks, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> VisibilityMetricsSnapshot {
         VisibilityMetricsSnapshot {
             visibility_sql_statements: self.visibility_sql_statements.load(Ordering::Relaxed),
@@ -59,6 +83,10 @@ impl VisibilityMetrics {
             principal_rebuilds: self.principal_rebuilds.load(Ordering::Relaxed),
             consistency_rebuilds: self.consistency_rebuilds.load(Ordering::Relaxed),
             in_memory_row_checks: self.in_memory_row_checks.load(Ordering::Relaxed),
+            compiled_row_checks: self.compiled_row_checks.load(Ordering::Relaxed),
+            class_evaluations: self.class_evaluations.load(Ordering::Relaxed),
+            member_evaluations: self.member_evaluations.load(Ordering::Relaxed),
+            fallback_row_checks: self.fallback_row_checks.load(Ordering::Relaxed),
         }
     }
 
@@ -71,6 +99,10 @@ impl VisibilityMetrics {
         self.principal_rebuilds.store(0, Ordering::Relaxed);
         self.consistency_rebuilds.store(0, Ordering::Relaxed);
         self.in_memory_row_checks.store(0, Ordering::Relaxed);
+        self.compiled_row_checks.store(0, Ordering::Relaxed);
+        self.class_evaluations.store(0, Ordering::Relaxed);
+        self.member_evaluations.store(0, Ordering::Relaxed);
+        self.fallback_row_checks.store(0, Ordering::Relaxed);
     }
 }
 
@@ -106,6 +138,7 @@ mod tests {
                 principal_rebuilds: 400,
                 consistency_rebuilds: 400,
                 in_memory_row_checks: 400,
+                ..VisibilityMetricsSnapshot::default()
             }
         );
         assert_eq!(second.snapshot(), VisibilityMetricsSnapshot::default());

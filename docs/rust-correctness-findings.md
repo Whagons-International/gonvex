@@ -1,5 +1,8 @@
 # Rust correctness fixes found during the Bend experiment
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](sqlite-storage.md).
+
 The first twelve failures were reproduced against staging commit
 `c233a96cb198669540fa29bb638fd7860611e5b8` and fixed in Rust separately from Bend.
 Later entries record additional regressions found during modularization and

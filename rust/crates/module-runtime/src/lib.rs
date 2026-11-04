@@ -17,6 +17,13 @@ use thiserror::Error;
 /// the depth and must remain bounded so runtimes cannot recurse forever.
 pub const MAX_INVOCATION_DEPTH: u8 = 8;
 
+/// Default bound on durable hops in one chain of work. A durable hop is work
+/// that starts after its parent finished: a scheduled job (`runAfter`/`runAt`,
+/// cron runs) or an outbox Action. A hop starts a new call at depth zero (it
+/// holds nothing of its parent, so it needs no separate isolate pool), and
+/// `durable_hops` counts the hops so a self-rescheduling loop still ends.
+pub const MAX_DURABLE_HOPS: u8 = 32;
+
 mod capabilities;
 pub use capabilities::{effective_capabilities, structural_capabilities};
 
@@ -159,8 +166,15 @@ pub struct InvocationProvenance {
     pub turn_id: Option<String>,
     pub tool_call_id: Option<String>,
     pub artifact_hash: String,
+    /// Synchronous nesting depth within one root invocation (an Action's
+    /// tool or `ctx.functions` calls). Selects the isolate pool and is
+    /// bounded by `MAX_INVOCATION_DEPTH`. Durable hops reset it to zero.
     #[serde(default)]
     pub depth: u8,
+    /// Durable hops (scheduled jobs, outbox Actions) since the chain's root,
+    /// bounded by `MAX_DURABLE_HOPS`. Persisted with the queued work.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub durable_hops: u8,
     #[serde(default)]
     pub action_stack: Vec<String>,
     /// Root in-process execution deadline. The host copies this into the
@@ -218,7 +232,23 @@ pub struct InvocationInfo {
     pub delegation: Option<InvocationDelegation>,
 }
 
+fn is_zero(value: &u8) -> bool {
+    *value == 0
+}
+
 impl InvocationProvenance {
+    /// Turns this (stored) provenance into the provenance of a durable hop:
+    /// one more hop, synchronous depth back to zero. Fails once the chain has
+    /// used `max_hops` hops.
+    pub fn durable_hop(&mut self, max_hops: u8) -> Result<(), DurableHopsExceeded> {
+        if self.durable_hops >= max_hops {
+            return Err(DurableHopsExceeded(self.durable_hops));
+        }
+        self.durable_hops += 1;
+        self.depth = 0;
+        Ok(())
+    }
+
     pub fn public_info(&self) -> InvocationInfo {
         InvocationInfo {
             channel: self.channel,
@@ -238,6 +268,11 @@ impl InvocationProvenance {
         }
     }
 }
+
+/// A chain of durable work exceeded its hop bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+#[error("durable work chain exceeded the maximum of {0} scheduled or outbox hops")]
+pub struct DurableHopsExceeded(pub u8);
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -386,6 +421,12 @@ pub enum HostCall {
         operation: String,
         payload: Vec<u8>,
     },
+    /// Does the invoking member hold `permission` in `scope` (`""` is
+    /// tenant-wide)? Answered from the host's in-memory permission bits.
+    PermissionsHas {
+        permission: String,
+        scope: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -406,7 +447,7 @@ impl HostCall {
     /// denial message a module sees.
     pub fn capability(&self) -> &'static str {
         match self {
-            Self::DbQuery { .. } => "db_read",
+            Self::DbQuery { .. } | Self::PermissionsHas { .. } => "db_read",
             Self::DbInsert { .. }
             | Self::DbUpdate { .. }
             | Self::DbDelete { .. }
@@ -452,6 +493,24 @@ pub trait ModuleHost: Send + Sync {
         context: &'a InvocationContext,
         call: HostCall,
     ) -> BoxFuture<'a, Result<HostResponse, HostError>>;
+
+    /// Host calls this invocation may answer synchronously on the thread that
+    /// runs the module (see [`InlineHost`]). `None` sends every call through
+    /// [`ModuleHost::call`].
+    fn inline(&self) -> Option<std::sync::Arc<dyn InlineHost>> {
+        None
+    }
+}
+
+/// The synchronous part of a host: calls it can answer on the engine's own
+/// thread without a hop to the task that owns the invocation (in-process
+/// database work on a connection the host leased to this invocation). The
+/// engine still checks capabilities first, and only offers a call when no
+/// other ordered host call is outstanding, so call order is preserved.
+pub trait InlineHost: Send + Sync {
+    /// Answers `call`, or hands it back (`Err`) to go through
+    /// [`ModuleHost::call`].
+    fn call_inline(&self, call: HostCall) -> Result<Result<HostResponse, HostError>, HostCall>;
 }
 
 #[derive(Debug, Error)]
@@ -874,5 +933,43 @@ mod invocation_delegation_tests {
         let stored = serde_json::to_value(delegated()).unwrap();
         let restored: InvocationProvenance = serde_json::from_value(stored).unwrap();
         assert_eq!(restored.delegation, delegated().delegation);
+    }
+}
+
+#[cfg(test)]
+mod durable_hop_tests {
+    use super::{DurableHopsExceeded, InvocationProvenance};
+
+    #[test]
+    fn durable_hops_reset_depth_count_hops_and_stop_at_the_bound() {
+        let mut provenance = InvocationProvenance {
+            depth: 3,
+            ..InvocationProvenance::default()
+        };
+        provenance.durable_hop(2).unwrap();
+        assert_eq!((provenance.depth, provenance.durable_hops), (0, 1));
+        provenance.depth = 1;
+        provenance.durable_hop(2).unwrap();
+        assert_eq!((provenance.depth, provenance.durable_hops), (0, 2));
+        assert_eq!(provenance.durable_hop(2), Err(DurableHopsExceeded(2)));
+    }
+
+    #[test]
+    fn stored_provenance_keeps_its_shape_without_hops_and_reads_old_rows() {
+        let plain = serde_json::to_value(InvocationProvenance::default()).unwrap();
+        assert!(plain.get("durableHops").is_none());
+        let hopped = InvocationProvenance {
+            durable_hops: 4,
+            ..InvocationProvenance::default()
+        };
+        let stored = serde_json::to_value(&hopped).unwrap();
+        assert_eq!(stored["durableHops"], 4);
+        let read: InvocationProvenance = serde_json::from_value(stored).unwrap();
+        assert_eq!(read.durable_hops, 4);
+        // Rows written before the counter existed carry only `depth`.
+        let mut old = plain;
+        old["depth"] = serde_json::json!(5);
+        let read: InvocationProvenance = serde_json::from_value(old).unwrap();
+        assert_eq!((read.depth, read.durable_hops), (5, 0));
     }
 }

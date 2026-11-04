@@ -87,9 +87,11 @@ export async function runSDKConcurrency(url, output) {
         } }, {});
       });
       const witness = await jsonWhenReady(join(directory, 'witness.json'), 'blocked receipt claim');
-      assert(witness.overlap === true && witness.firstBlockers.includes(witness.controllerPid)
-        && witness.secondBlockers.includes(witness.firstPid), 'missing witnessed receipt overlap');
-      assert(witness.firstPid > 0 && witness.secondPid > 0 && witness.firstPid !== witness.secondPid);
+      // The backend owned the tenant file's write lock: the first reducer held
+      // the single runtime writer inside its transaction while the second was
+      // admitted and waiting for that writer (sustained, not sampled once).
+      assert(witness.overlap === true && witness.gate === 'external-write-lock' && witness.writerOwned === true
+        && witness.admittedReducers >= 2, 'missing witnessed receipt overlap');
       if (mode === 'rollback') assert.equal(witness.takeover, true, 'losing claimant did not take over the rolled-back receipt');
       if (mode === 'rollback') {
         await until(async () => states.some(state => state.results.some(result => result.type === 'reducer.error'))
@@ -127,5 +129,5 @@ export async function runSDKConcurrency(url, output) {
     }
   }
   await writeFile(join(output, 'receipt.json'), JSON.stringify({ cases,
-    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. PostgreSQL wait graph witnesses overlap; query cancellation tests owner rollback and claimant takeover. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
+    boundary: 'Two real SDKs, independent SQLite journals/replicas and one immutable logical intent. An external SQLite write lock holds the first reducer inside its transaction on the single runtime writer while the second is admitted and waits; a busy-timeout statement failure tests owner rollback and claimant takeover. No arbitrary shared-store coordination claim.' }, null, 2) + '\n');
 }

@@ -42,7 +42,7 @@ async fn identity_migration_converts_tenant_members_and_resumes() {
     let control_url = scoped_url(&base_url, &control_schema);
     let tenant_url = scoped_url(&base_url, &tenant_schema);
     let control = connect(&control_url).await.unwrap();
-    sqlx::raw_sql(include_str!("../../postgres/src/control_schema.sql"))
+    sqlx::raw_sql(include_str!("fixtures/postgres/control_schema.sql"))
         .execute(&control)
         .await
         .unwrap();

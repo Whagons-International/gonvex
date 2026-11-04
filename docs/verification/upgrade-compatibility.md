@@ -1,5 +1,10 @@
 # Persisted state and protocol compatibility audit
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 This is the source-derived compatibility register for UPG-1. A declared transition
 is distinct from evidence that a particular platform executed it. The tests below
 must be bound to the release source before UPG-1 can close.

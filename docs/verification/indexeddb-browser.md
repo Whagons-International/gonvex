@@ -1,5 +1,10 @@
 # IndexedDB browser guarantees
 
+> Storage moved from PostgreSQL to SQLite on 2026-11-02 (see
+> [SQLite storage](../sqlite-storage.md)). Evidence below that names PostgreSQL
+> was established on the earlier backend and must be re-run on SQLite before it
+> is relied on for the current runtime.
+
 `pnpm --filter @gonvex/client test:browser-storage` runs both production IndexedDB
 adapters in real Chromium on Linux. It bundles the SDK source, uses an isolated
 persistent browser profile, and verifies these schedules for each adapter:

@@ -1,19 +1,24 @@
 //! Production Replica Collection feed budgets, measured after admission.
+//!
+//! Subscriptions hold no rows; what each client holds is modelled by the SDK
+//! client model, which also verifies every digest and reopens collections
+//! the runtime asks to reconcile (`replica.needHashes`).
+#[path = "support/replica_client.rs"]
+mod replica_client;
 use base64::Engine as _;
-use gonvex_postgres::{
-    Account, ControlPlane, Member, PoolLimits, PoolRegistry, RuntimeManifestRecord,
-    SessionIdentity, TenantRoute, TenantSession,
-};
-use gonvex_protocol::ReplicaOpenRequest;
 use gonvex_runtime::change_feed::{self, FeedEvent};
 use gonvex_runtime::replica::ReplicaSubscription;
 use gonvex_runtime::{
     config::{Config, ModuleHostConfig, SandboxConfig, StorageConfig},
     Runtime,
 };
+use gonvex_store::{
+    Account, ControlPlane, Member, PoolLimits, PoolRegistry, RuntimeManifestRecord,
+    SessionIdentity, TenantRoute, TenantSession,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::{Sqlite, SqliteArguments};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -46,6 +51,43 @@ impl<S: tracing::Subscriber> Layer<S> for SqlCapture {
     }
 }
 
+/// Fixture writes commit through a TenantTransaction so the change feed
+/// assigns their revision, exactly like a Reducer commit.
+async fn write<'q>(
+    pools: &PoolRegistry,
+    url: &str,
+    query: sqlx::query::Query<'q, Sqlite, SqliteArguments<'q>>,
+) {
+    let mut transaction = gonvex_store::begin_transaction(pools, url, false)
+        .await
+        .unwrap();
+    query
+        .execute(&mut **transaction.transaction())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// Writes a multi-statement fixture script as one committed revision.
+async fn script(pools: &PoolRegistry, url: &str, sql: &str) {
+    let mut transaction = gonvex_store::begin_transaction(pools, url, false)
+        .await
+        .unwrap();
+    gonvex_store::execute_script(transaction.transaction(), sql)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// A fixture statement (or a `BEGIN; ...; COMMIT` group) as one revision.
+async fn fixture_statement(pools: &PoolRegistry, url: &str, statement: &str) {
+    let body = statement
+        .strip_prefix("BEGIN;")
+        .and_then(|rest| rest.trim_end().strip_suffix("COMMIT"))
+        .unwrap_or(statement);
+    script(pools, url, body).await;
+}
+
 fn sql_capture() -> Arc<Mutex<Vec<String>>> {
     static CAPTURE: std::sync::OnceLock<Arc<Mutex<Vec<String>>>> = std::sync::OnceLock::new();
     CAPTURE
@@ -58,11 +100,6 @@ fn sql_capture() -> Arc<Mutex<Vec<String>>> {
             statements
         })
         .clone()
-}
-
-fn scoped_url(base: &str, schema: &str) -> String {
-    let separator = if base.contains('?') { '&' } else { '?' };
-    format!("{base}{separator}options=-csearch_path%3D{schema}")
 }
 
 fn test_config(database_url: String) -> Config {
@@ -90,6 +127,8 @@ fn test_config(database_url: String) -> Config {
         database_idle_timeout: std::time::Duration::from_secs(60),
         module_host: ModuleHostConfig {
             enabled: false,
+            in_process: false,
+            max_heap_bytes: 64 << 20,
             binary: None,
             endpoint: None,
             start_timeout: Duration::from_secs(30),
@@ -105,6 +144,8 @@ fn test_config(database_url: String) -> Config {
         storage: StorageConfig::default(),
         service_principals: Vec::new(),
         public_functions: Default::default(),
+        presence: Default::default(),
+        connection: Default::default(),
     }
 }
 
@@ -221,10 +262,80 @@ fn fixture_manifest(legacy: bool) -> (Value, String) {
     (json!({"project":"fanout","module":module}), hash)
 }
 
-struct Connection {
-    member: usize,
+/// One connection's subscriptions and its client's windows.
+struct Held {
     session: TenantSession,
     subscriptions: BTreeMap<String, ReplicaSubscription>,
+    model: replica_client::ClientModel,
+}
+
+impl Held {
+    fn new(session: TenantSession) -> Self {
+        Self {
+            session,
+            subscriptions: BTreeMap::new(),
+            model: replica_client::ClientModel::new(Some(replica_client::DigestKind::Xor)),
+        }
+    }
+
+    async fn open(&mut self, runtime: &Runtime, id: &str, path: &str) {
+        self.model.register(id, path, "", json!({}));
+        self.reopen(runtime, id).await;
+    }
+
+    async fn reopen(&mut self, runtime: &Runtime, id: &str) -> Vec<gonvex_protocol::ServerMessage> {
+        let path = self.model.windows[id].path.clone();
+        let request = self.model.open_request(id, &path, &json!({}));
+        let opened = runtime.open_replica(&self.session, request).await.unwrap();
+        if let Some(subscription) = opened.subscription {
+            self.model.windows.get_mut(id).unwrap().entity = subscription.definition.table.clone();
+            self.subscriptions.insert(id.to_owned(), subscription);
+        }
+        self.model.apply_all(&opened.messages);
+        opened.messages
+    }
+
+    /// Applies `event`, then the reopens it asked for. Returns every frame.
+    async fn apply(
+        &mut self,
+        runtime: &Runtime,
+        event: FeedEvent,
+    ) -> Vec<gonvex_protocol::ServerMessage> {
+        let revision = match &event {
+            FeedEvent::Transaction { revision, .. } => Some(*revision),
+            _ => None,
+        };
+        let mut messages = runtime
+            .apply_feed_event(&self.session, &mut self.subscriptions, event)
+            .await
+            .unwrap();
+        self.model.apply_all(&messages);
+        if let Some(revision) = revision {
+            self.model.watermark(revision);
+        }
+        for id in self.model.pending_reopens() {
+            messages.extend(self.reopen(runtime, &id).await);
+        }
+        assert!(
+            self.model.mismatches.is_empty(),
+            "{:?}",
+            self.model.mismatches
+        );
+        messages
+    }
+
+    fn has(&self, id: &str, key: &str) -> bool {
+        self.model.windows[id].rows.contains_key(key)
+    }
+
+    fn row(&self, id: &str, key: &str) -> &Value {
+        &self.model.windows[id].rows[key]
+    }
+}
+
+struct Connection {
+    member: usize,
+    held: Held,
 }
 
 async fn deliver(
@@ -235,14 +346,7 @@ async fn deliver(
     let mut worked = Vec::new();
     for connection in connections {
         let before = runtime.visibility_metrics().snapshot();
-        runtime
-            .apply_feed_event(
-                &connection.session,
-                &mut connection.subscriptions,
-                event.clone(),
-            )
-            .await
-            .unwrap();
+        connection.held.apply(runtime, event.clone()).await;
         // In-memory row checks are the expected per-connection cost of a
         // change (changed rows x connections). Budgets govern expensive work.
         let after = runtime.visibility_metrics().snapshot();
@@ -282,7 +386,7 @@ async fn committed(pools: &PoolRegistry, route: &TenantRoute, after: &mut u64) -
     FeedEvent::Transaction {
         database_epoch: clock.epoch,
         revision: clock.revision,
-        changes,
+        changes: std::sync::Arc::new(changes),
     }
 }
 
@@ -313,10 +417,6 @@ async fn visibility_fanout_legacy_baseline() {
 
 async fn run_visibility_fixture(legacy: bool) {
     let mode = if legacy { "legacy" } else { "v2" };
-    let Ok(base) = std::env::var("GONVEX_TEST_POSTGRES_URL") else {
-        eprintln!("GONVEX_TEST_POSTGRES_URL absent; PostgreSQL fixture unavailable");
-        return;
-    };
     let Some(binary) = module_host_binary() else {
         return;
     };
@@ -328,61 +428,50 @@ async fn run_visibility_fixture(legacy: bool) {
         n >= 7,
         "fixture needs three grant recipients, two ancestor controls and a lagging member"
     );
-    let schema = format!("visibility_fanout_{}", uuid::Uuid::new_v4().simple());
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&base)
-        .await
-        .unwrap();
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    let url = scoped_url(&base, &schema);
+    let directory = tempfile::tempdir().unwrap();
+    // One SQLite file holds both the Control Plane and the tenant tables.
+    let url = gonvex_store::database_url(&directory.path().join("fanout.db"));
     let pools = PoolRegistry::new(PoolLimits::default());
     let control = ControlPlane::connect(&url, pools.clone(), BTreeMap::new())
         .await
         .unwrap();
-    let db = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('fanout','Fanout','multiTenant','active')").execute(&db).await.unwrap();
-    sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status) VALUES('fanout','fanout','tenant','Tenant',$1,'active')").bind(&url).execute(&db).await.unwrap();
-    sqlx::raw_sql(
-        r#"
-        CREATE TABLE tasks(id text PRIMARY KEY, "workspaceId" text, title text);
-        CREATE TABLE "taskNotes"(id text PRIMARY KEY, "taskId" text, body text);
-        CREATE TABLE projects(id text PRIMARY KEY, "workspaceId" text);
-        CREATE TABLE attachments(id text PRIMARY KEY, "noteId" text, body text);
-        CREATE TABLE "taskLinks"(id text PRIMARY KEY, "taskId" text, label text);
-        CREATE TABLE "taskProjection"("taskId" text PRIMARY KEY, title text);
-        CREATE VIEW "taskProjectionView" AS SELECT * FROM "taskProjection";
-        CREATE TABLE "taskSearchDocuments"(source text, "sourceId" text, "taskId" text, "searchText" text,
-            PRIMARY KEY(source,"sourceId"));
-        CREATE TABLE hints(id text PRIMARY KEY, label text);
-        CREATE FUNCTION fixture_project_task() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN
-            IF TG_OP = 'DELETE' THEN
-                DELETE FROM "taskProjection" WHERE "taskId"=OLD.id;
-            ELSE
+    write(&pools, &url, sqlx::query("INSERT INTO gonvex_runtime_projects(id,name,database_mode,status) VALUES('fanout','Fanout','multiTenant','active')")).await;
+    write(&pools, &url, sqlx::query("INSERT INTO gonvex_runtime_tenants(relationship_id,project_id,tenant_id,name,database_url,status) VALUES('fanout','fanout','tenant','Tenant',$1,'active')").bind(&url)).await;
+    {
+        let mut transaction = gonvex_store::begin_transaction(&pools, &url, false)
+            .await
+            .unwrap();
+        gonvex_store::execute_script(transaction.transaction(), r#"
+            CREATE TABLE tasks(id TEXT PRIMARY KEY, "workspaceId" TEXT, title TEXT);
+            CREATE TABLE "taskNotes"(id TEXT PRIMARY KEY, "taskId" TEXT, body TEXT);
+            CREATE TABLE projects(id TEXT PRIMARY KEY, "workspaceId" TEXT);
+            CREATE TABLE attachments(id TEXT PRIMARY KEY, "noteId" TEXT, body TEXT);
+            CREATE TABLE "taskLinks"(id TEXT PRIMARY KEY, "taskId" TEXT, label TEXT);
+            CREATE TABLE "taskProjection"("taskId" TEXT PRIMARY KEY, title TEXT);
+            CREATE VIEW "taskProjectionView" AS SELECT * FROM "taskProjection";
+            CREATE TABLE "taskSearchDocuments"(source TEXT, "sourceId" TEXT, "taskId" TEXT, "searchText" TEXT,
+                PRIMARY KEY(source,"sourceId"));
+            CREATE TABLE hints(id TEXT PRIMARY KEY, label TEXT);
+            CREATE TRIGGER fixture_project_task_insert AFTER INSERT ON tasks BEGIN
                 INSERT INTO "taskProjection" VALUES(NEW.id,NEW.title)
                     ON CONFLICT("taskId") DO UPDATE SET title=excluded.title;
-            END IF;
-            RETURN NULL;
-        END; $$;
-        CREATE TRIGGER fixture_project_task AFTER INSERT OR UPDATE OR DELETE ON tasks
-            FOR EACH ROW EXECUTE FUNCTION fixture_project_task();
-        CREATE TABLE "taskUsers"(id text PRIMARY KEY, "taskId" text, "userId" text, "teamId" text);
-        CREATE TABLE "memberTeams"(id text PRIMARY KEY, "memberId" text, "teamId" text);
-        INSERT INTO tasks VALUES('hidden','private','Hidden'),('granted','private-grant','Granted');
-        INSERT INTO "taskNotes" VALUES('hidden-note','hidden','Private note');
-    "#,
-    )
-    .execute(&db)
-    .await
-    .unwrap();
+            END;
+            CREATE TRIGGER fixture_project_task_update AFTER UPDATE ON tasks BEGIN
+                INSERT INTO "taskProjection" VALUES(NEW.id,NEW.title)
+                    ON CONFLICT("taskId") DO UPDATE SET title=excluded.title;
+            END;
+            CREATE TRIGGER fixture_project_task_delete AFTER DELETE ON tasks BEGIN
+                DELETE FROM "taskProjection" WHERE "taskId"=OLD.id;
+            END;
+            CREATE TABLE "taskUsers"(id TEXT PRIMARY KEY, "taskId" TEXT, "userId" TEXT, "teamId" TEXT);
+            CREATE TABLE "memberTeams"(id TEXT PRIMARY KEY, "memberId" TEXT, "teamId" TEXT);
+            INSERT INTO tasks VALUES('hidden','private','Hidden'),('granted','private-grant','Granted');
+            INSERT INTO "taskNotes" VALUES('hidden-note','hidden','Private note');
+        "#)
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+    }
     let route = TenantRoute {
         project_id: "fanout".into(),
         tenant_id: "tenant".into(),
@@ -394,26 +483,31 @@ async fn run_visibility_fixture(legacy: bool) {
         .await
         .unwrap();
     for i in 0..n {
-        sqlx::query(
-            "INSERT INTO members(id,account_id,status,display_name) VALUES($1,$1,'active',$1)",
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "INSERT INTO members(id,account_id,status,display_name) VALUES($1,$1,'active',$1)",
+            )
+            .bind(format!("m{i}")),
         )
-        .bind(format!("m{i}"))
-        .execute(&db)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$1,'team')")
-            .bind(format!("m{i}"))
-            .execute(&db)
-            .await
-            .unwrap();
+        .await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$1,'team')").bind(format!("m{i}")),
+        )
+        .await;
     }
     for i in 1..=3 {
-        sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$2,'grant-team')")
-            .bind(format!("grant-team-{i}"))
-            .bind(format!("m{i}"))
-            .execute(&db)
-            .await
-            .unwrap();
+        write(
+            &pools,
+            &url,
+            sqlx::query("INSERT INTO \"memberTeams\" VALUES($1,$2,'grant-team')")
+                .bind(format!("grant-team-{i}"))
+                .bind(format!("m{i}")),
+        )
+        .await;
     }
     let (manifest, hash) = fixture_manifest(legacy);
     control
@@ -461,26 +555,20 @@ async fn run_visibility_fixture(legacy: bool) {
             delegation: None,
             developer_session: None,
         };
-        let mut subscriptions = BTreeMap::new();
+        let mut held = Held::new(session);
         for (id, path) in [("tasks", "tasks.list"), ("notes", "notes.list")] {
-            let request: ReplicaOpenRequest =
-                serde_json::from_value(json!({"id":id,"path":path,"args":{}})).unwrap();
-            let opened = runtime.open_replica(&session, request).await.unwrap();
-            let subscription = opened
-                .subscription
-                .expect("real collection must remain subscribed");
-            assert!(subscription.rows.is_empty());
-            subscriptions.insert(id.to_owned(), subscription);
+            held.open(&runtime, id, path).await;
+            assert!(
+                held.subscriptions.contains_key(id),
+                "real collection must remain subscribed"
+            );
+            assert!(held.model.windows[id].rows.is_empty());
         }
-        connections.push(Connection {
-            member: i,
-            session,
-            subscriptions,
-        });
+        connections.push(Connection { member: i, held });
     }
     let related = runtime
         .open_live_query(
-            &connections[0].session,
+            &connections[0].held.session,
             "related".into(),
             "tasks.withNotes".into(),
             json!({}),
@@ -493,9 +581,8 @@ async fn run_visibility_fixture(legacy: bool) {
         "hidden related rows must never make a task visible"
     );
     if !legacy {
-        sqlx::query("INSERT INTO members(id,account_id,status,display_name,role) VALUES('admin','admin','active','Admin','admin')")
-            .execute(&db).await.unwrap();
-        let mut admin_session = connections[0].session.clone();
+        write(&pools, &url, sqlx::query("INSERT INTO members(id,account_id,status,display_name,role) VALUES('admin','admin','active','Admin','admin')")).await;
+        let mut admin_session = connections[0].held.session.clone();
         admin_session.identity.account.id = "admin".into();
         admin_session.member.id = "admin".into();
         admin_session.member.account_id = "admin".into();
@@ -506,7 +593,7 @@ async fn run_visibility_fixture(legacy: bool) {
             .open_replica(&admin_session, request)
             .await
             .expect("role-pruned mask sets must not break admin admission");
-        assert_eq!(opened.subscription.unwrap().rows.len(), 2);
+        assert_eq!(opened.subscription.unwrap().row_count(), 2);
     }
     let mut revision = change_feed::read_clock(&pools, &route)
         .await
@@ -522,7 +609,7 @@ async fn run_visibility_fixture(legacy: bool) {
         "DELETE FROM \"taskNotes\" WHERE id='ordinary-note'",
     ] {
         runtime.visibility_metrics().reset_for_test();
-        sqlx::query(statement).execute(&db).await.unwrap();
+        write(&pools, &url, sqlx::query(statement)).await;
         let event = committed(&pools, &route, &mut revision).await;
         let worked = deliver(&runtime, &mut connections, &event).await;
         let counters = runtime.visibility_metrics().snapshot();
@@ -545,9 +632,13 @@ async fn run_visibility_fixture(legacy: bool) {
                 "legacy task writes must reproduce fan-out across every fixture member"
             );
         } else {
-            assert_eq!(
-                counters.visibility_sql_statements, 0,
-                "ordinary task write ran visibility SQL"
+            // Subscriptions hold no rows: a deleted (or hidden) parent's
+            // children are read once per event, shared by every connection
+            // (no visibility predicate), and decided in memory per member.
+            let budget = u64::from(statement.starts_with("DELETE FROM tasks"));
+            assert!(
+                counters.visibility_sql_statements <= budget,
+                "ordinary task write ran visibility SQL: {counters:?}"
             );
             assert_eq!(
                 counters.collection_snapshots, 0,
@@ -564,10 +655,12 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')")
-        .execute(&db)
-        .await
-        .unwrap();
+    write(
+        &pools,
+        &url,
+        sqlx::query("INSERT INTO \"taskUsers\" VALUES('team-grant','granted',NULL,'grant-team')"),
+    )
+    .await;
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
     if legacy {
@@ -577,13 +670,11 @@ async fn run_visibility_fixture(legacy: bool) {
         );
         assert!(runtime.visibility_metrics().snapshot().collection_snapshots > 0);
     } else {
-        assert_eq!(
-            worked
-                .iter()
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([1, 2, 3]),
-            "one team grant must affect exactly its three member recipients"
+        // The granted rows are read once and shared by the recipients (the
+        // read has no visibility predicate); membership is checked below.
+        assert!(
+            !worked.is_empty(),
+            "one team grant must reach its member recipients"
         );
         assert!(
             worked.iter().all(|member| (1..=3).contains(member)),
@@ -592,9 +683,7 @@ async fn run_visibility_fixture(legacy: bool) {
     }
     for connection in &connections {
         assert_eq!(
-            connection.subscriptions["tasks"]
-                .rows
-                .contains_key("granted"),
+            connection.held.has("tasks", "granted"),
             (1..=3).contains(&connection.member)
         );
     }
@@ -620,10 +709,12 @@ async fn run_visibility_fixture(legacy: bool) {
         );
     }
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"memberTeams\" VALUES('extra','m1','extra')")
-        .execute(&db)
-        .await
-        .unwrap();
+    write(
+        &pools,
+        &url,
+        sqlx::query("INSERT INTO \"memberTeams\" VALUES('extra','m1','extra')"),
+    )
+    .await;
     let event = committed(&pools, &route, &mut revision).await;
     let worked = deliver(&runtime, &mut connections, &event).await;
     assert!(
@@ -636,7 +727,7 @@ async fn run_visibility_fixture(legacy: bool) {
     let member_one_collections = connections
         .iter()
         .filter(|connection| connection.member == 1)
-        .map(|connection| connection.subscriptions.len() as u64)
+        .map(|connection| connection.held.subscriptions.len() as u64)
         .sum::<u64>();
     let rebuilds = runtime.visibility_metrics().snapshot().principal_rebuilds;
     eprintln!(
@@ -656,10 +747,12 @@ async fn run_visibility_fixture(legacy: bool) {
     );
     }
     runtime.visibility_metrics().reset_for_test();
-    sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)")
-        .execute(&db)
-        .await
-        .unwrap();
+    write(
+        &pools,
+        &url,
+        sqlx::query("INSERT INTO \"taskUsers\" VALUES('parent-grant','hidden','m0',NULL)"),
+    )
+    .await;
     let event = committed(&pools, &route, &mut revision).await;
     if legacy {
         let worked = deliver(&runtime, &mut connections, &event).await;
@@ -675,14 +768,7 @@ async fn run_visibility_fixture(legacy: bool) {
         let statements = sql_capture();
         for connection in &mut connections {
             statements.lock().unwrap().clear();
-            runtime
-                .apply_feed_event(
-                    &connection.session,
-                    &mut connection.subscriptions,
-                    event.clone(),
-                )
-                .await
-                .unwrap();
+            connection.held.apply(&runtime, event.clone()).await;
             let child_fetches = statements
                 .lock()
                 .unwrap()
@@ -704,9 +790,7 @@ async fn run_visibility_fixture(legacy: bool) {
     }
     for connection in &connections {
         assert_eq!(
-            connection.subscriptions["notes"]
-                .rows
-                .contains_key("hidden-note"),
+            connection.held.has("notes", "hidden-note"),
             connection.member == 0,
             "parent transition delivered children to the wrong member"
         );
@@ -727,7 +811,7 @@ async fn run_visibility_fixture(legacy: bool) {
     for connection in connections.iter().take(2) {
         let related = runtime
             .open_live_query(
-                &connection.session,
+                &connection.held.session,
                 "related".into(),
                 "tasks.withNotes".into(),
                 json!({}),
@@ -752,7 +836,7 @@ async fn run_visibility_fixture(legacy: bool) {
         for connection in &connections {
             let opened = runtime
                 .open_live_query(
-                    &connection.session,
+                    &connection.held.session,
                     "related-window".into(),
                     "tasks.withNotes".into(),
                     json!({}),
@@ -761,7 +845,7 @@ async fn run_visibility_fixture(legacy: bool) {
                 .unwrap();
             related_windows.push((
                 connection.member,
-                connection.session.clone(),
+                connection.held.session.clone(),
                 BTreeMap::from([("related-window".to_owned(), opened.subscription)]),
             ));
         }
@@ -792,7 +876,7 @@ async fn run_visibility_fixture(legacy: bool) {
             ),
             ("DELETE FROM \"taskNotes\" WHERE id='lq-granted-note'", None),
         ] {
-            sqlx::raw_sql(statement).execute(&db).await.unwrap();
+            fixture_statement(&pools, &url, statement).await;
             let event = committed(&pools, &route, &mut revision).await;
             runtime.visibility_metrics().reset_for_test();
             let mut worked = Vec::new();
@@ -847,12 +931,12 @@ async fn run_visibility_fixture(legacy: bool) {
                 ),
             ] {
                 let opened = runtime
-                    .open_live_query(&connection.session, id.into(), path.into(), args)
+                    .open_live_query(&connection.held.session, id.into(), path.into(), args)
                     .await
                     .unwrap();
                 queries.insert(id.to_owned(), opened.subscription);
             }
-            projected_windows.push((connection.member, connection.session.clone(), queries));
+            projected_windows.push((connection.member, connection.held.session.clone(), queries));
         }
         for (statement, recipient, expected_projection, expected_search) in [
             ("INSERT INTO tasks VALUES('lq-projection-hidden','projection-private','Hidden')", None, false, false),
@@ -874,7 +958,7 @@ async fn run_visibility_fixture(legacy: bool) {
             ("UPDATE \"taskSearchDocuments\" SET \"searchText\"='Revoked' WHERE \"sourceId\"='visible'", None, false, false),
             ("UPDATE tasks SET title='Revoked' WHERE id='lq-projection-visible'", None, false, false),
         ] {
-            sqlx::raw_sql(statement).execute(&db).await.unwrap();
+            fixture_statement(&pools, &url, statement).await;
             let event = committed(&pools, &route, &mut revision).await;
             if statement.contains("last hidden row") {
                 let FeedEvent::Transaction { changes, .. } = &event else { unreachable!() };
@@ -906,7 +990,7 @@ async fn run_visibility_fixture(legacy: bool) {
         }
         // Views are not CDC sources. Their declared dependency remains live;
         // claiming precise tracked routing here would silently miss updates.
-        let session = &connections[6].session;
+        let session = &connections[6].held.session;
         let opened = runtime
             .open_live_query(
                 session,
@@ -917,7 +1001,7 @@ async fn run_visibility_fixture(legacy: bool) {
             .await
             .unwrap();
         let mut queries = BTreeMap::from([("view".into(), opened.subscription)]);
-        sqlx::query("UPDATE \"taskProjection\" SET title='View dependency' WHERE \"taskId\"='lq-projection-hidden'").execute(&db).await.unwrap();
+        write(&pools, &url, sqlx::query("UPDATE \"taskProjection\" SET title='View dependency' WHERE \"taskId\"='lq-projection-hidden'")).await;
         let event = committed(&pools, &route, &mut revision).await;
         runtime.visibility_metrics().reset_for_test();
         runtime
@@ -935,7 +1019,7 @@ async fn run_visibility_fixture(legacy: bool) {
         // connection receives it. Before the single-writer applier, only
         // Replica connections advanced the shared index, so it froze here and
         // the next applied event jumped the gap.
-        let session = connections[0].session.clone();
+        let session = connections[0].held.session.clone();
         let mut lq_only = BTreeMap::new();
         lq_only.insert(
             "lq-only".to_owned(),
@@ -950,10 +1034,12 @@ async fn run_visibility_fixture(legacy: bool) {
                 .unwrap()
                 .subscription,
         );
-        sqlx::query("UPDATE tasks SET \"workspaceId\"='team' WHERE id='granted'")
-            .execute(&db)
-            .await
-            .unwrap();
+        write(
+            &pools,
+            &url,
+            sqlx::query("UPDATE tasks SET \"workspaceId\"='team' WHERE id='granted'"),
+        )
+        .await;
         let moved = committed(&pools, &route, &mut revision).await;
         runtime
             .apply_live_query_feed_event(&session, &mut lq_only, &moved)
@@ -961,30 +1047,19 @@ async fn run_visibility_fixture(legacy: bool) {
         // A brand-new collection after the gap, then a child of the moved
         // parent: decided in memory against the shared tasks index. taskLinks
         // is independent of the derived taskNotes set tested above.
-        let request: ReplicaOpenRequest =
-            serde_json::from_value(json!({"id":"late","path":"links.list","args":{}})).unwrap();
-        let mut late = BTreeMap::new();
-        late.insert(
-            "late".to_owned(),
-            runtime
-                .open_replica(&session, request)
-                .await
-                .unwrap()
-                .subscription
-                .unwrap(),
-        );
-        sqlx::query("INSERT INTO \"taskLinks\" VALUES('granted-link','granted','Now visible')")
-            .execute(&db)
-            .await
-            .unwrap();
+        let mut late = Held::new(session.clone());
+        late.open(&runtime, "late", "links.list").await;
+        write(
+            &pools,
+            &url,
+            sqlx::query("INSERT INTO \"taskLinks\" VALUES('granted-link','granted','Now visible')"),
+        )
+        .await;
         let link = committed(&pools, &route, &mut revision).await;
         runtime.visibility_metrics().reset_for_test();
-        runtime
-            .apply_feed_event(&session, &mut late, link)
-            .await
-            .unwrap();
+        late.apply(&runtime, link).await;
         assert!(
-            late["late"].rows.contains_key("granted-link"),
+            late.has("late", "granted-link"),
             "a child of a parent moved while only a Live Query consumed the feed must be delivered"
         );
         assert_eq!(
@@ -995,7 +1070,9 @@ async fn run_visibility_fixture(legacy: bool) {
 
         // Derived and grant revocations must cross both inheritance edges:
         // attachments -> taskNotes -> tasks -> projects.
-        sqlx::raw_sql(
+        script(
+            &pools,
+            &url,
             r#"
             INSERT INTO tasks VALUES('chain-task','chain-private','Chain');
             INSERT INTO "taskNotes" VALUES('chain-note','chain-task','Chain note');
@@ -1004,9 +1081,7 @@ async fn run_visibility_fixture(legacy: bool) {
             INSERT INTO "taskUsers" VALUES('chain-grant','chain-project','m4',NULL);
         "#,
         )
-        .execute(&db)
-        .await
-        .unwrap();
+        .await;
         let _ = committed(&pools, &route, &mut revision).await;
         let mut holders = Vec::new();
         for member in [4, 5] {
@@ -1014,28 +1089,12 @@ async fn run_visibility_fixture(legacy: bool) {
                 .iter()
                 .find(|c| c.member == member)
                 .unwrap()
+                .held
                 .session
                 .clone();
-            let mut replicas = BTreeMap::new();
-            replicas.insert(
-                "chain".to_owned(),
-                runtime
-                    .open_replica(
-                        &session,
-                        serde_json::from_value(
-                            json!({"id":"chain","path":"attachments.list","args":{}}),
-                        )
-                        .unwrap(),
-                    )
-                    .await
-                    .unwrap()
-                    .subscription
-                    .unwrap(),
-            );
-            assert_eq!(
-                replicas["chain"].rows.contains_key("chain-attachment"),
-                member == 4
-            );
+            let mut replicas = Held::new(session.clone());
+            replicas.open(&runtime, "chain", "attachments.list").await;
+            assert_eq!(replicas.has("chain", "chain-attachment"), member == 4);
             let mut queries = BTreeMap::new();
             queries.insert(
                 "chain".to_owned(),
@@ -1059,20 +1118,17 @@ async fn run_visibility_fixture(legacy: bool) {
             "UPDATE tasks SET \"workspaceId\"='chain-private' WHERE id='chain-task'",
             "DELETE FROM \"taskUsers\" WHERE id='chain-grant'",
         ] {
-            sqlx::query(statement).execute(&db).await.unwrap();
+            write(&pools, &url, sqlx::query(statement)).await;
             let event = committed(&pools, &route, &mut revision).await;
             for (member, session, replicas, queries) in &mut holders {
                 runtime.visibility_metrics().reset_for_test();
-                runtime
-                    .apply_feed_event(session, replicas, event.clone())
-                    .await
-                    .unwrap();
+                replicas.apply(&runtime, event.clone()).await;
                 runtime
                     .apply_live_query_feed_event(session, queries, &event)
                     .await;
                 let visible = *member == 4 && statement.contains("='chain-private'");
                 assert_eq!(
-                    replicas["chain"].rows.contains_key("chain-attachment"),
+                    replicas.has("chain", "chain-attachment"),
                     visible,
                     "two-level inherited replica must follow {statement}"
                 );
@@ -1099,101 +1155,77 @@ async fn run_visibility_fixture(legacy: bool) {
         }
 
         let member_session = holders[0].1.clone();
-        let mut direct_parent = BTreeMap::new();
-        direct_parent.insert(
-            "direct".to_owned(),
-            runtime
-                .open_replica(
-                    &member_session,
-                    serde_json::from_value(json!({"id":"direct","path":"notes.list","args":{}}))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .subscription
-                .unwrap(),
-        );
-        assert!(!direct_parent["direct"].rows.contains_key("chain-note"));
-        sqlx::query(
-            "INSERT INTO \"taskUsers\" VALUES('chain-grant-again','chain-project','m4',NULL)",
+        let mut direct_parent = Held::new(member_session.clone());
+        direct_parent.open(&runtime, "direct", "notes.list").await;
+        assert!(!direct_parent.has("direct", "chain-note"));
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "INSERT INTO \"taskUsers\" VALUES('chain-grant-again','chain-project','m4',NULL)",
+            ),
         )
-        .execute(&db)
-        .await
-        .unwrap();
+        .await;
         let grant_again = committed(&pools, &route, &mut revision).await;
-        runtime
-            .apply_feed_event(&member_session, &mut direct_parent, grant_again)
-            .await
-            .unwrap();
+        direct_parent.apply(&runtime, grant_again).await;
         assert!(
-            direct_parent["direct"].rows.contains_key("chain-note"),
+            direct_parent.has("direct", "chain-note"),
             "a direct-parent grant feeding a derived workspace must reveal existing notes"
         );
 
         // A lagging connection must never receive pre-share sensitive text
         // admitted by a parent index that has already reached the sharing write.
-        sqlx::raw_sql(
+        script(
+            &pools,
+            &url,
             r#"
             INSERT INTO tasks VALUES('lag-parent','lag-private','Lagged');
             INSERT INTO "memberTeams" VALUES('lag-team','m6','lag-space');
         "#,
         )
-        .execute(&db)
-        .await
-        .unwrap();
+        .await;
         let _ = committed(&pools, &route, &mut revision).await;
         let lag_session = connections
             .iter()
             .find(|c| c.member == 6)
             .unwrap()
+            .held
             .session
             .clone();
-        let mut lagged = BTreeMap::new();
-        lagged.insert(
-            "lagged".to_owned(),
-            runtime
-                .open_replica(
-                    &lag_session,
-                    serde_json::from_value(json!({"id":"lagged","path":"notes.list","args":{}}))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .subscription
-                .unwrap(),
-        );
-        sqlx::query(
+        let mut lagged = Held::new(lag_session.clone());
+        lagged.open(&runtime, "lagged", "notes.list").await;
+        write(&pools, &url, sqlx::query(
             "INSERT INTO \"taskNotes\" VALUES('lag-note','lag-parent','must-never-be-delivered')",
-        )
-        .execute(&db)
-        .await
-        .unwrap();
+        )).await;
         let old_note = committed(&pools, &route, &mut revision).await;
-        sqlx::query("UPDATE \"taskNotes\" SET body='Redacted before sharing' WHERE id='lag-note'")
-            .execute(&db)
-            .await
-            .unwrap();
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "UPDATE \"taskNotes\" SET body='Redacted before sharing' WHERE id='lag-note'",
+            ),
+        )
+        .await;
         let redaction = committed(&pools, &route, &mut revision).await;
-        sqlx::query("UPDATE tasks SET \"workspaceId\"='lag-space' WHERE id='lag-parent'")
-            .execute(&db)
-            .await
-            .unwrap();
+        write(
+            &pools,
+            &url,
+            sqlx::query("UPDATE tasks SET \"workspaceId\"='lag-space' WHERE id='lag-parent'"),
+        )
+        .await;
         let sharing = committed(&pools, &route, &mut revision).await;
         let clock = change_feed::read_clock(&pools, &route).await.unwrap();
         assert!(
             gonvex_runtime::visibility::indexes_ready(
-                &lagged["lagged"].resolved,
+                &lagged.subscriptions["lagged"].resolved,
                 clock.revision,
                 &clock.epoch
             )
             .await
         );
-        let delivered = runtime
-            .apply_feed_event(&lag_session, &mut lagged, old_note)
-            .await
-            .unwrap();
+        let delivered = lagged.apply(&runtime, old_note).await;
         assert_eq!(
-            lagged["lagged"].rows["lag-note"]["body"],
+            lagged.row("lagged", "lag-note")["body"],
             "Redacted before sharing"
         );
 
@@ -1204,44 +1236,42 @@ async fn run_visibility_fixture(legacy: bool) {
             "future ACL state must never expose an old event payload"
         );
         for event in [redaction, sharing] {
-            runtime
-                .apply_feed_event(&lag_session, &mut lagged, event)
-                .await
-                .unwrap();
+            lagged.apply(&runtime, event).await;
         }
         assert_eq!(
-            lagged["lagged"].rows["lag-note"]["body"],
+            lagged.row("lagged", "lag-note")["body"],
             "Redacted before sharing"
         );
         // Completeness can advance on an unrelated commit without changing any
         // ACL rows. A held-row edit must stay entirely in memory in that case.
-        sqlx::query("UPDATE \"taskNotes\" SET body='Current edit' WHERE id='lag-note'")
-            .execute(&db)
-            .await
-            .unwrap();
-        let edit = committed(&pools, &route, &mut revision).await;
-        sqlx::query(
-            "INSERT INTO attachments VALUES('unrelated-attachment','chain-note','Unrelated')",
+        write(
+            &pools,
+            &url,
+            sqlx::query("UPDATE \"taskNotes\" SET body='Current edit' WHERE id='lag-note'"),
         )
-        .execute(&db)
-        .await
-        .unwrap();
+        .await;
+        let edit = committed(&pools, &route, &mut revision).await;
+        write(
+            &pools,
+            &url,
+            sqlx::query(
+                "INSERT INTO attachments VALUES('unrelated-attachment','chain-note','Unrelated')",
+            ),
+        )
+        .await;
         let _ = committed(&pools, &route, &mut revision).await;
         let clock = change_feed::read_clock(&pools, &route).await.unwrap();
         assert!(
             gonvex_runtime::visibility::indexes_ready(
-                &lagged["lagged"].resolved,
+                &lagged.subscriptions["lagged"].resolved,
                 clock.revision,
                 &clock.epoch
             )
             .await
         );
         runtime.visibility_metrics().reset_for_test();
-        runtime
-            .apply_feed_event(&lag_session, &mut lagged, edit)
-            .await
-            .unwrap();
-        assert_eq!(lagged["lagged"].rows["lag-note"]["body"], "Current edit");
+        lagged.apply(&runtime, edit).await;
+        assert_eq!(lagged.row("lagged", "lag-note")["body"], "Current edit");
         let counters = runtime.visibility_metrics().snapshot();
         assert_eq!(
             counters.collection_snapshots, 0,
@@ -1254,11 +1284,5 @@ async fn run_visibility_fixture(legacy: bool) {
         assert_eq!(counters.consistency_rebuilds, 0);
     }
     runtime.shutdown().await;
-    db.close().await;
     pools.close().await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await
-        .unwrap();
-    admin.close().await;
 }

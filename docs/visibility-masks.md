@@ -1,6 +1,8 @@
 # Visibility masks: permission checks without fan-out
 
-Status: design, 2026-10-29. Implementation and behavior parity remain required.
+Status: design 2026-10-29; masks merged (#249, #255, #273); compiled visibility
+classes and permission bits implemented 2026-11-03 (see "Compiled visibility
+classes" and "Permission bits" at the end).
 
 ## Problem
 
@@ -581,3 +583,207 @@ The client worker must retain full old/new parity, including parent-only vs
 child-only grants, hidden existing parents, missing parents, literal parent
 filters and each child's independent plugin gates. No denormalized columns or
 Reducer changes are required by F5 itself.
+
+## Compiled visibility classes (implemented 2026-11-03, `perf/visibility-masks`)
+
+Workstream 7 of the 5k-users program: `visible(row, principal)` was already a
+pure in-memory function; this makes it cheap. Code:
+`rust/crates/runtime/src/visibility_class.rs` (pure, no database or async
+handle), corpus `visibility_corpus.rs`, bench `benches/visibility_classes.rs`.
+
+### Program
+
+Each version 2 plan compiles once (cached on the plan's shared caches, so
+every clone of a module's plan uses one program) into a flat node array over
+column slots. Atoms:
+
+- **class atoms**: `role`, `permission`, `nonEmpty` (one bit each) and `inSet`
+  over principal or principal-derived sets (tokens interned to `u32`, sorted
+  arrays; `inSet` is a binary search, or a scan up to 8 tokens);
+- **member atoms**: `eqContext`, and `inSet` over grant sets, grant-derived
+  sets and member-owned principal sets (a principal set selecting `_id`/`id`
+  of its own table anchored on `member.id`, such as the member's own personal
+  workspaces);
+- **row atoms**: `eq` literals.
+
+`inherits` (with `where`, `predicate` override and `onMissing`) compiles: the
+parent row comes from the tenant-shared parent ACL index and is evaluated by
+the parent plan's compiled program with the member's parent binding.
+`inheritsAny`, legacy (unversioned) plans and unknown operators are
+**unsupported**: `member_visibility` returns `MemberHandle::Fallback`, the
+caller uses `visibility::row_matches`, and the check is counted in
+`VisibilityMetricsSnapshot::fallback_row_checks`.
+
+Rows are decoded to their ACL columns only: from a `serde_json::Value`
+(map lookups, borrowed strings) or from raw JSON object bytes (a serde visitor
+that skips every other key with `IgnoredAny`), `RowView::{Value, Json}`.
+
+### Classes
+
+Members whose class atoms resolve identically share one
+`Arc<VisibilityClass>`. The class key is the plan's *residual* for the
+member's bits (which subtrees are already decided, and how) plus the token
+sets the residual can still consult; sets that cannot change a decision for
+those bits (an admin's team sets when `tasks.viewAll` decides) are left out.
+A principal change rebinds the subscription (`HandleCache::clear`) and so moves
+the member to another class; classes die with their last member.
+
+For a row, a member is *hit* when one of its member atoms is true on it
+(directly or on an inherited parent row). A member that is not hit sees the
+row exactly when the class *default* (member atoms false) admits it, so the
+default is evaluated once per class per changed row (`EvalMemo`), and only
+hit members are evaluated alone. The memo is keyed by row address and only
+holds change rows that outlive the feed event.
+
+Class ids: `id()` is process-local (memo keys); `stable_id()` is a 64-bit
+content hash (plan content, residual shape, consulted token text, parents'
+stable ids), identical across processes and restarts, for per-class change
+frames `(tenant, class, per-class revision)`.
+
+### Routing (sublinear fan-out)
+
+A class is *gated* when its default is false for every row whose tokens hit
+none of its sets (Kleene evaluation, class tokens false, row literals
+unknown). `ClassScope` keeps a token → class index of gated classes, the list
+of ungated classes, and (for registered members) token → member and
+context-value → member indexes. `candidates(old, new)` returns every class
+whose default may admit either row and every registered member hit on either;
+any other member sees neither row. Plans with `inherits` register their
+members as always-hit (parent-row routing is a follow-up).
+
+### API for the replica path (workstream 5)
+
+```rust
+use gonvex_runtime::visibility_class::{member_visibility, MemberHandle, RowView, EvalMemo};
+// Per subscription (or per member and plan), rebuilt only on principal change:
+let handle = member_visibility(&plan, &resolved, &session.route.database_url);
+// One change, every subscriber: decode once, one default per class.
+let mut memo = EvalMemo::default();
+let visible = match &handle {
+    MemberHandle::Compiled(member) => member.visible_memo(&mut memo, &change.new_value),
+    MemberHandle::Fallback => visibility::row_matches(&plan, &resolved, &change.new_value),
+};
+// Without a per-subscriber loop: route the change, then evaluate classes.
+let scope = member.scope();                    // per plan and tenant database
+scope.register(&member);                       // once per member binding
+let (old, new) = (scope.decode(RowView::Json(old_bytes)), scope.decode(RowView::Json(new_bytes)));
+let candidates = scope.candidates(Some(&old), Some(&new));
+// candidates.classes: class.visible_default(&old/&new) applies to every
+//   member of the class not listed in candidates.members;
+// candidates.members: member.visible_row(&old/&new) each;
+// everyone else: invisible before and after (no message).
+```
+
+Today's feed path (`replica.rs`, `replica_mask.rs`) uses `visible_memo`
+through `row_in_collection_compiled` for change rows and `visible` for cached
+rows, with `ReplicaSubscription::mask` as the per-subscription binding;
+subscription state is otherwise unchanged.
+
+### Correctness corpus
+
+`visibility_corpus.rs`: 9 plans (the Whagons task rule's operator shapes,
+public, roles/permissions, owner, double negation, empty sets, `inherits` with
+`onMissing`, `inherits` with parent `where` and a child-principal predicate) ×
+12 principals (admins, permission holders, team/spot members, grant-only,
+empty, guest, member-owned personal workspaces, and three principal changes)
+× 216 task rows and 72 notes (missing parents, null keys). Every case runs the
+SQL compiler on SQLite, the interpreted evaluator and the compiled evaluator
+(value, raw JSON, memo); any leaked or missing row fails. Further tests:
+irregular rows (missing columns, numbers, arrays, escaped keys, non-objects),
+class sharing and principal moves, and `candidates` soundness (no member that
+sees a row is outside the candidates).
+
+### Measurements (2026-11-03, arch3, 1 tokio worker, bench profile)
+
+One task update evaluated for every subscriber of `tasks.recentWorkspaceTasks`
+(`principal_change_concerns` + row check per subscriber), same binary and run
+(`benches/visibility_classes.rs`, final run on the branch merged with
+`perf/replica-state`; the shared machine varied up to 3x between runs, so
+compare columns within a row):
+
+| Tenant | interpreted | compiled | per subscriber | class evaluations / change |
+| --- | --- | --- | --- | --- |
+| fixture, 78 members | 147.9 µs | 21.1 µs | 1.9 µs → 0.27 µs | 45 (2 members alone) |
+| 9,000 tasks, 1,950 members | 10.54 ms | 0.517 ms | 5.4 µs → 0.27 µs | 758 (5 members alone) |
+
+"Interpreted" already includes this branch's `principal_change_concerns`
+early exit; on the unmodified base `visibility/task_update/78_members` was
+371 µs (same session) and 0.50 ms in the fixture baseline. Routing with
+`candidates` on the 1,950-member tenant visits 196 classes+members per change
+on average (of 759 classes and 1,950 members); 111 µs including the
+O(members) tally the bench does. Decoding ACL columns: 0.26-0.29 µs from a
+`Value`, 1.8 µs from raw JSON bytes (a 1.4 KB row is scanned in full).
+
+Class distribution with the shared fixture's member mix: 47 classes for 78
+members, 759 for 1,950 (largest 527; 667 singletons, almost all `TeamSpots`
+members whose 1-3 random spots from a 104-spot tree are unique; admins differ
+by the team sets of the personal-team-workspace rule). Memory: ~900 bytes per
+class, 520 bytes per member binding, interner ~0.6 MB for 8,969 tokens (grant
+task ids included).
+
+Sharing identical parent resolutions (taskUsers and taskTags each held a deep
+copy of the member's tasks principal) on top of `perf/replica-state`
+(`benches/replica_state.rs`, retained): 426 → 410 KB per member for 78
+members × 10 collections; marginal member Admin 128 → 92 KB, TeamAllSpots
+131 → 91 KB, TeamSpots 123 → 87 KB, GrantOnly 83 → 66 KB.
+
+Whole feed path, `baseline` bench, 78 members: on this branch before the
+`perf/replica-state` merge (same session as the unmodified base):
+`visibility/task_update/78_members` 371 µs → 141 µs, `fanout/presence_beat`
+11.4 → 5.25 ms, `fanout/task_update/apply` 182 → 170 ms with 82k → 47k
+allocations. After the merge: `fanout/task_update/apply` 4.85 ms (62 µs per
+subscriber), presence beat 2.67 ms.
+
+### Class ids for per-class frames
+
+`VisibilityClass::stable_id()` (u64, print as 16 hex chars) is a content hash
+of the plan, the residual of the member's bits and the token text of the sets
+that residual consults (and the parents' stable ids). It is equal for every
+member whose rows decide identically under the compiled rule, in every
+process and after restarts. It changes exactly when the member's binding
+changes: a principal rebuild (team/spot/role/permission rows naming the
+member), an in-memory grant or derived-set patch (`HandleCache::clear`), or a
+module install with a different plan. Grant and context atoms (assignments,
+shares, `createdBy`) are member atoms, not class inputs: a frame decided for a
+class applies to every member of it except the members `candidates` reports as
+hit, which need their own decision. Not done: running `apply_feed_event`'s
+decision once per (class, collection) in `perf/delivery`.
+
+## Permission bits (implemented 2026-11-03)
+
+`rust/crates/runtime/src/permission_bits.rs`. A module may declare a grant
+projection, `permissionGrants({table, member, permission, scope, whereNull?,
+key?})` in `@gonvex/module-sdk` (manifest field `permissionGrants`, included in
+the artifact hash only when declared). Every distinct (permission, scope)
+gets one bit per tenant database; a member's grants are one dense bitset with
+per-bit reference counts (duplicate rows stay correct).
+
+- Loaded from SQLite in one read transaction after its applier subscribed to
+  the tenant change feed; afterwards changed only by that applier, from
+  committed feed transactions in revision order. A rolled-back or crashed
+  Reducer never flips a bit. Lag, reset, epoch change or applier exit poisons
+  the index and the next use reloads it.
+- `ctx.permissions.has(permission, scope?)` in Reducers (host call
+  `permissionsHas`, capability `db_read`, wired through `module-runtime`,
+  `module-host` frames, the V8 bootstrap used by the socket host and
+  in-process V8, and `host_calls.rs`). When the Reducer's transaction is open
+  the host first waits until the bits cover that transaction's revision.
+  Reducers read the committed state, not their own uncommitted grant rows.
+- Scope matching is exact; `""` is tenant-wide. The application decides what
+  a tenant-wide grant means for a workspace by projecting rows for it.
+- Test `permission_bits::fixture_tests`: bits equal SQL over the projection
+  for every fixture member × role × team through inserts, soft deletes,
+  scope/member moves, restores, deletes and a rolled-back insert.
+
+Not done here: the Whagons projection itself and the JS-parity test. Whagons'
+`requireTaskPermission` / `requireTaskActionPermission` derive permissions
+from `members.permissions`, global roles, team roles (`memberTeams.roleId` /
+`roleKey`, `roles`, `rolePermissions`, `permissions`, code-defined built-in
+defaults with an override marker), workspace↔team links (`workspaceTeams`,
+`workspaces.teams`, category teams), personal-workspace membership, admin
+roles, own-task permissions and Full-access shares. Moving them onto
+`ctx.permissions` needs a `memberPermissionGrants` projection maintained by
+every Reducer that changes those tables (flattening role defaults and
+workspace serving into (permission, workspace) rows), plus a parity test of
+`hasWorkspaceTaskPermission` against the projection for every fixture member,
+permission and workspace. Share- and creator-based rules stay row checks.

@@ -1,6 +1,6 @@
 {
   "name": "@gonvex/local-runtime",
-  "version": "0.5.2-staging.31",
+  "version": "0.5.2-sqlite.1",
   "type": "module",
   "exports": {
     "./portable": {
@@ -54,8 +54,7 @@
   "devDependencies": {
     "@types/ungap__structured-clone": "^1.2.0",
     "typescript": "7.0.2",
-    "vitest": "^4.1.6",
-    "@electric-sql/pglite": "0.5.8"
+    "vitest": "^4.1.6"
   },
   "publishConfig": {
     "access": "public"

@@ -79,7 +79,7 @@ reject with `GonvexClientError` on timeout or disconnect and never hang forever.
 
 `useReplicaCollection` reads a bounded entity collection from the client's normalized
 IndexedDB store, then updates it as the server resumes or snapshots the durable
-Postgres cursor:
+SQLite revision cursor:
 
 ```tsx
 const tasks = useReplicaCollection<Task>(api.tasks.recent, { workspaceId });

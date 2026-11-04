@@ -1,5 +1,8 @@
 # Gonvex WebSocket protocol audit
 
+> Historical: written while Gonvex stored data in PostgreSQL. Storage moved to
+> SQLite on 2026-11-02; see [SQLite storage](../sqlite-storage.md).
+
 Audited `staging` at `d860fb7e` on 2026-10-23. The production changes are deliberately small: enable TCP_NODELAY on accepted runtime sockets, negotiate omission of transaction `oldValue`, and batch existing stationary IndexedDB membership updates. JSON, DEFLATE settings, complete new projections, resume, integrity, authorization and storage ordering retain their existing contracts. Experiments live in [an isolated benchmark package](../../scripts/bench-websocket/README.md), with no new production dependencies.
 
 The largest measured latency opportunity was outside serialization. The existing listener did not set TCP_NODELAY. In a 100-trial browser/LocalReplica loopback comparison, enabling it changed small-update p50/p95/p99 from 41.74/42.78/42.95 ms to 0.66/0.97/3.98 ms. The same four frames and 1,797 WebSocket bytes crossed the TCP counter in both runs. Both proxy sockets used TCP_NODELAY, isolating the accepted Rust socket. See [the listener](../../rust/crates/runtime/src/main.rs), [the baseline receipt](websocket-2026-10-23/nagle.json) and [the TCP_NODELAY receipt](websocket-2026-10-23/nodelay.json). This is a controlled transport-to-replica result, not a production WAN latency estimate.
