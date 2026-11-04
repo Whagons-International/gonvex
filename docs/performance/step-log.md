@@ -890,3 +890,71 @@ mix (≈1/5 of the creates, no chat sends) the same 500 users run at 0.41 cores*
 pass rule only narrowly: presence delivery p95 1,000 ms (p50 522 ms ≈ half the 1 s presence-v2
 tick, so this kind cannot reach p95 < 500 ms by design), query p95 910 ms, and p99s of
 1.06–1.11 s on save/taskDelivery/presence. Not stepped to 1k: 500 fails in both mixes.
+
+### Production-mix step-up: 1,000 users (ch-1k-prod-b) — FAIL; 2.5k not run
+
+Same build/artifact (cache-heap 19803c3e, da98a666), `LOAD_MIX=production`, 8 shards, 90 s ramp,
+180 s plateau. A first try (`ch-1k-prod`, invalid) was limited by the lab transport: the
+single-loop `remote-proxy.py` sat at 0.95–1.0 core from the ramp on (it used 0.04 core at 500, so
+likely a spinning connection rather than load), 477 users never connected and the runtime idled
+at 0.22 cores (oracle: 10 mismatches, all 0 leaked). The proxy now preforks `PROXY_WORKERS` (4)
+asyncio workers on the shared listening sockets; in the rerun it used 0.08 core.
+
+| | ch-500-prod | **ch-1k-prod-b** |
+|---|---|---|
+| users connected | 500/500 | 1,000/1,000 |
+| errors | 0.08 % | 82 % (6,362 × "save still pending at teardown", 523 metadata / 494 detail subscriptions never current, 453 undelivered, 60 jobs pending 90 s after plateau) |
+| oracle | 8 / 0 mismatched | 6 checks, 2 mismatched (0 leaked) |
+| save p50 / p95 / p99 | 83 / 493 / 1,109 | 91,198 / 188,567 / 216,314 |
+| taskDelivery | 138 / 506 / 1,086 | 55,507 / 150,932 / 176,554 |
+| presence delivery | 522 / 1,000 / 1,060 | 697 / 1,292 / 2,501 |
+| reconnect | 79 / 238 / 367 | 390 / 1,108 / 1,678 |
+| runtime CPU (throttled) | 0.41 (195/1,754) | 1.00 (1,751/1,761) |
+| cgroup peak / anon peak | 1,833 / 892 MiB | 2,048 / 1,491 MiB |
+| `fn.total` reducer p50 / p99 | 58 / 610 ms | 176 ms / 2.00 s |
+| `invoke.isolate_wait` reducer p50 / p99 / max | 0.04 / 336 / 624 ms | 63 ms / 1.83 s / 2.13 s (84 %) |
+| `invoke.isolate_wait` cron p50 / p99 / max | 0.02 / 7 / 361 ms | 0.03 ms / 2.15 s / 3.01 s (50 %) |
+| scheduled vs user | 2.4/s vs 5.2/s | 2.6/s vs 10.6/s |
+| 3 s slice errors | none | none (cron `fn.total` max 3.01 s = the slice) |
+| `snapshot.build` p50 / p99 | 9 ms / 2.76 s | 33.0 s / 75.2 s (66 builds/s) |
+| `delivery.queue_wait` p50 / p99 | 1.4 ms / 2.39 s | 23.9 s / 124.7 s |
+| clock offset Mac − arch3 | −33.8 / −35.1 ms | −16.9 / −15.9 ms |
+
+Saves look slow to clients (p50 91 s) although `fn.total` reducer p99 is 2.0 s: a save resolves
+only when the replica watermark covering its commit arrives, and that waits behind the 24 s
+delivery backlog. Background work (ms/s): checkpoint 70.5 (5,557 pages/s) + inline 4.8, V8 GC
+minor 15.7 + major 1.4, cache builds 5.8/s, offload busy 736. Top functions by server time:
+recordTaskViewByTaskId 19.4 % (2.4/s, mean 311 ms), createNote 8.7 %, updateDescription 8.6 %,
+update 6.5 %, assignUser 5.8 %, notifyIfUnassigned 4.3 % (31 calls, mean 948 ms),
+grantProjection.reconcile 3.6 % (47 steps, mean 525 ms).
+
+Heap by owner (plateau): SQLite 131–141 MiB, snapshot cache 72–88 MiB (0 evictions), V8 50–57 MiB,
+rest of anon ~1.2 GiB (anon 1,413–1,473 MiB; delivery backlog).
+
+CPU by thread (self time):
+
+| thread | total | SQLite | JSON | replica/cache/hash | visibility | deflate | V8 | alloc | libc | other | kernel |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `gonvex-offload` | 46.8 | 0.6 | 8.2 | 10.6 | 6.7 | 0 | 0 | 3.6 | 4.6 | 3.5 | 9.0 |
+| `tokio-rt-worker` | 30.6 | 0.7 | 1.7 | 4.9 | 0.1 | 3.7 | 0 | 2.1 | 2.2 | 5.3 | 9.8 |
+| `sqlx-sqlite-worker` | 12.0 | 2.9 | 0 | 0 | 0 | 0 | 0 | 0.3 | 1.6 | 1.2 | 5.9 |
+| `gonvex-module-isolate` | 8.0 | 0.9 | 0.5 | 0.1 | 0 | 0 | 1.8 | 0.2 | 0.8 | 1.2 | 2.5 |
+| **all** | 100 | 5.3 | 10.7 | 15.8 | 6.8 | 3.8 | 1.8 | 6.6 | 9.5 | 11.9 | 28.6 |
+
+Top self symbols: SipHash 4.5 % + std `hash_one<&String>` 2.4 % + foldhash `hash_one` 1.2 %,
+deflate 3.0 %, `visibility_class::CompiledPlan::eval` 1.1 %, `drop_glue<Value>` 1.1 %, indexmap
+clone 0.9 %. **Knee of the production mix: between 500 (near pass) and 1,000 (clear CPU
+failure).** Binding constraint at 1k: CPU in per-open snapshot builds on the offload pool
+(66 builds/s at ~1k connected; JSON, hashing, visibility evaluation), then delivery
+(compression, hashing) on the network worker; the 24 s delivery backlog is also the largest
+heap owner. Off-CPU not analysed for this step (on-CPU saturated: 1,751/1,761 periods
+throttled).
+
+### Batch-off oracle tail (ch-oracle-100-nobatch), cheap look
+
+vs the earlier batch-off gate (rl-oracle-100-nobatch, before cache-heap): system CPU 0.09 vs 0.03
+cores, throttled periods 360 vs 57, presence `fn.total` p99 4.72 s vs 50 ms, reducer p99 2.68 s vs
+59 ms, isolate wait max 0.9–1.3 s, `ws.inbound_wait` p99 331 ms vs 0.16 ms. The tail is CPU
+bursts in the cgroup (more syscalls for unbatched frames plus the new reader/offload nice
+settings changing scheduling inside the 1-vCPU cgroup), not delivery. One run each; not
+pursued further.
