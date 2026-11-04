@@ -6,6 +6,10 @@
 //! so `available_parallelism` is 1 as in the 1-vCPU container (2 snapshot
 //! permits, 1 offload thread). Clients run on other CPUs (`BURST_CLIENT_CPUS`).
 //!
+//! Users are e2e test members; `BURST_ADMIN_SHARE` (default 0.1) of them get
+//! the fixture Admin's role and permissions (they see all 9,000 tasks, so
+//! their login snapshots are heavy); the others see no task rows.
+//!
 //! Load (the 1k lab pattern in miniature): `BURST_USERS` active users hold the
 //! login set (10 collections) and loop: think (exponential, mean
 //! `BURST_THINK_MS`), then either open a task detail window (8 keyed
@@ -35,7 +39,7 @@ use futures_util::{SinkExt, StreamExt};
 use gonvex_runtime::accept::{AcceptedSocket, TunedListener};
 use gonvex_runtime::control::ControlConnection;
 use gonvex_runtime::perf_fixture::{
-    Fixture, FixtureOptions, WHAGONS_DETAIL_WINDOW, WHAGONS_SUBSCRIPTIONS,
+    Fixture, FixtureOptions, MemberKind, SqlValue, WHAGONS_DETAIL_WINDOW, WHAGONS_SUBSCRIPTIONS,
 };
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
@@ -357,6 +361,8 @@ impl Connection {
 #[derive(Default)]
 struct Samples {
     save: Vec<f64>,
+    /// Saves sent together with a detail window open.
+    save_window: Vec<f64>,
     save_errors: usize,
     open: Vec<f64>,
     open_timeouts: usize,
@@ -391,7 +397,7 @@ fn delivery(marks: &[(u64, f64)], commits: &[(u64, f64)], from_ms: f64, until_ms
     }
 }
 
-async fn provision(fixture: &Fixture, email: &str) -> String {
+async fn provision(fixture: &Fixture, email: &str, admin: bool) -> String {
     let route = &fixture.tenants[0].route;
     let response = fixture
         .runtime
@@ -412,6 +418,27 @@ async fn provision(fixture: &Fixture, email: &str) -> String {
     let status = response.status();
     let body = to_bytes(response.into_body(), 64 << 10).await.unwrap();
     assert!(status.is_success(), "{}", String::from_utf8_lossy(&body));
+    if admin {
+        // Sees every task, like the fixture's Admins (heavy login snapshots).
+        let member_id = serde_json::from_slice::<Value>(&body).unwrap()["memberId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let template = fixture.members_of_kind(0, MemberKind::Admin)[0];
+        let template = &fixture.tenants[0].members[template];
+        fixture
+            .commit(
+                0,
+                "UPDATE members SET role = $1, permissions = $2 WHERE id = $3",
+                vec![
+                    SqlValue::Text(template.role.clone()),
+                    SqlValue::Text(template.permissions.to_string()),
+                    SqlValue::Text(member_id),
+                ],
+            )
+            .await
+            .unwrap();
+    }
     let login = fixture
         .runtime
         .execute_control_action(
@@ -449,6 +476,7 @@ fn main() {
     let window_share: f64 = env("BURST_WINDOW_SHARE", 0.5);
     let reconnect: f64 = env("BURST_RECONNECT", 0.5);
     let seed: u64 = env("BURST_SEED", 7);
+    let admin_share: f64 = env("BURST_ADMIN_SHARE", 0.1);
     let label: String = env("BURST_LABEL", "run".to_owned());
     for (name, value) in [
         ("GONVEX_REPLICA_BATCH_IDLE_MS", "50"),
@@ -483,7 +511,9 @@ fn main() {
         let fixture = Fixture::build(options).await.unwrap();
         let mut tokens = Vec::new();
         for user in 0..users + observers {
-            tokens.push(provision(&fixture, &format!("burst-{user}@example.test")).await);
+            // Every 1/share-th user (active and observers alike) is an Admin.
+            let admin = admin_share > 0.0 && (user as f64 * admin_share).fract() + admin_share >= 1.0;
+            tokens.push(provision(&fixture, &format!("burst-{user}@example.test"), admin).await);
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -596,7 +626,7 @@ fn main() {
                                 samples.open_timeouts += 1;
                             }
                             match saved {
-                                Some((ms, revision, at)) => { samples.save.push(ms); samples.commits.push((revision, at)); }
+                                Some((ms, revision, at)) => { samples.save.push(ms); samples.save_window.push(ms); samples.commits.push((revision, at)); }
                                 None => samples.save_errors += 1,
                             }
                         }
@@ -661,9 +691,10 @@ fn main() {
         };
         let report = json!({
             "label": label,
-            "users": users, "observers": observers, "seconds": seconds, "think_ms": think_ms,
+            "users": users, "observers": observers, "admin_share": admin_share, "seconds": seconds, "think_ms": think_ms,
             "sign_in_ms": signed_in_ms.round(),
             "save": quantiles(&mut samples.save), "save_errors": samples.save_errors,
+            "save_window": quantiles(&mut samples.save_window),
             "delivery_observers": quantiles(&mut observer_delivery), "delivery_observers_missed": observer_missed,
             "delivery_active": quantiles(&mut active_delivery), "delivery_active_missed": active_missed,
             "open": quantiles(&mut samples.open), "open_timeouts": samples.open_timeouts, "open_errors": samples.open_errors,
@@ -678,6 +709,7 @@ fn main() {
                 "delivery.total": stage("delivery.total"),
                 "offload.queue_wait": stage("offload.queue_wait"),
                 "fn.total": stage("fn.total"),
+                "ws.inbound_wait": stage("ws.inbound_wait"),
                 "tokio.sched_lag": stage("tokio.sched_lag"),
             },
         });

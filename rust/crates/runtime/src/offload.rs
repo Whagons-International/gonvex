@@ -661,23 +661,67 @@ pub(crate) async fn encode_snapshot_json(
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot admission: a count bound plus an estimated byte budget.
+// Snapshot admission: a count bound in two priority lanes plus an estimated
+// byte budget (burst control, docs/performance/burst-control.md).
 
 /// Bounds concurrent replica snapshot builds by count and by the estimated
 /// decoded heap they hold before interning (the transient part of a
 /// snapshot build; the interned rows are retained by subscriptions anyway).
 /// Each build reserves its estimate, the last observed size of the same
 /// collection for the same member, else the largest observed size of the
-/// table, else 1 MiB. Both semaphores are FIFO. A build larger than the whole
-/// budget reserves the whole budget, so it runs alone instead of never.
+/// table (keyed and unkeyed collections apart), else 8 MiB. A build larger
+/// than the whole budget reserves the whole budget, so it runs alone instead
+/// of never.
+///
+/// Count slots are handed out in two lanes, FIFO within each: builds whose
+/// estimate is at most `GONVEX_SNAPSHOT_SHORT_BYTES` (default 256 KiB: a task
+/// detail window's keyed collections, small reference tables) go first, and
+/// larger ones (a member's full task set, an unknown collection) hold at most
+/// `count - 1` slots when `count >= 2`, so a short build never waits behind
+/// large ones (shortest-expected-first: under a burst the mean and tail wait
+/// of the interactive opens fall, the large ones keep `count - 1` slots and
+/// cannot starve). The estimate is a size, not a measured time, so the class
+/// does not drift with CPU contention.
+///
+/// `GONVEX_SNAPSHOT_LANES=0` restores one FIFO lane.
+///
+/// Overload: at most `GONVEX_SNAPSHOT_MAX_WAITING` builds wait (default
+/// 4096); beyond that, or after waiting `GONVEX_SNAPSHOT_ADMISSION_TIMEOUT_MS`
+/// (default 30 s), a build fails fast with [`SnapshotAdmissionError`], which
+/// the open reports as a `replica.error` (the SDK retries it with backoff).
 pub struct SnapshotAdmission {
-    count: tokio::sync::Semaphore,
+    lanes: Mutex<Lanes>,
+    capacity: usize,
+    long_capacity: usize,
+    short_bytes: usize,
+    max_waiting: usize,
+    timeout: Duration,
     budget: tokio::sync::Semaphore,
     budget_kib: usize,
     estimates: Mutex<Estimates>,
     reserved_kib: AtomicUsize,
     peak_reserved_kib: AtomicUsize,
+    shed: AtomicUsize,
 }
+
+struct Lanes {
+    free: usize,
+    long_active: usize,
+    short: std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>,
+    long: std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Lanes {
+    fn waiting(&self) -> usize {
+        self.short.len() + self.long.len()
+    }
+}
+
+/// A snapshot build was not admitted: too many builds wait, or it waited
+/// longer than the admission deadline. Retryable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("replica snapshot admission overloaded ({0}); retry")]
+pub struct SnapshotAdmissionError(pub &'static str);
 
 #[derive(Default)]
 struct Estimates {
@@ -694,7 +738,7 @@ const ESTIMATE_ENTRIES: usize = 65_536;
 
 pub struct SnapshotPermit {
     admission: &'static SnapshotAdmission,
-    _count: tokio::sync::SemaphorePermit<'static>,
+    _slot: Slot,
     _bytes: tokio::sync::SemaphorePermit<'static>,
     reserved_kib: usize,
     key: Box<str>,
@@ -702,16 +746,78 @@ pub struct SnapshotPermit {
     admitted: Instant,
 }
 
+/// One count slot; returned to the lanes on drop.
+struct Slot {
+    admission: &'static SnapshotAdmission,
+    long: bool,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.admission.release(self.long);
+    }
+}
+
+/// A queued waiter; a slot handed to it after it was dropped is passed on.
+struct LaneWait {
+    admission: &'static SnapshotAdmission,
+    long: bool,
+    receiver: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl Drop for LaneWait {
+    fn drop(&mut self) {
+        if let Some(mut receiver) = self.receiver.take() {
+            receiver.close();
+            if receiver.try_recv().is_ok() {
+                self.admission.release(self.long);
+            } else {
+                // Not handed a slot: forget the sender now, so the waiting
+                // count (and the waiter cap) exclude it.
+                let mut lanes = self.admission.lanes.lock().unwrap();
+                let lane = if self.long {
+                    &mut lanes.long
+                } else {
+                    &mut lanes.short
+                };
+                lane.retain(|sender| !sender.is_closed());
+            }
+        }
+    }
+}
+
 impl SnapshotAdmission {
     pub fn new(count: usize, budget_bytes: usize) -> Self {
+        Self::with_limits(count, budget_bytes, 256 << 10, 4096, Duration::from_secs(30))
+    }
+
+    pub fn with_limits(
+        count: usize,
+        budget_bytes: usize,
+        short_bytes: usize,
+        max_waiting: usize,
+        timeout: Duration,
+    ) -> Self {
+        let capacity = count.max(1);
         let budget_kib = (budget_bytes / 1024).clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         Self {
-            count: tokio::sync::Semaphore::new(count.max(1)),
+            lanes: Mutex::new(Lanes {
+                free: capacity,
+                long_active: 0,
+                short: Default::default(),
+                long: Default::default(),
+            }),
+            capacity,
+            long_capacity: if capacity >= 2 { capacity - 1 } else { 1 },
+            short_bytes,
+            max_waiting: max_waiting.max(1),
+            timeout,
             budget: tokio::sync::Semaphore::new(budget_kib),
             budget_kib,
             estimates: Mutex::default(),
             reserved_kib: AtomicUsize::new(0),
             peak_reserved_kib: AtomicUsize::new(0),
+            shed: AtomicUsize::new(0),
         }
     }
 
@@ -725,7 +831,27 @@ impl SnapshotAdmission {
             let budget = env_usize("GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES")
                 .filter(|value| *value > 0)
                 .unwrap_or(128 << 20);
-            Self::new(count, budget)
+            // `GONVEX_SNAPSHOT_LANES=0`: one FIFO lane (every build short),
+            // the admission order before burst control.
+            let lanes = std::env::var("GONVEX_SNAPSHOT_LANES").map_or(true, |value| value.trim() != "0");
+            let short = if lanes {
+                env_usize("GONVEX_SNAPSHOT_SHORT_BYTES").unwrap_or(256 << 10)
+            } else {
+                usize::MAX
+            };
+            let waiting = env_usize("GONVEX_SNAPSHOT_MAX_WAITING")
+                .filter(|value| *value > 0)
+                .unwrap_or(4096);
+            let timeout = env_usize("GONVEX_SNAPSHOT_ADMISSION_TIMEOUT_MS")
+                .filter(|value| *value > 0)
+                .unwrap_or(30_000);
+            Self::with_limits(
+                count,
+                budget,
+                short,
+                waiting,
+                Duration::from_millis(timeout as u64),
+            )
         })
     }
 
@@ -745,15 +871,23 @@ impl SnapshotAdmission {
         self.estimates.lock().unwrap().by_table.get(table).copied()
     }
 
-    /// Waits for a count slot, then for the estimated bytes of `key`. The
-    /// estimate is taken after the count wait, so a burst queued before any
-    /// build finished still uses the sizes those builds observe.
-    pub async fn admit(&'static self, key: String, table: &str) -> SnapshotPermit {
-        let count = self
-            .count
-            .acquire()
-            .await
-            .expect("snapshot semaphore is never closed");
+    /// Waits for a count slot in the build's lane, then for the estimated
+    /// bytes of `key`. The byte reservation is re-estimated after the slot
+    /// wait, so a burst queued before any build finished still uses the
+    /// sizes those builds observe.
+    pub async fn admit(
+        &'static self,
+        key: String,
+        table: &str,
+    ) -> Result<SnapshotPermit, SnapshotAdmissionError> {
+        let long = self.estimate(&key, table) > self.short_bytes;
+        let slot = match tokio::time::timeout(self.timeout, self.slot(long)).await {
+            Ok(slot) => slot?,
+            Err(_) => {
+                self.shed.fetch_add(1, Relaxed);
+                return Err(SnapshotAdmissionError("admission deadline"));
+            }
+        };
         let estimate = self.estimate(&key, table);
         let reserved_kib = estimate.div_ceil(1024).clamp(1, self.budget_kib);
         let bytes = self
@@ -763,14 +897,87 @@ impl SnapshotAdmission {
             .expect("snapshot budget is never closed");
         let reserved = self.reserved_kib.fetch_add(reserved_kib, Relaxed) + reserved_kib;
         self.peak_reserved_kib.fetch_max(reserved, Relaxed);
-        SnapshotPermit {
+        Ok(SnapshotPermit {
             admission: self,
-            _count: count,
+            _slot: slot,
             _bytes: bytes,
             reserved_kib,
             key: key.into(),
             table: table.into(),
             admitted: Instant::now(),
+        })
+    }
+
+    /// A count slot in the short or long lane. Cancel-safe.
+    async fn slot(&'static self, long: bool) -> Result<Slot, SnapshotAdmissionError> {
+        let receiver = {
+            let mut lanes = self.lanes.lock().unwrap();
+            let lane_open = if long {
+                lanes.long.is_empty()
+                    && lanes.short.is_empty()
+                    && lanes.long_active < self.long_capacity
+            } else {
+                lanes.short.is_empty()
+            };
+            if lane_open && lanes.free > 0 {
+                lanes.free -= 1;
+                lanes.long_active += usize::from(long);
+                return Ok(Slot {
+                    admission: self,
+                    long,
+                });
+            }
+            if lanes.waiting() >= self.max_waiting {
+                drop(lanes);
+                self.shed.fetch_add(1, Relaxed);
+                return Err(SnapshotAdmissionError("too many waiting builds"));
+            }
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            if long {
+                lanes.long.push_back(sender);
+            } else {
+                lanes.short.push_back(sender);
+            }
+            receiver
+        };
+        let mut wait = LaneWait {
+            admission: self,
+            long,
+            receiver: Some(receiver),
+        };
+        // A sender is dropped only after a send or when `release` skips a
+        // closed receiver, so this cannot fail while the waiter lives.
+        let _ = wait.receiver.as_mut().expect("receiver until handed over").await;
+        wait.receiver = None;
+        Ok(Slot {
+            admission: self,
+            long,
+        })
+    }
+
+    /// Returns a slot and hands free slots to waiters: short lane first,
+    /// then the long lane while it holds fewer than `long_capacity`.
+    fn release(&self, long: bool) {
+        let mut lanes = self.lanes.lock().unwrap();
+        lanes.free += 1;
+        lanes.long_active -= usize::from(long);
+        while lanes.free > 0 {
+            if let Some(waiter) = lanes.short.pop_front() {
+                if waiter.send(()).is_ok() {
+                    lanes.free -= 1;
+                }
+                continue;
+            }
+            if lanes.long_active < self.long_capacity {
+                if let Some(waiter) = lanes.long.pop_front() {
+                    if waiter.send(()).is_ok() {
+                        lanes.free -= 1;
+                        lanes.long_active += 1;
+                    }
+                    continue;
+                }
+            }
+            break;
         }
     }
 
@@ -780,9 +987,24 @@ impl SnapshotAdmission {
         self.peak_reserved_kib.swap(current, Relaxed) * 1024
     }
 
-    /// Free count permits right now.
+    /// Free count slots right now.
     pub fn available_permits(&self) -> usize {
-        self.count.available_permits()
+        self.lanes.lock().unwrap().free
+    }
+
+    /// Builds waiting for a slot right now, (short, long).
+    pub fn waiting(&self) -> (usize, usize) {
+        let lanes = self.lanes.lock().unwrap();
+        (lanes.short.len(), lanes.long.len())
+    }
+
+    /// Builds refused since start (waiter cap or deadline).
+    pub fn shed_total(&self) -> usize {
+        self.shed.load(Relaxed)
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     pub fn budget_bytes(&self) -> usize {
@@ -893,7 +1115,7 @@ mod tests {
         let small = vec![Value::String("x".repeat(4 * 1024 / HEAP_PER_JSON_BYTE - 2))];
         for n in 0..10 {
             let key = format!("member-{n}");
-            let permit = admission.admit(key, "tasks").await;
+            let permit = admission.admit(key, "tasks").await.unwrap();
             permit.observe(if n % 3 == 0 { &big } else { &small });
         }
         let held = Arc::new(AtomicUsize::new(0));
@@ -904,7 +1126,7 @@ mod tests {
             let peak = peak.clone();
             tasks.push(tokio::spawn(async move {
                 let n = burst % 10;
-                let permit = admission.admit(format!("member-{n}"), "tasks").await;
+                let permit = admission.admit(format!("member-{n}"), "tasks").await.unwrap();
                 let bytes = if n % 3 == 0 { 40 * 1024 } else { 4 * 1024 };
                 let now = held.fetch_add(bytes, Relaxed) + bytes;
                 peak.fetch_max(now, Relaxed);
@@ -927,8 +1149,8 @@ mod tests {
     async fn oversized_build_runs_alone_instead_of_never() {
         let admission = leak(SnapshotAdmission::new(8, 16 * 1024));
         let huge = vec![Value::String("x".repeat(100 * 1024))];
-        admission.admit("huge".into(), "t").await.observe(&huge);
-        let first = admission.admit("huge".into(), "t").await;
+        admission.admit("huge".into(), "t").await.unwrap().observe(&huge);
+        let first = admission.admit("huge".into(), "t").await.unwrap();
         // The whole budget is held: a small build waits.
         let waiting = admission.admit("small".into(), "other");
         tokio::pin!(waiting);
@@ -938,7 +1160,118 @@ mod tests {
         drop(first);
         tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
-            .expect("admitted after the oversized build");
+            .expect("admitted after the oversized build")
+            .unwrap();
+    }
+
+    /// Teaches `key` an estimate of about `bytes` of decoded heap.
+    async fn teach(admission: &'static SnapshotAdmission, key: &str, bytes: usize) {
+        let rows = vec![Value::String("x".repeat(bytes / HEAP_PER_JSON_BYTE))];
+        admission.admit(key.into(), key).await.unwrap().observe(&rows);
+    }
+
+    /// Polls once; the output when ready (kept, so a permit stays held).
+    fn poll_now<F: Future>(future: Pin<&mut F>) -> Option<F::Output> {
+        let waker = futures_util::task::noop_waker();
+        match future.poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(output) => Some(output),
+            Poll::Pending => None,
+        }
+    }
+
+    fn pending<F: Future>(future: Pin<&mut F>) -> bool {
+        poll_now(future).is_none()
+    }
+
+    #[tokio::test]
+    async fn short_builds_go_first_and_large_ones_keep_all_but_one_slot() {
+        let admission = leak(SnapshotAdmission::with_limits(
+            3,
+            1 << 30,
+            64 << 10,
+            64,
+            Duration::from_secs(30),
+        ));
+        teach(admission, "big", 1 << 20).await;
+        teach(admission, "small", 1 << 10).await;
+        // Large builds take at most count - 1 = 2 slots.
+        let big1 = admission.admit("big".into(), "big").await.unwrap();
+        let big2 = admission.admit("big".into(), "big").await.unwrap();
+        let big3 = admission.admit("big".into(), "big");
+        tokio::pin!(big3);
+        assert!(pending(big3.as_mut()), "a third large build waits");
+        // The reserved slot serves a short build at once, despite the
+        // waiting large one ahead of it.
+        let small1 = admission.admit("small".into(), "small").await.unwrap();
+        let small2 = admission.admit("small".into(), "small");
+        tokio::pin!(small2);
+        assert!(pending(small2.as_mut()));
+        assert_eq!(admission.waiting(), (1, 1));
+        // A freed large slot goes to the waiting short build first.
+        drop(big1);
+        let small2 = poll_now(small2.as_mut()).expect("short admitted").unwrap();
+        assert!(pending(big3.as_mut()));
+        drop(small1);
+        let _big3 = poll_now(big3.as_mut()).expect("large lane below its cap again");
+        // Two large active: a slot freed by a short build stays reserved.
+        let big4 = admission.admit("big".into(), "big");
+        tokio::pin!(big4);
+        assert!(pending(big4.as_mut()));
+        drop(small2);
+        assert!(pending(big4.as_mut()), "the last slot stays free for short builds");
+        assert_eq!(admission.available_permits(), 1);
+        drop(big2);
+        let _big4 = poll_now(big4.as_mut()).expect("admitted after a large build ended");
+        assert_eq!(admission.waiting(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_waiter_passes_its_slot_on() {
+        let admission = leak(SnapshotAdmission::with_limits(
+            1,
+            1 << 30,
+            64 << 10,
+            64,
+            Duration::from_secs(30),
+        ));
+        let held = admission.admit("a".into(), "t").await.unwrap();
+        let mut cancelled = Box::pin(admission.admit("b".into(), "t"));
+        assert!(pending(cancelled.as_mut()));
+        let next = admission.admit("c".into(), "t");
+        tokio::pin!(next);
+        assert!(pending(next.as_mut()));
+        // The slot is handed to `cancelled`, which is then dropped unpolled.
+        drop(held);
+        drop(cancelled);
+        let _next = poll_now(next.as_mut()).expect("the handed-over slot moved on");
+        assert_eq!(admission.available_permits(), 0);
+    }
+
+    #[tokio::test]
+    async fn overload_fails_fast_instead_of_queueing_without_bound() {
+        let admission = leak(SnapshotAdmission::with_limits(
+            1,
+            1 << 30,
+            64 << 10,
+            2,
+            Duration::from_millis(50),
+        ));
+        let _held = admission.admit("a".into(), "t").await.unwrap();
+        let first = admission.admit("b".into(), "t");
+        let second = admission.admit("c".into(), "t");
+        tokio::pin!(first, second);
+        assert!(pending(first.as_mut()));
+        assert!(pending(second.as_mut()));
+        // A third waiter exceeds the cap at once.
+        assert_eq!(
+            admission.admit("d".into(), "t").await.err(),
+            Some(SnapshotAdmissionError("too many waiting builds"))
+        );
+        // The queued ones hit the deadline.
+        assert!(first.await.is_err());
+        assert!(second.await.is_err());
+        assert_eq!(admission.shed_total(), 3);
+        assert_eq!(admission.waiting(), (0, 0));
     }
 
     #[tokio::test]
@@ -946,7 +1279,7 @@ mod tests {
         let admission = leak(SnapshotAdmission::new(2, 1 << 20));
         assert_eq!(admission.estimate("a", "tasks"), UNKNOWN_SNAPSHOT_BYTES);
         let rows: Vec<Value> = (0..1000).map(|n| serde_json::json!({ "n": n })).collect();
-        admission.admit("a".into(), "tasks").await.observe(&rows);
+        admission.admit("a".into(), "tasks").await.unwrap().observe(&rows);
         let exact: usize = rows.iter().map(crate::replica::json_byte_len).sum::<usize>()
             * HEAP_PER_JSON_BYTE;
         let estimate = admission.estimate("b", "tasks");

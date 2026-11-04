@@ -1655,6 +1655,7 @@ async fn websocket(
     // Removed and dropped subscriptions are freed on the offload pool.
     let mut replicas = offload::RetiringMap::default();
     let mut replica_opens = replica_open_queue::ReplicaOpenQueue::default();
+    let open_progress = replica_opens.progress();
     // Retain at most one decoded, transport-size-bounded frame. While it waits
     // for preparation capacity, stop reading further frames (TCP backpressure).
     // SQL preparations do not depend on socket input; auth timers remain live.
@@ -1752,7 +1753,12 @@ async fn websocket(
         // queued bytes and resets a connection whose writes stop progressing.
         let backlogged = socket_watch.is_backlogged();
         catching_up |= backlogged;
-        let defer_feed = preparing_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
+        // Burst control: opens that only wait for snapshot admission hold no
+        // clock, so feed events still reach the installed subscriptions (and
+        // this connection's own call watermarks) while they queue. Defer only
+        // while a preparation may be reading (`OpenProgress`).
+        let reading_replicas = preparing_replicas && replica_opens.reading();
+        let defer_feed = reading_replicas || !legacy_snapshot_delivery.is_empty() || backlogged;
         let batch_deadline = if backlogged { None } else { batcher.deadline(socket.batch()) };
         let presence_wait = presence_slot.clone().filter(|_| !backlogged);
         let message = tokio::select! {
@@ -1778,6 +1784,9 @@ async fn websocket(
                 }
                 continue;
             }
+            // A reading preparation went back to waiting for admission:
+            // re-evaluate `defer_feed`.
+            _ = open_progress.settled(), if reading_replicas => continue,
             opened = replica_opens.next(), if preparing_replicas => {
                 if let Some(outcome) = opened {
                     for response in install_replica_open_outcomes(&mut replicas, vec![outcome]) {
@@ -1861,6 +1870,12 @@ async fn websocket(
                         message
                     }
                     ScheduledTransport::Feed(event) => match event {
+                    // A preparation started reading after this loop chose
+                    // to take a feed event: keep it for after installation.
+                    Ok(event) if replica_opens.reading() => {
+                        pending_feed = Some(Ok(event));
+                        continue;
+                    }
                     Ok(event) => {
                         // A connection that fell behind takes every feed event
                         // waiting for it as one: each row's newest state once.

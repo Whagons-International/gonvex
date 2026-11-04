@@ -67,6 +67,8 @@ pub enum ReplicaError {
     Sql(#[from] sqlx::Error),
     #[error(transparent)]
     Visibility(#[from] visibility::VisibilityError),
+    #[error(transparent)]
+    Overloaded(#[from] crate::offload::SnapshotAdmissionError),
 }
 
 pub struct ReplicaOpenResult {
@@ -886,6 +888,9 @@ impl Runtime {
                 for row in view.rows {
                     visit(row)?;
                 }
+                // Cached views learn their size too (admission lane and byte
+                // reservation of the member's next open of this collection).
+                read.permit.observe_json_bytes(view.window.bytes.max(0) as usize);
                 return Ok(view.window);
             }
             self.inner.snapshot_cache.record_fallback();
@@ -1035,15 +1040,18 @@ impl Runtime {
     ) -> Result<Option<crate::snapshot_cache::CacheEntry>, ReplicaError> {
         use gonvex_profiler::{Label, ScopeTimer, Stage};
         let _build = ScopeTimer::new(Stage::SnapshotBuild, Label::None);
-        let permit = crate::offload::SnapshotAdmission::global()
-            .admit(
+        // No read of this open is in progress while it waits (the shared
+        // entry has its own transaction): the socket keeps delivering.
+        let permit = crate::replica_open_queue::admission_wait(
+            crate::offload::SnapshotAdmission::global().admit(
                 format!(
                     "{}\u{0}{}\u{0}cache\u{0}{}",
                     session.route.database_url, definition.table, args
                 ),
                 &definition.table,
-            )
-            .await;
+            ),
+        )
+        .await?;
         let control = self
             .inner
             .control_plane
@@ -1082,15 +1090,31 @@ impl Runtime {
         // (`crate::offload::SnapshotAdmission`).
         let permit = {
             let _waiting = gauge(GaugeId::SnapshotWaiting).guard();
-            crate::offload::SnapshotAdmission::global()
-                .admit(
+            // The read transaction and clock begin after admission: while
+            // it waits, the socket keeps applying feed events to its
+            // installed subscriptions (`replica_open_queue::OpenProgress`).
+            // Keyed collections (one task's detail rows) and collection-wide
+            // ones of the same table are estimated apart: their sizes differ
+            // by orders of magnitude and pick the admission lane.
+            let keyed = definition
+                .equal_filters
+                .values()
+                .any(|argument| args.get(argument).is_some());
+            let class = if keyed {
+                format!("{}\u{0}keyed", definition.table)
+            } else {
+                definition.table.clone()
+            };
+            crate::replica_open_queue::admission_wait(
+                crate::offload::SnapshotAdmission::global().admit(
                     format!(
                         "{}\u{0}{}\u{0}{}",
-                        session.route.database_url, definition.table, session.member.id
+                        session.route.database_url, class, session.member.id
                     ),
-                    &definition.table,
-                )
-                .await
+                    &class,
+                ),
+            )
+            .await?
         };
         let active = gauge(GaugeId::SnapshotActive).guard();
         timer.lap(Stage::SnapshotPermitWait, Label::None);

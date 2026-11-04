@@ -6,6 +6,107 @@ use futures_util::{
     FutureExt, StreamExt,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::Arc;
+
+/// Which of a socket's preparations may hold a read clock (burst control,
+/// docs/performance/burst-control.md).
+///
+/// A preparation counts as *reading* from its first poll until the socket
+/// takes its result (and installs the subscription in the same step), except
+/// while it waits for snapshot admission ([`admission_wait`]): no read
+/// transaction or clock of this open exists then. The socket applies feed
+/// events to its installed subscriptions while no preparation is reading,
+/// so a connection whose opens queue for seconds behind the process-wide
+/// snapshot permits still receives its deliveries and call watermarks.
+///
+/// Ordering argument: a preparation marks itself reading (SeqCst) before it
+/// reads its clock; the socket checks [`OpenProgress::reading`] (SeqCst)
+/// after it received a feed event, which is broadcast only after its commit.
+/// If the check sees no reader, any clock read later sees that commit, so the
+/// new subscription's snapshot already contains the event it would skip.
+#[derive(Default)]
+pub(crate) struct OpenProgress {
+    reading: AtomicUsize,
+    settled: tokio::sync::Notify,
+}
+
+/// `GONVEX_FEED_DURING_ADMISSION=0`: count waiting preparations as reading
+/// too (the socket defers its feed while any open is pending, as before
+/// burst control).
+fn feed_during_admission() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("GONVEX_FEED_DURING_ADMISSION").map_or(true, |value| value.trim() != "0")
+    })
+}
+
+impl OpenProgress {
+    pub fn reading(&self) -> bool {
+        self.reading.load(SeqCst) > 0
+    }
+    /// Resolves after a preparation stopped reading (spurious wake-ups are
+    /// possible; re-check [`Self::reading`]).
+    pub async fn settled(&self) {
+        self.settled.notified().await
+    }
+}
+
+/// One preparation's reading state.
+pub(crate) struct OpenState {
+    progress: Arc<OpenProgress>,
+    reading: AtomicBool,
+}
+
+impl OpenState {
+    fn set(&self, reading: bool) {
+        if self.reading.swap(reading, SeqCst) == reading {
+            return;
+        }
+        if reading {
+            self.progress.reading.fetch_add(1, SeqCst);
+        } else if self.progress.reading.fetch_sub(1, SeqCst) == 1 {
+            self.progress.settled.notify_one();
+        }
+    }
+}
+
+/// Marks its preparation reading while alive; dropped when the socket takes
+/// the result (or the preparation is cancelled).
+pub(crate) struct Reading(Arc<OpenState>);
+
+impl Reading {
+    fn new(state: Arc<OpenState>) -> Self {
+        state.set(true);
+        Self(state)
+    }
+}
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+tokio::task_local! {
+    static OPEN: Arc<OpenState>;
+}
+
+/// Awaits `admission` (a snapshot permit) with the calling preparation, if
+/// any, counted as not reading. Call it only where the preparation holds no
+/// read transaction or clock of its own.
+pub(crate) async fn admission_wait<F: Future>(admission: F) -> F::Output {
+    let state = OPEN.try_with(Arc::clone).ok().filter(|_| feed_during_admission());
+    if let Some(state) = &state {
+        state.set(false);
+    }
+    let output = admission.await;
+    if let Some(state) = &state {
+        state.set(true);
+    }
+    output
+}
 
 /// Per-socket bound on pending preparations. Large tenants (El Rey) open far more
 /// than 256 windows on a fresh replica; hitting the bound failed the page render.
@@ -15,7 +116,7 @@ pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 type Completion<T> = (String, u64, bool, T);
 /// Preparations run on the offload pool (`crate::offload`), not on the
 /// socket's runtime; dropping one cancels it.
-type Preparation<T> = crate::offload::Offloaded<(bool, Option<Completion<T>>)>;
+type Preparation<T> = crate::offload::Offloaded<(bool, Option<Completion<T>>, Reading)>;
 struct Entry {
     ticket: u64,
     bytes: usize,
@@ -32,6 +133,7 @@ pub(crate) struct ReplicaOpenQueue<T> {
     bytes: usize,
     ticket: u64,
     bulk_active: usize,
+    progress: Arc<OpenProgress>,
 }
 impl<T: Send + 'static> Default for ReplicaOpenQueue<T> {
     fn default() -> Self {
@@ -42,12 +144,23 @@ impl<T: Send + 'static> Default for ReplicaOpenQueue<T> {
             bytes: 0,
             ticket: 0,
             bulk_active: 0,
+            progress: Arc::default(),
         }
     }
 }
 impl<T: Send + 'static> ReplicaOpenQueue<T> {
     pub fn is_empty(&self) -> bool {
         self.active.is_empty() && self.waiting.is_empty()
+    }
+    /// Whether a preparation may hold a read clock ([`OpenProgress`]).
+    pub fn reading(&self) -> bool {
+        if !feed_during_admission() {
+            return !self.is_empty();
+        }
+        self.progress.reading()
+    }
+    pub fn progress(&self) -> Arc<OpenProgress> {
+        Arc::clone(&self.progress)
     }
     pub fn clear(&mut self) {
         self.active.clear();
@@ -123,19 +236,32 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
                 self.bulk_active += 1;
             }
             let bulk = job.bulk;
+            let state = Arc::new(OpenState {
+                progress: Arc::clone(&self.progress),
+                reading: AtomicBool::new(false),
+            });
             // The socket may await a query that needs a connection held by a
             // preparation. Keep SQL progress independent of polling next().
             // The queue owns cancellation and remains the only publisher.
             self.active.push(crate::offload::offload().spawn(gonvex_profiler::instrument(
                 gonvex_profiler::TaskKind::Snapshot,
-                async move { (bulk, job.future.await) },
+                async move {
+                    // Reading from the first poll; returned with the result
+                    // so it stays reading until the socket installs it.
+                    let reading = Reading::new(Arc::clone(&state));
+                    let result = OPEN.scope(state, job.future).await;
+                    (bulk, result, reading)
+                },
             )));
         }
     }
     pub async fn next(&mut self) -> Option<T> {
         loop {
             self.start();
-            let (bulk, result) = self.active.next().await?;
+            // `_reading` drops when this returns: the caller installs the
+            // value before its next await, so no feed event is applied
+            // between this preparation's clock and its installation.
+            let (bulk, result, _reading) = self.active.next().await?;
             if bulk {
                 self.bulk_active -= 1;
             }
