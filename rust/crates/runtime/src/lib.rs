@@ -35,6 +35,7 @@ pub mod perf_fixture;
 pub mod presence;
 pub mod profiling;
 pub mod public_functions;
+pub(crate) mod canonical_row;
 pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;
@@ -1874,8 +1875,19 @@ async fn websocket(
                             {
                                 if send_connection_json(&mut snapshot_delivery, &mut socket, &message).await.is_err() { return; }
                             }
-                            let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
-                            let applied = runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm).await;
+                            // Delivery v4: a connection whose shape already has a
+                            // shared outcome for this event only appends it.
+                            let shared = if batcher.enabled() && snapshot_delivery.is_empty() {
+                                runtime.fan_out_hit(session, &mut replicas, &event, &mut batcher, socket.batch_mut(), snapshot_delivery.native())
+                            } else { None };
+                            let applied = match shared {
+                                Some(Ok(())) => Ok(Vec::new()),
+                                Some(Err(_)) => return,
+                                None => {
+                                    let prewarm = batcher.enabled().then(|| (snapshot_delivery.native(), socket.deflate_window()));
+                                    runtime.apply_feed_event_offloaded(session, &mut replicas, event, prewarm).await
+                                }
+                            };
                             delivery_timer.lap(gonvex_profiler::Stage::DeliveryVisibility, gonvex_profiler::Label::None);
                             match applied {
                                 Ok(messages) if batcher.enabled() => {
@@ -5005,8 +5017,8 @@ mod tests {
                         cursor: cursor.clone(),
                         result: (0..1000)
                             .map(|id| {
-                                std::sync::Arc::new(
-                                    serde_json::json!({"id":id,"body":"x".repeat(1000)}),
+                                gonvex_protocol::JsonRow::from_value(
+                                    &serde_json::json!({"id":id,"body":"x".repeat(1000)}),
                                 )
                             })
                             .collect(),

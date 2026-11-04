@@ -123,3 +123,7 @@ required-features = ["perf-fixture"]
 name = "class_sharing_oracle"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "raw_rows_oracle"
+required-features = ["perf-fixture"]
+

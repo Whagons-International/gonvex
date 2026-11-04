@@ -100,30 +100,24 @@ async fn feed_one(
     conn: &mut Conn,
     event: &FeedEvent,
 ) -> bool {
-    let messages = fixture
+    // Delivery v4: the shared fan-out outcome when the connection's shape
+    // has one, else the full path (which records it).
+    let items = conn.batch.len();
+    let rest = fixture
         .runtime
-        .apply_feed_event(
+        .deliver_feed_event(
             &connection.session,
             &mut connection.subscriptions,
             event.clone(),
+            &mut conn.batcher,
+            &mut conn.batch,
+            hub,
+            native,
         )
         .await
         .unwrap();
-    let received = !messages.is_empty();
-    for message in messages {
-        let rest = conn
-            .batcher
-            .push(
-                &mut conn.batch,
-                hub,
-                tenant_id,
-                native,
-                &connection.subscriptions,
-                message,
-            )
-            .unwrap();
-        assert!(rest.is_none(), "unexpected unbatched frame {rest:?}");
-    }
+    assert!(rest.is_empty(), "unexpected unbatched frames {rest:?}");
+    let received = conn.batch.len() != items;
     conn.batcher.watermark(
         &mut conn.batch,
         tenant_id,
@@ -335,6 +329,8 @@ async fn run() {
         let mut v = conns(large_members);
         let tick = 0.05f64;
         let mut busy = Duration::ZERO;
+        let mut feed_busy = Duration::ZERO;
+        let mut feed_allocs = 0u64;
         let mut frames = 0u64;
         let mut receivers = 0u64;
         let before = AllocSnapshot::now();
@@ -358,11 +354,15 @@ async fn run() {
                 }
                 next_tick += tick;
             }
+            let feed_started = Instant::now();
+            let feed_before = AllocSnapshot::now();
             for (connection, conn) in connections.iter_mut().zip(v.iter_mut()) {
                 if feed_one(&fixture, &hub, &tenant_id, false, connection, conn, event).await {
                     receivers += 1;
                 }
             }
+            feed_allocs += AllocSnapshot::now().since(feed_before).allocations as u64;
+            feed_busy += feed_started.elapsed();
             busy += started.elapsed();
         }
         let started = Instant::now();
@@ -410,8 +410,29 @@ async fn run() {
             json!(allocs.allocated_bytes as f64 / writes as f64),
         );
         extra.insert(
+            "feedMsPerWrite".into(),
+            json!(feed_busy.as_secs_f64() * 1e3 / writes as f64),
+        );
+        extra.insert(
+            "feedNsPerMemberPerWrite".into(),
+            json!(feed_busy.as_secs_f64() * 1e9 / (writes * large_members) as f64),
+        );
+        extra.insert(
+            "feedAllocationsPerWrite".into(),
+            json!(feed_allocs as f64 / writes as f64),
+        );
+        extra.insert(
+            "flushMsPerWrite".into(),
+            json!((busy - feed_busy).as_secs_f64() * 1e3 / writes as f64),
+        );
+        let (hits, recorded, data_hits) = gonvex_runtime::replica::fanout_stats();
+        extra.insert(
+            "fanout".into(),
+            json!({"servedShared": hits, "servedWithRows": data_hits, "outcomesRecorded": recorded}),
+        );
+        extra.insert(
             "note".into(),
-            json!("apply_feed_event + batch push + flush through one compressed loopback socket for every member, in sequence on 1 tokio worker"),
+            json!("deliver_feed_event (shared fan-out outcome or full path) + batch push + flush through one compressed loopback socket for every member, in sequence on 1 tokio worker"),
         );
         report.record(&name, extra);
         fixture.shutdown().await;

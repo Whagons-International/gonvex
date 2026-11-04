@@ -381,7 +381,7 @@ impl Runtime {
         let tables = feed_tables(&event);
         if pool.is_inline() || subscriptions.is_empty() || !pool.offload_apply(&tables) {
             let started = Instant::now();
-            let result = self.apply_feed_event(session, subscriptions, event).await;
+            let result = self.apply_feed_event_with(session, subscriptions, event, prewarm.is_some()).await;
             if !pool.is_inline() {
                 pool.record_apply(&tables, started.elapsed());
             }
@@ -395,7 +395,7 @@ impl Runtime {
                 gonvex_profiler::TaskKind::Feed,
                 async move {
                     let started = Instant::now();
-                    let result = runtime.apply_feed_event(&session, &mut owned, event).await;
+                    let result = runtime.apply_feed_event_with(&session, &mut owned, event, prewarm.is_some()).await;
                     // Delivery v3: encode and compress the shared items here,
                     // not at push time on the network thread.
                     if let (Ok(messages), Some((native, window))) = (&result, prewarm) {

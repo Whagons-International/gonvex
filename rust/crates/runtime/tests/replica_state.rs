@@ -130,7 +130,7 @@ impl Client {
             };
             let expected = result
                 .iter()
-                .map(|row| (replica_client::key_of(row, key), Value::clone(row)))
+                .map(|row| { let row = row.to_value(); (replica_client::key_of(&row, key), row) })
                 .collect::<BTreeMap<_, _>>();
             let leaked = window
                 .rows

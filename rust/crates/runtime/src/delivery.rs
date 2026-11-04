@@ -231,6 +231,20 @@ pub fn perf_legacy_encode(
     serde_json::to_string(message).ok()
 }
 
+/// The shared item text of `message` as `TenantFrames::item` builds it
+/// (a delta without its closing brace).
+pub(crate) fn encode_shared(
+    message: &ServerMessage,
+    native: bool,
+    delta: bool,
+) -> Result<SharedText, DeliveryError> {
+    let mut text = encode_item(message, native)?;
+    if delta && text.pop() != Some('}') {
+        return Err(DeliveryError);
+    }
+    Ok(SharedText::new(text))
+}
+
 fn encode_item(message: &ServerMessage, native: bool) -> Result<String, DeliveryError> {
     if native {
         if let Some(encoded) = crate::replica::native_control_message(message).map_err(|_| DeliveryError)? {
@@ -366,7 +380,12 @@ pub fn merge_waiting_feed(
 }
 
 /// Stream token of a collection: path and arguments, never the socket.
-fn stream_identity(subscription: &ReplicaSubscription) -> u64 {
+pub(crate) fn stream_identity(subscription: &ReplicaSubscription) -> u64 {
+    // Path and arguments never change for a subscription: delivery v4 caches
+    // the identity with its fan-out keys.
+    if let Some(keys) = &subscription.fanout {
+        return keys.identity();
+    }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     subscription.path.hash(&mut hasher);
     // serde_json's canonical rendering of the same `Value` is stable.
@@ -716,6 +735,68 @@ impl ReplicaBatcher {
         self.push_segment(socket, Segment::Shared(text));
         self.data += 1;
         Ok(None)
+    }
+
+    /// Whether subscription `id` (of `identity`) is or would be bound to the
+    /// default stream token `~{identity:016x}` on this socket (delivery v4
+    /// shared items are encoded with it). Assumes distinct identities among
+    /// the connection's subscriptions.
+    pub(crate) fn default_binding(&self, id: &str, identity: u64) -> bool {
+        self.bindings
+            .get(id)
+            .is_none_or(|binding| binding.identity != identity || binding.token.len() == 17)
+    }
+
+    /// Delivery v4: appends a shared transaction item.
+    pub(crate) fn push_shared(
+        &mut self,
+        socket: &mut OutboundBatch,
+        tenant_id: &str,
+        replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
+        text: Arc<SharedText>,
+    ) {
+        self.ensure_open(socket, tenant_id, replicas);
+        self.push_segment(socket, Segment::Shared(text));
+        self.data += 1;
+    }
+
+    /// Delivery v4: appends a shared delta item and this connection's tail,
+    /// exactly as `push` of the delta would. False when `id` has no
+    /// subscription.
+    pub(crate) fn push_delta(
+        &mut self,
+        socket: &mut OutboundBatch,
+        tenant_id: &str,
+        replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
+        id: &str,
+        text: Arc<SharedText>,
+        tail: String,
+    ) -> bool {
+        self.ensure_open(socket, tenant_id, replicas);
+        if self.bind(socket, id, replicas).is_none() {
+            return false;
+        }
+        self.push_segment(socket, Segment::Shared(text));
+        socket.push(Segment::Inline(Bytes::from(tail)));
+        self.data += 1;
+        true
+    }
+
+    /// Delivery v4: appends this connection's ready item (already encoded).
+    pub(crate) fn push_ready(
+        &mut self,
+        socket: &mut OutboundBatch,
+        tenant_id: &str,
+        replicas: &std::collections::BTreeMap<String, ReplicaSubscription>,
+        id: &str,
+        text: Bytes,
+    ) -> bool {
+        self.ensure_open(socket, tenant_id, replicas);
+        if self.bind(socket, id, replicas).is_none() {
+            return false;
+        }
+        self.push_segment(socket, Segment::Inline(text));
+        true
     }
 
     /// Appends a non-replica item (delivery v3: the connection's drained
