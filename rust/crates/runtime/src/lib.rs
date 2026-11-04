@@ -6633,8 +6633,8 @@ export async function slowAction(ctx) { await new Promise(resolve => setTimeout(
                 row_id: "member".to_owned(),
                 operation: "UPDATE".to_owned(),
                 changed_columns: changed_columns.into_iter().map(str::to_owned).collect(),
-                old_value: serde_json::json!({"id":"member","account_id":"account","status":"active"}),
-                new_value: serde_json::json!({"id":"member","account_id":"account","status":"revoked"}),
+                old_value: std::sync::Arc::new(serde_json::json!({"id":"member","account_id":"account","status":"active"})),
+                new_value: std::sync::Arc::new(serde_json::json!({"id":"member","account_id":"account","status":"revoked"})),
                 provenance: change_feed::TransactionProvenance::default(),
             }]),
         };

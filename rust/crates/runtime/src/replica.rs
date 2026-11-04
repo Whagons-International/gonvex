@@ -1981,8 +1981,8 @@ pub(crate) async fn resume_changes(
                         .collect(),
                     _ => Vec::new(),
                 },
-                old_value: log_json(row, "old_value")?,
-                new_value: log_json(row, "new_value")?,
+                old_value: Arc::new(log_json(row, "old_value")?),
+                new_value: Arc::new(log_json(row, "new_value")?),
                 origin_command_id: String::new(),
                 provenance: Default::default(),
             })
@@ -3387,8 +3387,8 @@ mod tests {
                 .iter()
                 .map(|column| (*column).to_owned())
                 .collect(),
-            old_value: Value::Null,
-            new_value: Value::Null,
+            old_value: std::sync::Arc::new(Value::Null),
+            new_value: std::sync::Arc::new(Value::Null),
             provenance: Default::default(),
         }
     }
@@ -3477,8 +3477,8 @@ mod tests {
             row_id: "1".to_owned(),
             operation: "UPDATE".to_owned(),
             changed_columns: vec!["title".to_owned()],
-            old_value,
-            new_value,
+            old_value: std::sync::Arc::new(old_value),
+            new_value: std::sync::Arc::new(new_value),
             provenance: Default::default(),
         }
     }

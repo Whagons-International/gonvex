@@ -1974,8 +1974,8 @@ mod tests {
             row_id: "note".into(),
             operation: "insert".into(),
             changed_columns: vec![],
-            old_value: Value::Null,
-            new_value: serde_json::json!({"id":"note","memberId":member,"taskId":"task"}),
+            old_value: std::sync::Arc::new(Value::Null),
+            new_value: std::sync::Arc::new(serde_json::json!({"id":"note","memberId":member,"taskId":"task"})),
             provenance: Default::default(),
         }
     }
@@ -2061,7 +2061,7 @@ mod tests {
         let mut change = note_change("bob");
         change.table = "projectionRows".into();
         change.row_id = "a-composite-key-prefix-is-not-the-task-id".into();
-        change.new_value = serde_json::json!({"taskId":task});
+        change.new_value = std::sync::Arc::new(serde_json::json!({"taskId":task}));
         change
     }
 
@@ -2080,9 +2080,9 @@ mod tests {
             &projection_change("visible")
         ));
         let mut moved = projection_change("hidden");
-        moved.old_value = serde_json::json!({"taskId":"visible"});
+        moved.old_value = std::sync::Arc::new(serde_json::json!({"taskId":"visible"}));
         assert!(mask_change_relevant(&subscription, &roots, &moved));
-        moved.new_value = serde_json::json!({});
+        moved.new_value = std::sync::Arc::new(serde_json::json!({}));
         assert!(mask_change_relevant(&subscription, &roots, &moved));
     }
 
@@ -2102,8 +2102,8 @@ mod tests {
         let subscription = projection_subscription();
         let mut root = projection_change("visible");
         root.table = "tasks".into();
-        root.new_value = serde_json::json!({"id":"visible","memberId":"bob"});
-        root.old_value = root.new_value.clone();
+        root.new_value = std::sync::Arc::new(serde_json::json!({"id":"visible","memberId":"bob"}));
+
         let events = [root];
         let subscriptions = BTreeMap::from([("query".into(), subscription)]);
         let roots = ChangedRoots::new(&subscriptions, &events);
@@ -2127,7 +2127,7 @@ mod tests {
             .unwrap(),
         );
         let mut change = note_change("bob");
-        change.new_value["taskId"] = serde_json::json!("visible");
+        std::sync::Arc::make_mut(&mut change.new_value)["taskId"] = serde_json::json!("visible");
         assert!(mask_change_relevant(
             &subscription,
             &ChangedRoots::default(),
@@ -2290,8 +2290,8 @@ mod tests {
                 .iter()
                 .map(|column| (*column).to_owned())
                 .collect(),
-            old_value: Value::Null,
-            new_value: Value::Null,
+            old_value: std::sync::Arc::new(Value::Null),
+            new_value: std::sync::Arc::new(Value::Null),
             provenance: Default::default(),
         }
     }

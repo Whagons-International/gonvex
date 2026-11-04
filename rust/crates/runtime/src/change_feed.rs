@@ -29,8 +29,10 @@ pub struct LogChange {
     pub row_id: String,
     pub operation: String,
     pub changed_columns: Vec<String>,
-    pub old_value: Value,
-    pub new_value: Value,
+    /// Row images, shared: merged catch-up events and refilled copies
+    /// reference the same parsed JSON instead of deep-copying it.
+    pub old_value: std::sync::Arc<Value>,
+    pub new_value: std::sync::Arc<Value>,
     pub provenance: TransactionProvenance,
 }
 
@@ -499,8 +501,8 @@ pub(crate) fn log_change_from_row(
         row_id: row.try_get("row_id")?,
         operation: row.try_get("operation")?,
         changed_columns,
-        old_value: json_text(row, "old_value")?,
-        new_value: json_text(row, "new_value")?,
+        old_value: std::sync::Arc::new(json_text(row, "old_value")?),
+        new_value: std::sync::Arc::new(json_text(row, "new_value")?),
         provenance: TransactionProvenance {
             root_command_id: row.try_get("root_command_id")?,
             root_channel: row.try_get("root_invocation_channel")?,

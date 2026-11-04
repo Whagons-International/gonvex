@@ -525,8 +525,8 @@ mod tests {
             row_id: id.to_owned(),
             operation: "update".to_owned(),
             changed_columns: Vec::new(),
-            old_value: old,
-            new_value: new,
+            old_value: std::sync::Arc::new(old),
+            new_value: std::sync::Arc::new(new),
             provenance: Default::default(),
         }
     }

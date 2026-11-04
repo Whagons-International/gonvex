@@ -27,8 +27,8 @@ fn change(revision: u64, id: &str, row: Option<Value>) -> LogChange {
         row_id: id.into(),
         operation: if row.is_some() { "UPDATE" } else { "DELETE" }.into(),
         changed_columns: Vec::new(),
-        old_value: Value::Null,
-        new_value: row.unwrap_or(Value::Null),
+        old_value: std::sync::Arc::new(Value::Null),
+        new_value: std::sync::Arc::new(row.unwrap_or(Value::Null)),
         provenance: Default::default(),
     }
 }
