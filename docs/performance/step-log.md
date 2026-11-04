@@ -1317,3 +1317,50 @@ V8 15.4 % (SQL host calls 9.5 %, JS 4.9 %), snapshot open 12.1 % (visibility/ACL
 8.6 %, commit/fsync 4.1 %, scheduler 3.2 %, presence 2.1 %; kernel 31 % overall. Reducer isolate wait
 p99 0.5–1.0 s: `pushNotifications.deliverScheduled` runs at 36/s against ≈ 8 user reducer calls/s on
 the module host.
+
+## Step 16 (in progress, paused for the arch3 reboot 2026-11-04 ~15:40): gate6 on 7d01af5b
+
+Merges since step 15 (96c408c0): busy-database budget-close guard 94eec46f (my droppable commit,
+since folded into staging-findings), staging-findings 001678f4 → ef9bc21d → 636e3c45 (reader idle
+120 s, single-flight reader opens, snapshot cache keyed by content, replica-open counters by reason),
+admission-fix a47512f7 (snapshot slots claimed when the waiter runs), ci-fixes f9aec228 (rustfmt,
+clippy, deterministic tests). Head **7d01af5b**. Tests on 7d01af5b: workspace 677 / 0 / 8;
+perf-fixture 427 / **1** / 9: `live_query::tests::exact_count_parameter_type_changes_match_rows_on_one_connection`
+("the row and count statements must both remain cached") failed once in the full suite and passed
+5 / 5 alone and 22 / 22 with its module: order-dependent (process-wide SQLite state), not a gate
+blocker; queued. rustfmt drift after the ci-fixes merge in files staging-findings changed later
+(open_reasons.rs, replica.rs, snapshot_cache.rs, store reader_warm_bench.rs, reader_open_single_flight.rs)
+is left to the CI thread.
+
+**Real-app page loads (lab, Whagons web client at the lab pin 7d97617cf, load-user-0, idle lab).**
+Vite (e2e mode) + headless Chromium against the lab runtime through the proxy sockets; sent
+`replica.openMany` frames counted, runtime cgroup CPU and /dev/profile read around each phase
+(scripts in `/home/gabriel/work/gonvex-perf/app-opens/`):
+
+| phase | replica opens | runtime CPU | snapshot.build (count / Σ ms) |
+|---|---:|---:|---|
+| first visit (sign-in, /welcome, /workspace/all), ×3 | 177–178 | 1.49–1.52 s | 177–178 / 726–1,580 ms |
+| warm reload of /workspace/all, ×3 | 130 | 0.72–0.79 s | 130 / 1,278–1,337 ms |
+
+126 of the 130 reload opens are argument-less whole-collection `__local.*` collections; 4 take
+one argument (userId = member id, workspaceId 'all', associableType 'task'); 89 of 130 carry a
+resume cursor. The lab thin and SDK users open 9 collections at sign-in (8 metadata +
+recentWorkspaceTasks) plus ≈ 8 per detail window: **the gate so far modelled ≈ 1/15 of a real
+page load**. `LOAD_APP_OPENS=app-opens-7d97617cf.json` (51b419b3) makes every generator session
+open the captured set (deduplicated with the metadata ones) at sign-in and reconnect (cold, no
+cursors: conservative vs a warm reload). One page load per user per hour adds ≈ 36 opens/s and
+≈ 0.21 cores at 1k (warm-reload cost). The lab tenants had an empty control-plane `domain`; the
+browser run set `synthetic-0` on the live lab control DB only (reset from the baseline at each case).
+Lab readers per tenant file: `GONVEX_DB_MAX_OPEN_CONNS` unset → `available_parallelism` (1 under the
+1-CPU quota) clamped to 2; staging's 16 lets 16 readers per tenant open in a burst (2.9 MB schema
+parse each). Recommendation: unset on staging (2 on 1 vCPU), with single-flight opens bounding bursts.
+
+Lab changes: runtime pinned to one physical core (`cpuset 7,15`, quota 1 CPU), proxy on 4–6,12–14
+(`compose.new.yaml`, `LOAD_RUNTIME_CPUSET` / `LOAD_PROXY_CPUSET`); each case records its cpuset;
+host busy is scaled to 16 logical CPUs (earlier step-15 numbers used 14: ≈ 12 % low). `LAB_RUN_ACTIVE`
+is held per case and only the holder removes it.
+
+Gate6 status: builds (normal + frame-pointer, `lab-5k/bin-gate6`, `bin-gate6-fp`) and tests done;
+**no gate case run yet** (host load 20–66 from other projects for most of the afternoon). Planned
+series (`lab-5k-new/chain-gate6m.sh`): 100-user app-set smoke → oracle on/off → production 1k with
+`LOAD_APP_OPENS` until 3 clean runs (host busy ≤ 4.0/16) → :00 window with the app set.
