@@ -148,6 +148,36 @@ if dm.exists():
         ratio = (peak.get('connections') or 0) / max(1, peak.get('accounts') or 0)
         w(f"- runtime sockets at peak: {peak.get('connections')} for {peak.get('accounts')} accounts, {peak.get('subscriptions')} subscriptions"
           + (f" (**{ratio:.2f} sockets per account: transport retries; results not comparable**)" if ratio > 1.1 else ''))
+# Replica opens by reason over the plateau (/dev/metrics memory.replicaOpens,
+# staging-findings 636e3c45): reopen churn, needHashes and resets by reason.
+if dm.exists() and start:
+    snaps = []
+    for line in dm.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        ro = ((row.get('metrics') or {}).get('memory') or {}).get('replicaOpens')
+        if ro is not None and start <= row.get('at', 0) <= end:
+            snaps.append((row['at'], ro, (row['metrics'].get('websocket') or {}).get('connections') or 0))
+    if len(snaps) >= 2:
+        (t0, a, _), (t1, b, _) = snaps[0], snaps[-1]
+        minutes = (t1 - t0) / 60000
+        conns = max(1, sum(c for _, _, c in snaps) / len(snaps))
+        d = {k: b[k] - a.get(k, 0) for k in b if isinstance(b[k], (int, float))}
+        shapes = ', '.join(f"{k} {d.get(k, 0)}" for k in ('resume', 'reconcile', 'coldDigest', 'cold', 'fullIntegrity'))
+        need = {k: v for k, v in d.items() if k.startswith('needHashes') and v}
+        resets = {k: v for k, v in d.items() if k.startswith('reset') and v}
+        reopen = d.get('reopenOnSocket', 0)
+        w(f"- replica opens over {minutes:.1f} min of plateau ({conns:.0f} sockets): {shapes}; "
+          f"same-socket reopens {reopen} (**{reopen / conns / max(minutes, 1e-9):.2f} per socket per minute**), client closes {d.get('close', 0)}")
+        w(f"- needHashes by reason: {need or 'none'}; resets by reason: {resets or 'none'}")
+        pa, pb = a.get('topPaths') or {}, b.get('topPaths') or {}
+        top = sorted(((path, v.get('reopensOnSocket', 0) - (pa.get(path) or {}).get('reopensOnSocket', 0),
+                       v.get('opens', 0) - (pa.get(path) or {}).get('opens', 0)) for path, v in pb.items()),
+                     key=lambda x: -x[1])[:5]
+        if top and top[0][1] > 0:
+            w('- most reopened paths (reopens / opens): ' + ', '.join(f"{p} {r}/{o}" for p, r, o in top if r > 0))
 # Profile delta over the plateau.
 dumps = sorted((case / 'profile').glob('*.json'), key=lambda p: int(p.stem)) if (case / 'profile').exists() else []
 if dumps and start:

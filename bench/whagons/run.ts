@@ -231,6 +231,10 @@ async function main() {
  const reconnectAt=(fraction:number)=>deadline-seconds*1000*(1-fraction);
  const until=async(condition:()=>boolean,ms:number)=>{const end=Date.now()+ms;while(!condition()){if(Date.now()>end)return false;await pause(50);}return true;};
  const ids=(rows:any[])=>new Set(rows.map((r:any)=>r._id));
+ // Real-app page-load collection set (LOAD_APP_OPENS=<json>): {opens:[{path,args}]}, '$member' -> member id.
+ const appOpens:{path:string,args:any}[]|undefined=process.env.LOAD_APP_OPENS?JSON.parse(await readFile(process.env.LOAD_APP_OPENS.startsWith('/')?process.env.LOAD_APP_OPENS:new URL(process.env.LOAD_APP_OPENS,import.meta.url),'utf8')).opens:undefined;
+ const refFor=(path:string)=>{const dot=path.indexOf('.');const ns=(api as any)[path.slice(0,dot)];const r=ns?.[path.slice(dot+1)];const ref=typeof r==='function'?r():r;if(!ref?.path)throw new Error('LOAD_APP_OPENS: no replica reference for '+path);return ref;};
+ const mergeOpens=(base:[any,any][],opens:{path:string,args:any}[],member:string):[any,any][]=>{const seen=new Set(base.map(([r,a])=>r.path+'\0'+JSON.stringify(a)));const out=[...base];for(const o of opens){const args=JSON.parse(JSON.stringify(o.args).split('"$member"').join(JSON.stringify(member)));const key=o.path+'\0'+JSON.stringify(args);if(seen.has(key))continue;seen.add(key);out.push([refFor(o.path),args]);}return out;};
  const watchAll=(c:any,refs:[any,any][])=>{const ws=refs.map(([ref,args])=>{const w=c.watchReplica(ref,args);const stop=w.onUpdate(()=>{try{w.localReplicaResult();}catch(e){error(e);}});return {w,stop};});return {ready:()=>ws.every(x=>x.w.status().isUpToDate),close:()=>ws.forEach(x=>x.stop()),rows:(k:number)=>(ws[k].w.localReplicaResult()||[]) as any[]};};
  // The oracle: a fresh session computes the target's visible rows from scratch;
  // the target's long-lived replica (incrementally maintained) must converge to
@@ -285,7 +289,10 @@ async function main() {
     if(presenceReadyAt===Infinity){if(!watch.status().isUpToDate)return;presenceReadyAt=Date.now();}
     for(const row of watch.localReplicaResult()||[]){const ts=pending.get(row.userId);if(ts&&ts>=presenceReadyAt&&row.lastSeenAt>=ts&&seen.get(row.userId)!==row.lastSeenAt){seen.set(row.userId,row.lastSeenAt);sample('delivery',Date.now()-ts,ts);}}
    }catch(e){error(e);}});}
-   extras=watchAll(c,[api.workspaces.list,api.statuses.statuses,api.tags.tags,api.members.listMembers,api.members.listMemberTeams,api.taskResources.taskUsers,api.taskResources.taskTags,api.workspacePreferences.workspacePreferences].map(ref=>[ref,{}] as [any,any]));
+   // LOAD_APP_OPENS: also open the real web app's page-load collection set
+   // (captured from the browser, app-opens-*.json), deduplicated by path+args.
+   const baseRefs:[any,any][]=[api.workspaces.list,api.statuses.statuses,api.tags.tags,api.members.listMembers,api.members.listMemberTeams,api.taskResources.taskUsers,api.taskResources.taskTags,api.workspacePreferences.workspacePreferences].map(ref=>[ref,{}] as [any,any]);
+   extras=watchAll(c,appOpens?mergeOpens(baseRefs,appOpens,member):baseRefs);
    const w=c.watchReplica(api.tasks.recentWorkspaceTasks,{});const q0=performance.now();let first=true;
    stopTasks=w.onUpdate(()=>{try{
     if(first&&w.status().isUpToDate&&w.localReplicaState()?.completeness==='complete'){first=false;sample(kind==='login'?'initialLoad':'reconnect',performance.now()-q0);if(initial){initial=false;subscribedAt=Date.now();actionAt=Date.now()+think();}snapshots.push({received:(w.localReplicaResult()||[]).length,kind});}
