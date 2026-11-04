@@ -22,6 +22,8 @@ const DEFAULT_READERS_PER_DATABASE: u32 = 4;
 const NOTIFY_CAPACITY: usize = 4096;
 const DEFAULT_WARM_READER_MS: u64 = 10 * 60 * 1000;
 const DEFAULT_READER_PATIENCE_MS: u64 = 25;
+const DEFAULT_WARM_READERS: u64 = 1;
+const DEFAULT_READER_OPENS: u64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PoolLimits {
@@ -47,6 +49,19 @@ pub struct PoolLimits {
     /// opens shares one vCPU), while most reads take well under a
     /// millisecond, so a page load's burst of reads shares the warm reader.
     pub reader_patience: Duration,
+    /// Readers kept open while a database was read within
+    /// `warm_reader_window` (`GONVEX_DB_WARM_READERS`, default 1).
+    pub warm_readers: u32,
+    /// Reader connections opened at once across the process
+    /// (`GONVEX_DB_READER_OPENS`, default 2). Each open parses the whole
+    /// schema; concurrent parses contend on SQLite's global memory mutex and
+    /// on the CPU, so 8 at once took 1.1-2.5 s each on staging (2026-11-04)
+    /// where one alone takes ~30 ms. With a limit, a database also opens one
+    /// reader at a time: a burst of reads waits for the reader being opened
+    /// (or for any reader released meanwhile) instead of opening up to
+    /// `max_connections_per_database` in parallel. Zero: no limit (opens
+    /// race, the previous behaviour).
+    pub reader_opens: u32,
     pub acquire_timeout: Duration,
 }
 
@@ -65,6 +80,10 @@ impl Default for PoolLimits {
                 "GONVEX_DB_READER_PATIENCE_MS",
                 DEFAULT_READER_PATIENCE_MS,
             )),
+            warm_readers: env_u64("GONVEX_DB_WARM_READERS", DEFAULT_WARM_READERS)
+                .min(u64::from(u32::MAX)) as u32,
+            reader_opens: env_u64("GONVEX_DB_READER_OPENS", DEFAULT_READER_OPENS)
+                .min(u64::from(u32::MAX)) as u32,
             acquire_timeout: Duration::from_secs(30),
         }
     }
@@ -77,6 +96,7 @@ impl PoolLimits {
         self.max_idle_connections_per_database = self
             .max_idle_connections_per_database
             .min(self.max_connections_per_database);
+        self.warm_readers = self.warm_readers.min(self.max_connections_per_database);
         self
     }
 }
@@ -236,7 +256,7 @@ async fn close_idle_readers(pool: &SqlitePool, keep: usize) {
 /// Reader retention, run every [`sweep_interval`]:
 ///
 /// * read within `idle_timeout`: up to `max_idle_connections_per_database`;
-/// * read within `warm_reader_window`: one warm reader;
+/// * read within `warm_reader_window`: `warm_readers` warm readers (1);
 /// * otherwise: none.
 ///
 /// Warm readers count against the SQLite budget: while connection heap
@@ -256,7 +276,7 @@ async fn sweep_readers(databases: &[Database], limits: &PoolLimits) {
         let keep = if idle_for < busy_ms {
             limits.max_idle_connections_per_database as usize
         } else if idle_for < warm_ms {
-            1
+            limits.warm_readers as usize
         } else {
             0
         };
@@ -442,6 +462,9 @@ pub(crate) struct Database {
     /// When the budget sweep last closed this busy database's extra readers
     /// (`now_ms`; 0 = never). See [`busy_budget_close_interval_ms`].
     budget_closed: Arc<AtomicU64>,
+    /// One reader open at a time for this database (see
+    /// [`PoolLimits::reader_opens`]).
+    reader_open: Arc<Semaphore>,
     notify: broadcast::Sender<Notification>,
     locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Batched WAL syncs for `Durability::Full` (see `sync_barrier`).
@@ -456,6 +479,9 @@ pub struct PoolRegistry {
     limits: PoolLimits,
     durability: Durability,
     admission: Arc<Semaphore>,
+    /// Reader opens in flight across databases ([`PoolLimits::reader_opens`]);
+    /// `None` when unlimited.
+    reader_opens: Option<Arc<Semaphore>>,
     admission_count: Arc<AtomicU64>,
     admission_wait_us: Arc<AtomicU64>,
     admission_wait_max_us: Arc<AtomicU64>,
@@ -511,6 +537,8 @@ impl PoolRegistry {
         crate::reader_priority::install();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
+            reader_opens: (limits.reader_opens > 0)
+                .then(|| Arc::new(Semaphore::new(limits.reader_opens as usize))),
             admission_count: Arc::default(),
             admission_wait_us: Arc::default(),
             admission_wait_max_us: Arc::default(),
@@ -650,6 +678,7 @@ impl PoolRegistry {
             reader,
             reader_used,
             budget_closed: Arc::default(),
+            reader_open: Arc::new(Semaphore::new(1)),
             notify,
             locks: Arc::default(),
             sync: crate::sync_barrier::SyncBarrier::new(&path),
@@ -733,27 +762,59 @@ impl PoolRegistry {
     }
 
     /// Opens a read transaction on `database`, preferring an open reader
-    /// released within [`PoolLimits::reader_patience`] over opening another.
+    /// released within [`PoolLimits::reader_patience`] over opening another,
+    /// and opening readers one at a time per database (at most
+    /// [`PoolLimits::reader_opens`] across databases).
     pub(crate) async fn begin_read(
         &self,
         database: &Database,
     ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, DatabaseError> {
         let reader = &database.reader;
         let patience = self.limits.reader_patience;
-        if !patience.is_zero() && reader.num_idle() == 0 && reader.size() > 0 {
-            let deadline = std::time::Instant::now() + patience;
-            loop {
-                // `try_acquire` never opens a connection.
-                if let Some(connection) = reader.try_acquire() {
+        let started = std::time::Instant::now();
+        let mut patient_until = started + patience;
+        let give_up = started + self.limits.acquire_timeout;
+        loop {
+            // `try_acquire` never opens a connection.
+            if let Some(connection) = reader.try_acquire() {
+                return Ok(sqlx::Transaction::begin(connection, None).await?);
+            }
+            // `size` counts readers being opened too.
+            let size = reader.size();
+            if size >= self.limits.max_connections_per_database {
+                // Every reader exists and is busy: sqlx queues for a release.
+                break;
+            }
+            let now = std::time::Instant::now();
+            // A short read usually releases a reader within the patience,
+            // far sooner than another one opens.
+            let wait_for_release = !patience.is_zero() && size > 0 && now < patient_until;
+            if !wait_for_release {
+                let Some(opens) = &self.reader_opens else {
+                    break;
+                };
+                if let Ok(_local) = database.reader_open.clone().try_acquire_owned() {
+                    let _global = opens.clone().acquire_owned().await;
+                    // Another reader may have been released while this open
+                    // waited for a process-wide slot.
+                    let connection = match reader.try_acquire() {
+                        Some(connection) => connection,
+                        None => reader.acquire().await?,
+                    };
                     return Ok(sqlx::Transaction::begin(connection, None).await?);
                 }
-                if reader.size() == 0 || std::time::Instant::now() >= deadline {
+                // This database is opening a reader already: wait for it (or
+                // for a release) rather than parsing the schema in parallel.
+                // The patience restarts once it is open: its first read is
+                // usually done long before another open would be.
+                if now >= give_up {
                     break;
                 }
-                // A released connection becomes idle after sqlx's release
-                // ping, a worker round trip; poll rather than chase it.
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                patient_until = now + patience;
             }
+            // A released connection becomes idle after sqlx's release
+            // ping, a worker round trip; poll rather than chase it.
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         Ok(reader.begin().await?)
     }

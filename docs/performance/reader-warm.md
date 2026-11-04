@@ -132,7 +132,9 @@ SQLite writer workstream; the coordinator should choose.
 |---|---|---|
 | `GONVEX_DB_WARM_READER_MS` | 600000 | how long one reader stays open after a database's last read; 0 disables |
 | `GONVEX_DB_READER_PATIENCE_MS` | 25 | how long a read transaction waits for a busy reader before opening another |
-| `GONVEX_DB_IDLE_TIMEOUT_MS` | 15000 (runtime) | extra readers beyond the warm one close after this |
+| `GONVEX_DB_IDLE_TIMEOUT_MS` | 120000 (runtime; 15000 before perf/staging-findings) | extra readers beyond the warm one close after this |
+| `GONVEX_DB_WARM_READERS` | 1 | readers kept in the warm window (perf/staging-findings) |
+| `GONVEX_DB_READER_OPENS` | 2 | reader opens in flight process-wide; a database opens one at a time; 0 = unlimited (perf/staging-findings) |
 | `GONVEX_DB_MAX_IDLE_CONNS` | 4 | idle readers kept while a database is busy (now enforced) |
 | `GONVEX_SQLITE_CACHE_BUDGET_MB` | 128 | warm readers are evicted (LRU) while connection heap > 3/4 of it |
 
