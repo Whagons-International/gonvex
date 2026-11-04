@@ -258,3 +258,101 @@ cannot answer (`invoke.js` p99 17.5 s, `budget_exceeded … waiting for a module
 and one 33.7 s `outbox` poll stalls the single worker. Inputs for the scheduled-load
 workstream: Action memory in the module host at :00, and the outbox drain must not run
 on the network worker.
+
+---
+
+## Steps 1–4: merges on the old app (Whagons lab pin, legacy presence clients)
+
+Each step is the previous one plus the named merge, built from a local tag
+(`gvperf-step-<name>`, `local-load` profile) in its own worktree/target dir
+(`lab-5k/build-steps2.sh`); binary SHA-256 in `lab-5k/bin-<step>/sha256`. Same lab, data
+and workload as Step 0 (`bench/whagons/run-remote-case.sh`, thin + 8 SDK users, 2 shards
+per 200 users, 60 s ramp, 180 s plateau unless noted). Runtime env adds
+`GONVEX_PRESENCE_LEGACY_BEAT_PATHS=presence.beat`,
+`GONVEX_PRESENCE_LEGACY_TRANSITION_PATHS=presence.transition` (old clients' beats are
+answered in Rust), V8 in process (default). staging/replica-state/offload ran with the
+ws-buffers container sysctls (`tcp_[rw]mem 4096 16384 262144`, `tcp_notsent_lowat`,
+`somaxconn`); from ws-fix on they are dropped (a0a33ff4 caps per socket).
+
+| step (commit) | runtime sha256 |
+|---|---|
+| staging = deploy/sqlite-staging 216976c9 + ws-buffers 684330d8 + gonvex_capture fix (cde57d16) | `a672023b0adc…` |
+| + replica-state ccdc4e8b (9cc6e6fa) | `91b3db14ce29…` |
+| + offload b4edd647, thin client answers replica.needHashes (ab922f45) | `d2820e332d05…` |
+| + ws-buffers a0a33ff4 (bc5a0be8, local tag only) | see `bin-ws-fix/sha256` |
+| + scheduled-load edffa51a (2d539a28, local tag only) | see `bin-sched-load/sha256` |
+
+| step | case | users | heartbeat p95/p99 | save p95/p99 | delivery p95/p99 | taskDelivery p95/p99 | errors | connected | mem peak | CPU (throttled periods) | oracle | result |
+|---|---|---:|---|---|---|---|---:|---|---:|---|---|---|
+| base | base-thin-200 | 200 | 16,415/45,013 | 28,234/58,230 | 13,242/24,178 | 21,754/41,824 | 1.25 % | 200/200 | 2,048 MiB | 0.80 (1072/1781) | 1 mism./9 | FAIL |
+| staging+ws-buffers 684330d8 | staging-thin-200 | 200 | 3,940/16,848 | 16,603/24,621 | 9,471/17,053 | 13,067/20,090 | 0.70 % | 200/200 | 1,978 MiB | 0.61 (816/1766) | 0 mism./9 | FAIL |
+| +replica-state | rstate-thin-200 | 200 | 292/7,853 | 3,508/24,744 | 1,801/6,692 | 6,708/20,185 | 0.64 % | 200/200 | 1,532 MiB | 0.37 (417/1683) | 0 mism./9 | FAIL |
+| +offload | offload-thin-200 | 200 | 869/10,534 | 3,451/20,486 | 6,726/16,666 | 1,025/12,576 | 0.66 % | 196/200 | 1,710 MiB | 0.34 (415/1647) | 0 mism./9 | FAIL |
+| +offload | offload-thin-500b | 500 | 81,468/113,928 | 130,017/156,035 | 25,504/33,677 | 76,522/110,711 | 10.54 % | 500/500 | 1,821 MiB | 1.00 (1756/1758) | 4 mism./7 | FAIL |
+| +ws-buffers a0a33ff4 | wsfix-thin-200b | 200 | 1,045/13,937 | 8,712/16,055 | 7,216/13,597 | 7,999/16,693 | 1.44 % | 200/200 | 1,598 MiB | 0.41 (425/1451) | 0 mism./8 | FAIL |
+| +scheduled-load | sched-thin-200 | 200 | 500/12,220 | 3,135/20,446 | 6,478/15,142 | 1,922/14,323 | 0.58 % | 200/200 | 1,544 MiB | 0.39 (524/1729) | 0 mism./9 | FAIL |
+
+Notes: `offload-thin-500b` is the rerun with per-shard tunnels (the first 500-user try stalled at
+241 connections: a single reverse SSH tunnel ends in one macOS `sshd-session`, capped at 256
+open files; the generator now opens one `ssh -L` per shard from the Mac). `wsfix-thin-200b`
+ran 150 s plateau / 45 s ramp on a quiet host; a first `wsfix-thin-200` overlapped the
+new-app lab setup and is not used. `sched-thin-200` overlapped the new-lab user prepare
+(host io PSI 5 %). All oracle checks so far: 0 leaked rows; the 500-user mismatches are
+missing rows after 15 s while delivery queues were 18–30 s deep.
+
+Runtime side (plateau `top.py --delta`), p50 / p99:
+
+| stage | staging | +replica-state | +offload | +offload @500 | +ws a0a33ff4 | +scheduled-load |
+|---|---|---|---|---|---|---|
+| fn.total presence | 47 ms / 4.23 s | 22 ms / 2.68 s | 19 / 302 ms | 123 ms / 2.42 s | 15 ms / 1.50 s | 22 / 671 ms |
+| fn.total reducer | 116 ms / 4.94 s | 38 ms / 2.68 s | 27 / 638 ms | 183 ms / 3.43 s | 29 ms / 1.21 s | 34 / 940 ms |
+| snapshot.permit_wait | 4.78 / 21.9 s | 2.73 / 17.6 s | 3.25 / 19.0 s | 31.5 / 77.3 s | 4.45 / 15.5 s | 3.52 / 19.2 s |
+| delivery.queue_wait | 17 ms / 24.6 s | 7 ms / 16.9 s | 0.8 ms / 20.0 s | 18.1 / 116 s | 1.1 ms / 19.1 s | 1.5 ms / 21.1 s |
+| ws.inbound_wait | 0.03 ms / 8.95 s | 0.02 / 302 ms | 0.01 / 423 ms | 0.01 ms / 3.71 s | 0.01 / 487 ms | 0.01 / 532 ms |
+| tokio.sched_lag | 1.2 / 88 ms (2.3 s) | 1.2 / 50 ms | 1.2 / 44 ms | 1.3 / 80 ms | 1.2 / 48 ms | 1.2 / 48 ms (1.8 s) |
+
+**Binding constraint after these steps: replica snapshot admission.** Memory fell from the
+2 GiB limit (staging, runtime RSS 1.48 GiB with V8 in process) to 1.5–1.7 GiB with
+replica-state; reducers are no longer the tail at 200 users (offload: heartbeat `fn.total`
+p99 220 ms, `sched_lag` p99 44 ms). What remains: 2 snapshot permits
+(`GONVEX_REPLICA_SNAPSHOT_CONCURRENCY` default = CPU count, min 2), ~10 opens/s at 200 users
+queue for 3–5 s at p50, and a connection's replies and deliveries wait behind its pending
+opens (`delivery.queue_wait` p99 17–24 s while the worker is 3 % busy). At 500 users the CPU
+saturates as well (1.00 core, 1,756/1,758 periods throttled; permit wait p50 31 s). The
+replica-state snapshot path no longer records `snapshot.query/intern/build`, so the time
+inside a permit is not broken down; flamegraph user frames do not resolve past libc
+(DWARF unwinding stops at `[libc.so.6]`, ~25–30 % self time) — not fixed yet.
+
+## Cron :00 window at 200 users on the merged build (sched-cron-200)
+
+Binary: scheduled-load step (2d539a28). Plateau 15:46:14–16:06:15, on- and off-CPU perf in
+parallel 15:59:00–16:04:00 (`LOAD_PERF_PARALLEL=1 LOAD_PERF_SECONDS=300`, off-CPU switch
+timeline kept in `sched-cron-200/offcpu.switches.txt`). Host: a delivery-v3 build ran in
+parallel (other cores). **Generator caveat:** runtime access tokens live 15 min and
+run.ts did not refresh them, so every session dropped 15 min after sign-in (16:00:15–16:01:46).
+The minute before :00 is clean; after 16:00:15 users were leaving. The same expiry explains
+both earlier "teardown hangs" (base-cron-150 users dropped 14:04, 15 min after sign-in).
+run.ts now refreshes sessions (410f39bf).
+
+| minute | heartbeat n / p95 / p99 | save p95 / p99 | delivery p95 / p99 |
+|---|---|---|---|
+| 15:54 | 913 / 81 / 129 | 168 / 435 | 158 / 445 |
+| 15:55 | 934 / 199 / 475 | 223 / 806 | 467 / 616 |
+| 15:56 | 906 / 140 / 221 | 296 / 551 | 213 / 520 |
+| 15:57 | 914 / 86 / 114 | 219 / 239 | 134 / 258 |
+| 15:58 | 915 / 90 / 196 | 191 / 263 | 160 / 274 |
+| 15:59 | 905 / 86 / 179 | 242 / 503 | 158 / 249 |
+| 16:00 (users leaving from :15) | 679 / 108 / 415 | 432 / 585 | 416 / 724 |
+
+Runtime across :00 (where base had a 33.7 s `outbox` poll and reclaim): memory flat
+(anon 894–913 MiB, page cache 351–420 MiB, `memory.events max` 0, RSS 1.07–1.09 GiB, one
+process), longest poll of the whole run 369 ms (`ws_connection`, 15:55:18), `poll.outbox`
+max 55 ms, 15:59:50–16:00:15: `fn.total cron` p99 84 ms (max 1.53 s), `tokio.sched_lag`
+p99 6.6 ms (max 503 ms). Off-CPU: the longest `tokio-rt-worker`-named blocks (≤ 3 s) are
+blocking-pool threads parked on a futex; none in reclaim or page-fault paths. **Answer to
+"reclaim or synchronous code":** on the merged build the stall does not occur. On base it
+coincided with the cgroup at `memory.max` (module host 395→788 MiB at :00, direct reclaim
+26 % of on-CPU samples), and it disappears once memory has headroom (V8 in process +
+replica-state, ~1.5 GiB) and scheduled-load staggers crons. No synchronous long-running code
+showed on the outbox path in this capture. That is consistent with reclaim, but it does not
+prove the base stall was reclaim alone: the base run had no perf over 14:02.
