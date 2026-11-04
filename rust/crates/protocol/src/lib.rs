@@ -9,6 +9,52 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// One replica row as JSON text, serialized verbatim (delivery v4: snapshot
+/// rows stay the bytes SQLite produced; they are never parsed into a
+/// `Value` and re-encoded). Equality compares the text.
+#[derive(Clone, Debug)]
+pub struct JsonRow(Box<serde_json::value::RawValue>);
+
+impl JsonRow {
+    /// `text` must be one JSON value (validated).
+    pub fn from_json(text: String) -> Result<Self, serde_json::Error> {
+        serde_json::value::RawValue::from_string(text).map(Self)
+    }
+
+    pub fn from_value(value: &Value) -> Self {
+        Self(serde_json::value::to_raw_value(value).expect("a JSON value encodes"))
+    }
+
+    /// The row's JSON text.
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+
+    /// The row parsed (tests and rare consumers).
+    pub fn to_value(&self) -> Value {
+        serde_json::from_str(self.0.get()).unwrap_or(Value::Null)
+    }
+}
+
+impl PartialEq for JsonRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Serialize for JsonRow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonRow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Any deserializer (including `from_value`): through a `Value`.
+        Value::deserialize(deserializer).map(|value| Self::from_value(&value))
+    }
+}
+
 pub mod replica_digest;
 mod replica_wire;
 pub mod row_patch;
@@ -734,9 +780,8 @@ pub enum ServerMessage {
     #[serde(rename = "replica.snapshot")]
     ReplicaSnapshot {
         id: String,
-        /// Shared with the runtime's interned replica rows (serialized as
-        /// plain values), so a snapshot does not copy every row it sends.
-        result: Vec<std::sync::Arc<Value>>,
+        /// Rows as the JSON text SQLite produced, sent verbatim.
+        result: Vec<JsonRow>,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]
@@ -761,9 +806,8 @@ pub enum ServerMessage {
         sequence: u64,
         last: bool,
         id: String,
-        /// Shared with the runtime's interned replica rows (serialized as
-        /// plain values), so a snapshot does not copy every row it sends.
-        result: Vec<std::sync::Arc<Value>>,
+        /// Rows as the JSON text SQLite produced, sent verbatim.
+        result: Vec<JsonRow>,
         cursor: ReplicaCursor,
         key: String,
         #[serde(flatten)]

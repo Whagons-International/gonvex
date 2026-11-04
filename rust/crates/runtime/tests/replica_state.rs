@@ -18,7 +18,7 @@ use gonvex_runtime::perf_fixture::{
 use gonvex_runtime::replica::ReplicaSubscription;
 use gonvex_store::TenantSession;
 use replica_client::{ClientModel, DigestKind};
-use serde_json::{json, Value};
+use serde_json::json;
 
 const TASKS: &str = "tasks.recentWorkspaceTasks";
 
@@ -130,7 +130,7 @@ impl Client {
             };
             let expected = result
                 .iter()
-                .map(|row| (replica_client::key_of(row, key), Value::clone(row)))
+                .map(|row| { let row = row.to_value(); (replica_client::key_of(&row, key), row) })
                 .collect::<BTreeMap<_, _>>();
             let leaked = window
                 .rows

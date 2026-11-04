@@ -305,6 +305,8 @@ async fn run() {
         extra.insert("messages".into(), json!(counters.messages.load(Relaxed)));
         extra.insert("errors".into(), json!(counters.errors.load(Relaxed)));
         extra.insert("deliveryLatency".into(), Summary::of(latencies).to_json());
+        extra.insert("fanoutInlineMaxUs".into(), json!(counters.fanout_max_us.load(Relaxed)));
+        extra.insert("pushInlineMaxUs".into(), json!(counters.push_max_us.load(Relaxed)));
         let kind = if presence { "presence_beats" } else { "task_updates" };
         stop_probes(probes, &format!("stall/fanout_{rate}_{kind}_per_s"), extra).await;
         drop(sender);

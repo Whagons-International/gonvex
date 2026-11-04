@@ -474,6 +474,55 @@ impl Fixture {
         self.feed_since(tenant, before).await
     }
 
+    /// Delivery v4 raw-row hash check: every row of every table of `tenant`,
+    /// read as `json_object` over all its declared columns (the snapshot
+    /// encoding), hashed by the raw path (`canonical_row`) and by the `Value`
+    /// path (`stable_json` of the parsed row). Returns (rows, rows on the
+    /// fast path, rows whose hashes differ, a first mismatch).
+    pub async fn raw_hash_check(
+        &self,
+        tenant: usize,
+    ) -> FixtureResult<(usize, usize, usize, Option<String>)> {
+        let route = &self.tenants[tenant].route;
+        let mut transaction =
+            gonvex_store::begin_transaction(self.pools(), &route.database_url, true).await?;
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_all(&mut **transaction.transaction())
+        .await?;
+        let (mut rows, mut fast, mut mismatched, mut first) = (0, 0, 0, None);
+        for table in tables {
+            let columns = gonvex_store::rows::table_columns(&mut **transaction.transaction(), &table)
+                .await?
+                .into_iter()
+                .map(|column| (column.name.clone(), column.kind()))
+                .collect::<Vec<_>>();
+            if columns.is_empty() {
+                continue;
+            }
+            let statement = format!(
+                "SELECT {} FROM \"{}\" AS r",
+                gonvex_store::rows::json_object_expr("r", &columns),
+                table.replace('"', "\"\"")
+            );
+            let texts: Vec<Option<String>> = sqlx::query_scalar(&statement)
+                .fetch_all(&mut **transaction.transaction())
+                .await?;
+            for text in texts.into_iter().flatten() {
+                rows += 1;
+                let (raw, value, checked) = crate::canonical_row::hashes(&text)?;
+                fast += usize::from(checked);
+                if raw != value {
+                    mismatched += 1;
+                    first.get_or_insert_with(|| format!("{table}: {text}"));
+                }
+            }
+        }
+        transaction.commit().await?;
+        Ok((rows, fast, mismatched, first))
+    }
+
     /// Everything committed to `tenant` after `revision`, as one event.
     pub async fn feed_since(&self, tenant: usize, revision: u64) -> FixtureResult<FeedEvent> {
         let route = &self.tenants[tenant].route;

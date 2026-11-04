@@ -94,6 +94,11 @@ pub struct EventShare {
     /// Shared copies of change images (parent before-image overlays), by
     /// address in `changes`.
     images: Mutex<HashMap<usize, Arc<serde_json::Value>>>,
+    /// Delivery v4: the event's tables and collapsed rows, and the shared
+    /// outcome per connection shape (`replica_fanout`).
+    pub(crate) layout: std::sync::OnceLock<crate::replica::fanout::Layout>,
+    pub(crate) outcomes:
+        Mutex<HashMap<crate::replica::fanout::Shape, Arc<crate::replica::fanout::Outcome>>>,
 }
 
 impl EventShare {
@@ -103,6 +108,10 @@ impl EventShare {
             SHARED_DECISIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         found
+    }
+
+    pub(crate) fn changes(&self) -> &Arc<Vec<LogChange>> {
+        &self.changes
     }
 
     pub(crate) fn insert(&self, key: DecisionKey, decision: Arc<RowDecision>) {
@@ -162,6 +171,8 @@ impl EventShares {
             memo: Mutex::default(),
             decisions: Mutex::default(),
             images: Mutex::default(),
+            layout: Default::default(),
+            outcomes: Mutex::default(),
         });
         recent.push_back(Arc::clone(&share));
         while recent.len() > KEEP_EVENTS {

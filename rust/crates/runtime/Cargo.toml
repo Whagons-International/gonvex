@@ -123,3 +123,11 @@ required-features = ["perf-fixture"]
 name = "class_sharing_oracle"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "raw_rows_oracle"
+required-features = ["perf-fixture"]
+
+[[test]]
+name = "call_watermark_latency"
+required-features = ["perf-fixture"]
+
