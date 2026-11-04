@@ -393,6 +393,7 @@ async fn worker_loop(
         }
     };
     let mut served: u64 = 0;
+    let tally = HeapTallySlot::new();
     loop {
         let call = tokio::select! {
             biased;
@@ -406,6 +407,7 @@ async fn worker_loop(
         };
         let healthy = reply.healthy;
         served += 1;
+        tally.update(&mut isolate.runtime);
         if heap_stats_enabled() && (served == 1 || served % 200 == 0) {
             log_heap_statistics(
                 &mut isolate.runtime,
@@ -676,6 +678,58 @@ fn heap_stats_enabled() -> bool {
 
 /// Diagnostic only (`GONVEX_V8_HEAP_STATS=1`): one stderr line of V8 heap
 /// statistics, so memory studies can attribute RSS to isolate heaps.
+/// Process-wide V8 heap tally (perf: /dev/metrics `memory.v8`): one slot per
+/// live isolate worker, refreshed after each call, removed when the worker ends.
+static HEAP_TALLY: std::sync::Mutex<std::collections::BTreeMap<u64, [u64; 5]>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+static HEAP_TALLY_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct HeapTallySlot(u64);
+
+impl HeapTallySlot {
+    fn new() -> Self {
+        Self(HEAP_TALLY_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn update(&self, runtime: &mut JsRuntime) {
+        let mut stats = v8::HeapStatistics::default();
+        runtime.v8_isolate().get_heap_statistics(&mut stats);
+        let values = [
+            stats.total_heap_size() as u64,
+            stats.used_heap_size() as u64,
+            stats.total_physical_size() as u64,
+            stats.external_memory() as u64,
+            stats.malloced_memory() as u64,
+        ];
+        HEAP_TALLY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(self.0, values);
+    }
+}
+
+impl Drop for HeapTallySlot {
+    fn drop(&mut self) {
+        HEAP_TALLY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// `(isolates reporting, [total heap, used heap, physical, external, malloced])`
+/// summed over live isolate workers, as of each one's last call.
+pub fn heap_tally() -> (usize, [u64; 5]) {
+    let tally = HEAP_TALLY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut sum = [0u64; 5];
+    for values in tally.values() {
+        for (total, value) in sum.iter_mut().zip(values) {
+            *total += value;
+        }
+    }
+    (tally.len(), sum)
+}
+
 fn log_heap_statistics(runtime: &mut JsRuntime, specifier: &ModuleSpecifier, moment: &str) {
     let mut stats = v8::HeapStatistics::default();
     runtime.v8_isolate().get_heap_statistics(&mut stats);

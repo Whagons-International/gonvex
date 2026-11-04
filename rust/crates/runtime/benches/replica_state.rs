@@ -234,7 +234,7 @@ impl ModelConnection {
         for (id, window) in &self.model.windows {
             let opened = fixture
                 .runtime
-                .open_replica(
+                .open_replica_fresh(
                     &self.session,
                     serde_json::from_value(json!({"id": id, "path": window.path, "args": {}}))
                         .unwrap(),

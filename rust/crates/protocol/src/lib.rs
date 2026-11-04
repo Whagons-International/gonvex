@@ -11,18 +11,23 @@ use serde_json::Value;
 
 /// One replica row as JSON text, serialized verbatim (delivery v4: snapshot
 /// rows stay the bytes SQLite produced; they are never parsed into a
-/// `Value` and re-encoded). Equality compares the text.
+/// `Value` and re-encoded). Equality compares the text. Clones share the
+/// text (the shared snapshot cache hands the same rows to every open).
 #[derive(Clone, Debug)]
-pub struct JsonRow(Box<serde_json::value::RawValue>);
+pub struct JsonRow(std::sync::Arc<serde_json::value::RawValue>);
 
 impl JsonRow {
     /// `text` must be one JSON value (validated).
     pub fn from_json(text: String) -> Result<Self, serde_json::Error> {
-        serde_json::value::RawValue::from_string(text).map(Self)
+        serde_json::value::RawValue::from_string(text).map(|raw| Self(raw.into()))
     }
 
     pub fn from_value(value: &Value) -> Self {
-        Self(serde_json::value::to_raw_value(value).expect("a JSON value encodes"))
+        Self(
+            serde_json::value::to_raw_value(value)
+                .expect("a JSON value encodes")
+                .into(),
+        )
     }
 
     /// The row's JSON text.
@@ -44,7 +49,7 @@ impl PartialEq for JsonRow {
 
 impl Serialize for JsonRow {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
+        (*self.0).serialize(serializer)
     }
 }
 

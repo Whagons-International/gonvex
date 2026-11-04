@@ -1596,6 +1596,23 @@ async fn metrics(
     }
 }
 
+/// Process memory by owner (perf): SQLite allocator, shared snapshot cache, V8
+/// heaps (summed over live isolates as of their last call). The rest of RSS is
+/// Rust heap, socket buffers and mapped code.
+fn memory_json(runtime: &Runtime) -> Value {
+    let cache = runtime.snapshot_cache_stats();
+    let (isolates, v8) = gonvex_module_runtime_v8::heap_tally();
+    json!({
+        "sqliteUsedBytes": gonvex_store::sqlite_memory_used(),
+        "sqliteBudgetMiB": gonvex_store::sqlite_cache_budget_mib(),
+        "snapshotCache": {"entries": cache.entries, "bytes": cache.bytes, "hits": cache.hits,
+            "builds": cache.builds, "rollForwards": cache.roll_forwards, "fallbacks": cache.fallbacks,
+            "evictions": cache.evictions},
+        "v8": {"isolates": isolates, "totalHeapBytes": v8[0], "usedHeapBytes": v8[1],
+            "physicalBytes": v8[2], "externalBytes": v8[3], "mallocedBytes": v8[4]},
+    })
+}
+
 async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
     let control = runtime.inner.control_plane.read().await.clone()?;
     let mut transaction = control.begin_control_transaction(true).await.ok()?;
@@ -1711,7 +1728,7 @@ async fn metrics_snapshot(runtime: &Runtime, project: &str) -> Option<Value> {
         "reactiveDelayedByBootstrap":0,
     });
     Some(
-        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs,"profiler":crate::profiling::summary_json()}),
+        json!({"generatedAt":Utc::now(),"functions":functions,"cache":{"hits":0,"misses":0,"bypasses":0,"requests":0,"hitRate":0,"series":[]},"running":{"current":{},"total":0,"series":[]},"websocket":websocket,"database":database_json,"queryAdmission":query_admission,"scheduler":{"running":0,"queued":queued,"scheduled":queued,"completed":completed,"failed":0,"lagMs":0,"crons":crons,"recent":recent_jobs,"series":[]},"logs":logs,"profiler":crate::profiling::summary_json(),"memory":memory_json(runtime)}),
     )
 }
 

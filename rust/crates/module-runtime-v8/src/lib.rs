@@ -48,7 +48,7 @@ use gonvex_module_runtime::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::budget::CallBudget;
-pub use crate::isolate::{live_isolates, trim_native_heap};
+pub use crate::isolate::{heap_tally, live_isolates, trim_native_heap};
 use crate::isolate::{CallSpec, HostRequest, ModuleSource, WorkerCall};
 use crate::pool::IsolatePool;
 use gonvex_module_runtime::effective_capabilities;
