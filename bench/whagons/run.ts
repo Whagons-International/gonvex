@@ -180,7 +180,7 @@ async function main() {
  const presenceStates=new Map<string,string>();const users:any[]=[];const snapshots:any[]=[];const pending=new Map<string,number>();// One expectation per task (the latest edit wins). state: the save's outcome; a
  // failed save (e.g. budget_exceeded before the Reducer ran) expects nothing.
  // settled: optional teardown predicate for edits another user may satisfy first.
- type TaskOp={at:number,matches:(row:any,at:number)=>boolean,settled?:(row:any)=>boolean,path:string,by:string,state:'pending'|'ok'|'failed',savedAt?:number,error?:string};
+ type TaskOp={at:number,matches:(row:any,at:number)=>boolean,settled?:(row:any)=>boolean,path:string,args?:string,by:string,state:'pending'|'ok'|'failed',savedAt?:number,error?:string};
  const pendingTasks=new Map<string,TaskOp>();
  // Teardown diagnostics: every expectation still unmet after the delivery grace, per observer.
  const undelivered:any[]=[];const expectationStats={ops:0,failedSaves:0,lateDelivered:0,pendingSaveAtTeardown:0,legacyErrors:0,ownTaskViews:0,undeliveredOps:new Set<string>()};
@@ -320,7 +320,7 @@ async function main() {
   const open=()=>rows().filter(r=>r.statusId!==f.completedStatusId);
   const expectTask=(id:string,matches:(row:any,at:number)=>boolean,settled?:(row:any)=>boolean)=>{const op:TaskOp={at:Date.now(),matches,settled,path:'',by:member,state:'pending'};pendingTasks.set(f.tenant+':'+id,op);expectationStats.ops++;return op;};
   // A save whose Reducer failed never changes the row: drop its expectation.
-  const saveFor=async(op:TaskOp,ref:any,args:any)=>{op.path=ref.path||'';let ok=false;const v=await timed('save',async()=>{try{const r=await reducer(c,ref,args);ok=true;return r;}catch(e:any){op.error=String(e?.message||e).slice(0,160);throw e;}});op.state=ok?'ok':'failed';op.savedAt=Date.now();if(!ok)expectationStats.failedSaves++;return v;};
+  const saveFor=async(op:TaskOp,ref:any,args:any)=>{op.path=ref.path||'';op.args=JSON.stringify(args).slice(0,240);let ok=false;const v=await timed('save',async()=>{try{const r=await reducer(c,ref,args);ok=true;return r;}catch(e:any){op.error=String(e?.message||e).slice(0,160);throw e;}});op.state=ok?'ok':'failed';op.savedAt=Date.now();if(!ok)expectationStats.failedSaves++;return v;};
   const save=(ref:any,args:any)=>timed('save',()=>reducer(c,ref,args));
   const others=()=>(tenantUsers.get(f.tenant)||[]).filter(h=>h.member!==member&&!h.admin);
   // Workspaces this user may create in (team-linked), from its workspace replica.
@@ -428,7 +428,7 @@ async function main() {
   for(const [key,op] of missing){const id=key.slice(f.tenant.length+1),row=rows().find(r=>r._id===id);
    if(op.state==='pending'){expectationStats.pendingSaveAtTeardown++;error(new Error('Task update save still pending at teardown'));continue;}
    expectationStats.undeliveredOps.add(key+'@'+op.at);error(new Error('Task update was not delivered before teardown'));
-   if(undelivered.length<2000)undelivered.push({tenant:f.tenant,task:id,observer:member,observerUser:i,by:op.by,path:op.path,at:op.at,savedAt:op.savedAt,checkedAt:Date.now(),expect:op.matches.toString().slice(0,160),row:{name:row.name,statusId:row.statusId,priorityId:row.priorityId,dueDate:row.dueDate,spotId:row.spotId,firstViewedAt:row.firstViewedAt,updatedAt:row.updatedAt,createdBy:row.createdBy,description:String(row.description??'').slice(0,48)}});}
+   if(undelivered.length<2000)undelivered.push({tenant:f.tenant,task:id,observer:member,observerUser:i,by:op.by,path:op.path,args:op.args,at:op.at,savedAt:op.savedAt,checkedAt:Date.now(),expect:op.matches.toString().slice(0,160),row:{name:row.name,statusId:row.statusId,priorityId:row.priorityId,dueDate:row.dueDate,spotId:row.spotId,firstViewedAt:row.firstViewedAt,updatedAt:row.updatedAt,createdBy:row.createdBy,description:String(row.description??'').slice(0,48)}});}
   if(!extras.ready())error(new Error('Metadata subscription never became current'));
   disconnect();
  })().catch(e=>{error(e);ready();}));
