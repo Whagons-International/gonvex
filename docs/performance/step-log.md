@@ -597,3 +597,64 @@ Oracle gate, delivery-v4 binary (old-app lab, 100 users, 16 SDK, 600 s, permissi
 | v4-oracle-100-nobatch | 23 | 18 | 5 | 0 (0/0) | 0 | 118,009 | {} | 0.06 % | 51 / 165 | 171 / 2,500 | 81 / 1,894 |
 
 With delivery-v4's call-completion flush, batch-on heartbeat p99 is 104 ms (delivery-v3 alone: 1,398 ms).
+
+Oracle gate, resume-lazy line (fba5b411 binary, same setup):
+
+| case | checks | conv. | no change | mismatched | batches | frames in | unsupported | errors | heartbeat p95/p99 | save p95/p99 | delivery p95/p99 | taskDelivery p95/p99 | CPU | peak |
+|---|---:|---:|---:|---|---:|---:|---|---:|---|---|---|---|---:|---:|
+| rl-oracle-100 (batch on) | 23 | 18 | 5 | 0 (0/0) | 26,380 | 42,363 | {} | 0.06 % | 55 / 96 | 98 / 132 | 116 / 847 | 131 / 164 | 0.09 | 1,507 MiB |
+| rl-oracle-100-nobatch | 23 | 18 | 5 | 0 (0/0) | 0 | 118,294 | {} | 0.04 % | 46 / 72 | 106 / 148 | 55 / 711 | 96 / 118 | 0.09 | 1,436 MiB |
+
+**Gate: pass.** First runs with every kind's p99 under 1 s (100 users, old app). Memory at the
+end of rl-oracle-100: SQLite allocator 187 MB (budget 128 MiB is a soft limit), snapshot cache
+81 MB / 691 entries (2,119 hits, 84 roll-forwards, 0 fallbacks, 0 evictions), V8 80 MB in 2 isolates.
+
+### rl-500: 500 users, new app, resume-lazy line — FAIL (CPU; snapshot cache at its cap)
+
+| kind | samples | p50 | p95 | p99 | candidate new-500 p50 / p99 |
+|---|---:|---:|---:|---:|---|
+| save | 881 | 24,851 | 83,415 | 110,202 | 35,662 / 122,059 |
+| taskDelivery | 8,538 | 8,965 | 50,347 | 71,910 | 12,932 / 89,225 |
+| presence delivery | 35,047 | 661 | 2,342 | 9,250 | 652 / 2,497 |
+| query | 104 | 14,224 | 28,489 | 29,844 | 17,418 / 28,904 |
+| reconnect | 339 | 209 | 621 | 1,290 | – |
+
+users 500/500; oracle 7 checks, 2 mismatched, both **0 leaked** (277 and 697 missing, backlog);
+errors 65 % (1,567 × "Task update was not delivered before teardown", see new-200 note; 28 ×
+`budget_exceeded` in `taskResources.recordTaskViewByTaskId`). Runtime 1.00 core (1,758/1,758
+periods throttled), cgroup at 2,048 MiB. Profiler: `snapshot.build` p50 15.4 s (28.7 s on the
+candidate) / p99 39.4 s, `snapshot.permit_wait` p50 23.8 s, `snapshot.visibility` p50 5.7 ms,
+`delivery.queue_wait` p50 5.0 s (15.9 s) / p99 76.8 s, `fn.total reducer` p50 3.1 s,
+`tokio.sched_lag` p99 83 ms.
+
+Memory by owner (`/dev/metrics memory` + runtime cgroup), 500 users connected:
+
+| time | conn | SQLite alloc | snapshot cache (entries, evictions) | V8 heaps (isolates) | cgroup anon | page cache | rest of anon |
+|---|---:|---:|---|---|---:|---:|---:|
+| 19:22:57 (idle) | 0 | 127 MiB | 0 | 47 MiB (2) | 398 MiB | 346 MiB | ~224 MiB |
+| 19:24:18 | 500 | 136 | 166 MiB (578, 0) | 54 (2) | 1,246 | 553 | ~890 |
+| 19:25:40 | 502 | 131 | 249 MiB (618, 469) | 54 (2) | 1,675 | 348 | ~1,240 |
+| 19:26:23 | 500 | 135 | 253 MiB (997, 639) | 28 (1) | 1,430 | 585 | ~1,010 |
+
+The 256 MiB cache fills within ~2 min at 500 users and then evicts (1,591 evictions by the end
+of the case), so opens fall back to builds. SQLite stays at its budget. V8 is small (28–55 MiB).
+The largest share is the rest of the Rust heap, ~1.0–1.25 GiB at 500 users: per-connection
+replica state plus queued deliveries behind a 5 s / 77 s (p50/p99) backlog.
+
+CPU (on-CPU perf, self time by thread × category, as for new-500):
+
+| thread | total | SQLite | JSON | replica/cache/hash | visibility | deflate | V8 | alloc | libc | other | kernel |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `sqlx-sqlite-worker` | 34.1 | 17.5 | 0 | 0 | 0 | 0 | 0 | 0.1 | 2.1 | 2.4 | 12.1 |
+| `gonvex-offload` | 26.6 | 0.4 | 4.8 | 6.1 | 3.3 | 0.1 | 0 | 1.7 | 2.5 | 1.8 | 5.9 |
+| `gonvex-module-isolate` | 20.4 | 1.7 | 0.8 | 0.3 | 0 | 0 | 2.3 | 0.3 | 0.9 | 1.8 | 12.3 |
+| `tokio-rt-worker` | 17.5 | 0.3 | 0.7 | 6.8 | 0.1 | 1.2 | 0 | 0.9 | 0.8 | 2.0 | 4.7 |
+| **all** | 100 | 20.0 | 6.3 | 13.2 | 3.4 | 1.3 | 2.3 | 3.1 | 6.3 | 8.1 | 36.5 |
+
+vs the candidate (new-500): JSON 15.4 → 6.3 %, offload pool 46 → 27 %, SQLite worker threads 8 →
+34 % (`sqlite3VdbeExec` 11.3 % self). SipHash (`std` default hasher) is 5.8 % self, plus
+`RandomState::hash_one` ~2.6 %, much of it on the tokio worker (`hash_one<&(&str, &str)>`).
+V8 proper stays at 2.3 %. **Binding constraint at 500 (new app): CPU, now in SQLite reads**
+(sqlx worker threads; which statements is not attributed: call chains do not unwind) with the
+snapshot cache thrashing at 256 MiB, and memory at the 2 GiB limit, mostly Rust heap outside
+the cache/SQLite/V8.
