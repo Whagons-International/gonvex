@@ -367,6 +367,16 @@ impl Runtime {
         self.inner.snapshot_cache.stats()
     }
 
+    /// Every shared snapshot cache entry, largest first (diagnostics).
+    pub fn snapshot_cache_report(&self) -> Vec<crate::snapshot_cache::EntryReport> {
+        self.inner.snapshot_cache.report()
+    }
+
+    /// Distinct shared snapshot cache keys ever created.
+    pub fn snapshot_cache_keys_seen(&self) -> u64 {
+        self.inner.snapshot_cache.keys_seen()
+    }
+
     /// Drops every shared snapshot cache entry (benchmarks).
     #[doc(hidden)]
     pub fn clear_snapshot_cache(&self) {

@@ -359,6 +359,36 @@ struct Slot {
     entry: Option<Arc<CacheEntry>>,
     build: Arc<tokio::sync::Mutex<()>>,
     last_used: u64,
+    /// Per-key counters (diagnostics: `/dev/metrics` `memory.snapshotCache`).
+    hits: u64,
+    builds: u64,
+}
+
+impl Slot {
+    fn empty() -> Self {
+        Self {
+            entry: None,
+            build: Arc::default(),
+            last_used: 0,
+            hits: 0,
+            builds: 0,
+        }
+    }
+}
+
+/// One cached entry, for the diagnostics report.
+#[derive(Clone, Debug)]
+pub struct EntryReport {
+    /// Tenant database file name.
+    pub database: String,
+    pub path: String,
+    pub args: String,
+    pub rows: usize,
+    pub heap_bytes: usize,
+    pub hits: u64,
+    pub builds: u64,
+    pub revision: u64,
+    pub age_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -381,6 +411,8 @@ pub struct SnapshotCache {
     roll_forwards: AtomicU64,
     fallbacks: AtomicU64,
     evictions: AtomicU64,
+    /// Distinct keys ever given a slot.
+    keys: AtomicU64,
     disabled: std::sync::atomic::AtomicBool,
 }
 
@@ -445,12 +477,55 @@ impl SnapshotCache {
         self.fallbacks.fetch_add(1, Relaxed);
     }
 
+    /// Every slot holding an entry (diagnostics), largest first.
+    pub fn report(&self) -> Vec<EntryReport> {
+        let slots = self.slots.lock().unwrap();
+        let mut rows = slots
+            .iter()
+            .filter_map(|(key, slot)| {
+                let entry = slot.entry.as_ref()?;
+                Some(EntryReport {
+                    database: key
+                        .0
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&key.0)
+                        .chars()
+                        .take(12)
+                        .collect(),
+                    path: key.3.clone(),
+                    args: key.4.chars().take(80).collect(),
+                    rows: entry.rows.len(),
+                    heap_bytes: entry.heap_bytes,
+                    hits: slot.hits,
+                    builds: slot.builds,
+                    revision: entry.revision,
+                    age_secs: entry.built.elapsed().as_secs(),
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| right.heap_bytes.cmp(&left.heap_bytes));
+        rows
+    }
+
+    /// Distinct keys ever given a slot.
+    pub fn keys_seen(&self) -> u64 {
+        self.keys.load(Relaxed)
+    }
+
     fn current(&self, key: &Key) -> Option<Arc<CacheEntry>> {
         let mut slots = self.slots.lock().unwrap();
         let tick = self.tick.fetch_add(1, Relaxed);
         let slot = slots.get_mut(key)?;
         slot.last_used = tick;
         slot.entry.clone()
+    }
+
+    fn count_hit(&self, key: &Key) {
+        self.hits.fetch_add(1, Relaxed);
+        if let Some(slot) = self.slots.lock().unwrap().get_mut(key) {
+            slot.hits += 1;
+        }
     }
 
     /// Drops `key`'s entry if it is still `stale` (the next open rebuilds).
@@ -482,30 +557,32 @@ impl SnapshotCache {
         let owned = key.owned();
         let fresh = |entry: &Arc<CacheEntry>| entry.built.elapsed() <= max_age;
         if let Some(entry) = self.current(&owned).filter(fresh) {
-            self.hits.fetch_add(1, Relaxed);
+            self.count_hit(&owned);
             return Ok(Some(entry));
         }
         let build_lock = {
             let mut slots = self.slots.lock().unwrap();
             slots
                 .entry(owned.clone())
-                .or_insert_with(|| Slot {
-                    entry: None,
-                    build: Arc::default(),
-                    last_used: 0,
+                .or_insert_with(|| {
+                    self.keys.fetch_add(1, Relaxed);
+                    Slot::empty()
                 })
                 .build
                 .clone()
         };
         let _building = build_lock.lock().await;
         if let Some(entry) = self.current(&owned).filter(fresh) {
-            self.hits.fetch_add(1, Relaxed);
+            self.count_hit(&owned);
             return Ok(Some(entry));
         }
         let Some(entry) = build().await? else {
             return Ok(None);
         };
         self.builds.fetch_add(1, Relaxed);
+        if let Some(slot) = self.slots.lock().unwrap().get_mut(&owned) {
+            slot.builds += 1;
+        }
         let entry = Arc::new(entry);
         self.install(owned, entry.clone());
         Ok(Some(entry))
@@ -545,11 +622,7 @@ impl SnapshotCache {
             return;
         }
         let tick = self.tick.fetch_add(1, Relaxed);
-        let slot = slots.entry(key.clone()).or_insert_with(|| Slot {
-            entry: None,
-            build: Arc::default(),
-            last_used: 0,
-        });
+        let slot = slots.entry(key.clone()).or_insert_with(Slot::empty);
         slot.entry = Some(entry);
         slot.last_used = tick;
         let mut total = slots

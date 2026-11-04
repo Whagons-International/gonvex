@@ -42,13 +42,14 @@ pub use data_dir::{DataDir, DataDirLock, DATA_DIR_ENV, DEFAULT_DATA_DIR};
 pub use feed::{CommitNotice, Provenance, NOW_MS};
 pub use registry::{
     database_path, database_url, sqlite_cache_budget_mib, sqlite_connection_heap,
-    sqlite_memory_used, AdmissionPermit, DatabaseListener, Durability, KeyedLock, Notification,
+    sqlite_memory_used, sqlite_reader_opens, AdmissionPermit, DatabaseListener, Durability, KeyedLock, Notification,
     PoolLimits, PoolRegistry, PoolRegistrySnapshot, WriterQueue, WriterStats,
 };
 
 mod provision;
 pub mod reference_integrity;
 pub mod sql_lexer;
+pub mod statement_profile;
 pub use provision::{MigrationScope, SqlMigration};
 
 #[derive(Debug, Error)]

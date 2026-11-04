@@ -133,6 +133,13 @@ fn apply_cache_budget() {
     });
 }
 
+static READER_OPENS: AtomicU64 = AtomicU64::new(0);
+
+/// Reader connections opened since start (each parses the file's schema).
+pub fn sqlite_reader_opens() -> u64 {
+    READER_OPENS.load(Ordering::Relaxed)
+}
+
 /// SQLite heap in use by this process, in bytes.
 pub fn sqlite_memory_used() -> i64 {
     unsafe { libsqlite3_sys::sqlite3_memory_used() }
@@ -463,6 +470,7 @@ impl PoolRegistry {
     pub fn with_durability(limits: PoolLimits, durability: Durability) -> Self {
         let limits = limits.bounded();
         apply_cache_budget();
+        crate::statement_profile::install();
         Self {
             admission: Arc::new(Semaphore::new(limits.max_total_connections)),
             admission_count: Arc::default(),
@@ -582,6 +590,10 @@ impl PoolRegistry {
             .after_release(move |_, _| {
                 released.store(now_ms(), Ordering::Relaxed);
                 Box::pin(async { Ok(true) })
+            })
+            .after_connect(|_, _| {
+                READER_OPENS.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(()) })
             })
             .connect_lazy_with(self.options(&path, true)?);
         self.start_sweeper();

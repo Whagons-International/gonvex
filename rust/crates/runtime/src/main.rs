@@ -2,9 +2,49 @@ use std::process::ExitCode;
 
 // `system-alloc` keeps the system allocator so heap profilers that hook
 // malloc (heaptrack) see every allocation. Production uses mimalloc.
-#[cfg(not(feature = "system-alloc"))]
+#[cfg(not(any(feature = "system-alloc", feature = "jemalloc-prof")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// `jemalloc-prof`: sampled heap profiles for attributing live heap by call
+// site. Run with `_RJEM_MALLOC_CONF=prof:true,lg_prof_sample:17` and
+// `GONVEX_HEAP_DUMP_PREFIX=/dir/heap` (+ `GONVEX_HEAP_DUMP_SECS`, default 30):
+// a dump every interval, read with `jeprof --text <binary> <dump>`.
+#[cfg(feature = "jemalloc-prof")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "jemalloc-prof")]
+fn start_heap_dumps() {
+    let Ok(prefix) = std::env::var("GONVEX_HEAP_DUMP_PREFIX") else {
+        return;
+    };
+    let seconds = std::env::var("GONVEX_HEAP_DUMP_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30)
+        .max(1);
+    std::thread::Builder::new()
+        .name("gonvex-heap-dump".into())
+        .spawn(move || {
+            for sequence in 0u64.. {
+                std::thread::sleep(std::time::Duration::from_secs(seconds));
+                let at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs());
+                let path = format!("{prefix}.{at}.{sequence:04}.heap\0");
+                // SAFETY: prof.dump takes a NUL-terminated file name.
+                let result = unsafe {
+                    tikv_jemalloc_ctl::raw::write(b"prof.dump\0", path.as_ptr() as *const std::ffi::c_char)
+                };
+                if let Err(error) = result {
+                    eprintln!("gonvex-runtime: heap dump failed: {error}");
+                    return;
+                }
+            }
+        })
+        .ok();
+}
 
 use gonvex_runtime::config::Config;
 use gonvex_runtime::Runtime;
@@ -13,6 +53,8 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
+    #[cfg(feature = "jemalloc-prof")]
+    start_heap_dumps();
     // In-process module isolates need the V8 platform initialized on this
     // thread before Tokio starts its workers (see gonvex-module-host main).
     gonvex_module_runtime_v8::initialize_v8_platform();
