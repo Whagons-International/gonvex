@@ -107,7 +107,9 @@ impl AuthWatch {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Connections this module revalidates: plain session tokens, with a tenant
@@ -134,7 +136,10 @@ impl AuthRevalidator {
             *watch = None;
             return;
         }
-        if watch.as_ref().is_some_and(|watch| watch.matches(connection)) {
+        if watch
+            .as_ref()
+            .is_some_and(|watch| watch.matches(connection))
+        {
             return;
         }
         *watch = batchable(connection).map(|account| self.register(connection, account));
@@ -173,25 +178,28 @@ impl AuthRevalidator {
 
     /// (rounds run, connections revoked) since start.
     pub(crate) fn counters(&self) -> (u64, u64) {
-        (self.inner.rounds.load(Relaxed), self.inner.revoked.load(Relaxed))
+        (
+            self.inner.rounds.load(Relaxed),
+            self.inner.revoked.load(Relaxed),
+        )
     }
 
     /// One revalidation round over every registered connection.
     pub(crate) async fn round(&self, control: Option<&ControlPlane>) {
         // (project, token hash, tenant, account, signal) of every entry.
-        let entries: Vec<(String, String, Option<String>, String, Arc<Signal>)> =
-            lock(&self.inner.entries)
-                .values()
-                .map(|entry| {
-                    (
-                        entry.project.clone(),
-                        entry.token_hash.clone(),
-                        entry.tenant.clone(),
-                        entry.account_id.clone(),
-                        entry.signal.clone(),
-                    )
-                })
-                .collect();
+        type Snapshot = (String, String, Option<String>, String, Arc<Signal>);
+        let entries: Vec<Snapshot> = lock(&self.inner.entries)
+            .values()
+            .map(|entry| {
+                (
+                    entry.project.clone(),
+                    entry.token_hash.clone(),
+                    entry.tenant.clone(),
+                    entry.account_id.clone(),
+                    entry.signal.clone(),
+                )
+            })
+            .collect();
         self.inner.rounds.fetch_add(1, Relaxed);
         if entries.is_empty() {
             return;
@@ -254,7 +262,8 @@ impl AuthRevalidator {
                     }
                 };
                 for account in chunk {
-                    active_members.insert((project, tenant, account.clone()), active.contains(account));
+                    active_members
+                        .insert((project, tenant, account.clone()), active.contains(account));
                 }
             }
         }

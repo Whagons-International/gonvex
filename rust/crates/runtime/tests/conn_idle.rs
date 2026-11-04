@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use futures_util::{SinkExt, StreamExt};
-use gonvex_runtime::accept::{AcceptedSocket, SocketTuning, TunedListener};
+use gonvex_runtime::accept::{AcceptedSocket, TunedListener};
 use gonvex_runtime::config::{
     Config, ConnectionConfig, ModuleHostConfig, SandboxConfig, StorageConfig,
 };
@@ -22,7 +22,6 @@ use tower::ServiceExt;
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-
 fn test_config(
     database_url: String,
     presence: PresenceConfig,
@@ -31,7 +30,7 @@ fn test_config(
     let data_dir = gonvex_store::DataDir::parse(&database_url);
     Config {
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-        control_plane_database_url: Some(database_url.clone()),
+        control_plane_database_url: Some(database_url),
         default_database_url: Some(gonvex_store::database_url(data_dir.root())),
         tenant_database_urls: BTreeMap::new(),
         project_database_urls: BTreeMap::new(),
@@ -211,38 +210,18 @@ impl Fixture {
         let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws", self.address))
             .await
             .unwrap();
-        self.authenticate(&mut socket, token, tenant, capabilities).await;
+        self.authenticate(&mut socket, token, tenant, capabilities)
+            .await;
         socket
     }
 
-    async fn connect_with_receive_buffer(
+    async fn authenticate(
         &self,
+        socket: &mut Socket,
         token: &str,
         tenant: &str,
-        receive_buffer: Option<u32>,
-    ) -> Socket {
-        let tcp = tokio::net::TcpSocket::new_v4().unwrap();
-        if let Some(bytes) = receive_buffer {
-            tcp.set_recv_buffer_size(bytes).unwrap();
-        }
-        let stream = tcp.connect(self.address).await.unwrap();
-        let (mut socket, _) = tokio_tungstenite::client_async(
-            format!("ws://{}/ws", self.address),
-            tokio_tungstenite::MaybeTlsStream::Plain(stream),
-        )
-        .await
-        .unwrap();
-        self.authenticate(
-            &mut socket,
-            token,
-            tenant,
-            json!({"preserveSubscriptions":1,"presence":1}),
-        )
-        .await;
-        socket
-    }
-
-    async fn authenticate(&self, socket: &mut Socket, token: &str, tenant: &str, capabilities: Value) {
+        capabilities: Value,
+    ) {
         let ready = next_json(socket).await;
         assert_eq!(ready["type"], "session.ready");
         assert_eq!(ready["capabilities"]["presence"], 1);
@@ -282,7 +261,6 @@ async fn next_json(socket: &mut Socket) -> Value {
     }
 }
 
-
 async fn control(fixture: &Fixture) -> sqlx::SqlitePool {
     fixture.pools.pool(&fixture.control_url).await.unwrap()
 }
@@ -319,7 +297,10 @@ async fn batched_revalidation_revokes_only_invalid_sessions() {
     // Every plain session connection is registered with the batched round.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while fixture.runtime.session_revalidation_counters().0 < 4 {
-        assert!(tokio::time::Instant::now() < deadline, "connections not registered");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connections not registered"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
@@ -327,7 +308,9 @@ async fn batched_revalidation_revokes_only_invalid_sessions() {
     fixture.runtime.revalidate_sessions_now().await;
     assert_eq!(fixture.runtime.session_revalidation_counters().2, 0);
     for socket in [&mut keep, &mut revoked, &mut disabled, &mut expired] {
-        assert!(auth_error(socket, Duration::from_millis(200)).await.is_none());
+        assert!(auth_error(socket, Duration::from_millis(200))
+            .await
+            .is_none());
     }
 
     let pool = control(&fixture).await;
@@ -353,12 +336,17 @@ async fn batched_revalidation_revokes_only_invalid_sessions() {
         assert_eq!(error["id"], "session-expired", "{error}");
         assert_eq!(error["code"], "transient", "{error}");
     }
-    assert!(auth_error(&mut keep, Duration::from_millis(300)).await.is_none());
+    assert!(auth_error(&mut keep, Duration::from_millis(300))
+        .await
+        .is_none());
     assert_eq!(fixture.runtime.session_revalidation_counters().2, 3);
     // Revoked connections are unauthenticated now and leave the registry.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while fixture.runtime.session_revalidation_counters().0 != 1 {
-        assert!(tokio::time::Instant::now() < deadline, "revoked connections stay registered");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "revoked connections stay registered"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     // The kept session's `last_seen_at` was refreshed by the round.
@@ -396,7 +384,10 @@ async fn batched_revalidation_revokes_a_member_that_left() {
         .await
         .unwrap()
         .is_empty());
-    let mut tx = control.begin_tenant_transaction(&route, false).await.unwrap();
+    let mut tx = control
+        .begin_tenant_transaction(&route, false)
+        .await
+        .unwrap();
     tx.set_command_id("conn-idle-test:leave").await.unwrap();
     sqlx::query("UPDATE members SET status='removed' WHERE id=$1")
         .bind(&member)
@@ -428,10 +419,12 @@ async fn batched_revalidation_revokes_a_member_that_left() {
 async fn list_tenants_still_follows_connection_counts() {
     let fixture = fixture(PresenceConfig::default()).await;
     let pool = control(&fixture).await;
-    sqlx::query("UPDATE gonvex_runtime_projects SET owner_email='owner@example.test' WHERE id='project'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE gonvex_runtime_projects SET owner_email='owner@example.test' WHERE id='project'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let (_, owner_token) = fixture.member("tenant-a", "owner@example.test").await;
     let (_, member_token) = fixture.member("tenant-b", "member@example.test").await;
     // A control-only socket (no tenant), as the support console opens.

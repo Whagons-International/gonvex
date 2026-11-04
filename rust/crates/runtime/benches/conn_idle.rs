@@ -181,7 +181,10 @@ async fn provision(
         .unwrap();
         let ids: Vec<usize> = (next..next + count).collect();
         next += count;
-        let mut tenant_tx = control.begin_tenant_transaction(&route, false).await.unwrap();
+        let mut tenant_tx = control
+            .begin_tenant_transaction(&route, false)
+            .await
+            .unwrap();
         tenant_tx
             .set_command_id(&format!("conn-idle:{tenant}"))
             .await
@@ -202,7 +205,10 @@ async fn provision(
         tenant_tx.commit().await.unwrap();
         let mut control_tx = control.begin_control_transaction(false).await.unwrap();
         for id in &ids {
-            let token = format!("gvx_session_conn_idle_{id:06}_{}", uuid::Uuid::new_v4().simple());
+            let token = format!(
+                "gvx_session_conn_idle_{id:06}_{}",
+                uuid::Uuid::new_v4().simple()
+            );
             for statement in [
                 "INSERT INTO accounts(id,auth_realm_id,email,name) VALUES($1,'project',$2,$3)",
                 "INSERT INTO account_tenant_index(account_id,tenant_id,member_id,status) VALUES($1,$4,$5,'active')",
@@ -249,9 +255,18 @@ fn thread_cpu() -> BTreeMap<(String, String), u64> {
         let fields: Vec<&str> = stat[close + 2..].split(' ').collect();
         // Fields after the name start at state (3rd field): utime is the
         // 14th field overall, stime the 15th.
-        let ticks = fields.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
-            + fields.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        threads.insert((name, entry.file_name().to_string_lossy().into_owned()), ticks);
+        let ticks = fields
+            .get(11)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            + fields
+                .get(12)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+        threads.insert(
+            (name, entry.file_name().to_string_lossy().into_owned()),
+            ticks,
+        );
     }
     threads
 }
@@ -306,7 +321,11 @@ async fn server_main() {
     let control_url = gonvex_store::database_url(&data.path().join("control.db"));
     let started = Instant::now();
     let tokens = provision(data.path(), &control_url, &counts).await;
-    eprintln!("conn_idle: provisioned {} members in {:?}", tokens.len(), started.elapsed());
+    eprintln!(
+        "conn_idle: provisioned {} members in {:?}",
+        tokens.len(),
+        started.elapsed()
+    );
 
     let config = config(data.path(), control_url);
     let tuning = config.connection.socket;
@@ -337,14 +356,20 @@ async fn server_main() {
         .env("CONN_IDLE_ROLE", "client")
         .env("CONN_IDLE_ADDR", address.to_string())
         .env("CONN_IDLE_TOKENS", &tokens_path)
-        .env("CONN_IDLE_CLIENT_SECONDS", (warmup + seconds + 600).to_string())
+        .env(
+            "CONN_IDLE_CLIENT_SECONDS",
+            (warmup + seconds + 600).to_string(),
+        )
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let stdout = child.stdout.take().unwrap();
     let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
     std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
             if lines_tx.send(line).is_err() {
                 break;
             }
@@ -354,7 +379,10 @@ async fn server_main() {
     loop {
         let line = lines.recv().await.expect("client exited before READY");
         if line.starts_with("READY") {
-            eprintln!("conn_idle: client {line} after {:?}", connect_started.elapsed());
+            eprintln!(
+                "conn_idle: client {line} after {:?}",
+                connect_started.elapsed()
+            );
             break;
         }
     }
@@ -385,7 +413,10 @@ async fn server_main() {
     // Threads that exited during the window are not counted here.
     let mut by_name = BTreeMap::<String, u64>::new();
     for ((name, tid), after) in &threads_after {
-        let before = threads_before.get(&(name.clone(), tid.clone())).copied().unwrap_or(0);
+        let before = threads_before
+            .get(&(name.clone(), tid.clone()))
+            .copied()
+            .unwrap_or(0);
         *by_name.entry(name.clone()).or_default() += after.saturating_sub(before);
     }
     let mut threads = serde_json::Map::new();
@@ -460,7 +491,11 @@ fn client_main() {
     // Run on every CPU except the server's.
     unsafe {
         let mut parent: libc::cpu_set_t = std::mem::zeroed();
-        libc::sched_getaffinity(libc::getppid(), std::mem::size_of::<libc::cpu_set_t>(), &mut parent);
+        libc::sched_getaffinity(
+            libc::getppid(),
+            std::mem::size_of::<libc::cpu_set_t>(),
+            &mut parent,
+        );
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         let cpus = libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize;
         let mut any = false;
@@ -494,7 +529,10 @@ async fn connect(address: &str, token: &str, tenant: &str, stats: &ClientStats) 
             Some("session.ready") => {
                 let auth = json!({"type":"auth","id":"auth","token":token,"project":"project","tenant":tenant,
                     "capabilities":{"preserveSubscriptions":1,"presence":1}});
-                socket.send(Message::Text(auth.to_string().into())).await.ok()?;
+                socket
+                    .send(Message::Text(auth.to_string().into()))
+                    .await
+                    .ok()?;
             }
             Some("auth.result") => {
                 authed = true;
@@ -514,26 +552,32 @@ async fn connect(address: &str, token: &str, tenant: &str, stats: &ClientStats) 
         json!({"type":"presence.set","state":"active"}),
         json!({"type":"presence.subscribe","id":"presence-1"}),
     ] {
-        socket.send(Message::Text(frame.to_string().into())).await.ok()?;
+        socket
+            .send(Message::Text(frame.to_string().into()))
+            .await
+            .ok()?;
     }
     Some(socket)
 }
 
 /// Exponential delay with the given mean (seconds), from a per-task LCG.
 fn exp_delay(state: &mut u64, mean: f64) -> Duration {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     let uniform = ((*state >> 11) as f64 / (1u64 << 53) as f64).max(1e-9);
     Duration::from_secs_f64(-uniform.ln() * mean)
 }
 
 async fn client_run() {
     let address = std::env::var("CONN_IDLE_ADDR").unwrap();
-    let tokens: Vec<(String, String)> = std::fs::read_to_string(std::env::var("CONN_IDLE_TOKENS").unwrap())
-        .unwrap()
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(token, tenant)| (token.to_owned(), tenant.to_owned()))
-        .collect();
+    let tokens: Vec<(String, String)> =
+        std::fs::read_to_string(std::env::var("CONN_IDLE_TOKENS").unwrap())
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(token, tenant)| (token.to_owned(), tenant.to_owned()))
+            .collect();
     let transition_mean: f64 = env("CONN_IDLE_TRANSITION_S", 0.0);
     let reconnect_total: f64 = env("CONN_IDLE_RECONNECT_PER_S", 0.0);
     let reconnect_mean = (reconnect_total > 0.0).then(|| tokens.len() as f64 / reconnect_total);
@@ -546,7 +590,8 @@ async fn client_run() {
         let ready = ready.clone();
         let up_tx = up_tx.clone();
         tokio::spawn(async move {
-            let mut rng = 0x9e37_79b9_7f4a_7c15u64 ^ (index as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            let mut rng =
+                0x9e37_79b9_7f4a_7c15u64 ^ (index as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9);
             let mut first = true;
             loop {
                 let socket = {
@@ -566,7 +611,11 @@ async fn client_run() {
                 let mut state_idle = false;
                 let far = Duration::from_secs(1 << 30);
                 let mut transition_at = tokio::time::Instant::now()
-                    + if transition_mean > 0.0 { exp_delay(&mut rng, transition_mean) } else { far };
+                    + if transition_mean > 0.0 {
+                        exp_delay(&mut rng, transition_mean)
+                    } else {
+                        far
+                    };
                 let reconnect_at = tokio::time::Instant::now()
                     + reconnect_mean.map_or(far, |mean| exp_delay(&mut rng, mean));
                 loop {
@@ -609,7 +658,8 @@ async fn client_run() {
     }
     println!("READY up={up} failed={failed}");
     let _ = std::io::stdout().flush();
-    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()).unwrap();
+    let mut signal =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()).unwrap();
     let seconds: u64 = env("CONN_IDLE_CLIENT_SECONDS", 3600);
     tokio::select! {
         _ = signal.recv() => {}
