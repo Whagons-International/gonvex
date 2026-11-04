@@ -76,15 +76,19 @@ async fn one_warm_reader_outlives_the_idle_timeout_until_the_warm_window_ends() 
     let urls = (0..4)
         .map(|index| dir.url(&format!("warm-{index}")))
         .collect::<Vec<_>>();
+    // Open every database and hold all its readers before releasing any:
+    // opening files (writer setup, PRAGMA optimize) can take longer than the
+    // 400 ms idle timeout on a loaded machine, and a database whose readers
+    // were released early would already be swept. The idle clock starts at
+    // release, so release them together and count right away.
+    let mut held = Vec::new();
     for url in &urls {
         let reader = registry.reader(url).await.unwrap();
-        let held = (
-            reader.acquire().await.unwrap(),
-            reader.acquire().await.unwrap(),
-            reader.acquire().await.unwrap(),
-        );
-        drop(held);
+        for _ in 0..3 {
+            held.push(reader.acquire().await.unwrap());
+        }
     }
+    drop(held);
     assert_eq!(registry.snapshot().await.open_connections, 4 * 4);
     // Past the idle timeout, each database keeps exactly one warm reader.
     tokio::time::sleep(Duration::from_millis(1000)).await;
