@@ -121,6 +121,17 @@ if gen:
 rtt = [float(x) for x in re.findall(r'time=([\d.]+)', (lab / f'{label}.json.rtt.log').read_text())] if (lab / f'{label}.json.rtt.log').exists() else []
 if rtt:
     w(f'- RTT Mac→arch3 (ping, Tailscale): p50 {q(rtt, .5):.1f} ms, p95 {q(rtt, .95):.1f} ms, max {max(rtt):.1f} ms ({len(rtt)} samples)')
+offsets = []
+for name in ('before', 'after'):
+    f = case / f'clock-offset-{name}.json'
+    if f.exists():
+        try:
+            o = json.loads(f.read_text())
+            offsets.append(f"{name} {o['offsetMs']:+.1f} ms (rtt {o['rttMs']:.1f} ms)")
+        except (ValueError, KeyError):
+            pass
+if offsets:
+    w('- clock offset Mac − arch3: ' + ', '.join(offsets))
 # Profile delta over the plateau.
 dumps = sorted((case / 'profile').glob('*.json'), key=lambda p: int(p.stem)) if (case / 'profile').exists() else []
 if dumps and start:

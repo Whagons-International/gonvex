@@ -737,3 +737,20 @@ Instrumentation gaps found: in the in-process V8 path `invoke.*` stages (JS time
 count) and `/dev/metrics` per-function `calls`/`averageDurationMs` stay 0, and slow traces carry
 the class label but not the function; that is why the per-function split above needed the bench.
 `bridge_bench` gained `taskResources.recordTaskViewByTaskId` and `BRIDGE_BENCH_ONLY`.
+
+## Harness: perf/delivery-loss 295c3aed merged (corrected task-delivery check), clock offset per run
+
+**Flag for every earlier new-app run (new-200, new-500, rw-500-b256, rw-500-b128, rl-500, rl-500b):
+their error rates include false alarms.** "Task update was not delivered before teardown" was a
+harness defect, not lost updates (docs/performance/delivery-loss.md): run.ts compared an arch3
+server timestamp with a Mac generator timestamp across clock skew, still expected failed saves,
+had no teardown grace and some impossible view expectations, and each false alarm was counted
+once per user of the tenant. Those runs' error rates (29.6 %, 35.6 %, 19.3 %, 65 %, 92 %, 53 % at
+200) are therefore not meaningful; their latency, CPU, memory and oracle results are unaffected.
+Old-app runs carried the same defect at a smaller skew (e.g. 17 such errors in ad-cron-200).
+delivery-loss reports 200 users on the new app at 0 undelivered, 0.44 % errors, oracle pass.
+
+From here on every case records the Mac − arch3 clock offset before and after the generator
+(`bench/whagons/clock-offset.py`: one SSH session, 15 round trips, lowest-RTT sample, precision
+≈ RTT/2; `<case>/clock-offset-{before,after}.json`, printed by step-report.py). First reading
+20:2x: Mac −23.8 ms vs arch3 (RTT 4.0 ms).

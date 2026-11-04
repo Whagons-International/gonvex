@@ -118,12 +118,15 @@ if [ "${LOAD_PERF:-1}" != 0 ] && command -v perf >/dev/null; then
     "$bench/../profiler/offcpu.sh" "$rpid" "$ps" "$out/offcpu.svg" > "$out/perf-offcpu.log" 2>&1
    fi ) & perfjob=$!
 fi
+# Generator vs runtime clock offset (task expectations compare timestamps across hosts).
+python3 "$bench/clock-offset.py" "$remote" > "$out/clock-offset-before.json" 2>/dev/null || true
 status=0
 ssh "$remote" "cd $rroot && env WHAGONS_CHECKOUT=$rroot/${LOAD_REMOTE_APP:-app} LOAD_STATE=$rroot/fixture.json LOAD_ADMIN_KEY=local-load-admin \
  LOAD_URL=http://127.0.0.1:$rport LOAD_AUTH_URL=http://127.0.0.1:$aport LOAD_RESULT=$rresult \
  LOAD_NODE_BIN=$rroot/tools/node-v26.13.0-darwin-arm64/bin/node LOAD_HARNESS_ROOT=$rh LOAD_RTT_HOST=${LOAD_RTT_HOST:-100.85.148.8} \
  PATH=$rroot/tools/node-v26.13.0-darwin-arm64/bin:/usr/bin:/bin:/usr/sbin:/sbin $fwd $tunnelenv sh $rh/remote-shards.sh" > "$out/generator.log" 2>&1 || status=$?
 finish
+python3 "$bench/clock-offset.py" "$remote" > "$out/clock-offset-after.json" 2>/dev/null || true
 trap - EXIT INT TERM
 ssh "$remote" "cd $rroot/results && tar -cf - $label.json*" | tar -C "$lab" -xf - || true
 # summarize.py reads <label>.json (+ .shard-0.metrics.jsonl) beside the case directory.
