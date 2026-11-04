@@ -473,7 +473,7 @@ impl Drop for PoisonOnExit {
 
 /// The only writer of one index: committed feed transactions, in order.
 async fn run_applier(
-    mut receiver: tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>,
+    mut receiver: crate::change_feed::FeedReceiver,
     index: SharedPermissions,
     source: PermissionGrantSource,
 ) {

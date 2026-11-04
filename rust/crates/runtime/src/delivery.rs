@@ -335,7 +335,7 @@ pub fn prewarm(
 /// another epoch, lag) is left in `pending` for the next turn.
 pub fn merge_waiting_feed(
     event: crate::change_feed::FeedEvent,
-    receiver: &mut Option<tokio::sync::broadcast::Receiver<crate::change_feed::FeedEvent>>,
+    receiver: &mut Option<crate::change_feed::FeedReceiver>,
     pending: &mut Option<Result<crate::change_feed::FeedEvent, tokio::sync::broadcast::error::RecvError>>,
     replicas: &std::collections::BTreeMap<String, crate::replica::ReplicaSubscription>,
     allowed: bool,

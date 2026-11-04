@@ -111,7 +111,7 @@ async fn ensure(
         .ensure_index(
             "tenant\u{0}tasks\u{0}id".into(),
             shape,
-            || std::future::ready(sender.subscribe()),
+            || std::future::ready(sender.subscribe().into()),
             |_| std::future::ready(Ok(loaded)),
         )
         .await
@@ -128,7 +128,7 @@ async fn ordered_single_writer_applies_each_transaction_once() {
             .ensure_index(
                 "tenant\u{0}tasks\u{0}id".into(),
                 shape(&["id", "workspaceId"]),
-                || std::future::ready(sender.subscribe()),
+                || std::future::ready(sender.subscribe().into()),
                 |_| {
                     loads.fetch_add(1, Ordering::SeqCst);
                     async {
@@ -215,7 +215,7 @@ async fn subscribing_before_the_load_snapshot_closes_the_load_gap() {
         .ensure_index(
             "tenant\u{0}tasks\u{0}id".into(),
             shape(&["id", "workspaceId"]),
-            || std::future::ready(sender.subscribe()),
+            || std::future::ready(sender.subscribe().into()),
             |_| {
                 // Delivered while the scan runs: 10 is inside the snapshot,
                 // 11 committed after it.
