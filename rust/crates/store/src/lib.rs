@@ -427,6 +427,83 @@ impl ControlPlane {
         Ok(identity)
     }
 
+    /// Batched revalidation of many live sessions (conn-idle): the subset of
+    /// `token_hashes` that [`Self::load_session_identity`] would still accept
+    /// for `project_id` (not revoked, not expired, account enabled; an empty
+    /// project matches any). Refreshes `last_seen_at` of the valid ones as
+    /// `load_session_identity` does (at most once per 5 minutes per session).
+    pub async fn valid_session_hashes(
+        &self,
+        project_id: &str,
+        token_hashes: &[String],
+    ) -> Result<std::collections::HashSet<String>, DatabaseError> {
+        if token_hashes.is_empty() {
+            return Ok(Default::default());
+        }
+        let list = serde_json::to_string(token_hashes).unwrap_or_default();
+        let _admission = self.pools.admit(&self.database_url).await?;
+        let valid: std::collections::HashSet<String> = sqlx::query_scalar(concat!(
+            r#"SELECT session.token_hash
+               FROM gonvex_auth_sessions session
+               JOIN accounts account
+                 ON account.id = session.account_id
+                AND account.auth_realm_id = session.project_id
+               WHERE session.token_hash IN (SELECT value FROM json_each($1))
+                 AND ($2 = '' OR session.project_id = $2)
+                 AND session.revoked_at IS NULL
+                 AND session.expires_at > "#,
+            now_ms!(),
+            r#"
+                 AND account.disabled_at IS NULL"#
+        ))
+        .bind(&list)
+        .bind(project_id.trim())
+        .fetch_all(&self.reader)
+        .await?
+        .into_iter()
+        .collect();
+        if !valid.is_empty() {
+            let touched = serde_json::to_string(&valid).unwrap_or_default();
+            sqlx::query(concat!(
+                "UPDATE gonvex_auth_sessions SET last_seen_at = ",
+                now_ms!(),
+                " WHERE token_hash IN (SELECT value FROM json_each($1)) AND (last_seen_at IS NULL OR last_seen_at < ",
+                now_ms!(),
+                " - 300000)"
+            ))
+            .bind(touched)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(valid)
+    }
+
+    /// Batched form of [`Self::admit_member`]'s check (conn-idle): the subset
+    /// of `account_ids` with an active Member in the tenant. Fails when the
+    /// tenant no longer resolves, as `admit_member` does.
+    pub async fn active_member_accounts(
+        &self,
+        project_id: &str,
+        tenant_id: &str,
+        account_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>, DatabaseError> {
+        let route = self.resolve_tenant(project_id, tenant_id).await?;
+        if account_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let list = serde_json::to_string(account_ids).unwrap_or_default();
+        let mut transaction = begin_transaction(&self.pools, &route.database_url, true).await?;
+        let active: Vec<String> = sqlx::query_scalar(
+            r#"SELECT DISTINCT account_id FROM members
+               WHERE status = 'active' AND account_id IN (SELECT value FROM json_each($1))"#,
+        )
+        .bind(list)
+        .fetch_all(&mut **transaction.transaction())
+        .await?;
+        transaction.commit().await?;
+        Ok(active.into_iter().collect())
+    }
+
     pub async fn authenticate_session(
         &self,
         token: &str,
