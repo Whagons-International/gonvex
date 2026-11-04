@@ -686,7 +686,14 @@ fn bridge_bench_whagons() {
             ("tasks.updateDescription", Box::new({ let tasks = tasks.clone(); move |i| json!({"taskId": tasks[i % tasks.len()].0, "description": format!("bench description {i}")}) })),
             ("taskResources.createNote", Box::new({ let tasks = tasks.clone(); let member = member["id"].clone(); move |i| json!({"entity": {"_id": uuid::Uuid::new_v4().to_string(), "_creationTime": 1_793_000_000_000i64, "taskId": tasks[i % tasks.len()].0, "userId": member, "source": "web", "note": format!("bench note {i}")}}) })),
             ("tasks.create", Box::new({ let tasks = tasks.clone(); move |i| { let t = &tasks[i % tasks.len()]; json!({"entityId": uuid::Uuid::new_v4().to_string(), "name": format!("bench task {i}"), "workspaceId": t.1, "categoryId": t.2, "priorityId": t.3}) } })),
+            ("taskResources.recordTaskViewByTaskId", Box::new({ let tasks = tasks.clone(); move |i| json!({"taskId": tasks[i % tasks.len()].0}) })),
         ];
+        // BRIDGE_BENCH_ONLY=a,b: run only these workloads.
+        let only = env("BRIDGE_BENCH_ONLY");
+        let workloads: Vec<(&str, Args)> = workloads
+            .into_iter()
+            .filter(|(name, _)| only.as_deref().is_none_or(|list| list.split(',').any(|item| item.trim() == *name)))
+            .collect();
         let mut reports = Vec::new();
         for (function, args) in &workloads {
             let mut samples = Samples::default();

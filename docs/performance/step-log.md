@@ -692,3 +692,48 @@ mismatched. Runtime 1.00 core, cgroup at 2,048 MiB. `fn.total reducer` p50 **8.7
 staging-deploy line arrived with f38c1dd28; visibility plans are unchanged) makes the reducer
 path heavier at this load; which function is not yet isolated (slow traces in
 `rl-500b/profile/*.json`, `top.py --file`).
+
+### Slow reducers on the 83669147 artifact: not an app or runtime regression (offline analysis)
+
+Question: rl-500b (artifact 83669147) showed reducer `fn.total` p50 8.7 s vs 3.1 s (rl-500,
+8e7aa7b4), 113 vs 28 `budget_exceeded`. Answer: same reducer cost per invoke; the difference is
+queueing at CPU saturation.
+
+1. **The budget:** all `budget_exceeded` in both runs are `invocation deadline elapsed while
+   waiting for a module isolate`: the 10 s time budget spent queued for an isolate, not a
+   host-call or row budget. They hit every task reducer (rl-500b: recordTaskViewByTaskId 113,
+   tasks.create 56, updateDescription 53, createNote 45, update 34, reschedule 32, rename 26,
+   assignUser 26, …); recordTaskViewByTaskId leads only because it is the most frequent call.
+   Committed reducers fell 5.1/s → 2.7/s (fewer got an isolate in time); per completed slow
+   trace, SQL (p50 6–7 ms) and finish (40–79 ms) are similar.
+2. **App diff:** of the 13 non-merge commits between f7faec3e5 and the merge, the net source
+   change under `gonvex/` (excluding generated files and tests) is `forms.ts` +11 (publish
+   validation, #1631), `workspaces.ts` +22 (default-space task type, #1632) and one line of a
+   generated catalog; no migrations. `gonvex/taskResources/commands.ts`
+   (recordTaskViewByTaskId), task create/update, triggers, indexes: unchanged. The SDK change
+   bundled with the rebuild is manifest/type-only (cron `dueWhen`; no cron uses it). Scheduled
+   jobs ran the same mix in both runs.
+3. **Micro-run on the real bundle** (`bridge_bench_whagons`, in process, `taskset -c 5`, copy of the
+   largest new-lab tenant: 8,851 tasks, 1,951 active members; 200 calls per function; runs A1 =
+   8e7aa7b4, B1 = 83669147, A2 = 8e7aa7b4):
+
+| function | host calls / invoke | invoke p50 A1 / B1 / A2 (ms) | bridge+JS mean A1 / B1 / A2 (ms) |
+|---|---|---|---|
+| taskResources.recordTaskViewByTaskId | 12 (11 query, 1 write) | 0.82 / 0.84 / 0.80 | 0.37 / 0.38 / 0.36 |
+| tasks.update | 15 (13 query, 2 write) | 1.33 / 1.44 / 1.28 | 0.61 / 0.66 / 0.57 |
+| tasks.updateDescription | 15 | 1.32 / 1.29 / 1.26 | 0.52 / 0.51 / 0.49 |
+| taskResources.createNote | 15 | 1.06 / 1.01 / 1.04 | 0.61 / 0.58 / 0.62 |
+| tasks.create | 31 (28 query, 2 write, 1 schedule) | 1.50 / 1.50 / 1.55 | 0.85 / 0.82 / 0.86 |
+
+   Module load 577 / 548 / 560 ms; RSS after load 159 / 158 / 149 MB. (Some calls fail with
+   "Task not found" for tasks outside the admin's spaces; same in all three runs.)
+
+**Reading:** a reducer costs ~1–1.5 ms of isolate time on either artifact; under load it waits
+3–9 s for the isolate because the single vCPU is saturated by snapshot builds and SQLite reads
+(the V8 isolate thread gets ~20–25 % of samples, mostly kernel), so the rl-500 vs rl-500b gap is
+run-to-run variance of a saturated queue, not the artifact. Fix belongs to neither the Whagons
+reducers nor the reducer path: it is the CPU budget at 500 (cache-heap / snapshot work).
+Instrumentation gaps found: in the in-process V8 path `invoke.*` stages (JS time, host-call
+count) and `/dev/metrics` per-function `calls`/`averageDurationMs` stay 0, and slow traces carry
+the class label but not the function; that is why the per-function split above needed the bench.
+`bridge_bench` gained `taskResources.recordTaskViewByTaskId` and `BRIDGE_BENCH_ONLY`.
