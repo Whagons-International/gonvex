@@ -4,17 +4,16 @@
 //! process) and a read-only pool whose transactions see one WAL snapshot. The
 //! races that PostgreSQL witnessed with advisory locks and `pg_blocking_pids`
 //! are orchestrated here with the mechanisms that now provide the guarantee:
-//! the runtime's keyed in-process locks, the single writer connection, query
-//! admission, and (for intra-transaction holds) a second SQLite connection
-//! that owns the file's write lock so the runtime writer waits in SQLite's busy
-//! handler inside its own transaction.
+//! the runtime's keyed in-process locks, the single writer connection (a
+//! fixture holds it in a real tenant transaction so reducers queue behind it)
+//! and query admission.
 use super::*;
 use base64::Engine as _;
 use gonvex_store::{MigrationScope, RuntimeManifestRecord, SqlMigration, TenantRoute};
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use sqlx::{Connection as _, Row as _};
-use std::path::{Path, PathBuf};
+use sqlx::sqlite::SqlitePool;
+use sqlx::Row as _;
+use std::path::PathBuf;
 
 const SCHEMA_LOCK: &str = "gonvex:reducer-receipt-schema";
 
@@ -32,41 +31,44 @@ struct Fixture {
     _data: Option<tempfile::TempDir>,
 }
 
-/// Opens a connection that is not owned by the runtime registry. Holding
-/// `BEGIN IMMEDIATE` on it owns the file's write lock, so the runtime's writer
-/// blocks inside its transaction at its first write (SQLite busy handler).
-async fn external_connection(path: &Path) -> sqlx::SqliteConnection {
-    sqlx::SqliteConnection::connect_with(
-        &SqliteConnectOptions::new()
-            .filename(path)
-            .busy_timeout(Duration::from_secs(5)),
-    )
-    .await
-    .unwrap()
-}
-
 /// The runtime writer is checked out by some transaction (its only connection).
 fn writer_owned(pool: &SqlitePool) -> bool {
     pool.size() == 1 && pool.num_idle() == 0
 }
 
+/// Competing SDK claims of one logical intent, serialized by the runtime's
+/// own single tenant writer (the only writer in production). The gate holds
+/// that writer in a real tenant write transaction while both SDK reducers are
+/// admitted and queue behind it; reads keep working and see none of the
+/// intent meanwhile. `commit`: the gate releases without effect, one claimant
+/// executes and the other replays its receipt. `rollback`: the gate is a first
+/// owner that claimed the same receipt and wrote the business row, then rolls
+/// back; a claimant must take over (execute, not replay a phantom receipt).
 #[derive(Default)]
 struct SDKConcurrencyGate {
     index: usize,
-    gate: Option<sqlx::SqliteConnection>,
+    gate: Option<gonvex_store::TenantTransaction>,
     stable: usize,
-    overlap: Option<serde_json::Value>,
     witnesses: Vec<serde_json::Value>,
+}
+
+/// Transactions queued for this tenant database's single writer.
+fn queued_writers(fixture: &Fixture) -> u32 {
+    let path = gonvex_store::database_path(&fixture.session.route.database_url);
+    fixture
+        .runtime
+        .inner
+        .pools
+        .writer_queues(usize::MAX)
+        .into_iter()
+        .find(|queue| std::path::Path::new(&queue.database) == path)
+        .map_or(0, |queue| queue.waiting)
 }
 
 impl SDKConcurrencyGate {
     async fn release(&mut self) {
-        if let Some(mut connection) = self.gate.take() {
-            sqlx::query("ROLLBACK")
-                .execute(&mut connection)
-                .await
-                .unwrap();
-            connection.close().await.unwrap();
+        if let Some(gate) = self.gate.take() {
+            gate.rollback().await.unwrap();
         }
     }
 
@@ -85,18 +87,24 @@ impl SDKConcurrencyGate {
                 serde_json::from_slice(&tokio::fs::read(request).await.unwrap()).unwrap();
             assert_eq!(request["mode"], mode);
             assert_eq!(request["rowId"], format!("sdk-concurrent-{mode}"));
-            assert!(!request["key"].as_str().unwrap().is_empty());
-            // Own the tenant file's write lock. Both SDK reducers are admitted;
-            // the first takes the single runtime writer and waits inside its
-            // transaction at the receipt claim, the second waits for the writer.
-            let mut gate = external_connection(&gonvex_store::database_path(
+            let key = request["key"].as_str().unwrap();
+            assert!(!key.is_empty());
+            // The runtime's own writer: the same single connection reducers use.
+            let mut gate = gonvex_store::begin_transaction(
+                &fixture.runtime.inner.pools,
                 &fixture.session.route.database_url,
-            ))
-            .await;
-            sqlx::query("BEGIN IMMEDIATE")
-                .execute(&mut gate)
-                .await
-                .unwrap();
+                false,
+            )
+            .await
+            .unwrap();
+            if mode == "rollback" {
+                assert!(gate.claim_reducer("account", key, "write").await.unwrap());
+                sqlx::query("INSERT INTO receipt_records(id, value) VALUES ($1, 7)")
+                    .bind(request["rowId"].as_str().unwrap())
+                    .execute(&mut **gate.transaction())
+                    .await
+                    .unwrap();
+            }
             self.gate = Some(gate);
             self.stable = 0;
             tokio::fs::write(directory.join("prepared.tmp"), b"{\"ready\":true}")
@@ -110,56 +118,52 @@ impl SDKConcurrencyGate {
             .unwrap();
             return;
         }
-        let admitted = fixture
-            .runtime
-            .inner
-            .pools
-            .snapshot()
-            .await
-            .admission_active;
+        let row_id = format!("sdk-concurrent-{mode}");
+        let queued = queued_writers(fixture);
         let owned = writer_owned(&fixture.pool);
-        if self.overlap.is_none() {
-            // Require both reducer transactions to stay admitted together while
-            // the writer is owned and cannot commit (sustained, not a sample).
-            if owned && admitted >= 2 {
-                self.stable += 1;
-            } else {
-                self.stable = 0;
-                tokio::fs::write(
-                    directory.join("wait-graph.json"),
-                    serde_json::to_vec_pretty(&serde_json::json!({
-                        "writerOwned": owned, "admissionActive": admitted}))
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-            }
-            if self.stable < 3 {
-                return;
-            }
+        // Reads proceed while the writer is held, and see nothing uncommitted:
+        // a second writer that let a claimant commit would show here.
+        let visible = tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query("SELECT count(*) FROM receipt_records WHERE id=$1")
+                .bind(&row_id)
+                .fetch_one(&fixture.reader),
+        )
+        .await;
+        let read = visible.is_ok();
+        let rows = visible
+            .ok()
+            .map(|row| row.unwrap().get::<i64, _>(0))
+            .unwrap_or(-1);
+        assert_eq!(
+            rows.max(0),
+            0,
+            "a claimant committed while the single writer was held"
+        );
+        if owned && queued >= 2 && read {
+            self.stable += 1;
+        } else {
             self.stable = 0;
-            self.overlap = Some(serde_json::json!({"overlap":true,"mode":mode,
-                "gate":"external-write-lock","writerOwned":true,"admittedReducers":admitted}));
-            if mode == "rollback" {
-                // Keep the gate: the first transaction's receipt claim fails with
-                // SQLITE_BUSY at its busy timeout (the analog of a cancelled
-                // statement) and rolls back; the second then owns the writer.
-                return;
-            }
+            tokio::fs::write(
+                directory.join("wait-graph.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "writerOwned": owned, "queuedWriters": queued, "readDuringWrite": read,
+                    "admissionActive": fixture.runtime.inner.pools.snapshot().await.admission_active,
+                    "writerQueues": fixture.runtime.inner.pools.writer_queues(8)}))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         }
-        let mut witness = self.overlap.as_ref().unwrap().clone();
+        // Sustained (three polls 50 ms apart), not one sample.
+        if self.stable < 3 {
+            return;
+        }
+        let mut witness = serde_json::json!({"overlap": true, "mode": mode,
+            "gate": "runtime-writer", "writerOwned": owned, "queuedWriters": queued,
+            "readDuringWrite": read, "rowsWhileHeld": rows});
         if mode == "rollback" {
-            // The first reducer released its admission after rolling back while
-            // the second now owns the writer and waits at its own claim.
-            if owned && admitted == 1 {
-                self.stable += 1;
-            } else {
-                self.stable = 0;
-            }
-            if self.stable < 3 {
-                return;
-            }
-            witness["takeover"] = serde_json::json!(true);
+            witness["ownerRolledBack"] = serde_json::json!(true);
         }
         if std::env::var_os("GONVEX_SDK_CONCURRENCY_DAMAGE").is_some() {
             witness["overlap"] = serde_json::json!(false);
@@ -178,7 +182,6 @@ impl SDKConcurrencyGate {
         .await
         .unwrap();
         self.witnesses.push(witness);
-        self.overlap = None;
         self.stable = 0;
         self.index += 1;
     }
@@ -213,7 +216,9 @@ impl Fixture {
         let url = gonvex_store::database_url(&root.join("tenant.db"));
         let mut cfg = config(true);
         cfg.module_host.binary = Some(binary.into());
-        cfg.module_host.isolate_pool_size = 1;
+        // The SDK composition runs two competing reducers at once (both must
+        // reach the writer queue); other fixtures keep one isolate.
+        cfg.module_host.isolate_pool_size = if sdk { 2 } else { 1 };
         cfg.module_host.max_concurrent_calls = 2;
         cfg.module_host.start_timeout = Duration::from_secs(5);
         let runtime = Runtime::new(cfg);
@@ -722,6 +727,23 @@ async fn authenticated_sdk_receipt_replica_composition() {
     let leaked_into_a = f
         .count("receipt_records WHERE id IN ('sdk-tenant-bob','tenant-b-private')")
         .await;
+    // Each competing intent took effect exactly once, from an executed claim
+    // (a stored result), after the gate released the single writer.
+    let mut concurrent = Vec::new();
+    for mode in ["commit", "rollback"] {
+        let row = format!("sdk-concurrent-{mode}");
+        let business = f
+            .count(&format!("receipt_records WHERE id='{row}' AND value=7"))
+            .await;
+        let executed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM _gonvex_reducer_idempotency WHERE subject='account' AND path='write' AND result LIKE '%' || $1 || '%'",
+        )
+        .bind(&row)
+        .fetch_one(&f.reader)
+        .await
+        .unwrap();
+        concurrent.push((mode, business, executed));
+    }
     server.abort();
     f.close().await;
     let output = result
@@ -767,6 +789,16 @@ async fn authenticated_sdk_receipt_replica_composition() {
         2,
         "both concurrent SDK outcomes require witnessed overlap"
     );
+    for (mode, business, executed) in concurrent {
+        assert_eq!(
+            business, 1,
+            "{mode}: competing claims must take effect exactly once"
+        );
+        assert_eq!(
+            executed, 1,
+            "{mode}: exactly one executed receipt must remain"
+        );
+    }
     assert_eq!(
         renamed_receipt.as_deref(),
         Some("abort"),
