@@ -34,7 +34,7 @@
 //! Principal or visibility changes need no invalidation: entries hold no
 //! visibility decision; every open evaluates its own principal at `C`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -164,7 +164,12 @@ impl CachedRow {
         let eval = if extra.is_empty() {
             None
         } else {
-            let mut eval = projection.as_object().cloned().unwrap_or_default();
+            // The projection is not needed after its canonical text: extend
+            // it in place instead of deep-cloning it.
+            let mut eval = match projection {
+                Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            };
             if let Some(image) = image.as_object() {
                 for column in extra {
                     if let Some(value) = image.get(column) {
@@ -842,7 +847,7 @@ pub(crate) fn extra_columns(
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,
 ) -> Vec<String> {
-    let projected = definition.columns.iter().collect::<HashSet<_>>();
+    let projected = definition.columns.iter().collect::<crate::fast_hash::FastSet<_>>();
     let mut needed = visibility::acl_columns(plan);
     needed.extend(definition.exclude_when_set.iter().cloned());
     needed.extend(definition.equal_filters.keys().cloned());

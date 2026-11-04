@@ -9,6 +9,7 @@ WORKDIR /src/rust
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/.cargo ./.cargo
 COPY rust/crates ./crates
+COPY rust/vendor ./vendor
 COPY packages/module-sdk/runtime-contract /src/packages/module-sdk/runtime-contract
 # Cache Cargo artifacts independently of Docker layers: Coolify build arguments
 # and network host mappings can invalidate RUN layers even on an unchanged tree.

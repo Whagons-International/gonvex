@@ -33,7 +33,7 @@
 //! outcome only when it ran clean (no resync); the frames other connections
 //! append are then byte-identical to what their own full path would produce
 //! (`tests/class_sharing_oracle.rs`).
-use std::collections::HashSet;
+use crate::fast_hash::{FastMap, FastSet};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -81,7 +81,7 @@ pub(crate) struct FanoutKeys {
     identity: u64,
     /// Tables whose change can move this plan's principal, sets or grants
     /// (one set per plan, shared).
-    slow: Arc<HashSet<String>>,
+    slow: Arc<FastSet<String>>,
     /// Version 2 plan without inherited visibility (`shareable_plan`).
     shareable: bool,
 }
@@ -115,7 +115,7 @@ fn keys(subscription: &mut ReplicaSubscription) -> Arc<FanoutKeys> {
         return Arc::clone(keys);
     }
     type Registry<K, V> = std::sync::Mutex<std::collections::HashMap<K, std::sync::Weak<V>>>;
-    static SLOW: OnceLock<Registry<usize, HashSet<String>>> = OnceLock::new();
+    static SLOW: OnceLock<Registry<usize, FastSet<String>>> = OnceLock::new();
     static ARGS: OnceLock<Registry<String, str>> = OnceLock::new();
     let plan = &subscription.visibility;
     // Keyed by the shared plan's address; the entry holds no reference to
@@ -126,7 +126,7 @@ fn keys(subscription: &mut ReplicaSubscription) -> Arc<FanoutKeys> {
         SLOW.get_or_init(Default::default),
         Arc::as_ptr(plan) as usize,
         || {
-            let mut slow = HashSet::new();
+            let mut slow = FastSet::default();
             slow.insert("members".to_owned());
             for set in plan.sets.values() {
                 slow.insert(set.table.clone());
@@ -155,26 +155,30 @@ fn keys(subscription: &mut ReplicaSubscription) -> Arc<FanoutKeys> {
 /// The event's changed tables and its collapsed rows (first before-image,
 /// last after-image, as `collapse_changes`), by change index into the share.
 pub(crate) struct Layout {
-    tables: HashSet<String>,
+    tables: FastSet<String>,
     rows: Vec<(String, usize, usize)>,
 }
 
 fn layout(changes: &[LogChange]) -> Layout {
-    let mut index = crate::fast_hash::FastMap::<(&str, &str), usize>::default();
+    let mut index = FastMap::<(&str, &str), usize>::with_capacity_and_hasher(
+        changes.len(),
+        Default::default(),
+    );
+    let mut tables = FastSet::<String>::default();
     let mut rows: Vec<(String, usize, usize)> = Vec::new();
     for (position, change) in changes.iter().enumerate() {
         match index.get(&(change.table.as_str(), change.row_id.as_str())) {
             Some(row) => rows[*row].2 = position,
             None => {
                 index.insert((change.table.as_str(), change.row_id.as_str()), rows.len());
+                if !tables.contains(change.table.as_str()) {
+                    tables.insert(change.table.clone());
+                }
                 rows.push((change.table.clone(), position, position));
             }
         }
     }
-    Layout {
-        tables: changes.iter().map(|change| change.table.clone()).collect(),
-        rows,
-    }
+    Layout { tables, rows }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

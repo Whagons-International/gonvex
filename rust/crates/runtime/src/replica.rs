@@ -95,7 +95,7 @@ pub struct ReplicaSubscription {
     pub(crate) mask: crate::visibility_class::HandleCache,
     /// Every table a change to which can concern this subscription
     /// (`replica_mask::concern_tables`), computed on first use.
-    pub(crate) concern_tables: Option<Arc<std::collections::HashSet<String>>>,
+    pub(crate) concern_tables: Option<Arc<crate::fast_hash::FastSet<String>>>,
     /// Per inherited parent table: the parent ACL index columns (the only
     /// parent columns its visibility reads), computed on first use.
     pub(crate) parent_acl_columns: Option<Arc<BTreeMap<String, BTreeSet<String>>>>,
@@ -2212,7 +2212,8 @@ async fn collect_window(
 ) -> Result<ReplicaWindow, ReplicaError> {
     futures_util::pin_mut!(rows);
     let mut window = ReplicaWindow::default();
-    let mut seen = std::collections::HashSet::new();
+    // Per-scan, bounded by the window's rows: foldhash (`fast_hash`).
+    let mut seen = crate::fast_hash::FastSet::default();
     let mut last = None;
     let ordered = !definition.order_by.is_empty();
     let mut scratch = String::new();
@@ -2392,7 +2393,7 @@ pub(crate) fn project_row(
     definition: &ReplicaCollectionDefinition,
 ) -> Result<Value, ReplicaError> {
     let object = row.as_object().ok_or(ReplicaError::InvalidArguments)?;
-    let mut projected = serde_json::Map::new();
+    let mut projected = serde_json::Map::with_capacity(definition.columns.len());
     for column in &definition.columns {
         if let Some(value) = object.get(column) {
             projected.insert(column.clone(), value.clone());

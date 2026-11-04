@@ -13,6 +13,7 @@ members = [
   "crates/server",
   "crates/sandbox-worker",
 ]
+exclude = ["vendor"]
 
 [workspace.package]
 edition = "2021"
@@ -78,3 +79,12 @@ codegen-units = 4
 [profile.local-load]
 inherits = "release"
 debug-assertions = true
+
+# serde_json with `preserve_order` (enabled by deno_core) stores every JSON
+# object in an IndexMap with std SipHash, ~7 % of runtime CPU at 1,000 users.
+# The vendored copy only swaps the map's hasher for foldhash; see
+# docs/performance/fast-hash.md. Drop this patch when upgrading serde_json
+# (re-apply the 4-line change in vendor/serde_json/src/map.rs).
+[patch.crates-io]
+serde_json = { path = "vendor/serde_json" }
+

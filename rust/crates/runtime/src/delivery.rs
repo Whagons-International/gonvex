@@ -406,8 +406,9 @@ pub struct ReplicaBatcher {
     config: BatchConfig,
     tenant_id: String,
     frames: Option<Arc<TenantFrames>>,
-    bindings: HashMap<String, Binding>,
-    token_owner: HashMap<Arc<str>, String>,
+    // Per connection, bounded by its own subscriptions: foldhash.
+    bindings: crate::fast_hash::FastMap<String, Binding>,
+    token_owner: crate::fast_hash::FastMap<Arc<str>, String>,
     // State of the batch currently open on the socket.
     open: bool,
     opened_at: Option<Instant>,
@@ -434,8 +435,8 @@ impl ReplicaBatcher {
             config,
             tenant_id: String::new(),
             frames: None,
-            bindings: HashMap::new(),
-            token_owner: HashMap::new(),
+            bindings: Default::default(),
+            token_owner: Default::default(),
             open: false,
             opened_at: None,
             items: 0,
