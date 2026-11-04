@@ -674,6 +674,7 @@ impl Runtime {
                         // row images cannot say what the client holds.
                         tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, "resume reconciles: visibility inputs changed since the cursor");
                         read.transaction.commit().await?;
+                        crate::open_reasons::add(crate::open_reasons::Reason::NeedHashesResumeDependency, 1);
                         return Ok(need_hashes(&request));
                     }
                     // The current aggregate verifies the client's claim. It
@@ -746,6 +747,7 @@ impl Runtime {
                         || request.digest.as_deref() != Some(prior.digest().as_str())
                     {
                         tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, "resume reconciles: client digest does not match the log");
+                        crate::open_reasons::add(crate::open_reasons::Reason::NeedHashesResumeDigest, 1);
                         return Ok(need_hashes(&request));
                     }
                     if !upserts.is_empty()
@@ -783,6 +785,7 @@ impl Runtime {
                         .await?;
                     read.transaction.commit().await?;
                     if request.digest.as_deref() != Some(hashes_digest(&hashes).as_str()) {
+                        crate::open_reasons::add(crate::open_reasons::Reason::NeedHashesResumeWholeSet, 1);
                         return Ok(need_hashes(&request));
                     }
                 }
@@ -1245,6 +1248,10 @@ impl Runtime {
         else {
             // Parent ACL appliers poison their own indexes on Reset; a
             // connection never resets shared state another one may hold.
+            crate::open_reasons::add(
+                crate::open_reasons::Reason::ResetFeedReset,
+                subscriptions.len() as u64,
+            );
             return Ok(subscriptions
                 .values()
                 .map(|subscription| ServerMessage::ReplicaReset {
@@ -1473,6 +1480,14 @@ impl Runtime {
         messages: &mut Vec<ServerMessage>,
         resynced: &mut BTreeSet<String>,
     ) {
+        crate::open_reasons::add(
+            match reason {
+                Resync::Principal => crate::open_reasons::Reason::NeedHashesPrincipal,
+                Resync::Consistency => crate::open_reasons::Reason::NeedHashesConsistency,
+                Resync::Window => crate::open_reasons::Reason::NeedHashesWindow,
+            },
+            1,
+        );
         match reason {
             Resync::Principal => self.inner.visibility_metrics.record_principal_rebuild(),
             Resync::Consistency | Resync::Window => {

@@ -321,3 +321,117 @@ and the local app capture in `/home/gabriel/work/gonvex-perf/app-opens/`.
 
 `/dev/metrics` → `memory.snapshotCache` (hits, builds, fallbacks, rollForwards), the 21:48 profile and the logs.
 These confirm the hit count, split the fallbacks, and count reopens by trigger.
+
+## Follow-up 2: steady-state churn, memory, slow statements (staging 22:12–22:20 UTC)
+
+Evidence: `/dev/metrics` at 22:12 and 22:20, profiles at 21:48, 22:12 and 22:20, runtime logs **21:18:30–21:57:06**
+(the saved log ends there; 22:24 is not in it), RSS samples every minute 21:49–22:28, and the page-load collection
+list. Staging runs preview 96c408c0: cache keyed by module generation, no per-reason open counters.
+
+### (1) Steady-state reopen churn
+
+- **Rate:** `snapshot.begin` +6,980 in 8.47 min = **824 opens/min**. The cache counted +5,656 hits, +491 shared
+  builds and +356 keyed inline builds = 6,503 lookups; per path, hits + builds = 6,147.
+- **By path** (`snapshotCache.byPath` delta, 22:12 → 22:20). It is concentrated, not ~1 reopen per subscription
+  every 2 min:
+
+  | collection | opens in 8.5 min | entries | note |
+  |---|---|---|---|
+  | `tasks.get` (keyed by task id) | 800 (152 builds) | 390 | detail windows |
+  | `members.listMembers` | 669 | 6 | `{}` args everywhere in the app |
+  | `members.listMemberTeams` | 574 | 6 | |
+  | `taskResources.getTaskAcknowledgmentProgressForTask` (keyed) | 542 | 156 | detail |
+  | `taskWorkspaceContexts.listForTask` (keyed) | 514 | 156 | detail |
+  | `taskResources.listTaskAckReads` (keyed) | 513 | 156 | detail |
+  | `spots.list` / `taskWorkspaceContexts.contexts` / `statuses.statuses` / `tasks.list` | 141 / 103 / 102 / 95 | | |
+  | all 40 `__local.*` | 400 (6.5 %) | | |
+
+- **Decomposition, as far as the evidence goes:**
+  - **New sockets (page loads, reconnects):** at least 5 new main connections appeared between the two
+    snapshots, holding 582 subscriptions: **≥ 9.5 %** of opens, more counting the connections that came and went
+    in between (13 disappeared). This includes ~40 `__local.*` opens each: the 400 `__local.*` opens are almost
+    exactly 5 × ~40 + another ~5 page loads, so **`__local.*` is reload traffic, not churn of its own.**
+  - **Task detail windows as users browse:** the keyed collections (`tasks.get` plus the
+    `taskResources.*`/`listForTask`/`listTaskAckReads` family and smaller per-task collections) are
+    **≈ 3,000 opens, ~half**. 356 inline builds means 356 first-time (task, collection) pairs. The other ~2,600 are
+    reopens of tasks already opened, about **4–5 collections per task view × ~120 task views per 8 min** across ~10
+    users. Expected client behaviour, cheap per open: 8.8 MiB for all 1,296 keyed entries.
+  - **`members.listMembers` / `listMemberTeams`: ~1,240 opens (20 %), unexplained.** The app opens them with `{}`,
+    so each client holds one deduplicated subscription, and the SDK closes one only 60 s after its last listener
+    (`replicaSubscriptionRetentionMs`). Five new connections explain about 10 of these opens. The rest
+    (~25 per connection in 8 min) must be server-driven: `needHashes`, which the client answers by reopening with
+    keys and hashes. Code candidates:
+    - a resume answers `needHashes` when **any** row of a visibility-dependency table changed since the cursor
+      (`table_change_relevance(...).1`, replica.rs);
+    - feed delivery resyncs (`Resync::Principal / Consistency / Window`).
+    - `presence.transition` (78 of the last 200 operations) writes only `userPresence`, so it is not the trigger.
+  - **Re-authentication, feed-lag resets:** `feedBacklog.lagResumes` 0 and `fillResets` 0, so feed-lag resets
+    are unlikely. Re-auth is invisible in these logs (INFO is off; only `sqlx` WARNs are logged).
+- **The server cannot tell these apart today.** Added on this branch (`runtime/src/open_reasons.rs`):
+  `/dev/metrics` → `memory.replicaOpens` with
+  - every open by request shape: `resume`, `reconcile` (keys + hashes), `coldDigest`, `cold`, `fullIntegrity`;
+  - `reopenOnSocket`: the same socket opening the same (path, args) again;
+  - `clientClose`;
+  - every `needHashes` the server sent, by reason: `needHashesResumeDependency`, `needHashesResumeDigest`,
+    `needHashesResumeWholeSet`, `needHashesPrincipal`, `needHashesConsistency`, `needHashesWindow`;
+  - every reset: `resetFeedLagged`, `resetFeedReset`;
+  - `topPaths` (40 paths: opens, reopensOnSocket, reconciles).
+
+  Two 8-minute snapshots of it decompose the churn directly. Relaxed atomics plus a per-socket
+  `HashSet<(path, args)>`, about 150 entries per connection.
+
+### (2) Memory: RSS 1.39–1.65 GB with ~10 users
+
+At 22:20 RSS was 1,450 MB (VmHWM 1,708 MB). Accounted by the metrics:
+
+| owner | 22:12 | 22:20 | note |
+|---|---|---|---|
+| snapshot cache | 128 MiB / 1,854 entries | 129 MiB / 2,076 entries | 613 entries empty; keyed entries 8.8 MiB |
+| …of which pre-deploy duplicates (21:29 generation change) | | **≥ 34 MiB** | 16 of the top 40 entries are the old generation's copies of the same (db, path, args), never hit again (evictions 0) |
+| SQLite allocator | 104 MiB | 110 MiB | budget 128; up to 16 readers per tenant (`GONVEX_DB_MAX_OPEN_CONNS=16`) at 2.9 MB of schema each |
+| V8 heaps | 122 MiB (5 isolates) | 97 MiB (4) | heap only; code and isolate overhead not counted |
+| principal cache | 2.2 MiB | 2.3 MiB | |
+| feed backlog | 0 (peak 1 MB) | 0 (peak 2.5 MB) | |
+| **accounted** | **≈ 356 MiB** | **≈ 338 MiB** | |
+| **unaccounted** | | **≈ 1,080 MiB** | Rust heap (per-connection replica state for ~1,680 subscriptions, delivery state, retained freed memory), V8 non-heap, thread stacks, mmapped tenant-file pages (`mmap_size` 256 MiB per file; touched pages count in RSS as file pages) |
+
+- The unaccounted part cannot be split from these files. The RSS log has total RSS only, no
+  `RssAnon`/`RssFile`.
+- Lab reference: the same app shape idles at 546–640 MB RSS (anon 408–522 MB). A loaded lab plateau sat at
+  ~1.1 GiB (anon ~0.9 GiB, page cache 0.35–0.42 GiB).
+- `mem.malloc_trim` ran 5 times in 8 min, with p99 1.23 s.
+- Next capture: `/proc/<pid>/smaps_rollup` (anon vs file), `/proc/<pid>/status`, and per-connection replica
+  bytes.
+- **Does a 256 MiB LRU hold the working set?**
+  - On staging today, yes: 129 MiB including ≥ 34 MiB of dead duplicates, so ≲ 95 MiB live. That is
+    effectively two active tenants: `tenant_a937c` ≥ 59 MiB in its top entries alone (one
+    `notifications.listNotifications` entry is 17.7 MB / 13,185 rows), `tenant_754db` ~10 MiB.
+  - The content-keyed cache (previous follow-up) stops deploys from duplicating entries.
+- **Production, 26 tenants:** the cache scales with active tenants × their table sizes, not with users. Two
+  el-rey-sized tenants (39 % + 39 % of users) at ~60–100 MiB each, plus 24 small ones at ≤ 10 MiB, is about
+  **150–450 MiB**. That fits the 256 MiB LRU only at the low end. The small tenants' entries will be evicted and
+  rebuilt (cheap for them), which is the intended behaviour. Estimate, not measured.
+- **1k users:** the cache stays bounded by the budget. SQLite stays near its budget (raise it to 256 MiB for
+  warm readers, previous follow-up). Per-connection state is the open question. It is the part of the
+  unaccounted ~1 GB that grows with users, and these files cannot measure it; with 10 users it cannot even be
+  separated from the baseline. The lab's 1k plateau (≈ 1.1 GiB) is the better data point.
+
+### (3) Slow statements and slow acquires
+
+- **The log covers 21:18:30–21:57:06**, so the 22:24:08 burst is not in it. The RSS sampler saw 528 % CPU at
+  22:24:06, consistent with a burst.
+- Of **2,454 slow-statement WARNs**, **2,286 (93 %) are reader connection setup** (`PRAGMA foreign_keys = ON;
+  cache_size; mmap_size; temp_store`): p50 2.69 s, max 10.5 s. **Yes, it is the reader-open pattern again.**
+- The rest are control-plane reads starved behind it:
+  - `SELECT id,tenant_id,account_id,release,environment,last_seen…` ×121, p50 1.7 s;
+  - session and membership checks ×16, 6–10 s;
+  - `_gonvex_sync_clock` ×11.
+- **1,578 slow-acquire WARNs.** Their per-minute counts follow the reader setups (21:28–21:45: 59–137/min). Only
+  9 fall after 21:50 within the logged window (21:54).
+- Reader opens keep happening in steady state: `sqliteReaderOpens` 5,717 → 6,115 between 22:12 and 22:20 is
+  **47 opens/min with no restart**. That is `GONVEX_DB_IDLE_TIMEOUT_MS=15 s` (RC default) closing extra
+  readers, plus up to 16 readers per database reopening in parallel at nice 10.
+- The statements carry no database path, so the tenants can't be named from these logs.
+- **Fix:** the settings from the previous follow-up (`GONVEX_SQLITE_READER_NICE=0`,
+  `GONVEX_DB_MAX_OPEN_CONNS=4`, `GONVEX_SQLITE_CACHE_BUDGET_MB=256`) plus this branch's reader changes
+  (120 s extra-reader idle, one open per database at a time).
