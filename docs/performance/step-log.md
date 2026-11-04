@@ -447,3 +447,45 @@ HWM 672 MB, 84 threads; cgroup anon 408 → 522 MB. For comparison, Coordinator'
 point for the same shape before action-depth: 528 MB → ~990 MB by :00 → ~1.07 GB after :13 (HWM
 1.11 GB). Idle RSS stays roughly flat across :00 with action-depth (+~95 MB in the first 35 min,
 no step at :00). Sampler log: `lab-5k-new/idle-rss-action-depth.log` (to 17:20).
+
+---
+
+## sqlite.1 candidate: `f23a2194`
+
+**perf/integrate-5k `f23a2194` = sqlite.1 candidate (green).** Contents: deploy/sqlite-staging
+bc1f0a06 (incl. f482033c, f3ef8ae1), perf/delivery-v3 adb6bcd9 (delivery 12d4ba07,
+replica-state ccdc4e8b, visibility-masks 2d031e4f, sqlite-direct 6e08c242, offload b4edd647,
+ws-buffers websocket crate a0a33ff4 rebuild + review fixes, profiler, fixture), perf/action-depth
+3f5a2ed2 (scheduled-load edffa51a, ported onto sqlite-direct, see Step 6), check_restart.py
+`gonvex_capture` control fix, bench changes. All four upstream heads are ancestors (checked
+18:xx, no newer commits). Runtime code is identical to the measured `bin-action-depth`
+(sha256 `b075a23e6f1b…`; `git diff 6a934356 f23a2194 -- rust ':!rust/crates/admin-cli'` is
+empty).
+
+| gate | result |
+|---|---|
+| `cargo test --workspace --no-fail-fast` (debug, featureless) | **633 passed, 0 failed, 7 ignored** (41 test binaries; quiet host). A first run while a 500-user case was loading the host failed one timing test, `gonvex-store writer_durability::checkpoints_run_off_the_writer_and_the_wal_stays_bounded` (WAL 4.86 MB vs ~4.1 MB bound; the background checkpoint thread was starved); it passes 3/3 alone and in the quiet full run. Flaky under host load, flagged. |
+| oracle, batch frames on (rc1-oracle-100: 100 users, 16 SDK, 600 s, permission changes) | 23 checks, 18 converged, 5 no change, **0 leaked / 0 missing**; 26,246 `replica.batch` frames; `unsupported` {}; errors 0.08 %; heartbeat p95/p99 115/201 ms, save 176/198, delivery 193/3,949 |
+| oracle, `LOAD_THIN_BATCH_FRAMES=0` (rc1-oracle-100-nobatch) | 23 / 18 / 5, **0 leaked / 0 missing**; 0 batches, 118,929 frames; `unsupported` {}; errors 0.08 %; heartbeat 87/540, save 137/1,842, delivery 260/3,470 |
+| 200-user thin run vs base (ad-cron-200, 20 min plateau, vs base-thin-200) | heartbeat p50/p95/p99 9/138/1,534 vs 1,119/16,415/45,013 ms; save 100/194/984 vs 3,970/28,234/58,230; delivery 88/184/2,443 vs 1,090/13,242/24,178; errors 0.24 vs 1.25 %; memory peak 1,467 vs 2,048 MiB; CPU 0.12 vs 0.80 cores; oracle 61 checks / 0 mismatched |
+| :00 window vs base (ad-cron-200 @200 vs base-cron-150 @150) | heartbeat p95 at :00/:01/:02 = 115/121/123 ms vs 31.8/26.0/52.0 s; no memory events (base: cgroup at 2 GiB); longest poll < 30 ms after the ramp (base: 33.7 s `outbox`) |
+
+Not a pass of the 5k rule yet: at 200 users p99s are 1.0–2.4 s on the old app (the 16:52
+reconnect wave and a 17:03 link drop are inside the window), and 500 users fail on CPU
+(below).
+
+Known behaviour to pass on: with batch frames, a reducer whose commit carries no rows for its
+caller resolves at the next data-free batch (1 s tick). It showed as heartbeat p99 1.4 s in the
+delivery-v3-only gate, and not in the candidate gate (201 ms). Not investigated further.
+
+### 500 users on the candidate (ad-thin-500b, old app)
+
+users 500/500, errors 3.97 %, oracle 8 checks / 0 mismatched; heartbeat p50/p95/p99
+85 / 46,101 / 64,299 ms, save 25,702 / 79,408 / 105,221 (offload step @500: 577 / 81,468 /
+113,928 and 64,143 / 130,017 / 156,035). Runtime 0.99 cores (1,709/1,753 periods throttled),
+peak 1,659 MiB. `snapshot.build` p50 18.4 s / p99 48.8 s (now instrumented again) and
+`snapshot.permit_wait` p50 19 s; `delivery.queue_wait` p50 9.4 s. **Binding constraint at 500:
+CPU in snapshot builds** (sign-in burst plus detail windows); reducers are 70–90 ms p50.
+`thin unsupported`: 155 × `replica.error: authenticate with an active tenant before opening a
+Replica Collection` (opens racing re-auth under the backlog). First try (ad-thin-500) lost one
+shard's tunnel to a Tailscale drop (17:12); tunnels now retry.
