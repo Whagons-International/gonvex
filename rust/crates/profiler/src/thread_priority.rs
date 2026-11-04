@@ -150,11 +150,7 @@ pub fn init() {
 /// Spawns a thread named `name` that runs `f` at `target(offset)`, created by
 /// the base-priority spawner thread so it does not inherit its caller's nice
 /// value. Errors if the spawner thread is gone.
-pub fn spawn_at<F, T>(
-    name: impl Into<String>,
-    offset: i32,
-    f: F,
-) -> std::io::Result<std::thread::JoinHandle<T>>
+pub fn spawn_at<F, T>(name: impl Into<String>, offset: i32, f: F) -> std::io::Result<std::thread::JoinHandle<T>>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -163,36 +159,26 @@ where
     let (reply, handle) = mpsc::sync_channel(1);
     let request_name = name.clone();
     let request: Spawn = Box::new(move || {
-        let spawned = std::thread::Builder::new()
-            .name(request_name)
-            .spawn(move || {
-                set_current_target(offset);
-                f()
-            });
+        let spawned = std::thread::Builder::new().name(request_name).spawn(move || {
+            set_current_target(offset);
+            f()
+        });
         let _ = reply.send(spawned);
     });
-    let sent = spawner()
-        .lock()
-        .map(|sender| sender.send(request).is_ok())
-        .unwrap_or(false);
+    let sent = spawner().lock().map(|sender| sender.send(request).is_ok()).unwrap_or(false);
     if sent {
         if let Ok(spawned) = handle.recv() {
             return spawned;
         }
     }
-    Err(std::io::Error::other(format!(
-        "thread spawner unavailable for {name}"
-    )))
+    Err(std::io::Error::other(format!("thread spawner unavailable for {name}")))
 }
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
-    fn nice_of_new_thread<F: FnOnce() -> std::thread::JoinHandle<i32> + Send + 'static>(
-        from_offset: i32,
-        spawn: F,
-    ) -> i32 {
+    fn nice_of_new_thread<F: FnOnce() -> std::thread::JoinHandle<i32> + Send + 'static>(from_offset: i32, spawn: F) -> i32 {
         std::thread::spawn(move || {
             assert!(set_current_target(from_offset));
             spawn().join().unwrap()
@@ -214,12 +200,10 @@ mod tests {
         assert_eq!(inherited, base + 5);
         // Absolute target: applying base+5 again on an inherited base+5 thread stays base+5
         // (the old relative "current + n" gave base+10).
-        let twice = nice_of_new_thread(5, || {
-            std::thread::spawn(|| {
-                set_current_target(5);
-                current()
-            })
-        });
+        let twice = nice_of_new_thread(5, || std::thread::spawn(|| {
+            set_current_target(5);
+            current()
+        }));
         assert_eq!(twice, base + 5);
         // spawn_at from a niced creator: base for unniced threads, base+3 when asked.
         let unniced = nice_of_new_thread(5, || spawn_at("t-unniced", 0, current).unwrap());
