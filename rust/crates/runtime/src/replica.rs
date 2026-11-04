@@ -462,7 +462,14 @@ impl Runtime {
             &session.identity.account.id,
             &session.member.permissions,
         );
-        let generation = module.generation;
+        let content = crate::snapshot_cache::content_hash(
+            &module.project_id,
+            module.generation,
+            &request.path,
+            &definition,
+            &visibility,
+            &module.schema,
+        );
         let project = module.project_id.clone();
         drop(module);
         // An entry depends only on the arguments its equality filters read:
@@ -472,7 +479,7 @@ impl Runtime {
         let cache_key = crate::snapshot_cache::CacheKey {
             database_url: &session.route.database_url,
             project: &project,
-            generation,
+            content,
             path: &request.path,
             args: &cache_args,
             member: &session.member.id,

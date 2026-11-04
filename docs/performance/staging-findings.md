@@ -211,3 +211,113 @@ the network worker). Raw: `/home/gabriel/work/gonvex-perf/sf-lab/results/snapsho
   only from the code and the compose files.
 - The 120 s idle default under the 1k gate load (statement re-preparation share before/after). Only the burst
   driver was measured.
+
+## Follow-up: preview 96c408c0 on staging, 21:18–21:48 UTC (23 connections, ~1,590 subscriptions)
+
+Reported numbers (coordinator): `snapshot.build` 32,227 (p99 2.9 s), `snapshot.begin` p99 2.5 s,
+`db.reader_begin` 115,584 (p99 2.58 s), `snapshot.cache_inline` 1,003, `snapshot_cache.build` 910 (p99 9.2 s),
+140 watchdog stalls, 1,537 slow acquires. Triggers: three restarts and a client deploy at ~21:29. Host load was
+32–41 on 12 cores, `GONVEX_DB_MAX_OPEN_CONNS=16`, reader nice 10. The 21:48 profile and logs were not in
+`staging-evidence/` when this was written. The numbers below come from code, the module manifest, the fixture
+and the local app capture in `/home/gabriel/work/gonvex-perf/app-opens/`.
+
+### (1) Did the cache serve few opens? Mostly a reading of the stage names, plus four real misses
+
+- **`snapshot.build` is not a SQL build.**
+  - In the RC it times `begin_collection_read`, which **every** open runs, hit or miss: permit wait, ACL,
+    begin and principal resolution (`replica.rs` 1096). It also covers each shared-entry build
+    (`build_cache_entry`, 1051) and each re-read when an index is moving (up to 3 per open).
+  - 32,227 is therefore the number of opens and re-reads.
+  - SQL row scans are only `snapshot_cache.build` (910 shared entries), `snapshot.cache_inline` (1,003 keyed
+    entries), and per-member fallbacks.
+  - Cache hits have no profiler stage. They are in `/dev/metrics` → `memory.snapshotCache.{hits, builds,
+    fallbacks}`, and that is the number to save next time.
+- **Upper bound on hits:** 32,227 − 910 − 1,003 ≈ 30,300 opens served from an entry. The real figure is lower
+  by the fallbacks and the index re-reads.
+- **Eligibility of the 807 Whagons replica collections** (module.json on `feat/sqlite-staging-deploy`):
+  - All 807 use version 2 plans, so the v1 bounded-plan fallback never applies.
+  - 677 use shared entries; 130 are keyed (equality-filter arguments: one task's detail collections).
+  - Keyed collections build per distinct arguments inside the open (the 1,003). The earlier measurement put
+    these at 0.1–0.3 hits per build, as expected for per-task windows.
+  - The unordered-truncation fallback needs a collection to exceed its `maxRows`. That is rare at Whagons sizes,
+    but a 1–20-row `__local.*` collection whose table holds more rows (e.g. `deepResearchSettings` maxRows 1)
+    takes it on every open. Not quantified.
+- **Real misses, in order:**
+  1. **A deploy invalidated every entry.** The key included the module **generation**, so after 21:29 every
+     (tenant, collection, args) missed, although the client's cursors stayed valid. The cursor is (database
+     epoch, revision) and no deploy changes it. The SDK answers `system.reload` with cursor+digest resumes
+     (`resumeReplicaSubscriptions`). The epoch-changed path (`activateReplicaDirective`) keeps the stored
+     windows. **Fixed below.**
+  2. **Restarts start with an empty cache.** Three restarts and one deploy are four full key sets. 910 builds
+     over ~4 rounds is ~230 distinct shared keys per round, about what 2–3 active tenants × ~100–170
+     collections give. Single-flight works per key (database, project, content, path, args) across members and
+     connections; it can't share across collections or tenants, by design. Each build reads the whole table
+     (no visibility predicate). Under load 32–41 with niced readers that took up to 9.2 s, and every open of
+     that key waits for it.
+  3. **Reopens without cursors.** In a local capture of the real web client (`app-opens/reload-opens.json`, one
+     user, reload 15 s after the first visit), **41 of 130 reload opens (32 %) carried a digest but no cursor**:
+     40 small `__local.*` collections plus `members.listMembers`. The SDK only sends a cursor when a stored
+     window exists (`replicaOpenRequest`), so these windows were not persisted: empty windows, or not yet
+     flushed at 15 s. They are cold opens (full snapshot sent) but still cache hits on the server.
+  4. **Index-moving re-reads and fallbacks.** An open re-reads up to 3 times, waiting up to 2 s each, while a
+     parent ACL index is behind its clock. Under a write load on an overloaded host this inflates
+     `snapshot.build` and `db.reader_begin` (115,584 reader begins for ~32k opens). Unmeasured on staging: needs
+     `fallbacks` from `/dev/metrics`.
+- **Opens per connection:** 32,227 / 23 ≈ 1,400 per connection in 30 min, about 9 full reopen rounds of ~150.
+  The 4 known triggers account for fewer than half. The rest (re-authentication not preserved, watchdog-related
+  reconnects, `needHashes`) needs the logs.
+
+### (2) Does a deploy force full re-snapshots? Not for clients; it did for the server cache. Fixed
+
+- **Client side:** the cursor survives the deploy, and the reopen is a log-only resume.
+- **Server side:** the shared entry for that key was keyed by generation, so the first resume of each key
+  rebuilt it from SQL. Every other resume waited on that build (single-flight).
+- **Fix:** `snapshot_cache::content_hash`. Entries are keyed by SHA-256 of (collection definition, visibility
+  plan, the table's schema entry) instead of the generation, memoized per (project, generation, path).
+  - The plan is in the key because `build_entry` reads the plan's ACL columns into every row.
+  - Decoded ACL rows are re-decoded whenever the class scope changes (pointer compare), so a new generation's
+    compiled program never uses the old decode.
+  - A deploy that changes a collection's definition, plan or table schema still misses that collection only.
+  - Correctness relies on the same contract as client cursors: the change log is authoritative across deploys.
+- **Tests:**
+  - `tests/redeploy_cache.rs`: cold open → redeploy as generation 2 with a different bundle → write → resume.
+    It asserts no `needHashes`, no snapshot, 0 member rows and 0 cache-fill rows read, cache builds unchanged,
+    the digest equal to a fresh SQL snapshot's, and a second member's cold open after the deploy served from the
+    same entry.
+  - With the generation put back into the key, the same test fails with `(0, 2500)` rows read: the old full
+    refill.
+  - Unit test `content_hash_ignores_the_generation_but_not_what_rows_depend_on`.
+
+### (3) Reader nice 10 on a busy host
+
+- `GONVEX_SQLITE_READER_NICE` sets each reader's sqlx worker thread to base + N (`store/src/reader_priority.rs`).
+  Nice only weighs threads against others in the same CPU cgroup (under cgroup v2 a container is one group; other
+  containers compete through `cpu.weight`).
+- So a reader at nice 10 has weight 110 against 1,024 for each of the runtime's own nice-0 threads: tokio
+  workers (12 on staging), V8 isolates, writers, checkpoint.
+- In a reopen storm those nice-0 threads are runnable, and readers get about a tenth of their share: slow
+  queries, and **schema parses of new connections at nice 10**. With `GONVEX_DB_MAX_OPEN_CONNS=16`, up to 16 of
+  those per tenant at once.
+- **Measured** (`MODE=burst`, 2 tenants × 14 reads after an idle gap, one CPU shared with two nice-0 busy threads
+  standing in for the runtime's network workers, 3 rounds):
+
+  | reader nice | `snapshot.begin` p50 | p99 | burst wall |
+  |---|---|---|---|
+  | 10 | 605 ms | 707 ms | 623–714 ms |
+  | 0 | 154 ms | 188 ms | 169–194 ms |
+
+  3.9× slower at nice 10 whenever the runtime's own nice-0 threads are busy, which they are in a storm.
+  Host-wide oversubscription (other containers) slows the whole container, but does not change this ratio.
+- **Recommendation for staging:**
+  - `GONVEX_SQLITE_READER_NICE=0`. Reader nice was tuned for the 1-vCPU lab, where readers had to yield to the
+    writer and the isolate.
+  - Keep `GONVEX_OFFLOAD_NICE` as is unless the profile shows offload starvation.
+  - `GONVEX_DB_MAX_OPEN_CONNS=4` instead of 16. Each reader holds 2.9 MB of parsed schema, and 16 concurrent
+    parses per tenant are exactly the slow-acquire pattern. `GONVEX_DB_READER_OPENS` (this branch) serializes
+    opens per database either way.
+  - `GONVEX_SQLITE_CACHE_BUDGET_MB=256` so warm readers survive across ~26 tenants.
+
+### Still needed from staging (not readable here)
+
+`/dev/metrics` → `memory.snapshotCache` (hits, builds, fallbacks, rollForwards), the 21:48 profile and the logs.
+These confirm the hit count, split the fallbacks, and count reopens by trigger.

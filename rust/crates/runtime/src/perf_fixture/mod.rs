@@ -918,6 +918,26 @@ impl Fixture {
         sets(&subscription.resolved)
     }
 
+    /// Installs the fixture module again as `generation` with a different
+    /// bundle (new artifact hash, same collections), like an app deploy.
+    pub async fn redeploy(&self, generation: u64) -> FixtureResult<()> {
+        let code = format!("export const generation = {generation};\n");
+        let (manifest, hash) = module_manifest_with(generation, &code)?;
+        self.runtime
+            .inner
+            .modules
+            .install(
+                &self.runtime.inner.module_host,
+                RuntimeManifestRecord {
+                    project_id: PROJECT_ID.to_owned(),
+                    module_hash: hash,
+                    manifest,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Orderly shutdown (runtime first, then the fake host and run files).
     pub async fn shutdown(self) {
         self.runtime.shutdown().await;
@@ -998,11 +1018,16 @@ fn migration_sql() -> String {
 /// functions and visibility plans, the schema as its tenant migration, and a
 /// placeholder bundle the fake host never evaluates.
 pub fn module_manifest() -> FixtureResult<(Value, String)> {
+    module_manifest_with(1, "export {};\n")
+}
+
+/// [`module_manifest`] as another generation with another bundle: an app
+/// deploy that changes no collection, visibility plan or table.
+pub fn module_manifest_with(generation: u64, code: &str) -> FixtureResult<(Value, String)> {
     let source: Value = serde_json::from_str(MODULE_JSON)?;
-    let code = "export {};\n";
     let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
     let mut module = json!({
-        "generation": 1,
+        "generation": generation,
         "language": "typescript",
         "entrypoint": "perf-fixture.js",
         "files": {format!("migrations/{MIGRATION_NAME}"): encode(migration_sql().as_bytes())},
