@@ -191,7 +191,9 @@ async fn a_socket_whose_open_waits_for_admission_still_gets_its_deliveries() {
     let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
         .await
         .unwrap();
-    next_frames(&mut socket, Duration::from_secs(10)).await.unwrap();
+    next_frames(&mut socket, Duration::from_secs(10))
+        .await
+        .unwrap();
     send(
         &mut socket,
         json!({"type":"auth","id":"auth","token":token,"project":route.project_id,"tenant":route.tenant_id,
@@ -199,7 +201,9 @@ async fn a_socket_whose_open_waits_for_admission_still_gets_its_deliveries() {
     )
     .await;
     'auth: loop {
-        let (_, frames) = next_frames(&mut socket, Duration::from_secs(10)).await.unwrap();
+        let (_, frames) = next_frames(&mut socket, Duration::from_secs(10))
+            .await
+            .unwrap();
         for frame in frames {
             match frame["type"].as_str() {
                 Some("auth.result") => break 'auth,
@@ -219,16 +223,25 @@ async fn a_socket_whose_open_waits_for_admission_still_gets_its_deliveries() {
         let mut done = false;
         for frame in frames {
             match frame["type"].as_str() {
-                Some("replica.ready") if frame["id"] == id || frame["id"].as_str().is_some_and(|f| f.starts_with('~')) => done = true,
+                Some("replica.ready")
+                    if frame["id"] == id
+                        || frame["id"].as_str().is_some_and(|f| f.starts_with('~')) =>
+                {
+                    done = true
+                }
                 Some("replica.error") => panic!("open failed: {frame}"),
-                Some("replica.watermark") => *watermark = (*watermark).max(frame["revision"].as_u64().unwrap()),
+                Some("replica.watermark") => {
+                    *watermark = (*watermark).max(frame["revision"].as_u64().unwrap())
+                }
                 _ => {}
             }
         }
         done
     };
     loop {
-        let (_, frames) = next_frames(&mut socket, Duration::from_secs(10)).await.unwrap();
+        let (_, frames) = next_frames(&mut socket, Duration::from_secs(10))
+            .await
+            .unwrap();
         if ready(&frames, "statuses", &mut watermark) {
             break;
         }

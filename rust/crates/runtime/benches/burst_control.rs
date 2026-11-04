@@ -65,7 +65,11 @@ fn cpu_jiffies(cpu: usize) -> (u64, u64) {
     let Some(line) = stat.lines().find(|line| line.starts_with(&prefix)) else {
         return (0, 0);
     };
-    let values: Vec<u64> = line.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect();
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|v| v.parse().ok())
+        .collect();
     let total: u64 = values.iter().take(8).sum();
     let idle = values.get(3).copied().unwrap_or(0) + values.get(4).copied().unwrap_or(0);
     (total - idle, total)
@@ -124,6 +128,9 @@ struct Connection {
     reader: tokio::task::JoinHandle<()>,
 }
 
+/// One socket generation of a user: (connection, from ms, until ms).
+type Span = (Arc<Connection>, f64, f64);
+
 struct Clock(Instant);
 impl Clock {
     fn ms(&self) -> f64 {
@@ -148,7 +155,13 @@ fn frames_of(text: &str) -> Vec<Value> {
 fn apply(state: &mut SocketState, frame: &Value, now: f64) {
     let id = |state: &SocketState| -> Option<String> {
         let id = frame["id"].as_str()?;
-        Some(state.streams.get(id).cloned().unwrap_or_else(|| id.to_owned()))
+        Some(
+            state
+                .streams
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.to_owned()),
+        )
     };
     match frame["type"].as_str().unwrap_or("") {
         "replica.stream" => {
@@ -164,7 +177,11 @@ fn apply(state: &mut SocketState, frame: &Value, now: f64) {
         "replica.readyMany" => {
             for item in frame["ready"].as_array().into_iter().flatten() {
                 if let Some(id) = item["id"].as_str() {
-                    let id = state.streams.get(id).cloned().unwrap_or_else(|| id.to_owned());
+                    let id = state
+                        .streams
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| id.to_owned());
                     state.ready.insert(id);
                 }
             }
@@ -239,8 +256,12 @@ impl Connection {
             let clock = clock.clone();
             let reader = tokio::spawn(async move {
                 while let Some(Ok(message)) = stream.next().await {
-                    let Message::Text(text) = message else { continue };
-                    let Some(connection) = weak.upgrade() else { return };
+                    let Message::Text(text) = message else {
+                        continue;
+                    };
+                    let Some(connection) = weak.upgrade() else {
+                        return;
+                    };
                     let now = clock.ms();
                     {
                         let mut state = connection.state.lock().unwrap();
@@ -331,23 +352,27 @@ impl Connection {
     /// Returns (latency ms, committed revision, result time) on success.
     async fn save(&self, id: String, task: &str, clock: &Clock) -> Option<(f64, u64, f64)> {
         let started = clock.ms();
-        self.send(json!({"type":"reducer.call","id":id,"path":"tasks.updateDescription",
+        self.send(
+            json!({"type":"reducer.call","id":id,"path":"tasks.updateDescription",
                          "args":{"taskId":task,"description":format!("burst {id}")},
-                         "scope":"tenant","idempotencyKey":id}))
-            .await;
+                         "scope":"tenant","idempotencyKey":id}),
+        )
+        .await;
         let mut result_at = None;
         let mut revision = None;
         let ok = self
-            .until(Duration::from_secs(60), |state| match state.results.get(&id) {
-                Some(Ok(committed)) => {
-                    revision = Some(*committed);
-                    if result_at.is_none() {
-                        result_at = Some(clock.ms());
+            .until(Duration::from_secs(60), |state| {
+                match state.results.get(&id) {
+                    Some(Ok(committed)) => {
+                        revision = Some(*committed);
+                        if result_at.is_none() {
+                            result_at = Some(clock.ms());
+                        }
+                        state.watermark >= *committed
                     }
-                    state.watermark >= *committed
+                    Some(Err(_)) => true,
+                    None => false,
                 }
-                Some(Err(_)) => true,
-                None => false,
             })
             .await;
         let result = self.state.lock().unwrap().results.remove(&id);
@@ -378,13 +403,21 @@ fn quantiles(values: &mut [f64]) -> Value {
         return json!({"n":0});
     }
     values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let at = |q: f64| values[((q * values.len() as f64).ceil() as usize).clamp(1, values.len()) - 1];
+    let at =
+        |q: f64| values[((q * values.len() as f64).ceil() as usize).clamp(1, values.len()) - 1];
     json!({"n":values.len(),"p50":at(0.5).round(),"p95":at(0.95).round(),"p99":at(0.99).round(),"max":at(1.0).round()})
 }
 
 /// Delivery latencies of `commits` on a socket's watermark marks, for
 /// commits made while it was connected (from `from_ms`, up to `until_ms`).
-fn delivery(marks: &[(u64, f64)], commits: &[(u64, f64)], from_ms: f64, until_ms: f64, out: &mut Vec<f64>, missed: &mut usize) {
+fn delivery(
+    marks: &[(u64, f64)],
+    commits: &[(u64, f64)],
+    from_ms: f64,
+    until_ms: f64,
+    out: &mut Vec<f64>,
+    missed: &mut usize,
+) {
     for (revision, at) in commits {
         if *at < from_ms + 500.0 || *at > until_ms {
             continue;
@@ -501,7 +534,10 @@ fn main() {
         for (name, value) in [
             ("GONVEX_REQUIRE_AUTH", "true"),
             ("GONVEX_ADMIN_KEY", ADMIN_KEY),
-            ("GONVEX_DASHBOARD_SESSION_SECRET", "burst-control-secret-long-enough-xx"),
+            (
+                "GONVEX_DASHBOARD_SESSION_SECRET",
+                "burst-control-secret-long-enough-xx",
+            ),
             ("GONVEX_AUTH_URL", "http://localhost:8080"),
             ("GONVEX_PENDING_CONNECTIONS_PER_IP", "100000"),
             ("GONVEX_PUBLIC_CONNECTIONS_PER_IP", "100000"),
@@ -512,7 +548,8 @@ fn main() {
         let mut tokens = Vec::new();
         for user in 0..users + observers {
             // Every 1/share-th user (active and observers alike) is an Admin.
-            let admin = admin_share > 0.0 && (user as f64 * admin_share).fract() + admin_share >= 1.0;
+            let admin =
+                admin_share > 0.0 && user % ((1.0 / admin_share).round() as usize).max(1) == 0;
             tokens.push(provision(&fixture, &format!("burst-{user}@example.test"), admin).await);
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -529,7 +566,13 @@ fn main() {
         (fixture, address, tokens)
     });
     let route = fixture.tenants[0].route.clone();
-    let tasks: Arc<Vec<String>> = Arc::new(fixture.tenants[0].tasks.iter().map(|t| t.id.clone()).collect());
+    let tasks: Arc<Vec<String>> = Arc::new(
+        fixture.tenants[0]
+            .tasks
+            .iter()
+            .map(|t| t.id.clone())
+            .collect(),
+    );
     // Keep the server runtime driving on its own thread while clients run.
     let (stop_server, server_stopped) = tokio::sync::oneshot::channel::<()>();
     let server_thread = std::thread::spawn(move || {
@@ -574,7 +617,7 @@ fn main() {
         let reconnect_at = start + seconds * 300.0;
         // Active users. The observers are the connections after `users`.
         let mut tasks_running = Vec::new();
-        let generations: Arc<Mutex<Vec<Vec<(Arc<Connection>, f64, f64)>>>> = Arc::new(Mutex::new(vec![Vec::new(); users]));
+        let generations: Arc<Mutex<Vec<Vec<Span>>>> = Arc::new(Mutex::new(vec![Vec::new(); users]));
         for user in 0..users {
             let mut connection = connections[user].clone();
             let (token, project, tenant, clock, samples, tasks, generations) = (
@@ -655,7 +698,7 @@ fn main() {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let after = gonvex_profiler::snapshot();
         let mut samples = std::mem::take(&mut *samples.lock().unwrap());
-        samples.commits.sort_by(|a, b| a.0.cmp(&b.0));
+        samples.commits.sort_by_key(|commit| commit.0);
         let mut observer_delivery = Vec::new();
         let mut observer_missed = 0;
         let mut resets = 0;
@@ -721,7 +764,11 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
     if let Ok(path) = std::env::var("BURST_JSON_OUT") {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
         writeln!(file, "{}", serde_json::to_string(&report).unwrap()).unwrap();
     }
     let _ = stop_server.send(());

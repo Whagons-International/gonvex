@@ -243,11 +243,15 @@ impl Offload {
             }
             Strategy::Runtime => {
                 let work = tracked_work(work);
-                Offloaded::Join(self.runtime.as_ref().unwrap().spawn(
-                    gonvex_profiler::instrument(gonvex_profiler::TaskKind::Other, async move {
-                        work()
-                    }),
-                ))
+                Offloaded::Join(
+                    self.runtime
+                        .as_ref()
+                        .unwrap()
+                        .spawn(gonvex_profiler::instrument(
+                            gonvex_profiler::TaskKind::Other,
+                            async move { work() },
+                        )),
+                )
             }
             Strategy::Blocking | Strategy::Threads => {
                 let work = tracked_work(work);
@@ -507,7 +511,9 @@ impl Runtime {
         let tables = feed_tables(&event);
         if pool.is_inline() || subscriptions.is_empty() || !pool.offload_apply(&tables) {
             let started = Instant::now();
-            let result = self.apply_feed_event_with(session, subscriptions, event, record).await;
+            let result = self
+                .apply_feed_event_with(session, subscriptions, event, record)
+                .await;
             if !pool.is_inline() {
                 pool.record_apply(&tables, started.elapsed());
             }
@@ -521,7 +527,9 @@ impl Runtime {
                 gonvex_profiler::TaskKind::Feed,
                 async move {
                     let started = Instant::now();
-                    let result = runtime.apply_feed_event_with(&session, &mut owned, event, record).await;
+                    let result = runtime
+                        .apply_feed_event_with(&session, &mut owned, event, record)
+                        .await;
                     // Delivery v3: encode and compress the shared items here,
                     // not at push time on the network thread.
                     if let (Ok(messages), Some((native, window))) = (&result, prewarm) {
@@ -600,7 +608,8 @@ impl<K: Ord + Send + 'static, V: Send + 'static> Drop for RetiringMap<K, V> {
 fn feed_tables(event: &FeedEvent) -> String {
     match event {
         FeedEvent::Transaction { changes, .. } => {
-            let mut tables: Vec<&str> = changes.iter().map(|change| change.table.as_str()).collect();
+            let mut tables: Vec<&str> =
+                changes.iter().map(|change| change.table.as_str()).collect();
             tables.sort_unstable();
             tables.dedup();
             tables.join(",")
@@ -680,10 +689,13 @@ pub(crate) async fn encode_snapshot_json(
 /// `count - 1` slots when `count >= 2`, so a short build never waits behind
 /// large ones (shortest-expected-first: under a burst the mean and tail wait
 /// of the interactive opens fall, the large ones keep `count - 1` slots and
-/// cannot starve). The estimate is a size, not a measured time, so the class
-/// does not drift with CPU contention.
+/// cannot starve: a large build that waited 4x longer than the short head, or
+/// 1 s with no short one waiting, may also take the reserved slot). The
+/// estimate is a size, not a measured time, so the class does not drift with
+/// CPU contention.
 ///
-/// `GONVEX_SNAPSHOT_LANES=0` restores one FIFO lane.
+/// The lanes are opt-in: `GONVEX_SNAPSHOT_LANES=1` (default: one FIFO lane;
+/// `with_limits` with `short_bytes = usize::MAX` is the same).
 ///
 /// Overload: at most `GONVEX_SNAPSHOT_MAX_WAITING` builds wait (default
 /// 4096); beyond that, or after waiting `GONVEX_SNAPSHOT_ADMISSION_TIMEOUT_MS`
@@ -707,9 +719,17 @@ pub struct SnapshotAdmission {
 struct Lanes {
     free: usize,
     long_active: usize,
-    short: std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>,
-    long: std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>,
+    short: std::collections::VecDeque<(Instant, tokio::sync::oneshot::Sender<()>)>,
+    long: std::collections::VecDeque<(Instant, tokio::sync::oneshot::Sender<()>)>,
 }
+
+/// A large build at the head of its lane may take the slot reserved for
+/// short builds once it waited this many times longer than the short head
+/// (aging: large builds are delayed under a burst of short ones, never
+/// starved).
+const LONG_AGING: u32 = 4;
+/// ... or this long, with no short build waiting.
+const LONG_AGED: Duration = Duration::from_secs(1);
 
 impl Lanes {
     fn waiting(&self) -> usize {
@@ -780,7 +800,7 @@ impl Drop for LaneWait {
                 } else {
                     &mut lanes.short
                 };
-                lane.retain(|sender| !sender.is_closed());
+                lane.retain(|(_, sender)| !sender.is_closed());
             }
         }
     }
@@ -788,7 +808,13 @@ impl Drop for LaneWait {
 
 impl SnapshotAdmission {
     pub fn new(count: usize, budget_bytes: usize) -> Self {
-        Self::with_limits(count, budget_bytes, 256 << 10, 4096, Duration::from_secs(30))
+        Self::with_limits(
+            count,
+            budget_bytes,
+            256 << 10,
+            4096,
+            Duration::from_secs(30),
+        )
     }
 
     pub fn with_limits(
@@ -831,9 +857,12 @@ impl SnapshotAdmission {
             let budget = env_usize("GONVEX_REPLICA_SNAPSHOT_BUDGET_BYTES")
                 .filter(|value| *value > 0)
                 .unwrap_or(128 << 20);
-            // `GONVEX_SNAPSHOT_LANES=0`: one FIFO lane (every build short),
-            // the admission order before burst control.
-            let lanes = std::env::var("GONVEX_SNAPSHOT_LANES").map_or(true, |value| value.trim() != "0");
+            // Lanes are opt-in (`GONVEX_SNAPSHOT_LANES=1`): on the burst
+            // driver they cut no window-open tail but tripled heavy
+            // reconnect p99 (docs/performance/burst-control.md). Off, every
+            // build is short: one FIFO lane, the order before burst control.
+            let lanes =
+                std::env::var("GONVEX_SNAPSHOT_LANES").is_ok_and(|value| value.trim() == "1");
             let short = if lanes {
                 env_usize("GONVEX_SNAPSHOT_SHORT_BYTES").unwrap_or(256 << 10)
             } else {
@@ -934,9 +963,9 @@ impl SnapshotAdmission {
             }
             let (sender, receiver) = tokio::sync::oneshot::channel();
             if long {
-                lanes.long.push_back(sender);
+                lanes.long.push_back((Instant::now(), sender));
             } else {
-                lanes.short.push_back(sender);
+                lanes.short.push_back((Instant::now(), sender));
             }
             receiver
         };
@@ -947,7 +976,11 @@ impl SnapshotAdmission {
         };
         // A sender is dropped only after a send or when `release` skips a
         // closed receiver, so this cannot fail while the waiter lives.
-        let _ = wait.receiver.as_mut().expect("receiver until handed over").await;
+        let _ = wait
+            .receiver
+            .as_mut()
+            .expect("receiver until handed over")
+            .await;
         wait.receiver = None;
         Ok(Slot {
             admission: self,
@@ -956,26 +989,38 @@ impl SnapshotAdmission {
     }
 
     /// Returns a slot and hands free slots to waiters: short lane first,
-    /// then the long lane while it holds fewer than `long_capacity`.
+    /// then the long lane while it holds fewer than `long_capacity`; a long
+    /// head that aged ([`LONG_AGING`] and [`LONG_AGED`]) goes before short
+    /// ones and may use the reserved slot.
     fn release(&self, long: bool) {
         let mut lanes = self.lanes.lock().unwrap();
         lanes.free += 1;
         lanes.long_active -= usize::from(long);
+        let now = Instant::now();
         while lanes.free > 0 {
-            if let Some(waiter) = lanes.short.pop_front() {
+            let short_wait = lanes.short.front().map(|(at, _)| now - *at);
+            let long_wait = lanes.long.front().map(|(at, _)| now - *at);
+            let below_cap = lanes.long_active < self.long_capacity;
+            let long_turn = match (long_wait, short_wait) {
+                (None, _) => false,
+                (Some(waited), None) => below_cap || waited >= LONG_AGED,
+                // Behind short builds only once aged (both bounds: a ratio
+                // alone is met by microsecond waits).
+                (Some(waited), Some(short)) => waited > short * LONG_AGING && waited >= LONG_AGED,
+            };
+            if long_turn {
+                let (_, waiter) = lanes.long.pop_front().unwrap();
+                if waiter.send(()).is_ok() {
+                    lanes.free -= 1;
+                    lanes.long_active += 1;
+                }
+                continue;
+            }
+            if let Some((_, waiter)) = lanes.short.pop_front() {
                 if waiter.send(()).is_ok() {
                     lanes.free -= 1;
                 }
                 continue;
-            }
-            if lanes.long_active < self.long_capacity {
-                if let Some(waiter) = lanes.long.pop_front() {
-                    if waiter.send(()).is_ok() {
-                        lanes.free -= 1;
-                        lanes.long_active += 1;
-                    }
-                    continue;
-                }
             }
             break;
         }
@@ -1037,7 +1082,9 @@ impl SnapshotPermit {
 
 impl Drop for SnapshotPermit {
     fn drop(&mut self) {
-        self.admission.reserved_kib.fetch_sub(self.reserved_kib, Relaxed);
+        self.admission
+            .reserved_kib
+            .fetch_sub(self.reserved_kib, Relaxed);
         gonvex_profiler::record_duration(
             gonvex_profiler::Stage::SnapshotPermitHold,
             gonvex_profiler::Label::None,
@@ -1082,7 +1129,12 @@ mod tests {
                 .map(|row| row.count)
                 .sum()
         };
-        let before = [Stage::OffloadQueueWait, Stage::OffloadBusy, Stage::OffloadRun].map(count);
+        let before = [
+            Stage::OffloadQueueWait,
+            Stage::OffloadBusy,
+            Stage::OffloadRun,
+        ]
+        .map(count);
         for strategy in [Strategy::Runtime, Strategy::Blocking, Strategy::Threads] {
             let pool = Offload::new(strategy, 1, 0, Duration::ZERO);
             assert_eq!(pool.run(|| 7).await, 7);
@@ -1095,7 +1147,12 @@ mod tests {
             assert_eq!(value, 8);
             std::mem::forget(pool);
         }
-        let after = [Stage::OffloadQueueWait, Stage::OffloadBusy, Stage::OffloadRun].map(count);
+        let after = [
+            Stage::OffloadQueueWait,
+            Stage::OffloadBusy,
+            Stage::OffloadRun,
+        ]
+        .map(count);
         for (before, after) in before.iter().zip(after) {
             assert!(after >= before + 6, "{before} -> {after}");
         }
@@ -1111,7 +1168,9 @@ mod tests {
         // 64 KiB budget, generous count: bytes are the binding bound.
         let admission = leak(SnapshotAdmission::new(64, 64 * 1024));
         // Teach sizes: 40 KiB for "big" keys, 4 KiB for the others.
-        let big = vec![Value::String("x".repeat(40 * 1024 / HEAP_PER_JSON_BYTE - 2))];
+        let big = vec![Value::String(
+            "x".repeat(40 * 1024 / HEAP_PER_JSON_BYTE - 2),
+        )];
         let small = vec![Value::String("x".repeat(4 * 1024 / HEAP_PER_JSON_BYTE - 2))];
         for n in 0..10 {
             let key = format!("member-{n}");
@@ -1126,7 +1185,10 @@ mod tests {
             let peak = peak.clone();
             tasks.push(tokio::spawn(async move {
                 let n = burst % 10;
-                let permit = admission.admit(format!("member-{n}"), "tasks").await.unwrap();
+                let permit = admission
+                    .admit(format!("member-{n}"), "tasks")
+                    .await
+                    .unwrap();
                 let bytes = if n % 3 == 0 { 40 * 1024 } else { 4 * 1024 };
                 let now = held.fetch_add(bytes, Relaxed) + bytes;
                 peak.fetch_max(now, Relaxed);
@@ -1149,14 +1211,20 @@ mod tests {
     async fn oversized_build_runs_alone_instead_of_never() {
         let admission = leak(SnapshotAdmission::new(8, 16 * 1024));
         let huge = vec![Value::String("x".repeat(100 * 1024))];
-        admission.admit("huge".into(), "t").await.unwrap().observe(&huge);
+        admission
+            .admit("huge".into(), "t")
+            .await
+            .unwrap()
+            .observe(&huge);
         let first = admission.admit("huge".into(), "t").await.unwrap();
         // The whole budget is held: a small build waits.
         let waiting = admission.admit("small".into(), "other");
         tokio::pin!(waiting);
-        assert!(tokio::time::timeout(Duration::from_millis(20), &mut waiting)
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
         drop(first);
         tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
@@ -1167,7 +1235,11 @@ mod tests {
     /// Teaches `key` an estimate of about `bytes` of decoded heap.
     async fn teach(admission: &'static SnapshotAdmission, key: &str, bytes: usize) {
         let rows = vec![Value::String("x".repeat(bytes / HEAP_PER_JSON_BYTE))];
-        admission.admit(key.into(), key).await.unwrap().observe(&rows);
+        admission
+            .admit(key.into(), key)
+            .await
+            .unwrap()
+            .observe(&rows);
     }
 
     /// Polls once; the output when ready (kept, so a permit stays held).
@@ -1218,7 +1290,10 @@ mod tests {
         tokio::pin!(big4);
         assert!(pending(big4.as_mut()));
         drop(small2);
-        assert!(pending(big4.as_mut()), "the last slot stays free for short builds");
+        assert!(
+            pending(big4.as_mut()),
+            "the last slot stays free for short builds"
+        );
         assert_eq!(admission.available_permits(), 1);
         drop(big2);
         let _big4 = poll_now(big4.as_mut()).expect("admitted after a large build ended");
@@ -1279,11 +1354,21 @@ mod tests {
         let admission = leak(SnapshotAdmission::new(2, 1 << 20));
         assert_eq!(admission.estimate("a", "tasks"), UNKNOWN_SNAPSHOT_BYTES);
         let rows: Vec<Value> = (0..1000).map(|n| serde_json::json!({ "n": n })).collect();
-        admission.admit("a".into(), "tasks").await.unwrap().observe(&rows);
-        let exact: usize = rows.iter().map(crate::replica::json_byte_len).sum::<usize>()
+        admission
+            .admit("a".into(), "tasks")
+            .await
+            .unwrap()
+            .observe(&rows);
+        let exact: usize = rows
+            .iter()
+            .map(crate::replica::json_byte_len)
+            .sum::<usize>()
             * HEAP_PER_JSON_BYTE;
         let estimate = admission.estimate("b", "tasks");
-        assert!(estimate.abs_diff(exact) * 10 < exact, "{estimate} vs {exact}");
+        assert!(
+            estimate.abs_diff(exact) * 10 < exact,
+            "{estimate} vs {exact}"
+        );
         assert_eq!(admission.estimate("a", "tasks"), estimate);
     }
 

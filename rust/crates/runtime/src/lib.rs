@@ -1879,9 +1879,18 @@ async fn websocket(
                     Ok(event) => {
                         // A connection that fell behind takes every feed event
                         // waiting for it as one: each row's newest state once.
-                        let event = if catching_up {
+                        // Burst control: behind also means events already
+                        // queued in its receiver (it applies slower than the
+                        // tenant commits), not only a backlogged socket.
+                        let lagging = catching_up || feed.as_ref().is_some_and(|receiver| delivery::feed_lagging(receiver.len()));
+                        let event = if lagging {
                             let merged = delivery::merge_waiting_feed(event, &mut feed, &mut pending_feed, &replicas, live_queries.is_empty() && batcher.enabled());
-                            if feed.as_ref().is_none_or(|receiver| receiver.is_empty()) { catching_up = false; }
+                            if feed.as_ref().is_none_or(|receiver| receiver.is_empty()) {
+                                catching_up = false;
+                                // What was queued is merged: the socket's
+                                // inbound frames (the user's own calls) go next.
+                                feed_scheduler.merged();
+                            }
                             merged
                         } else { event };
                         let (feed_revision, feed_key) = match &event {
@@ -3736,6 +3745,12 @@ impl FeedFirstScheduler {
 
     fn selected_socket(&mut self) {
         self.socket_turn = false;
+    }
+
+    /// The events counted as ready were merged into the current one.
+    fn merged(&mut self) {
+        self.remaining_snapshot_feed_events = 0;
+        self.socket_turn = true;
     }
 }
 

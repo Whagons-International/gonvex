@@ -1061,7 +1061,8 @@ pub fn record_slow_trace(label: Label, function: u16, values: &TraceValues) {
     let slot = &TRACES[(seq as usize) % TRACE_RING];
     slot.seq.store(0, std::sync::atomic::Ordering::Release);
     slot.at_unix_ms.store(unix_ms(), Relaxed);
-    slot.label.store(label as u64 | u64::from(function) << 8, Relaxed);
+    slot.label
+        .store(label as u64 | u64::from(function) << 8, Relaxed);
     for (target, value) in slot.values.iter().zip(values) {
         target.store(*value, Relaxed);
     }

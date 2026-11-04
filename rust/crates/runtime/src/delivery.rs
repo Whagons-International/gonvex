@@ -329,6 +329,22 @@ pub fn prewarm(
     }
 }
 
+/// Burst control: a connection with at least `GONVEX_FEED_MERGE_LAG` feed
+/// events already waiting in its receiver (default 1) is behind and takes them
+/// merged with the current one ([`merge_waiting_feed`]), one apply instead of
+/// one per transaction; its inbound frames come next. 0 merges only while the
+/// socket's writes are backlogged (delivery v3).
+pub fn feed_lagging(waiting: usize) -> bool {
+    static LAG: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let lag = *LAG.get_or_init(|| {
+        std::env::var("GONVEX_FEED_MERGE_LAG")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(1)
+    });
+    lag > 0 && waiting >= lag
+}
+
 /// Delivery v3: `event` merged with the transactions already waiting in the
 /// receiver (`crate::change_feed::merge_transactions`), when every subscription's
 /// cursor is before them. A waiting event that cannot be merged (a reset,

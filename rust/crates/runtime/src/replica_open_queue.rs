@@ -97,7 +97,10 @@ tokio::task_local! {
 /// any, counted as not reading. Call it only where the preparation holds no
 /// read transaction or clock of its own.
 pub(crate) async fn admission_wait<F: Future>(admission: F) -> F::Output {
-    let state = OPEN.try_with(Arc::clone).ok().filter(|_| feed_during_admission());
+    let state = OPEN
+        .try_with(Arc::clone)
+        .ok()
+        .filter(|_| feed_during_admission());
     if let Some(state) = &state {
         state.set(false);
     }
@@ -243,16 +246,17 @@ impl<T: Send + 'static> ReplicaOpenQueue<T> {
             // The socket may await a query that needs a connection held by a
             // preparation. Keep SQL progress independent of polling next().
             // The queue owns cancellation and remains the only publisher.
-            self.active.push(crate::offload::offload().spawn(gonvex_profiler::instrument(
-                gonvex_profiler::TaskKind::Snapshot,
-                async move {
-                    // Reading from the first poll; returned with the result
-                    // so it stays reading until the socket installs it.
-                    let reading = Reading::new(Arc::clone(&state));
-                    let result = OPEN.scope(state, job.future).await;
-                    (bulk, result, reading)
-                },
-            )));
+            self.active
+                .push(crate::offload::offload().spawn(gonvex_profiler::instrument(
+                    gonvex_profiler::TaskKind::Snapshot,
+                    async move {
+                        // Reading from the first poll; returned with the result
+                        // so it stays reading until the socket installs it.
+                        let reading = Reading::new(Arc::clone(&state));
+                        let result = OPEN.scope(state, job.future).await;
+                        (bulk, result, reading)
+                    },
+                )));
         }
     }
     pub async fn next(&mut self) -> Option<T> {
