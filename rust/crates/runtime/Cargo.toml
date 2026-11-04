@@ -123,3 +123,11 @@ required-features = ["perf-fixture"]
 name = "class_sharing_oracle"
 required-features = ["perf-fixture"]
 
+[[test]]
+name = "snapshot_cache_oracle"
+required-features = ["perf-fixture"]
+
+[[bench]]
+name = "snapshot_cache"
+harness = false
+required-features = ["perf-fixture"]

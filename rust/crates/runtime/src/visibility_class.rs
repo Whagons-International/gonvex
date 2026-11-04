@@ -646,6 +646,18 @@ impl<'a> AclRow<'a> {
         }
     }
 
+    /// Re-resolves the row's tokens if `scope` interned new ones since (call
+    /// after binding the member that will evaluate it).
+    pub fn refresh(&mut self, scope: &ClassScope) {
+        self.current(scope)
+    }
+
+    /// Whether [`AclRow::refresh`] would re-resolve tokens.
+    pub fn stale(&self, scope: &ClassScope) -> bool {
+        self.tokens.len() != self.values.len()
+            || self.generation != scope.generation.load(Ordering::Acquire)
+    }
+
     /// Whether the row is a JSON object at all (null rows are never visible).
     pub fn is_row(&self) -> bool {
         self.object
@@ -1666,6 +1678,12 @@ pub struct Candidates {
 }
 
 impl ClassScope {
+    /// Decode a row once for repeated evaluation: an owned row whose tokens
+    /// are re-resolved by [`AclRow::refresh`] when the interner moved.
+    pub fn decode_owned(&self, row: &Value) -> AclRow<'static> {
+        self.decode(RowView::Value(row)).into_owned()
+    }
+
     /// Decode a row's ACL columns and resolve its tokens.
     pub fn decode<'a>(&self, row: RowView<'a>) -> AclRow<'a> {
         let Some(plan) = self.plan.upgrade() else {

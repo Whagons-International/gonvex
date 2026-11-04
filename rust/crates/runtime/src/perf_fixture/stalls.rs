@@ -185,6 +185,10 @@ pub struct SocketOpen {
     pub subscription: Option<ReplicaSubscription>,
     pub rows: usize,
     pub bytes: usize,
+    /// The final `replica.ready` (cursor and digest a client persists).
+    pub ready: Option<(gonvex_protocol::ReplicaCursor, String)>,
+    /// The server asked for the client's hashes.
+    pub need_hashes: bool,
 }
 
 /// One replica open as the websocket loop runs it: the socket's preparation
@@ -198,6 +202,16 @@ pub async fn socket_open(
 ) -> FixtureResult<SocketOpen> {
     let request: ReplicaOpenRequest =
         serde_json::from_value(json!({"id": path, "path": path, "args": {}}))?;
+    socket_open_request(runtime, session, request).await
+}
+
+/// [`socket_open`] of any request (a resume carries the client's cursor and
+/// digest).
+pub async fn socket_open_request(
+    runtime: &Runtime,
+    session: &TenantSession,
+    request: ReplicaOpenRequest,
+) -> FixtureResult<SocketOpen> {
     let mut queue = crate::replica_open_queue::ReplicaOpenQueue::default();
     if let Some(error) =
         crate::enqueue_replica_open(runtime, Some(session), request, false, &mut queue).await
@@ -209,7 +223,13 @@ pub async fn socket_open(
     let messages = crate::install_replica_open_outcomes(&mut replicas, vec![outcome]);
     let mut rows = 0;
     let mut bytes = 0;
+    let mut ready = None;
+    let mut need_hashes = false;
     for message in messages {
+        if let ServerMessage::ReplicaReady { cursor, digest, .. } = &message {
+            ready = Some((cursor.clone(), digest.clone()));
+        }
+        need_hashes |= matches!(message, ServerMessage::ReplicaNeedHashes { .. });
         match message {
             ServerMessage::ReplicaSnapshot { ref result, .. } => {
                 rows += result.len();
@@ -227,6 +247,8 @@ pub async fn socket_open(
         subscription: replicas.into_values().next(),
         rows,
         bytes,
+        ready,
+        need_hashes,
     })
 }
 

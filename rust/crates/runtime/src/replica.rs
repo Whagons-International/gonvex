@@ -336,6 +336,51 @@ impl Runtime {
         request: ReplicaOpenRequest,
         sum_enabled: bool,
     ) -> Result<ReplicaOpenResult, ReplicaError> {
+        self.open_replica_with(
+            session,
+            request,
+            sum_enabled,
+            self.inner.snapshot_cache.enabled(),
+        )
+        .await
+    }
+
+    /// `open_replica` from a fresh SQL scan, bypassing the shared snapshot
+    /// cache (the SQL oracle of tests and benchmarks).
+    #[doc(hidden)]
+    pub async fn open_replica_fresh(
+        &self,
+        session: &TenantSession,
+        request: ReplicaOpenRequest,
+    ) -> Result<ReplicaOpenResult, ReplicaError> {
+        self.open_replica_with(session, request, false, false).await
+    }
+
+    /// Counters and size of the shared snapshot cache.
+    pub fn snapshot_cache_stats(&self) -> crate::snapshot_cache::CacheStats {
+        self.inner.snapshot_cache.stats()
+    }
+
+    /// Drops every shared snapshot cache entry (benchmarks).
+    #[doc(hidden)]
+    pub fn clear_snapshot_cache(&self) {
+        self.inner.snapshot_cache.clear()
+    }
+
+    /// Switches the shared snapshot cache off or on (benchmarks: before and
+    /// after in one process).
+    #[doc(hidden)]
+    pub fn set_snapshot_cache_enabled(&self, enabled: bool) {
+        self.inner.snapshot_cache.set_enabled(enabled)
+    }
+
+    async fn open_replica_with(
+        &self,
+        session: &TenantSession,
+        request: ReplicaOpenRequest,
+        sum_enabled: bool,
+        use_cache: bool,
+    ) -> Result<ReplicaOpenResult, ReplicaError> {
         let sum = requested_sum_digest(&request, sum_enabled)?;
         if session.is_anonymous() {
             return Err(ReplicaError::PublicSession(
@@ -374,7 +419,33 @@ impl Runtime {
             &session.identity.account.id,
             &session.member.permissions,
         );
+        let generation = module.generation;
+        let project = module.project_id.clone();
         drop(module);
+        let cache_key = crate::snapshot_cache::CacheKey {
+            database_url: &session.route.database_url,
+            project: &project,
+            generation,
+            path: &request.path,
+            args: &request.args,
+        };
+        // The shared base is taken before this open's read transaction, so
+        // its revision is never ahead of the open's clock.
+        let entry = if use_cache && request.args.is_object() {
+            self.inner
+                .snapshot_cache
+                .entry(&cache_key, || {
+                    self.build_cache_entry(session, &definition, &visibility, &request.args)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::debug!(target: "gonvex_runtime::replica", path = %request.path, %error, "snapshot cache build failed; fresh scan");
+                    None
+                })
+        } else {
+            None
+        };
+        let cached = entry.as_ref().map(|entry| (&cache_key, entry));
         let requested = match request.digest.as_deref() {
             Some(digest)
                 if !digest.is_empty() && !request.full_integrity && request.hashes.is_empty() =>
@@ -397,6 +468,40 @@ impl Runtime {
         let mut read = self
             .begin_collection_read(session, &definition, &visibility, &request.args)
             .await?;
+        if entry.is_some() {
+            // The cache evaluates visibility in memory, which equals SQL only
+            // when every index is exactly at the read's clock. Never wait for
+            // an index applier while holding a read connection (the change
+            // feed needs one to advance it): release the read, wait, and
+            // begin again at a newer clock. After 3 tries the open falls
+            // back to the SQL scan.
+            for _ in 0..3 {
+                use crate::snapshot_cache::{index_state, IndexState};
+                if index_state(&read.resolved, read.clock.revision, &read.clock.epoch)
+                    != IndexState::Moving
+                {
+                    break;
+                }
+                let CollectionRead {
+                    transaction,
+                    clock,
+                    resolved,
+                    permit,
+                    _active,
+                } = read;
+                transaction.commit().await?;
+                drop((permit, _active));
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    visibility::indexes_ready(&resolved, clock.revision, &clock.epoch),
+                )
+                .await;
+                drop(resolved);
+                read = self
+                    .begin_collection_read(session, &definition, &visibility, &request.args)
+                    .await?;
+            }
+        }
         let cursor = cursor_for(&read.clock, &definition, &directive.visibility_scope);
         let resumable = cursor_resumable(
             request.cursor.as_ref(),
@@ -411,27 +516,29 @@ impl Runtime {
             // retained after it is sent.
             let mut rows = Vec::new();
             let mut inline = Some(BTreeMap::new());
-            window = scan_window(
-                &mut read.transaction,
-                &definition,
-                &visibility,
-                &read.resolved,
-                &request.args,
-                |row| {
-                    digest.add(&row.hash);
-                    if let Some(hashes) = &mut inline {
-                        if hashes.len() < INLINE_SNAPSHOT_HASH_LIMIT {
-                            hashes.insert(row.key, row.hash);
-                        } else {
-                            inline = None;
+            window = self
+                .collection_rows(
+                    session,
+                    cached,
+                    &mut read,
+                    &definition,
+                    &visibility,
+                    &request.args,
+                    None,
+                    |row| {
+                        digest.add(&row.hash);
+                        if let Some(hashes) = &mut inline {
+                            if hashes.len() < INLINE_SNAPSHOT_HASH_LIMIT {
+                                hashes.insert(row.key.to_string(), row.hash.to_string());
+                            } else {
+                                inline = None;
+                            }
                         }
-                    }
-                    rows.push(Arc::new(row.row));
-                    Ok(())
-                },
-            )
-            .await?;
-            read.permit.observe_json_bytes(window.bytes.max(0) as usize);
+                        rows.push(row.row);
+                        Ok(())
+                    },
+                )
+                .await?;
             read.transaction.commit().await?;
             messages.push(replica_snapshot_message(
                 &request,
@@ -469,21 +576,25 @@ impl Runtime {
                         read.transaction.commit().await?;
                         return Ok(need_hashes(&request));
                     }
-                    // The current aggregate is computed from SQL (it verifies
-                    // the client's claim); no row is retained.
-                    window = scan_window(
-                        &mut read.transaction,
-                        &definition,
-                        &visibility,
-                        &read.resolved,
-                        &request.args,
-                        |row| {
-                            digest.add(&row.hash);
-                            Ok(())
-                        },
-                    )
-                    .await?;
-                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
+                    // The current aggregate verifies the client's claim. It
+                    // comes from the shared snapshot cache plus the change log
+                    // (no full-set query) or, without a usable entry, from a
+                    // SQL scan; no row is retained.
+                    window = self
+                        .collection_rows(
+                            session,
+                            cached,
+                            &mut read,
+                            &definition,
+                            &visibility,
+                            &request.args,
+                            Some((after, &changes)),
+                            |row| {
+                                digest.add(&row.hash);
+                                Ok(())
+                            },
+                        )
+                        .await?;
                     read.transaction.commit().await?;
                     let mut prior = digest.clone();
                     let mut upserts = BTreeMap::new();
@@ -550,20 +661,22 @@ impl Runtime {
                 }
                 DigestRequest::WholeSet => {
                     let mut hashes = BTreeMap::new();
-                    window = scan_window(
-                        &mut read.transaction,
-                        &definition,
-                        &visibility,
-                        &read.resolved,
-                        &request.args,
-                        |row| {
-                            digest.add(&row.hash);
-                            hashes.insert(row.key, row.hash);
-                            Ok(())
-                        },
-                    )
-                    .await?;
-                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
+                    window = self
+                        .collection_rows(
+                            session,
+                            cached,
+                            &mut read,
+                            &definition,
+                            &visibility,
+                            &request.args,
+                            None,
+                            |row| {
+                                digest.add(&row.hash);
+                                hashes.insert(row.key, row.hash);
+                                Ok(())
+                            },
+                        )
+                        .await?;
                     read.transaction.commit().await?;
                     if request.digest.as_deref() != Some(hashes_digest(&hashes).as_str()) {
                         return Ok(need_hashes(&request));
@@ -573,24 +686,28 @@ impl Runtime {
                     // The client sent its keys and hashes: send only rows
                     // whose hash differs and the keys SQL no longer returns.
                     let mut upserts = Vec::new();
-                    let mut seen = BTreeSet::new();
-                    window = scan_window(
-                        &mut read.transaction,
-                        &definition,
-                        &visibility,
-                        &read.resolved,
-                        &request.args,
-                        |row| {
-                            digest.add(&row.hash);
-                            if request.hashes.get(&row.key) != Some(&row.hash) {
-                                upserts.push(row.row);
-                            }
-                            seen.insert(row.key);
-                            Ok(())
-                        },
-                    )
-                    .await?;
-                    read.permit.observe_json_bytes(window.bytes.max(0) as usize);
+                    let mut seen = BTreeSet::<Arc<str>>::new();
+                    window = self
+                        .collection_rows(
+                            session,
+                            cached,
+                            &mut read,
+                            &definition,
+                            &visibility,
+                            &request.args,
+                            None,
+                            |row| {
+                                digest.add(&row.hash);
+                                if request.hashes.get(&*row.key).map(String::as_str)
+                                    != Some(&*row.hash)
+                                {
+                                    upserts.push(Value::clone(&row.row));
+                                }
+                                seen.insert(row.key);
+                                Ok(())
+                            },
+                        )
+                        .await?;
                     read.transaction.commit().await?;
                     let deleted = request
                         .keys
@@ -641,6 +758,212 @@ impl Runtime {
                 parent_acl_columns: None,
             }),
         })
+    }
+
+    /// The member's rows at `read`'s clock, in snapshot order and within the
+    /// collection's budgets, passed to `visit`: from the shared snapshot cache
+    /// plus the change log when `cached` can answer exactly, otherwise from a
+    /// SQL scan (`scan_window`).
+    #[allow(clippy::too_many_arguments)]
+    async fn collection_rows(
+        &self,
+        session: &TenantSession,
+        cached: Option<(
+            &crate::snapshot_cache::CacheKey<'_>,
+            &Arc<crate::snapshot_cache::CacheEntry>,
+        )>,
+        read: &mut CollectionRead,
+        definition: &ReplicaCollectionDefinition,
+        visibility: &VisibilityPlan,
+        args: &Value,
+        known: Option<(u64, &[LogChange])>,
+        mut visit: impl FnMut(crate::snapshot_cache::CachedRow) -> Result<(), ReplicaError>,
+    ) -> Result<ReplicaWindow, ReplicaError> {
+        if let Some((key, entry)) = cached {
+            if let Some(view) = self
+                .cached_view(session, key, entry, read, definition, visibility, args, known)
+                .await?
+            {
+                for row in view.rows {
+                    visit(row)?;
+                }
+                return Ok(view.window);
+            }
+            self.inner.snapshot_cache.record_fallback();
+        }
+        let window = scan_window(
+            &mut read.transaction,
+            definition,
+            visibility,
+            &read.resolved,
+            args,
+            |row| {
+                visit(crate::snapshot_cache::CachedRow {
+                    key: row.key.into(),
+                    row: Arc::new(row.row),
+                    eval: None,
+                    hash: row.hash.into(),
+                    bytes: 0,
+                })
+            },
+        )
+        .await?;
+        read.permit.observe_json_bytes(window.bytes.max(0) as usize);
+        Ok(window)
+    }
+
+    /// Base (cached rows at R) + source-table log (R, clock], filtered with
+    /// this member's visibility at the clock. None when that is not exactly
+    /// what SQL would return at the clock.
+    #[allow(clippy::too_many_arguments)]
+    async fn cached_view(
+        &self,
+        session: &TenantSession,
+        key: &crate::snapshot_cache::CacheKey<'_>,
+        entry: &Arc<crate::snapshot_cache::CacheEntry>,
+        read: &mut CollectionRead,
+        definition: &ReplicaCollectionDefinition,
+        visibility: &VisibilityPlan,
+        args: &Value,
+        known: Option<(u64, &[LogChange])>,
+    ) -> Result<Option<crate::snapshot_cache::View>, ReplicaError> {
+        use crate::visibility_class::{MemberHandle, RowView};
+        let cache = &self.inner.snapshot_cache;
+        let clock = read.clock.clone();
+        if entry.epoch != clock.epoch || entry.revision < clock.retained_revision {
+            // Another database epoch, or older than the log's retention: the
+            // log cannot bring it to the clock. The next open rebuilds.
+            cache.invalidate(key, entry);
+            return Ok(None);
+        }
+        if entry.revision > clock.revision
+            || bounded_sql_visibility(definition, visibility, &read.resolved)
+            || !crate::snapshot_cache::indexes_at(&read.resolved, clock.revision, &clock.epoch)
+        {
+            return Ok(None);
+        }
+        if !read.resolved.ephemeral_member {
+            let active = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS (SELECT 1 FROM members WHERE account_id = $1 AND status = 'active')",
+            )
+            .bind(read.resolved.direct["account.id"].clone())
+            .fetch_one(&mut **read.transaction.transaction())
+            .await?;
+            if active == 0 {
+                return Ok(Some(crate::snapshot_cache::View {
+                    rows: Vec::new(),
+                    window: ReplicaWindow::default(),
+                    replayed: 0,
+                    rolled: None,
+                    rolled_sources: Vec::new(),
+                }));
+            }
+        }
+        // The resume path already read the log after the client's cursor
+        // through this clock: reuse its suffix when the entry is not older.
+        let read_changes;
+        let changes = match known {
+            Some((after, known)) if entry.revision >= after => {
+                &known[known.partition_point(|change| change.revision <= entry.revision)..]
+            }
+            _ => {
+                read_changes = crate::snapshot_cache::source_changes(
+                    &mut read.transaction,
+                    &definition.table,
+                    entry.revision,
+                    clock.revision,
+                )
+                .await?;
+                &read_changes[..]
+            }
+        };
+        let handle = (visibility.version == Some(2)).then(|| {
+            crate::visibility_class::member_visibility(
+                visibility,
+                &read.resolved,
+                &session.route.database_url,
+            )
+        });
+        let resolved = &read.resolved;
+        let mut view = match &handle {
+            Some(MemberHandle::Compiled(member)) => {
+                // Cached rows evaluate from their decoded ACL columns (decoded
+                // once per entry); rows from the log are decoded here.
+                entry.with_acl(member.scope(), |acl| {
+                    crate::snapshot_cache::view(
+                        entry,
+                        changes,
+                        clock.revision,
+                        definition,
+                        visibility,
+                        args,
+                        &mut |row, index| match index {
+                            Some(index) => member.visible_row(&acl[index]),
+                            None => member.visible(RowView::Value(row.eval())),
+                        },
+                    )
+                })?
+            }
+            _ => crate::snapshot_cache::view(
+                entry,
+                changes,
+                clock.revision,
+                definition,
+                visibility,
+                args,
+                &mut |row, _| visibility::row_matches(visibility, resolved, row.eval()),
+            )?,
+        };
+        // An index applier that advanced during the evaluation may have
+        // shown some rows later parents: not the clock's state.
+        if !crate::snapshot_cache::indexes_at(&read.resolved, clock.revision, &clock.epoch) {
+            return Ok(None);
+        }
+        if let Some(view) = view.as_mut() {
+            if let Some(rolled) = view.rolled.take() {
+                rolled.inherit_acl(entry, &std::mem::take(&mut view.rolled_sources));
+                cache.roll_forward(key, entry, rolled);
+            }
+        }
+        Ok(view)
+    }
+
+    /// One SQL read of every row a collection's own filters admit, for the
+    /// shared snapshot cache. Admitted like a snapshot build.
+    async fn build_cache_entry(
+        &self,
+        session: &TenantSession,
+        definition: &ReplicaCollectionDefinition,
+        visibility: &VisibilityPlan,
+        args: &Value,
+    ) -> Result<Option<crate::snapshot_cache::CacheEntry>, ReplicaError> {
+        use gonvex_profiler::{Label, ScopeTimer, Stage};
+        let _build = ScopeTimer::new(Stage::SnapshotBuild, Label::None);
+        let permit = crate::offload::SnapshotAdmission::global()
+            .admit(
+                format!(
+                    "{}\u{0}{}\u{0}cache\u{0}{}",
+                    session.route.database_url, definition.table, args
+                ),
+                &definition.table,
+            )
+            .await;
+        let control = self
+            .inner
+            .control_plane
+            .read()
+            .await
+            .clone()
+            .ok_or(ReplicaError::ModuleMissing)?;
+        let mut transaction = control
+            .begin_tenant_transaction(&session.route, true)
+            .await?;
+        let entry =
+            crate::snapshot_cache::build_entry(&mut transaction, definition, visibility, args)
+                .await?;
+        transaction.commit().await?;
+        permit.observe_json_bytes(entry.rows.iter().map(|row| row.bytes as usize).sum());
+        Ok(Some(entry))
     }
 
     /// Opens a read transaction for one collection scan and resolves the
@@ -1521,7 +1844,7 @@ fn normalize_entity_changes(
     changes
 }
 
-async fn resume_changes(
+pub(crate) async fn resume_changes(
     transaction: &mut TenantTransaction,
     after: u64,
     through: u64,
@@ -1568,7 +1891,7 @@ fn log_json(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Value, Replic
     }
 }
 
-async fn clock_in_transaction(
+pub(crate) async fn clock_in_transaction(
     transaction: &mut TenantTransaction,
 ) -> Result<ReplicaClock, ReplicaError> {
     let row = sqlx::query(
@@ -1688,7 +2011,7 @@ pub(crate) async fn scan_window(
 }
 
 /// `columns` with their declared kinds (JSON, BOOLEAN decide the encoding).
-async fn declared_columns<'a>(
+pub(crate) async fn declared_columns<'a>(
     transaction: &mut TenantTransaction,
     definition: &ReplicaCollectionDefinition,
     columns: impl Iterator<Item = &'a String>,
@@ -1766,7 +2089,7 @@ async fn collect_window(
 
 /// SQLite's ordering of the JSON scalars a collection orders by: NULL, then
 /// numbers (booleans are integers), then text (binary collation).
-fn sql_order(left: &Value, right: &Value) -> std::cmp::Ordering {
+pub(crate) fn sql_order(left: &Value, right: &Value) -> std::cmp::Ordering {
     fn class(value: &Value) -> u8 {
         match value {
             Value::Null => 0,
@@ -1821,7 +2144,7 @@ fn row_in_collection(
 }
 
 /// The collection's own filters (exclusions and argument equalities).
-fn collection_filters_admit(
+pub(crate) fn collection_filters_admit(
     row: &Value,
     args: &Value,
     definition: &ReplicaCollectionDefinition,
@@ -1865,7 +2188,7 @@ fn bounded_sql_visibility(
         && plan.needs_materialized_sets(resolved)
 }
 
-fn project_row(
+pub(crate) fn project_row(
     row: &Value,
     definition: &ReplicaCollectionDefinition,
 ) -> Result<Value, ReplicaError> {
@@ -1882,7 +2205,7 @@ fn project_row(
     Ok(Value::Object(projected))
 }
 
-fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
+pub(crate) fn row_key(row: &Value, key: &str) -> Result<String, ReplicaError> {
     match row.get(key) {
         Some(Value::String(value)) => Ok(value.clone()),
         Some(Value::Number(value)) => Ok(value.to_string()),
@@ -1957,7 +2280,7 @@ fn hashes_digest<K: Ord + AsRef<str>, V: AsRef<str>>(hashes: &BTreeMap<K, V>) ->
     hex_digest(out.as_bytes())
 }
 
-fn stable_json(value: &Value) -> String {
+pub(crate) fn stable_json(value: &Value) -> String {
     let mut out = String::new();
     write_stable_json(&mut out, value);
     out
@@ -2436,7 +2759,7 @@ fn replica_ready(
     }
 }
 
-fn quote(value: &str) -> Result<String, ReplicaError> {
+pub(crate) fn quote(value: &str) -> Result<String, ReplicaError> {
     if !value.is_empty()
         && value.len() <= 63
         && value.chars().enumerate().all(|(index, character)| {
@@ -2451,7 +2774,7 @@ fn quote(value: &str) -> Result<String, ReplicaError> {
     }
 }
 
-fn hex_digest(value: &[u8]) -> String {
+pub(crate) fn hex_digest(value: &[u8]) -> String {
     Sha256::digest(value)
         .iter()
         .map(|byte| format!("{byte:02x}"))

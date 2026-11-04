@@ -304,6 +304,30 @@ pub async fn ready_at(
         .unwrap_or(false)
 }
 
+/// The revision `index` is complete through, or None when it is poisoned or
+/// at another epoch. Never waits.
+pub(crate) fn usable_revision(
+    index: &std::sync::RwLock<ParentAclIndex>,
+    epoch: &str,
+) -> Option<u64> {
+    let index = index.read().ok()?;
+    (!index.poisoned && (index.epoch.is_empty() || index.epoch == epoch)).then_some(index.revision)
+}
+
+/// Whether `index` is complete through exactly `revision` of `epoch` (no
+/// later transaction applied yet). Never waits.
+pub(crate) fn exactly_at(
+    index: &std::sync::RwLock<ParentAclIndex>,
+    revision: u64,
+    epoch: &str,
+) -> bool {
+    index.read().is_ok_and(|index| {
+        !index.poisoned
+            && (index.epoch.is_empty() || index.epoch == epoch)
+            && index.revision == revision
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
