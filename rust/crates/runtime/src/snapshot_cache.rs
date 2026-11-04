@@ -487,8 +487,17 @@ struct Slot {
     observed: u64,
     admitted: u64,
     scanned: u64,
-    /// Opens of this key skip the cache until then (a sparse entry).
+    /// Opens of members not known to be broad skip the cache until then
+    /// (a sparse entry).
     sparse_until: Option<Instant>,
+    /// Whether an open in the current observation window admitted a large
+    /// share (then the key is not sparse, whatever the average).
+    broad_in_window: bool,
+    /// Rows of the last entry observed (the share a skipped open's SQL
+    /// result is compared with).
+    entry_rows: usize,
+    /// Per member: broad (true) or narrow (false), until when.
+    members: HashMap<Box<str>, (bool, Instant)>,
 }
 
 impl Slot {
@@ -503,12 +512,46 @@ impl Slot {
             admitted: 0,
             scanned: 0,
             sparse_until: None,
+            broad_in_window: false,
+            entry_rows: 0,
+            members: HashMap::new(),
         }
     }
 
     fn sparse(&self) -> bool {
         self.sparse_until
             .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// The member's recent verdict: Some(true) broad, Some(false) narrow.
+    fn member(&self, member: &str) -> Option<bool> {
+        self.members
+            .get(member)
+            .filter(|(_, until)| Instant::now() < *until)
+            .map(|(broad, _)| *broad)
+    }
+
+    fn remember(&mut self, member: &str, broad: bool, hold: Duration) {
+        const MEMBERS: usize = 16_384;
+        if self.members.len() >= MEMBERS && !self.members.contains_key(member) {
+            let now = Instant::now();
+            self.members.retain(|_, (_, until)| now < *until);
+            if self.members.len() >= MEMBERS {
+                self.members.clear();
+            }
+        }
+        self.members
+            .insert(member.into(), (broad, Instant::now() + hold));
+    }
+
+    /// Whether an open by `member` skips the cache: a narrow member always
+    /// (SQL finds its few rows through an index); a member not known to be
+    /// broad while the key is sparse.
+    fn skips(&self, member: &str) -> bool {
+        match self.member(member) {
+            Some(broad) => !broad,
+            None => self.sparse(),
+        }
     }
 
     /// Kept while it holds an entry, a build is in flight or it is sparse.
@@ -586,6 +629,10 @@ pub(crate) struct CacheKey<'a> {
     pub generation: u64,
     pub path: &'a str,
     pub args: &'a Value,
+    /// The opening member (not part of the entry's key): sparse decisions
+    /// are per member, so a broad member keeps its log-only resume on a key
+    /// that narrow members made sparse.
+    pub member: &'a str,
 }
 
 impl CacheKey<'_> {
@@ -681,26 +728,63 @@ impl SnapshotCache {
     }
 
     /// Records what one open of `key` admitted out of the entry rows it
-    /// evaluated. A large entry whose opens keep admitting a small share is
-    /// dropped and its key skips the cache for a while: every open would
-    /// otherwise evaluate (and every roll-forward copy) all of its rows,
-    /// while SQL finds the member's few rows through an index.
+    /// evaluated. A member whose opens admit a small share of a large entry
+    /// is marked narrow: its opens read SQL (the member's visibility as an
+    /// indexed predicate) instead of evaluating every row. A large entry
+    /// whose opens in a window were all narrow is dropped, and members not
+    /// known to be broad skip its key for a while. Members known to be broad
+    /// keep using (and rebuilding) it, so their resumes stay log-only.
     pub(crate) fn observe(&self, key: &CacheKey<'_>, admitted: usize, scanned: usize) {
         let config = config();
         let mut slots = self.slots.lock().unwrap();
         let Some(slot) = slots.get_mut(&key.owned()) else {
             return;
         };
+        let broad = config.sparse_ratio == 0
+            || scanned < config.sparse_min_rows
+            || (admitted as u64).saturating_mul(config.sparse_ratio) >= scanned as u64;
+        if config.sparse_ratio > 0 {
+            slot.remember(key.member, broad, config.sparse_hold);
+        }
+        slot.entry_rows = scanned;
+        slot.broad_in_window |= broad;
         slot.observed += 1;
         slot.admitted += admitted as u64;
         slot.scanned += scanned as u64;
-        if Self::sparse_verdict(slot, config) {
+        if Self::sparse_verdict(slot, config) && !slot.broad_in_window {
             slot.entry = None;
             slot.sparse_until = Some(Instant::now() + config.sparse_hold);
+            self.sparse_drops.fetch_add(1, Relaxed);
+        }
+        if slot.observed >= 3 && (slot.entry.is_none() || slot.observed >= 64) {
+            // A new window: decisions follow the current population.
             slot.observed = 0;
             slot.admitted = 0;
             slot.scanned = 0;
-            self.sparse_drops.fetch_add(1, Relaxed);
+            slot.broad_in_window = false;
+        }
+    }
+
+    /// An open of `key` that skipped the cache admitted `admitted` rows from
+    /// SQL. Compared with the last entry's size it classifies the member: a
+    /// broad member revives a sparse key (its next open builds the entry and
+    /// its resumes are log-only again).
+    pub(crate) fn observe_skipped(&self, key: &CacheKey<'_>, admitted: usize) {
+        let config = config();
+        if config.sparse_ratio == 0 {
+            return;
+        }
+        let mut slots = self.slots.lock().unwrap();
+        let Some(slot) = slots.get_mut(&key.owned()) else {
+            return;
+        };
+        if slot.entry_rows == 0 || !(slot.sparse() || slot.member(key.member) == Some(false)) {
+            return;
+        }
+        let broad = (admitted as u64).saturating_mul(config.sparse_ratio) >= slot.entry_rows as u64;
+        slot.remember(key.member, broad, config.sparse_hold);
+        if broad {
+            slot.sparse_until = None;
         }
     }
 
@@ -758,7 +842,7 @@ impl SnapshotCache {
             .lock()
             .unwrap()
             .get(&owned)
-            .is_some_and(Slot::sparse)
+            .is_some_and(|slot| slot.skips(key.member))
         {
             self.sparse_skips.fetch_add(1, Relaxed);
             return Ok(None);
@@ -812,7 +896,7 @@ impl SnapshotCache {
             .lock()
             .unwrap()
             .get(&owned)
-            .is_some_and(Slot::sparse)
+            .is_some_and(|slot| slot.skips(key.member))
         {
             self.sparse_skips.fetch_add(1, Relaxed);
             return Lookup::Skip;
@@ -1297,6 +1381,7 @@ mod tests {
             generation: 1,
             path,
             args,
+            member: "m",
         }
     }
 
