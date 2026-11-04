@@ -1,5 +1,5 @@
 //! Optional lower OS priority for SQLite reader threads
-//! (`GONVEX_SQLITE_READER_NICE`, default 0 = unchanged).
+//! (`GONVEX_SQLITE_READER_NICE`, default 10; 0 = unchanged).
 //!
 //! sqlx runs each connection on its own worker thread and opens the
 //! connection on it, so an SQLite auto-extension (called inside
@@ -19,7 +19,7 @@ fn nice() -> i32 {
         std::env::var("GONVEX_SQLITE_READER_NICE")
             .ok()
             .and_then(|value| value.trim().parse::<i32>().ok())
-            .unwrap_or(0)
+            .unwrap_or(10)
             .clamp(0, 19)
     })
 }

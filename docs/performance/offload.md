@@ -42,7 +42,7 @@ visibility parent-ACL applier and every pool job are wrapped with
 
 Configuration: `GONVEX_OFFLOAD` = `runtime` (default) | `inline` (previous
 behaviour) | `blocking` | `threads`; `GONVEX_OFFLOAD_THREADS` (default CPUs,
-1..=4); `GONVEX_OFFLOAD_NICE` (default 0); `GONVEX_OFFLOAD_MIN_US` (250).
+1..=4); `GONVEX_OFFLOAD_NICE` (default 10; 0 turns it off); `GONVEX_OFFLOAD_MIN_US` (250).
 
 ## Measuring: the stall driver
 
@@ -143,7 +143,9 @@ resolved.
 
 Pool thread priority: an early run with nice 10 isolated as well as nice 0
 did later; nice was not shown to help and risks starving the pool's cgroup
-share on a shared host, so the default is 0 (`GONVEX_OFFLOAD_NICE`).
+share on a shared host, so the default was 0 (`GONVEX_OFFLOAD_NICE`). Since 2026-11-04 the
+default is 10, together with `GONVEX_SQLITE_READER_NICE=10` (cache-heap.md §5: the pool alone at
+nice 10 is worse, both together let the writer and the isolate run first).
 
 ## Memory during bursts
 

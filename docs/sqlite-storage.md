@@ -77,6 +77,11 @@ of every file) has one process-wide soft limit,
 caches recycle instead of growing. Idle readers close after
 `database_idle_timeout` (runtime default 15 s).
 
+Read-only connections' worker threads run at nice 10 (`GONVEX_SQLITE_READER_NICE`, default 10,
+0 = unchanged), as do the offload/snapshot pool threads (`GONVEX_OFFLOAD_NICE`, default 10), so
+under CPU saturation the writer, the module isolate and the network threads run first.
+Measurements: `docs/performance/cache-heap.md` §5.
+
 `TenantTransaction::commit` finalizes the change feed inside the same
 transaction (see below), commits, waits for durability, and only then
 publishes the revision. A caller never sees a revision that did not commit.

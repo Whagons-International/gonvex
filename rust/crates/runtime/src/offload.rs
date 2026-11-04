@@ -16,7 +16,7 @@
 //!   `threads` (fixed OS threads, one job at a time each). The alternatives
 //!   exist for the comparison in docs/performance/offload.md.
 //! - `GONVEX_OFFLOAD_THREADS`: pool threads (default: available CPUs, 1..=4).
-//! - `GONVEX_OFFLOAD_NICE`: nice increment of pool threads (default 0: off).
+//! - `GONVEX_OFFLOAD_NICE`: nice increment of pool threads (default 10; 0: off).
 //!   Measured: nice 10 cut pool throughput 2-20x on a shared host (hierarchical
 //!   CFS weighs a cgroup by the nice weight of its runnable threads), while the
 //!   network thread was already isolated at nice 0 (docs/performance/offload.md).
@@ -118,7 +118,7 @@ pub fn offload() -> &'static Offload {
         let threads = env_usize("GONVEX_OFFLOAD_THREADS")
             .filter(|threads| *threads > 0)
             .unwrap_or_else(|| cpus().clamp(1, 4));
-        let nice = env_usize("GONVEX_OFFLOAD_NICE").unwrap_or(0) as i32;
+        let nice = env_usize("GONVEX_OFFLOAD_NICE").unwrap_or(10) as i32;
         let inline_below =
             Duration::from_micros(env_usize("GONVEX_OFFLOAD_MIN_US").unwrap_or(250) as u64);
         Offload::new(strategy, threads, nice, inline_below)

@@ -135,7 +135,9 @@ The isolate wait is the unaccounted share of reducer `fn.total` (94–99 % in sl
 reducer `fn.total` is the isolate-wait signal here. Offload alone is worse (its snapshot SQL still
 runs at normal priority on reader threads while the offload half waits); both together let the
 writer and the isolate run first. Recommendation: `GONVEX_OFFLOAD_NICE=10
-GONVEX_SQLITE_READER_NICE=10` in the lab compose / deployment; code defaults stay 0.
+GONVEX_SQLITE_READER_NICE=10` in the lab compose / deployment. **Since 2026-11-04 both are the code
+defaults (10; 0 turns either off)**, approved for staging and releases; the reducer/V8 and network
+threads stay at 0.
 
 ## All cases
 
