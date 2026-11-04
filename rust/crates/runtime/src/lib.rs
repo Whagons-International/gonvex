@@ -40,6 +40,7 @@ pub mod profiling;
 pub mod public_functions;
 pub(crate) mod canonical_row;
 pub mod raw_sites;
+mod raw_log;
 pub mod replica;
 mod replica_cursor;
 mod replica_open_queue;

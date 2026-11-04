@@ -22,6 +22,29 @@ impl JsonRow {
         serde_json::value::RawValue::from_string(text).map(|raw| Self(raw.into()))
     }
 
+    /// One allocation (the shared text), no validation pass.
+    ///
+    /// # Safety
+    /// `text` must be exactly one well-formed JSON value with no leading or
+    /// trailing whitespace (e.g. checked by the runtime's row scanner).
+    pub unsafe fn from_str_unchecked(text: &str) -> Self {
+        debug_assert!(
+            serde_json::from_str::<&serde_json::value::RawValue>(text)
+                .is_ok_and(|raw| raw.get().len() == text.len()),
+            "from_str_unchecked: not one well-formed JSON value"
+        );
+        let shared: std::sync::Arc<str> = std::sync::Arc::from(text);
+        // SAFETY: `RawValue` is `#[repr(transparent)]` over `str`, so an
+        // `Arc<str>` and an `Arc<RawValue>` have the same layout (serde_json
+        // casts `Box<str>` to `Box<RawValue>` the same way); the text is one
+        // JSON value per the caller's contract.
+        Self(unsafe {
+            std::sync::Arc::from_raw(
+                std::sync::Arc::into_raw(shared) as *const serde_json::value::RawValue
+            )
+        })
+    }
+
     pub fn from_value(value: &Value) -> Self {
         Self(
             serde_json::value::to_raw_value(value)

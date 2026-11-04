@@ -43,7 +43,6 @@ use gonvex_protocol::JsonRow;
 use gonvex_store::TenantTransaction;
 use serde_json::Value;
 
-use crate::change_feed::LogChange;
 use crate::modules::ReplicaCollectionDefinition;
 use crate::replica::{self, ReplicaError, ReplicaWindow};
 use crate::visibility::{self, ResolvedVisibility, VisibilityPlan};
@@ -130,12 +129,12 @@ pub struct CachedRow {
 impl CachedRow {
     /// A row of a SQL scan (the fallback path; only its key, row and hash
     /// are used).
-    pub(crate) fn scanned(key: String, row: JsonRow, hash: String) -> Self {
+    pub(crate) fn scanned(key: Arc<str>, row: JsonRow, hash: Arc<str>) -> Self {
         Self {
-            key: key.into(),
+            key,
             row,
             eval: None,
-            hash: hash.into(),
+            hash,
             bytes: 0,
             sort: None,
         }
@@ -192,7 +191,7 @@ impl CachedRow {
         });
         Ok(Self {
             key: key.into(),
-            hash: replica::hex_digest(canonical.as_bytes()).into(),
+            hash: crate::canonical_row::hex_sha256(canonical.as_bytes()),
             bytes: canonical.len() as u32,
             // The canonical text is valid JSON of the same projection.
             row: JsonRow::from_json(canonical).map_err(invalid)?,
@@ -201,59 +200,146 @@ impl CachedRow {
         })
     }
 
-    /// A row of the cache's SQL read (`json_object` over the projection and
-    /// `extra`). Without extra columns the text is kept as it is and only
-    /// the key and order columns are decoded (`canonical_row`).
-    fn from_sql(
-        text: String,
+    /// A row from a raw change-log image: the projection sliced out of the
+    /// image text (`from_image` for images the scanner could not check).
+    pub(crate) fn from_raw_image(
+        image: &crate::raw_log::RawImage,
         definition: &ReplicaCollectionDefinition,
         extra: &[String],
         scratch: &mut String,
     ) -> Result<Self, ReplicaError> {
+        let Some((projection, eval, has_key)) =
+            image.object_text(&definition.columns, extra, &definition.key)
+        else {
+            return Self::from_image(&image.value(), definition, extra);
+        };
+        let _site = crate::raw_sites::raw_site!(LogImageRow);
+        if !has_key {
+            return Err(ReplicaError::MissingKey(definition.key.clone()));
+        }
+        let key = image.key(&definition.key)?;
+        let sort = (!definition.order_by.is_empty()).then(|| {
+            Arc::new((image.column(&definition.order_by), image.column(&definition.key)))
+        });
+        let (row, hash, bytes) = Self::projection(projection, scratch)?;
+        let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
+        Ok(Self {
+            key,
+            row,
+            eval: eval
+                .map(|eval| match crate::canonical_row::check(&eval) {
+                    Some(checked) => Ok(crate::canonical_row::json_row(&eval, &checked)),
+                    None => JsonRow::from_json(eval),
+                })
+                .transpose()
+                .map_err(invalid)?,
+            hash,
+            bytes,
+            sort,
+        })
+    }
+
+    /// A projection's text as a row: (row, hash, canonical bytes).
+    fn projection(
+        projection: String,
+        scratch: &mut String,
+    ) -> Result<(JsonRow, Arc<str>, u32), ReplicaError> {
+        let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
+        let checked = crate::canonical_row::check(&projection);
+        let canonical = crate::canonical_row::canonical(&projection, checked.as_ref(), scratch)
+            .map_err(invalid)?;
+        let (hash, bytes) = (
+            crate::canonical_row::hex_sha256(canonical.as_bytes()),
+            canonical.len() as u32,
+        );
+        drop(canonical);
+        let row = match &checked {
+            Some(checked) => crate::canonical_row::json_row(&projection, checked),
+            None => JsonRow::from_json(projection).map_err(invalid)?,
+        };
+        Ok((row, hash, bytes))
+    }
+
+    /// A row of the cache's SQL read (`json_object` over the projection, then
+    /// `extra`). The text is kept as it is (with extra columns it is the
+    /// eval text and the projection is its leading members); only the key
+    /// and order columns are decoded (`canonical_row`).
+    fn from_sql(
+        text: &str,
+        definition: &ReplicaCollectionDefinition,
+        extra: &[String],
+        scratch: &mut String,
+        spare: &mut Vec<crate::canonical_row::Member>,
+    ) -> Result<Self, ReplicaError> {
+        use crate::canonical_row::{find, member_key, value_of};
         let mut _site = crate::raw_sites::raw_site!(CacheRowRaw);
         let invalid = |error: serde_json::Error| ReplicaError::InvalidIdentifier(error.to_string());
-        let checked = if extra.is_empty() {
-            crate::canonical_row::check(&text)
-        } else {
-            None
-        };
+        let projected = definition.columns.len();
+        // With extra columns the projection must be exactly the leading
+        // members (SQLite writes `json_object`'s arguments in order) and
+        // carry the key (`project_row`).
+        let checked = crate::canonical_row::check_reusing(text, spare).filter(|checked| {
+            extra.is_empty()
+                || (checked.members.len() == projected + extra.len()
+                    && checked.members[..projected]
+                        .iter()
+                        .zip(&definition.columns)
+                        .all(|(member, column)| &text[member.key.clone()] == column)
+                    && definition.columns.contains(&definition.key))
+        });
         let Some(checked) = checked else {
             _site.set(crate::raw_sites::Site::CacheRowParsed);
-            let image: Value = serde_json::from_str(&text).map_err(invalid)?;
+            let image: Value = serde_json::from_str(text).map_err(invalid)?;
             let mut row = Self::from_image(&image, definition, extra)?;
             if extra.is_empty() {
                 // Same projection; keep SQLite's text like the fresh path.
-                row.row = JsonRow::from_json(text).map_err(invalid)?;
+                row.row = JsonRow::from_json(text.to_owned()).map_err(invalid)?;
             }
             return Ok(row);
         };
-        let member = |name: &str| crate::canonical_row::member_value(&text, &checked, name);
-        let key_value = member(&definition.key)
+        let key_member = find(text, &checked.members, &definition.key)
             .ok_or_else(|| ReplicaError::MissingKey(definition.key.clone()))?;
-        let key = match &key_value {
-            Value::String(value) => value.clone(),
-            Value::Number(value) => value.to_string(),
-            Value::Bool(value) => value.to_string(),
-            _ => return Err(ReplicaError::MissingKey(definition.key.clone())),
-        };
+        let key = member_key(text, key_member)
+            .ok_or_else(|| ReplicaError::MissingKey(definition.key.clone()))?;
         let sort = (!definition.order_by.is_empty()).then(|| {
             Arc::new((
-                member(&definition.order_by).unwrap_or(Value::Null),
-                key_value,
+                value_of(text, find(text, &checked.members, &definition.order_by)),
+                value_of(text, Some(key_member)),
             ))
         });
-        let canonical =
-            crate::canonical_row::canonical(&text, Some(&checked), scratch).map_err(invalid)?;
-        let (hash, bytes) = (replica::hex_digest(canonical.as_bytes()), canonical.len());
-        drop(canonical);
-        Ok(Self {
-            key: key.into(),
-            row: JsonRow::from_json(text).map_err(invalid)?,
-            eval: None,
-            hash: hash.into(),
-            bytes: bytes as u32,
-            sort,
-        })
+        let row = if extra.is_empty() {
+            let canonical =
+                crate::canonical_row::canonical(text, Some(&checked), scratch).map_err(invalid)?;
+            let (hash, bytes) = (
+                crate::canonical_row::hex_sha256(canonical.as_bytes()),
+                canonical.len() as u32,
+            );
+            drop(canonical);
+            Self {
+                key,
+                row: crate::canonical_row::json_row(text, &checked),
+                eval: None,
+                hash,
+                bytes,
+                sort,
+            }
+        } else {
+            let projection = match checked.members[..projected].last() {
+                Some(last) => format!("{{{}}}", &text[1..last.value.end]),
+                None => "{}".to_owned(),
+            };
+            let (row, hash, bytes) = Self::projection(projection, scratch)?;
+            Self {
+                key,
+                row,
+                eval: Some(crate::canonical_row::json_row(text, &checked)),
+                hash,
+                bytes,
+                sort,
+            }
+        };
+        crate::canonical_row::recycle(checked, spare);
+        Ok(row)
     }
 }
 
@@ -928,13 +1014,13 @@ pub(crate) async fn build_entry(
     let mut rows = Vec::new();
     let mut seen = crate::fast_hash::FastSet::default();
     let mut scratch = String::new();
+    let mut spare = Vec::new();
     while let Some(batch) = stream.next_batch().await {
         let batch = batch?;
         for bytes in batch.rows() {
             let text = std::str::from_utf8(bytes)
-                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?
-                .to_owned();
-            let row = CachedRow::from_sql(text, definition, &extra, &mut scratch)?;
+                .map_err(|error| ReplicaError::InvalidIdentifier(error.to_string()))?;
+            let row = CachedRow::from_sql(text, definition, &extra, &mut scratch, &mut spare)?;
             if !seen.insert(row.key.clone()) {
                 return Err(ReplicaError::DuplicateKey(row.key.to_string()));
             }
@@ -968,7 +1054,7 @@ pub struct View {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn view(
     entry: &CacheEntry,
-    changes: &[LogChange],
+    changes: &[crate::raw_log::RawChange],
     revision: u64,
     definition: &ReplicaCollectionDefinition,
     plan: &VisibilityPlan,
@@ -980,20 +1066,18 @@ pub(crate) fn view(
     // Keys whose rows the log replaces, and their rows at `revision`.
     let mut replaced = crate::fast_hash::FastSet::<Arc<str>>::default();
     let mut inserted = Vec::new();
-    for (id, change) in replica::collapse_changes(changes) {
+    let mut scratch = String::new();
+    for (id, change) in crate::raw_log::collapse(changes) {
         if id.0 != definition.table {
             continue;
         }
-        for image in [change.old, change.new] {
-            if !image.is_null() {
-                if let Ok(key) = replica::row_key(image, &definition.key) {
-                    replaced.insert(key.into());
-                }
+        for image in [change.old, change.new].into_iter().flatten() {
+            if let Ok(key) = image.key(&definition.key) {
+                replaced.insert(key);
             }
         }
-        if !change.new.is_null() && replica::collection_filters_admit(change.new, args, definition)
-        {
-            inserted.push(CachedRow::from_image(change.new, definition, &extra)?);
+        if let Some(new) = change.new.filter(|new| new.filters_admit(args, definition)) {
+            inserted.push(CachedRow::from_raw_image(new, definition, &extra, &mut scratch)?);
         }
     }
     let ordered = !definition.order_by.is_empty();
@@ -1170,11 +1254,11 @@ pub(crate) async fn source_changes(
     table: &str,
     after: u64,
     through: u64,
-) -> Result<Vec<LogChange>, ReplicaError> {
+) -> Result<Vec<crate::raw_log::RawChange>, ReplicaError> {
     if after >= through {
         return Ok(Vec::new());
     }
-    replica::resume_changes(
+    crate::raw_log::read_changes(
         transaction,
         after,
         through,

@@ -97,6 +97,8 @@ pub struct EventShare {
     /// Delivery v4: the event's tables and collapsed rows, and the shared
     /// outcome per connection shape (`replica_fanout`).
     pub(crate) layout: std::sync::OnceLock<crate::replica::fanout::Layout>,
+    /// The event's rows collapsed (first before-image, last after-image).
+    collapsed: std::sync::OnceLock<Arc<crate::replica::CollapseIndex>>,
     pub(crate) outcomes:
         Mutex<crate::fast_hash::FastMap<crate::replica::fanout::Shape, Arc<crate::replica::fanout::Outcome>>>,
 }
@@ -112,6 +114,14 @@ impl EventShare {
 
     pub(crate) fn changes(&self) -> &Arc<Vec<LogChange>> {
         &self.changes
+    }
+
+    /// The event's collapsed rows (built by its first connection).
+    pub(crate) fn collapsed(&self) -> Arc<crate::replica::CollapseIndex> {
+        Arc::clone(
+            self.collapsed
+                .get_or_init(|| Arc::new(crate::replica::CollapseIndex::new(&self.changes))),
+        )
     }
 
     pub(crate) fn insert(&self, key: DecisionKey, decision: Arc<RowDecision>) {
@@ -172,6 +182,7 @@ impl EventShares {
             decisions: Mutex::default(),
             images: Mutex::default(),
             layout: Default::default(),
+            collapsed: Default::default(),
             outcomes: Mutex::default(),
         });
         recent.push_back(Arc::clone(&share));
